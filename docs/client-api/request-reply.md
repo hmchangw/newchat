@@ -1442,7 +1442,10 @@ See [../client-api.md §3.3](../client-api.md#search-orgs).
 
 All user-service subjects: `chat.user.{account}.request.user.{siteID}.<area>.<action>`,
 except `me` — a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
-[settings.set](#settingsset) emits [settings.update](events.md#settingsupdate--user-settings-sync);
+[settings.set](#settingsset), [settings.priorityContacts.add](#settingsprioritycontactsadd), and
+[settings.priorityContacts.remove](#settingsprioritycontactsremove) each emit
+[settings.update](events.md#settingsupdate--user-settings-sync);
+[settings.priorityContacts.get](#settingsprioritycontactsget) is a pure read and emits nothing;
 no other endpoint emits a client-facing event.
 
 | RPC subject | Method |
@@ -1453,6 +1456,9 @@ no other endpoint emits a client-facing event.
 | `chat.user.{account}.request.user.{siteID}.status.set` | [status.set](#statusset) |
 | `chat.user.{account}.request.user.{siteID}.settings.get` | [settings.get](#settingsget) |
 | `chat.user.{account}.request.user.{siteID}.settings.set` | [settings.set](#settingsset) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get` | [settings.priorityContacts.get](#settingsprioritycontactsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add` | [settings.priorityContacts.add](#settingsprioritycontactsadd) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove` | [settings.priorityContacts.remove](#settingsprioritycontactsremove) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.get` | [Chatlist Sections](../client-api.md#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.section.create` | [Chatlist Sections](../client-api.md#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.section.rename` | [Chatlist Sections](../client-api.md#chatlist-sections) |
@@ -1575,7 +1581,7 @@ None (empty payload).
 
 #### Success response
 
-The stored settings object. All nine fields optional, present only when explicitly set:
+The stored settings object. All ten fields optional, present only when explicitly set:
 
 | Field | Type |
 |---|---|
@@ -1588,6 +1594,7 @@ The stored settings object. All nine fields optional, present only when explicit
 | `showPreviewsInNotifications` | boolean |
 | `showNotificationsInCall` | boolean |
 | `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
+| `priorityContacts` | string[] (raw accounts, read-only here — written only by `settings.priorityContacts.add`/`.remove`) |
 
 `{ "fullWidth": true, "translateMessageInto": "en-US" }`
 
@@ -1629,6 +1636,111 @@ The **full post-update settings** (same shape as [settings.get](#settingsget)).
 caller's other devices, carrying the full post-update settings. A server-side
 cross-site federation update also fires — every other site receives the full
 settings so its notification worker can apply them — but is not delivered to clients.
+
+---
+
+### settings.priorityContacts.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get`
+
+Returns the caller's priority-contact list, enriched for display, in stored
+order. Capped at 30 stored entries (enforced by the mutating RPCs).
+
+#### Request body
+
+None (empty payload).
+
+#### Success response
+
+`{ "contacts": PriorityContactItem[] }` — see
+[../client-api.md §3.0](../client-api.md#prioritycontactitem) for the row shape
+(`account`, `type`, optional `user`, optional `app`). A contact whose account
+no longer resolves keeps `account`+`type` with `user`/`app` omitted.
+
+```json
+{
+  "contacts": [
+    { "account": "alice", "type": "user", "user": { "engName": "Alice", "chineseName": "愛麗絲", "employeeId": "E12345", "sectName": "Engineering" } },
+    { "account": "helper.bot", "type": "bot", "app": { "name": "Helper Bot" } }
+  ]
+}
+```
+
+#### Errors
+
+`"user not found"` (`not_found`).
+
+**Emits:** None.
+
+---
+
+### settings.priorityContacts.add
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add`
+
+Adds one contact to the caller's list and returns the full enriched list.
+**Idempotent**: re-adding an already-present contact succeeds and returns the
+unchanged list, even at the 30-entry cap.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `contactAccount` | string | yes | Non-empty; must not equal the caller's own account. |
+
+`{ "contactAccount": "helper.bot" }`
+
+#### Success response
+
+Same shape as [settings.priorityContacts.get](#settingsprioritycontactsget).
+
+#### Errors
+
+`"contactAccount is required"` (`bad_request`), `"cannot add yourself as a
+priority contact"` (`bad_request`), `"priority contact not found"`
+(`not_found`, reason `priority_contact_not_found` — the account doesn't
+resolve: a user must be ACTIVE, a `.bot` account only needs its app to
+exist), `"priority contact limit reached"` (`forbidden`, reason
+`priority_contact_limit` — list already at 30 and the contact isn't already
+on it), `"user not found"` (`not_found`, no reason — the caller's own user
+doc is missing).
+
+**Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to
+the caller's other devices, carrying the full post-update settings. Not
+published when the add is a no-op duplicate. A server-side cross-site
+federation update also fires on an actual change, same as `settings.set`.
+
+---
+
+### settings.priorityContacts.remove
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove`
+
+Removes one contact from the caller's list and returns the full enriched
+list. **Idempotent**: removing an absent contact succeeds and returns the
+unchanged list. Unlike `add`, removing yourself is allowed, and there is no
+existence check on `contactAccount`.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `contactAccount` | string | yes | Non-empty. |
+
+`{ "contactAccount": "helper.bot" }`
+
+#### Success response
+
+Same shape as [settings.priorityContacts.get](#settingsprioritycontactsget).
+
+#### Errors
+
+`"contactAccount is required"` (`bad_request`), `"user not found"`
+(`not_found`, no reason).
+
+**Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to
+the caller's other devices, carrying the full post-update settings. A
+server-side cross-site federation update also fires, same as `settings.set`.
 
 ---
 
