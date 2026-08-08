@@ -5,10 +5,16 @@ import RoomList from './RoomList'
 vi.mock('@/context/RoomEventsContext', () => ({
   useRoomSummaries: vi.fn(),
   useSidebarSections: vi.fn(),
+  useChatlistSectionOrder: vi.fn(),
   useChatlistActions: vi.fn(),
 }))
 
-import { useRoomSummaries, useSidebarSections, useChatlistActions } from '@/context/RoomEventsContext'
+import {
+  useRoomSummaries,
+  useSidebarSections,
+  useChatlistSectionOrder,
+  useChatlistActions,
+} from '@/context/RoomEventsContext'
 
 function summary(id, overrides = {}) {
   return {
@@ -33,6 +39,7 @@ const actions = {
   createSection: vi.fn(),
   renameSection: vi.fn(),
   deleteSection: vi.fn(),
+  reorderSections: vi.fn(),
   setSortMode: vi.fn(),
   moveChatTo: vi.fn(),
 }
@@ -41,6 +48,7 @@ function setup(sections, { error = null } = {}) {
   const all = sections.flatMap((s) => s.rooms)
   useRoomSummaries.mockReturnValue({ summaries: all, setActiveRoom: vi.fn(), error })
   useSidebarSections.mockReturnValue(sections)
+  useChatlistSectionOrder.mockReturnValue(sections.filter((s) => !s.builtIn).map((s) => s.key))
   useChatlistActions.mockReturnValue(actions)
 }
 
@@ -144,7 +152,7 @@ describe('RoomList: drag to move', () => {
     // The Work section is the first .room-list-section
     const workSection = container.querySelectorAll('.room-list-section')[0]
     fireEvent.drop(workSection)
-    expect(actions.moveChatTo).toHaveBeenCalledWith('c1', 'site-A', 'work', undefined)
+    expect(actions.moveChatTo).toHaveBeenCalledWith('c1', 'site-A', 'work', undefined, undefined)
   })
 
   it('dropping a chat on the Chats section removes it (sectionId null)', () => {
@@ -157,7 +165,7 @@ describe('RoomList: drag to move', () => {
     fireEvent.dragStart(screen.getByText(/# proj/).closest('.room-item'), { dataTransfer })
     const chatsSection = container.querySelectorAll('.room-list-section')[1]
     fireEvent.drop(chatsSection)
-    expect(actions.moveChatTo).toHaveBeenCalledWith('w1', 'site-A', null, undefined)
+    expect(actions.moveChatTo).toHaveBeenCalledWith('w1', 'site-A', null, undefined, undefined)
   })
 
   it('dropping onto a specific room passes it as afterRoomId', () => {
@@ -169,6 +177,6 @@ describe('RoomList: drag to move', () => {
     const dataTransfer = { setData: vi.fn(), getData: vi.fn(), effectAllowed: '' }
     fireEvent.dragStart(screen.getByText(/# gen/).closest('.room-item'), { dataTransfer })
     fireEvent.drop(screen.getByText(/# proj/).closest('.room-item'))
-    expect(actions.moveChatTo).toHaveBeenCalledWith('c1', 'site-A', 'work', 'w1')
+    expect(actions.moveChatTo).toHaveBeenCalledWith('c1', 'site-A', 'work', 'w1', undefined)
   })
 })
