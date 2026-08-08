@@ -4,6 +4,10 @@ datasources:
     type: prometheus
     uid: prometheus
     access: proxy
-    url: http://prometheus:9090
+    # By container name, not the `prometheus` service alias: docker-local's
+    # compose.o11y.yaml also runs a service called `prometheus` on the shared
+    # chat-local network, so that alias resolves to both and Grafana would
+    # round-robin between two unrelated Prometheus instances.
+    url: http://chat-local-prometheus:9090
     isDefault: true
     editable: false

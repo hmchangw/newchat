@@ -416,3 +416,57 @@ func TestBuildRestrictedCache_OneEntryPerEngMember(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"alice", "bob", "carol", "ivan"}, accounts)
 }
+
+// --- hr_employee ------------------------------------------------------------
+
+func TestBuildHREmployees_OneRowPerHumanUser(t *testing.T) {
+	rows := BuildHREmployees()
+
+	// Every seeded user except the demo admin, which deliberately has no HR
+	// record so portal's users-primary left-join stays covered.
+	require.Len(t, rows, 10)
+	for _, e := range rows {
+		assert.NotEqual(t, "admin", e.Account, "admin must not get an hr_employee row")
+	}
+}
+
+func TestBuildHREmployees_MirrorsBuildUsers(t *testing.T) {
+	byAccount := map[string]model.IEmployee{}
+	for _, e := range BuildHREmployees() {
+		byAccount[e.Account] = e
+	}
+
+	for _, u := range BuildUsers() {
+		if u.Account == "admin" {
+			continue
+		}
+		e, ok := byAccount[u.Account]
+		require.True(t, ok, "no hr_employee row for %s", u.Account)
+		assert.Equal(t, u.EmployeeID, e.EmployeeID)
+		assert.Equal(t, u.SiteID, e.SiteID)
+		assert.Equal(t, u.EngName, e.EngName)
+		assert.Equal(t, u.ChineseName, e.ChineseName)
+	}
+}
+
+// The hr_employee _id is the employeeId, matching how hr-sync-worker keys the
+// collection — so re-seeding updates the same doc instead of inserting a twin.
+func TestBuildHREmployees_IDIsEmployeeID(t *testing.T) {
+	for _, e := range BuildHREmployees() {
+		assert.Equal(t, e.EmployeeID, e.ID, "account %s", e.Account)
+		assert.NotEmpty(t, e.ID)
+	}
+}
+
+func TestBuildHREmployees_DirectoryFieldsPopulated(t *testing.T) {
+	for _, e := range BuildHREmployees() {
+		assert.True(t, e.AccountEnabled, "account %s", e.Account)
+		assert.Equal(t, "Member", e.UserType, "account %s", e.Account)
+		assert.Equal(t, e.Account+"@example.com", e.Mail, "account %s", e.Account)
+		assert.Equal(t, e.Account, e.MailNickname)
+	}
+}
+
+func TestBuildHREmployees_DeterministicAcrossCalls(t *testing.T) {
+	assert.Equal(t, BuildHREmployees(), BuildHREmployees())
+}

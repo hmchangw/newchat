@@ -20,7 +20,11 @@ datasources:
     type: prometheus
     uid: prometheus
     access: proxy
-    url: http://prometheus:9090
+    # By container name, not the `prometheus` service alias: tools/observability
+    # also runs a service called `prometheus` on the shared chat-local network,
+    # so that alias resolves to both and Grafana would round-robin between two
+    # unrelated Prometheus instances. Container names are unique network-wide.
+    url: http://chat-local-o11y-prometheus:9090
     isDefault: true
     jsonData:
       exemplarTraceIdDestinations:

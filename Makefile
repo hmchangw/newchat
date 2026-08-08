@@ -1,12 +1,14 @@
 .PHONY: lint fmt tidy test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
-        require-deps up up-detached down dev \
-        obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
+        require-deps up up-detached down dev ui-up ui-down \
+        o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
 
 DEPS_COMPOSE     := docker-local/compose.deps.yaml
 SERVICES_COMPOSE := docker-local/compose.services.yaml
 NATS_CREDS       := docker-local/backend.creds
 NATS_CONF        := docker-local/nats.conf
 NATS_CONTAINER   := chat-local-nats
+UI_COMPOSE       := docker-local/compose.ui.yaml
+O11Y_COMPOSE     := docker-local/compose.o11y.yaml
 OBS_COMPOSE      := tools/observability/docker-compose.yml
 NULL_DEVICE      := $(if $(filter Windows_NT,$(OS)),NUL,/dev/null)
 KUBE_DRY_RUN     ?= false
@@ -196,9 +198,34 @@ else
 	docker compose -f $(SERVICES_COMPOSE) down
 endif
 
+# Start the browser UIs (chat-frontend :3000, admin-frontend :3001). Separate
+# from `make up` because chat-frontend's port is the one `npm run dev` wants —
+# run one or the other, not both. Needs the backend up for anything to load.
+ui-up: require-deps
+	docker compose -f $(UI_COMPOSE) up -d --build
+
+ui-down:
+	docker compose -f $(UI_COMPOSE) down
+
 # --- Local observability targets ----------------------------------------------
+# Two complementary stacks, both opt-in and safe to run together:
+#   o11y-up  OTLP collector + Tempo/Loki/Prometheus/Grafana (:3003) — the
+#            backend for the traces/metrics/logs services export when
+#            O11Y_ENABLED=true, which compose.services.yaml sets by default.
+#            Without it those exports just fail in the background; nothing else
+#            breaks, but the logs get noisy.
+#   obs-up   cAdvisor + NATS JetStream exporter + Prometheus/Grafana (:3002).
+o11y-up:
+	@docker network inspect chat-local >/dev/null 2>&1 || { \
+	  echo "chat-local network missing. Run 'make deps-up' first."; exit 1; \
+	}
+	docker compose -f $(O11Y_COMPOSE) up -d
+
+o11y-down:
+	docker compose -f $(O11Y_COMPOSE) down
+
 # Start cAdvisor + Prometheus + Grafana. Requires `make deps-up` first so the
-# chat-local network exists. Dashboard at http://localhost:3001.
+# chat-local network exists. Dashboard at http://localhost:3002.
 obs-up:
 	@docker network inspect chat-local >/dev/null 2>&1 || { \
 	  echo "chat-local network missing. Run 'make deps-up' first."; exit 1; \
