@@ -161,3 +161,107 @@ func TestSetUserStatus_Integration(t *testing.T) {
 		assert.Nil(t, u, "active:false user is excluded by the filter ⇒ nil")
 	})
 }
+
+func TestGetUserPriorityContacts_Integration(t *testing.T) {
+	r, db := newTestUserRepo(t)
+	ctx := context.Background()
+	seed(t, db, "users",
+		bson.M{"_id": "u1", "account": "alice", "settings": bson.M{"priorityContacts": []string{"bob", "helper.bot"}}},
+		bson.M{"_id": "u2", "account": "carol"},
+		bson.M{"_id": "u3", "account": "dave", "active": false},
+	)
+
+	t.Run("returns the stored list in order", func(t *testing.T) {
+		u, err := r.GetUserPriorityContacts(ctx, "alice")
+		require.NoError(t, err)
+		require.NotNil(t, u)
+		require.NotNil(t, u.Settings)
+		assert.Equal(t, []string{"bob", "helper.bot"}, u.Settings.PriorityContacts)
+	})
+
+	t.Run("user with no settings returns a user with nil settings", func(t *testing.T) {
+		u, err := r.GetUserPriorityContacts(ctx, "carol")
+		require.NoError(t, err)
+		require.NotNil(t, u)
+		assert.Nil(t, u.Settings)
+	})
+
+	t.Run("inactive user is not found", func(t *testing.T) {
+		u, err := r.GetUserPriorityContacts(ctx, "dave")
+		require.NoError(t, err)
+		assert.Nil(t, u)
+	})
+
+	t.Run("unknown account is not found", func(t *testing.T) {
+		u, err := r.GetUserPriorityContacts(ctx, "ghost")
+		require.NoError(t, err)
+		assert.Nil(t, u)
+	})
+}
+
+func TestUserExists_Integration(t *testing.T) {
+	r, db := newTestUserRepo(t)
+	ctx := context.Background()
+	seed(t, db, "users",
+		bson.M{"_id": "u1", "account": "alice"},
+		bson.M{"_id": "u2", "account": "dave", "active": false},
+	)
+
+	t.Run("active user exists", func(t *testing.T) {
+		ok, err := r.UserExists(ctx, "alice")
+		require.NoError(t, err)
+		assert.True(t, ok)
+	})
+
+	t.Run("deactivated user does not", func(t *testing.T) {
+		ok, err := r.UserExists(ctx, "dave")
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+
+	t.Run("unknown account does not", func(t *testing.T) {
+		ok, err := r.UserExists(ctx, "ghost")
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+}
+
+func TestGetPriorityContactUsers_Integration(t *testing.T) {
+	r, db := newTestUserRepo(t)
+	ctx := context.Background()
+	seed(t, db, "users",
+		bson.M{"_id": "u1", "account": "bob", "engName": "Bob", "chineseName": "鮑伯", "employeeId": "E9", "sectName": "Ops"},
+		bson.M{"_id": "u2", "account": "erin", "engName": "Erin", "chineseName": "艾琳", "employeeId": "E8", "sectName": "QA", "active": false},
+	)
+
+	t.Run("projects all four display fields", func(t *testing.T) {
+		got, err := r.GetPriorityContactUsers(ctx, []string{"bob"})
+		require.NoError(t, err)
+		require.NotNil(t, got["bob"])
+		assert.Equal(t, "Bob", got["bob"].EngName)
+		assert.Equal(t, "鮑伯", got["bob"].ChineseName)
+		assert.Equal(t, "E9", got["bob"].EmployeeID)
+		assert.Equal(t, "Ops", got["bob"].SectName)
+	})
+
+	// Deliberately NOT active-filtered: a contact deactivated after being added
+	// still renders their name instead of collapsing to a bare account row.
+	t.Run("includes deactivated users", func(t *testing.T) {
+		got, err := r.GetPriorityContactUsers(ctx, []string{"erin"})
+		require.NoError(t, err)
+		require.NotNil(t, got["erin"])
+		assert.Equal(t, "Erin", got["erin"].EngName)
+	})
+
+	t.Run("unknown accounts are omitted", func(t *testing.T) {
+		got, err := r.GetPriorityContactUsers(ctx, []string{"bob", "ghost"})
+		require.NoError(t, err)
+		assert.Len(t, got, 1)
+	})
+
+	t.Run("empty input returns an empty map", func(t *testing.T) {
+		got, err := r.GetPriorityContactUsers(ctx, []string{})
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+}

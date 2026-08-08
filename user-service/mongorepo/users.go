@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/user-service/models"
 )
 
 const usersCollection = "users"
@@ -209,4 +210,61 @@ func (r *UserRepo) SetUserStatus(ctx context.Context, account, text string, isSh
 		return nil, fmt.Errorf("decode updated user status: %w", err)
 	}
 	return &u, nil
+}
+
+// GetUserPriorityContacts returns the user's stored priority-contact list (Settings
+// is nil when the user never set any settings); (nil, nil) when no active user
+// matched. The narrow projection is safe here — unlike Add/Remove, this result never
+// feeds a settings fanout.
+func (r *UserRepo) GetUserPriorityContacts(ctx context.Context, account string) (*model.User, error) {
+	return r.users.FindOne(ctx, activeUserFilter(account),
+		mongoutil.WithProjection(bson.M{"_id": 0, "settings.priorityContacts": 1}),
+	)
+}
+
+// UserExists reports whether account names an active user. Backs the add-time
+// existence check; active-only by design — a deactivated user cannot be added.
+func (r *UserRepo) UserExists(ctx context.Context, account string) (bool, error) {
+	u, err := r.users.FindOne(ctx, activeUserFilter(account),
+		mongoutil.WithProjection(bson.M{"_id": 0, "account": 1}),
+	)
+	if err != nil {
+		return false, fmt.Errorf("check user exists: %w", err)
+	}
+	return u != nil, nil
+}
+
+// GetPriorityContactUsers maps account → the display fields the priority-contacts
+// list renders. GetHRInfoByAccounts is unusable here: it carries no employeeId or
+// sectName, and widening it would change every DM subscription payload. Deliberately
+// NOT active-filtered — a contact deactivated after being added still renders.
+// Accounts with no users doc are omitted.
+func (r *UserRepo) GetPriorityContactUsers(ctx context.Context, accounts []string) (map[string]*models.PriorityContactUser, error) {
+	type contactUser struct {
+		Account     string `bson:"account"`
+		EngName     string `bson:"engName"`
+		ChineseName string `bson:"chineseName"`
+		EmployeeID  string `bson:"employeeId"`
+		SectName    string `bson:"sectName"`
+	}
+	col := mongoutil.NewCollection[contactUser](r.users.Raw())
+	rows, err := col.FindMany(ctx,
+		bson.M{"account": bson.M{"$in": accounts}},
+		mongoutil.WithProjection(bson.M{
+			"_id": 0, "account": 1, "engName": 1, "chineseName": 1, "employeeId": 1, "sectName": 1,
+		}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find priority contact users: %w", err)
+	}
+	out := make(map[string]*models.PriorityContactUser, len(rows))
+	for i := range rows {
+		out[rows[i].Account] = &models.PriorityContactUser{
+			EngName:     rows[i].EngName,
+			ChineseName: rows[i].ChineseName,
+			EmployeeID:  rows[i].EmployeeID,
+			SectName:    rows[i].SectName,
+		}
+	}
+	return out, nil
 }

@@ -36,6 +36,9 @@ type UserRepository interface {
 	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error)
 	GetUserChatlist(ctx context.Context, account string) (*model.User, error)
 	UpdateUserChatlist(ctx context.Context, account string, state *model.ChatlistState) (*model.User, error)
+	GetUserPriorityContacts(ctx context.Context, account string) (*model.User, error)
+	GetPriorityContactUsers(ctx context.Context, accounts []string) (map[string]*models.PriorityContactUser, error)
+	UserExists(ctx context.Context, account string) (bool, error)
 }
 
 // AppRepository is the consumer-defined interface for app catalog reads.
