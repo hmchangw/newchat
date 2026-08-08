@@ -101,6 +101,12 @@ func TestMongoStore_EnsureIndexes(t *testing.T) {
 	assert.Equal(t, "needCreateRoom:1,_id:1", keySpec(createRoom.Key),
 		"compound with _id serves find(needCreateRoom:true).sort(_id) without an in-memory sort")
 	assert.Equal(t, true, createRoom.Partial["needCreateRoom"], "indexes only needCreateRoom=true docs")
+
+	verify, ok := chatIdx["needVerify_pending"]
+	require.True(t, ok, "teams_chat must have the needVerify pending index")
+	assert.Equal(t, "needVerify:1,_id:1", keySpec(verify.Key),
+		"compound with _id serves find(needVerify:true).sort(_id) without an in-memory sort")
+	assert.Equal(t, true, verify.Partial["needVerify"], "indexes only needVerify=true docs")
 }
 
 func TestMongoStore_SetFrom(t *testing.T) {

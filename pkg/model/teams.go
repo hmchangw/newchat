@@ -89,4 +89,58 @@ type TeamsChat struct {
 	UpdatedAt           time.Time         `json:"updatedAt" bson:"updatedAt"` // stamped now at build time; written on every upsert
 	NeedMemberSync      bool              `json:"needMemberSync" bson:"needMemberSync"`
 	NeedCreateRoom      bool              `json:"needCreateRoom" bson:"needCreateRoom"` // set true by teams-chat-sync (oneOnOne) or teams-chat-member-sync (group); consumed by room creation
+	// NeedVerify is set true by teams-room-creation in the same write that clears
+	// NeedCreateRoom, so it means "a creation event for this chat was durably
+	// published". teams-room-verify audits these chats against their site and
+	// clears the flag only for chats whose room and subscriptions converged.
+	NeedVerify bool `json:"needVerify" bson:"needVerify"`
+}
+
+// Wire contracts for the room-creation verification lane: teams-room-verify
+// (global CronJob) asks each site's teams-room-inspector what its Mongo holds
+// for a batch of Teams chat ids. Service-to-service HTTP — not a client-facing
+// RPC — so these are absent from docs/client-api.md by design.
+
+// TeamsRoomVerifyMaxChatIDs bounds one verify request. It lives beside the wire
+// contract because both ends depend on it: the inspector rejects a larger batch,
+// and teams-room-verify's config validation refuses a VERIFY_BATCH_SIZE above it.
+// Without the shared constant, raising that env var past the cap would make every
+// batch 400 and leave the chats flagged forever, which reads exactly like a
+// healthy no-op run.
+const TeamsRoomVerifyMaxChatIDs = 500
+
+// TeamsRoomVerifyRequest is the body of POST /internal/teams/rooms/verify.
+// Chat ids are Graph ids (…@thread.v2 / …@unq.gbl.spaces); the inspector maps
+// each to its room id itself, so caller and callee speak one vocabulary.
+type TeamsRoomVerifyRequest struct {
+	ChatIDs []string `json:"chatIds" bson:"chatIds"`
+}
+
+// TeamsRoomVerifyResult is one chat's state at the answering site.
+// SubscriptionCount is the live count of subscription documents for the room
+// and is what teams-room-verify's pass/fail comparison uses. RoomUserCount is
+// the room's denormalized counter; it plays no part in that comparison and is
+// carried purely as extra context in the mismatch log, for diagnosing why a
+// chat didn't converge.
+//
+// RoomUserCount is always zero when RoomExists is false — it is read off the
+// room document. SubscriptionCount is NOT: subscriptions can outlive their room
+// (or precede it), so a missing room may still report a non-zero count, which is
+// itself a useful signal that the room was deleted out from under its members.
+type TeamsRoomVerifyResult struct {
+	ChatID            string `json:"chatId" bson:"chatId"`
+	RoomID            string `json:"roomId" bson:"roomId"`
+	RoomExists        bool   `json:"roomExists" bson:"roomExists"`
+	SubscriptionCount int    `json:"subscriptionCount" bson:"subscriptionCount"`
+	RoomUserCount     int    `json:"roomUserCount" bson:"roomUserCount"`
+}
+
+// TeamsRoomVerifyResponse is the inspector's reply. Chats carries exactly one
+// result per requested chat id, in request order; FoundCount is how many of
+// them have a room.
+type TeamsRoomVerifyResponse struct {
+	SiteID         string                  `json:"siteId" bson:"siteId"`
+	RequestedCount int                     `json:"requestedCount" bson:"requestedCount"`
+	FoundCount     int                     `json:"foundCount" bson:"foundCount"`
+	Chats          []TeamsRoomVerifyResult `json:"chats" bson:"chats"`
 }

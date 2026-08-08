@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -49,6 +50,13 @@ func TestMongoStore_ListAndMark(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, after, 1)
 	assert.Equal(t, "c2", after[0].ID)
+
+	// The clear is one write: needCreateRoom goes false AND needVerify goes true,
+	// so the verification lane picks the chat up on its next run.
+	var doc model.TeamsChat
+	require.NoError(t, col.FindOne(ctx, bson.M{"_id": "c1"}).Decode(&doc))
+	assert.False(t, doc.NeedCreateRoom, "needCreateRoom must be cleared")
+	assert.True(t, doc.NeedVerify, "needVerify must be set for the verification lane")
 }
 
 func TestMongoStore_MarkRoomsCreated_EmptyIsNoop(t *testing.T) {
