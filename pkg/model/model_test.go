@@ -2677,24 +2677,25 @@ func TestSendMessageRequest_ForwardFields_JSON(t *testing.T) {
 }
 
 func TestMessage_ForwardedMessage_JSON(t *testing.T) {
-	msg := model.Message{
+	threadParentTS := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
+	m := model.Message{
 		ID: "m-fwd", RoomID: "r-dst", UserID: "u1", UserAccount: "alice",
 		Content: "check this out", CreatedAt: time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC),
 		ForwardedMessage: &cassandra.ForwardedMessage{
 			MessageID: "m-src", RoomID: "r-src",
-			Sender:    cassandra.Participant{ID: "u5", Account: "eve"},
-			CreatedAt: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC),
-			Msg:       "original body",
+			Sender:                cassandra.Participant{ID: "u5", Account: "eve", EngName: "Eve Wu"},
+			CreatedAt:             time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC),
+			Msg:                   "original body",
+			Mentions:              []cassandra.Participant{{ID: "u-carol", Account: "carol", EngName: "Carol Lee"}},
+			ThreadParentID:        "thread-parent-uuid",
+			ThreadParentCreatedAt: &threadParentTS,
+			Room:                  &model.MessageRoom{ID: "r-src", Name: "source room", Type: model.RoomTypeChannel},
 		},
 	}
-	data, err := json.Marshal(msg)
+	data, err := json.Marshal(&m)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"forwardedMessage"`)
-	var got model.Message
-	require.NoError(t, json.Unmarshal(data, &got))
-	require.NotNil(t, got.ForwardedMessage)
-	assert.Equal(t, "m-src", got.ForwardedMessage.MessageID)
-	assert.Equal(t, "original body", got.ForwardedMessage.Msg)
+	roundTrip(t, &m, &model.Message{})
 }
 
 func TestSubscriptionNewFields(t *testing.T) {

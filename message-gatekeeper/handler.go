@@ -238,20 +238,20 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	// or may not set the NATS header, so overwrite ctx unconditionally before any downstream publish.
 	ctx = natsutil.WithRequestID(ctx, req.RequestID)
 
-	// Validate ID is a valid 20-char base62 message ID
+	// Validate ID is a valid 17- or 20-char base62 message ID
 	if !idgen.IsValidMessageID(req.ID) {
-		return nil, errcode.BadRequest(fmt.Sprintf("invalid message ID %q: must be a 20-char base62 string", req.ID))
+		return nil, errcode.BadRequest(fmt.Sprintf("invalid message ID %q: must be a 17- or 20-char base62 string", req.ID))
 	}
 
 	if req.ThreadParentMessageID != "" && !idgen.IsValidMessageID(req.ThreadParentMessageID) {
-		return nil, errcode.BadRequest(fmt.Sprintf("invalid thread parent message ID %q: must be a 20-char base62 string", req.ThreadParentMessageID))
+		return nil, errcode.BadRequest(fmt.Sprintf("invalid thread parent message ID %q: must be a 17- or 20-char base62 string", req.ThreadParentMessageID))
 	}
 
 	// Validate the quoted parent ID at the boundary too: on the degrade path it is
 	// copied verbatim into the snapshot MessageID and messageLink, so a malformed
 	// value must fail fast rather than leak into the canonical event.
 	if req.QuotedParentMessageID != "" && !idgen.IsValidMessageID(req.QuotedParentMessageID) {
-		return nil, errcode.BadRequest(fmt.Sprintf("invalid quoted parent message ID %q: must be a 20-char base62 string", req.QuotedParentMessageID))
+		return nil, errcode.BadRequest(fmt.Sprintf("invalid quoted parent message ID %q: must be a 17- or 20-char base62 string", req.QuotedParentMessageID))
 	}
 
 	// Forward validation: both fields together, a valid source ID, and no
@@ -264,7 +264,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 			return nil, errcode.BadRequest("forwardedMessageId and forwardedRoomId must be set together")
 		}
 		if !idgen.IsValidMessageID(req.ForwardedMessageID) {
-			return nil, errcode.BadRequest(fmt.Sprintf("invalid forwarded message ID %q: must be a 20-char base62 string", req.ForwardedMessageID))
+			return nil, errcode.BadRequest(fmt.Sprintf("invalid forwarded message ID %q: must be a 17- or 20-char base62 string", req.ForwardedMessageID))
 		}
 		if req.QuotedParentMessageID != "" {
 			return nil, errcode.BadRequest("a forward cannot also quote a message")

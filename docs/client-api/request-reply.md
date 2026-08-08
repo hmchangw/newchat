@@ -2095,7 +2095,7 @@ Same subject. See [../client-api.md §4](../client-api.md#4-message-send) for th
 error table. Key errors:
 
 - `"invalid requestId"` (`bad_request`)
-- `"content must not be empty"` / `"content exceeds maximum size of 20480 bytes"`
+- `"content must not be empty"` (unless `attachments` is present or the message is a forward) / `"content exceeds maximum size of 20480 bytes"`
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
 

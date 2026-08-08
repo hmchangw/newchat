@@ -1191,7 +1191,7 @@ and after its `quotedParentMessage` response row (~line 2049):
 - [ ] **Step 5:** Coverage spot-check on the two changed hot paths:
 
 ```bash
-go test -coverprofile=/tmp/claude-0/-home-user-newchat/ebd4f9f5-2cbb-562c-9535-edebcf532410/scratchpad/cov.out ./message-gatekeeper/ && go tool cover -func=/tmp/claude-0/-home-user-newchat/ebd4f9f5-2cbb-562c-9535-edebcf532410/scratchpad/cov.out | grep -E "resolveForwardSnapshot|FetchForwardedSource|total"
+go test -coverprofile=coverage.out ./message-gatekeeper/ && go tool cover -func=coverage.out | grep -E "resolveForwardSnapshot|FetchForwardedSource|total"
 ```
 
 (Direct `go test` is acceptable here only because the Makefile has no coverage target; if it does — `grep -n cover Makefile` — use that instead.) Both new funcs must be ≥ 80%; add table rows if not.

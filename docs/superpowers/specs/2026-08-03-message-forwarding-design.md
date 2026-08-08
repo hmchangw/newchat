@@ -31,7 +31,7 @@ Let a user forward an existing chat message into one or more other rooms. The fo
 
 ## Architecture
 
-```
+```text
 client ──(SendMessageRequest{forwardedMessageId, forwardedRoomId})──> MESSAGES stream
         (one publish per destination room; per-room replies)             │
                                                                          ▼

@@ -2868,7 +2868,7 @@ When the reader is in a restricted access window and the quoted parent falls out
 
 ##### ForwardedMessage
 
-Immutable snapshot of the forwarded source message, built server-side at forward time. Text-only — never carries attachments or cards. Never redacted by the reader's access window (the source room's window was enforced once, at forward time).
+Immutable snapshot of the forwarded source message, built server-side at forward time. Text-only — never carries attachments or cards. Never redacted by the reader's access window (the source room's window was enforced once, at forward time) — except that on [List Pinned Messages](#list-pinned-messages), a pin outside the reader's access window is redacted entirely, dropping `forwardedMessage` along with the rest of the message body.
 
 On history reads the snapshot additionally carries a best-effort `room` object resolved from `roomId` at read time (see the field note).
 
@@ -6095,7 +6095,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 | `invalid requestId "…": must be a hyphenated UUID` | `bad_request` | — | Empty/malformed `requestId`. (Reachable only when `requestId` is non-empty but malformed; an empty `requestId` leaves no reply subject, so the client just times out.) |
 | `invalid message ID "…": must be a 20-char base62 string` | `bad_request` | — | `id` is not valid base62. |
 | `invalid thread parent message ID "…": …` | `bad_request` | — | `threadParentMessageId` is not a valid message ID. |
-| `content must not be empty` | `bad_request` | — | Empty `content`. |
+| `content must not be empty` | `bad_request` | — | Empty `content` (unless `attachments` is present or the message is a forward). |
 | `invalid message type "…"` | `bad_request` | — | `type` is set to something other than `"important"` (e.g. a system type). |
 | `content exceeds maximum size of 20480 bytes` | `bad_request` | — | `content` > 20 KiB. |
 | `not subscribed` | `forbidden` | `not_subscribed` | Sender is not a member of the room. |
