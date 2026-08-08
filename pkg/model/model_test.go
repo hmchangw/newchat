@@ -2971,6 +2971,22 @@ func TestSearchOrgsJSON(t *testing.T) {
 func boolPtr(b bool) *bool { return &b }
 
 // roundTrip marshals src to JSON, unmarshals into dst, and compares.
+func TestUserSettingsPriorityContactsRoundTrip(t *testing.T) {
+	src := model.UserSettings{PriorityContacts: []string{"alice", "helper.bot"}}
+	dst := model.UserSettings{}
+	roundTrip(t, &src, &dst)
+}
+
+// priorityContacts must NOT satisfy settings.set: it is written only by the
+// dedicated add/remove RPCs, so a settings.set carrying just this field has to
+// fall through to bad_request "no settings provided".
+func TestUserSettingsIsEmptyIgnoresPriorityContacts(t *testing.T) {
+	s := model.UserSettings{PriorityContacts: []string{"alice"}}
+	if !s.IsEmpty() {
+		t.Error("IsEmpty() = false, want true")
+	}
+}
+
 func roundTrip[T any](t *testing.T, src *T, dst *T) {
 	t.Helper()
 	data, err := json.Marshal(src)

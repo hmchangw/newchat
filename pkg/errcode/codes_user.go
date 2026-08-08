@@ -15,4 +15,8 @@ const (
 	UserChatlistInvalidOrder     Reason = "chatlist_invalid_order"
 	UserChatlistInvalidSortMode  Reason = "chatlist_invalid_sort_mode"
 	UserChatlistBuiltinTarget    Reason = "chatlist_builtin_target"
+
+	// Priority-contact reasons — the client branches on each.
+	UserPriorityContactLimit    Reason = "priority_contact_limit"
+	UserPriorityContactNotFound Reason = "priority_contact_not_found"
 )

@@ -40,6 +40,11 @@ func (s *UserService) GetSettings(c *natsrouter.Context) (*model.UserSettings, e
 // SetSettings partially updates the caller's settings — only the fields sent
 // are written — then fans out settings.update with the full post-update
 // settings so the caller's other devices sync live.
+//
+// grew a PriorityContacts field this handler never reads; natsrouter.Register requires the
+// value (non-pointer) request type used by every other handler in this file.
+//
+//nolint:gocritic // hugeParam: req crossed the size threshold only because model.UserSettings
 func (s *UserService) SetSettings(c *natsrouter.Context, req models.SettingsSetRequest) (*model.UserSettings, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
