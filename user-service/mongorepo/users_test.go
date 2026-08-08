@@ -4,7 +4,10 @@ package mongorepo
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -263,5 +266,120 @@ func TestGetPriorityContactUsers_Integration(t *testing.T) {
 		got, err := r.GetPriorityContactUsers(ctx, []string{})
 		require.NoError(t, err)
 		assert.Empty(t, got)
+	})
+}
+
+func TestAddPriorityContact_Integration(t *testing.T) {
+	r, db := newTestUserRepo(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_700_000_000_000).UTC()
+	seed(t, db, "users",
+		bson.M{"_id": "u1", "account": "alice", "settings": bson.M{"themePreference": "dark"}},
+		bson.M{"_id": "u2", "account": "dave", "active": false},
+	)
+
+	t.Run("adds and returns the whole settings sub-document", func(t *testing.T) {
+		u, err := r.AddPriorityContact(ctx, "alice", "bob", 30, at)
+		require.NoError(t, err)
+		require.NotNil(t, u)
+		require.NotNil(t, u.Settings)
+		assert.Equal(t, []string{"bob"}, u.Settings.PriorityContacts)
+		// The projection MUST stay {"_id":0,"settings":1}: this object is the
+		// cross-site fanout payload and inbox-worker $sets it whole.
+		require.NotNil(t, u.Settings.ThemePreference)
+		assert.Equal(t, "dark", *u.Settings.ThemePreference)
+	})
+
+	t.Run("stamps settingsUpdatedAt", func(t *testing.T) {
+		var doc struct {
+			SettingsUpdatedAt time.Time `bson:"settingsUpdatedAt"`
+		}
+		require.NoError(t, db.Collection("users").FindOne(ctx, bson.M{"account": "alice"}).Decode(&doc))
+		assert.Equal(t, at, doc.SettingsUpdatedAt.UTC())
+	})
+
+	t.Run("re-adding is a no-op", func(t *testing.T) {
+		u, err := r.AddPriorityContact(ctx, "alice", "bob", 30, at)
+		require.NoError(t, err)
+		require.NotNil(t, u)
+		assert.Equal(t, []string{"bob"}, u.Settings.PriorityContacts)
+	})
+
+	t.Run("at cap returns no match", func(t *testing.T) {
+		u, err := r.AddPriorityContact(ctx, "alice", "carol", 1, at)
+		require.NoError(t, err)
+		assert.Nil(t, u)
+	})
+
+	t.Run("inactive user returns no match", func(t *testing.T) {
+		u, err := r.AddPriorityContact(ctx, "dave", "bob", 30, at)
+		require.NoError(t, err)
+		assert.Nil(t, u)
+	})
+}
+
+// The whole reason the cap rides in the filter: a read-then-write guard lets two
+// concurrent adds both pass at limit-1 and overshoot.
+func TestAddPriorityContact_ConcurrentAddsRespectCap_Integration(t *testing.T) {
+	r, db := newTestUserRepo(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_700_000_000_000).UTC()
+
+	// Named `existing`, not `seed` — `seed` is the package-level helper.
+	existing := make([]string, 0, 28)
+	for i := 0; i < 28; i++ {
+		existing = append(existing, fmt.Sprintf("existing%02d", i))
+	}
+	seed(t, db, "users",
+		bson.M{"_id": "u1", "account": "alice", "settings": bson.M{"priorityContacts": existing}},
+	)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, _ = r.AddPriorityContact(ctx, "alice", fmt.Sprintf("race%02d", n), 30, at)
+		}(i)
+	}
+	wg.Wait()
+
+	u, err := r.GetUserPriorityContacts(ctx, "alice")
+	require.NoError(t, err)
+	require.NotNil(t, u.Settings)
+	assert.Len(t, u.Settings.PriorityContacts, 30, "cap must hold under concurrent adds")
+}
+
+func TestRemovePriorityContact_Integration(t *testing.T) {
+	r, db := newTestUserRepo(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_700_000_000_000).UTC()
+	seed(t, db, "users",
+		bson.M{"_id": "u1", "account": "alice", "settings": bson.M{
+			"themePreference": "dark", "priorityContacts": []string{"bob", "helper.bot"},
+		}},
+		bson.M{"_id": "u2", "account": "dave", "active": false},
+	)
+
+	t.Run("removes and returns the whole settings sub-document", func(t *testing.T) {
+		u, err := r.RemovePriorityContact(ctx, "alice", "bob", at)
+		require.NoError(t, err)
+		require.NotNil(t, u)
+		assert.Equal(t, []string{"helper.bot"}, u.Settings.PriorityContacts)
+		require.NotNil(t, u.Settings.ThemePreference)
+		assert.Equal(t, "dark", *u.Settings.ThemePreference)
+	})
+
+	t.Run("removing an absent entry is a no-op", func(t *testing.T) {
+		u, err := r.RemovePriorityContact(ctx, "alice", "ghost", at)
+		require.NoError(t, err)
+		require.NotNil(t, u)
+		assert.Equal(t, []string{"helper.bot"}, u.Settings.PriorityContacts)
+	})
+
+	t.Run("inactive user returns no match", func(t *testing.T) {
+		u, err := r.RemovePriorityContact(ctx, "dave", "bob", at)
+		require.NoError(t, err)
+		assert.Nil(t, u)
 	})
 }

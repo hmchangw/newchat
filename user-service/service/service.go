@@ -39,6 +39,8 @@ type UserRepository interface {
 	GetUserPriorityContacts(ctx context.Context, account string) (*model.User, error)
 	GetPriorityContactUsers(ctx context.Context, accounts []string) (map[string]*models.PriorityContactUser, error)
 	UserExists(ctx context.Context, account string) (bool, error)
+	AddPriorityContact(ctx context.Context, account, contact string, limit int, at time.Time) (*model.User, error)
+	RemovePriorityContact(ctx context.Context, account, contact string, at time.Time) (*model.User, error)
 }
 
 // AppRepository is the consumer-defined interface for app catalog reads.
