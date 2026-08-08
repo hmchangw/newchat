@@ -201,12 +201,15 @@ falsely.
 Deliveries therefore dedupe per `(userID, messageID, lane)`, and a
 duplicate is a violation only **within** a single lane.
 
-### 7.2 Sender self-delivery (calibration required)
+### 7.2 Sender self-delivery
 
-Whether the sender receives its own broadcast changes every expected set.
-This is not assumed. The implementation plan includes a short calibration
-run to establish actual behaviour, and the result is encoded as an explicit
-documented rule in the tracker.
+`broadcast-worker` **does** echo a message back to its sender. The sender is
+therefore always a member of its own probe's expected set, and a missing
+self-delivery is a `missing_recipient` violation like any other.
+
+No calibration step is needed. `ProbeTracker` tests assert the sender is
+present in the expected set explicitly, so a future change to echo
+behaviour surfaces as a test failure rather than silent under-counting.
 
 ## 8. Persistence Readback
 
