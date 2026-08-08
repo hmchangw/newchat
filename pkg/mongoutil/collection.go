@@ -8,6 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 // Collection wraps *mongo.Collection. Goroutine-safe.
@@ -18,6 +19,24 @@ type Collection[T any] struct {
 
 func NewCollection[T any](col *mongo.Collection) *Collection[T] {
 	return &Collection[T]{col: col, name: col.Name()}
+}
+
+// CollectionWithReadPreference clones col with reads routed to rp, leaving col
+// untouched. A nil rp returns col.
+func CollectionWithReadPreference(col *mongo.Collection, rp *readpref.ReadPref) *mongo.Collection {
+	if rp == nil {
+		return col
+	}
+	return col.Database().Collection(col.Name(), options.Collection().SetReadPreference(rp))
+}
+
+// WithReadPreference clones the collection with reads routed to rp, leaving the
+// receiver untouched. A nil rp returns the receiver.
+func (c *Collection[T]) WithReadPreference(rp *readpref.ReadPref) *Collection[T] {
+	if rp == nil {
+		return c
+	}
+	return &Collection[T]{col: CollectionWithReadPreference(c.col, rp), name: c.name}
 }
 
 // FindOne returns (nil, nil) on no match.

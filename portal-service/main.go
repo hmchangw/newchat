@@ -57,6 +57,9 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// MongoReadPreference: read-only service (directory lookups); secondaryPreferred
+	// offloads the primary.
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
 
 	// BotLoginEnabled gates portal's bot-role password login. Flip to false
 	// once the dedicated bot-devs client (which talks to botplatform directly)
@@ -96,10 +99,16 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference %q: %w", cfg.MongoReadPreference, err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	store := newMongoDirectoryStore(mongoClient.Database(cfg.MongoDB))
 	if err := store.EnsureIndexes(ctx); err != nil {

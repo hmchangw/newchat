@@ -28,16 +28,25 @@ type SubscriptionRepo struct {
 	// room baseline) over the same subscriptions collection; writes go through
 	// subscriptions so the baseline fields are never persisted.
 	enriched *mongoutil.Collection[model.EnrichedSubscription]
-	siteID   string // this instance's site — distinguishes local vs cross-site rows in the deleted-filter
+	// *Secondary route list/count reads; GetAppSubscription (dedup guard) keeps the
+	// primary handle.
+	subscriptionsSecondary *mongoutil.Collection[model.Subscription]
+	enrichedSecondary      *mongoutil.Collection[model.EnrichedSubscription]
+	siteID                 string // this instance's site — distinguishes local vs cross-site rows in the deleted-filter
 }
 
 // NewSubscriptionRepo builds a SubscriptionRepo over db; the deleted-filter keeps cross-site rows, drops local rows with missing/soft-deleted rooms.
-func NewSubscriptionRepo(db *mongo.Database, siteID string) *SubscriptionRepo {
+func NewSubscriptionRepo(db *mongo.Database, siteID string, opts ...Option) *SubscriptionRepo {
+	s := applyOptions(opts)
 	col := db.Collection(subscriptionsCollection)
+	subscriptions := mongoutil.NewCollection[model.Subscription](col)
+	enriched := mongoutil.NewCollection[model.EnrichedSubscription](col)
 	return &SubscriptionRepo{
-		subscriptions: mongoutil.NewCollection[model.Subscription](col),
-		enriched:      mongoutil.NewCollection[model.EnrichedSubscription](col),
-		siteID:        siteID,
+		subscriptions:          subscriptions,
+		enriched:               enriched,
+		subscriptionsSecondary: subscriptions.WithReadPreference(s.readPref),
+		enrichedSecondary:      enriched.WithReadPreference(s.readPref),
+		siteID:                 siteID,
 	}
 }
 
@@ -266,6 +275,7 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// the skip/limit page (the sort key lives on the joined room, so it can't be pushed past
 	// the lookup). Fine at realistic per-account sub counts; the fix for very large accounts is
 	// denormalizing room activity onto the subscription — a write-side change tracked separately.
+	// Primary: the subscription list must reflect a just-changed subscription immediately.
 	return r.enriched.AggregatePagedHasMore(ctx, pipeline, page)
 }
 
@@ -340,6 +350,7 @@ func (r *SubscriptionRepo) FindChannelsByMembers(ctx context.Context, account st
 		bson.M{"$sort": bson.D{{Key: matchedRoomField + ".createdAt", Value: -1}}},
 		bson.D{{Key: "$project", Value: subscriptionProjection(nil)}},
 	)
+	// Primary: the subscription list must reflect a just-changed subscription immediately.
 	return r.enriched.AggregatePagedHasMore(ctx, pipeline, page)
 }
 
@@ -366,7 +377,7 @@ func (r *SubscriptionRepo) GetDMSubscription(ctx context.Context, account, targe
 		bson.M{"$project": bson.M{"hrUser": 0}},
 	)
 	// r.enriched.Raw(): decodes into []model.EnrichedDMSubscription (stored sub + room baseline + hrInfo).
-	cur, err := r.enriched.Raw().Aggregate(ctx, pipeline)
+	cur, err := r.enrichedSecondary.Raw().Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate dm subscription: %w", err)
 	}
@@ -385,7 +396,7 @@ func (r *SubscriptionRepo) GetSubscriptionByRoomID(ctx context.Context, account,
 	pipeline := bson.A{bson.M{"$match": bson.M{"u.account": account, "roomId": roomID}}}
 	pipeline = append(pipeline, roomsEnrichStages(false)...)
 	pipeline = append(pipeline, bson.M{"$limit": int64(1)}) // (roomId, u.account) is unique — short-circuit defensively
-	out, err := r.enriched.Aggregate(ctx, pipeline)
+	out, err := r.enrichedSecondary.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate subscription by roomId: %w", err)
 	}
@@ -410,7 +421,7 @@ func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	pipeline = append(pipeline, bson.M{"$count": "n"})
-	cur, err := r.subscriptions.Raw().Aggregate(ctx, pipeline)
+	cur, err := r.subscriptionsSecondary.Raw().Aggregate(ctx, pipeline)
 	if err != nil {
 		return 0, fmt.Errorf("count active subscriptions: %w", err)
 	}
@@ -434,7 +445,7 @@ func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account s
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
-	return r.enriched.Aggregate(ctx, pipeline)
+	return r.enrichedSecondary.Aggregate(ctx, pipeline)
 }
 
 // GetAppSubscription returns the requester's botDM subscription for botName, or (nil, nil).

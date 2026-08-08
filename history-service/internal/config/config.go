@@ -8,6 +8,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // CassandraConfig holds Cassandra connection settings (env prefix: CASSANDRA_).
@@ -26,6 +27,9 @@ type MongoConfig struct {
 	DB       string `env:"DB"       envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
+	// ReadPreference is the client-level read preference; secondaryPreferred offloads
+	// history reads. DEK reads pin to primary in code regardless.
+	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
 	// MaxPoolSize caps connections per server. This is authoritative — it is
 	// always applied to the client, overriding any maxPoolSize in the URI — so
 	// the pool ceiling is explicit rather than the driver default of 100.
@@ -130,6 +134,9 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
+		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
 	}
 	// 0 makes the driver treat the pool as unbounded — reject it so the cap stays explicit.
 	if cfg.Mongo.MaxPoolSize < 1 {
