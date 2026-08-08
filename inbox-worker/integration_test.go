@@ -1631,6 +1631,23 @@ func TestInboxWorker_UpdateUserSettings_Integration(t *testing.T) {
 		require.NotNil(t, got.Settings.FullWidth)
 	})
 
+	t.Run("same-millisecond event is applied, not dropped", func(t *testing.T) {
+		// The guard was $lt, so of two writes stamped in the same millisecond the
+		// second was dropped at every remote site. Tapping through a contact picker
+		// makes same-ms add/remove bursts reachable; the apply is an idempotent
+		// whole-object replace, so $lte is safe.
+		seed(t, "settings-same-ms")
+		dark, light := "dark", "light"
+
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-same-ms", &model.UserSettings{ThemePreference: &dark}, t1))
+		require.NoError(t, store.UpdateUserSettings(ctx, "settings-same-ms", &model.UserSettings{ThemePreference: &light}, t1))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "settings-same-ms"}).Decode(&got))
+		require.NotNil(t, got.Settings.ThemePreference)
+		assert.Equal(t, "light", *got.Settings.ThemePreference)
+	})
+
 	t.Run("unknown account is a no-op", func(t *testing.T) {
 		require.NoError(t, store.UpdateUserSettings(ctx, "ghost", &model.UserSettings{FullWidth: &yes}, t2))
 

@@ -202,10 +202,13 @@ func (s *mongoInboxStore) UpdateUserStatus(ctx context.Context, account, statusT
 // here too. A missing user (no doc on this site) is a silent no-op.
 func (s *mongoInboxStore) UpdateUserSettings(ctx context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error {
 	// Guard on the settingsUpdatedAt high-water mark so an out-of-order or duplicate event
-	// (settings fan to all sites) can't regress to older settings.
+	// (settings fan to all sites) can't regress to older settings. $lte, not $lt: two
+	// writes can share a millisecond, and dropping the second would leave a remote site
+	// permanently behind. Safe because the apply is an idempotent whole-object replace —
+	// a same-ms tie resolves to last-delivered.
 	filter := bson.M{"account": account, "$or": bson.A{
 		bson.M{"settingsUpdatedAt": bson.M{"$exists": false}},
-		bson.M{"settingsUpdatedAt": bson.M{"$lt": updatedAt}},
+		bson.M{"settingsUpdatedAt": bson.M{"$lte": updatedAt}},
 	}}
 	set := bson.M{"settings": settings, "settingsUpdatedAt": updatedAt}
 	if _, err := s.userCol.UpdateOne(ctx, filter, bson.M{"$set": set}); err != nil {
