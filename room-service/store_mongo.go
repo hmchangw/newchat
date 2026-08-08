@@ -1134,7 +1134,7 @@ func (s *MongoStore) MoveSubscriptionSection(ctx context.Context, roomID, accoun
 // ComputeSectionOrder midpoints a new position within (account, sectionID). Two
 // small indexed reads in the placed case (the afterRoomID sub, then the next
 // higher order); one in the append case (the section max). Both afterRoomID and
-// beforeRoomID empty ⇒ append at the section end (max order + gap).
+// beforeRoomID empty ⇒ append at the section end (max order + 1).
 func (s *MongoStore) ComputeSectionOrder(ctx context.Context, account, sectionID, afterRoomID, beforeRoomID string) (float64, bool, error) {
 	secFilter := bson.M{"u.account": account, "sectionId": sectionID}
 	if beforeRoomID != "" {

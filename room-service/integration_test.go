@@ -4232,3 +4232,29 @@ func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testi
 	assert.Equal(t, []string{"p9"}, bobRaw.ThreadUnread)
 	assert.True(t, bobRaw.Alert)
 }
+
+// RebalanceSection renumbers a section's rows spaced by 10, not 1, so later
+// midpoint inserts rarely exhaust the gap.
+func TestMongoStore_RebalanceSection_SpacesByTen(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	// Three chats in one section with collapsed near-zero orders (forces a renumber).
+	for i, rid := range []string{"r1", "r2", "r3"} {
+		mustInsertSub(t, db, &model.Subscription{
+			ID:           "s" + rid,
+			User:         model.SubscriptionUser{ID: "u" + rid, Account: "alice"},
+			RoomID:       rid,
+			SectionId:    strPtr("sec1"),
+			SectionOrder: float64(i) * 0.0001,
+		})
+	}
+
+	out, err := store.RebalanceSection(ctx, "alice", "sec1", time.Now())
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	for i := range out {
+		assert.Equal(t, float64((i+1)*10), out[i].SectionOrder, "row %d spaced by 10", i)
+	}
+}
