@@ -168,11 +168,8 @@ func upsertAll(ctx context.Context, db *mongo.Database) (mongoCounts, error) {
 	return c, nil
 }
 
-// upsertHREmployees writes the portal directory's enrichment rows. It first
-// drops any row that holds one of our accounts under a different _id: the
-// collection carries a unique account index, and dev databases created before
-// the seeder owned hr_employee hold those accounts under a generated ObjectId,
-// which would make the keyed upsert below collide. A no-op once clean.
+// upsertHREmployees drops rows holding a seeded account under a foreign _id
+// (the unique account index would collide), then upserts.
 func upsertHREmployees(ctx context.Context, db *mongo.Database) (int64, error) {
 	if _, err := db.Collection("hr_employee").DeleteMany(ctx, bson.M{
 		"account": bson.M{"$in": hrEmployeeAccounts()},

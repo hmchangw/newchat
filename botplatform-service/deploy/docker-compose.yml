@@ -6,10 +6,8 @@ services:
       context: ../..
       dockerfile: botplatform-service/deploy/Dockerfile
     pull_policy: build
-    # No host port publish, and no Traefik route either: the only caller is
-    # portal-service, which forwards POST /api/v1/login here in-network as
-    # botplatform-service:8080 (BOTPLATFORM_URL). Publishing host 8080 collided
-    # with auth-service and media-service, which also default to 8080.
+    # No host port and no Traefik route: the only caller is portal-service,
+    # forwarding /api/v1/login in-network via BOTPLATFORM_URL.
     environment:
       - OTEL_SERVICE_NAME=botplatform-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}

@@ -8,12 +8,7 @@
 # Portal-service's own /api/v1/login is deliberately NOT routed here — portal
 # stays "portal-direct" (its own host port, 8085), not behind the gateway.
 #
-# There is no /api/v1/password/change router: botplatform-service never grew
-# that endpoint (it serves /api/v1/login and /api/v1/auth/validate only), and
-# password change is served by admin-service's POST /v1/password/change, which
-# admin-frontend calls directly on :8082. A router pointing at an endpoint that
-# 404s is worse than no router — re-add one here only if botplatform gains the
-# route and a client starts calling it through baseUrl.
+# No password-change router: that endpoint lives on admin-service, not botplatform.
 http:
   routers:
     auth:

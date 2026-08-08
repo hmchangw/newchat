@@ -1,9 +1,8 @@
 name: portal-service
 
 services:
-  # The directory portal serves is chat.users left-joined with chat.hr_employee.
-  # Both collections are seeded by `make seed` (tools/seed-sample-data) — run it
-  # once after `make deps-up`, and again whenever you want the fixtures back.
+  # The directory is chat.users left-joined with chat.hr_employee; `make seed`
+  # owns both collections.
   portal-service:
     build:
       context: ../..
@@ -26,15 +25,10 @@ services:
       # in handler.go — both required, nothing else read). baseUrl is the unified
       # backend origin (`{baseUrl}/api/v1/...` via the Traefik gateway on :7777);
       # natsUrl is the site's NATS WS URL.
-      #
-      # site-remote points at the same local endpoints on purpose. `make seed`
-      # homes ivan and judy on site-remote to exercise cross-site data, but local
-      # dev runs a single site — without an entry here, resolving either account
-      # is an ops misconfiguration to portal and /api/userInfo answers 500.
+      # site-remote maps to the same local endpoints: `make seed` homes ivan and
+      # judy there, and an unregistered site is a 500 on /api/userInfo.
       - 'PORTAL_SITE_URLS={"site-local":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"},"site-remote":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"}}'
-      # Local dev re-reads the directory every minute (prod default is 2h) so a
-      # `make seed` run after the stack is already up shows up in /api/userInfo
-      # without a portal restart.
+      # 1m, not the 2h prod default, so `make seed` lands without a restart.
       - PORTAL_CACHE_REFRESH_INTERVAL=1m
       # Single cluster-internal botplatform endpoint /api/v1/login forwards to.
       - BOTPLATFORM_URL=http://botplatform-service:8080

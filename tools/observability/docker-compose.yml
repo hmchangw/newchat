@@ -47,14 +47,7 @@ services:
     container_name: chat-local-nats-exporter
     command: ["-port=7777", "-jsz=all", "http://chat-local-nats:8222"]
     ports:
-      # localhost-only; raw exporter metrics for debugging. Host :7778, not
-      # :7777 — that host port belongs to the Traefik `/api/v1` gateway in
-      # docker-local/compose.services.yaml, and it is baked into portal's
-      # PORTAL_SITE_URLS baseUrl, so the gateway cannot move. Publishing both on
-      # :7777 made `make obs-up` and `make up` mutually exclusive: whichever
-      # started second failed to bind, and a missing gateway takes the frontend's
-      # /api/v1/auth call down with it. The container port stays 7777 so the
-      # Prometheus scrape target (nats-exporter:7777) is unchanged.
+      # Host :7778 — :7777 is the Traefik gateway. Container port unchanged.
       - "127.0.0.1:7778:7777"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7777/metrics"]
@@ -102,10 +95,7 @@ services:
       prometheus:
         condition: service_healthy
     ports:
-      # localhost-only (anonymous-admin Grafana stays off LAN). Host :3002 —
-      # :3000 is chat-frontend and :3001 is admin-frontend; the product UIs keep
-      # the low ports, the observability UIs sit above them (:3003 is the
-      # o11y-SDK Grafana in docker-local/compose.o11y.yaml).
+      # localhost-only (anonymous-admin stays off LAN). :3000/:3001 are the UIs.
       - "127.0.0.1:3002:3000"
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"

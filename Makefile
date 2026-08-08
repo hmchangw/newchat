@@ -198,9 +198,8 @@ else
 	docker compose -f $(SERVICES_COMPOSE) down
 endif
 
-# Start the browser UIs (chat-frontend :3000, admin-frontend :3001). Separate
-# from `make up` because chat-frontend's port is the one `npm run dev` wants —
-# run one or the other, not both. Needs the backend up for anything to load.
+# Browser UIs (chat-frontend :3000, admin-frontend :3001). Kept out of `make up`
+# because chat-frontend's port is the one `npm run dev` wants.
 ui-up: require-deps
 	docker compose -f $(UI_COMPOSE) up -d --build
 
@@ -208,13 +207,8 @@ ui-down:
 	docker compose -f $(UI_COMPOSE) down
 
 # --- Local observability targets ----------------------------------------------
-# Two complementary stacks, both opt-in and safe to run together:
-#   o11y-up  OTLP collector + Tempo/Loki/Prometheus/Grafana (:3003) — the
-#            backend for the traces/metrics/logs services export when
-#            O11Y_ENABLED=true, which compose.services.yaml sets by default.
-#            Without it those exports just fail in the background; nothing else
-#            breaks, but the logs get noisy.
-#   obs-up   cAdvisor + NATS JetStream exporter + Prometheus/Grafana (:3002).
+# Two opt-in stacks, safe to run together: o11y-up receives what services export
+# under O11Y_ENABLED (:3003); obs-up is cAdvisor + NATS metrics (:3002).
 o11y-up:
 	@docker network inspect chat-local >/dev/null 2>&1 || { \
 	  echo "chat-local network missing. Run 'make deps-up' first."; exit 1; \

@@ -35,10 +35,8 @@ services:
     ports:
       - "27017:27017"
     volumes:
-      # No /docker-entrypoint-initdb.d hook: it runs only when the volume is
-      # first created, so chat.hr_employee silently stayed stale on every
-      # existing dev database. `make seed` owns that collection now, alongside
-      # the chat.users rows it left-joins onto.
+      # No initdb.d hook — it only runs on first volume creation, so
+      # chat.hr_employee went stale. `make seed` owns that collection now.
       - mongo-data:/data/db
     healthcheck:
       test: ["CMD-SHELL", "echo 'db.runCommand({ping:1}).ok' | mongosh --quiet | grep -q 1"]

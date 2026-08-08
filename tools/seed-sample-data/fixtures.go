@@ -39,10 +39,8 @@ const (
 // realm in auth-service/deploy/keycloak/realm-export.json; most of the rest
 // populate rooms so member lists look realistic. u-admin is a demo
 // platform-admin account (no rooms, no HR record) so local bot/admin
-// password login has something to authenticate against end-to-end.
-// portal-service builds its directory from this same chat.users collection
-// (left-joined with hr_employee), so the roles written here are what portal's
-// login role-gate reads.
+// password login has something to authenticate against end-to-end. Portal's
+// login role-gate reads the roles written here.
 func BuildUsers() []model.User {
 	return []model.User{
 		{ID: "u-alice", Account: "alice", SiteID: siteLocal, SectID: "eng", SectName: "Engineering", SectTCName: "工程部", DeptID: "eng-backend", DeptName: "Backend", DeptTCName: "後端組", EngName: "Alice Engineer", ChineseName: "王小愛", EmployeeID: "E001"},
@@ -66,15 +64,8 @@ func BuildUsers() []model.User {
 	}
 }
 
-// BuildHREmployees returns the hr_employee enrichment rows portal-service
-// left-joins onto users to resolve `employeeId`. Derived from BuildUsers so
-// the two can never drift. Role-carrying accounts (today just the demo admin)
-// are skipped: HR feeds humans, and an account present in users but absent
-// from hr_employee is exactly the case portal's users-primary left-join
-// exists to cover.
-//
-// _id is the employeeId, matching how hr-sync-worker keys the collection, so
-// re-seeding updates the same doc rather than inserting a twin.
+// BuildHREmployees returns the hr_employee rows portal left-joins onto users,
+// derived from BuildUsers. Role-carrying accounts are skipped by design.
 func BuildHREmployees() []model.IEmployee {
 	users := BuildUsers()
 	out := make([]model.IEmployee, 0, len(users))

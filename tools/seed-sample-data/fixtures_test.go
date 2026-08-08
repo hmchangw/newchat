@@ -422,8 +422,7 @@ func TestBuildRestrictedCache_OneEntryPerEngMember(t *testing.T) {
 func TestBuildHREmployees_OneRowPerHumanUser(t *testing.T) {
 	rows := BuildHREmployees()
 
-	// Every seeded user except the demo admin, which deliberately has no HR
-	// record so portal's users-primary left-join stays covered.
+	// Every seeded user except the demo admin, which has no HR record.
 	require.Len(t, rows, 10)
 	for _, e := range rows {
 		assert.NotEqual(t, "admin", e.Account, "admin must not get an hr_employee row")
@@ -449,8 +448,7 @@ func TestBuildHREmployees_MirrorsBuildUsers(t *testing.T) {
 	}
 }
 
-// The hr_employee _id is the employeeId, matching how hr-sync-worker keys the
-// collection — so re-seeding updates the same doc instead of inserting a twin.
+// _id = employeeId, so re-seeding updates the same doc instead of twinning it.
 func TestBuildHREmployees_IDIsEmployeeID(t *testing.T) {
 	for _, e := range BuildHREmployees() {
 		assert.Equal(t, e.EmployeeID, e.ID, "account %s", e.Account)

@@ -16,11 +16,7 @@ services:
       - LOG_LEVEL=info
       - SITE_ID=site-local
       # JSON array of {siteID, domain} for cross-cluster avatar redirects. The
-      # domain is the browser-reachable origin that fronts /api/v1/avatar — the
-      # Traefik gateway on :7777, not :8080 (this service stopped publishing a
-      # host port, and :8080 is auth-service now, so a redirect there 404s).
-      # site-remote mirrors the seeded remote users' home site; see
-      # portal-service/deploy/docker-compose.yml.
+      # domain must be the gateway that fronts /api/v1/avatar, not :8080.
       - 'CLUSTER_DOMAINS=[{"siteID":"site-local","domain":"http://localhost:7777"},{"siteID":"site-remote","domain":"http://localhost:7777"}]'
       - EMPLOYEE_PHOTO_BASE_URL=http://localhost:8081/photos
       - MONGO_URI=mongodb://mongodb:27017

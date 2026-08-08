@@ -43,11 +43,8 @@ services:
     networks:
       - chat-local
 
-  # Container names carry the -o11y- infix so this stack can run alongside
-  # tools/observability (`make obs-up`), which owns plain chat-local-prometheus
-  # and chat-local-grafana. The two are complementary — traces/logs/SDK metrics
-  # here, cAdvisor + NATS JetStream metrics there — but sharing a container name
-  # made whichever started second fail outright.
+  # -o11y- infix: tools/observability (`make obs-up`) owns the plain
+  # chat-local-prometheus / chat-local-grafana names, and both stacks co-run.
   prometheus:
     image: prom/prometheus:v3.0.1
     container_name: chat-local-o11y-prometheus
@@ -88,7 +85,7 @@ services:
     volumes:
       - ./o11y/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
     ports:
-      # :3000 chat-frontend, :3001 admin-frontend, :3002 the obs-up Grafana.
+      # :3000/:3001 are the UIs, :3002 the obs-up Grafana.
       - "3003:3000"
     depends_on:
       - tempo

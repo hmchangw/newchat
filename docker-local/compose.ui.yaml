@@ -1,19 +1,9 @@
 name: chat-local-ui
 
-# The two browser UIs, kept out of compose.services.yaml on purpose: their
-# images are npm builds that have nothing to do with the Go backend, and
-# chat-frontend's container port (3000) is the same port `npm run dev` binds —
-# folding them into `make up` would make the container and the Vite dev server
-# fight over it. Bring them up only when you want the packaged build:
+# chat-frontend :3000, admin-frontend :3001. Kept out of compose.services.yaml
+# because chat-frontend's port is the one `npm run dev` binds.
 #
-#   make ui-up      (detached)
-#   make ui-down
-#
-# Expects `make deps-up` (owns the chat-local network) and `make up` (the
-# backend, including the Traefik gateway both UIs call through) to be running.
-#
-#   chat-frontend   http://localhost:3000  → portal :8085, gateway :7777
-#   admin-frontend  http://localhost:3001  → admin-service :8082
+# Start: make ui-up   Stop: make ui-down   Needs: make deps-up, make up
 include:
   - ../chat-frontend/deploy/docker-compose.yml
   - ../admin-frontend/deploy/docker-compose.yml

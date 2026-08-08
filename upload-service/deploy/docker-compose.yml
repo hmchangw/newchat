@@ -31,11 +31,8 @@ services:
       - OIDC_ISSUER_URL=http://keycloak:8080/realms/chatapp
       - OIDC_AUDIENCES=nats-chat
       - TLS_SKIP_VERIFY=false
-      # The browser reaches these endpoints cross-origin — the page is served
-      # from :3000 (chat-frontend, container or `npm run dev`) while uploads and
-      # /file/setCookie go to the gateway on :7777. An empty allowlist emits no
-      # CORS headers at all, so every upload and the media-cookie handshake fail
-      # in the browser while curl keeps working. :3001 is admin-frontend.
+      # The frontends call these cross-origin via the gateway. An empty
+      # allowlist emits no CORS headers, so uploads fail in the browser.
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001}
       - DRIVE_URL=${DRIVE_URL:-http://drive-mock:9000}
       - DRIVE_API_TOKEN=${DRIVE_API_TOKEN:-dev-token}
