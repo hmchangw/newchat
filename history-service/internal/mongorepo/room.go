@@ -90,18 +90,6 @@ type RoomTimes struct {
 	Preview *model.PreviewMessage
 }
 
-// previewProjection is the stored-preview half of the GetRoomTimesByIDs
-// projection. lastMsgId rides along because freshness is an identity check
-// against it (see pkg/preview and the design's §3).
-var previewProjection = bson.M{
-	"lastMsgId":         1,
-	"previewMeta":       1,
-	"previewCiphertext": 1,
-	"previewNonce":      1,
-	"previewKeyEpoch":   1,
-	"previewForMsgId":   1,
-}
-
 // GetRoomTimesByIDs batches GetRoomTimes across ids into a single $in query,
 // returning a map keyed by room ID. Rooms absent from Mongo are simply absent
 // from the map (not an error). Empty ids returns an empty, non-nil map with no query.
@@ -113,13 +101,19 @@ func (r *RoomRepo) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[str
 	if len(ids) == 0 {
 		return out, nil
 	}
-	projection := bson.M{"_id": 1, "lastMsgAt": 1, "createdAt": 1}
-	for k, v := range previewProjection {
-		projection[k] = v
-	}
+	// lastMsgId rides along because freshness is an identity check against it
+	// (see pkg/preview and the design's §3).
 	rooms, err := r.rooms.FindMany(ctx,
 		bson.M{"_id": bson.M{"$in": ids}},
-		mongoutil.WithProjection(projection),
+		mongoutil.WithProjection(bson.M{
+			"_id": 1, "lastMsgAt": 1, "createdAt": 1,
+			"lastMsgId":         1,
+			"previewMeta":       1,
+			"previewCiphertext": 1,
+			"previewNonce":      1,
+			"previewKeyEpoch":   1,
+			"previewForMsgId":   1,
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get room times for %d rooms: %w", len(ids), err)

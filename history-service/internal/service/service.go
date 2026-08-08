@@ -61,7 +61,9 @@ type SubscriptionRepository interface {
 // RoomRepository reads room metadata required by history handlers:
 // MinUserLastSeenAt as a per-user read-receipt floor surfaced to clients,
 // GetRoomTimes (lastMsgAt, createdAt) for bucket-walk bounds, and
-// GetRoomTimesByIDs, the batched ($in) form for resolving many rooms at once.
+// GetRoomTimesByIDs, the batched ($in) form for resolving many rooms at once —
+// which also carries each room's memoized preview, already freshness-checked and
+// opened, so a room list can skip the Cassandra walk entirely.
 type RoomRepository interface {
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)

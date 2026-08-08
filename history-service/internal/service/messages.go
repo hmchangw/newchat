@@ -657,7 +657,7 @@ func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models
 	w := s.roomLastPreviewMessage(c, roomID, nil, at)
 	switch w.State {
 	case previewFound:
-		s.storePreviewAfterMutation(c, roomID, &w, at)
+		s.storePreview(c, roomID, "mutation", &w, at.UnixMilli())
 		return &w.Preview
 	case previewEmpty:
 		// The walk COMPLETED and found no eligible survivor, so the stored preview
@@ -669,19 +669,6 @@ func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models
 		return nil
 	default: // previewDegraded — a survivor may still exist; clearing would lose it
 		return nil
-	}
-}
-
-// storePreviewAfterMutation persists the post-mutation preview, best-effort: a
-// failure leaves a stale preview until the next message changes lastMsgId, which
-// costs correctness of a room-list snippet and nothing else.
-func (s *HistoryService) storePreviewAfterMutation(c *natsrouter.Context, roomID string, w *previewWalk, at time.Time) {
-	if w.NewestObservedID == "" {
-		return // nothing observed — no freshness key to store against
-	}
-	if err := s.rooms.SetPreviewMessage(c, roomID, w.Preview, w.NewestObservedID, at.UnixMilli()); err != nil {
-		slog.WarnContext(c, "preview store after mutation failed", "room_id", roomID,
-			"request_id", natsutil.RequestIDFromContext(c), "error", err)
 	}
 }
 

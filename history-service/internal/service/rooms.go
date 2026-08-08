@@ -137,14 +137,19 @@ func (s *HistoryService) resolveRoomMetaHints(
 	return metaByRoom
 }
 
-// resolvePreview resolves one room's preview, serving it from the preview cache
-// when installed. The cache is positives-only, so empty rooms and read failures
-// fall through to a fresh resolve. meta is the caller/batch-resolved times hint
-// (nil when none applies); previewAfterMutation (edit/delete) keeps calling
-// roomLastPreviewMessage directly with meta=nil so mutations always see fresh state.
-// Both resolve paths (cache-miss loader and no-cache) route through the same load
-// closure so a walk that actually runs and finds a preview always warm-backs it;
-// a cache HIT never invokes load, so it never warm-backs (nothing new to persist).
+// resolvePreview resolves one room's preview, in three tiers: a current stored
+// preview (served as-is, no walk), then the in-process preview cache when
+// installed, then a fresh Cassandra walk that warm-backs what it finds.
+//
+// stored is the memoized preview from the batch room-doc read, already
+// freshness- and epoch-checked by the repo — nil means "walk instead". The cache
+// is positives-only, so empty rooms and read failures fall through to a fresh
+// resolve. meta is the caller/batch-resolved times hint (nil when none applies);
+// previewAfterMutation (edit/delete) keeps calling roomLastPreviewMessage directly
+// with meta=nil so mutations always see fresh state. Both walk paths (cache-miss
+// loader and no-cache) route through the same load closure so a walk that runs and
+// finds a preview always warm-backs it; a cache HIT never invokes load, so it never
+// warm-backs (nothing new to persist).
 func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta *models.RoomMeta, stored *models.PreviewMessage, now time.Time) (models.PreviewMessage, bool) {
 	// A current stored preview short-circuits the walk entirely — the whole
 	// point of the denormalization. The repo has already checked freshness and
@@ -155,7 +160,7 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta
 	load := func(ctx context.Context) (models.PreviewMessage, bool, error) {
 		w := s.roomLastPreviewMessage(ctx, roomID, meta, now)
 		if w.State == previewFound {
-			s.warmBackPreview(ctx, roomID, w.Preview, w.NewestObservedID)
+			s.storePreview(ctx, roomID, "warm_back", &w, w.Preview.CreatedAt.UnixMilli())
 		}
 		return w.Preview, w.State == previewFound, nil
 	}
@@ -171,24 +176,27 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta
 	return pvw, ok
 }
 
-// warmBackPreview best-effort persists a walk-resolved preview so subsequent
-// reads serve it from the room doc instead of re-walking. asOf is the preview's
-// own createdAt millis — conservative by construction (<= any event timestamp
-// that observed this message), so a warm-back never outranks a post-mutation
-// write. Failures only cost the optimization, never the read: log and continue.
+// storePreview best-effort persists a walk-resolved preview so subsequent reads
+// serve it from the room doc instead of re-walking. Shared by both writers — the
+// read-path warm-back and the post-mutation refresh — so the skip rule below
+// cannot drift between them. Failures only cost the optimization, never the read
+// or the mutation: log and continue.
 //
-// newestObservedID is the freshness key and comes from the walk, never from the
-// room doc; see previewWalk.NewestObservedID.
+// asOf differs per caller and stays explicit at the call site: the warm-back uses
+// the preview's own createdAt (conservative by construction — <= any event
+// timestamp that observed this message, so it never outranks a mutation write),
+// while a mutation uses its own edit/delete time.
 //
-//nolint:gocritic // hugeParam: p's by-value shape matches roomLastPreviewMessage's return and RoomRepository.SetPreviewMessage's contract; the copy cost is negligible on this best-effort path.
-func (s *HistoryService) warmBackPreview(ctx context.Context, roomID string, p models.PreviewMessage, newestObservedID string) {
-	if newestObservedID == "" {
+// path labels which writer this was, so the two stay distinguishable in logs now
+// that they share a code path.
+func (s *HistoryService) storePreview(ctx context.Context, roomID, path string, w *previewWalk, asOf int64) {
+	if w.NewestObservedID == "" {
 		// Nothing observed means nothing to key freshness on; storing the preview
 		// would make it permanently un-invalidatable. Skip rather than guess.
 		return
 	}
-	if err := s.rooms.SetPreviewMessage(ctx, roomID, p, newestObservedID, p.CreatedAt.UnixMilli()); err != nil {
-		slog.WarnContext(ctx, "preview warm-back failed", "room_id", roomID,
+	if err := s.rooms.SetPreviewMessage(ctx, roomID, w.Preview, w.NewestObservedID, asOf); err != nil {
+		slog.WarnContext(ctx, "preview store failed", "room_id", roomID, "path", path,
 			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 	}
 }

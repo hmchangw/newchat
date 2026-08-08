@@ -33,13 +33,13 @@ const MaxContentRunes = 500
 //
 //nolint:gocritic // hugeParam: PreviewMessage is the stored/wire shape itself; by-value keeps callers simple and the copy cost is negligible.
 func Build(p model.PreviewMessage) model.PreviewMessage {
-	p.Content = TruncateContent(p.Content)
+	p.Content = truncateContent(p.Content)
 	p.CreatedAt = p.CreatedAt.UTC()
 	return p
 }
 
-// TruncateContent caps s at MaxContentRunes runes (never splitting a rune).
-func TruncateContent(s string) string {
+// truncateContent caps s at MaxContentRunes runes (never splitting a rune).
+func truncateContent(s string) string {
 	// Byte length bounds rune count, so the common short message needs no scan.
 	if len(s) <= MaxContentRunes {
 		return s
