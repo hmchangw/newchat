@@ -103,6 +103,7 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 func (h *Handler) Register(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.MuteTogglePattern(h.siteID), h.muteToggle)
 	natsrouter.RegisterNoBody(r, subject.FavoriteTogglePattern(h.siteID), h.favoriteToggle)
+	natsrouter.Register(r, subject.MoveChatPattern(h.siteID), h.moveChat)
 	natsrouter.RegisterNoBody(r, subject.OpenRoomPattern(h.siteID), h.openRoom)
 	natsrouter.RegisterNoBody(r, subject.RoomAppTabsPattern(h.siteID), h.getRoomAppTabs)
 	natsrouter.RegisterNoBody(r, subject.RoomAppCmdMenuPattern(h.siteID), h.getRoomAppCommandMenu)
@@ -2215,6 +2216,137 @@ func (h *Handler) favoriteToggle(c *natsrouter.Context) (*model.FavoriteToggleRe
 	}
 
 	return &model.FavoriteToggleResponse{Status: "ok", Favorite: sub.Favorite}, nil
+}
+
+// moveChat assigns a chat to a chatlist section (+ manual order) or removes it
+// (sectionId == nil). Membership lives on the subscription, mirroring
+// favorite.toggle: one sub write + one subscription-update fanout + one cross-site
+// federation event, HWM-guarded by sectionUpdatedAt. Built-in section ids are
+// rejected — their membership is derived client-side (the migration-only "teams"
+// stamp is written directly at the sub-create, not via this RPC).
+func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*model.MoveChatResponse, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
+	var ctx context.Context = c
+	account := c.Param("account")
+	roomID := c.Param("roomID")
+
+	if req.SectionID != nil {
+		if *req.SectionID == "" {
+			return nil, errcode.BadRequest("sectionId is empty", errcode.WithReason(errcode.UserChatlistSectionNotFound))
+		}
+		if model.IsBuiltinSection(*req.SectionID) {
+			// static built-in check only. A custom section's *existence*
+			// is not verified here (that would couple room-service to the
+			// user-service registry on every move) — orphan tolerance renders an
+			// unknown sectionId under Chats client-side.
+			return nil, errcode.BadRequest("cannot move a chat into a built-in section", errcode.WithReason(errcode.UserChatlistBuiltinTarget))
+		}
+		if req.AfterRoomID != "" && req.BeforeRoomID != "" {
+			return nil, errcode.BadRequest("afterRoomId and beforeRoomId are mutually exclusive")
+		}
+	}
+
+	// One instant shared by the origin write and the published event so remote
+	// replicas guard against the same high-water mark.
+	now := time.Now().UTC()
+
+	var order float64
+	var rebalanced []model.Subscription
+	if req.SectionID != nil {
+		var needRebalance bool
+		var err error
+		order, needRebalance, err = h.store.ComputeSectionOrder(ctx, account, *req.SectionID, req.AfterRoomID, req.BeforeRoomID)
+		if err != nil {
+			return nil, fmt.Errorf("compute section order: %w", err)
+		}
+		if needRebalance {
+			if rebalanced, err = h.store.RebalanceSection(ctx, account, *req.SectionID, now); err != nil {
+				return nil, fmt.Errorf("rebalance section: %w", err)
+			}
+			if order, _, err = h.store.ComputeSectionOrder(ctx, account, *req.SectionID, req.AfterRoomID, req.BeforeRoomID); err != nil {
+				return nil, fmt.Errorf("recompute section order: %w", err)
+			}
+		}
+	}
+
+	sub, err := h.store.MoveSubscriptionSection(ctx, roomID, account, req.SectionID, order, now)
+	if err != nil {
+		if errors.Is(err, model.ErrSubscriptionNotFound) {
+			return nil, errNotRoomMember
+		}
+		return nil, fmt.Errorf("move subscription section: %w", err)
+	}
+
+	userSiteID, err := h.store.GetUserSiteID(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("get user siteId: %w", err)
+	}
+
+	if len(rebalanced) > 0 {
+		// RebalanceSection ran before the final MoveSubscriptionSection write, so
+		// the moved room's entry in rebalanced (if present — it's only a member of
+		// the rebalanced section pre-move when moving within the same section)
+		// still carries its intermediate integer order. Overwrite it with sub, the
+		// authoritative post-move row; if it's not present (moved in from a
+		// different section), append it so the move itself still gets published.
+		moved := false
+		for i := range rebalanced {
+			if rebalanced[i].RoomID == roomID {
+				rebalanced[i] = *sub
+				moved = true
+				break
+			}
+		}
+		if !moved {
+			rebalanced = append(rebalanced, *sub)
+		}
+		// A rebalance renumbered every sibling in the section, not just the moved
+		// chat — fan out one section_moved event per rewritten row (the moved row
+		// is already in this set) instead of the single-row publish below.
+		for i := range rebalanced {
+			row := &rebalanced[i]
+			if _, err := h.publishSubscriptionUpdate(ctx, account, "section_moved", row, "", now); err != nil {
+				return nil, err
+			}
+			if userSiteID != "" && userSiteID != h.siteID {
+				payload := model.SubscriptionSectionMovedEvent{
+					Account:      account,
+					RoomID:       row.RoomID,
+					SectionID:    row.SectionId,
+					SectionOrder: row.SectionOrder,
+					Timestamp:    now.UnixMilli(),
+				}
+				payloadData, err := json.Marshal(payload)
+				if err != nil {
+					return nil, fmt.Errorf("marshal section-moved payload: %w", err)
+				}
+				if err := h.federateOne(ctx, row.RoomID, userSiteID, model.InboxSubscriptionSectionMoved, payloadData, row.RoomID+":"+account, now.UnixMilli()); err != nil {
+					return nil, fmt.Errorf("federate section-moved: %w", err)
+				}
+			}
+		}
+	} else {
+		if _, err := h.publishSubscriptionUpdate(ctx, account, "section_moved", sub, "", now); err != nil {
+			return nil, err
+		}
+		if userSiteID != "" && userSiteID != h.siteID {
+			payload := model.SubscriptionSectionMovedEvent{
+				Account:      account,
+				RoomID:       roomID,
+				SectionID:    sub.SectionId,
+				SectionOrder: sub.SectionOrder,
+				Timestamp:    now.UnixMilli(),
+			}
+			payloadData, err := json.Marshal(payload)
+			if err != nil {
+				return nil, fmt.Errorf("marshal section-moved payload: %w", err)
+			}
+			if err := h.federateOne(ctx, roomID, userSiteID, model.InboxSubscriptionSectionMoved, payloadData, roomID+":"+account, now.UnixMilli()); err != nil {
+				return nil, fmt.Errorf("federate section-moved: %w", err)
+			}
+		}
+	}
+
+	return &model.MoveChatResponse{Status: "ok", SectionID: sub.SectionId, SectionOrder: sub.SectionOrder}, nil
 }
 
 func (h *Handler) openRoom(c *natsrouter.Context) (*model.OpenRoomResponse, error) {

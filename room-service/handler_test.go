@@ -30,6 +30,10 @@ import (
 // (e.g. model.Room.CrossSite) in test literals.
 func ptrBool(b bool) *bool { return &b }
 
+// strPtr returns a pointer to s, for constructing *string fields
+// (e.g. model.Subscription.SectionId) in test literals.
+func strPtr(s string) *string { return &s }
+
 // expectAllAccountsExist registers a FindExistingAccounts expectation that
 // echoes its input back — i.e. "every account being asked about exists".
 // Used by every add-member / create-channel happy-path test that doesn't
@@ -5986,6 +5990,87 @@ func TestHandler_FavoriteToggle_CorePublishFailureIsNonFatal(t *testing.T) {
 
 	assert.Equal(t, "ok", resp.Status)
 	assert.True(t, resp.Favorite)
+}
+
+// TestHandler_MoveChat_Rebalance_PublishesAndFederatesAllRows covers the
+// needRebalance path: RebalanceSection renumbers every sibling in the
+// section, so moveChat must fan out one section_moved subscription.update
+// (+ cross-site federation event) per rewritten row, not just the moved one.
+func TestHandler_MoveChat_Rebalance_PublishesAndFederatesAllRows(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		ComputeSectionOrder(gomock.Any(), "alice", "sec1", "", "").
+		Return(0.0, true, nil) // needRebalance
+
+	var rebalanceNow time.Time
+	store.EXPECT().
+		RebalanceSection(gomock.Any(), "alice", "sec1", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _, _ string, now time.Time) ([]model.Subscription, error) {
+			rebalanceNow = now
+			ts := now
+			return []model.Subscription{
+				{User: model.SubscriptionUser{ID: "u-sib", Account: "alice"}, RoomID: "sibling", SiteID: "site-a", SectionId: strPtr("sec1"), SectionOrder: 1, SectionUpdatedAt: &ts},
+				{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", SiteID: "site-a", SectionId: strPtr("sec1"), SectionOrder: 2, SectionUpdatedAt: &ts},
+			}, nil
+		})
+	store.EXPECT().
+		ComputeSectionOrder(gomock.Any(), "alice", "sec1", "", "").
+		Return(3.0, false, nil) // recompute after rebalance
+
+	store.EXPECT().
+		MoveSubscriptionSection(gomock.Any(), "r1", "alice", gomock.Any(), 3.0, gomock.Any()).
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", SiteID: "site-a", SectionId: strPtr("sec1"), SectionOrder: 3}, nil)
+	store.EXPECT().
+		GetUserSiteID(gomock.Any(), "alice").
+		Return("site-b", nil) // cross-site → federates
+
+	var coreBodies [][]byte
+	var streamSubjects []string
+	var streamBodies [][]byte
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishCore: func(_ context.Context, _ string, data []byte) error {
+			coreBodies = append(coreBodies, data)
+			return nil
+		},
+		publishToStream: func(_ context.Context, subj string, data []byte, _ string) error {
+			streamSubjects = append(streamSubjects, subj)
+			streamBodies = append(streamBodies, data)
+			return nil
+		},
+	}
+
+	sectionID := "sec1"
+	resp, err := h.moveChat(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MoveChatRequest{SectionID: &sectionID})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Status)
+	assert.Equal(t, 3.0, resp.SectionOrder)
+	assert.False(t, rebalanceNow.IsZero())
+
+	// One local publish + one federation event per rewritten row (sibling + the
+	// moved chat itself, with its FINAL order — not the rebalance's intermediate one).
+	require.Len(t, coreBodies, 2)
+	require.Len(t, streamSubjects, 2)
+
+	gotRooms := map[string]float64{}
+	for _, body := range coreBodies {
+		var evt model.SubscriptionUpdateEvent
+		require.NoError(t, json.Unmarshal(body, &evt))
+		assert.Equal(t, "section_moved", evt.Action)
+		gotRooms[evt.Subscription.RoomID] = evt.Subscription.SectionOrder
+	}
+	assert.Equal(t, map[string]float64{"sibling": 1, "r1": 3}, gotRooms, "moved chat's row must carry its final post-move order, not the rebalance intermediate")
+
+	for i, subj := range streamSubjects {
+		assert.Equal(t, subject.Outbox("site-a", "site-b", model.InboxSubscriptionSectionMoved), subj)
+		var fed model.OutboxEvent
+		require.NoError(t, json.Unmarshal(streamBodies[i], &fed))
+		var inboxEnv model.InboxEvent
+		require.NoError(t, json.Unmarshal(fed.Envelope, &inboxEnv))
+		assert.Equal(t, model.InboxSubscriptionSectionMoved, inboxEnv.Type)
+	}
 }
 
 func TestHandler_OpenRoom_Success(t *testing.T) {

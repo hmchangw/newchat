@@ -60,6 +60,7 @@ paths.
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
      - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
+     - [Chatlist Sections](#chatlist-sections)
      - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
@@ -936,6 +937,8 @@ it is absent on every other action.
 | `alert` | boolean | Whether the room has an unread alert for the user. Authoritative subscription state maintained by the write path (set on new message, cleared on read receipt); **not** modified by read enrichment. |
 | `muted` | boolean | Whether the user muted the room. |
 | `favorite` | boolean | Whether the user favorited the room. |
+| `sectionId` | string | Optional. The custom chatlist section this room is in; absent = no custom section (the client derives a built-in placement). Set/cleared via [Move Chat to Section](#move-chat-to-section). |
+| `sectionOrder` | number | Optional. Manual fractional position within `sectionId`'s section; honored only when that section's `sortMode == "custom"`. |
 | `open` | boolean | Sidebar-visibility flag; false hides the room from subscription.list. |
 | `isSubscribed` | boolean | Optional. Whether the user is actively subscribed. |
 | `historySharedSince` | RFC3339 timestamp | Optional. Boundary before which prior history is shared. |
@@ -2135,6 +2138,51 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 ##### Cross-site behaviour
 
 When the requester's home site differs from the room's site, `room-service` emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `subscription_favorite_toggled` event (at-least-once) to `chat.inbox.{userSite}.external.subscription_favorite_toggled`. `inbox-worker` on the user's home site mirrors the flip onto the local `Subscription` document. Missing-subscription on the home site (e.g., a federation race) is a silent no-op — no NACK, no redelivery loop.
+
+---
+
+#### Move Chat to Section
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.chat.move`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
+
+Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual order, or removes it from its section. Membership + order live on the **subscription** (`sectionId` / `sectionOrder`) — the exact storage + fanout model as `favorite.toggle`, so the per-user section overlay never carries per-chat data (see [Chatlist Sections](#chatlist-sections)). `room-service` writes one subscription, replies with the result, and fans out a `subscription.update` (`action: "section_moved"`).
+
+**Order key.** `sectionOrder` is a `float64`. `afterRoomId` places the chat just after that room (midpoint between its order and the next member's); `beforeRoomId` places it just before that room (top-insertion when the target is the section head); omit both to append (last + 1). `afterRoomId` and `beforeRoomId` are mutually exclusive — supplying both is rejected. A single move is one subscription write. When repeated inserts into one gap exhaust float precision, `room-service` transparently re-spaces that section's members and retries — the client sees nothing.
+
+##### Request body
+
+| Field | Type | Notes |
+|---|---|---|
+| `sectionId` | string \| null | The custom section to move the chat into. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in) — the two are indistinguishable at the wire layer and handled identically. A **built-in** id (`favorites`/`apps`/`teams`/`chats`) is rejected — built-in membership is derived, not user-set. |
+| `afterRoomId` | string | Optional. Place the chat just after this room within the section. Omit to append at the end. Mutually exclusive with `beforeRoomId`. |
+| `beforeRoomId` | string | Optional. Place the chat just before this room within the section (top-insertion when it is the section head). Mutually exclusive with `afterRoomId`. |
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `sectionId` | string | Omitted on a remove. The section the chat is now in. |
+| `sectionOrder` | number | Omitted on a remove. The chat's new manual position. |
+
+```json
+{ "status": "ok", "sectionId": "0192...uuid", "sectionOrder": 3.5 }
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+- reason `chatlist_builtin_target` — `sectionId` is a built-in section.
+- reason `chatlist_section_not_found` — `sectionId` is empty.
+- `"only room members can list members"` — the user has no subscription in the room.
+
+##### Triggered events — success path
+
+**`chat.user.{account}.event.subscription.update`** — `action: "section_moved"`; `subscription` carries the updated `sectionId` / `sectionOrder`. Cross-site, the `subscription_section_moved` inbox event mirrors it onto the user's home-site subscription (HWM-guarded by `sectionUpdatedAt`), the same lane `favorite_toggled` uses.
 
 ---
 
@@ -4394,6 +4442,12 @@ See [Error envelope](#6-error-envelope-reference).
 | `chat.user.{account}.request.user.{siteID}.status.set` | [`status.set`](#statusset) |
 | `chat.user.{account}.request.user.{siteID}.settings.get` | [`settings.get`](#settingsget) |
 | `chat.user.{account}.request.user.{siteID}.settings.set` | [`settings.set`](#settingsset) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.get` | [`chatlist.get`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.create` | [`chatlist.section.create`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.rename` | [`chatlist.section.rename`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.delete` | [`chatlist.section.delete`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.reorder` | [`chatlist.section.reorder`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.setsortmode` | [`chatlist.section.setSortMode`](#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.subscription.list` | [`subscription.list`](#subscriptionlist) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getChannels` | [`subscription.getChannels`](#subscriptiongetchannels) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getDM` | [`subscription.getDM`](#subscriptiongetdm) |
@@ -4701,6 +4755,72 @@ The payload carries the **full post-update settings** (replace, don't merge):
   "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
 }
 ```
+
+---
+
+#### Chatlist Sections
+
+The per-user chatlist is split into **sections**. A chat's section **membership**
+and manual **order** live on its subscription (`sectionId` / `sectionOrder`, set via
+[Move Chat to Section](#move-chat-to-section)); the section **definitions** (names,
+display order, sort mode) live in a small per-user overlay owned by `user-service`.
+So the overlay is O(number of sections), never O(number of chats) — a rename or
+reorder fans a few-KB event no matter how many chats a section holds.
+
+**Built-in sections** (membership derived client-side, never user-set): `favorites`
+(from `subscription.favorite`), `apps` (from `isBot`), `teams` (from
+`subscription.sectionId == "teams"`), `chats` (everything else — no `sectionId`, not
+favorite, not a bot). All built-ins default to `sortMode: "mostRecent"`.
+
+**sortMode**: `"custom"` (sort the section's chats by `subscription.sectionOrder`) or
+`"mostRecent"` (sort by last message — the default and fallback).
+
+##### Client read model
+
+1. Load the paginated room list ([`subscription.list`](#subscriptionlist)) — each sub
+   already carries `favorite`, `sectionId`, `sectionOrder`.
+2. Load `chatlist.get` once — the section definitions (names, order, sortMode).
+3. Group each sub: `favorites` (favorite) · `apps` (bot) · `teams` (`sectionId == "teams"`)
+   · each custom section (`sectionId == <that id>`) · `chats` (no `sectionId`, not
+   favorite/bot). A `sectionId` pointing at a section not in the definitions renders in
+   **chats** (orphan tolerance — a deleted section leaves its members orphaned, no cascade).
+4. Within a section: `sortMode == "custom"` → order by `sectionOrder`; else by last message.
+5. Live updates: `subscription.update` (a chat's membership/order changed) and
+   `chatlist.update` (a section def changed) each replace their own scope, guarded by
+   their timestamp (last-write-wins, no deltas).
+
+##### RPCs
+
+| Subject action | Body | Notes |
+|---|---|---|
+| `chatlist.get` | — (no body) | Returns the [ChatlistState](#chatliststate). Defaults (the built-ins) when never customized. |
+| `chatlist.section.create` | `{ "name": string, "sortMode"?: "custom"\|"mostRecent" }` | Adds a custom section above `chats`. `sortMode` defaults to `custom`. |
+| `chatlist.section.rename` | `{ "sectionId": string, "name": string }` | Custom sections only. |
+| `chatlist.section.delete` | `{ "sectionId": string }` | Custom sections only; members orphan to `chats`. |
+| `chatlist.section.reorder` | `{ "sectionOrder": string[] }` | A permutation of **every** section id (built-in + custom). |
+| `chatlist.section.setSortMode` | `{ "sectionId": string, "sortMode": "custom"\|"mostRecent" }` | Any section (a built-in may be flipped to `custom`). |
+
+Every mutation returns the full post-update [ChatlistState](#chatliststate) and fans out
+[`chatlist.update`](events.md#chatlistupdate--chatlist-section-sync) to the caller's other
+devices (and cross-site, HWM-guarded by `chatlistUpdatedAt`).
+
+**Section name validation** (create / rename): 1–50 characters after trimming, no
+consecutive spaces, only letters/digits (any script), spaces, or `-_./()`. Names are
+case-sensitive and unique across a user's custom sections. Errors carry a reason:
+`chatlist_invalid_name`, `chatlist_duplicate_name`, `chatlist_section_not_found`,
+`chatlist_builtin_immutable` (rename/delete a built-in), `chatlist_invalid_order`,
+`chatlist_invalid_sort_mode`.
+
+##### ChatlistState
+
+| Field | Type | Notes |
+|---|---|---|
+| `sectionOrder` | string[] | Section display order — every section id, built-in + custom. |
+| `sections` | ChatlistSection[] | The section definitions. |
+| `lastUpdatedAt` | number | Unix-millis high-water mark (last-write-wins). |
+
+**ChatlistSection**: `{ "id": string, "name": string, "builtIn": boolean, "sortMode": "custom"|"mostRecent" }`.
+There is **no** member list on a section — membership rides the subscriptions.
 
 ---
 

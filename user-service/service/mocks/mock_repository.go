@@ -202,6 +202,21 @@ func (mr *MockUserRepositoryMockRecorder) GetHRInfoByAccounts(ctx, accounts any)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHRInfoByAccounts", reflect.TypeOf((*MockUserRepository)(nil).GetHRInfoByAccounts), ctx, accounts)
 }
 
+// GetUserChatlist mocks base method.
+func (m *MockUserRepository) GetUserChatlist(ctx context.Context, account string) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUserChatlist", ctx, account)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUserChatlist indicates an expected call of GetUserChatlist.
+func (mr *MockUserRepositoryMockRecorder) GetUserChatlist(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserChatlist", reflect.TypeOf((*MockUserRepository)(nil).GetUserChatlist), ctx, account)
+}
+
 // GetUserSettings mocks base method.
 func (m *MockUserRepository) GetUserSettings(ctx context.Context, account string) (*model.User, error) {
 	m.ctrl.T.Helper()
@@ -245,6 +260,21 @@ func (m *MockUserRepository) SetUserStatus(ctx context.Context, account, text st
 func (mr *MockUserRepositoryMockRecorder) SetUserStatus(ctx, account, text, isShow any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetUserStatus", reflect.TypeOf((*MockUserRepository)(nil).SetUserStatus), ctx, account, text, isShow)
+}
+
+// UpdateUserChatlist mocks base method.
+func (m *MockUserRepository) UpdateUserChatlist(ctx context.Context, account string, state *model.ChatlistState) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateUserChatlist", ctx, account, state)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// UpdateUserChatlist indicates an expected call of UpdateUserChatlist.
+func (mr *MockUserRepositoryMockRecorder) UpdateUserChatlist(ctx, account, state any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserChatlist", reflect.TypeOf((*MockUserRepository)(nil).UpdateUserChatlist), ctx, account, state)
 }
 
 // UpdateUserSettings mocks base method.

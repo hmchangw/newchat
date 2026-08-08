@@ -45,6 +45,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.response.{requestID}` | AsyncJobResult (one-shot async job completion) |
 | `chat.user.{account}.event.subscription.update` | SubscriptionUpdateEvent / SubscriptionRemovedEvent |
 | `chat.user.{account}.event.settings.update` | SettingsUpdateEvent |
+| `chat.user.{account}.event.chatlist.update` | ChatlistUpdateEvent |
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above, per-user fan-out for DM/botDM rooms |
@@ -103,9 +104,9 @@ Two shapes exist — discriminated by `action`:
 | Field | Type | Notes |
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path. |
-| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](../client-api.md#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms — so clients can render the sidebar entry and store the room key from this single event. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
-| `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
-| `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. |
+| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `section_moved` / `opened` / `read`. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](../client-api.md#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms — so clients can render the sidebar entry and store the room key from this single event. On `section_moved`, `sectionId` / `sectionOrder` carry the new placement (both absent = removed from its section). On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
+| `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"section_moved"`, `"opened"`, or `"read"`. |
+| `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `section_moved` / `opened` / `read`. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 ```json
@@ -216,6 +217,43 @@ UserSettings — every field optional, present only when explicitly set:
 {
   "timestamp": 1737000000000,
   "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
+}
+```
+
+---
+
+## chatlist.update — chatlist section sync
+
+**Subject:** `chat.user.{account}.event.chatlist.update`
+
+Published by user-service after every successful chatlist section-definition
+mutation ([Chatlist Sections](../client-api.md#chatlist-sections)) — ephemeral
+core-NATS fan-out to the caller's own connected devices, the same delivery pattern
+as settings.update. Best-effort. Note this carries only the section **definitions**,
+never per-chat membership — a chat moving section fires a `subscription.update`
+(`action: "section_moved"`) instead, so `chatlist.update` stays O(sections).
+
+The payload carries the **full post-update state** — receivers replace their local
+copy, they never merge deltas.
+
+### Schema (ChatlistUpdateEvent)
+
+| Field | Type | Notes |
+|---|---|---|
+| `timestamp` | number | Publish time, Unix ms (the state's high-water mark). |
+| `chatlist` | [ChatlistState](../client-api.md#chatliststate) | Full post-update section definitions. |
+
+```json
+{
+  "timestamp": 1737000000000,
+  "chatlist": {
+    "sectionOrder": ["favorites", "apps", "teams", "work", "chats"],
+    "sections": [
+      { "id": "favorites", "name": "Favorites", "builtIn": true, "sortMode": "mostRecent" },
+      { "id": "work", "name": "Work", "builtIn": false, "sortMode": "custom" }
+    ],
+    "lastUpdatedAt": 1737000000000
+  }
 }
 ```
 
