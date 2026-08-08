@@ -85,14 +85,64 @@ func TestHistoryService_ListThreadSubscriptions_Success(t *testing.T) {
 	parent := decodeThreadMsg(t, first.ParentMessage)
 	assert.Equal(t, "p1", parent.MessageID)
 	require.NotNil(t, parent.TCount)
-	assert.Equal(t, 4, *parent.TCount) // reply count rides on the parent
+	assert.Equal(t, 4, *parent.TCount) // parent still carries its own tcount
+	assert.Equal(t, 4, first.TCount)
 	require.NotNil(t, first.LastMessage)
 	assert.Equal(t, "m1", decodeThreadMsg(t, first.LastMessage).MessageID)
 	assert.True(t, first.Unread) // lastMsgAt 5h > lastSeenAt 2h
 
 	second := resp.Items[1]
 	assert.Nil(t, second.LastSeenAt)
-	assert.True(t, second.Unread) // never-seen ⇒ unread
+	assert.True(t, second.Unread)     // never-seen ⇒ unread
+	assert.Equal(t, 0, second.TCount) // p2 carries no tcount column
+}
+
+// The item's tcount is lifted straight off the hydrated parent's Cassandra
+// column: a nil column reads as 0 and the cap rides through untouched.
+func TestHistoryService_ListThreadSubscriptions_TCountFromParent(t *testing.T) {
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	// wantParentKey pins the one intra-row divergence: the item's tcount is always
+	// present, while the parent body's is omitempty — absent when the column is nil.
+	tests := []struct {
+		name          string
+		parentTCount  *int
+		want          int
+		wantParentKey bool
+	}{
+		{name: "count passes through", parentTCount: intPtr(4), want: 4, wantParentKey: true},
+		{name: "never written — migrated thread", parentTCount: nil, want: 0, wantParentKey: false},
+		{name: "all replies deleted", parentTCount: intPtr(0), want: 0, wantParentKey: true},
+		{name: "cap passes through unchanged", parentTCount: intPtr(99), want: 99, wantParentKey: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, msgs, _, _, threadSubs := newThreadListService(t)
+			rows := []mongorepo.ThreadSubRow{
+				{ThreadRoomID: "tr-1", RoomID: "r1", SiteID: "site-a", ParentMessageID: "p1", LastMsgID: "m1", LastMsgAt: base.Add(5 * time.Hour)},
+			}
+			threadSubs.EXPECT().ListUserThreadSubscriptions(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).Return(rows, false, nil)
+			msgs.EXPECT().GetMessagesByIDs(gomock.Any(), gomock.Any()).Return([]models.Message{
+				{MessageID: "p1", RoomID: "r1", Msg: "parent", TCount: tt.parentTCount},
+				{MessageID: "m1", RoomID: "r1", Msg: "last"},
+			}, nil)
+
+			resp, err := svc.ListThreadSubscriptions(testContext(), pkgmodel.ThreadSubscriptionListRequest{Account: "alice", Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, resp.Items, 1)
+			assert.Equal(t, tt.want, resp.Items[0].TCount)
+
+			var parent map[string]any
+			require.NoError(t, json.Unmarshal(resp.Items[0].ParentMessage, &parent))
+			if tt.wantParentKey {
+				require.Contains(t, parent, "tcount", "parent body must keep its own tcount key")
+				// Asserted against the source column, not tt.want, so the two stay
+				// independent if the lift ever stops being an identity.
+				assert.Equal(t, float64(*tt.parentTCount), parent["tcount"])
+			} else {
+				assert.NotContains(t, parent, "tcount", "a nil column must be omitted from the parent body")
+			}
+		})
+	}
 }
 
 // A parent carrying reactions still builds and its body rides through as the
