@@ -95,14 +95,17 @@ command can be scripted without parsing stdout.
 | Flag | Default | Notes |
 |---|---|---|
 | `--preset` | `daily-heavy` | Same presets as `daily` |
-| `--users` | `preset.Users` | Activation count. Full activation maximises room eligibility (§6) |
+| `--users` | `preset.Users` | Total activation count. Background load; probe recipients are chosen separately (§6) |
+| `--probe-rooms` | `50` | Number of probe rooms; their members are forced into the direct pool (§6) |
 | `--warmup` | `30s` | Pre-measurement settle |
 | `--steady` | `120s` | Probe-generating window |
 | `--drain` | `30s` | Post-quiesce wait for in-flight probes |
-| `--probe-rate` | `0.01` | Fraction of sends tracked (§5) |
+| `--probe-rate` | `0.01` | Fraction of sends into probe rooms that are tracked (§5) |
 | `--min-probes` | `50` | Below this, verdict is INCONCLUSIVE |
 | `--large-room-threshold` | `500` | Must match the gatekeeper's setting; preflight enforces (§6.1) |
-| `--seed` | `42` | Drives fixtures and probe selection; same seed ⇒ same probe set |
+| `--lane` | `both` | `global` \| `local` \| `both`. Halves subscription count when set explicitly (§6.3) |
+| `--direct-only` | `false` | Disable multiplex; every user gets a dedicated conn. Preflight errors if `--users` exceeds the direct budget (§6.3) |
+| `--seed` | `42` | Drives fixtures, probe-room choice, and probe selection; same seed ⇒ same probe set |
 | `--json` | `""` | Full violation detail output path |
 
 ## 5. Probe Sampling
@@ -111,8 +114,9 @@ Full per-recipient accounting is O(messages × room members). A single send
 into a 2000-member room creates 2000 expectation tuples, and the workload
 runs hundreds of sends per second — unbounded in practice.
 
-Instead, a deterministic fraction of sends are tagged as **probes** and get
-full per-recipient accounting. Everything else is ordinary load.
+Instead, a deterministic fraction of sends **into probe rooms** (§6) are
+tagged as **probes** and get full per-recipient accounting. Everything
+else — including all sends into non-probe rooms — is ordinary load.
 
 - Probe selection happens at publish time in `sendMessage`, derived from
   the run seed and a per-user counter. Never `rand` on the hot path, never
@@ -124,35 +128,62 @@ full per-recipient accounting. Everything else is ordinary load.
 The system under test still runs at full concurrency; only the *accounting*
 is sampled.
 
-## 6. Expected-Recipient Set
+## 6. Probe Rooms and the Expected-Recipient Set
 
-For each probe, the expected set is a three-way intersection:
+Probe rooms are chosen **first**, and the direct pool is built to cover
+them — rather than activating N users and discovering which rooms happen to
+be fully covered.
 
-```
-room members (from Fixtures.Subscriptions)
-  ∩ activated users
-  ∩ direct-pool members
-```
+### 6.0 Probe-room-first activation
+
+1. Select `--probe-rooms` rooms from the eligible bands (small and medium;
+   see §6.1 for why large rooms are excluded), deterministically from
+   `--seed`.
+2. Force the **union of their members** into the direct pool. This set is
+   complete by construction.
+3. Activate remaining users up to `--users` normally — multiplex is fine,
+   they are background load and never probe recipients.
+4. Probes only ever target the selected probe rooms.
+
+The expected set for a probe is then simply **all members of its room**,
+with the sender included (§7.2). No intersection with activation state is
+needed, because step 2 guarantees every member is live on a dedicated
+connection.
 
 `Fixtures` is a pure function of `(preset, seed, siteID)` (`preset.go:127`),
 so membership is derivable in-process, deterministically, with no Mongo
 query at verdict time.
 
-The second and third intersections are what make the verdict honest:
+**Why not the obvious alternative.** Activating N users and treating
+fully-covered rooms as eligible collapses coverage at any `N <
+preset.Users`. Activation is a strict prefix (`env.users[from:to]`,
+`daily.go:411`) and direct-pool assignment is also prefix-ordered, while
+room membership scatters across the whole user index. The chance a
+size-`k` room is fully covered is ≈ `(N/preset.Users)^k`:
 
-- A user who never activated has no NATS subscription and provably cannot
-  receive. Counting them would manufacture failures.
-- A user in the **multiplex** pool can lose a broadcast to a full per-user
-  inbox channel — a harness artifact, already counted as
-  `Collector.RecordMultiplexDrop`. Restricting probes to direct-pool
-  members (one `nats.Conn` per user, no shared channel) removes that path
-  entirely.
+| Band | k | N=2 000 | N=5 000 | N=10 000 |
+|---|---|---|---|---|
+| DM | 2 | 4% | 25% | 100% |
+| small | ~10 | ~0% | 0.1% | 100% |
+| medium | ~100 | ~0 | ~0 | 100% |
 
-**Room eligibility.** A room is probe-eligible only if all its members are
-in the direct pool. Because fixture membership spans all `preset.Users`,
-running at `N < preset.Users` makes many rooms ineligible. Recommended
-operation is full activation (`N = preset.Users`). Either way the report
-prints eligible-room coverage so thin coverage is visible, never silent.
+Medium rooms are never eligible below full activation. That forces
+`N = preset.Users` — 10 000 dedicated connections — which is the load the
+multiplex pool exists to avoid, and pushes the run into the GC-pause
+INCONCLUSIVE branch. Probe-room-first bounds the direct pool by probe-room
+membership instead: ~30 small (~20 members) plus ~20 medium (~100) is
+~2 600 connections worst case, less with overlap.
+
+**Why not expect only the direct-pool subset of each room.** That would
+restore coverage cheaply, but tracked recipients would be systematically
+the low-index users, since activation and direct assignment are both index
+prefixes. A truncation-style fan-out bug — "only the first K members
+receive it" — would leave exactly the untracked tail broken. That is a
+correlated blind spot on the most plausible fan-out bug class, so it is
+rejected.
+
+Coverage (probe rooms, their total membership, and direct-pool size) is
+printed in the report so thin coverage is visible, never silent.
 
 ### 6.1 Large-room exclusion (mandatory)
 
@@ -162,16 +193,78 @@ rooms on every user, so ~5% of sends are rejected **by design** — a
 documented known limitation of the daily scenario.
 
 That rejection happens *after* a successful publish, so an affected probe
-is indistinguishable from a lost message. At full activation those rooms
-become probe-eligible, so we would manufacture guaranteed failures.
+is indistinguishable from a lost message — we would manufacture guaranteed
+failures.
 
 Two mitigations, both required:
 
-1. Probe eligibility excludes rooms at or above the configured threshold.
+1. Probe-room selection (§6.0 step 1) excludes rooms at or above the
+   configured threshold.
 2. Preflight verifies the configured threshold matches what the gatekeeper
    is actually running, and refuses to start on mismatch.
 
 Failing fast in seconds beats a ten-minute run reporting a phantom bug.
+
+### 6.2 Multiplex users are never probe recipients
+
+A user in the multiplex pool can lose a broadcast to a full per-user inbox
+channel (128-deep, non-blocking send — `daily_pool.go:173`, `:249`), already
+counted as `Collector.RecordMultiplexDrop`. Worse, `multiplexPool.route`
+calls `RecordBroadcast` **once per routed message, before the inbox sends
+and regardless of whether every inbox dropped it** (`daily_pool.go:245`).
+The multiplex path therefore conflates "arrived at the pool" with
+"delivered to users" — correct for a latency histogram, fatal for a
+completeness assertion.
+
+Attribution also moves in-process there: with refcounted shared
+subscriptions the broker delivers once and loadgen's own `dispatch` map
+decides who received it, so a completeness check would be partly testing
+loadgen's bookkeeping rather than the system under test.
+
+§6.0 step 2 removes both problems by construction. Any multiplex drop
+recorded during a run still forces INCONCLUSIVE (§9) as a backstop.
+
+### 6.3 Resource budget
+
+Each direct user opens one connection and `2 × rooms + 1` subscriptions —
+the ×2 because every room is subscribed on both lanes (`daily_pool.go:58`).
+
+| Preset | Rooms/user | Subs/user | Subs @ 2 000 | @ 10 000 |
+|---|---|---|---|---|
+| daily-light | ~32 | 65 | 130 k | 650 k |
+| daily-heavy | ~56 | 113 | 226 k | 1.13 M |
+| daily-power | ~83 | 167 | 334 k | 1.67 M |
+
+**The estimates below are unmeasured** — derived from the code and stock
+nats.go behaviour, not from a benchmark. Establishing real numbers is a
+task in the implementation plan.
+
+Limits in the order they bite:
+
+1. **File descriptors** — one per conn. A default `ulimit -n` of 1024 caps
+   you near 1 000 users; raise to 65536.
+2. **Client memory** — nats.go allocates ~32 KB read + ~32 KB write buffers
+   per `Conn` plus 2–3 goroutines. Call it ~100 KB/user, so ~1 GB at
+   10 000 users before any message processing.
+3. **NATS server sublist** — 1.13 M subscriptions at daily-heavy is
+   server-side memory plus matching work on every publish.
+4. **Loadgen GC pressure** — trips the existing INCONCLUSIVE branch.
+
+Rough tiers, to be confirmed rather than trusted: ~2 000 comfortable on a
+dev box; ~5 000 needs raised limits and a few GB; ~10 000 needs a dedicated
+load box. The `--max-direct-users=20000` default is a safety ceiling, not a
+demonstrated capability.
+
+**`--lane`** halves every subscription count above when set to `global` or
+`local`. The dual-lane default exists to stay `ROOM_SUBJECT_MODE`-agnostic;
+an operator who knows their stack's mode should set it explicitly. Doing so
+also removes the phantom-duplicate concern in §7.1.
+
+**`--direct-only`** disables multiplex so every user gets a dedicated conn,
+trading background-load scale for uniform fidelity. Note that with
+multiplex disabled, `daily` silently skips any user past
+`--max-direct-users`; `verify` instead **fails preflight**, because a
+silently-absent recipient corrupts a completeness verdict.
 
 ## 7. Receiver Attribution
 
@@ -199,7 +292,9 @@ live, one broadcast arrives twice and a naive exactly-once check fires
 falsely.
 
 Deliveries therefore dedupe per `(userID, messageID, lane)`, and a
-duplicate is a violation only **within** a single lane.
+duplicate is a violation only **within** a single lane. Setting `--lane`
+explicitly (§6.3) removes the ambiguity entirely and halves subscription
+cost.
 
 ### 7.2 Sender self-delivery
 
@@ -269,11 +364,12 @@ Latency never produces a FAIL. `verify` is not an SLO tool.
 Console summary, styled after `daily_report.go`:
 
 ```
-probes:      412 sent / 409 eligible / 3 skipped (large-room)
-delivery:    407 complete / 2 partial / 0 total-loss
+probe rooms: 50 (32 small, 18 medium) / 2417 members / direct pool 2417
+background:  7583 users on multiplex
+probes:      412 tracked
+delivery:    410 complete / 2 partial / 0 total-loss
 duplicates:  0
-persistence: 409 confirmed / 0 missing / 0 mismatch
-coverage:    88 of 100 rooms eligible
+persistence: 412 confirmed / 0 missing / 0 mismatch
 
 VIOLATIONS (showing 2 of 2)
   missing_recipient  msg=7Hq3... room=r-000042  missing: u-000317, u-000904
@@ -281,6 +377,10 @@ VIOLATIONS (showing 2 of 2)
 
 VERDICT: FAIL
 ```
+
+The `direct pool` figure equalling probe-room membership is the invariant
+from §6.0 step 2 — if they ever diverge, the run is misconfigured and
+preflight should have caught it.
 
 Violations print `msgID`, `roomID`, and missing recipient IDs — enough to
 grep service logs directly. Console caps at ~10; `--json` carries full
@@ -293,6 +393,7 @@ Following the existing flat per-scenario convention in `tools/loadgen/`:
 | File | Contents |
 |---|---|
 | `verify.go` | `runVerify`, config parsing, lifecycle (warmup/steady/quiesce/drain) |
+| `verify_rooms.go` | Probe-room selection and direct-pool member union (§6.0) |
 | `verify_probe.go` | `ProbeTracker` — expected sets, delivery recording, dedupe, finalize |
 | `verify_readback.go` | `history-service` readback with bounded retry |
 | `verify_verdict.go` | PASS/FAIL/INCONCLUSIVE evaluation |
@@ -300,7 +401,14 @@ Following the existing flat per-scenario convention in `tools/loadgen/`:
 | `verify_*_test.go` | Unit tests per the above |
 
 Modified: `main.go` (dispatch a `verify` case), `daily_pool.go` (thread
-`u.ID` into broadcast attribution), `deploy/Makefile` (`run-verify`).
+`u.ID` and lane into broadcast attribution; honour `--lane`), `daily.go`
+(seed the direct pool with a designated member set before the prefix walk
+in `activateUsers`), `deploy/Makefile` (`run-verify`).
+
+The `activateUsers` change is the only edit touching a path `daily` also
+uses. It is additive — an empty designated set reproduces today's
+behaviour exactly — and covered by a regression test asserting `daily`'s
+activation order is unchanged when no set is supplied.
 
 No new dependencies — `nats.go`, `testify`, and `go.uber.org/mock` are
 already in `go.mod`.
@@ -350,11 +458,12 @@ test will be added.
 | Risk | Mitigation |
 |---|---|
 | Drain too short ⇒ false failures | Generous 30s default; on-demand runs have no CI clock to fight |
-| Large-room gatekeeper rejects ⇒ phantom bugs | Excluded from eligibility + preflight threshold check (§6.1) |
-| Multiplex drops ⇒ phantom bugs | Probes restricted to direct pool; any drop ⇒ INCONCLUSIVE |
-| Dual-lane subscribe ⇒ phantom duplicates | Dedupe per `(user, msg, lane)` (§7.1) |
-| Thin room coverage at low N | Coverage printed in report; full activation recommended |
-| Sender self-delivery assumption wrong | Calibrated empirically before encoding (§7.2) |
+| Large-room gatekeeper rejects ⇒ phantom bugs | Excluded from probe-room selection + preflight threshold check (§6.1) |
+| Multiplex drops ⇒ phantom bugs | Probe-room members forced into direct pool (§6.0); any drop ⇒ INCONCLUSIVE |
+| Dual-lane subscribe ⇒ phantom duplicates | Dedupe per `(user, msg, lane)`; `--lane` to disambiguate (§7.1) |
+| Coverage collapse at partial activation | Probe-room-first activation decouples coverage from N (§6.0) |
+| Truncation-style fan-out bug hidden by index-correlated sampling | Full room membership tracked, never a subset (§6.0) |
+| Direct-pool resource limits unknown | Budget estimates flagged unmeasured; benchmarking is a plan task (§6.3) |
 
 ## 15. Success Criteria
 
@@ -363,10 +472,13 @@ test will be added.
 2. Withholding a delivery in a unit test produces FAIL with the correct
    violation class and actionable IDs.
 3. A harness-side drop produces INCONCLUSIVE, never FAIL.
-4. Two runs with the same seed select the same probe set.
-5. Unit coverage ≥ 80% overall, ≥ 90% on `ProbeTracker` and the verdict.
-6. No behaviour change to `daily`, `max-rps`, `soak`, or `members` — the
-   `Collector` is untouched.
+4. Two runs with the same seed select the same probe rooms and probe set.
+5. Every probe-room member is in the direct pool — asserted at preflight,
+   not merely assumed.
+6. Unit coverage ≥ 80% overall, ≥ 90% on `ProbeTracker` and the verdict.
+7. A measured direct-pool resource profile replaces the estimates in §6.3.
+8. No behaviour change to `daily`, `max-rps`, `soak`, or `members` — the
+   `Collector` is untouched and `activateUsers` is additive-only.
 
 ## 16. References
 
