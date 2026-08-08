@@ -15,7 +15,6 @@ services:
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      - BOOTSTRAP_STREAMS=false
     volumes:
       - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
     networks:
