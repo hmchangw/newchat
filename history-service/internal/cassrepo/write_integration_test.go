@@ -1771,3 +1771,78 @@ func TestRepository_countThreadReplies_CapsAtThreadcountCap(t *testing.T) {
 	newest := base.Add(time.Duration(threadcount.Cap+9) * time.Millisecond)
 	assert.Equal(t, newest.UnixMilli(), tlm.UnixMilli())
 }
+
+// TestEditMessage_Encrypted_PreservesForwardedMessageMetadata verifies that
+// editing a forwarded message under the cipher-enabled path keeps the
+// forwarded snapshot's metadata (message_id, sender, createdAt, …) in the
+// plaintext forwarded_message column while only its body moves into
+// enc_payload — mirroring the quoted-parent contract (Task 7).
+func TestEditMessage_Encrypted_PreservesForwardedMessageMetadata(t *testing.T) {
+	ctx := context.Background()
+	session := setupCassandra(t)
+	mongoDB := setupMongo(t)
+
+	wrapper := newTestVaultWrapper(t, ctx)
+	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
+		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
+	sizer := msgbucket.New(24 * time.Hour)
+	repo := NewRepository(session, sizer, 365, cipher)
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	roomID := "r-edit-fwd-1"
+	sourceCreatedAt := now.Add(-time.Hour)
+	forwarded := &cassmodel.ForwardedMessage{
+		MessageID: "m-src",
+		RoomID:    "r-src",
+		Sender:    cassmodel.Participant{ID: "u-src", Account: "carol", IsBot: true, AppID: "A1", AppName: "Deploy Bot"},
+		CreatedAt: sourceCreatedAt,
+		Msg:       "original body",
+	}
+
+	// Seed an encrypted forwarded-message row: body in enc_payload, metadata in
+	// the plaintext forwarded_message column (as the write path stores it).
+	enc := atrest.SplitForEncryption(&cassmodel.Message{Msg: "fwd wrapper text", ForwardedMessage: forwarded})
+	payload, meta, err := cipher.Encrypt(ctx, roomID, enc)
+	require.NoError(t, err)
+	stored := *forwarded
+	atrest.StripEncryptedFields(&cassmodel.Message{ForwardedMessage: &stored})
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, enc_payload, enc_meta, forwarded_message, site_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, sizer.Of(now), now, "m-fwd", payload, &cassmodel.EncMeta{Nonce: meta.Nonce}, &stored, "site-a",
+	).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, created_at, room_id, enc_payload, enc_meta, forwarded_message, site_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"m-fwd", now, roomID, payload, &cassmodel.EncMeta{Nonce: meta.Nonce}, &stored, "site-a",
+	).Exec())
+
+	require.NoError(t, repo.UpdateMessageContent(ctx, &models.Message{
+		RoomID: roomID, MessageID: "m-fwd", CreatedAt: now,
+	}, "edited wrapper text", now.Add(time.Minute)))
+
+	// (i) and (ii): read the raw plaintext column back — message_id survives,
+	// msg is blank (the body moved into enc_payload).
+	var gotForwarded *cassmodel.ForwardedMessage
+	require.NoError(t, session.Query(
+		`SELECT forwarded_message FROM messages_by_id WHERE message_id = ?`,
+		"m-fwd",
+	).Scan(&gotForwarded))
+	require.NotNil(t, gotForwarded, "forwarded_message column must survive the encrypted edit")
+	assert.Equal(t, "m-src", gotForwarded.MessageID, "forwarded_message.message_id must survive")
+	assert.Empty(t, gotForwarded.Msg, "forwarded_message.msg must be blank in the plaintext column")
+
+	// (iii) GetMessageByID (decrypts) returns the restored forwarded body.
+	got, err := repo.GetMessageByID(ctx, "m-fwd")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.ForwardedMessage, "forwarded message must survive the encrypted edit")
+	assert.Equal(t, "m-src", got.ForwardedMessage.MessageID)
+	assert.Equal(t, "carol", got.ForwardedMessage.Sender.Account)
+	// The nested frozen Participant keeps every field, not just account —
+	// is_bot/app_id/app_name drive bot rendering on the forwarded snapshot.
+	assert.True(t, got.ForwardedMessage.Sender.IsBot, "forwarded sender is_bot must survive the UDT round-trip")
+	assert.Equal(t, "A1", got.ForwardedMessage.Sender.AppID)
+	assert.Equal(t, "Deploy Bot", got.ForwardedMessage.Sender.AppName)
+	assert.True(t, got.ForwardedMessage.CreatedAt.Equal(sourceCreatedAt))
+	assert.Equal(t, "original body", got.ForwardedMessage.Msg, "forwarded body restored from enc_payload")
+	assert.Equal(t, "edited wrapper text", got.Msg)
+}

@@ -67,6 +67,28 @@ type QuotedParentMessage struct {
 	TShow bool `json:"tshow,omitempty" cql:"-"`
 }
 
+// ForwardedMessage maps to the Cassandra "ForwardedMessage" UDT — the immutable
+// snapshot of a forwarded source message, captured at forward time by
+// message-gatekeeper. Text-only by design: sources carrying attachments or
+// cards are rejected at forward time, so the UDT has no attachment fields.
+// Never redacted on read (self-contained; the source room's access window was
+// enforced once, at forward time).
+type ForwardedMessage struct {
+	MessageID             string        `json:"messageId"                       cql:"message_id"`
+	RoomID                string        `json:"roomId"                          cql:"room_id"`
+	Sender                Participant   `json:"sender"                          cql:"sender"`
+	CreatedAt             time.Time     `json:"createdAt"                       cql:"created_at"`
+	Msg                   string        `json:"msg,omitempty"                   cql:"msg"`
+	Mentions              []Participant `json:"mentions,omitempty"              cql:"mentions"`
+	ThreadParentID        string        `json:"threadParentId,omitempty"        cql:"thread_parent_id"`
+	ThreadParentCreatedAt *time.Time    `json:"threadParentCreatedAt,omitempty" cql:"thread_parent_created_at"`
+	// Room is read-time enrichment of RoomID (name/type resolved from the
+	// local rooms collection by history-service read paths); transient
+	// (cql:"-"), never persisted into the UDT. dm/botDM sources carry only
+	// ID and Type. Omitted when the room could not be resolved.
+	Room *MessageRoom `json:"room,omitempty" cql:"-"`
+}
+
 // Message represents a message row in the Cassandra message tables
 // (messages_by_room, messages_by_id, thread_messages_by_thread).
 //
@@ -91,6 +113,7 @@ type Message struct {
 	ThreadParentID        string               `json:"threadParentId,omitempty"        cql:"thread_parent_id"`
 	ThreadParentCreatedAt *time.Time           `json:"threadParentCreatedAt,omitempty" cql:"thread_parent_created_at"`
 	QuotedParentMessage   *QuotedParentMessage `json:"quotedParentMessage,omitempty"   cql:"quoted_parent_message"`
+	ForwardedMessage      *ForwardedMessage    `json:"forwardedMessage,omitempty"      cql:"forwarded_message"`
 	VisibleTo             string               `json:"visibleTo,omitempty"             cql:"visible_to"`
 	// Reactions is nil when absent (omitted from JSON); not modified by edit/delete paths.
 	Reactions    Reactions    `json:"reactions,omitempty"             cql:"reactions"`

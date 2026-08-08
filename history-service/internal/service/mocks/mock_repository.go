@@ -680,6 +680,21 @@ func (mr *MockRoomRepositoryMockRecorder) GetRoomUserCount(ctx, roomID any) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomUserCount", reflect.TypeOf((*MockRoomRepository)(nil).GetRoomUserCount), ctx, roomID)
 }
 
+// GetRoomsNameType mocks base method.
+func (m *MockRoomRepository) GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]mongorepo.RoomNameType, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetRoomsNameType", ctx, roomIDs)
+	ret0, _ := ret[0].(map[string]mongorepo.RoomNameType)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetRoomsNameType indicates an expected call of GetRoomsNameType.
+func (mr *MockRoomRepositoryMockRecorder) GetRoomsNameType(ctx, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomsNameType", reflect.TypeOf((*MockRoomRepository)(nil).GetRoomsNameType), ctx, roomIDs)
+}
+
 // MockEventPublisher is a mock of EventPublisher interface.
 type MockEventPublisher struct {
 	ctrl     *gomock.Controller

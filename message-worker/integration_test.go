@@ -16,6 +16,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
@@ -91,6 +92,17 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			thread_parent_id         TEXT,
 			thread_parent_created_at TIMESTAMP
 		)`, keyspace),
+		fmt.Sprintf(`CREATE TYPE IF NOT EXISTS %s."ForwardedMessage" (
+			message_id               TEXT,
+			room_id                  TEXT,
+			sender                   FROZEN<"Participant">,
+			created_at               TIMESTAMP,
+			msg                      TEXT,
+			mentions                 SET<FROZEN<"Participant">>,
+			message_link             TEXT,
+			thread_parent_id         TEXT,
+			thread_parent_created_at TIMESTAMP
+		)`, keyspace),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.messages_by_room (
 			room_id               TEXT,
 			bucket                BIGINT,
@@ -114,6 +126,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                  TEXT,
 			sys_msg_data          BLOB,
 			quoted_parent_message FROZEN<"QuotedParentMessage">,
+			forwarded_message     FROZEN<"ForwardedMessage">,
 			enc_payload           BLOB,
 			enc_meta              FROZEN<"EncMeta">,
 			PRIMARY KEY ((room_id, bucket), created_at, message_id)
@@ -140,6 +153,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                     TEXT,
 			sys_msg_data             BLOB,
 			quoted_parent_message    FROZEN<"QuotedParentMessage">,
+			forwarded_message        FROZEN<"ForwardedMessage">,
 			enc_payload              BLOB,
 			enc_meta                 FROZEN<"EncMeta">,
 			PRIMARY KEY (message_id)
@@ -2140,4 +2154,97 @@ func TestCassandraStore_SaveThreadMessage_TShowWritesAllTables(t *testing.T) {
 		`SELECT tshow FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
 		"r-tshow", bucket.Of(now), now, "m-tshow").WithContext(ctx).Scan(&gotTShow))
 	assert.True(t, gotTShow, "tshow mirror row written to messages_by_room with tshow=true")
+}
+
+// TestCassandraStore_SaveMessage_ForwardedMessage verifies the forwarded_message
+// snapshot round-trips on both main-timeline tables via the plaintext path.
+func TestCassandraStore_SaveMessage_ForwardedMessage(t *testing.T) {
+	cassSession := setupCassandra(t)
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(cassSession, bucket, nil)
+	ctx := context.Background()
+
+	sender := &cassParticipant{ID: "u-1", EngName: "Alice Wang", CompanyName: "愛麗絲", Account: "alice"}
+	fwd := &cassandra.ForwardedMessage{
+		MessageID: "01970a4f8c2d7c9aSRCM", RoomID: "r-src",
+		Sender:    cassandra.Participant{ID: "u5", Account: "eve"},
+		CreatedAt: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC).UTC(),
+		Msg:       "original body",
+	}
+	msg := &model.Message{ID: idgen.GenerateMessageID(), RoomID: "r-dst", Content: "comment",
+		CreatedAt: time.Now().UTC().Truncate(time.Millisecond), ForwardedMessage: fwd}
+	require.NoError(t, store.SaveMessage(ctx, msg, sender, "site-a"))
+
+	var got cassandra.ForwardedMessage
+	require.NoError(t, cassSession.Query(
+		`SELECT forwarded_message FROM messages_by_id WHERE message_id = ?`, msg.ID,
+	).WithContext(ctx).Scan(&got))
+	assert.Equal(t, "original body", got.Msg)
+	assert.Equal(t, "eve", got.Sender.Account)
+	// mirror row
+	require.NoError(t, cassSession.Query(
+		`SELECT forwarded_message FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		msg.RoomID, bucket.Of(msg.CreatedAt), msg.CreatedAt, msg.ID,
+	).WithContext(ctx).Scan(&got))
+	assert.Equal(t, "original body", got.Msg)
+}
+
+// TestSaveMessage_ForwardedMessage_Encrypted mirrors TestSaveMessage_EncryptsBody
+// for the forwarded_message snapshot: the body (msg) must read back empty
+// (stripped — moved into enc_payload) while metadata (message_id) survives, and
+// the encrypted bundle decrypts back to the original forwarded body.
+func TestSaveMessage_ForwardedMessage_Encrypted(t *testing.T) {
+	ctx := context.Background()
+	session := setupCassandra(t)
+	mongoDB := setupMongo(t)
+	bucket := msgbucket.New(24 * time.Hour)
+
+	wrapper := newTestVaultWrapper(t, ctx)
+	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
+		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
+	store := NewCassandraStore(session, bucket, cipher)
+
+	sender := &cassParticipant{ID: "u-1", Account: "alice"}
+	fwd := &cassandra.ForwardedMessage{
+		MessageID: "01970a4f8c2d7c9aSRCM", RoomID: "r-src",
+		Sender:    cassandra.Participant{ID: "u5", Account: "eve"},
+		CreatedAt: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC).UTC(),
+		Msg:       "original body",
+	}
+	msg := &model.Message{
+		ID: idgen.GenerateMessageID(), RoomID: "r-enc-fwd-1",
+		UserID: "u-1", UserAccount: "alice", Content: "comment",
+		CreatedAt:        time.Now().UTC().Truncate(time.Millisecond),
+		ForwardedMessage: fwd,
+	}
+	require.NoError(t, store.SaveMessage(ctx, msg, sender, "site-a"))
+
+	// Scan into pointers for null-safety, matching how quoted_parent_message
+	// is scanned in the other encrypted-path tests.
+	var got *cassandra.ForwardedMessage
+	var encPayload []byte
+	var encNonce []byte
+	require.NoError(t, session.Query(
+		`SELECT forwarded_message, enc_payload, enc_meta.nonce FROM messages_by_id WHERE message_id = ?`,
+		msg.ID,
+	).WithContext(ctx).Scan(&got, &encPayload, &encNonce))
+	require.NotNil(t, got)
+	assert.Empty(t, got.Msg, "forwarded body must be stripped on the encrypted path")
+	assert.Equal(t, "01970a4f8c2d7c9aSRCM", got.MessageID, "forwarded metadata survives")
+	require.NotEmpty(t, encPayload)
+
+	plain, err := cipher.Decrypt(ctx, msg.RoomID, encPayload, atrest.EncMeta{Nonce: encNonce})
+	require.NoError(t, err)
+	require.NotNil(t, plain.ForwardedContent)
+	assert.Equal(t, "original body", plain.ForwardedContent.Msg)
+
+	// mirror row
+	var gotRoom *cassandra.ForwardedMessage
+	require.NoError(t, session.Query(
+		`SELECT forwarded_message FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		msg.RoomID, bucket.Of(msg.CreatedAt), msg.CreatedAt, msg.ID,
+	).WithContext(ctx).Scan(&gotRoom))
+	require.NotNil(t, gotRoom)
+	assert.Empty(t, gotRoom.Msg)
+	assert.Equal(t, "01970a4f8c2d7c9aSRCM", gotRoom.MessageID)
 }

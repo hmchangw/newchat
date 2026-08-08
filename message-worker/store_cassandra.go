@@ -87,21 +87,21 @@ func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, se
 	batch.Query(
 		`INSERT INTO messages_by_room
 		   (room_id, bucket, created_at, message_id, sender, msg, site_id, updated_at,
-		    mentions, type, sys_msg_data, tshow, quoted_parent_message,
+		    mentions, type, sys_msg_data, tshow, quoted_parent_message, forwarded_message,
 		    attachments, card, card_action)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.RoomID, b, msg.CreatedAt, msg.ID, sender, msg.Content, siteID, msg.CreatedAt,
-		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
+		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage, msg.ForwardedMessage,
 		msg.Attachments, msg.Card, msg.CardAction,
 	)
 	batch.Query(
 		`INSERT INTO messages_by_id
 		   (message_id, created_at, room_id, sender, msg, site_id, updated_at,
-		    mentions, type, sys_msg_data, tshow, quoted_parent_message,
+		    mentions, type, sys_msg_data, tshow, quoted_parent_message, forwarded_message,
 		    attachments, card, card_action)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, msg.Content, siteID, msg.CreatedAt,
-		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
+		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage, msg.ForwardedMessage,
 		msg.Attachments, msg.Card, msg.CardAction,
 	)
 	if err := s.cassSession.ExecuteBatch(batch); err != nil {
@@ -138,22 +138,22 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 	batch.Query(
 		`INSERT INTO messages_by_room
 		   (room_id, bucket, created_at, message_id, sender, site_id, updated_at,
-		    mentions, type, tshow, quoted_parent_message, sys_msg_data,
+		    mentions, type, tshow, quoted_parent_message, forwarded_message, sys_msg_data,
 		    msg, attachments, card, card_action,
 		    enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
 		msg.RoomID, b, msg.CreatedAt, msg.ID, sender, siteID, msg.CreatedAt,
-		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
+		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, cm.ForwardedMessage, msg.SysMsgData, payload, encMeta,
 	)
 	batch.Query(
 		`INSERT INTO messages_by_id
 		   (message_id, created_at, room_id, sender, site_id, updated_at,
-		    mentions, type, tshow, quoted_parent_message, sys_msg_data,
+		    mentions, type, tshow, quoted_parent_message, forwarded_message, sys_msg_data,
 		    msg, attachments, card, card_action,
 		    enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, siteID, msg.CreatedAt,
-		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
+		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, cm.ForwardedMessage, msg.SysMsgData, payload, encMeta,
 	)
 	if err := s.cassSession.ExecuteBatch(batch); err != nil {
 		return fmt.Errorf("save message %s: %w", msg.ID, err)
@@ -322,6 +322,10 @@ func buildCassandraMessage(msg *model.Message) cassandra.Message {
 		// it here (before encryption — Attachments is an encrypted field).
 		q.Attachments = cassandra.EncodeAttachments(q.DecodedAttachments)
 		cm.QuotedParentMessage = &q
+	}
+	if msg.ForwardedMessage != nil {
+		f := *msg.ForwardedMessage
+		cm.ForwardedMessage = &f
 	}
 	return cm
 }

@@ -154,6 +154,7 @@ type RoomSource interface {
 	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]mongorepo.RoomNameType, error)
 }
 
 type roomTimes struct {
@@ -215,6 +216,13 @@ func (c *RoomCache) GetMinUserLastSeenAt(ctx context.Context, roomID string) (*t
 // large-room pin check needs the live member count, not a cached one.
 func (c *RoomCache) GetRoomUserCount(ctx context.Context, roomID string) (int, error) {
 	return c.inner.GetRoomUserCount(ctx, roomID)
+}
+
+// GetRoomsNameType bypasses the cache and delegates to the source. Forwarded-
+// message room enrichment is a batched, per-request lookup — caching a
+// variable-length ID set doesn't fit the single-key TTL cache shape here.
+func (c *RoomCache) GetRoomsNameType(ctx context.Context, roomIDs []string) (map[string]mongorepo.RoomNameType, error) {
+	return c.inner.GetRoomsNameType(ctx, roomIDs)
 }
 
 // GetRoomTimesByIDs bypasses the per-key cache and delegates to the source.

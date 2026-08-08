@@ -140,6 +140,7 @@ func provisionHistorySchema(t *testing.T, session *gocql.Session, keyspace strin
 		cql(`CREATE TYPE IF NOT EXISTS %s."Card" (template TEXT, data BLOB)`),
 		cql(`CREATE TYPE IF NOT EXISTS %s."CardAction" (verb TEXT, text TEXT, card_id TEXT, display_text TEXT, hide_exec_log BOOLEAN, card_tmid TEXT, data BLOB, bot_username TEXT)`),
 		cql(`CREATE TYPE IF NOT EXISTS %s."QuotedParentMessage" (message_id TEXT, room_id TEXT, sender FROZEN<"Participant">, created_at TIMESTAMP, msg TEXT, mentions SET<FROZEN<"Participant">>, attachments LIST<BLOB>, message_link TEXT, thread_parent_id TEXT, thread_parent_created_at TIMESTAMP)`),
+		cql(`CREATE TYPE IF NOT EXISTS %s."ForwardedMessage" (message_id TEXT, room_id TEXT, sender FROZEN<"Participant">, created_at TIMESTAMP, msg TEXT, mentions SET<FROZEN<"Participant">>, thread_parent_id TEXT, thread_parent_created_at TIMESTAMP)`),
 	}
 	for _, stmt := range udts {
 		require.NoError(t, session.Query(stmt).Exec())
@@ -152,6 +153,7 @@ func provisionHistorySchema(t *testing.T, session *gocql.Session, keyspace strin
 			file FROZEN<"File">, card FROZEN<"Card">, card_action FROZEN<"CardAction">,
 			tshow BOOLEAN, tcount INT, thread_parent_id TEXT,
 			thread_parent_created_at TIMESTAMP, quoted_parent_message FROZEN<"QuotedParentMessage">,
+			forwarded_message FROZEN<"ForwardedMessage">,
 			visible_to TEXT, reactions MAP<TEXT, FROZEN<SET<FROZEN<"Participant">>>>,
 			deleted BOOLEAN, type TEXT, sys_msg_data BLOB, site_id TEXT,
 			edited_at TIMESTAMP, updated_at TIMESTAMP,
@@ -164,6 +166,7 @@ func provisionHistorySchema(t *testing.T, session *gocql.Session, keyspace strin
 			file FROZEN<"File">, card FROZEN<"Card">, card_action FROZEN<"CardAction">,
 			tshow BOOLEAN, tcount INT, thread_parent_id TEXT,
 			thread_parent_created_at TIMESTAMP, quoted_parent_message FROZEN<"QuotedParentMessage">,
+			forwarded_message FROZEN<"ForwardedMessage">,
 			visible_to TEXT, reactions MAP<TEXT, FROZEN<SET<FROZEN<"Participant">>>>,
 			deleted BOOLEAN, type TEXT, sys_msg_data BLOB, site_id TEXT,
 			edited_at TIMESTAMP, created_at TIMESTAMP, updated_at TIMESTAMP,

@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 )
@@ -1078,4 +1079,33 @@ func TestHandle_DoesNotInvalidateOnRegularMessage(t *testing.T) {
 	for _, c := range members.calls {
 		assert.NotContains(t, c, "inval:", "regular messages must not invalidate cache")
 	}
+}
+
+func TestHandle_ForwardedFlagOnPushPayload(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", RoomType: model.RoomTypeChannel},
+			{ID: "bob", Account: "bob", RoomType: model.RoomTypeChannel},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "", CreatedAt: time.Now(),
+		ForwardedMessage: &cassandra.ForwardedMessage{MessageID: "m-src", RoomID: "r-src", Msg: "body"},
+	})))
+	require.Len(t, emit.emitted, 1)
+	assert.True(t, emit.emitted[0].Data.Forwarded, "forwarded flag must be set")
+	assert.Empty(t, emit.emitted[0].Body, "empty comment ships an empty body; client renders from the flag")
+
+	// Non-forward messages must not carry the flag.
+	emit2 := &recordingEmitter{}
+	h2 := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit2)
+	require.NoError(t, h2.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m2", RoomID: "r1", UserID: "alice", UserAccount: "alice", Content: "hi", CreatedAt: time.Now(),
+	})))
+	require.Len(t, emit2.emitted, 1)
+	assert.False(t, emit2.emitted[0].Data.Forwarded)
 }

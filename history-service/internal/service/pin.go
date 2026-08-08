@@ -208,6 +208,7 @@ func (s *HistoryService) ListPinnedMessages(c *natsrouter.Context, req models.Li
 	redactUnavailablePins(page.Data, accessSince)
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
+	s.enrichForwardedRooms(c, page.Data)
 
 	return &models.ListPinnedMessagesResponse{
 		Messages:   page.Data,
@@ -245,6 +246,7 @@ func redactUnavailablePins(pinned []models.Message, accessSince *time.Time) {
 		pinned[i].Card = nil
 		pinned[i].CardAction = nil
 		pinned[i].QuotedParentMessage = nil
+		pinned[i].ForwardedMessage = nil
 		pinned[i].Reactions = nil
 		// System messages carry event metadata in Type/SysMsgData (e.g.
 		// "user_joined" with a payload); scrub both so pre-access system
