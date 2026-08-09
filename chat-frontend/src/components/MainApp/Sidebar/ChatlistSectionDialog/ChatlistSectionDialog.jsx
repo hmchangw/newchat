@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import Modal from '@/components/shared/Modal/Modal'
 import { validateSectionName } from '@/lib/chatlist'
 
 const INVALID_COPY = 'Use 1–50 letters, digits, spaces or - _ . / ( ), no double spaces.'
@@ -14,6 +15,7 @@ export default function ChatlistSectionDialog({ mode = 'create', initialName = '
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const inputRef = useRef(null)
+  const headingId = 'chatlist-section-dialog-heading'
 
   useEffect(() => {
     inputRef.current?.focus()
@@ -42,29 +44,27 @@ export default function ChatlistSectionDialog({ mode = 'create', initialName = '
   const verb = mode === 'rename' ? 'Rename' : 'Create'
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog" role="dialog" aria-label={title} onClick={(e) => e.stopPropagation()}>
-        <h2>{title}</h2>
-        <form onSubmit={submit}>
-          <input
-            ref={inputRef}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Section name"
-            maxLength={50}
-            aria-label="Section name"
-          />
-          {error && <div className="dialog-error">{error}</div>}
-          <div className="dialog-actions">
-            <button type="button" className="dialog-cancel" onClick={onClose} disabled={busy}>
-              Cancel
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={busy}>
-              {busy ? '…' : verb}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+    <Modal onClose={onClose} labelledBy={headingId}>
+      <h2 id={headingId}>{title}</h2>
+      <form onSubmit={submit}>
+        <input
+          ref={inputRef}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Section name"
+          maxLength={50}
+          aria-label="Section name"
+        />
+        {error && <div className="dialog-error">{error}</div>}
+        <div className="dialog-actions">
+          <button type="button" className="dialog-cancel" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {busy ? '…' : verb}
+          </button>
+        </div>
+      </form>
+    </Modal>
   )
 }

@@ -39,16 +39,12 @@ const chatlistListeners = new Set<ChatlistListener>()
 const sectionMovedListeners = new Set<SectionMovedListener>()
 let idCounter = 0
 
-function now(): number {
-  return Date.now()
-}
-
 function clone(s: ChatlistState): ChatlistState {
   return { sectionOrder: [...s.sectionOrder], sections: s.sections.map((x) => ({ ...x })), lastUpdatedAt: s.lastUpdatedAt }
 }
 
 function emitChatlist(): void {
-  state.lastUpdatedAt = now()
+  state.lastUpdatedAt = Date.now()
   const snapshot = clone(state)
   chatlistListeners.forEach((cb) => cb({ timestamp: snapshot.lastUpdatedAt, chatlist: snapshot }))
 }
@@ -172,7 +168,7 @@ export function moveChatMock(
   const evt: SubscriptionUpdateEvent = {
     userId: 'mock',
     action: 'section_moved',
-    timestamp: now(),
+    timestamp: Date.now(),
     subscription: {
       roomId,
       sectionId: sectionId ?? undefined,

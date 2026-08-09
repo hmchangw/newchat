@@ -48,7 +48,7 @@ function lastMsgTime(summary) {
   return summary.lastMsgAt ? new Date(summary.lastMsgAt).getTime() : 0
 }
 
-function sortByLastMsgDesc(rooms) {
+export function sortByLastMsgDesc(rooms) {
   return [...rooms].sort((a, b) => lastMsgTime(b) - lastMsgTime(a))
 }
 
@@ -88,9 +88,7 @@ export function deriveSidebarSections(summaries, subscriptions, chatlist) {
   for (const s of base.sections) byId.set(s.id, s)
   for (const s of custom.sections) byId.set(s.id, s)
   const customIds = custom.sectionOrder.filter((id) => byId.has(id) && !isBuiltinSectionId(id))
-  const order = [BUILTIN_FAVORITES, BUILTIN_APPS, BUILTIN_TEAMS, ...customIds, BUILTIN_CHATS].filter(
-    (id, i, a) => a.indexOf(id) === i,
-  )
+  const order = [BUILTIN_FAVORITES, BUILTIN_APPS, BUILTIN_TEAMS, ...customIds, BUILTIN_CHATS]
   const buckets = new Map(order.map((id) => [id, []]))
 
   for (const room of summaries) {

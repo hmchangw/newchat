@@ -1,5 +1,5 @@
 import { appendBounded, mergeById, MAX_CACHED } from '@/lib/messageBuffer'
-import { defaultChatlistState } from '@/lib/chatlist'
+import { defaultChatlistState, sortByLastMsgDesc } from '@/lib/chatlist'
 
 export { MAX_CACHED }
 
@@ -96,13 +96,6 @@ export const initialState = {
 }
 
 
-function sortByLastMsgDesc(summaries) {
-  return [...summaries].sort((a, b) => {
-    const at = a.lastMsgAt ? new Date(a.lastMsgAt).getTime() : 0
-    const bt = b.lastMsgAt ? new Date(b.lastMsgAt).getTime() : 0
-    return bt - at
-  })
-}
 
 function toSummary(room) {
   return {
