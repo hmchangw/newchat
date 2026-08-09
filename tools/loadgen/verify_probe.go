@@ -32,6 +32,7 @@ type probeRecord struct {
 	publishedAt time.Time
 	expected    map[string]struct{}
 	received    map[deliveryKey]int
+	leaked      map[string]struct{} // userIDs outside expected, user lane only
 }
 
 // ProbeCounts is the summary surfaced in the report.
@@ -41,6 +42,7 @@ type ProbeCounts struct {
 	Complete   int
 	Partial    int
 	TotalLoss  int
+	Leaked     int
 }
 
 // ProbeTracker records per-recipient delivery for sampled messages and reports
@@ -74,6 +76,7 @@ func (t *ProbeTracker) RegisterProbe(msgID, roomID, senderID string, epoch int, 
 		publishedAt: at,
 		expected:    exp,
 		received:    make(map[deliveryKey]int, len(expected)),
+		leaked:      make(map[string]struct{}),
 	}
 	t.mu.Lock()
 	t.probes[msgID] = rec
@@ -91,6 +94,12 @@ func (t *ProbeTracker) RecordDelivery(userID, msgID, roomID string, ln lane, _ t
 		return
 	}
 	if _, expected := rec.expected[userID]; !expected {
+		// Leakage is only meaningful on the per-user lane, where the system
+		// chooses the address. On the room lane, delivery follows from whoever
+		// subscribed to the topic, which loadgen controls (spec §7.3).
+		if ln == laneUser {
+			rec.leaked[userID] = struct{}{}
+		}
 		return
 	}
 	rec.received[deliveryKey{userID: userID, ln: ln}]++
@@ -120,6 +129,7 @@ func (t *ProbeTracker) Counts() ProbeCounts {
 		default:
 			c.Complete++
 		}
+		c.Leaked += len(rec.leaked)
 	}
 	return c
 }
@@ -190,6 +200,18 @@ func (r *probeRecord) violations() []Violation {
 		out = append(out, Violation{
 			Kind: KindDuplicateDelivery, MsgID: r.msgID, RoomID: r.roomID,
 			Users: dupes, Epoch: r.epoch, Detail: "same messageID delivered twice on one lane",
+		})
+	}
+
+	if len(r.leaked) > 0 {
+		leaked := make([]string, 0, len(r.leaked))
+		for u := range r.leaked {
+			leaked = append(leaked, u)
+		}
+		sort.Strings(leaked)
+		out = append(out, Violation{
+			Kind: KindUnexpectedRecipient, MsgID: r.msgID, RoomID: r.roomID,
+			Users: leaked, Epoch: r.epoch, Detail: "delivered to non-member on the per-user lane",
 		})
 	}
 
