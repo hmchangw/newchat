@@ -13,7 +13,7 @@ func at(sec int) time.Time { return time.Unix(int64(sec), 0).UTC() }
 
 func TestProbeTracker_CompleteDelivery_NoViolations(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1", "u-2", "u-3"}, at(1))
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1", "u-2", "u-3"})
 
 	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(2))
 	tr.RecordDelivery("u-2", "m1", "room-small-000001", laneGlobal, at(2))
@@ -26,7 +26,7 @@ func TestProbeTracker_SenderMustBeExpected(t *testing.T) {
 	tr := NewProbeTracker()
 	// Sender u-1 is in the expected set (broadcast-worker echoes) but never
 	// receives its own message.
-	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1", "u-2"}, at(1))
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1", "u-2"})
 	tr.RecordDelivery("u-2", "m1", "room-small-000001", laneGlobal, at(2))
 
 	vs := tr.Finalize()
@@ -37,7 +37,7 @@ func TestProbeTracker_SenderMustBeExpected(t *testing.T) {
 
 func TestProbeTracker_PartialDelivery_MissingRecipient(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1", "u-2", "u-3"}, at(1))
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1", "u-2", "u-3"})
 	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(2))
 
 	vs := tr.Finalize()
@@ -49,7 +49,7 @@ func TestProbeTracker_PartialDelivery_MissingRecipient(t *testing.T) {
 
 func TestProbeTracker_ZeroDelivery_TotalLoss(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1", "u-2"}, at(1))
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1", "u-2"})
 
 	vs := tr.Finalize()
 	require.Len(t, vs, 1)
@@ -59,7 +59,7 @@ func TestProbeTracker_ZeroDelivery_TotalLoss(t *testing.T) {
 
 func TestProbeTracker_DuplicateWithinLane_IsViolation(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1"}, at(1))
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1"})
 	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(2))
 	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(3))
 
@@ -71,7 +71,7 @@ func TestProbeTracker_DuplicateWithinLane_IsViolation(t *testing.T) {
 
 func TestProbeTracker_SameMsgOnBothLanes_IsNotDuplicate(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1"}, at(1))
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1"})
 	// Both lanes are subscribed to stay ROOM_SUBJECT_MODE-agnostic. One
 	// arrival per lane is expected, not a duplicate.
 	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(2))
@@ -90,8 +90,8 @@ func TestProbeTracker_UnknownMsgID_Ignored(t *testing.T) {
 
 func TestProbeTracker_Counts(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1"}, at(1))
-	tr.RegisterProbe("m2", "room-small-000001", "u-1", 0, []string{"u-1"}, at(1))
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1"})
+	tr.RegisterProbe("m2", "room-small-000001", 0, []string{"u-1"})
 	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(2))
 	tr.RecordSuppressed()
 	tr.RecordSuppressed()
@@ -105,7 +105,7 @@ func TestProbeTracker_Counts(t *testing.T) {
 
 func TestProbeTracker_LeakageOnUserLane_IsViolation(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-dm-000001", "u-1", 0, []string{"u-1", "u-2"}, at(1))
+	tr.RegisterProbe("m1", "room-dm-000001", 0, []string{"u-1", "u-2"})
 
 	tr.RecordDelivery("u-1", "m1", "room-dm-000001", laneUser, at(2))
 	tr.RecordDelivery("u-2", "m1", "room-dm-000001", laneUser, at(2))
@@ -120,7 +120,7 @@ func TestProbeTracker_LeakageOnUserLane_IsViolation(t *testing.T) {
 
 func TestProbeTracker_LeakageOnRoomLane_IsIgnored(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1"}, at(1))
+	tr.RegisterProbe("m1", "room-small-000001", 0, []string{"u-1"})
 
 	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(2))
 	// A non-member receiving on the room topic reflects who subscribed, which
@@ -135,7 +135,7 @@ func TestProbeTracker_LeakageOnRoomLane_IsIgnored(t *testing.T) {
 
 func TestProbeTracker_LeakageDoesNotCountAsDelivery(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-dm-000001", "u-1", 0, []string{"u-1", "u-2"}, at(1))
+	tr.RegisterProbe("m1", "room-dm-000001", 0, []string{"u-1", "u-2"})
 
 	tr.RecordDelivery("u-1", "m1", "room-dm-000001", laneUser, at(2))
 	tr.RecordDelivery("u-9", "m1", "room-dm-000001", laneUser, at(2))
@@ -150,7 +150,7 @@ func TestProbeTracker_LeakageDoesNotCountAsDelivery(t *testing.T) {
 
 func TestProbeTracker_RepeatedLeakFromSameUser_ReportedOnce(t *testing.T) {
 	tr := NewProbeTracker()
-	tr.RegisterProbe("m1", "room-dm-000001", "u-1", 0, []string{"u-1", "u-2"}, at(1))
+	tr.RegisterProbe("m1", "room-dm-000001", 0, []string{"u-1", "u-2"})
 	tr.RecordDelivery("u-1", "m1", "room-dm-000001", laneUser, at(2))
 	tr.RecordDelivery("u-2", "m1", "room-dm-000001", laneUser, at(2))
 	tr.RecordDelivery("u-9", "m1", "room-dm-000001", laneUser, at(2))
@@ -167,7 +167,7 @@ func TestProbeTracker_ConcurrentDeliveries(t *testing.T) {
 	for i := range expected {
 		expected[i] = fmtUserID(i)
 	}
-	tr.RegisterProbe("m1", "room-medium-000001", expected[0], 0, expected, at(1))
+	tr.RegisterProbe("m1", "room-medium-000001", 0, expected)
 
 	var wg sync.WaitGroup
 	for i := range expected {
