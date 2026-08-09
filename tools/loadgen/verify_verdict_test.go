@@ -67,6 +67,25 @@ func TestEvaluateVerify_TooFewProbes_IsInconclusive(t *testing.T) {
 	assert.Contains(t, r.Reasons[0], "min-probes")
 }
 
+func TestEvaluateVerify_TrackedEqualsMinProbes_IsPass(t *testing.T) {
+	in := passingInputs()
+	in.Counts = ProbeCounts{Tracked: 50, Complete: 50}
+	in.MinProbes = 50
+
+	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict,
+		"tracked meeting the floor exactly satisfies --min-probes")
+}
+
+func TestEvaluateVerify_TrackedOneBelowMinProbes_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.Counts = ProbeCounts{Tracked: 49, Complete: 49}
+	in.MinProbes = 50
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	assert.Contains(t, r.Reasons[0], "min-probes")
+}
+
 func TestEvaluateVerify_SuppressedProbesDoNotCountTowardFloor(t *testing.T) {
 	in := passingInputs()
 	in.Counts = ProbeCounts{Tracked: 10, Complete: 10, Suppressed: 500}
