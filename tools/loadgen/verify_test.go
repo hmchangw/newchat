@@ -91,6 +91,34 @@ func TestPreflightVerify_RejectsThresholdMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "threshold")
 }
 
+func TestPreflightVerify_RejectsRoomAtExactThreshold(t *testing.T) {
+	vc, err := parseVerifyFlags([]string{"--large-room-threshold=500"})
+	require.NoError(t, err)
+
+	prs := ProbeRoomSet{
+		Rooms:  []model.Room{{ID: "room-medium-000001", UserCount: 500}},
+		byRoom: map[string][]string{"room-medium-000001": {"u-1"}},
+	}
+
+	err = preflightVerify(t.Context(), vc, prs, 1)
+	require.Error(t, err,
+		"the gatekeeper's threshold is inclusive: a room with exactly LargeRoomThreshold "+
+			"members is already rejected, so preflight must reject at the boundary too")
+	assert.Contains(t, err.Error(), "threshold")
+}
+
+func TestPreflightVerify_AcceptsRoomOneBelowThreshold(t *testing.T) {
+	vc, err := parseVerifyFlags([]string{"--large-room-threshold=500"})
+	require.NoError(t, err)
+
+	prs := ProbeRoomSet{
+		Rooms:  []model.Room{{ID: "room-medium-000001", UserCount: 499}},
+		byRoom: map[string][]string{"room-medium-000001": {"u-1"}},
+	}
+
+	require.NoError(t, preflightVerify(t.Context(), vc, prs, 1))
+}
+
 func TestPreflightVerify_RejectsIncompleteDirectPool(t *testing.T) {
 	vc, err := parseVerifyFlags(nil)
 	require.NoError(t, err)
