@@ -265,6 +265,13 @@ type stepEnv struct {
 	cooldown       time.Duration
 	mintJWT        func(ctx context.Context, account string) error // optional; nil = skip
 
+	// designated user IDs are activated before everyone else, so they occupy
+	// the direct pool. nil in daily runs, which keeps the activation walk
+	// byte-for-byte identical to the plain env.users order (orderForActivation
+	// returns its input order for an empty set). Set by `verify`, which needs
+	// every probe-room member on a dedicated connection (spec §6.0).
+	designated []string
+
 	// Presence load (nil when --presence is off). presencePool owns its own
 	// publisher + observer conns, independent of the message pools.
 	presencePool      *presencePool
@@ -407,15 +414,23 @@ func activateUsers(ctx context.Context, env *stepEnv, from, to int) {
 	if from >= to {
 		return
 	}
+	// Walk an explicit ID order rather than indexing env.users, so a caller can
+	// front-load a designated set into the direct pool. With env.designated nil
+	// the order is env.users' own order, so daily is unaffected.
+	order := orderForActivation(env.users, env.designated)
+	byID := make(map[string]*userState, len(env.users))
+	for _, u := range env.users {
+		byID[u.ID] = u
+	}
 	tokens := time.NewTicker(time.Second / 500)
 	defer tokens.Stop()
-	for i := from; i < to && i < len(env.users); i++ {
+	for i := from; i < to && i < len(order); i++ {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tokens.C:
 		}
-		u := env.users[i]
+		u := byID[order[i]]
 		if env.mintJWT != nil {
 			if err := env.mintJWT(ctx, u.Account); err != nil {
 				slog.Warn("jwt mint failed", "user", u.ID, "err", err)
