@@ -11,8 +11,8 @@ under concurrency**, as opposed to the capacity and latency questions the
 existing `loadgen daily` scenario answers.
 
 The output answers: *"Under a realistic concurrent daily-IM workload, did
-every tracked message reach exactly the right recipients exactly once, and
-did it persist?"*
+every tracked message reach exactly the right recipients exactly once, did
+it persist, and did membership changes actually take effect?"*
 
 `daily` answers *how much* the system can take. `verify` answers *whether
 what it took came out correct.*
@@ -23,10 +23,13 @@ what it took came out correct.*
 
 - Delivery completeness — every tracked message reaches every expected
   room member
+- No leakage — and *only* those members, on the per-user lane (§7.3)
 - Exactly-once delivery — no recipient receives the same `messageID` twice
 - Persistence readback — each tracked message is retrievable through
   `history-service` with the correct `roomID`, `senderID`, and
   `threadParentMessageID`
+- Membership changes — an add or remove is applied to subscription state
+  and takes effect on the authorization path (§9)
 - Probe sampling to bound accounting cost while keeping the system under
   full realistic load
 - PASS / FAIL / INCONCLUSIVE verdict with actionable violation detail
@@ -56,10 +59,18 @@ A run FAILs if any probe message shows any of:
 | `duplicate_delivery` | One recipient received the same `messageID` twice on the same lane | JetStream redelivery / worker idempotency |
 | `persistence_miss` | Probe not retrievable via `history-service` after bounded retries | `message-worker` write loss |
 | `persistence_mismatch` | Retrieved, but `roomID` / `senderID` / `threadParentMessageID` differs | wrong-partition or field-mapping write bug |
+| `unexpected_recipient` | A tracked user received a probe for a room they are not a member of, on the per-user lane | DM/user-lane mis-addressing |
+| `membership_not_applied` | After add/remove + settle, `subscription.list` does not reflect the change | room-service / room-worker / Mongo write |
+| `membership_add_ineffective` | An added member's send into the room is still rejected after settle | membership visible to `subscription.list` but not to the gatekeeper |
+| `membership_remove_ineffective` | A removed member's send into the room is still accepted after settle | stale membership on the authorization path |
 
 `total_loss` is counted separately from `missing_recipient` on purpose.
 Zero recipients points upstream of broadcast; partial delivery points at
 fan-out. Same symptom, different investigation.
+
+`unexpected_recipient` is the most severe class — a message reaching a
+non-member is a privacy incident, not a delivery defect. See §7.3 for why
+it is meaningful only on the per-user lane.
 
 ## 4. Run Lifecycle
 
@@ -97,6 +108,9 @@ command can be scripted without parsing stdout.
 | `--preset` | `daily-heavy` | Same presets as `daily` |
 | `--users` | `preset.Users` | Total activation count. Background load; probe recipients are chosen separately (§6) |
 | `--probe-rooms` | `50` | Number of probe rooms; their members are forced into the direct pool (§6) |
+| `--reserve-users` | `200` | Direct-connected floaters, initially in no probe room, used as membership-change targets (§6.0 step 3) |
+| `--member-churn` | `0.2` | Membership changes per probe room per minute. `0` disables §9 entirely |
+| `--settle` | `5s` | Post-change quiet window per room; probes suspended, then E recomputed (§9.2) |
 | `--warmup` | `30s` | Pre-measurement settle |
 | `--steady` | `120s` | Probe-generating window |
 | `--drain` | `30s` | Post-quiesce wait for in-flight probes |
@@ -141,14 +155,18 @@ be fully covered.
    `--seed`.
 2. Force the **union of their members** into the direct pool. This set is
    complete by construction.
-3. Activate remaining users up to `--users` normally — multiplex is fine,
+3. Add `--reserve-users` **floaters** to the direct pool — users in no
+   probe room initially, held as targets for membership changes (§9).
+   Without this, a user added mid-run would have no dedicated connection
+   and their deliveries would be unobservable.
+4. Activate remaining users up to `--users` normally — multiplex is fine,
    they are background load and never probe recipients.
-4. Probes only ever target the selected probe rooms.
+5. Probes only ever target the selected probe rooms.
 
-The expected set for a probe is then simply **all members of its room**,
-with the sender included (§7.2). No intersection with activation state is
-needed, because step 2 guarantees every member is live on a dedicated
-connection.
+The expected set for a probe is **all members of its room at the probe's
+membership epoch** (§9.2), with the sender included (§7.2). No intersection
+with activation state is needed, because steps 2 and 3 guarantee every
+current and future member is live on a dedicated connection.
 
 `Fixtures` is a pure function of `(preset, seed, siteID)` (`preset.go:127`),
 so membership is derivable in-process, deterministically, with no Mongo
@@ -222,7 +240,7 @@ decides who received it, so a completeness check would be partly testing
 loadgen's bookkeeping rather than the system under test.
 
 §6.0 step 2 removes both problems by construction. Any multiplex drop
-recorded during a run still forces INCONCLUSIVE (§9) as a backstop.
+recorded during a run still forces INCONCLUSIVE (§10) as a backstop.
 
 ### 6.3 Resource budget
 
@@ -306,6 +324,34 @@ No calibration step is needed. `ProbeTracker` tests assert the sender is
 present in the expected set explicitly, so a future change to echo
 behaviour surfaces as a test failure rather than silent under-counting.
 
+### 7.3 Lane asymmetry — where non-delivery is checkable
+
+Check 1 asserts `E ⊆ O`. The leakage check asserts `O ⊆ E`. The second is
+only meaningful on one of the two lanes, and conflating them would produce
+guaranteed false failures.
+
+**Room lane (channel rooms) — topic broadcast.** `broadcast-worker`
+publishes **once** to `subject.RoomEvent(roomID)`; NATS fans it out to
+whoever subscribed. Membership is not consulted at broadcast time — it is
+enforced when a client subscribes. Two consequences:
+
+- A non-member who stays subscribed still receives, and loadgen dials with
+  `backend.creds` (full `chat.>` permissions), so it can *always* stay
+  subscribed. A room-lane leakage check would fail on every run and would
+  be testing NATS ACLs, not the chat system.
+- Symmetrically, "an added member now receives" is near-vacuous on this
+  lane: *loadgen* issues the subscribe, so delivery follows from NATS, not
+  from anything the system did.
+
+**Per-user lane — addressed delivery.** DM and BotDM broadcasts go to
+`subject.UserRoomEvent(account)` (`daily_pool.go:70`), one subject per
+recipient. Here the system chooses *who* to address, so mis-addressing is a
+real, system-controlled defect and `unexpected_recipient` is meaningful.
+
+**Therefore:** `O ⊆ E` is asserted on the per-user lane only. On the room
+lane, membership correctness is verified through the authorization path
+instead (§9.1), which is what the system actually controls.
+
 ## 8. Persistence Readback
 
 Runs after drain. O(probes), not O(probes × members) — cheap regardless of
@@ -336,21 +382,105 @@ A readback query that errors or times out yields INCONCLUSIVE for the
 affected probes, never FAIL: an unreachable `history-service` tells us
 nothing about whether the write happened.
 
-## 9. Verdict
+## 9. Membership Correctness
+
+Membership churn runs throughout the steady window at `--member-churn`
+changes per probe room per minute, drawing targets from the reserve pool
+(§6.0 step 3). Each change is an add or a remove via the existing
+`memberAdd` action path and its removal counterpart.
+
+Set `--member-churn=0` to disable this section entirely and run
+delivery-only.
+
+### 9.1 What is asserted
+
+For a change **C** (add or remove of user **T** in probe room **R**),
+evaluated after the settle window:
+
+| Check | Assertion | Violation |
+|---|---|---|
+| Change applied | `subscription.list` for T reflects the change | `membership_not_applied` |
+| Add effective | T's send into R is **accepted** by the gatekeeper | `membership_add_ineffective` |
+| Remove effective | T's send into R is **rejected** by the gatekeeper | `membership_remove_ineffective` |
+| Post-add delivery | probes after settle include T in E, and reach T | `missing_recipient` (§3) |
+
+The add/remove-effective checks are phrased against **authorization**, not
+fan-out, for the reason given in §7.3: on the room lane the system does not
+decide who receives, it decides who may *send*. The gatekeeper's
+`user X is not subscribed to room Y` rejection is the observable that
+actually exercises room-service → room-worker → Mongo → gatekeeper end to
+end.
+
+A removed member's send being accepted is the severe direction here: it
+means stale membership on the write path.
+
+### 9.2 Membership epochs and the settle window
+
+E is no longer static. A message published microseconds before an add
+creates a genuine race — whether T receives it depends on whether
+`room-worker` committed before `broadcast-worker` read the member list.
+**Both outcomes are legitimate**, so the race must be avoided rather than
+adjudicated.
+
+Each probe room therefore carries a **membership epoch**:
+
+1. A change bumps the room's epoch and opens a `--settle` quiet window.
+2. During settle, **no probes are sent into that room**. Ordinary
+   (untracked) load continues, so the system stays under churn.
+3. After settle, E is recomputed and probing resumes at the new epoch.
+
+Messages in flight across a change are simply never probed. Probes carry
+their epoch, so a late delivery is matched against the E in force when it
+was published, not the current one.
+
+### 9.3 Two oracles, deliberately
+
+Membership is tracked from **two independent sources**:
+
+- **Loadgen's model** — fixtures plus the changes loadgen itself issued.
+  This is the oracle for what membership *should* be.
+- **`subscription.list`** — what the system *thinks* membership is.
+
+Divergence between them is `membership_not_applied`. Delivery is then
+judged against loadgen's model, never against `subscription.list`: if the
+membership write were lost, both the system's state and its self-report
+would agree, and judging against it would mask exactly the bug the check
+exists to find.
+
+### 9.4 Ordering caveat
+
+Per-room message ordering is out of scope (§2), but membership changes have
+an ordering hazard of their own — a remove overtaking its add leaves the
+wrong final state. `verify` does not track membership event ordering; it
+asserts the **final state after settle**, which catches the observable
+consequence without the cost of full ordering tracking.
+
+Cross-site membership ordering (the per-destination FIFO OUTBOX lanes) is
+out of scope with the rest of federation.
+
+## 10. Verdict
 
 INCONCLUSIVE overrides, matching the precedence `daily` already uses.
 
-**FAIL** if any probe shows any violation from §3 surviving retries.
+**FAIL** if any probe shows a delivery, leakage, or persistence violation
+from §3 surviving retries, **or** any membership change shows a
+`membership_*` violation after its settle window (§9.1).
 
 **INCONCLUSIVE** if any of:
 
 - Any multiplex drop was recorded during the run
-- A probe's expected set shrank between publish and finalize — i.e. a
-  tracked recipient's connection dropped mid-run, so its non-delivery
-  cannot be attributed to the system under test
+- A tracked recipient's connection dropped mid-run, so its non-delivery
+  cannot be attributed to the system under test. This is distinct from an
+  epoch change: a membership change legitimately alters the expected set
+  (§9.2) and is never INCONCLUSIVE on its own
 - Readback errored or timed out
-- Fewer than `--min-probes` (default `50`) eligible probes were sampled —
-  nothing meaningful was measured, and a PASS would be a silent lie
+- A `subscription.list` query backing the membership oracle errored or
+  timed out — same reasoning as readback: an unreachable service tells us
+  nothing about whether the write happened
+- Fewer than `--min-probes` (default `50`) probes were tracked — probes
+  suppressed inside a settle window (§9.2) do not count toward this floor,
+  so aggressive `--member-churn` with a long `--settle` can starve the run
+  into INCONCLUSIVE rather than silently thinning coverage
 - `ctx` cancelled mid-run
 - Loadgen GC pause p99 above the existing self-metric threshold — the load
   box was saturated, so the measurement is not trustworthy
@@ -359,34 +489,38 @@ INCONCLUSIVE overrides, matching the precedence `daily` already uses.
 
 Latency never produces a FAIL. `verify` is not an SLO tool.
 
-## 10. Output
+## 11. Output
 
 Console summary, styled after `daily_report.go`:
 
 ```
-probe rooms: 50 (32 small, 18 medium) / 2417 members / direct pool 2417
-background:  7583 users on multiplex
-probes:      412 tracked
+probe rooms: 50 (32 small, 18 medium) / 2417 members / direct pool 2617
+background:  7383 users on multiplex / 200 reserve floaters
+probes:      412 tracked / 18 suppressed (settle window)
 delivery:    410 complete / 2 partial / 0 total-loss
+leakage:     0 unexpected recipients (user lane)
 duplicates:  0
 persistence: 412 confirmed / 0 missing / 0 mismatch
+membership:  24 changes (14 add, 10 remove) / 24 applied / 24 effective
 
-VIOLATIONS (showing 2 of 2)
+VIOLATIONS (showing 3 of 3)
   missing_recipient  msg=7Hq3... room=r-000042  missing: u-000317, u-000904
   missing_recipient  msg=9Kp1... room=r-000042  missing: u-000317
+  membership_remove_ineffective  room=r-000108 target=u-009412 epoch=3
+      send still accepted 5s after remove
 
 VERDICT: FAIL
 ```
 
-The `direct pool` figure equalling probe-room membership is the invariant
-from §6.0 step 2 — if they ever diverge, the run is misconfigured and
-preflight should have caught it.
+The `direct pool` figure equals probe-room membership plus reserve
+floaters — the invariant from §6.0 steps 2–3. If it ever diverges, the run
+is misconfigured and preflight should have caught it.
 
 Violations print `msgID`, `roomID`, and missing recipient IDs — enough to
 grep service logs directly. Console caps at ~10; `--json` carries full
 detail. Never prints message content.
 
-## 11. Implementation Layout
+## 12. Implementation Layout
 
 Following the existing flat per-scenario convention in `tools/loadgen/`:
 
@@ -394,36 +528,49 @@ Following the existing flat per-scenario convention in `tools/loadgen/`:
 |---|---|
 | `verify.go` | `runVerify`, config parsing, lifecycle (warmup/steady/quiesce/drain) |
 | `verify_rooms.go` | Probe-room selection and direct-pool member union (§6.0) |
-| `verify_probe.go` | `ProbeTracker` — expected sets, delivery recording, dedupe, finalize |
+| `verify_probe.go` | `ProbeTracker` — epoch-scoped expected sets, delivery recording, dedupe, leakage, finalize |
+| `verify_membership.go` | Churn driver, epoch/settle bookkeeping, dual-oracle comparison (§9) |
 | `verify_readback.go` | `history-service` readback with bounded retry |
 | `verify_verdict.go` | PASS/FAIL/INCONCLUSIVE evaluation |
 | `verify_report.go` | Console + JSON rendering |
 | `verify_*_test.go` | Unit tests per the above |
 
-Modified: `main.go` (dispatch a `verify` case), `daily_pool.go` (thread
-`u.ID` and lane into broadcast attribution; honour `--lane`), `daily.go`
-(seed the direct pool with a designated member set before the prefix walk
-in `activateUsers`), `deploy/Makefile` (`run-verify`).
+Modified:
+
+- `main.go` — dispatch a `verify` case
+- `daily_pool.go` — thread `u.ID` and lane into broadcast attribution;
+  honour `--lane`; add `directPool.SubscribeRoom(userID, roomID)` for
+  dynamic subscription when a reserve floater is added to a room mid-run
+  (which is what a real client does on joining)
+- `daily.go` — seed the direct pool with a designated member set before
+  the prefix walk in `activateUsers`
+- `deploy/Makefile` — `run-verify`
 
 The `activateUsers` change is the only edit touching a path `daily` also
 uses. It is additive — an empty designated set reproduces today's
 behaviour exactly — and covered by a regression test asserting `daily`'s
-activation order is unchanged when no set is supplied.
+activation order is unchanged when no set is supplied. `SubscribeRoom` is
+a new method, so it cannot affect existing callers.
 
 No new dependencies — `nats.go`, `testify`, and `go.uber.org/mock` are
 already in `go.mod`.
 
-## 12. Testing
+## 13. Testing
 
 TDD throughout per CLAUDE.md: tests first, confirmed red, then
 implementation. Coverage floor 80%, targeting 90%+ on tracker and verdict.
 
 Unit-testable with no infrastructure — which is most of it:
 
-- `ProbeTracker` — table-driven: expected-set intersection, delivery
+- `ProbeTracker` — table-driven: expected-set construction, delivery
   recording, per-lane dedupe, duplicate detection, partial-vs-total-loss
-  classification, finalize
-- Probe selection determinism — same seed ⇒ same probe set
+  classification, leakage (`O ⊆ E`) on the user lane only, finalize
+- Probe selection determinism — same seed ⇒ same probe rooms and probe set
+- Membership epochs — a probe published at epoch N is judged against
+  epoch N's expected set even when it lands after epoch N+1 begins; probes
+  inside a settle window are suppressed, not failed
+- Dual-oracle divergence — loadgen's model and a stubbed
+  `subscription.list` disagree ⇒ `membership_not_applied`
 - `verify_verdict` — table-driven over every trigger and the override
   precedence
 - Readback — `requestFn` is already an injectable func type
@@ -441,7 +588,7 @@ validation therefore lives in the docker-compose harness as
 `make -C tools/loadgen/deploy run-verify`. No vacuously-skipped integration
 test will be added.
 
-## 13. Error Handling
+## 14. Error Handling
 
 - Wrap with `fmt.Errorf("…: %w", err)`; never bare `err`
 - `log/slog` structured fields only
@@ -453,7 +600,7 @@ test will be added.
 - Preflight failures exit non-zero immediately, matching the existing
   daily preflight style
 
-## 14. Risks & Mitigations
+## 15. Risks & Mitigations
 
 | Risk | Mitigation |
 |---|---|
@@ -464,8 +611,12 @@ test will be added.
 | Coverage collapse at partial activation | Probe-room-first activation decouples coverage from N (§6.0) |
 | Truncation-style fan-out bug hidden by index-correlated sampling | Full room membership tracked, never a subset (§6.0) |
 | Direct-pool resource limits unknown | Budget estimates flagged unmeasured; benchmarking is a plan task (§6.3) |
+| Room-lane leakage check would always fire (loadgen holds full-permission creds) | `O ⊆ E` asserted on the per-user lane only; room-lane membership verified via authorization instead (§7.3) |
+| Membership change races a concurrent send ⇒ ambiguous expectation | Epoch + settle window; probes suppressed during settle, never adjudicated (§9.2) |
+| Membership write lost ⇒ system and its self-report agree | Dual oracle; delivery judged against loadgen's model, not `subscription.list` (§9.3) |
+| Added member unobservable (no dedicated conn) | Reserve floaters pre-connected; `SubscribeRoom` on add (§6.0 step 3) |
 
-## 15. Success Criteria
+## 16. Success Criteria
 
 1. `loadgen verify` runs to completion against the docker-compose stack and
    reports PASS on a healthy system.
@@ -477,10 +628,18 @@ test will be added.
    not merely assumed.
 6. Unit coverage ≥ 80% overall, ≥ 90% on `ProbeTracker` and the verdict.
 7. A measured direct-pool resource profile replaces the estimates in §6.3.
-8. No behaviour change to `daily`, `max-rps`, `soak`, or `members` — the
-   `Collector` is untouched and `activateUsers` is additive-only.
+8. A membership change is detected as `membership_not_applied` when the
+   `subscription.list` stub withholds it, and as
+   `membership_remove_ineffective` when a removed member's send is still
+   accepted.
+9. A probe published before a change and delivered after it is judged
+   against its own epoch, not the current one.
+10. `--member-churn=0` reproduces the delivery-only behaviour exactly, so
+    membership can be switched off when triaging.
+11. No behaviour change to `daily`, `max-rps`, `soak`, or `members` — the
+    `Collector` is untouched and `activateUsers` is additive-only.
 
-## 16. References
+## 17. References
 
 - `docs/superpowers/specs/2026-05-27-daily-im-load-scenario-design.md` —
   the capacity scenario this reuses
