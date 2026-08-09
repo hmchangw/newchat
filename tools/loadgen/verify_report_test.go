@@ -46,6 +46,20 @@ func TestRenderVerifyConsole_ShowsViolationDetail(t *testing.T) {
 	assert.Contains(t, out, "u-1")
 }
 
+func TestRenderVerifyConsole_ShowsDetailLine(t *testing.T) {
+	rep := reportForTest()
+	rep.Result.Violations = []Violation{
+		{
+			Kind: KindMissingRecipient, MsgID: "m1", RoomID: "r1", Users: []string{"u-1"},
+			Detail: "reached 3 of 5 expected recipients",
+		},
+	}
+
+	out := renderVerifyConsole(rep)
+	assert.Contains(t, out, "reached 3 of 5 expected recipients")
+	assert.Contains(t, out, "\n      reached 3 of 5 expected recipients")
+}
+
 func TestRenderVerifyConsole_CapsViolationsAtTen(t *testing.T) {
 	rep := reportForTest()
 	rep.Result.Violations = nil
