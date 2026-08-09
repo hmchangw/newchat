@@ -226,10 +226,18 @@ Two mitigations, both required:
 
 1. Probe-room selection (§6.0 step 1) excludes rooms at or above the
    configured threshold.
-2. Preflight verifies the configured threshold matches what the gatekeeper
-   is actually running, and refuses to start on mismatch.
+2. `--large-room-threshold` must be set by the operator to match the
+   gatekeeper's actual `LARGE_ROOM_THRESHOLD`. **This is trusted, not
+   verified** — `verify` never queries the gatekeeper to check the flag
+   against its real running config. Get it wrong and preflight stays
+   silent; the run instead produces phantom `total_loss` /
+   `missing_recipient` violations on probes in rooms that sit in the gap
+   between the configured and actual threshold. See
+   `tools/loadgen/README.md` § Verify scenario → Prerequisites.
 
-Failing fast in seconds beats a ten-minute run reporting a phantom bug.
+Failing fast in seconds beats a ten-minute run reporting a phantom bug —
+mitigation 1 does that; mitigation 2 does not, and is only as good as the
+operator's manual bookkeeping.
 
 ### 6.2 Multiplex users are never probe recipients
 
@@ -262,8 +270,13 @@ the ×2 because every room is subscribed on both lanes (`daily_pool.go:58`).
 | daily-power | ~83 | 167 | 334 k | 1.67 M |
 
 **The estimates below are unmeasured** — derived from the code and stock
-nats.go behaviour, not from a benchmark. Establishing real numbers is a
-task in the implementation plan.
+nats.go behaviour, not from a benchmark. Establishing real numbers was a
+task in the implementation plan (Task 11); it did not happen. Docker was
+unavailable in the environment that ran Task 11, so the compose stack could
+never be brought up to measure against — see
+`.superpowers/sdd/2026-08-08-loadgen-verify-correctness/task-11-report.md`.
+These estimates **remain unmeasured** and are the next thing an operator
+with Docker access should establish before trusting them at scale.
 
 Limits in the order they bite:
 
@@ -285,6 +298,14 @@ demonstrated capability.
 `local`. The dual-lane default exists to stay `ROOM_SUBJECT_MODE`-agnostic;
 an operator who knows their stack's mode should set it explicitly. Doing so
 also removes the phantom-duplicate concern in §7.1.
+
+The table above and the halving both describe the **direct pool only**.
+`--lane` does not touch the multiplex background pool, which always
+subscribes both lanes regardless of the flag (same code path as `daily`,
+deliberately not forked — see the design note at `daily_pool.go`). So
+`--lane` halves the direct-pool subscription budget tabulated above, not
+the run's total subscription count; the multiplex pool's contribution is
+unchanged either way.
 
 **`--direct-only`** disables multiplex so every user gets a dedicated conn,
 trading background-load scale for uniform fidelity. Note that with
@@ -670,8 +691,15 @@ test will be added.
 
 ## 16. Success Criteria
 
-1. `loadgen verify` runs to completion against the docker-compose stack and
-   reports PASS on a healthy system.
+**Outstanding — not met.** Criteria 1 and 7 require running the assembled
+`loadgen verify` command against a live docker-compose stack. Docker was
+unavailable in the environment that implemented this plan through Task 11,
+so neither has been attempted; both remain open work for an operator with
+Docker access. See
+`.superpowers/sdd/2026-08-08-loadgen-verify-correctness/task-11-report.md`.
+
+1. **OUTSTANDING.** `loadgen verify` runs to completion against the
+   docker-compose stack and reports PASS on a healthy system.
 2. Withholding a delivery in a unit test produces FAIL with the correct
    violation class and actionable IDs.
 3. A harness-side drop produces INCONCLUSIVE, never FAIL.
@@ -679,7 +707,8 @@ test will be added.
 5. Every probe-room member is in the direct pool — asserted at preflight,
    not merely assumed.
 6. Unit coverage ≥ 80% overall, ≥ 90% on `ProbeTracker` and the verdict.
-7. A measured direct-pool resource profile replaces the estimates in §6.3.
+7. **OUTSTANDING.** A measured direct-pool resource profile replaces the
+   estimates in §6.3.
 8. A membership change is detected as `membership_not_applied` when the
    `subscription.list` stub withholds it, and as
    `membership_remove_ineffective` when a removed member's send is still
