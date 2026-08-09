@@ -196,3 +196,67 @@ func TestMembershipModel_Counts(t *testing.T) {
 		Total: 2, Adds: 1, Removes: 1, Applied: 1, Effective: 1,
 	}, m.Counts())
 }
+
+// TestMembershipModel_MembersAtEpoch_AlignsWithEachSequentialChange pins the
+// history-indexing invariant directly, rather than relying on statement
+// coverage to catch an off-by-one. An implementation that appends to history
+// before incrementing epoch (or vice versa), or that seeds history empty
+// instead of with the epoch-0 set, would misjudge every late-delivered probe
+// while still executing every line in apply/MembersAtEpoch — so this test
+// checks alignment at every epoch produced by a run of sequential changes,
+// not just epoch 0 and 1. Adds and removes are interleaved so a transposition
+// between epochs (not just a missing append) would also show up.
+func TestMembershipModel_MembersAtEpoch_AlignsWithEachSequentialChange(t *testing.T) {
+	m := modelForTest()
+
+	epoch0 := m.MembersAtEpoch("room-small-000001", 0)
+	require.Equal(t, []string{"u-1", "u-2", "u-3"}, epoch0)
+
+	m.ApplyAdd("room-small-000001", "u-9", at(10))    // epoch 1: {u-1,u-2,u-3,u-9}
+	m.ApplyRemove("room-small-000001", "u-2", at(20)) // epoch 2: {u-1,u-3,u-9}
+	m.ApplyAdd("room-small-000001", "u-5", at(30))    // epoch 3: {u-1,u-3,u-5,u-9}
+
+	require.Equal(t, 3, m.Epoch("room-small-000001"))
+
+	assert.Equal(t, []string{"u-1", "u-2", "u-3"}, m.MembersAtEpoch("room-small-000001", 0),
+		"epoch 0 must remain the seeded set even after later changes")
+	assert.Equal(t, []string{"u-1", "u-2", "u-3", "u-9"}, m.MembersAtEpoch("room-small-000001", 1),
+		"epoch 1 must be the set right after the first add, not epoch 0 or 2")
+	assert.Equal(t, []string{"u-1", "u-3", "u-9"}, m.MembersAtEpoch("room-small-000001", 2),
+		"epoch 2 must be the set right after the remove")
+	assert.Equal(t, []string{"u-1", "u-3", "u-5", "u-9"}, m.MembersAtEpoch("room-small-000001", 3),
+		"epoch 3 must be the set right after the second add, and must equal current Members")
+	assert.Equal(t, m.Members("room-small-000001"), m.MembersAtEpoch("room-small-000001", 3),
+		"current epoch's history entry must match Members")
+
+	assert.Nil(t, m.MembersAtEpoch("room-small-000001", 4), "epoch beyond current must be nil, not panic")
+	assert.Nil(t, m.MembersAtEpoch("room-small-000001", -1), "negative epoch must be nil, not panic")
+}
+
+// TestMembershipModel_Members_ReturnsCopyNotReference pins the copy contract
+// documented on Members: mutating the returned slice must never be able to
+// corrupt the model's internal state for a later caller.
+func TestMembershipModel_Members_ReturnsCopyNotReference(t *testing.T) {
+	m := modelForTest()
+
+	got := m.Members("room-small-000001")
+	got[0] = "tampered"
+
+	assert.Equal(t, []string{"u-1", "u-2", "u-3"}, m.Members("room-small-000001"),
+		"mutating a slice returned by Members must not affect the model")
+}
+
+// TestMembershipModel_MembersAtEpoch_ReturnsCopyNotReference pins the same
+// copy contract for MembersAtEpoch, whose result is a past history entry —
+// corrupting it would poison every future read of that epoch, including late
+// probes judged against it.
+func TestMembershipModel_MembersAtEpoch_ReturnsCopyNotReference(t *testing.T) {
+	m := modelForTest()
+	m.ApplyAdd("room-small-000001", "u-9", at(10))
+
+	got := m.MembersAtEpoch("room-small-000001", 0)
+	got[0] = "tampered"
+
+	assert.Equal(t, []string{"u-1", "u-2", "u-3"}, m.MembersAtEpoch("room-small-000001", 0),
+		"mutating a slice returned by MembersAtEpoch must not affect the model's stored history")
+}
