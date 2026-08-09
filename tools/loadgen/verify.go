@@ -424,6 +424,7 @@ func executeVerify(
 		DirectPoolSize: directSize,
 		ReserveSize:    len(run.reserve),
 		BackgroundSize: int(env.activatedCount.Load()) - directSize,
+		MultiplexDrops: in.MultiplexDrops,
 		Counts:         in.Counts,
 		Changes:        in.Changes,
 		Result:         evaluateVerify(in),
