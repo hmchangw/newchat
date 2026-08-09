@@ -271,7 +271,7 @@ is the exemplar). 🔧 declared last-mile via P5/P6.
 - A channel broadcast is **one room-subject enqueue, not N recipient deliveries**;
   `UserCount` ≠ connected recipients. Denominators are **canonical messages on the
   room-subject path**, not recipients.
-- **Cross-process clock-skew contract (SLO-2).** `broadcast_channel_enqueue_age`
+- **Cross-process clock-skew contract (SLO-2).** `broadcast_channel_enqueue_age_seconds`
   subtracts the **JetStream metadata store timestamp (set by the stream-server
   leader)** from broadcast-worker's `now` — two clocks on two hosts — so the 1 s
   bound only means something if those clocks are disciplined. **Requires** NTP/chrony
@@ -281,8 +281,10 @@ is the exemplar). 🔧 declared last-mile via P5/P6.
   - **Measurement-invalid** = a *broken reading*, not a slow one: only `age < 0`
     (broadcast-worker clock behind the stream-server clock) or a **missing/zero
     metadata timestamp**. These carry no usable latency, so they are **fail-closed,
-    never green**: counted in `enqueue_age_invalid_total` (its own skew/health
-    alert), and in production **kept in the denominator but excluded from the good
+    never green**: counted in
+    `broadcast_channel_enqueue_age_invalid_total{reason}` (its own skew/health
+    alert, with the bounded reasons `missing_metadata` / `negative_age`), and in
+    production **kept in the denominator but excluded from the good
     numerator** (i.e. they count against the SLO, they are *not* dropped). In a
     load-test run any nonzero measurement-invalid rate **fails the hard gate** (§10)
     — SLO-2 cannot be certified while the measurement itself is broken.
@@ -487,13 +489,13 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 | P | Work | Unlocks |
 |---|---|---|
 | P1 | `natsrouter` metrics middleware (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | SLO-4/5 + dashboards for all non-named RPCs |
-| P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate unscored gatekeeper build→publish diagnostic measured as a same-process monotonic duration (`time.Since(buildStartedAt)`), not by subtracting `evt.Timestamp`**; `enqueue_age_invalid_total` for **measurement-invalid only** (`age < 0` / missing metadata — no upper latency cap; large positive ages stay scored as bad, §2 Caveats); terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
+| P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate unscored gatekeeper build→publish diagnostic measured as a same-process monotonic duration (`time.Since(buildStartedAt)`), not by subtracting `evt.Timestamp`**; `broadcast_channel_enqueue_age_invalid_total{reason}` (`missing_metadata` / `negative_age`) for **measurement-invalid only** (`age < 0` / missing metadata — no upper latency cap; large positive ages stay scored as bad, §2 Caveats); terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `{is_consumer_leader="true"}`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
 | P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-risk counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b connection-risk backstop | SLO-1b/6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |
 | P6 | **loadgen NATS-subscribe prober** (protocol receipt) + SLO assertion mode (§10) · login→connect→initial-data; sparse-journey floor; SLO-aware load asserts. **Render is out of scope here** — proves protocol receipt, not decrypt/render | protocol-receive last-mile SLI |
 | P6b | **browser synthetic / RUM** prober — decrypt/render/state-apply | render-level declared last mile |
-| P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion via a max-delivery **advisory consumer** — makes 1a/1b/6/9 exact instead of approximate) · **SLO-1b/2 server-confirmed publication boundary** (flush checkpoint / durable-PubAck path, migrating both off v1 enqueue-acceptance) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
+| P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion via a max-delivery **advisory consumer** — makes 1a/1b/2/6/9 exact instead of approximate) · **SLO-1b/2 server-confirmed publication boundary** (flush checkpoint / durable-PubAck path, migrating both off v1 enqueue-acceptance; SLO-2 timing must use a **single-clock or explicitly correlated boundary**, not PubAck observation alone) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
 
 ---
 
