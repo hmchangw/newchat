@@ -3981,7 +3981,6 @@ See [Error envelope](#6-error-envelope-reference).
   "senders": ["bob", "carol"],
   "dateRange": { "start": "2026-07-01T00:00:00Z", "end": "2026-07-31T23:59:59Z" },
   "hasAttachment": true,
-  "mentionedMe": true,
   "fileTypes": ["pdf", "zip"],
   "size": 25,
   "offset": 0
@@ -3995,7 +3994,6 @@ See [Error envelope](#6-error-envelope-reference).
 | `senders` | string[] | no | Filter to messages from any of these `userAccount`s (multi-select From). |
 | `dateRange` | { start, end } | no | Filter `createdAt` to this range (RFC3339 timestamps). Either bound may be omitted to leave that side open. Date presets (today/yesterday/thisWeek/thisMonth/custom) are resolved client-side into a concrete range before sending. |
 | `hasAttachment` | boolean | no | `true` filters to messages carrying at least one attachment. |
-| `mentionedMe` | boolean | no | `true` filters to messages that mention the requesting account. |
 | `fileTypes` | string[] | no | Filter to messages with an attachment in any of these categories: `image`, `pdf`, `excel`, `powerpoint`, `word`, `zip`, `others`. This is also how file search is served — no new subject. Existing messages indexed before this field shipped are not backfilled and won't match. |
 | `size` | integer | no | Page size. Default `25`, capped at `100`. |
 | `offset` | integer | no | Page offset. Default `0`. |

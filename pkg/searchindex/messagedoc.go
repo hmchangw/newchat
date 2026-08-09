@@ -41,6 +41,8 @@ type MessageDoc struct {
 	// filter matches, folded into the messages index rather than a new subject.
 	FileTypes []string `json:"fileTypes,omitempty" es:"keyword"`
 	// Mentions is the deduped set of mentioned accounts (MessageFields.MentionAccounts).
+	// Indexed now; the mentionedMe filter that consumes it ships in a follow-up once
+	// mentions are resolved onto the canonical event (they currently ride empty).
 	Mentions []string `json:"mentions,omitempty" es:"keyword"`
 }
 

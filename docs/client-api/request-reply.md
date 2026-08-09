@@ -1306,7 +1306,6 @@ separate subject.
 | `senders` | string[] | no | Filter to these `userAccount`s (multi-select From). |
 | `dateRange` | `{start, end}` | no | Filter `createdAt`; either bound may be omitted. Presets resolved client-side. |
 | `hasAttachment` | boolean | no | `true` filters to messages with an attachment. |
-| `mentionedMe` | boolean | no | `true` filters to messages mentioning the requester. |
 | `fileTypes` | string[] | no | Filter by attachment category: `image`/`pdf`/`excel`/`powerpoint`/`word`/`zip`/`others`. Existing messages are not backfilled. |
 | `size` | integer | no | Page size. Default 25, max 100. |
 | `offset` | integer | no | Page offset. Default 0. |

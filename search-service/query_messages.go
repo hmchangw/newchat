@@ -46,7 +46,7 @@ func buildMessageQuery(req model.SearchMessagesRequest, account string, restrict
 			},
 		},
 	}
-	filters = append(filters, messageFilterClauses(req, account)...)
+	filters = append(filters, messageFilterClauses(req)...)
 
 	body := map[string]any{
 		"from":             req.Offset,
@@ -87,9 +87,8 @@ func buildMessageQuery(req model.SearchMessagesRequest, account string, restrict
 }
 
 // messageFilterClauses translates the additive request-level filters
-// (senders/dateRange/hasAttachment/mentionedMe/fileTypes) into ES filter
-// clauses. mentionedMe filters on account (the requester), not a request field.
-func messageFilterClauses(req model.SearchMessagesRequest, account string) []any { //nolint:gocritic // hugeParam: req copied once per search request, not a hot path
+// (senders/dateRange/hasAttachment/fileTypes) into ES filter clauses.
+func messageFilterClauses(req model.SearchMessagesRequest) []any { //nolint:gocritic // hugeParam: req copied once per search request, not a hot path
 	var clauses []any
 	if len(req.Senders) > 0 {
 		clauses = append(clauses, map[string]any{"terms": map[string]any{"userAccount": req.Senders}})
@@ -112,9 +111,6 @@ func messageFilterClauses(req model.SearchMessagesRequest, account string) []any
 		// non-empty" — reuses the indexed keyword field instead of `exists` on
 		// the disabled `attachments` object, which isn't reliably indexed.
 		clauses = append(clauses, map[string]any{"exists": map[string]any{"field": "fileTypes"}})
-	}
-	if req.MentionedMe != nil && *req.MentionedMe {
-		clauses = append(clauses, map[string]any{"term": map[string]any{"mentions": account}})
 	}
 	if len(req.FileTypes) > 0 {
 		clauses = append(clauses, map[string]any{"terms": map[string]any{"fileTypes": req.FileTypes}})

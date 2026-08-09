@@ -259,17 +259,6 @@ func TestBuildMessageQuery_HasAttachment(t *testing.T) {
 	assert.Equal(t, "fileTypes", exists["field"])
 }
 
-func TestBuildMessageQuery_MentionedMe(t *testing.T) {
-	yes := true
-	req := model.SearchMessagesRequest{Query: "hi", MentionedMe: &yes}
-	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
-	require.NoError(t, err)
-
-	filters := filterClauses(t, parseQuery(t, raw))
-	term := filters[2].(map[string]any)["term"].(map[string]any)
-	assert.Equal(t, "alice", term["mentions"], "mentionedMe filters on the requester's own account")
-}
-
 func TestBuildMessageQuery_FileTypes(t *testing.T) {
 	req := model.SearchMessagesRequest{Query: "hi", FileTypes: []string{"pdf", "zip"}}
 	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
@@ -286,15 +275,14 @@ func TestBuildMessageQuery_CombinedFilters(t *testing.T) {
 		Query:         "hi",
 		Senders:       []string{"bob"},
 		HasAttachment: &yes,
-		MentionedMe:   &yes,
 		FileTypes:     []string{"image"},
 	}
 	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
 	require.NoError(t, err)
 
-	// range + should + senders + hasAttachment + mentionedMe + fileTypes
+	// recent-window range + access should + senders + hasAttachment + fileTypes
 	filters := filterClauses(t, parseQuery(t, raw))
-	require.Len(t, filters, 6)
+	require.Len(t, filters, 5)
 }
 
 func TestRecentWindowToGte_Units(t *testing.T) {

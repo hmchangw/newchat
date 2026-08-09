@@ -2407,7 +2407,6 @@ func TestSearchMessagesRequestJSON_NewFilters(t *testing.T) {
 			End:   time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC),
 		},
 		HasAttachment: &senders,
-		MentionedMe:   &senders,
 		FileTypes:     []string{"pdf", "zip"},
 	}
 	roundTrip(t, &req, &model.SearchMessagesRequest{})
@@ -2415,7 +2414,7 @@ func TestSearchMessagesRequestJSON_NewFilters(t *testing.T) {
 	reqBare := model.SearchMessagesRequest{Query: "hello"}
 	data, err := json.Marshal(&reqBare)
 	require.NoError(t, err)
-	for _, key := range []string{"senders", "dateRange", "hasAttachment", "mentionedMe", "fileTypes"} {
+	for _, key := range []string{"senders", "dateRange", "hasAttachment", "fileTypes"} {
 		assert.NotContains(t, string(data), `"`+key+`"`, "%s must be omitted when unset", key)
 	}
 }

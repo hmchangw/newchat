@@ -19,8 +19,6 @@ type SearchMessagesRequest struct {
 	DateRange *DateRange `json:"dateRange,omitempty"`
 	// HasAttachment, set true, filters to messages carrying at least one attachment.
 	HasAttachment *bool `json:"hasAttachment,omitempty"`
-	// MentionedMe, set true, filters to messages that mention the requesting account.
-	MentionedMe *bool `json:"mentionedMe,omitempty"`
 	// FileTypes filters to messages with an attachment in any of these categories
 	// (image/pdf/excel/powerpoint/word/zip/others). This is also how file search
 	// folds into this RPC — no separate subject.
