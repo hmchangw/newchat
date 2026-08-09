@@ -114,7 +114,7 @@ func writeDailyCSV(path string, results []StepResult) error {
 	header := []string{
 		"n", "effective_n", "started_at", "p50_ms", "p95_ms", "p99_ms",
 		"error_rate", "attempted_ops", "failed_ops",
-		"missing_broadcasts", "missing_broadcast_rate",
+		"missing_broadcasts", "broadcast_eligible_ops", "missing_broadcast_rate",
 		"worst_durable", "worst_pending_delta",
 		"tripped", "inconclusive", "tripped_reasons",
 	}
@@ -155,6 +155,7 @@ func writeDailyCSV(path string, results []StepResult) error {
 			strconv.FormatInt(r.AttemptedOps, 10),
 			strconv.FormatInt(r.FailedOps, 10),
 			strconv.FormatInt(r.MissingBroadcasts, 10),
+			strconv.FormatInt(r.BroadcastEligibleOps, 10),
 			fmt.Sprintf("%.6f", r.MissingBroadcastRate),
 			worstName,
 			strconv.FormatInt(worstDelta, 10),

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -54,6 +55,51 @@ func TestSendMessage_PublishesToFrontdoor(t *testing.T) {
 	var req model.SendMessageRequest
 	require.NoError(t, json.Unmarshal(got.Data, &req))
 	require.Equal(t, "hello", req.Content)
+}
+
+// The missing-broadcast rate is scored against broadcast-eligible ops, so a
+// send that registers a correlation must also bump that denominator —
+// otherwise every drop divides by zero-ish and the gate never fires.
+func TestSendMessage_CountsBroadcastEligible(t *testing.T) {
+	c := &captured{}
+	col := NewCollector(nil, "test")
+	u := &userState{ID: "u-1", Account: "user-1", Rooms: []string{"room-a"}}
+	ctx := actionCtx{Ctx: context.Background(), Publish: c.publish, Request: c.request, SiteID: "site-test", Collector: col}
+
+	require.NoError(t, sendMessage(ctx, u, "hello"))
+	require.NoError(t, sendMessage(ctx, u, "hello again"))
+
+	require.Equal(t, int64(2), col.BroadcastEligibleOps())
+}
+
+// A user with no rooms sends nothing and registers no correlation, so it can
+// never produce a missing broadcast. Counting it would dilute the rate.
+func TestSendMessage_NoRoomsIsNotBroadcastEligible(t *testing.T) {
+	c := &captured{}
+	col := NewCollector(nil, "test")
+	u := &userState{ID: "u-1", Account: "user-1"}
+	ctx := actionCtx{Ctx: context.Background(), Publish: c.publish, Request: c.request, SiteID: "site-test", Collector: col}
+
+	require.NoError(t, sendMessage(ctx, u, "hello"))
+
+	require.Equal(t, int64(0), col.BroadcastEligibleOps())
+}
+
+// A publish that never left the box clears its own correlation entry via
+// RecordPublishFailed, so it can never surface as a missing broadcast either.
+// Keeping it out of the denominator keeps numerator and denominator drawn from
+// the same set of publishes.
+func TestSendMessage_PublishFailureIsNotBroadcastEligible(t *testing.T) {
+	col := NewCollector(nil, "test")
+	u := &userState{ID: "u-1", Account: "user-1", Rooms: []string{"room-a"}}
+	failing := func(context.Context, string, []byte) error { return errors.New("boom") }
+	ctx := actionCtx{Ctx: context.Background(), Publish: failing, SiteID: "site-test", Collector: col}
+
+	require.Error(t, sendMessage(ctx, u, "hello"))
+
+	require.Equal(t, int64(0), col.BroadcastEligibleOps())
+	_, missing := col.MissingInWindow(time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
+	require.Equal(t, 0, missing, "a failed publish must not be scored as a lost broadcast")
 }
 
 func TestMarkRead_Requests(t *testing.T) {

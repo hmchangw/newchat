@@ -192,40 +192,89 @@ func TestCollector_DiscardReply_UnknownRequestIDIsNoop(t *testing.T) {
 	assert.Equal(t, 0, missingBroadcasts)
 }
 
-// Continuous-emitter scenarios (daily) can't stop publishing and drain, so
-// "unmatched" alone would count everything still legitimately in flight.
-// Age is what separates a dropped broadcast from an in-flight one.
-func TestCollector_MissingBroadcastsOlderThan(t *testing.T) {
+// Unmatched alone does not mean dropped. Two boundaries are needed: the step's
+// start, because Reset races with a still-running generator and a warm-up
+// publish can land in a freshly cleared shard; and the step's end, because a
+// continuous emitter (daily) is still publishing while the grace elapses.
+func TestCollector_MissingInWindow(t *testing.T) {
 	c := NewCollector(NewMetrics(), "test")
-	now := time.Unix(1000, 0)
-	cutoff := now.Add(-2 * time.Second)
+	start := time.Unix(1000, 0)
+	end := start.Add(30 * time.Second)
 
-	c.RecordPublishBroadcastOnly("old-dropped", now.Add(-5*time.Second))
-	c.RecordPublishBroadcastOnly("old-delivered", now.Add(-4*time.Second))
-	c.RecordPublishBroadcastOnly("recent-inflight", now.Add(-500*time.Millisecond))
-	c.RecordBroadcast("old-delivered", now.Add(-3*time.Second))
+	c.RecordPublishBroadcastOnly("before-window", start.Add(-time.Second))
+	c.RecordPublishBroadcastOnly("in-window-dropped", start.Add(5*time.Second))
+	c.RecordPublishBroadcastOnly("in-window-delivered", start.Add(6*time.Second))
+	c.RecordPublishBroadcastOnly("after-window", end.Add(time.Second))
+	c.RecordBroadcast("in-window-delivered", start.Add(7*time.Second))
 
-	assert.Equal(t, 1, c.MissingBroadcastsOlderThan(cutoff),
-		"only the aged-out unmatched publish counts")
+	_, broadcasts := c.MissingInWindow(start, end)
+	assert.Equal(t, 1, broadcasts, "only the in-window unmatched publish counts")
 }
 
-func TestCollector_MissingBroadcastsOlderThan_BoundaryIsInclusive(t *testing.T) {
+// A warm-up publish whose RecordPublish lands just after Reset keeps its
+// pre-holdStart timestamp. DiscardBefore only filters the completed-sample
+// slices, so without a start boundary that entry would trip the measured step.
+func TestCollector_MissingInWindow_ExcludesWarmupLeak(t *testing.T) {
 	c := NewCollector(NewMetrics(), "test")
-	cutoff := time.Unix(1000, 0)
-	c.RecordPublishBroadcastOnly("exactly-at-cutoff", cutoff)
+	holdStart := time.Unix(1000, 0)
 
-	assert.Equal(t, 1, c.MissingBroadcastsOlderThan(cutoff))
+	c.RecordPublish("warmup-req", "warmup-msg", holdStart.Add(-50*time.Millisecond))
+	c.RecordPublish("hold-req", "hold-msg", holdStart.Add(time.Second))
+
+	replies, broadcasts := c.MissingInWindow(holdStart, holdStart.Add(30*time.Second))
+	assert.Equal(t, 1, replies, "the warm-up publish is outside the measured step")
+	assert.Equal(t, 1, broadcasts)
 }
 
-func TestCollector_MissingBroadcastsOlderThan_IgnoresReplyCorrelation(t *testing.T) {
+func TestCollector_MissingInWindow_BoundariesAreInclusive(t *testing.T) {
 	c := NewCollector(NewMetrics(), "test")
-	now := time.Unix(1000, 0)
-	// RecordPublish populates byReqID too. A caller that never correlates
-	// replies must not see those entries leak into the broadcast count.
-	c.RecordPublish("req-1", "msg-1", now.Add(-10*time.Second))
-	c.RecordBroadcast("msg-1", now.Add(-9*time.Second))
+	start := time.Unix(1000, 0)
+	end := start.Add(10 * time.Second)
+	c.RecordPublishBroadcastOnly("at-start", start)
+	c.RecordPublishBroadcastOnly("at-end", end)
 
-	assert.Equal(t, 0, c.MissingBroadcastsOlderThan(now))
+	_, broadcasts := c.MissingInWindow(start, end)
+	assert.Equal(t, 2, broadcasts)
+}
+
+// Broadcast-eligible attempts are the denominator for the missing-broadcast
+// rate. Counting every action would understate the rate by the share of
+// actions that cannot produce a broadcast at all.
+func TestCollector_BroadcastEligibleOps(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	assert.Equal(t, int64(0), c.BroadcastEligibleOps())
+
+	c.RecordActionAttempt()
+	c.RecordActionAttempt()
+	c.RecordBroadcastEligible()
+
+	assert.Equal(t, int64(2), c.AttemptedOps())
+	assert.Equal(t, int64(1), c.BroadcastEligibleOps(), "only sends are broadcast-eligible")
+}
+
+func TestCollector_Reset_ClearsBroadcastEligible(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	c.RecordBroadcastEligible()
+	c.Reset()
+	assert.Equal(t, int64(0), c.BroadcastEligibleOps())
+}
+
+// Broadcasts that land during the grace belong to the hold, but publishes made
+// during the grace do not. Filtering by publish time keeps the slow tail
+// (dropping it would make percentiles optimistic) without importing samples
+// from outside the measured window.
+func TestCollector_LatencySamplesUpTo(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	holdEnd := time.Unix(1000, 0)
+
+	c.RecordPublishBroadcastOnly("in-hold", holdEnd.Add(-time.Second))
+	c.RecordBroadcast("in-hold", holdEnd.Add(300*time.Millisecond)) // arrived during grace
+	c.RecordPublishBroadcastOnly("during-grace", holdEnd.Add(500*time.Millisecond))
+	c.RecordBroadcast("during-grace", holdEnd.Add(600*time.Millisecond))
+
+	samples := c.LatencySamplesUpTo(holdEnd)
+	assert.Len(t, samples, 1, "only publishes from inside the hold are timed")
+	assert.InDelta(t, 1300.0, samples[0], 1.0, "the late-arriving slow sample is kept")
 }
 
 func TestCollector_Reset(t *testing.T) {

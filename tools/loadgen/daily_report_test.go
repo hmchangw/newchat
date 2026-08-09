@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/csv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,7 +51,8 @@ func TestWriteDailyCSV_MissingBroadcastColumns(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/out.csv"
 	results := []StepResult{{
-		N: 1000, AttemptedOps: 10000, MissingBroadcasts: 7, MissingBroadcastRate: 0.0007,
+		N: 1000, AttemptedOps: 10000, BroadcastEligibleOps: 6390,
+		MissingBroadcasts: 7, MissingBroadcastRate: 0.0007,
 	}}
 	require.NoError(t, writeDailyCSV(path, results))
 
@@ -59,6 +61,17 @@ func TestWriteDailyCSV_MissingBroadcastColumns(t *testing.T) {
 	out := string(data)
 	assert.Contains(t, out, "missing_broadcasts")
 	assert.Contains(t, out, "missing_broadcast_rate")
+	// The rate's denominator is not attempted_ops, so without this column the
+	// CSV would carry a rate nothing else in the file can reproduce.
+	assert.Contains(t, out, "broadcast_eligible_ops")
+	assert.Contains(t, out, "6390")
+
+	// Header and row must stay the same width — adding a header without its
+	// value silently shifts every column after it.
+	recs, err := csv.NewReader(strings.NewReader(out)).ReadAll()
+	require.NoError(t, err)
+	require.Len(t, recs, 2)
+	assert.Len(t, recs[1], len(recs[0]))
 }
 
 func TestWriteCSV_OneRowPerStep(t *testing.T) {

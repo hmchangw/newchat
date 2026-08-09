@@ -71,6 +71,13 @@ func sendMessage(a actionCtx, u *userState, content string) error {
 		}
 		return fmt.Errorf("publish send-message: %w", err)
 	}
+	if a.Collector != nil {
+		// Counted here, not next to RecordPublishBroadcastOnly above: a failed
+		// publish has its correlation entry removed again, so it can never turn
+		// into a missing broadcast. Numerator and denominator must be drawn from
+		// the same set of publishes or the rate is diluted.
+		a.Collector.RecordBroadcastEligible()
+	}
 	return nil
 }
 

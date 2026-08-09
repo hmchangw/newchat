@@ -345,6 +345,8 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 		env.presenceCollector.Reset()
 	}
 
+	holdStartedAt := time.Now()
+
 	if err := waitOrCancel(ctx, env.hold); err != nil {
 		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during hold")
 	}
@@ -375,6 +377,15 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 		actionSamples[actionKind(kind).String()] = ss
 	}
 
+	// Freeze the op counters at the hold boundary, before the delivery grace.
+	// Emitters keep running through the grace, so reading them afterwards would
+	// inflate the denominators with attempts the rest of this step's numerators
+	// (missing broadcasts, latency samples) deliberately exclude — every gate
+	// scored as good/valid would read optimistically low.
+	attemptedOps := env.collector.AttemptedOps()
+	failedOps := env.collector.FailedOps()
+	broadcastEligibleOps := env.collector.BroadcastEligibleOps()
+
 	// Emitters keep running across steps, so there is no quiet point at which
 	// every unmatched publish is a drop. Wait out the delivery grace, then score
 	// everything published up to the hold boundary.
@@ -388,19 +399,23 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 	if err := waitOrCancel(ctx, deliveryGrace); err != nil {
 		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during delivery grace")
 	}
-	missingBroadcasts := env.collector.MissingBroadcastsOlderThan(holdEndedAt)
+	// holdStartedAt as the lower bound: Reset() races with a still-running
+	// emitter, so a publish recorded just after the shard was cleared keeps its
+	// warm-up timestamp and would otherwise be scored against this step.
+	_, missingBroadcasts := env.collector.MissingInWindow(holdStartedAt, holdEndedAt)
 
 	in := stepInputs{
 		N: n, StartedAt: startedAt, HoldDuration: env.hold,
-		EffectiveN:        int(env.activatedCount.Load()),
-		LatencySamples:    env.collector.LatencySamples(),
-		ActionSamplesMs:   actionSamples,
-		AttemptedOps:      env.collector.AttemptedOps(),
-		FailedOps:         env.collector.FailedOps(),
-		MissingBroadcasts: int64(missingBroadcasts),
-		ConsumerPending:   pendingDeltas,
-		ServiceErrors:     svcErrors,
-		Self:              snapshotSelfMetrics(),
+		EffectiveN:           int(env.activatedCount.Load()),
+		LatencySamples:       env.collector.LatencySamplesUpTo(holdEndedAt),
+		ActionSamplesMs:      actionSamples,
+		AttemptedOps:         attemptedOps,
+		FailedOps:            failedOps,
+		BroadcastEligibleOps: broadcastEligibleOps,
+		MissingBroadcasts:    int64(missingBroadcasts),
+		ConsumerPending:      pendingDeltas,
+		ServiceErrors:        svcErrors,
+		Self:                 snapshotSelfMetrics(),
 	}
 	r := evaluateStep(in, env.thresholds)
 	snapshotPresenceStats(env, &r)

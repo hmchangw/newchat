@@ -57,6 +57,15 @@ type Collector struct {
 	attempted      atomic.Int64
 	failed         atomic.Int64
 
+	// broadcastEligible counts only the actions that actually register a
+	// broadcast correlation. It is the denominator for the missing-broadcast
+	// rate: `attempted` covers every action kind (mark-read, scroll-history,
+	// room-create, …), none of which can produce a missing broadcast, so
+	// dividing by it dilutes the rate by whatever the send share happens to
+	// be — ~64% under the default weights, which turns a real 0.15% send-loss
+	// into a reported 0.0948% and slips it past a 0.1% gate.
+	broadcastEligible atomic.Int64
+
 	// actMu guards actSamples. Per-action latency samples are kept here
 	// (one slice per action kind) so the daily-IM report can surface
 	// p50/p95/p99 broken down by sendMessage / scrollHistory / memberAdd /
@@ -215,30 +224,66 @@ func (c *Collector) Finalize() (missingReplies int, missingBroadcasts int) {
 	return
 }
 
-// MissingBroadcastsOlderThan counts publishes that are still unmatched and
-// were published at or before cutoff.
+// MissingInWindow counts publishes that are still unmatched and were published
+// within [start, end] inclusive. Both boundaries matter, for different reasons:
 //
-// Finalize's plain unmatched count only means "dropped" once the generator has
-// stopped and drained. Scenarios whose emitters run continuously across steps
-// (daily) have no such quiet point: at any instant some publishes are
-// legitimately in flight. Age is what separates the two, so callers pass a
-// cutoff of now minus a delivery grace and everything older is a genuine drop.
+//   - end: a scenario whose emitters run continuously (daily) has no quiet
+//     point at which every unmatched publish is a drop — at any instant some
+//     are legitimately in flight. Callers wait out a delivery grace and pass
+//     the hold boundary as end, so in-flight publishes from the grace itself
+//     are not scored.
+//   - start: Reset races with a still-running generator. A publish whose
+//     RecordPublish lands just after the shard was cleared keeps its
+//     pre-holdStart timestamp, and DiscardBefore only filters the completed
+//     sample slices — not the correlation maps. Without a start boundary that
+//     warm-up entry would trip the measured step.
 //
-// Only the broadcast side is exposed. A caller that never calls RecordReply
-// leaves every byReqID entry unmatched forever, so a reply count here would
-// read as a 100% failure rate rather than a real signal.
-func (c *Collector) MissingBroadcastsOlderThan(cutoff time.Time) int {
-	missing := 0
+// Callers that never call RecordReply should ignore the reply count: every
+// byReqID entry stays unmatched forever, so it would read as 100% failure.
+func (c *Collector) MissingInWindow(start, end time.Time) (replies, broadcasts int) {
+	inWindow := func(t time.Time) bool { return !t.Before(start) && !t.After(end) }
+	for _, rs := range &c.reqShards {
+		rs.mu.Lock()
+		for _, e := range rs.byReqID {
+			if inWindow(e.publishedAt) {
+				replies++
+			}
+		}
+		rs.mu.Unlock()
+	}
 	for _, ms := range &c.msgShards {
 		ms.mu.Lock()
 		for _, e := range ms.byMsgID {
-			if !e.publishedAt.After(cutoff) {
-				missing++
+			if inWindow(e.publishedAt) {
+				broadcasts++
 			}
 		}
 		ms.mu.Unlock()
 	}
-	return missing
+	return replies, broadcasts
+}
+
+// LatencySamplesUpTo returns broadcast latencies in milliseconds for publishes
+// made at or before cutoff.
+//
+// Reading samples only after a delivery grace would import publishes made
+// during the grace; reading them before it would drop the broadcasts that
+// arrived late — and those are the slowest, so excluding them makes the
+// percentiles optimistic in exactly the direction that hides a struggling
+// pipeline. Filtering by publish time keeps the slow tail without widening the
+// window.
+func (c *Collector) LatencySamplesUpTo(cutoff time.Time) []float64 {
+	var out []float64
+	for _, ms := range &c.msgShards {
+		ms.mu.Lock()
+		for i := range ms.e2 {
+			if !ms.e2[i].publishedAt.After(cutoff) {
+				out = append(out, float64(ms.e2[i].latency.Microseconds())/1000.0)
+			}
+		}
+		ms.mu.Unlock()
+	}
+	return out
 }
 
 // E1Count returns the number of matched E1 samples.
@@ -291,6 +336,16 @@ func (c *Collector) RecordActionAttempt() { c.attempted.Add(1) }
 
 // RecordActionFailure is called when an action returns an error.
 func (c *Collector) RecordActionFailure() { c.failed.Add(1) }
+
+// RecordBroadcastEligible is called for every action that registers a
+// broadcast correlation (i.e. one whose loss would show up as a missing
+// broadcast). It is deliberately separate from RecordActionAttempt so the
+// missing-broadcast rate can be scored against its own denominator.
+func (c *Collector) RecordBroadcastEligible() { c.broadcastEligible.Add(1) }
+
+// BroadcastEligibleOps returns the count of broadcast-eligible actions since
+// last Reset.
+func (c *Collector) BroadcastEligibleOps() int64 { return c.broadcastEligible.Load() }
 
 // AttemptedOps returns the total count of action attempts since last Reset.
 func (c *Collector) AttemptedOps() int64 { return c.attempted.Load() }
@@ -345,6 +400,7 @@ func (c *Collector) Reset() {
 	c.actMu.Unlock()
 	c.attempted.Store(0)
 	c.failed.Store(0)
+	c.broadcastEligible.Store(0)
 }
 
 // LatencySamples returns the current broadcast-latency samples in milliseconds.

@@ -283,6 +283,9 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 	// the unanswered-publish counts are taken.
 	cancel()
 	wg.Wait()
+	// No publish can land after wg.Wait, so [holdStart, holdEnd] bounds every
+	// publish this step made.
+	holdEnd := time.Now()
 	endCounts := w.snapshotCounters()
 	endPending, perr2 := w.snapshotPending(ctx)
 	if err := waitOrCancel(ctx, w.drain); err != nil {
@@ -297,7 +300,13 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 	// Taken after the drain and after the generator has stopped, so what remains
 	// unmatched was published during the hold and never answered — a dropped
 	// delivery, not a straggler still in flight.
-	missingReplies, missingBroadcasts := w.collector.Finalize()
+	//
+	// Windowed rather than Finalize(): Reset races with the warm-up generator,
+	// and a publish whose map write lands just after the clear keeps its
+	// pre-holdStart timestamp. DiscardBefore only filters the completed sample
+	// slices, not the correlation maps, so Finalize would score that warm-up
+	// leftover against this step.
+	missingReplies, missingBroadcasts := w.collector.MissingInWindow(holdStart, holdEnd)
 
 	delta := diffCounters(startCounts, endCounts)
 	pendingOK := perr1 == nil && perr2 == nil

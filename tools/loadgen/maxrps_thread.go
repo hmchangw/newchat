@@ -198,6 +198,7 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	// correlation map, which can push the miss rate over 100%.
 	cancel()
 	wg.Wait()
+	holdEnd := time.Now()
 	endCounts := w.snapshotCounters()
 	endPending, perr2 := w.snapshotPending(ctx)
 	if err := waitOrCancel(ctx, w.drain); err != nil {
@@ -209,7 +210,10 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 		return rpsStepInputs{}, holdErr
 	}
 
-	missingReplies, missingBroadcasts := w.collector.Finalize()
+	// Windowed rather than Finalize() — see the note in messagesWorkload.RunStep:
+	// a warm-up publish whose map write lands after Reset keeps its pre-holdStart
+	// timestamp and would otherwise be charged to this step.
+	missingReplies, missingBroadcasts := w.collector.MissingInWindow(holdStart, holdEnd)
 
 	delta := diffCounters(startCounts, endCounts)
 	pendingOK := perr1 == nil && perr2 == nil

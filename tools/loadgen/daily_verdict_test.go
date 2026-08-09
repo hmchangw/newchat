@@ -278,7 +278,7 @@ unrelated 99
 func TestEvaluateStep_TripsOnMissingBroadcasts(t *testing.T) {
 	in := stepInputs{
 		N: 1000, HoldDuration: time.Minute,
-		AttemptedOps: 10000, FailedOps: 0, MissingBroadcasts: 500,
+		AttemptedOps: 10000, BroadcastEligibleOps: 10000, FailedOps: 0, MissingBroadcasts: 500,
 		LatencySamples: []float64{10, 20, 30},
 	}
 	r := evaluateStep(in, defaultThresholds())
@@ -292,13 +292,44 @@ func TestEvaluateStep_TripsOnMissingBroadcasts(t *testing.T) {
 func TestEvaluateStep_ToleratesMissingBroadcastsUnderThreshold(t *testing.T) {
 	in := stepInputs{
 		N: 1000, HoldDuration: time.Minute,
-		AttemptedOps: 100000, FailedOps: 0, MissingBroadcasts: 50,
+		AttemptedOps: 100000, BroadcastEligibleOps: 100000, FailedOps: 0, MissingBroadcasts: 50,
 		LatencySamples: []float64{10, 20, 30},
 	}
 	r := evaluateStep(in, defaultThresholds())
 
 	assert.False(t, r.Tripped)
 	assert.Empty(t, r.TrippedReasons)
+}
+
+// Only sends can produce a broadcast. Dividing by every action understates the
+// rate by the non-send share — with the default weights that is 60/93.9, so a
+// real 0.15% send-loss would report 0.096% and slip under the 0.1% gate.
+func TestEvaluateStep_MissingRateUsesBroadcastEligibleDenominator(t *testing.T) {
+	in := stepInputs{
+		N: 1000, HoldDuration: time.Minute,
+		AttemptedOps:         9390, // all actions
+		BroadcastEligibleOps: 6000, // sends only
+		MissingBroadcasts:    9,    // 0.15% of sends
+		LatencySamples:       []float64{10, 20, 30},
+	}
+	r := evaluateStep(in, defaultThresholds())
+
+	assert.InDelta(t, 0.0015, r.MissingBroadcastRate, 1e-9,
+		"rate is per broadcast-eligible send, not per action")
+	assert.True(t, r.Tripped, "0.15% send loss must exceed the 0.1% gate")
+}
+
+// A step with no sends must not divide by zero or invent a rate.
+func TestEvaluateStep_NoBroadcastEligibleOpsYieldsZeroRate(t *testing.T) {
+	in := stepInputs{
+		N: 1000, HoldDuration: time.Minute,
+		AttemptedOps: 500, BroadcastEligibleOps: 0, MissingBroadcasts: 0,
+		LatencySamples: []float64{10},
+	}
+	r := evaluateStep(in, defaultThresholds())
+
+	assert.Equal(t, 0.0, r.MissingBroadcastRate)
+	assert.False(t, r.Tripped)
 }
 
 // A misconfigured metric name must not pass as "no errors". Scrape keeps

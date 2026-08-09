@@ -107,6 +107,13 @@ type stepInputs struct {
 	ActionSamplesMs map[string][]float64 // per-action wall-clock latency in ms
 	AttemptedOps    int64
 	FailedOps       int64
+	// BroadcastEligibleOps counts only the actions that registered a broadcast
+	// correlation, and is the denominator for MissingBroadcastRate. AttemptedOps
+	// spans every action kind — mark-read, scroll-history, room-create — none of
+	// which can lose a broadcast, so scoring against it dilutes the rate by
+	// whatever share of traffic is sends (~64% under the default weights) and
+	// lets a real loss slip under the gate.
+	BroadcastEligibleOps int64
 	// MissingBroadcasts counts sends whose broadcast never arrived within the
 	// delivery grace. They are invisible to FailedOps — the action returned nil
 	// because the publish itself succeeded — so without this a step that drops
@@ -158,6 +165,7 @@ type StepResult struct {
 	AttemptedOps          int64
 	FailedOps             int64
 	MissingBroadcasts     int64
+	BroadcastEligibleOps  int64
 	MissingBroadcastRate  float64
 	ConsumerPending       map[string]ConsumerPendingDelta
 	ServiceErrorIncreases map[string]int64
@@ -217,6 +225,7 @@ func evaluateStep(in stepInputs, th Thresholds) StepResult {
 		StartedAt: in.StartedAt, HoldDuration: in.HoldDuration,
 		AttemptedOps: in.AttemptedOps, FailedOps: in.FailedOps,
 		MissingBroadcasts:     in.MissingBroadcasts,
+		BroadcastEligibleOps:  in.BroadcastEligibleOps,
 		ConsumerPending:       in.ConsumerPending,
 		ServiceErrorIncreases: in.ServiceErrors,
 		LoadgenSelfMetrics:    in.Self,
@@ -227,7 +236,9 @@ func evaluateStep(in stepInputs, th Thresholds) StepResult {
 	}
 	if in.AttemptedOps > 0 {
 		r.ErrorRate = float64(in.FailedOps) / float64(in.AttemptedOps)
-		r.MissingBroadcastRate = float64(in.MissingBroadcasts) / float64(in.AttemptedOps)
+	}
+	if in.BroadcastEligibleOps > 0 {
+		r.MissingBroadcastRate = float64(in.MissingBroadcasts) / float64(in.BroadcastEligibleOps)
 	}
 
 	// Inconclusive overrides trip. Reserved for situations where the
