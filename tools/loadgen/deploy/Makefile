@@ -9,7 +9,7 @@ STEPS            ?=
 # `ENCRYPTION_ENABLED=false make up` for a plaintext comparison run.
 export ENCRYPTION_ENABLED ?= true
 
-.PHONY: up stack-up overlay-up image seed teardown run run-dashboards run-max-rps run-daily down logs seed-members teardown-members reset-members run-sustained run-capacity seed-roomread teardown-roomread seed-botroom teardown-botroom run-max-room-size soak-seed soak-run soak-teardown
+.PHONY: up stack-up overlay-up image seed teardown run run-dashboards run-max-rps run-daily run-verify down logs seed-members teardown-members reset-members run-sustained run-capacity seed-roomread teardown-roomread seed-botroom teardown-botroom run-max-room-size soak-seed soak-run soak-teardown
 
 up: stack-up overlay-up
 
@@ -125,6 +125,26 @@ run-daily:
 	    --steps=$(or $(STEPS),1000$(comma)2000$(comma)5000$(comma)10000$(comma)20000) \
 	    --hold=$(or $(HOLD),180s) \
 	    --csv=/results/daily-$(PRESET)-$$(date +%Y%m%d-%H%M%S).csv
+
+run-verify: ## Correctness check against a seeded stack (PRESET=daily-light|daily-heavy|daily-power required; see README "loadgen verify" section)
+	@test -n "$(PRESET)" || (echo "PRESET=<daily-light|daily-heavy|daily-power> required" && exit 1)
+	$(COMPOSE) exec -T loadgen /loadgen verify \
+	    --preset=$(PRESET) \
+	    $(if $(USERS),--users=$(USERS),) \
+	    $(if $(PROBE_ROOMS),--probe-rooms=$(PROBE_ROOMS),) \
+	    $(if $(RESERVE_USERS),--reserve-users=$(RESERVE_USERS),) \
+	    $(if $(MEMBER_CHURN),--member-churn=$(MEMBER_CHURN),) \
+	    $(if $(SETTLE),--settle=$(SETTLE),) \
+	    $(if $(WARMUP),--warmup=$(WARMUP),) \
+	    $(if $(STEADY),--steady=$(STEADY),) \
+	    $(if $(DRAIN),--drain=$(DRAIN),) \
+	    $(if $(PROBE_RATE),--probe-rate=$(PROBE_RATE),) \
+	    $(if $(MIN_PROBES),--min-probes=$(MIN_PROBES),) \
+	    $(if $(LARGE_ROOM_THRESHOLD),--large-room-threshold=$(LARGE_ROOM_THRESHOLD),) \
+	    $(if $(LANE),--lane=$(LANE),) \
+	    $(if $(DIRECT_ONLY),--direct-only=$(DIRECT_ONLY),) \
+	    $(if $(SEED),--seed=$(SEED),) \
+	    --json=/results/verify-$(PRESET)-$$(date +%Y%m%d-%H%M%S).json
 
 down:
 	$(COMPOSE) --profile dashboards down -v

@@ -1001,6 +1001,202 @@ run:
 - `docs/superpowers/plans/2026-05-27-daily-im-load-scenario.md` — implementation plan (file structure, task decomposition).
 - `tools/loadgen/daily.go`, `daily_pool.go`, `daily_actions.go`, `daily_verdict.go`, `daily_report.go`, `preset.go` — implementation.
 
+## Verify scenario (correctness check)
+
+Runs the daily-IM fixture set as a correctness probe instead of a capacity
+ramp: it samples a fraction of sends into a fixed set of "probe rooms",
+tracks each probe's expected recipient set, and asserts on delivery
+completeness, leakage, persistence, and membership-change effectiveness. The
+output answers:
+
+> *Does the system deliver every message to every expected recipient,
+> nowhere else, persist it correctly, and apply membership changes
+> effectively?*
+
+Single-site only. Not a CI gate — invoked manually as a correctness check
+against a running stack.
+
+**This feature has not been run end-to-end.** See
+[Not yet validated end-to-end](#not-yet-validated-end-to-end) before you rely
+on any FAIL it reports.
+
+### Table of contents
+
+1. [Quick start](#quick-start-8)
+2. [Prerequisites](#prerequisites-1)
+3. [CLI flags](#cli-flags-1)
+4. [Violation classes](#violation-classes)
+5. [Reading the output](#reading-the-output-2)
+6. [Not yet validated end-to-end](#not-yet-validated-end-to-end)
+7. [Known limitations](#known-limitations-1)
+8. [Design references](#design-references-1)
+
+### Quick start
+
+```bash
+# 1. Bring up the docker-local stack (NATS, Mongo, Valkey, Cassandra, all services).
+make -C tools/loadgen/deploy up
+
+# 2. Seed Mongo for your preset — verify reuses daily's fixtures and preflight.
+make -C tools/loadgen/deploy seed PRESET=daily-heavy
+
+# 3. Run the correctness check.
+make -C tools/loadgen/deploy run-verify PRESET=daily-heavy
+```
+
+### Prerequisites
+
+| Requirement | Why | How to get it |
+|---|---|---|
+| Docker-local stack running | `verify` talks to the same services `daily` does (gatekeeper, room-service, broadcast-worker, message-worker, history-service) | `make -C tools/loadgen/deploy up` |
+| Mongo seeded for the exact preset | `verify` runs the same seeded-database preflight `daily` does (`verifyDailySeeded`) — there is **no NATS-only smoke-test mode**; an unseeded or wrong-preset DB fails preflight in seconds rather than producing a confident FAIL | `loadgen seed --workload=messages --preset=<preset>` (or `make -C tools/loadgen/deploy seed PRESET=<preset>`) |
+| `--large-room-threshold` matching the gatekeeper's `LARGE_ROOM_THRESHOLD` | **Nothing queries the gatekeeper to check this.** The flag is trusted, not verified — preflight only checks the flag's value against fixture room sizes, not against the running gatekeeper's actual config | Read the gatekeeper's real `LARGE_ROOM_THRESHOLD` and pass it explicitly if it differs from the default `500` |
+| Same environment variables as `daily` (`NATS_URL`, `NATS_CREDS_FILE`, `MONGO_URI`/`MONGO_DB`, `SITE_ID`) | Same connections, same preflight | See [daily's Environment variables](#environment-variables) |
+
+Three things worth repeating because they will bite an operator immediately:
+
+- **`--large-room-threshold` is trusted, not checked.** If it doesn't match the gatekeeper's actual `LARGE_ROOM_THRESHOLD`, probe rooms near the boundary will produce phantom `total_loss`/`missing_recipient` violations that have nothing to do with a real bug.
+- **There is no NATS-only smoke-test mode.** `MONGO_URI` must be reachable — `verify` runs the identical seeded-database preflight `daily` uses before it will start.
+- **Fixtures are pinned to seed 42 regardless of `--seed`.** `--seed` only drives probe-room and probe selection (so a run is reproducible), not fixture generation — that's hard-coded to the same seed `loadgen seed` uses. If you seeded the database with `loadgen seed --seed=<something else>`, the probe rooms `verify` selects and the ones actually in Mongo will disagree, producing a confident FAIL on a healthy system.
+
+### CLI flags
+
+`loadgen verify -h` prints the same:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--preset` | `daily-heavy` | `daily-light` \| `daily-heavy` \| `daily-power` |
+| `--users` | `0` | Total activation count (`0` = preset default) |
+| `--probe-rooms` | `50` | Number of probe rooms selected deterministically from `--seed` |
+| `--reserve-users` | `200` | Direct-connected floaters used as membership-change targets |
+| `--member-churn` | `0.2` | Membership changes per probe room per minute (`0` disables churn) |
+| `--settle` | `5s` | Post-change quiet window per room before probes resume counting toward that room |
+| `--warmup` | `30s` | Pre-measurement settle before probes start being tracked |
+| `--steady` | `120s` | Probe-generating window |
+| `--drain` | `30s` | Post-quiesce wait for in-flight probes to resolve |
+| `--probe-rate` | `0.01` | Fraction of probe-room sends tracked for full per-recipient accounting |
+| `--min-probes` | `50` | Below this tracked-probe count, the verdict is INCONCLUSIVE instead of PASS/FAIL |
+| `--large-room-threshold` | `500` | Must match the gatekeeper's `LARGE_ROOM_THRESHOLD` — see [Prerequisites](#prerequisites-1); **not verified against the running gatekeeper** |
+| `--lane` | `both` | `global` \| `local` \| `both` — which room-broadcast lane(s) the direct pool subscribes |
+| `--direct-only` | `false` | Disable multiplex; every activated user gets a dedicated connection. Unlike `daily`, `verify` **fails preflight** rather than silently skipping users past `--max-direct-users`, since a silently-absent recipient corrupts the completeness verdict |
+| `--seed` | `42` | Drives probe-room choice and probe selection — same seed ⇒ same probe set. Does **not** reseed fixtures (see [Prerequisites](#prerequisites-1)) |
+| `--json` | `""` | Path to write the full, uncapped violation report as JSON |
+
+Example:
+
+```bash
+loadgen verify \
+  --preset=daily-heavy \
+  --probe-rooms=50 --member-churn=0.2 \
+  --warmup=30s --steady=120s --drain=30s \
+  --json=/results/verify.json
+```
+
+### Violation classes
+
+Every violation carries `roomId`, and where applicable `msgId` / `users` /
+`epoch` / a `detail` string — IDs only, never message content.
+
+| Kind | What it means | Points at |
+|---|---|---|
+| `missing_recipient` | Some, but not all, expected recipients of a probe received it (a full miss is `total_loss` instead) — `Users` lists exactly which expected recipients were missed | `broadcast-worker` fan-out, or an affected member's own connection |
+| `total_loss` | Zero recipients received the probe at all | The publish→broadcast pipeline end-to-end (gatekeeper, MESSAGES-CANONICAL, `broadcast-worker`), or a room with no live receivers |
+| `duplicate_delivery` | A recipient received the same probe more than once on the per-user lane | Dual-lane de-duplication, or `broadcast-worker`/JetStream redelivery |
+| `unexpected_recipient` | A non-member received the probe on the per-user lane (leakage) — see [Known limitations](#known-limitations-1), this check only runs on that lane | Authorization/routing sending a message to a user it shouldn't have addressed |
+| `persistence_miss` | The sent message ID was not found on readback from history-service after the retry budget | `message-worker` failing to persist to Cassandra, or the history-service read path |
+| `persistence_mismatch` | The message was found on readback but a field (e.g. sender, thread parent) doesn't match what was sent | `message-worker` corrupting a field on write |
+| `membership_not_applied` | After an add/remove and its settle window, the `subscription.list` oracle still reports the pre-change membership state | `room-service`/`room-worker` failing to durably apply the membership change |
+| `membership_add_ineffective` | After an add, a send from that user is still rejected by the gatekeeper | Gatekeeper authorization state not reflecting the new membership |
+| `membership_remove_ineffective` | After a remove, a send from that user is still accepted by the gatekeeper | Gatekeeper authorization state not reflecting the removal (stale allow) |
+
+### Reading the output
+
+Console summary:
+
+```
+probe rooms: 50 / 1200 members / direct pool 1400 (200 reserve)
+background:  8600 users on multiplex
+probes:      612 tracked / 8 suppressed (settle window)
+delivery:    608 complete / 3 partial / 1 total-loss
+leakage:     0 unexpected recipients (user lane)
+membership:  24 changes (14 add, 10 remove) / 24 applied / 24 effective
+
+VIOLATIONS (showing 4 of 4)
+  missing_recipient              room=room-medium-000042 msg=m-abc123 users=u-000091
+  total_loss                     room=room-small-000017 msg=m-def456
+
+VERDICT: FAIL
+```
+
+An INCONCLUSIVE run prints a `REASONS` block instead of (or in addition to)
+`VIOLATIONS`, naming which signal made the run untrustworthy (multiplex
+drop, dropped recipient connection, readback/oracle error, probe floor not
+met, GC pressure, or cancellation — see `evaluateVerify` in
+`tools/loadgen/verify_verdict.go`). The console violation list is capped at
+10; pass `--json=<path>` for the full, uncapped report.
+
+**Exit codes** (so the run can be scripted without parsing stdout):
+
+| Verdict | Exit code |
+|---|---|
+| PASS | `0` |
+| FAIL | `1` |
+| INCONCLUSIVE | `2` |
+
+INCONCLUSIVE takes precedence over FAIL: if any trust signal fired, the
+verdict is INCONCLUSIVE even when violations were also recorded (they're
+still listed, but the run's own reliability is the reported problem).
+
+### Not yet validated end-to-end
+
+Every component behind `loadgen verify` is unit-tested — the `tools/loadgen`
+package suite passes under `-race` — but **the assembled command has never
+been run against a live docker-compose stack.** Ten tasks of independently
+reviewed, unit-tested components were wired together in the final task and
+have not yet executed end-to-end, because Docker was unavailable in the
+environment that built them.
+
+Practical consequences for the first operator to run this:
+
+- Expect setup friction — a flag interaction, an env var, or a timing
+  assumption that unit tests couldn't exercise.
+- Treat an unexpected FAIL as suspect until a known-healthy run has produced
+  a PASS at least once. Check the [Prerequisites](#prerequisites-1) footguns
+  above first — a seed mismatch or a wrong `--large-room-threshold` produces
+  a FAIL that looks exactly like a real bug.
+- The resource estimates in the design spec (§6.3) are unmeasured — treat
+  `--probe-rooms`, `--reserve-users`, and direct-pool sizing as starting
+  points, not validated numbers.
+
+### Known limitations
+
+- **Probe sampling means most traffic is unverified.** At the default
+  `--probe-rate=0.01`, roughly 99% of sends get no per-recipient accounting
+  at all — only the sampled 1% get full delivery/leakage/persistence
+  checking. This bounds tracking cost (§5 of the design spec); it also means
+  a real defect that only affects unsampled traffic will not be caught.
+- **Message ordering is not checked**, for regular sends or for membership
+  changes. Membership asserts final state after the settle window, not that
+  changes applied in the order issued.
+- **Leakage (`unexpected_recipient`) is checked on the per-user lane only.**
+  On the room (channel) lane, loadgen's own `backend.creds` can always stay
+  subscribed regardless of membership, so a room-lane leakage check would
+  fail on every run and test NATS ACLs rather than the chat system. Channel
+  rooms are exempt.
+- **Single-site only.** Cross-site federation (INBOX/OUTBOX) is out of
+  scope, same as `daily`.
+- **`--lane=global` against a `ROOM_SUBJECT_MODE=local` stack yields zero
+  deliveries.** The direct pool only subscribes the lane(s) requested;
+  pointing `verify` at the wrong lane for your stack's configured mode
+  produces a confident FAIL — every probe reports `total_loss` — that looks
+  like a real bug. Leave `--lane=both` (the default) unless you know your
+  stack's `ROOM_SUBJECT_MODE`.
+
+### Design references
+
+- `docs/superpowers/specs/2026-08-08-loadgen-verify-correctness-design.md` — full spec (goal, scope, correctness definition, probe sampling, probe-room selection, receiver attribution, persistence readback, membership correctness, verdict, output).
+- `tools/loadgen/verify.go`, `verify_rooms.go`, `verify_probe.go`, `verify_membership.go`, `verify_readback.go`, `verify_verdict.go`, `verify_report.go` — implementation.
+
 ## Large-room bot scenario (max-room-size)
 
 Finds the largest room a bot can blast at a fixed send rate before an SLO
