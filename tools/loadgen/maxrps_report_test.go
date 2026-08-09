@@ -82,7 +82,7 @@ func TestWriteRPSCSV_CarriesEventRatioCounts(t *testing.T) {
 func TestWriteRPSCSV_CarriesMissingColumns(t *testing.T) {
 	results := []rpsStepResult{
 		{TargetRPS: 1000, AchievedRPS: 990, Kind: verdictPass,
-			AttemptedOps: 10000, MissingReplies: 7, MissingBroadcasts: 9,
+			AttemptedOps: 10000, MissingReplies: 7, MissingBroadcasts: 9, BroadcastEligible: 6390,
 			MissingReplyRate: 0.0007, MissingBroadcastRate: 0.0009},
 	}
 	var buf bytes.Buffer
@@ -91,12 +91,14 @@ func TestWriteRPSCSV_CarriesMissingColumns(t *testing.T) {
 
 	assert.Contains(t, out, "missing_replies")
 	assert.Contains(t, out, "missing_broadcasts")
+	assert.Contains(t, out, "broadcast_eligible")
 	assert.Contains(t, out, "missing_reply_rate")
 	assert.Contains(t, out, "missing_broadcast_rate")
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	require.Len(t, lines, 2)
 	assert.Contains(t, lines[1], ",7,")
 	assert.Contains(t, lines[1], ",9,")
+	assert.Contains(t, lines[1], ",6390,")
 }
 
 func TestRenderRPSReport_NoStepPassed(t *testing.T) {

@@ -213,7 +213,8 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	// Windowed rather than Finalize() — see the note in messagesWorkload.RunStep:
 	// a warm-up publish whose map write lands after Reset keeps its pre-holdStart
 	// timestamp and would otherwise be charged to this step.
-	missingReplies, missingBroadcasts := w.collector.MissingInWindow(holdStart, holdEnd)
+	missingReplies, _ := w.collector.MissingInWindow(holdStart, holdEnd)
+	broadcastEligible, missingBroadcasts := w.collector.BroadcastStatsInWindow(holdStart, holdEnd)
 
 	delta := diffCounters(startCounts, endCounts)
 	pendingOK := perr1 == nil && perr2 == nil
@@ -223,5 +224,8 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	return buildMessagesInputs(targetRPS, hold, delta,
 		w.collector.E1Samples(), w.collector.E2Samples(),
 		startPending, endPending, w.durables, pendingOK,
-		missCounts{Replies: missingReplies, Broadcasts: missingBroadcasts}), nil
+		missCounts{
+			Replies: missingReplies, Broadcasts: missingBroadcasts,
+			BroadcastEligible: broadcastEligible,
+		}), nil
 }

@@ -50,11 +50,12 @@ func diffCounters(start, end msgCounters) msgCounters {
 	return d
 }
 
-// missCounts holds the publishes left unanswered at the end of a step, as
-// reported by Collector.Finalize after the drain window.
+// missCounts holds the accepted broadcast denominator and the publishes left
+// unanswered at the end of a step after the drain window.
 type missCounts struct {
-	Replies    int
-	Broadcasts int
+	Replies           int
+	Broadcasts        int
+	BroadcastEligible int
 }
 
 // buildMessagesInputs assembles the normalized step inputs from a counter delta,
@@ -83,6 +84,7 @@ func buildMessagesInputs(
 		EmitUnderrun:      int(delta.err["underrun"]),
 		MissingReplies:    miss.Replies,
 		MissingBroadcasts: miss.Broadcasts,
+		BroadcastEligible: miss.BroadcastEligible,
 		Latencies: []seriesSamples{
 			{Name: "E1", Samples: e1},
 			{Name: "E2", Samples: e2},
@@ -306,7 +308,8 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 	// pre-holdStart timestamp. DiscardBefore only filters the completed sample
 	// slices, not the correlation maps, so Finalize would score that warm-up
 	// leftover against this step.
-	missingReplies, missingBroadcasts := w.collector.MissingInWindow(holdStart, holdEnd)
+	missingReplies, _ := w.collector.MissingInWindow(holdStart, holdEnd)
+	broadcastEligible, missingBroadcasts := w.collector.BroadcastStatsInWindow(holdStart, holdEnd)
 
 	delta := diffCounters(startCounts, endCounts)
 	pendingOK := perr1 == nil && perr2 == nil
@@ -316,5 +319,8 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 	return buildMessagesInputs(targetRPS, hold, delta,
 		w.collector.E1Samples(), w.collector.E2Samples(),
 		startPending, endPending, w.durables, pendingOK,
-		missCounts{Replies: missingReplies, Broadcasts: missingBroadcasts}), nil
+		missCounts{
+			Replies: missingReplies, Broadcasts: missingBroadcasts,
+			BroadcastEligible: broadcastEligible,
+		}), nil
 }

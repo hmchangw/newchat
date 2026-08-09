@@ -57,12 +57,15 @@ type rpsStepInputs struct {
 	Saturation   int // in-flight pool full when an event was due (raise MaxInFlight)
 	EmitUnderrun int // events the pacer could not release on schedule (load box CPU/scheduler limited)
 	// MissingReplies/MissingBroadcasts count publishes that were never answered
-	// by the drain deadline. Kept apart from FailedOps (and from each other)
+	// by the drain deadline. BroadcastEligible is the accepted-publish
+	// denominator for MissingBroadcasts; missing replies continue to use
+	// AttemptedOps. Kept apart from FailedOps (and from each other)
 	// because one send has two independent deliverables — o11y-slo.md §2 scores
 	// persistence and publication as separate ratios for the same reason, and
 	// summing them into one counter would count a fully dropped message twice.
 	MissingReplies    int
 	MissingBroadcasts int
+	BroadcastEligible int
 	Latencies         []seriesSamples
 	EventRatios       []eventRatioInput
 	// ErrorRateDiagnosticOnly keeps the failed/attempted rate visible without
@@ -121,11 +124,13 @@ type rpsStepResult struct {
 	Saturation   int
 	EmitUnderrun int
 	ErrorRate    float64
-	// Missing counts and their rates over AttemptedOps. A run that drops
-	// deliveries shows up here; it used to show up nowhere, and the surviving
-	// (faster) samples made the percentiles look better as more was dropped.
+	// Missing replies are scored over AttemptedOps; missing broadcasts are
+	// scored over BroadcastEligible so failed publishes cannot dilute delivery
+	// loss. A run that drops deliveries shows up here; it used to show up
+	// nowhere, and surviving samples made the percentiles look healthier.
 	MissingReplies       int
 	MissingBroadcasts    int
+	BroadcastEligible    int
 	MissingReplyRate     float64
 	MissingBroadcastRate float64
 	Latencies            []seriesPercentile
@@ -160,6 +165,7 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 		EmitUnderrun:      in.EmitUnderrun,
 		MissingReplies:    in.MissingReplies,
 		MissingBroadcasts: in.MissingBroadcasts,
+		BroadcastEligible: in.BroadcastEligible,
 	}
 	res.Pending = in.Pending
 	if in.Hold > 0 {
@@ -168,7 +174,9 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 	if in.AttemptedOps > 0 {
 		res.ErrorRate = float64(in.FailedOps) / float64(in.AttemptedOps)
 		res.MissingReplyRate = float64(in.MissingReplies) / float64(in.AttemptedOps)
-		res.MissingBroadcastRate = float64(in.MissingBroadcasts) / float64(in.AttemptedOps)
+	}
+	if in.BroadcastEligible > 0 {
+		res.MissingBroadcastRate = float64(in.MissingBroadcasts) / float64(in.BroadcastEligible)
 	}
 
 	// Compute percentiles for every series (always, so the report has data).

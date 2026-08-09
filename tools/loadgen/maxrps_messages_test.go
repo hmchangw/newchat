@@ -106,7 +106,7 @@ func TestBuildMessagesInputs_CarriesMissingCounts(t *testing.T) {
 		published: 1000,
 		err:       map[string]float64{"publish": 0, "marshal": 0, "gatekeeper": 0, "bad_reply": 0},
 	}
-	miss := missCounts{Replies: 30, Broadcasts: 45}
+	miss := missCounts{Replies: 30, Broadcasts: 45, BroadcastEligible: 900}
 
 	in := buildMessagesInputs(1000, 10*time.Second, delta, nil, nil,
 		map[string]uint64{}, map[string]uint64{}, nil, true, miss)
@@ -114,6 +114,7 @@ func TestBuildMessagesInputs_CarriesMissingCounts(t *testing.T) {
 	assert.Equal(t, 1000, in.AttemptedOps)
 	assert.Equal(t, 30, in.MissingReplies)
 	assert.Equal(t, 45, in.MissingBroadcasts)
+	assert.Equal(t, 900, in.BroadcastEligible)
 	// Missing deliveries are tracked as their own signals, matching the way
 	// o11y-slo.md §2 keeps SLO-1b (publication) separate from SLO-1a: folding
 	// both into FailedOps would count one dropped message twice.
@@ -136,14 +137,28 @@ func TestEvaluateRPSStep_TripsOnMissingReplies(t *testing.T) {
 func TestEvaluateRPSStep_TripsOnMissingBroadcasts(t *testing.T) {
 	in := rpsStepInputs{
 		TargetRPS: 1000, Hold: 10 * time.Second,
-		AttemptedOps: 10000, FailedOps: 0, MissingBroadcasts: 800,
+		AttemptedOps: 10000, FailedOps: 0,
+		BroadcastEligible: 5000, MissingBroadcasts: 80,
 	}
 	res := evaluateRPSStep(&in, buildThresholds(ms(100), ms(250), 0.01, 1000, 0.1))
 
 	assert.Equal(t, verdictTrip, res.Kind)
-	assert.Equal(t, 0.08, res.MissingBroadcastRate)
+	assert.Equal(t, 5000, res.BroadcastEligible)
+	assert.Equal(t, 0.016, res.MissingBroadcastRate)
 	require.Len(t, res.Reasons, 1)
 	assert.Contains(t, res.Reasons[0], "missing broadcast")
+}
+
+func TestEvaluateRPSStep_NoBroadcastEligibleKeepsMissingRateZero(t *testing.T) {
+	in := rpsStepInputs{
+		TargetRPS: 1000, Hold: time.Second,
+		AttemptedOps: 1000, BroadcastEligible: 0, MissingBroadcasts: 1,
+	}
+
+	res := evaluateRPSStep(&in, buildThresholds(ms(100), ms(250), 0.01, 1000, 0.1))
+
+	assert.Zero(t, res.MissingBroadcastRate)
+	assert.Equal(t, verdictPass, res.Kind)
 }
 
 // Stragglers within the threshold must not manufacture a trip — that was the
@@ -151,7 +166,8 @@ func TestEvaluateRPSStep_TripsOnMissingBroadcasts(t *testing.T) {
 func TestEvaluateRPSStep_ToleratesMissingUnderThreshold(t *testing.T) {
 	in := rpsStepInputs{
 		TargetRPS: 1000, Hold: 10 * time.Second,
-		AttemptedOps: 10000, FailedOps: 0, MissingReplies: 50, MissingBroadcasts: 50,
+		AttemptedOps: 10000, FailedOps: 0, MissingReplies: 50,
+		BroadcastEligible: 10000, MissingBroadcasts: 50,
 	}
 	res := evaluateRPSStep(&in, buildThresholds(ms(100), ms(250), 0.01, 1000, 0.1))
 

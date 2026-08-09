@@ -163,7 +163,7 @@ func writeRPSCSV(w io.Writer, results []rpsStepResult, bn *bottleneckVerdict) er
 	}
 	header = append(header,
 		"error_rate", "attempted", "failed",
-		"missing_replies", "missing_broadcasts", "missing_reply_rate", "missing_broadcast_rate",
+		"missing_replies", "missing_broadcasts", "broadcast_eligible", "missing_reply_rate", "missing_broadcast_rate",
 		"saturation", "emit_underrun", "worst_durable", "worst_pending_delta", "verdict", "reasons",
 		// bottleneck attribution columns (nil when bottleneck detection is disabled)
 		"bottleneck_component", "bottleneck_resource", "bottleneck_confidence",
@@ -197,6 +197,7 @@ func writeRPSCSV(w io.Writer, results []rpsStepResult, bn *bottleneckVerdict) er
 			strconv.FormatFloat(r.ErrorRate, 'f', 6, 64),
 			strconv.Itoa(r.AttemptedOps), strconv.Itoa(r.FailedOps),
 			strconv.Itoa(r.MissingReplies), strconv.Itoa(r.MissingBroadcasts),
+			strconv.Itoa(r.BroadcastEligible),
 			strconv.FormatFloat(r.MissingReplyRate, 'f', 6, 64),
 			strconv.FormatFloat(r.MissingBroadcastRate, 'f', 6, 64),
 			strconv.Itoa(r.Saturation),
