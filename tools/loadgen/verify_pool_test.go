@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,10 @@ func TestLaneForSubject_Global(t *testing.T) {
 
 func TestLaneForSubject_User(t *testing.T) {
 	assert.Equal(t, laneUser, laneForSubject("chat.user.alice.room.event"))
+}
+
+func TestLaneForSubject_Local(t *testing.T) {
+	assert.Equal(t, laneLocal, laneForSubject("chat.local.room.r-1.event"))
 }
 
 func TestDirectPool_NilSink_IsNoop(t *testing.T) {
@@ -66,4 +71,33 @@ func TestDirectPool_Deliver_IgnoresMalformedPayload(t *testing.T) {
 	p.deliver("u-1", []byte(`{not json`), laneGlobal)
 
 	assert.Empty(t, sink.calls)
+}
+
+// TestDirectPool_AttachSinkDeliver_ConcurrentAccessIsRaceFree pins the
+// locking contract between attachSink (writer) and deliver (reader) of
+// p.sink: NATS subscription callbacks call deliver from readLoop goroutines
+// concurrently with SubscribeRoom/attachSink mutating pool state. Without
+// p.mu guarding both sides, -race reports a data race on p.sink even though
+// no test assertion depends on the interleaving — the race detector catches
+// the unsynchronized access itself.
+func TestDirectPool_AttachSinkDeliver_ConcurrentAccessIsRaceFree(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	sink := &recordingSink{}
+
+	const iterations = 2000
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			p.deliver("u-1", []byte(`{"roomId":"r-1","lastMsgId":"m-1"}`), laneGlobal)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			p.attachSink(sink)
+		}
+	}()
+	wg.Wait()
 }
