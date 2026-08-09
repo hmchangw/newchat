@@ -57,7 +57,7 @@ type VerifyResult struct {
 // Membership churn (Changes) is deliberately NOT considered here: churn
 // legitimately changes the expected recipient set and is not, on its own,
 // evidence that measurement was untrustworthy.
-func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugeParam: in is passed by value to match the task-8 spec's evaluateVerify(in VerifyInputs) signature
+func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugeParam: VerifyInputs is 192 bytes, but the by-value signature is fixed by this plan's brief and its pinned test call sites (e.g. evaluateVerify(passingInputs())), not by any interface conformance
 	var reasons []string
 
 	if in.MultiplexDrops > 0 {
