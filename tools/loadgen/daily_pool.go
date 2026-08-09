@@ -30,13 +30,19 @@ type directPool struct {
 	// to the system under test (verify spec §10).
 	dropped atomic.Int64
 
+	// sink is read on every received broadcast, so it is deliberately NOT
+	// behind p.mu: in `daily` every direct user's every arrival would then
+	// serialise on one pool-global lock. Collector is sharded 64 ways for
+	// exactly that reason (collector.go) — an atomic load keeps the nil-sink
+	// path (all of `daily`) lock-free.
+	sink atomic.Pointer[deliverySink]
+
 	mu    sync.Mutex
 	users map[string]*directUser
 	// lanes selects which room-broadcast lanes each room is subscribed on:
 	// true = global (chat.room.…), false = local (chat.local.room.…). Both by
 	// default, which is daily's behaviour; `verify --lane` narrows it.
 	lanes []bool
-	sink  deliverySink
 }
 
 // deliverySink receives per-recipient delivery attribution. Implemented by
@@ -63,6 +69,10 @@ type directUser struct {
 	id   string
 	nc   *nats.Conn
 	subs []*nats.Subscription
+	// registered flips once the user is in p.users. Until then its connection
+	// is not a tracked recipient, so losing it is not a dropped recipient —
+	// see recordDisconnectFor.
+	registered atomic.Bool
 }
 
 func newDirectPool(natsURL, credsFile string, c *Collector) *directPool {
@@ -105,6 +115,22 @@ func (p *directPool) recordDisconnect() {
 	p.dropped.Add(1)
 }
 
+// recordDisconnectFor is the per-connection disconnect hook armed by Add.
+//
+// The registered gate is the point: Add arms the handler before it subscribes,
+// and every one of its error paths Drains the connection it just opened.
+// Draining closes it, the handler fires, and without this gate a subscribe or
+// flush hiccup during activation would count a connection that never entered
+// p.users and was never a tracked recipient. That reaches
+// VerifyInputs.DroppedRecipients and turns an otherwise clean run
+// INCONCLUSIVE for a background user's activation failure.
+func (p *directPool) recordDisconnectFor(du *directUser) {
+	if !du.registered.Load() {
+		return
+	}
+	p.recordDisconnect()
+}
+
 // MissingUsers returns the subset of ids that are not in the pool. Counting
 // pool size is not enough: activateUsers skips a user whose Add failed and the
 // freed slot is backfilled by the next user, so Size() can reach the expected
@@ -135,12 +161,13 @@ func (p *directPool) MissingUsers(ids []string) []string {
 // failing loudly. An operator who knows their stack's mode can halve the
 // subscription count via setLanes (`verify --lane`).
 func (p *directPool) Add(u *userState) error {
+	du := &directUser{id: u.ID}
 	nc, err := connectWithCreds(p.url, "loadgen-daily-"+u.ID, p.credsFile,
-		nats.DisconnectErrHandler(func(_ *nats.Conn, _ error) { p.recordDisconnect() }))
+		nats.DisconnectErrHandler(func(_ *nats.Conn, _ error) { p.recordDisconnectFor(du) }))
 	if err != nil {
 		return fmt.Errorf("connect for %s: %w", u.ID, err)
 	}
-	du := &directUser{id: u.ID, nc: nc}
+	du.nc = nc
 	lanes := p.laneSelection()
 	for _, roomID := range u.Rooms {
 		for _, global := range lanes {
@@ -172,6 +199,9 @@ func (p *directPool) Add(u *userState) error {
 		_ = nc.Drain()
 		return fmt.Errorf("flush subs for %s: %w", u.ID, err)
 	}
+	// Arm drop accounting only now: from here on this connection is a tracked
+	// recipient, so losing it really does invalidate the run's delivery claims.
+	du.registered.Store(true)
 	p.mu.Lock()
 	p.users[u.ID] = du
 	p.mu.Unlock()
@@ -198,20 +228,23 @@ func (p *directPool) onBroadcast(m *nats.Msg) {
 
 // attachSink wires a delivery sink. Must be called before Add.
 func (p *directPool) attachSink(s deliverySink) {
-	p.mu.Lock()
-	p.sink = s
-	p.mu.Unlock()
+	p.sink.Store(&s)
 }
 
 // deliver decodes a broadcast and attributes it to userID. Split out from the
 // subscription callback so it is unit-testable without a NATS connection.
+//
+// The sink load is atomic, not mutex-guarded: this runs on every broadcast
+// every direct user receives, and `daily` (which defaults to 20000 direct
+// users and exists to produce latency numbers) never attaches a sink at all.
+// Taking a single pool-global lock here would put daily's whole receive path
+// behind one mutex — the same ceiling that made Collector shard 64 ways.
 func (p *directPool) deliver(userID string, data []byte, ln lane) {
-	p.mu.Lock()
-	sink := p.sink
-	p.mu.Unlock()
-	if sink == nil {
+	sp := p.sink.Load()
+	if sp == nil || *sp == nil {
 		return
 	}
+	sink := *sp
 	var evt model.RoomEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return // ignore malformed
