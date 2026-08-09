@@ -101,7 +101,7 @@ type config struct {
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|pool-export|run|teardown|soak|members-sustained|members-capacity|history-sustained|max-rps|daily|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: loadgen <seed|pool-export|run|teardown|soak|members-sustained|members-capacity|history-sustained|max-rps|daily|verify|max-room-size|presence-sustained|presence-storm|presence-capacity> [flags]")
 		os.Exit(2)
 	}
 	cfg, err := env.ParseAs[config]()
@@ -146,6 +146,8 @@ func dispatch(ctx context.Context, cfg *config) int {
 		return runMaxRPS(ctx, cfg, os.Args[2:])
 	case "daily":
 		return runDaily(ctx, cfg, os.Args[2:])
+	case "verify":
+		return runVerify(ctx, cfg, os.Args[2:])
 	case "max-room-size":
 		return runMaxRoomSize(ctx, cfg, os.Args[2:])
 	case "presence-sustained":
