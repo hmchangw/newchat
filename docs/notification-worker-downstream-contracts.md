@@ -83,7 +83,8 @@ without a separate round trip.
 - **Shape:** `account → count`, restricted per event to the accounts in that
   event's `accounts` batch (each batch carries only its own recipients' counts).
 - **Cap:** count is the number of distinct unread rooms for that account,
-  capped at **10** (the client renders `10` as `"9+"`).
+  capped at **10** by default (`BADGE_COUNT_CAP` on user-service; the client
+  renders the capped value as `"9+"`).
 - **Absence semantics:** an account **missing** from the map means its count
   could not be computed this time (its home-site RPC failed, timed out, or the
   phase is disabled) — the push is still delivered. Clients should not treat
@@ -127,7 +128,8 @@ Request / reply (`pkg/model/subscription.go`):
   `user-service` SADDs it into the account's unread-room set atomically with
   reading the set's size, so the triggering room is always reflected even on
   a cache miss.
-- **`counts`** maps account → unread-room count, capped at 10. An account
+- **`counts`** maps account → unread-room count, capped (`BADGE_COUNT_CAP`,
+  default 10). An account
   absent from `counts` means its count could not be computed (see the
   degrade path below); the caller logs and drops it rather than failing.
 - Per-account degrade path, in order: cache hit (`BumpBatch`, one pipelined
@@ -144,7 +146,8 @@ Request / reply (`pkg/model/subscription.go`):
 **Accuracy model:** the triggering room is exact at notify time — the RPC's
 `SADD` is atomic with the size read. Everything else the count reflects (rooms
 marked unread by other activity, rooms read since the account's set was last
-seeded) can drift by about **±1 room**, bounded by the set's 24h TTL and by
+seeded) can drift by about **±1 room**, bounded by the set's TTL
+(`BADGE_CACHE_TTL`, default 24h, identical across its writers) and by
 reseed-on-`subscription.count` — both eventually reconcile any divergence.
 
 ### Payload decoding

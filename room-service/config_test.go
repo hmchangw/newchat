@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
@@ -71,6 +72,25 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
 	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
+}
+
+func TestConfig_BadgeCacheTTL(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	t.Run("default", func(t *testing.T) {
+		require.NoError(t, os.Unsetenv("BADGE_CACHE_TTL"))
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 24*time.Hour, cfg.BadgeCacheTTL)
+	})
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("BADGE_CACHE_TTL", "48h")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 48*time.Hour, cfg.BadgeCacheTTL)
+	})
 }
 
 func TestConfig_MaxConcurrency(t *testing.T) {

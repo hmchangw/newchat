@@ -567,11 +567,13 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 }
 
 // unreadRooms returns the IDs of the account's active rooms with unread activity. A
-// room contributes once if its messages are unread (LOCAL from the $lookup baseline,
-// CROSS-SITE via per-site GetRoomsInfo) OR it is message-read but its subscription
-// carries >=1 unread followed thread (Subscription.ThreadUnread — federated onto the
-// home-replica sub by message-worker/inbox-worker, so no separate thread RPC is
-// needed for either local or cross-site rooms). Everything degrades best-effort — an
+// room contributes once iff its messages are unread OR its subscription carries >=1
+// unread followed thread (Subscription.ThreadUnread — federated onto the home-replica
+// sub by message-worker/inbox-worker, so it is always complete locally and no thread
+// RPC is needed). Message-level unread needs the room's lastMsgAt: LOCAL subs carry it
+// on the $lookup baseline, CROSS-SITE subs fetch it via the per-site GetRoomsMeta RPC
+// (which also reveals not-found/soft-deleted rooms, excluded entirely — their stale
+// ThreadUnread must not count either). Everything degrades best-effort — an
 // unreachable site is skipped rather than nuking the result.
 func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]string, error) {
 	subs, err := s.subs.GetActiveSubscriptions(c, account, s.maxSubs)
@@ -579,20 +581,13 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 		return nil, fmt.Errorf("unread rooms: %w", err)
 	}
 
-	// LOCAL subs carry room.lastMsgAt on the $lookup baseline — resolve them with no RPC.
-	// Only CROSS-SITE subs need the per-site GetRoomsInfo RPC (their room docs live remotely).
-	// pendingRooms collects the ThreadUnread of subs that came out READ (roomID ->
-	// ThreadUnread) for the thread phase below.
 	var ids []string
-	pendingRooms := map[string][]string{}
 	crossBySite := map[string][]model.EnrichedSubscription{}
 	roomIDsBySite := map[string][]string{}
 	for i := range subs {
 		if subs[i].SiteID == s.siteID {
-			if unread(subs[i].LastSeenAt, timeutil.TimeToMillis(subs[i].LastMsgAt)) {
+			if unread(subs[i].LastSeenAt, timeutil.TimeToMillis(subs[i].LastMsgAt)) || len(subs[i].ThreadUnread) > 0 {
 				ids = append(ids, subs[i].RoomID)
-			} else {
-				pendingRooms[subs[i].RoomID] = subs[i].ThreadUnread
 			}
 			continue
 		}
@@ -606,21 +601,10 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 		for site := range crossBySite {
 			sites = append(sites, site)
 		}
-		// roomCand is a read room's thread-bump candidacy: just enough to key pendingRooms
-		// without copying the whole (large) EnrichedSubscription through the results channel.
-		type roomCand struct {
-			roomID       string
-			threadUnread []string
-		}
 		// Per-site degradation (matches the list path's enrichCrossSite): a failed site is
-		// SKIPPED — its subs drop out of the result and out of pendingRooms — while local
-		// subs and the sites that did respond still contribute. results[i] is written by
-		// exactly one goroutine.
-		type siteResult struct {
-			unreadIDs []string
-			readCands []roomCand
-		}
-		results := make([]siteResult, len(sites))
+		// SKIPPED — its subs drop out of the result — while local subs and the sites that
+		// did respond still contribute. results[i] is written by exactly one goroutine.
+		results := make([][]string, len(sites))
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, maxSiteFanout) // bound concurrent per-site RPCs
 		for i, site := range sites {
@@ -652,20 +636,17 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 					}
 					lastMsg[infos[k].RoomID] = infos[k].LastMsgAt
 				}
-				var res siteResult
+				var res []string
 				siteSubs := crossBySite[site]
 				for j := range siteSubs {
 					rid := siteSubs[j].RoomID
-					// Not-found / soft-deleted rooms are absent from lastMsg — neither
-					// counted nor a thread candidate.
+					// Not-found / soft-deleted rooms are absent from lastMsg — not counted.
 					ms, ok := lastMsg[rid]
 					if !ok {
 						continue
 					}
-					if unread(siteSubs[j].LastSeenAt, ms) {
-						res.unreadIDs = append(res.unreadIDs, rid)
-					} else {
-						res.readCands = append(res.readCands, roomCand{roomID: rid, threadUnread: siteSubs[j].ThreadUnread})
+					if unread(siteSubs[j].LastSeenAt, ms) || len(siteSubs[j].ThreadUnread) > 0 {
+						res = append(res, rid)
 					}
 				}
 				results[i] = res
@@ -673,18 +654,7 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 		}
 		wg.Wait()
 		for i := range results {
-			ids = append(ids, results[i].unreadIDs...)
-			for _, cand := range results[i].readCands {
-				pendingRooms[cand.roomID] = cand.threadUnread
-			}
-		}
-	}
-
-	// Thread phase: a message-read room still counts once if it has >=1 unread followed
-	// thread. pendingRooms is keyed by roomID, so each room bumps at most once here.
-	for roomID, threadUnread := range pendingRooms {
-		if len(threadUnread) > 0 {
-			ids = append(ids, roomID)
+			ids = append(ids, results[i]...)
 		}
 	}
 	return ids, nil

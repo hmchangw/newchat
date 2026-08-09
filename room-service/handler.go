@@ -1361,10 +1361,14 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil, err
 	}
 
-	// Best-effort badge cache clear: only when the reader has no thread-unread
-	// left on this subscription (fetched before the read applied) and is
-	// home-local — a cross-site reader's home replica is cleared by
-	// inbox-worker once the federated subscription_read event lands.
+	// Best-effort badge cache clear. The badge set holds rooms unread for ANY
+	// reason (main messages or threads); reading the main room ends the room's
+	// message-level unread, so it must leave the set now or the badge stays
+	// inflated until TTL/reseed. Guarded on ThreadUnread (fetched before the
+	// read applied): a room with unread followed threads stays unread, so its
+	// entry must survive a main-room read. Home-local readers only — a
+	// cross-site reader's home replica is cleared by inbox-worker once the
+	// federated subscription_read event lands.
 	if len(sub.ThreadUnread) == 0 && userSiteID == h.siteID && h.badge != nil {
 		h.badge.ClearRoom(ctx, account, roomID)
 	}

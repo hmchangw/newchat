@@ -26,10 +26,6 @@ import (
 	"github.com/hmchangw/chat/user-service/service"
 )
 
-// badgeCacheTTL bounds how long an account's badge unread-room set survives
-// without a Bump/Seed/Reseed refresh (pkg/badgecache.New's ttl param).
-const badgeCacheTTL = 24 * time.Hour
-
 // Compile-time interface assertions — fail the build if implementations drift.
 var (
 	_ service.SubscriptionRepository       = (*mongorepo.SubscriptionRepo)(nil)
@@ -172,8 +168,8 @@ func main() {
 			slog.Error("valkey connect failed", "error", err)
 			os.Exit(1)
 		}
-		badge = badgecache.New(valkeyClient, badgeCacheTTL)
-		slog.Info("badge cache enabled", "ttl", badgeCacheTTL)
+		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, cfg.BadgeCountCap)
+		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL, "count_cap", cfg.BadgeCountCap)
 	} else {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}

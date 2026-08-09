@@ -13,10 +13,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// maxCount is the cap applied in Go to every count BumpBatch/Seed return — the
-// badge UI never needs to distinguish "10 unread rooms" from "50 unread
-// rooms", and capping keeps SCARD's cost bounded from the caller's view.
-const maxCount = 10
+// DefaultMaxCount is the default cap applied in Go to every count
+// BumpBatch/Seed return — the badge UI never needs to distinguish "10 unread
+// rooms" from "50 unread rooms", and capping keeps SCARD's cost bounded from
+// the caller's view. Overridable per deploy via New's maxCount param
+// (user-service exposes it as BADGE_COUNT_CAP).
+const DefaultMaxCount = 10
 
 // bumpScript adds a single room to an existing unread set and refreshes its
 // TTL. It is a miss (no writes at all) when the key does not exist yet — the
@@ -57,15 +59,21 @@ return 1
 
 // Cache is the Valkey-backed unread-room-id set, one SET per account.
 type Cache struct {
-	rdb redis.UniversalClient
-	ttl time.Duration
+	rdb      redis.UniversalClient
+	ttl      time.Duration
+	maxCount int
 }
 
 // New builds a Cache. ttl bounds how long an account's unread-room set
 // survives without a BumpBatch/Seed/Reseed refresh, so a crashed/missed clear
-// self-heals rather than sticking forever.
-func New(rdb redis.UniversalClient, ttl time.Duration) *Cache {
-	return &Cache{rdb: rdb, ttl: ttl}
+// self-heals rather than sticking forever. maxCount caps every count
+// BumpBatch/Seed return; a non-positive value falls back to DefaultMaxCount
+// (fail-open — a misconfigured cap must not zero every badge).
+func New(rdb redis.UniversalClient, ttl time.Duration, maxCount int) *Cache {
+	if maxCount <= 0 {
+		maxCount = DefaultMaxCount
+	}
+	return &Cache{rdb: rdb, ttl: ttl, maxCount: maxCount}
 }
 
 // Key returns the hash-tagged Valkey key for account's unread-room set. The
@@ -78,7 +86,7 @@ func Key(account string) string {
 // BumpBatch adds one triggering roomID to many accounts' unread sets (TTL
 // refreshed) in a single pipeline — grouped ~1 round trip per cluster node
 // instead of one per account. The result maps each account that HIT (key
-// existed; SADD+EXPIRE applied) to its post-add set size capped at 10;
+// existed; SADD+EXPIRE applied) to its post-add set size, capped;
 // accounts that missed (no key yet) or errored are simply absent — fail-open,
 // so callers seed those from the source of truth. NOSCRIPT failures (empty
 // script cache on a fresh node) are re-run as one pipelined EVAL pass, which
@@ -112,7 +120,7 @@ func (c *Cache) BumpBatch(ctx context.Context, accounts []string, roomID string)
 		if n < 0 {
 			continue // miss — the key does not exist yet
 		}
-		counts[account] = capCount(n)
+		counts[account] = c.capCount(n)
 	}
 	if len(retry) == 0 {
 		return counts
@@ -130,7 +138,7 @@ func (c *Cache) BumpBatch(ctx context.Context, accounts []string, roomID string)
 	}
 	for j, i := range retry {
 		if n, err := retryCmds[j].Int64(); err == nil && n >= 0 {
-			counts[accounts[i]] = capCount(n)
+			counts[accounts[i]] = c.capCount(n)
 		}
 	}
 	return counts
@@ -138,8 +146,8 @@ func (c *Cache) BumpBatch(ctx context.Context, accounts []string, roomID string)
 
 // Seed creates (or extends) account's unread set from roomIDs plus
 // triggerRoomID (deduplicated; an empty triggerRoomID is skipped), refreshes
-// the TTL, and returns the resulting size capped at 10. ok=false on any
-// Valkey error (fail-open, after one warn log).
+// the TTL, and returns the resulting size, capped. ok=false on any Valkey
+// error (fail-open, after one warn log).
 func (c *Cache) Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (count int, ok bool) {
 	argv := seedArgs(c.ttl, roomIDs, triggerRoomID)
 	n, err := seedScript.Run(ctx, c.rdb, []string{Key(account)}, argv...).Int64()
@@ -147,7 +155,7 @@ func (c *Cache) Seed(ctx context.Context, account string, roomIDs []string, trig
 		slog.WarnContext(ctx, "badgecache seed failed", "account", account, "error", err)
 		return 0, false
 	}
-	return capCount(n), true
+	return c.capCount(n), true
 }
 
 // ClearRoom removes roomID from account's unread set. Fail-open: a missing
@@ -209,10 +217,10 @@ func ttlSeconds(ttl time.Duration) int64 {
 	return int64(ttl / time.Second)
 }
 
-// capCount bounds n at maxCount, matching the badge UI's "10+" display cap.
-func capCount(n int64) int {
-	if n > maxCount {
-		return maxCount
+// capCount bounds n at the configured cap, matching the badge UI's "9+" display.
+func (c *Cache) capCount(n int64) int {
+	if n > int64(c.maxCount) {
+		return c.maxCount
 	}
 	return int(n)
 }

@@ -15,6 +15,22 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
+func TestConfig_BadgeCacheTTL(t *testing.T) {
+	t.Run("defaults to 24h", func(t *testing.T) {
+		require.NoError(t, os.Unsetenv("BADGE_CACHE_TTL"))
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 24*time.Hour, cfg.BadgeCacheTTL)
+	})
+
+	t.Run("honors BADGE_CACHE_TTL override", func(t *testing.T) {
+		t.Setenv("BADGE_CACHE_TTL", "48h")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 48*time.Hour, cfg.BadgeCacheTTL)
+	})
+}
+
 func TestConfig_MaxWorkers(t *testing.T) {
 	t.Run("defaults to 100", func(t *testing.T) {
 		cfg, err := env.ParseAs[config]()

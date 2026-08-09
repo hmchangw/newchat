@@ -62,7 +62,7 @@ func (f *fakeBadgeCache) Reseed(_ context.Context, account string, roomIDs []str
 // (and the unreadRooms it calls on a miss) needs.
 func newBadgeService(t *testing.T, subs *mocks.MockSubscriptionRepository, badge *fakeBadgeCache) *UserService {
 	t.Helper()
-	return &UserService{subs: subs, badge: badge, siteID: "site-a", maxSubs: 1000}
+	return &UserService{subs: subs, badge: badge, siteID: "site-a", maxSubs: 1000, badgeCap: 10}
 }
 
 func TestBadgeCountBatch_EmptyAccounts_BadRequest(t *testing.T) {
@@ -201,17 +201,19 @@ func TestCappedUnion(t *testing.T) {
 		name    string
 		ids     []string
 		trigger string
+		cap     int
 		want    int
 	}{
-		{"empty", nil, "", 0},
-		{"trigger only", nil, "r1", 1},
-		{"ids plus new trigger", []string{"r1", "r2"}, "r3", 3},
-		{"trigger already a member", []string{"r1", "r2"}, "r1", 2},
-		{"capped at 10", []string{"r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10"}, "r11", 10},
+		{"empty", nil, "", 10, 0},
+		{"trigger only", nil, "r1", 10, 1},
+		{"ids plus new trigger", []string{"r1", "r2"}, "r3", 10, 3},
+		{"trigger already a member", []string{"r1", "r2"}, "r1", 10, 2},
+		{"capped at 10", []string{"r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10"}, "r11", 10, 10},
+		{"custom cap honored", []string{"r1", "r2", "r3"}, "r4", 2, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, cappedUnion(tc.ids, tc.trigger))
+			assert.Equal(t, tc.want, cappedUnion(tc.ids, tc.trigger, tc.cap))
 		})
 	}
 }

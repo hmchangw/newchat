@@ -9,13 +9,8 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
-// badgeCountCap mirrors pkg/badgecache's own 10-cap (10 renders as "9+" in the
-// UI) so the cache-down fallback path (cappedUnion) agrees with the
-// cache-backed paths on what the badge count tops out at.
-const badgeCountCap = 10
-
 // BadgeCountBatch returns each account's badge unread-room count (capped at
-// 10) for a notification in req.RoomID. Cache hit: one pipelined SADD+SCARD
+// BADGE_COUNT_CAP) for a notification in req.RoomID. Cache hit: one pipelined SADD+SCARD
 // batch for all accounts. Miss: seed from unreadRooms (Mongo + cross-site
 // room RPCs) ∪ the trigger room. Per-account failures degrade to absence —
 // the push must never block.
@@ -41,16 +36,17 @@ func (s *UserService) BadgeCountBatch(c *natsrouter.Context, req model.BadgeCoun
 			continue
 		}
 		// Cache down entirely: compute without it (ids ∪ trigger, capped).
-		resp.Counts[account] = cappedUnion(ids, req.RoomID)
+		resp.Counts[account] = cappedUnion(ids, req.RoomID, s.badgeCap)
 	}
 	return resp, nil
 }
 
 // cappedUnion returns the size of ids ∪ {trigger} (deduplicated — trigger is
-// skipped if blank or already a member of ids), capped at badgeCountCap. This
-// is the cache-down fallback BadgeCountBatch uses when neither Bump nor Seed
+// skipped if blank or already a member of ids), capped at cap (BADGE_COUNT_CAP,
+// mirrored into pkg/badgecache so the cache-backed paths agree). This is the
+// cache-down fallback BadgeCountBatch uses when neither BumpBatch nor Seed
 // could reach Valkey.
-func cappedUnion(ids []string, trigger string) int {
+func cappedUnion(ids []string, trigger string, cap int) int {
 	seen := make(map[string]struct{}, len(ids)+1)
 	for _, id := range ids {
 		seen[id] = struct{}{}
@@ -58,8 +54,8 @@ func cappedUnion(ids []string, trigger string) int {
 	if trigger != "" {
 		seen[trigger] = struct{}{}
 	}
-	if len(seen) > badgeCountCap {
-		return badgeCountCap
+	if len(seen) > cap {
+		return cap
 	}
 	return len(seen)
 }

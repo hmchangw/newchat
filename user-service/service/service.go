@@ -136,11 +136,14 @@ type UserService struct {
 	ssoRefreshWindow time.Duration
 	siteID           string
 	allSiteIDs       []string
-	maxSubs          int
-	defaultLimit     int
-	maxApps          int
-	defaultApps      int
-	maxAccountNames  int
+	// badgeCap caps badge unread-room counts on the cache-down fallback path
+	// (BADGE_COUNT_CAP; pkg/badgecache applies the same cap on cache hits).
+	badgeCap        int
+	maxSubs         int
+	defaultLimit    int
+	maxApps         int
+	defaultApps     int
+	maxAccountNames int
 }
 
 // New constructs a UserService with the given dependencies and configuration.
@@ -162,6 +165,7 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		ssoRefreshWindow: cfg.SSORefreshWindow,
 		siteID:           cfg.SiteID,
 		allSiteIDs:       cfg.AllSiteIDs,
+		badgeCap:         cfg.BadgeCountCap,
 		maxSubs:          cfg.MaxSubscriptionLimit,
 		defaultLimit:     cfg.DefaultSubscriptionLimit,
 		maxApps:          cfg.MaxAppsLimit,

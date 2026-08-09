@@ -20,7 +20,7 @@ func TestMain(m *testing.M) { testutil.RunTests(m) }
 func TestBadgeCache_BumpMissThenSeedThenBump(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	ctx := context.Background()
 
 	assert.Empty(t, c.BumpBatch(ctx, []string{"alice"}, "roomB"), "no key yet → miss")
@@ -43,7 +43,7 @@ func TestBadgeCache_BumpMissThenSeedThenBump(t *testing.T) {
 func TestBadgeCache_CapAt10(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	rooms := make([]string, 15)
 	for i := range rooms {
 		rooms[i] = fmt.Sprintf("room%02d", i)
@@ -59,7 +59,7 @@ func TestBadgeCache_CapAt10(t *testing.T) {
 func TestBadgeCache_ClearRoomAndClearAll_MissingKey_NoPanic(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	ctx := context.Background()
 
 	assert.NotPanics(t, func() { c.ClearRoom(ctx, "bob", "roomA") })
@@ -75,7 +75,7 @@ func TestBadgeCache_ClearRoomAndClearAll_MissingKey_NoPanic(t *testing.T) {
 func TestBadgeCache_Reseed_ReplacesPriorContents(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	ctx := context.Background()
 
 	n, ok := c.Seed(ctx, "carol", []string{"roomA", "roomB"}, "roomC")
@@ -97,7 +97,7 @@ func TestBadgeCache_Reseed_ReplacesPriorContents(t *testing.T) {
 func TestBadgeCache_Reseed_EmptyRoomIDs_JustDeletes(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	ctx := context.Background()
 
 	_, ok := c.Seed(ctx, "dave", []string{"roomA"}, "roomB")
@@ -113,7 +113,7 @@ func TestBadgeCache_Reseed_EmptyRoomIDs_JustDeletes(t *testing.T) {
 func TestBadgeCache_Bump_RefreshesTTL(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	ctx := context.Background()
 
 	_, ok := c.Seed(ctx, "erin", []string{"roomA"}, "roomB")
@@ -132,7 +132,7 @@ func TestBadgeCache_Bump_RefreshesTTL(t *testing.T) {
 func TestBadgeCache_BumpBatch_MixedHitMiss(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	ctx := context.Background()
 
 	_, ok := c.Seed(ctx, "gina", []string{"roomA"}, "")
@@ -160,7 +160,7 @@ func TestBadgeCache_BumpBatch_MixedHitMiss(t *testing.T) {
 func TestBadgeCache_BumpBatch_NoScriptSelfHeals(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	ctx := context.Background()
 
 	_, ok := c.Seed(ctx, "jane", []string{"roomA"}, "")
@@ -179,7 +179,7 @@ func TestBadgeCache_BumpBatch_NoScriptSelfHeals(t *testing.T) {
 // TestBadgeCache_BumpBatch_EmptyAccounts must not touch Valkey at all — a nil
 // client would panic on any command.
 func TestBadgeCache_BumpBatch_EmptyAccounts(t *testing.T) {
-	c := New(nil, time.Hour)
+	c := New(nil, time.Hour, DefaultMaxCount)
 	counts := c.BumpBatch(context.Background(), nil, "roomA")
 	assert.Empty(t, counts)
 }
@@ -191,7 +191,7 @@ func TestBadgeCache_BumpBatch_EmptyAccounts(t *testing.T) {
 func TestBadgeCache_ValkeyError_FailsOpen(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 200 * time.Millisecond})
 	t.Cleanup(func() { _ = rdb.Close() })
-	c := New(rdb, time.Hour)
+	c := New(rdb, time.Hour, DefaultMaxCount)
 	ctx := context.Background()
 
 	assert.Empty(t, c.BumpBatch(ctx, []string{"frank", "grace"}, "roomA"), "batch fails open to all-absent")

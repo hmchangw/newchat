@@ -50,12 +50,11 @@ type config struct {
 	// clear hooks become no-ops — Phase A deploys need no Valkey).
 	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
 	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// BadgeCacheTTL bounds how long an account's badge unread-room set survives
+	// without a BumpBatch/Seed/Reseed refresh. Keep identical across the badge
+	// cache's writers (user-service, room-service, inbox-worker).
+	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 }
-
-// badgeCacheTTL bounds how long an account's badge unread-room set survives
-// without a Bump/Seed/Reseed refresh (pkg/badgecache.New's ttl param) — see
-// user-service's identical constant, the accelerator's other writer.
-const badgeCacheTTL = 24 * time.Hour
 
 // mongoInboxStore implements InboxStore using MongoDB.
 type mongoInboxStore struct {
@@ -707,8 +706,8 @@ func main() {
 			slog.Error("valkey connect failed", "error", err)
 			os.Exit(1)
 		}
-		badge = badgecache.New(valkeyClient, badgeCacheTTL)
-		slog.Info("badge cache enabled", "ttl", badgeCacheTTL)
+		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
+		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL)
 	} else {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}

@@ -54,10 +54,17 @@ type Config struct {
 	// ValkeyAddrs seeds the Valkey cluster backing the thread-unread badge
 	// accelerator (pkg/badgecache); empty disables it (Phase A deploys need no
 	// Valkey — badge.count.batch falls back to computing counts on the fly).
-	ValkeyAddrs    []string    `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
-	ValkeyPassword string      `env:"VALKEY_PASSWORD" envDefault:""`
-	Mongo          MongoConfig `envPrefix:"MONGO_"`
-	NATS           NATSConfig  `envPrefix:"NATS_"`
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// BadgeCacheTTL bounds how long an account's badge unread-room set survives
+	// without a BumpBatch/Seed/Reseed refresh. Keep identical across the badge
+	// cache's writers (user-service, room-service, inbox-worker).
+	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
+	// BadgeCountCap caps every badge unread-room count returned to clients and
+	// the push pipeline (the UI renders the cap as "N-1+", e.g. 10 → "9+").
+	BadgeCountCap int         `env:"BADGE_COUNT_CAP" envDefault:"10"`
+	Mongo         MongoConfig `envPrefix:"MONGO_"`
+	NATS          NATSConfig  `envPrefix:"NATS_"`
 }
 
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.
@@ -86,6 +93,12 @@ func Load() (Config, error) {
 	}
 	if cfg.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)
+	}
+	if cfg.BadgeCacheTTL <= 0 {
+		return Config{}, fmt.Errorf("BADGE_CACHE_TTL must be > 0, got %s", cfg.BadgeCacheTTL)
+	}
+	if cfg.BadgeCountCap < 1 {
+		return Config{}, fmt.Errorf("BADGE_COUNT_CAP must be >= 1, got %d", cfg.BadgeCountCap)
 	}
 	if cfg.OIDCIssuerURL != "" {
 		if len(cfg.OIDCAudiences) == 0 {
