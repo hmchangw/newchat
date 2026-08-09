@@ -58,7 +58,7 @@ A run FAILs if any probe message shows any of:
 | `total_loss` | The probe reached **zero** expected recipients | gatekeeper reject, or canonical-publish failure |
 | `duplicate_delivery` | One recipient received the same `messageID` twice on the same lane | JetStream redelivery / worker idempotency |
 | `persistence_miss` | Probe not retrievable via `history-service` after bounded retries | `message-worker` write loss |
-| `persistence_mismatch` | Retrieved, but `roomID` / `senderID` / `threadParentMessageID` differs | wrong-partition or field-mapping write bug |
+| `persistence_mismatch` | Retrieved, but `senderID` / `threadParentMessageID` differs | field-mapping write bug (see §8 — wrong-room is not detectable here) |
 | `unexpected_recipient` | A tracked user received a probe for a room they are not a member of, on the per-user lane | DM/user-lane mis-addressing |
 | `membership_not_applied` | After add/remove + settle, `subscription.list` does not reflect the change | room-service / room-worker / Mongo write |
 | `membership_add_ineffective` | An added member's send into the room is still rejected after settle | membership visible to `subscription.list` but not to the gatekeeper |
@@ -368,10 +368,9 @@ step 1) — without them the leakage check has no lane to run on.
 Runs after drain. O(probes), not O(probes × members) — cheap regardless of
 room size.
 
-**Read path: `history-service` RPC, not direct CQL.** Readback reuses
-`subject.MsgGet` (already used by the `scrollHistory` action,
-`daily_actions.go:110`) and inspects the response rather than discarding
-it. Rationale:
+**Read path: `history-service` RPC, not direct CQL.** Readback uses
+`subject.MsgGetIDs` → `GetMessagesByIDs` (`history-service/internal/service/messages.go:445`),
+the batch-by-ID RPC. Rationale:
 
 - Exercises the real client read path.
 - Avoids coupling the test to the Cassandra bucketing scheme. Direct CQL
@@ -380,8 +379,29 @@ it. Rationale:
   the services — a documented silent-data-loss trap, and not one worth
   building into a correctness test.
 
+**Wire contract** (verified against the handler, not assumed):
+
+| | |
+|---|---|
+| Subject | `subject.MsgGetIDs(account, roomID, siteID)` |
+| Request | `{"messageIds": [...]}`, **max 100 per request** (`maxGetByIDsBatchSize`); empty list is a `BadRequest` |
+| Response | `{"messages": [...]}` |
+| Fields read | `messageId`, `threadParentId`, and `sender.id` (a nested `Participant`) |
+
+A room with more than 100 probes is chunked across multiple requests.
+
 **Asserted per probe:** present in the room's history, with matching
-`roomID`, `senderID`, `threadParentMessageID`.
+`senderID` and `threadParentMessageID`.
+
+**Room mismatch is not detectable, by design of the endpoint.**
+`GetMessagesByIDs` fetches by ID and then filters results to the room
+named in the subject, silently dropping cross-room matches
+(`messages.go:467-477`). A message persisted under the wrong room is
+therefore absent from the reply rather than present-and-wrong, so it
+surfaces as `persistence_miss`, never `persistence_mismatch`. The
+`roomID` comparison is consequently omitted from the readback rather than
+carried as unreachable code. This is a real reduction in diagnostic
+precision — the violation still fires, but names the wrong cause.
 
 **Storage lag is not storage loss.** `message-worker` consumes
 MESSAGES-CANONICAL asynchronously, so a probe missing on first read may
