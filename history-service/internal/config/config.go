@@ -93,6 +93,12 @@ type Config struct {
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
+	// PreviewKeyEpoch selects the site preview DEK (preview:{siteID}:{epoch}).
+	// Rotation is an ops action — bump and redeploy; the restart is what drops the
+	// cached DEK. Set it identically across instances: during a rolling deploy both
+	// epochs are live and previews churn self-correctingly.
+	PreviewKeyEpoch int `env:"PREVIEW_KEY_EPOCH" envDefault:"1"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
@@ -134,6 +140,11 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	// Part of a DEK id, so a non-positive value mints a sentinel rotation could
+	// never move forward from.
+	if cfg.PreviewKeyEpoch < 1 {
+		return fmt.Errorf("PREVIEW_KEY_EPOCH must be >= 1, got %d", cfg.PreviewKeyEpoch)
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)

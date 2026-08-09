@@ -25,6 +25,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -128,8 +129,9 @@ func main() {
 	}
 
 	var (
-		cipher       atrest.Cipher
-		vaultWrapper atrest.KeyWrapperCloser
+		cipher        atrest.Cipher
+		previewCipher atrest.Cipher
+		vaultWrapper  atrest.KeyWrapperCloser
 	)
 	if cfg.Atrest.Enabled {
 		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
@@ -143,12 +145,26 @@ func main() {
 		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName,
 			options.Collection().SetReadPreference(readpref.Primary()))
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+
+		// A SEPARATE cipher over its own DEK collection, sharing the KEK. The
+		// preview key must never seal message bodies: it sees far more GCM
+		// invocations than a per-room DEK, and a nonce collision under it would
+		// expose the GHASH subkey for everything it protects.
+		// Pinned to primary for the same reason as the message DEKs above, and
+		// more acutely: history-service mints the preview DEK on first use and
+		// reads it back immediately, so a lagging secondary would miss the key
+		// it just wrote.
+		previewDEKColl := mongoClient.Database(cfg.Mongo.DB).Collection(mongorepo.PreviewDEKCollection,
+			options.Collection().SetReadPreference(readpref.Primary()))
+		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
+
+	previewKey := preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch}
 
 	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
-	roomRepo := mongorepo.NewRoomRepo(db)
+	roomRepo := mongorepo.NewRoomRepo(db, previewCipher, previewKey)
 	threadRoomRepo := mongorepo.NewThreadRoomRepo(db)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	userStore := userstore.NewMongoStore(db.Collection("users"))

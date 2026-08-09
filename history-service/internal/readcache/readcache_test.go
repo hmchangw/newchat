@@ -160,6 +160,9 @@ type fakeRoomSource struct {
 	timesByIDsIDs   []string
 	timesByIDs      map[string]mongorepo.RoomTimes
 	timesByIDsErr   error
+
+	setPreviewCalls   atomic.Int32
+	clearPreviewCalls atomic.Int32
 }
 
 func (f *fakeRoomSource) GetRoomTimes(_ context.Context, _ string) (time.Time, time.Time, error) {
@@ -183,6 +186,17 @@ func (f *fakeRoomSource) GetRoomTimesByIDs(_ context.Context, ids []string) (map
 		return nil, f.timesByIDsErr
 	}
 	return f.timesByIDs, nil
+}
+
+//nolint:gocritic // hugeParam: matches the RoomSource.SetPreviewMessage by-value contract.
+func (f *fakeRoomSource) SetPreviewMessage(_ context.Context, _ string, _ pkgmodel.PreviewMessage, _ string, _ int64) error {
+	f.setPreviewCalls.Add(1)
+	return nil
+}
+
+func (f *fakeRoomSource) ClearPreview(_ context.Context, _ string, _ int64) error {
+	f.clearPreviewCalls.Add(1)
+	return nil
 }
 
 func TestRoomCache_CachesRoomTimes(t *testing.T) {
@@ -415,4 +429,20 @@ func TestSubscriptionCache_CallerCancelReturnsCtxErr(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("caller did not return on its own ctx cancel within 2s")
 	}
+}
+
+// Preview writes are writes, not reads this cache fronts: both must reach the
+// source unchanged rather than being absorbed or cached.
+func TestRoomCache_PreviewWrites_BypassCache(t *testing.T) {
+	src := &fakeRoomSource{}
+	c, err := NewRoomCache(src, 10, time.Minute)
+	require.NoError(t, err)
+
+	require.NoError(t, c.SetPreviewMessage(context.Background(), "r1", pkgmodel.PreviewMessage{}, "m1", 100))
+	require.NoError(t, c.SetPreviewMessage(context.Background(), "r1", pkgmodel.PreviewMessage{}, "m1", 200))
+	assert.EqualValues(t, 2, src.setPreviewCalls.Load())
+
+	require.NoError(t, c.ClearPreview(context.Background(), "r1", 300))
+	require.NoError(t, c.ClearPreview(context.Background(), "r1", 400))
+	assert.EqualValues(t, 2, src.clearPreviewCalls.Load())
 }
