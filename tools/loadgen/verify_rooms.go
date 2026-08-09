@@ -64,12 +64,6 @@ func bandOf(roomID string) band {
 	}
 }
 
-// usesUserLane reports whether broadcasts for this room are addressed
-// per-recipient (subject.UserRoomEvent) rather than published once to the
-// room topic. Only DM rooms use the per-user lane, and only there is the
-// leakage check meaningful — see spec §7.3.
-func usesUserLane(roomID string) bool { return bandOf(roomID) == bandDM } //nolint:unused // reserved for the leakage check (spec §7.3), added in a later task
-
 // ProbeRoomSet is the outcome of probe-room selection: the chosen rooms, the
 // complete union of their members, and a per-room member index.
 type ProbeRoomSet struct {

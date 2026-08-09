@@ -103,6 +103,64 @@ func TestProbeTracker_Counts(t *testing.T) {
 	assert.Equal(t, 1, c.TotalLoss)
 }
 
+func TestProbeTracker_LeakageOnUserLane_IsViolation(t *testing.T) {
+	tr := NewProbeTracker()
+	tr.RegisterProbe("m1", "room-dm-000001", "u-1", 0, []string{"u-1", "u-2"}, at(1))
+
+	tr.RecordDelivery("u-1", "m1", "room-dm-000001", laneUser, at(2))
+	tr.RecordDelivery("u-2", "m1", "room-dm-000001", laneUser, at(2))
+	// u-9 is not a member of this DM.
+	tr.RecordDelivery("u-9", "m1", "room-dm-000001", laneUser, at(2))
+
+	vs := tr.Finalize()
+	require.Len(t, vs, 1)
+	assert.Equal(t, KindUnexpectedRecipient, vs[0].Kind)
+	assert.Equal(t, []string{"u-9"}, vs[0].Users)
+}
+
+func TestProbeTracker_LeakageOnRoomLane_IsIgnored(t *testing.T) {
+	tr := NewProbeTracker()
+	tr.RegisterProbe("m1", "room-small-000001", "u-1", 0, []string{"u-1"}, at(1))
+
+	tr.RecordDelivery("u-1", "m1", "room-small-000001", laneGlobal, at(2))
+	// A non-member receiving on the room topic reflects who subscribed, which
+	// loadgen itself controls (backend.creds has full chat.> permissions).
+	// Treating it as leakage would test NATS ACLs, not the chat system.
+	tr.RecordDelivery("u-9", "m1", "room-small-000001", laneGlobal, at(2))
+	tr.RecordDelivery("u-8", "m1", "room-small-000001", laneLocal, at(2))
+
+	assert.Empty(t, tr.Finalize(),
+		"room-lane delivery to a non-member must never be reported as leakage")
+}
+
+func TestProbeTracker_LeakageDoesNotCountAsDelivery(t *testing.T) {
+	tr := NewProbeTracker()
+	tr.RegisterProbe("m1", "room-dm-000001", "u-1", 0, []string{"u-1", "u-2"}, at(1))
+
+	tr.RecordDelivery("u-1", "m1", "room-dm-000001", laneUser, at(2))
+	tr.RecordDelivery("u-9", "m1", "room-dm-000001", laneUser, at(2))
+
+	vs := tr.Finalize()
+	// u-2 is still missing; the leak must not paper over the gap.
+	require.Len(t, vs, 2)
+	kinds := []ViolationKind{vs[0].Kind, vs[1].Kind}
+	assert.Contains(t, kinds, KindMissingRecipient)
+	assert.Contains(t, kinds, KindUnexpectedRecipient)
+}
+
+func TestProbeTracker_RepeatedLeakFromSameUser_ReportedOnce(t *testing.T) {
+	tr := NewProbeTracker()
+	tr.RegisterProbe("m1", "room-dm-000001", "u-1", 0, []string{"u-1", "u-2"}, at(1))
+	tr.RecordDelivery("u-1", "m1", "room-dm-000001", laneUser, at(2))
+	tr.RecordDelivery("u-2", "m1", "room-dm-000001", laneUser, at(2))
+	tr.RecordDelivery("u-9", "m1", "room-dm-000001", laneUser, at(2))
+	tr.RecordDelivery("u-9", "m1", "room-dm-000001", laneUser, at(3))
+
+	vs := tr.Finalize()
+	require.Len(t, vs, 1)
+	assert.Equal(t, []string{"u-9"}, vs[0].Users, "same leaking user must be deduped")
+}
+
 func TestProbeTracker_ConcurrentDeliveries(t *testing.T) {
 	tr := NewProbeTracker()
 	expected := make([]string, 200)
