@@ -23,6 +23,27 @@ type directPool struct {
 
 	mu    sync.Mutex
 	users map[string]*directUser
+	sink  deliverySink
+}
+
+// deliverySink receives per-recipient delivery attribution. Implemented by
+// ProbeTracker. nil in daily runs, which keeps that path byte-for-byte
+// identical to its previous behaviour.
+type deliverySink interface {
+	RecordDelivery(userID, msgID, roomID string, ln lane, at time.Time)
+}
+
+// laneForSubject classifies which subscription carried a message. The
+// per-user lane is the only one where delivery is addressed rather than
+// broadcast to a topic (spec §7.3).
+func laneForSubject(subj string) lane {
+	if strings.HasPrefix(subj, "chat.user.") {
+		return laneUser
+	}
+	if strings.Contains(subj, ".local.") {
+		return laneLocal
+	}
+	return laneGlobal
 }
 
 type directUser struct {
@@ -58,6 +79,7 @@ func (p *directPool) Add(u *userState) error {
 		for _, global := range []bool{true, false} {
 			sub, err := nc.Subscribe(subject.RoomEvent(roomID, global), func(m *nats.Msg) {
 				p.onBroadcast(m)
+				p.deliver(u.ID, m.Data, laneForSubject(m.Subject))
 			})
 			if err != nil {
 				_ = nc.Drain()
@@ -69,6 +91,7 @@ func (p *directPool) Add(u *userState) error {
 	// User-scoped subscription for DM broadcasts.
 	userSub, err := nc.Subscribe(subject.UserRoomEvent(u.Account), func(m *nats.Msg) {
 		p.onBroadcast(m)
+		p.deliver(u.ID, m.Data, laneForSubject(m.Subject))
 	})
 	if err != nil {
 		_ = nc.Drain()
@@ -104,6 +127,60 @@ func (p *directPool) onBroadcast(m *nats.Msg) {
 		return
 	}
 	p.collector.RecordBroadcast(evt.LastMsgID, time.Now())
+}
+
+// attachSink wires a delivery sink. Must be called before Add.
+func (p *directPool) attachSink(s deliverySink) {
+	p.mu.Lock()
+	p.sink = s
+	p.mu.Unlock()
+}
+
+// deliver decodes a broadcast and attributes it to userID. Split out from the
+// subscription callback so it is unit-testable without a NATS connection.
+func (p *directPool) deliver(userID string, data []byte, ln lane) {
+	p.mu.Lock()
+	sink := p.sink
+	p.mu.Unlock()
+	if sink == nil {
+		return
+	}
+	var evt model.RoomEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return // ignore malformed
+	}
+	if evt.LastMsgID == "" {
+		return // membership/rename events carry no message
+	}
+	sink.RecordDelivery(userID, evt.LastMsgID, evt.RoomID, ln, time.Now())
+}
+
+// SubscribeRoom adds a room subscription to an already-connected user. Used
+// when a reserve floater is added to a probe room mid-run — the same thing a
+// real client does on joining.
+func (p *directPool) SubscribeRoom(userID, roomID string) error {
+	p.mu.Lock()
+	du, ok := p.users[userID]
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("subscribe room %s: user %s not in direct pool", roomID, userID)
+	}
+	for _, global := range []bool{true, false} {
+		subj := subject.RoomEvent(roomID, global)
+		sub, err := du.nc.Subscribe(subj, func(m *nats.Msg) {
+			p.deliver(userID, m.Data, laneForSubject(m.Subject))
+		})
+		if err != nil {
+			return fmt.Errorf("subscribe room %s for %s: %w", roomID, userID, err)
+		}
+		p.mu.Lock()
+		du.subs = append(du.subs, sub)
+		p.mu.Unlock()
+	}
+	if err := du.nc.Flush(); err != nil {
+		return fmt.Errorf("flush room subscription %s for %s: %w", roomID, userID, err)
+	}
+	return nil
 }
 
 // Close drains all connections.
