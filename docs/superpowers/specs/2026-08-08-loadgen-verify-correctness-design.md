@@ -393,15 +393,36 @@ A room with more than 100 probes is chunked across multiple requests.
 **Asserted per probe:** present in the room's history, with matching
 `senderID` and `threadParentMessageID`.
 
-**Room mismatch is not detectable, by design of the endpoint.**
-`GetMessagesByIDs` fetches by ID and then filters results to the room
-named in the subject, silently dropping cross-room matches
-(`messages.go:467-477`). A message persisted under the wrong room is
-therefore absent from the reply rather than present-and-wrong, so it
-surfaces as `persistence_miss`, never `persistence_mismatch`. The
+**Two server-side filters drop rows silently — both degrade a mismatch
+into a miss.** `GetMessagesByIDs` fetches by ID and then filters the
+result set twice before replying (`messages.go:467-477`):
+
+1. **Room filter** — rows whose `RoomID` differs from the subject's room
+   are dropped. A message persisted under the wrong room is therefore
+   absent rather than present-and-wrong.
+2. **`accessSince` filter** — rows with `CreatedAt` before the caller's
+   access window are dropped. A probe read back under an account whose
+   `historySharedSince` has moved forward (a rejoin after removal — which
+   membership churn does produce, §9) is likewise absent.
+
+Both surface as `persistence_miss`, never `persistence_mismatch`. The
 `roomID` comparison is consequently omitted from the readback rather than
 carried as unreachable code. This is a real reduction in diagnostic
-precision — the violation still fires, but names the wrong cause.
+precision: the violation still fires, but names the wrong cause.
+
+**Caller constraint:** readback MUST run as the probe's own sender
+account. Querying as an unrelated account narrows or empties the access
+window and manufactures phantom misses.
+
+**An error reply is not an empty result.** NATS handlers in this repo
+answer errors with an ordinary message body on the reply subject
+(`pkg/errcode/errnats/reply.go:41-45`), which `requestFn` returns with a
+nil Go error. Decoded naively into the response envelope, that yields zero
+messages and reports every probe in the batch as lost. Readback therefore
+runs `errcode.Parse` on each reply before decoding and returns the parsed
+error, so it exits via the INCONCLUSIVE path. This matters because our own
+workload provokes it: `GetMessagesByIDs` calls `getAccessSince` first, and
+a sender removed by membership churn gets `Forbidden` for that room.
 
 **Storage lag is not storage loss.** `message-worker` consumes
 MESSAGES-CANONICAL asynchronously, so a probe missing on first read may
