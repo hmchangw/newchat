@@ -155,6 +155,69 @@ func TestReadback_QueryError_ReturnsErrorNotViolation(t *testing.T) {
 	assert.Empty(t, vs)
 }
 
+// TestReadback_ErrcodeEnvelopeReply_ReturnsErrorNotViolation pins Critical-1:
+// a request-level failure at history-service (e.g. the probe's sender account
+// no longer subscribed to the room, or a subscriptions-store hiccup collapsed
+// to Internal) replies on the same reply subject with an ordinary errcode
+// envelope body and err == nil from requestFn. That must never be read as
+// "zero messages found" -- it says nothing about whether the write happened,
+// so it must surface as a query error, not a persistence_miss violation.
+func TestReadback_ErrcodeEnvelopeReply_ReturnsErrorNotViolation(t *testing.T) {
+	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+		b, err := json.Marshal(map[string]string{"code": "forbidden", "error": "not subscribed to room"})
+		require.NoError(t, err)
+		return b, nil // NATS-level success; the failure is in the payload
+	}
+	rb := NewReadback(req, "site-test", 3, time.Millisecond)
+
+	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
+		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
+	})
+	require.Error(t, err, "an errcode reply is INCONCLUSIVE, never a false persistence_miss")
+	assert.Empty(t, vs)
+}
+
+// TestReadback_MalformedReply_ReturnsErrorNotViolation covers a reply that is
+// neither a valid historyResponse nor a valid errcode envelope: decode
+// failure must be an error, not a violation.
+func TestReadback_MalformedReply_ReturnsErrorNotViolation(t *testing.T) {
+	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+		return []byte("not-json"), nil
+	}
+	rb := NewReadback(req, "site-test", 2, time.Millisecond)
+
+	vs, err := rb.Verify(context.Background(), "user-1", []ReadbackTarget{
+		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
+	})
+	require.Error(t, err, "a malformed reply must not be treated as zero messages found")
+	assert.Empty(t, vs)
+}
+
+// TestReadback_ContextCancelledMidRetry_AbortsWithoutBurningBudget pins the
+// mid-retry cancellation branch specifically: a context cancelled between
+// attempts must abort during the backoff wait rather than spend the rest of
+// the configured retry budget. The backoff is deliberately long so the select
+// in verifyRoom can only be won by ctx.Done(), never by time.After.
+func TestReadback_ContextCancelledMidRetry_AbortsWithoutBurningBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	req := func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			cancel() // cancel once the first attempt has been made, still nothing found
+		}
+		return historyReply(t), nil
+	}
+	rb := NewReadback(req, "site-test", 5, time.Hour)
+
+	vs, err := rb.Verify(ctx, "user-1", []ReadbackTarget{
+		{MsgID: "m1", RoomID: "r1", SenderID: "u-1"},
+	})
+	require.Error(t, err)
+	assert.Empty(t, vs)
+	assert.Equal(t, 1, calls, "must abort during the backoff wait, not burn the remaining retry budget")
+}
+
 func TestReadback_BatchesByRoom(t *testing.T) {
 	queried := map[string]int{}
 	req := func(_ context.Context, subj string, _ []byte, _ time.Duration) ([]byte, error) {
