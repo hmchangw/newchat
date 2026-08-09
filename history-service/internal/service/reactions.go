@@ -15,6 +15,7 @@ import (
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -170,14 +171,14 @@ func toWireParticipant(p *cassandra.Participant) pkgmodel.Participant {
 
 // botAwareDisplayName composes a render-ready name; for a bot account it prefers the
 // app's display name, degrading to the composed name on lookup miss/error.
+//
+// The lookup is built only when an app store is wired: s.apps.AppNameByAccount is a
+// method value, so Go dereferences the receiver where it is written — a nil store
+// would panic here for every account, not just the bot ones that need it.
 func (s *HistoryService) botAwareDisplayName(ctx context.Context, engName, chineseName, account string) string {
-	name := displayfmt.CombineWithFallback(engName, chineseName, account)
-	if pkgmodel.IsBot(account) {
-		if appName, err := s.apps.AppNameByAccount(ctx, account); err != nil {
-			slog.WarnContext(ctx, "app name lookup failed, using composed name", "account", account, "error", err)
-		} else if appName != "" {
-			name = appName
-		}
+	var lookup preview.AppNameLookup
+	if s.apps != nil {
+		lookup = s.apps.AppNameByAccount
 	}
-	return name
+	return preview.BotAwareDisplayName(ctx, lookup, engName, chineseName, account)
 }

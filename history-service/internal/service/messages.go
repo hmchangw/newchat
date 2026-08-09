@@ -638,20 +638,35 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 	}, nil
 }
 
-// previewAfterMutation resolves the room's current last-eligible preview (same walk as
-// subscription.list) to carry on an edit/delete fan-out. Hidden thread replies (TShow==false)
-// never appear in the room timeline, so they're skipped — clients tell those apart via the
-// event's threadParentMessageId and drive the room preview themselves. TShow==true replies do
-// appear in the room, so they still get a preview. nil for a hidden thread reply, when the room
-// has no eligible message, or on a read error.
+// previewAfterMutation resolves the room's current last-eligible preview (the same
+// walk as subscription.list), both to carry on the edit/delete fan-out and to refresh
+// the stored copy. Bypasses the preview cache so a mutation always sees fresh state.
+// Hidden thread replies (TShow==false) never appear in the room timeline and are
+// skipped; clients drive those themselves off threadParentMessageId.
+//
+// The write happens here rather than riding the canonical event because a mutation is
+// invisible to the freshness check: editing or deleting the preview message does not
+// change lastMsgId, so nothing else would ever invalidate the memoized copy.
 func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
 	if msg.ThreadParentID != "" && !msg.TShow {
 		return nil
 	}
-	if preview, ok := s.roomLastPreviewMessage(c, roomID, nil, at); ok {
-		return &preview
+	w := s.roomLastPreviewMessage(c, roomID, nil, at)
+	switch w.State {
+	case previewFound:
+		s.storePreview(c, roomID, "mutation", &w, at.UnixMilli())
+		return &w.Preview
+	case previewEmpty:
+		// Walk completed with no eligible survivor, so the stored preview is
+		// definitively wrong. A degraded walk never reaches here.
+		if err := s.rooms.ClearPreview(c, roomID, at.UnixMilli()); err != nil {
+			slog.WarnContext(c, "preview clear after mutation failed", "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(c), "error", err)
+		}
+		return nil
+	default: // previewDegraded — a survivor may still exist; clearing would lose it
+		return nil
 	}
-	return nil
 }
 
 // publishCanonicalBestEffort publishes a canonical event; failures are logged and swallowed (Cassandra is source of truth).
