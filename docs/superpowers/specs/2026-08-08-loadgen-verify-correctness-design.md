@@ -150,9 +150,17 @@ be fully covered.
 
 ### 6.0 Probe-room-first activation
 
-1. Select `--probe-rooms` rooms from the eligible bands (small and medium;
-   see §6.1 for why large rooms are excluded), deterministically from
-   `--seed`.
+1. Select `--probe-rooms` rooms from the eligible bands — **DM, small, and
+   medium** — deterministically from `--seed`. Large rooms are excluded
+   (§6.1).
+
+   DM rooms are mandatory in the mix, not optional: they are the only band
+   that broadcasts on the per-user lane, and §7.3 establishes that lane as
+   the only place the leakage check (`O ⊆ E`) is meaningful. A probe-room
+   set without DMs would leave `unexpected_recipient` permanently
+   unexercised. Selection therefore takes a fixed proportion from each
+   band (default ⅓ DM, ⅓ small, ⅓ medium) rather than sampling the bands
+   uniformly at random, so no seed can produce a DM-free set.
 2. Force the **union of their members** into the direct pool. This set is
    complete by construction.
 3. Add `--reserve-users` **floaters** to the direct pool — users in no
@@ -351,6 +359,9 @@ real, system-controlled defect and `unexpected_recipient` is meaningful.
 **Therefore:** `O ⊆ E` is asserted on the per-user lane only. On the room
 lane, membership correctness is verified through the authorization path
 instead (§9.1), which is what the system actually controls.
+
+This is why DM rooms are a mandatory share of the probe-room mix (§6.0
+step 1) — without them the leakage check has no lane to run on.
 
 ## 8. Persistence Readback
 
