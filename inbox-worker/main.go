@@ -282,7 +282,8 @@ func (s *mongoInboxStore) UpdateSubscriptionMute(ctx context.Context, roomID, ac
 // UpdateSubscriptionFavorite sets favorite by (roomID, account) under a
 // favoriteUpdatedAt guard so an out-of-order or duplicate toggle cannot regress
 // favorite state. Missing-sub and guard-rejected events both leave MatchedCount
-// 0 and are silent no-ops.
+// 0 and are silent no-ops. Mirrors the origin toggle's section clear: turning
+// favorite off also drops sectionId/sectionOrder when they're "favorites".
 func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID, account string, favorite bool, favoriteUpdatedAt time.Time) error {
 	filter := bson.M{
 		"roomId":    roomID,
@@ -292,7 +293,14 @@ func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID
 			bson.M{"favoriteUpdatedAt": bson.M{"$lt": favoriteUpdatedAt}},
 		},
 	}
-	update := bson.M{"$set": bson.M{"favorite": favorite, "favoriteUpdatedAt": favoriteUpdatedAt}}
+	set := bson.M{"favorite": favorite, "favoriteUpdatedAt": favoriteUpdatedAt}
+	var update any = bson.M{"$set": set}
+	if !favorite {
+		clearFavSection := bson.M{"$eq": bson.A{"$sectionId", model.SectionFavorites}}
+		set["sectionId"] = bson.M{"$cond": bson.A{clearFavSection, "$$REMOVE", "$sectionId"}}
+		set["sectionOrder"] = bson.M{"$cond": bson.A{clearFavSection, "$$REMOVE", "$sectionOrder"}}
+		update = mongo.Pipeline{bson.D{{Key: "$set", Value: set}}}
+	}
 	res, err := s.subCol.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return fmt.Errorf("update subscription favorite for %q in room %q: %w", account, roomID, err)
@@ -306,7 +314,9 @@ func (s *mongoInboxStore) UpdateSubscriptionFavorite(ctx context.Context, roomID
 // UpdateSubscriptionSection sets sectionId+sectionOrder (or clears both when
 // sectionID==nil, a remove) by (roomID, account) under a sectionUpdatedAt guard so
 // an out-of-order or duplicate move cannot regress. A guard-rejected event is a
-// silent no-op; a missing sub NAKs so it retries after the sub replicates.
+// silent no-op; a missing sub NAKs so it retries after the sub replicates. Mirrors
+// favorite alongside, same as the origin write: true only when sectionID ==
+// "favorites", false otherwise (including a remove).
 func (s *mongoInboxStore) UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error {
 	filter := bson.M{
 		"roomId":    roomID,
@@ -319,11 +329,17 @@ func (s *mongoInboxStore) UpdateSubscriptionSection(ctx context.Context, roomID,
 	var update bson.M
 	if sectionID == nil {
 		update = bson.M{
-			"$set":   bson.M{"sectionUpdatedAt": updatedAt},
+			"$set":   bson.M{"sectionUpdatedAt": updatedAt, "favorite": false, "favoriteUpdatedAt": updatedAt},
 			"$unset": bson.M{"sectionId": "", "sectionOrder": ""},
 		}
 	} else {
-		update = bson.M{"$set": bson.M{"sectionId": *sectionID, "sectionOrder": order, "sectionUpdatedAt": updatedAt}}
+		update = bson.M{"$set": bson.M{
+			"sectionId":         *sectionID,
+			"sectionOrder":      order,
+			"sectionUpdatedAt":  updatedAt,
+			"favorite":          *sectionID == model.SectionFavorites,
+			"favoriteUpdatedAt": updatedAt,
+		}}
 	}
 	res, err := s.subCol.UpdateOne(ctx, filter, update)
 	if err != nil {

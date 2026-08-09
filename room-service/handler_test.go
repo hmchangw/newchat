@@ -6075,6 +6075,49 @@ func TestHandler_FavoriteToggle_CorePublishFailureIsNonFatal(t *testing.T) {
 // needRebalance path: RebalanceSection renumbers every sibling in the
 // section, so moveChat must fan out one section_moved subscription.update
 // (+ cross-site federation event) per rewritten row, not just the moved one.
+// TestHandler_MoveChat_RejectsNonFavoriteBuiltin locks the moveChat gate: every
+// built-in EXCEPT favorites is still rejected before any store call.
+func TestHandler_MoveChat_RejectsNonFavoriteBuiltin(t *testing.T) {
+	for _, id := range []string{model.SectionApps, model.SectionTeams, model.SectionChats} {
+		t.Run(id, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl) // no EXPECT() calls: must reject before touching the store
+			h := &Handler{store: store, siteID: "site-a"}
+
+			sectionID := id
+			_, err := h.moveChat(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MoveChatRequest{SectionID: &sectionID})
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestHandler_MoveChat_AllowsFavorites is the mirror: "favorites" is a built-in
+// id but must pass the gate and reach the normal store path like any custom
+// section (favorite-flag mirroring itself lives in the store layer).
+func TestHandler_MoveChat_AllowsFavorites(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		ComputeSectionOrder(gomock.Any(), "alice", model.SectionFavorites, "", "").
+		Return(1.0, false, nil)
+	store.EXPECT().
+		MoveSubscriptionSection(gomock.Any(), "r1", "alice", gomock.Any(), 1.0, gomock.Any()).
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", SiteID: "site-a", SectionId: strPtr(model.SectionFavorites), SectionOrder: 1, Favorite: true}, nil)
+	store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
+
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishCore: func(context.Context, string, []byte) error { return nil },
+	}
+
+	sectionID := model.SectionFavorites
+	resp, err := h.moveChat(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MoveChatRequest{SectionID: &sectionID})
+	require.NoError(t, err)
+	require.NotNil(t, resp.SectionID)
+	assert.Equal(t, model.SectionFavorites, *resp.SectionID)
+}
+
 func TestHandler_MoveChat_Rebalance_PublishesAndFederatesAllRows(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
