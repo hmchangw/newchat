@@ -44,16 +44,6 @@ type RoomRenamedSysData struct {
 	ByAccount string `json:"byAccount" bson:"byAccount"`
 }
 
-// RoomRestrictedSysData is the JSON payload stored in Message.SysMsgData
-// for a room_restricted system message — emitted when room.restricted or
-// room.externalAccess flip.
-type RoomRestrictedSysData struct {
-	Restricted     bool   `json:"restricted"             bson:"restricted"`
-	ExternalAccess bool   `json:"externalAccess"         bson:"externalAccess"`
-	ByAccount      string `json:"byAccount"              bson:"byAccount"`
-	OwnerAccount   string `json:"ownerAccount,omitempty" bson:"ownerAccount,omitempty"`
-}
-
 // TeamsMeetStartedSysData is the JSON payload stored in Message.SysMsgData for
 // a teams_meet_started system message — emitted when a Microsoft Teams online
 // meeting is created for a room. It is also the read-back source the meetings

@@ -268,6 +268,34 @@ func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionRoles(ctx, account, room
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionRoles", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionRoles), ctx, account, roomID, roles, rolesUpdatedAt)
 }
 
+// UpdateSubscriptionSection mocks base method.
+func (m *MockInboxStore) UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateSubscriptionSection", ctx, roomID, account, sectionID, order, updatedAt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateSubscriptionSection indicates an expected call of UpdateSubscriptionSection.
+func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionSection(ctx, roomID, account, sectionID, order, updatedAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateSubscriptionSection", reflect.TypeOf((*MockInboxStore)(nil).UpdateSubscriptionSection), ctx, roomID, account, sectionID, order, updatedAt)
+}
+
+// UpdateUserChatlist mocks base method.
+func (m *MockInboxStore) UpdateUserChatlist(ctx context.Context, account string, chatlist *model.ChatlistState, updatedAt int64) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateUserChatlist", ctx, account, chatlist, updatedAt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateUserChatlist indicates an expected call of UpdateUserChatlist.
+func (mr *MockInboxStoreMockRecorder) UpdateUserChatlist(ctx, account, chatlist, updatedAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserChatlist", reflect.TypeOf((*MockInboxStore)(nil).UpdateUserChatlist), ctx, account, chatlist, updatedAt)
+}
+
 // UpdateUserSettings mocks base method.
 func (m *MockInboxStore) UpdateUserSettings(ctx context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error {
 	m.ctrl.T.Helper()

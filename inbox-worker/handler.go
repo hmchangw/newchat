@@ -95,6 +95,17 @@ type InboxStore interface {
 	// full post-update settings from the origin site, guarded by settingsUpdatedAt so an
 	// out-of-order or duplicate delivery can't regress. A missing user is a logged no-op.
 	UpdateUserSettings(ctx context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error
+	// UpdateUserChatlist replaces the local users doc's chatlist sub-document with the
+	// full post-update state from the origin site, guarded by chatlistUpdatedAt so an
+	// out-of-order or duplicate delivery can't regress. A missing user is a logged no-op.
+	// updatedAt is unix-millis (int64) — matches how user-service writes
+	// chatlistUpdatedAt (mongorepo/users.go), unlike the other Update* methods here
+	// which take time.Time.
+	UpdateUserChatlist(ctx context.Context, account string, chatlist *model.ChatlistState, updatedAt int64) error
+	// UpdateSubscriptionSection sets sectionId+sectionOrder (or clears both when
+	// sectionID==nil) on (roomID, account), guarded by sectionUpdatedAt so an
+	// out-of-order or duplicate move can't regress. A missing sub NAKs for retry.
+	UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error
 }
 
 // badgeCache is the consumer-defined interface for the thread-unread badge's
@@ -161,6 +172,10 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleUserStatusUpdated(ctx, &evt)
 	case model.InboxUserSettingsUpdated:
 		return h.handleUserSettingsUpdated(ctx, &evt)
+	case model.InboxUserChatlistUpdated:
+		return h.handleUserChatlistUpdated(ctx, &evt)
+	case model.InboxSubscriptionSectionMoved:
+		return h.handleSubscriptionSectionMoved(ctx, &evt)
 	default:
 		slog.Warn("unknown event type, skipping", "type", evt.Type)
 		return nil
@@ -486,6 +501,32 @@ func (h *Handler) handleUserSettingsUpdated(ctx context.Context, evt *model.Inbo
 	}
 	if err := h.store.UpdateUserSettings(ctx, e.Account, &e.Settings, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update user settings for %q: %w", e.Account, err)
+	}
+	return nil
+}
+
+// handleUserChatlistUpdated mirrors a cross-site chatlist change onto the local users doc,
+// guarded by the event Timestamp so an out-of-order or duplicate delivery can't regress.
+func (h *Handler) handleUserChatlistUpdated(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.UserChatlistUpdated
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal user_chatlist_updated payload: %w", err)
+	}
+	if err := h.store.UpdateUserChatlist(ctx, e.Account, &e.Chatlist, e.Timestamp); err != nil {
+		return fmt.Errorf("update user chatlist for %q: %w", e.Account, err)
+	}
+	return nil
+}
+
+// handleSubscriptionSectionMoved mirrors a room-side section move onto the user's
+// home-site subscription, guarded by sectionUpdatedAt (the event Timestamp).
+func (h *Handler) handleSubscriptionSectionMoved(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.SubscriptionSectionMovedEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal subscription_section_moved payload: %w", err)
+	}
+	if err := h.store.UpdateSubscriptionSection(ctx, e.RoomID, e.Account, e.SectionID, e.SectionOrder, time.UnixMilli(e.Timestamp).UTC()); err != nil {
+		return fmt.Errorf("update subscription section for %q in room %q: %w", e.Account, e.RoomID, err)
 	}
 	return nil
 }

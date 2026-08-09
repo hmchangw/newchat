@@ -29,6 +29,10 @@ import (
 )
 
 type config struct {
+	// Mode selects which stream/consumer this pod binds: "default" runs the live
+	// .created feed off MESSAGES-CANONICAL; "teams" runs the Teams-migration batch
+	// feed off MESSAGES-TEAMS. Two deploys of the same binary, gated by env only.
+	Mode               string                  `env:"MODE"                 envDefault:"default"`
 	NatsURL            string                  `env:"NATS_URL,required"`
 	NatsCredsFile      string                  `env:"NATS_CREDS_FILE"      envDefault:""`
 	SiteID             string                  `env:"SITE_ID,required"`
@@ -65,6 +69,11 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+
+	if cfg.Mode != "default" && cfg.Mode != "teams" {
+		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
+		os.Exit(1)
+	}
 
 	if cfg.MessageBucketHours < 1 {
 		slog.Error("invalid config", "MESSAGE_BUCKET_HOURS", cfg.MessageBucketHours)
@@ -156,14 +165,17 @@ func main() {
 		return nil
 	})
 
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
 		os.Exit(1)
 	}
 
-	canonicalCfg := stream.MessagesCanonical(cfg.SiteID)
+	streamName := stream.MessagesCanonical(cfg.SiteID).Name
+	if cfg.Mode == "teams" {
+		streamName = stream.MessagesTeams(cfg.SiteID).Name
+	}
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, canonicalCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamName, buildConsumerConfig(cfg.Consumer, cfg.Mode, cfg.SiteID))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -178,11 +190,11 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	// Teams migration shares this one durable consumer (both .created and
-	// .teams.batch on the canonical stream — reused rather than a second durable
-	// for a one-shot job). Its batches are transformed + written straight to
-	// Cassandra — never re-published, so broadcast/notification stay silent;
-	// search-sync indexes off the same .teams.batch subject.
+	// Built unconditionally in both modes: the consumer filter already scopes each
+	// pod to its own mode's subject, so a default-mode pod never sees teamsBatchSubj
+	// and this handler just sits unused. Batches are transformed + written straight
+	// to Cassandra — never re-published, so broadcast/notification stay silent;
+	// search-sync indexes off the same subject on its own MESSAGES-TEAMS consumer.
 	// The migration only runs against the central site, so cfg.SiteID here is the
 	// central site — the same one HR-sync's own users.upsert publishes to.
 	teamsMigration := newTeamsBatchHandler(store, newMongoHRIdentityStore(db), cfg.SiteID,
@@ -196,7 +208,7 @@ func main() {
 			}
 			return nil
 		})
-	teamsBatchSubj := subject.MsgCanonicalTeamsBatch(cfg.SiteID)
+	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
 
 	go func() {
 		for {
@@ -270,17 +282,19 @@ func main() {
 	)
 }
 
-// buildConsumerConfig binds the single message-worker durable to the two subjects
-// it processes on the canonical stream: the live .created feed and the one-time
-// Teams migration .teams.batch feed (handler dispatches by subject). .updated and
+// buildConsumerConfig returns the durable consumer config for the given mode.
+// default mode binds only the live .created feed on MESSAGES-CANONICAL (.updated/
 // .deleted are excluded — history-service already wrote Cassandra synchronously for
-// those, so re-processing would duplicate writes.
-func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
+// those, so re-processing would duplicate writes). teams mode binds only the Teams
+// migration batch subject on MESSAGES-TEAMS, its own durable.
+func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
-	cc.Durable = "message-worker"
-	cc.FilterSubjects = []string{
-		subject.MsgCanonicalCreated(siteID),
-		subject.MsgCanonicalTeamsBatch(siteID),
+	if mode == "teams" {
+		cc.Durable = "message-worker-teams"
+		cc.FilterSubjects = []string{subject.MsgTeamsCanonicalBatch(siteID)}
+		return cc
 	}
+	cc.Durable = "message-worker"
+	cc.FilterSubjects = []string{subject.MsgCanonicalCreated(siteID)}
 	return cc
 }

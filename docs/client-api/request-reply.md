@@ -249,9 +249,10 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `DELETE /v1/admin/sessions?account=<account>` | synchronous HTTP | Revoke all of an account's sessions (§9.7). |
 | `DELETE /v1/admin/sessions/:sessionId?account=<account>` | synchronous HTTP | Revoke a single session (§9.8). |
 | `GET /v1/admin/audit` | synchronous HTTP | List the audit log (§9.9). |
+| `POST /v1/admin/rooms/:roomId/onduty` | synchronous HTTP | Toggle a channel's on-duty state: maps the boolean onto `restricted` + `externalAccess` via room-service's restrict RPC, with `ownerAccount` required when turning on. Emits a `room_restricted` room event; no system message, so nothing is displayed (§9.12). |
 | `POST /v1/password/change` | synchronous HTTP | Logged-in admin's self-service password change (§9.11). |
 
-**Emits:** `None — HTTP-only.`
+**Emits:** None directly — HTTP-only. `POST /v1/admin/rooms/:roomId/onduty` makes room-service publish [`room_restricted`](events.md#room_restricted-roomrestrictedroomevent) on `chat.room.{roomID}.event`.
 
 ---
 
@@ -271,6 +272,7 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read` | [Mark Thread as Read](#mark-thread-as-read) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.mute.toggle` | [Toggle Mute](#toggle-mute) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.favorite.toggle` | [Toggle Favorite](#toggle-favorite) |
+| `chat.user.{account}.request.room.{roomID}.{siteID}.chat.move` | [Move Chat to Section](#move-chat-to-section) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.open` | [Open Room](#open-room) |
 | `chat.user.{account}.request.room.{roomID}.{siteID}.message.read-receipt` | [Read Message Receipts](#read-message-receipts) |
 | `chat.user.{account}.request.orgs.{orgID}.{siteID}.members` | [List Org Members](#list-org-members) |
@@ -364,7 +366,7 @@ available (no app record / disabled assistant), user/org not found.
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
 ```
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject, embedding the room object incl. the room key for channels; no separate `room.key` event), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.add"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — one per newly subscribed member, bots included on their encoded per-user subject, embedding the room object incl. the room key for channels; no separate `room.key` event), [`member_added`](events.md#member_added-memberaddevent) (on `chat.room.{roomID}.event.member`, or `chat.local.room.{roomID}.event.member` for same-site rooms by `crossSite`), `new_message` system message (`members_added`) → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -395,7 +397,7 @@ Synchronous: neither/both of `account`/`orgId` set; requester not an owner; targ
 last **human** member (bots don't count, and a bot target skips the guard); org member
 cannot leave individually.
 
-**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed account, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`), `new_message` system message → [events.md](events.md#new_message-roomevent)
+**Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed account, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`, or `chat.local.room.{roomID}.event.member` for same-site rooms by `crossSite`), `new_message` system message → [events.md](events.md#new_message-roomevent)
 
 ---
 
@@ -637,6 +639,35 @@ clients must debounce. No request body required.
 `"only room members can list members"`, `"invalid favorite-toggle subject: …"`.
 
 **Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "favorite_toggled"` — to the requester for other sessions) → [events.md](events.md)
+
+---
+
+### Move Chat to Section
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.chat.move`
+**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Synchronous RPC. Sets the subscription's `sectionId` + fractional `sectionOrder`, or
+removes it from its section (`sectionId: null`). Membership lives on the subscription,
+mirroring favorite. Full detail + read model: [Chatlist Sections](../client-api.md#chatlist-sections).
+
+#### Request body
+
+| Field | Type | Notes |
+|---|---|---|
+| `sectionId` | string \| null | Custom section to move into; `null` or omitting the field both remove it (indistinguishable at the wire layer). A built-in id (`favorites`/`apps`/`teams`/`chats`) is rejected. |
+| `afterRoomId` | string | Optional. Place just after this room; omit to append. Mutually exclusive with `beforeRoomId`. |
+| `beforeRoomId` | string | Optional. Place just before this room (top-insertion at the section head). Mutually exclusive with `afterRoomId`. |
+
+#### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `sectionId` | string | Omitted on remove. |
+| `sectionOrder` | number | Omitted on remove. |
+
+**Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "section_moved"`) → [events.md](events.md)
 
 ---
 
@@ -1428,6 +1459,12 @@ no other endpoint emits a client-facing event.
 | `chat.user.{account}.request.user.{siteID}.status.set` | [status.set](#statusset) |
 | `chat.user.{account}.request.user.{siteID}.settings.get` | [settings.get](#settingsget) |
 | `chat.user.{account}.request.user.{siteID}.settings.set` | [settings.set](#settingsset) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.get` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.create` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.rename` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.delete` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.reorder` | [Chatlist Sections](../client-api.md#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.setsortmode` | [Chatlist Sections](../client-api.md#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.subscription.list` | [subscription.list](#subscriptionlist) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getChannels` | [subscription.getChannels](#subscriptiongetchannels) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getDM` | [subscription.getDM](#subscriptiongetdm) |
@@ -2099,7 +2136,7 @@ with a `TranslateResult`, or the standard error envelope on failure.
 
 #### Error response
 
-Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `internal` for a backend failure. See [../client-api.md §3.6](../client-api.md#36-translation-service).
+Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `unavailable` / `upstream_unavailable` when the third-party backend returns a 5XX or is unreachable; `internal` for other backend failures. See [../client-api.md §3.6](../client-api.md#36-translation-service).
 
 **Emits:** none — the reply is the only output.
 

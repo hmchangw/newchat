@@ -12,6 +12,7 @@ CREATE TYPE IF NOT EXISTS "Card"(
 #### CardAction
 ```cql
 CREATE TYPE IF NOT EXISTS "CardAction"(
+  bot_username TEXT,    // target bot for the tcard_execute callback (client-supplied on the cardAction payload); optional
   card_id TEXT,
   card_tmid TEXT,
   data BLOB,

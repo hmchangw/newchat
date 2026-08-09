@@ -38,6 +38,7 @@ func (f *fakeStreamManager) Stream(_ context.Context, name string) (o11ynats.Str
 func TestBootstrapStreams(t *testing.T) {
 	tests := []struct {
 		name        string
+		mode        string
 		enabled     bool
 		existing    map[string]bool
 		failOn      string
@@ -47,35 +48,53 @@ func TestBootstrapStreams(t *testing.T) {
 	}{
 		{
 			name:        "disabled - verifies existing stream",
+			mode:        "default",
 			enabled:     false,
-			existing:    map[string]bool{"MESSAGES_CANONICAL_test": true},
+			existing:    map[string]bool{"MESSAGES-CANONICAL-test": true},
 			wantCreated: nil,
 		},
 		{
 			name:       "disabled - fails when stream missing",
+			mode:       "default",
 			enabled:    false,
 			existing:   map[string]bool{},
-			wantErrSub: "verify MESSAGES_CANONICAL stream",
+			wantErrSub: "verify MESSAGES-CANONICAL-test stream",
 		},
 		{
-			name:        "enabled - creates MESSAGES_CANONICAL",
+			name:        "enabled - creates MESSAGES-CANONICAL",
+			mode:        "default",
 			enabled:     true,
 			existing:    map[string]bool{},
-			wantCreated: []string{"MESSAGES_CANONICAL_test"},
+			wantCreated: []string{"MESSAGES-CANONICAL-test"},
 		},
 		{
-			name:       "enabled - wraps MESSAGES_CANONICAL creator error",
+			name:       "enabled - wraps MESSAGES-CANONICAL creator error",
+			mode:       "default",
 			enabled:    true,
 			existing:   map[string]bool{},
-			failOn:     "MESSAGES_CANONICAL_test",
+			failOn:     "MESSAGES-CANONICAL-test",
 			failErr:    errors.New("nats down"),
-			wantErrSub: "create MESSAGES_CANONICAL stream",
+			wantErrSub: "create MESSAGES-CANONICAL-test stream",
+		},
+		{
+			name:        "teams mode disabled - verifies MESSAGES-TEAMS",
+			mode:        "teams",
+			enabled:     false,
+			existing:    map[string]bool{"MESSAGES-TEAMS-test": true},
+			wantCreated: nil,
+		},
+		{
+			name:        "teams mode enabled - creates MESSAGES-TEAMS",
+			mode:        "teams",
+			enabled:     true,
+			existing:    map[string]bool{},
+			wantCreated: []string{"MESSAGES-TEAMS-test"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeStreamManager{failOn: tc.failOn, failErr: tc.failErr, existing: tc.existing}
-			err := bootstrapStreams(context.Background(), fake, "test", tc.enabled)
+			err := bootstrapStreams(context.Background(), fake, "test", tc.mode, tc.enabled)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)

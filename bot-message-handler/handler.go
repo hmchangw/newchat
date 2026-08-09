@@ -182,7 +182,7 @@ func (h *handler) handleSendRoom(c *natsrouter.Context, req BotSendRoomRequest) 
 	return &BotSendResponse{Message: msg}, nil
 }
 
-// publishCanonical wraps msg in the shared MessageEvent envelope and publishes to BOT_MESSAGES_CANONICAL.
+// publishCanonical wraps msg in the shared MessageEvent envelope and publishes to BOT-MESSAGES-CANONICAL.
 func (h *handler) publishCanonical(ctx context.Context, msg *model.Message) error {
 	evt := model.MessageEvent{
 		Event:     model.EventCreated,

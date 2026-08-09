@@ -16,7 +16,7 @@ to the automated fetcher; claims resting on search-summary extracts are flagged.
 | Rank | Risk | Why it matters here | Action |
 |------|------|--------------------|--------|
 | 1 | **Federation durability is split: only consumer-originated events have an implicit outbox** | Cross-site events are a blocking JetStream publish into the *remote* site's INBOX over a gateway; streams never cross gateways. Events published from a **JetStream consumer** (messages, room membership) get a free outbox — a failed PubAck Naks the source message, which redelivers from the durable source stream. Events published from a **request/reply handler** (subscription read/mute/favorite, role_updated, room_restricted in room-service) have **no source stream to redeliver**: the local Mongo write commits, the inline publish fails, the client gets an error, and local/remote silently diverge. | Consumer paths: raise `MaxDeliver`+BackOff so a partition delays rather than drops (and pin source streams R3+file). Request/reply paths: route through a durable local stream + async federating consumer. |
-| 2 | **Stream replica count (R1 vs R3) is not set in code** | `pkg/stream/stream.go` defines only `Name + Subjects`. `MESSAGES_CANONICAL` (single source of truth) and `INBOX` (federation ingress) **must be R3 + file storage** in prod, but nothing in the repo enforces it — dev bootstrap is minimal (effectively R1). | Verify production IaC pins R3 + file storage for these streams; consider `sync_interval` posture. |
+| 2 | **Stream replica count (R1 vs R3) is not set in code** | `pkg/stream/stream.go` defines only `Name + Subjects`. `MESSAGES-CANONICAL` (single source of truth) and `INBOX` (federation ingress) **must be R3 + file storage** in prod, but nothing in the repo enforces it — dev bootstrap is minimal (effectively R1). | Verify production IaC pins R3 + file storage for these streams; consider `sync_interval` posture. |
 | 3 | **MongoDB write/read concern uses driver defaults (untuned)** | Rooms/subscriptions are control-plane truth; a `w:1`-class write can be rolled back on primary stepdown. The code sets no explicit concern. | Pin `w:majority` + journaling as the connection-string default; use `majority` read concern on authz/membership reads. |
 | 4 | **Security patch hygiene** | 2024–2025 brought a critical NATS authz-bypass (CVSS 9.6), a critical Redis/Valkey Lua RCE (CVE-2025-49844), and an exploited MongoDB info-leak (MongoBleed). | Pin patched builds (versions below). |
 | 5 | **Cassandra read-side availability + repair discipline** | History-only and off the send path, so blast radius is bounded — but LocalQuorum hard-fails reads on quorum loss, and repair must run inside `gc_grace_seconds`. | Add a gocql retry/speculative policy; schedule repair; keep bucket sizing tight. |
@@ -43,7 +43,7 @@ Concrete, citable facts that ground the analysis below:
   Dedup keys are built by `pkg/natsutil/canonical_dedup.go` (`CanonicalDedupID`) and `natsutil.InboxDedupID`.
   **The origin-side durable buffer is the source stream itself** for events published inside a JetStream consumer:
   a failed publish returns an error → the handler Naks → the message redelivers from the durable source stream and
-  the publish retries. This holds for `message-worker` (consumes `MESSAGES_CANONICAL`) and `room-worker` (consumes
+  the publish retries. This holds for `message-worker` (consumes `MESSAGES-CANONICAL`) and `room-worker` (consumes
   `ROOMS`; external publish error returned at `room-worker/handler.go:514`). It does **not** hold for `room-service`
   cross-site publishes (`subscription_read`, `thread_read`, `mute_toggled`, `favorite_toggled`, `role_updated`,
   `room_restricted`), which are emitted inline from request/reply handlers (e.g. `room-service/handler.go:2035`):
@@ -55,7 +55,7 @@ Concrete, citable facts that ground the analysis below:
 
 | Cross-site event | Publisher | Origin context | Implicit outbox? |
 |---|---|---|---|
-| message persist / thread-subscription | `message-worker` | consumes `MESSAGES_CANONICAL` (JS) | ✅ yes (Nak → redeliver) |
+| message persist / thread-subscription | `message-worker` | consumes `MESSAGES-CANONICAL` (JS) | ✅ yes (Nak → redeliver) |
 | `member_added` / `member_removed` | `room-worker` | consumes `ROOMS` (JS) | ✅ yes |
 | `subscription_read`, `thread_read`, `mute_toggled`, `favorite_toggled` | `room-service` | request/reply handler | ❌ no — client-retry only |
 | `role_updated`, `room_restricted` | `room-service` | request/reply handler | ❌ no — client-retry only |
@@ -66,7 +66,7 @@ Concrete, citable facts that ground the analysis below:
   state (`inbox-worker/main.go`).
 - **Cassandra** (`pkg/cassutil/cass.go`): `LocalQuorum`, 10s query timeout, `TokenAwareHostPolicy`, 8 conns/host,
   **no explicit retry policy** (gocql default = none). Message persistence is **async** via `message-worker`
-  consuming `MESSAGES_CANONICAL` (idempotent `UnloggedBatch`), so **the send path does not block on Cassandra**.
+  consuming `MESSAGES-CANONICAL` (idempotent `UnloggedBatch`), so **the send path does not block on Cassandra**.
   Bucketing via `pkg/msgbucket`, `MESSAGE_BUCKET_HOURS` default 72.
 - **Valkey** (`pkg/valkeyutil`, `pkg/roommetacache`): **best-effort cache only**, cluster client, used by
   message-gatekeeper / broadcast-worker (L2 room-meta cache) and search-service (restricted-rooms cache). Every
@@ -127,7 +127,7 @@ Concrete, citable facts that ground the analysis below:
 - **Idempotency is already designed in** (`CanonicalDedupID` + `WithMsgID`, server dedup window ~2 min; idempotent
   Cassandra `UnloggedBatch` keyed on message ID). Keep every INBOX/canonical consumer idempotent — publish retries
   after an ambiguous PubAck timeout will double-deliver.
-- **Pin `MESSAGES_CANONICAL` and `INBOX` to R3 + file storage in IaC** (the code won't do it for you), and decide a
+- **Pin `MESSAGES-CANONICAL` and `INBOX` to R3 + file storage in IaC** (the code won't do it for you), and decide a
   `sync_interval` posture for them — `always` trades throughput for durability on the streams that must not lose
   data. Treat rolling restarts/multi-node kills as real data-loss risk given the open RAFT issues; pin nats-server
   ≥ 2.10.27 / ≥ 2.11.1 and vet the 2.12.x open issues before adopting 2.12 in prod.
@@ -244,7 +244,7 @@ Concrete, citable facts that ground the analysis below:
 - **Blast radius is read-side, not write-side.** Persistence is async via `message-worker` (canonical → idempotent
   `UnloggedBatch`), so a Cassandra outage does **not** block message-send. What degrades: **history reads** (the
   history path reads at LocalQuorum; ≥2 of 3 local replicas down → `UnavailableException`, surfaced fast by gocql's
-  no-retry default), and a **write-behind backlog** on `MESSAGES_CANONICAL` — *provided the worker Naks transient
+  no-retry default), and a **write-behind backlog** on `MESSAGES-CANONICAL` — *provided the worker Naks transient
   Cassandra errors (Unavailable/WriteTimeout) for redelivery and only Ack-poisons genuinely permanent ones* (the
   `errcode.Permanent` / `jobguard` convention is the right lever; confirm the timeout path Naks rather than panics).
 - **Add a non-default gocql retry/speculative-execution policy** for history reads + a graceful "history temporarily
@@ -323,14 +323,14 @@ Concrete, citable facts that ground the analysis below:
    (`subscription_read`/`thread_read`/`mute`/`favorite`/`role_updated`/`room_restricted`), which publish inline
    after the local Mongo commit with no source message to redeliver — route those through a durable local stream +
    async federating consumer. Run a **per-site JetStream domain** regardless.
-2. **Pin durability in IaC, not hope:** `MESSAGES_CANONICAL` + `INBOX` at **R3 + file storage**, chosen
+2. **Pin durability in IaC, not hope:** `MESSAGES-CANONICAL` + `INBOX` at **R3 + file storage**, chosen
    `sync_interval` posture; MongoDB **`w:majority` + journaling** as the default; gocql **retry/speculative policy**;
    Valkey **client timeouts**. Today these all rely on unstated defaults.
 3. **Patch the 2024–2025 CVEs:** nats-server ≥ 2.10.27/2.11.1; MongoDB ≥ 8.0.5 (MongoBleed); Valkey ≥ 8.1.4/8.0.6/
    7.2.11 (RediShell); Cassandra ≥ 5.0.3 (or 4.0.17+/4.1.8+).
 4. **Operational discipline:** Cassandra repair within `gc_grace_seconds`; MongoDB oplog sizing + lag alerts;
    serialize Cassandra DDL; avoid NATS rolling-restart/multi-kill choreography that the open RAFT issues punish;
-   monitor `MESSAGES_CANONICAL` consumer lag as the Cassandra-outage pressure gauge.
+   monitor `MESSAGES-CANONICAL` consumer lag as the Cassandra-outage pressure gauge.
 5. **Verify the worker error taxonomy:** confirm the message-worker Naks transient Cassandra/Mongo errors
    (Unavailable/WriteTimeout/stepdown) for redelivery and only `errcode.Permanent`-Acks genuinely poison messages —
    this is what converts a dependency outage into a recoverable backlog instead of data loss.

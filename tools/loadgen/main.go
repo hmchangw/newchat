@@ -600,18 +600,29 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 	owners := OwnersByRoom(&fixtures)
 	collector := NewMemberCollector(metrics, p.Name, injectMode)
 
-	e2Sub, err := nc.NatsConn().Subscribe(subject.RoomMemberEventWildcard(), func(m *nats.Msg) {
+	memberHandler := func(m *nats.Msg) {
 		roomID, accounts, ok := ParseMemberAddEvent(m.Data)
 		if !ok {
 			return
 		}
 		collector.RecordMemberEvent(roomID, accounts, time.Now())
-	})
-	if err != nil {
-		slog.Error("subscribe e2", "error", err)
-		return 1
 	}
-	defer func() { _ = e2Sub.Unsubscribe() }()
+	// Subscribe both lanes so member-event latency is measured regardless of
+	// ROOM_SUBJECT_MODE — a same-site room's events land on the local wildcard.
+	var e2Subs []*nats.Subscription
+	for _, global := range []bool{true, false} {
+		sub, err := nc.NatsConn().Subscribe(subject.RoomMemberEventWildcard(global), memberHandler)
+		if err != nil {
+			slog.Error("subscribe e2", "error", err)
+			return 1
+		}
+		e2Subs = append(e2Subs, sub)
+	}
+	defer func() {
+		for _, s := range e2Subs {
+			_ = s.Unsubscribe()
+		}
+	}()
 
 	var publisher MemberPublisher
 	var frontdoor *frontdoorMemberPublisher
@@ -811,18 +822,29 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	owners := OwnersByRoom(&fixtures)
 	collector := NewMemberCollector(metrics, p.Name, injectMode)
 
-	e2Sub, err := nc.NatsConn().Subscribe(subject.RoomMemberEventWildcard(), func(m *nats.Msg) {
+	memberHandler := func(m *nats.Msg) {
 		roomID, accounts, ok := ParseMemberAddEvent(m.Data)
 		if !ok {
 			return
 		}
 		collector.RecordMemberEvent(roomID, accounts, time.Now())
-	})
-	if err != nil {
-		slog.Error("subscribe e2", "error", err)
-		return 1
 	}
-	defer func() { _ = e2Sub.Unsubscribe() }()
+	// Subscribe both lanes so member-event latency is measured regardless of
+	// ROOM_SUBJECT_MODE — a same-site room's events land on the local wildcard.
+	var e2Subs []*nats.Subscription
+	for _, global := range []bool{true, false} {
+		sub, err := nc.NatsConn().Subscribe(subject.RoomMemberEventWildcard(global), memberHandler)
+		if err != nil {
+			slog.Error("subscribe e2", "error", err)
+			return 1
+		}
+		e2Subs = append(e2Subs, sub)
+	}
+	defer func() {
+		for _, s := range e2Subs {
+			_ = s.Unsubscribe()
+		}
+	}()
 
 	var publisher MemberPublisher
 	var frontdoor *frontdoorMemberPublisher

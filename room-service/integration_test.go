@@ -2844,6 +2844,117 @@ func TestMongoStore_ApplySubscriptionRestriction_StampsTimestamp(t *testing.T) {
 	assert.Equal(t, ts2.UnixMilli(), subTimeField(t, db, "r1", "alice", "restrictUpdatedAt").UnixMilli())
 }
 
+// seedRestrictRoom inserts one channel room's worth of subscriptions with mixed
+// roles and returns the seed so assertions can compare against it.
+func seedRestrictRoom(t *testing.T, db *mongo.Database, roomID string) []struct {
+	account string
+	roles   []model.Role
+} {
+	t.Helper()
+	seed := []struct {
+		account string
+		roles   []model.Role
+	}{
+		{account: "alice", roles: []model.Role{model.RoleOwner}},
+		{account: "bob", roles: []model.Role{model.RoleAdmin}},
+		{account: "carol", roles: []model.Role{model.RoleMember}},
+		{account: "dave", roles: []model.Role{model.RoleOwner, model.RoleMember}},
+	}
+	for i, s := range seed {
+		mustInsertSub(t, db, &model.Subscription{
+			ID:       idgen.GenerateUUIDv7(),
+			User:     model.SubscriptionUser{ID: fmt.Sprintf("u%d", i+1), Account: s.account},
+			RoomID:   roomID,
+			RoomType: model.RoomTypeChannel,
+			SiteID:   "site-a",
+			Roles:    s.roles,
+			JoinedAt: time.Now().UTC(),
+		})
+	}
+	return seed
+}
+
+// TestMongoStore_ApplySubscriptionRestriction_EmptyOwnerPreservesRoles covers the
+// branch the on-duty toggle takes. Restricting with no ownerAccount must write
+// both flags and leave every member's roles exactly as they were — including a
+// second owner and a multi-role subscription. The handler relies on this to
+// toggle duty without reshuffling who runs the room.
+func TestMongoStore_ApplySubscriptionRestriction_EmptyOwnerPreservesRoles(t *testing.T) {
+	db := testutil.MongoDB(t, "room-svc-restrict-keep-roles")
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	seed := seedRestrictRoom(t, db, "r1")
+
+	ts := time.Now().UTC()
+	require.NoError(t, store.ApplySubscriptionRestriction(ctx, "r1", true, true, "", ts))
+
+	for _, s := range seed {
+		got, err := store.GetSubscription(ctx, s.account, "r1")
+		require.NoError(t, err)
+		assert.Equal(t, s.roles, got.Roles, "%s: roles must survive a flags-only restrict", s.account)
+		// restricted/externalAccess are not in subscriptionReadProjection, so they
+		// must be read from the stored doc — the projected struct would report false
+		// whatever was written.
+		assert.True(t, subBoolField(t, db, "r1", s.account, "restricted"), "%s: restricted must be written", s.account)
+		assert.True(t, subBoolField(t, db, "r1", s.account, "externalAccess"), "%s: externalAccess must be written", s.account)
+	}
+	assert.Equal(t, ts.UnixMilli(), subTimeField(t, db, "r1", "alice", "restrictUpdatedAt").UnixMilli())
+}
+
+// The contrast to the test above, and the reason the on-duty caller must send an
+// empty ownerAccount rather than the room's current owner: naming an account
+// rewrites the whole room to that sole owner and demotes everyone else to plain
+// member — an existing admin included.
+func TestMongoStore_ApplySubscriptionRestriction_NamedOwnerRewritesRoles(t *testing.T) {
+	db := testutil.MongoDB(t, "room-svc-restrict-rewrite-roles")
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	seedRestrictRoom(t, db, "r1")
+
+	require.NoError(t, store.ApplySubscriptionRestriction(ctx, "r1", true, true, "bob", time.Now().UTC()))
+
+	bob, err := store.GetSubscription(ctx, "bob", "r1")
+	require.NoError(t, err)
+	assert.Equal(t, []model.Role{model.RoleOwner}, bob.Roles, "named account becomes sole owner")
+
+	for _, account := range []string{"alice", "carol", "dave"} {
+		got, err := store.GetSubscription(ctx, account, "r1")
+		require.NoError(t, err)
+		assert.Equal(t, []model.Role{model.RoleMember}, got.Roles, "%s: flattened to member by the rewrite", account)
+	}
+}
+
+// The rewrite branch refuses to run when the named owner has no subscription —
+// it would leave the room with zero owners. The flags-only branch has no such
+// guard; the handler's errOwnerAccountRequired check keeps callers out of it on
+// a false→true transition.
+func TestMongoStore_ApplySubscriptionRestriction_NamedOwnerNotSubscribed(t *testing.T) {
+	db := testutil.MongoDB(t, "room-svc-restrict-owner-missing")
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	seed := seedRestrictRoom(t, db, "r1")
+
+	err := store.ApplySubscriptionRestriction(ctx, "r1", true, true, "nonmember", time.Now().UTC())
+	require.ErrorIs(t, err, ErrOwnerNotSubscribed)
+
+	// Rejected before any write: roles untouched and the flag never written. The
+	// seed omits `restricted` entirely, so its absence — not a stored false — is
+	// what proves nothing was applied.
+	for _, s := range seed {
+		got, gErr := store.GetSubscription(ctx, s.account, "r1")
+		require.NoError(t, gErr)
+		assert.Equal(t, s.roles, got.Roles, "%s: roles must be untouched after a rejected restrict", s.account)
+
+		var doc bson.M
+		require.NoError(t, db.Collection("subscriptions").
+			FindOne(ctx, bson.M{"roomId": "r1", "u.account": s.account}).Decode(&doc))
+		assert.NotContains(t, doc, "restricted", "%s: no flag may be written when the owner is rejected", s.account)
+	}
+}
+
 func TestMongoStore_SetOwnerRole_Integration(t *testing.T) {
 	db := testutil.MongoDB(t, "room-svc-role")
 	store := NewMongoStore(db)
@@ -3295,7 +3406,7 @@ func TestMongoStore_EnsureIndexes_NewCompoundIndexes(t *testing.T) {
 	}
 }
 
-// setupRoomsStream creates the ROOMS_{siteID} JetStream stream and returns a JetStream
+// setupRoomsStream creates the ROOMS-{siteID} JetStream stream and returns a JetStream
 // client. The stream captures all chat.room.canonical.{siteID}.* events published by
 // the handler's publishToStream closure.
 func setupRoomsStream(t *testing.T, nc *nats.Conn, siteID string) jetstream.JetStream {
@@ -3474,7 +3585,7 @@ func TestIntegration_RoomRename(t *testing.T) {
 func TestIntegration_RoomRestricted(t *testing.T) {
 	const siteID = "site-restricted"
 
-	t.Run("admin syncs restricted state — sys message published + Mongo updated", func(t *testing.T) {
+	t.Run("admin syncs restricted state — Mongo updated, room not told", func(t *testing.T) {
 		db := testutil.MongoDB(t, "room-service-restricted")
 		store := NewMongoStore(db)
 		ctx := context.Background()
@@ -3489,7 +3600,7 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		t.Cleanup(func() { _ = handlerNC.Drain() })
 
 		// Capture publishes via the handler's stream-publish callback so we can
-		// assert the sys message lands without standing up the MESSAGES_CANONICAL
+		// assert the sys message lands without standing up the MESSAGES-CANONICAL
 		// stream just for this test.
 		type captured struct {
 			subj string
@@ -3571,19 +3682,17 @@ func TestIntegration_RoomRestricted(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, updatedRoom.Restricted)
 
-		// Sys message published to canonical messages stream.
+		// A restriction change is administrative, not room content: nothing reaches
+		// the canonical message stream, so the room is never told.
 		mu.Lock()
 		var sawSysMsg bool
 		for _, p := range pubs {
 			if p.subj == subject.MsgCanonicalCreated(siteID) {
 				sawSysMsg = true
-				var msgEvt model.MessageEvent
-				require.NoError(t, json.Unmarshal(p.data, &msgEvt))
-				assert.Equal(t, model.MessageTypeRoomRestricted, msgEvt.Message.Type)
 			}
 		}
 		mu.Unlock()
-		assert.True(t, sawSysMsg, "expected room_restricted sys message to be published")
+		assert.False(t, sawSysMsg, "a restriction change must not publish a sys message")
 	})
 
 	t.Run("non-admin requester is rejected", func(t *testing.T) {
@@ -4235,4 +4344,30 @@ func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testi
 	var bobRaw model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB1"}).Decode(&bobRaw))
 	assert.Equal(t, []string{"p9"}, bobRaw.ThreadUnread)
+}
+
+// RebalanceSection renumbers a section's rows spaced by 10, not 1, so later
+// midpoint inserts rarely exhaust the gap.
+func TestMongoStore_RebalanceSection_SpacesByTen(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	// Three chats in one section with collapsed near-zero orders (forces a renumber).
+	for i, rid := range []string{"r1", "r2", "r3"} {
+		mustInsertSub(t, db, &model.Subscription{
+			ID:           "s" + rid,
+			User:         model.SubscriptionUser{ID: "u" + rid, Account: "alice"},
+			RoomID:       rid,
+			SectionId:    strPtr("sec1"),
+			SectionOrder: float64(i) * 0.0001,
+		})
+	}
+
+	out, err := store.RebalanceSection(ctx, "alice", "sec1", time.Now())
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	for i := range out {
+		assert.Equal(t, float64((i+1)*10), out[i].SectionOrder, "row %d spaced by 10", i)
+	}
 }

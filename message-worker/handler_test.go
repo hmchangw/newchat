@@ -544,7 +544,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 
 // TestHandler_ProcessMessage_ThreadReply_PublishesBadgeEvent verifies that when
 // SaveThreadMessage returns a non-nil tcount (first write or redelivery recovery),
-// the handler calls publishThreadReplyEvent on the MESSAGES_CANONICAL stream.
+// the handler calls publishThreadReplyEvent on the MESSAGES-CANONICAL stream.
 func TestHandler_ProcessMessage_ThreadReply_PublishesBadgeEvent(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	parentCreatedAt := now.Add(-time.Hour)
@@ -602,7 +602,7 @@ func TestHandler_ProcessMessage_ThreadReply_PublishesBadgeEvent(t *testing.T) {
 	require.NoError(t, h.processMessage(context.Background(), data, false))
 
 	assert.Equal(t, subject.ServerBroadcastThreadTCount("site-a"), capturedSubj,
-		"badge event must be published via core NATS server-broadcast, not MESSAGES_CANONICAL")
+		"badge event must be published via core NATS server-broadcast, not MESSAGES-CANONICAL")
 	var badgeEvt model.MessageEvent
 	require.NoError(t, json.Unmarshal(capturedData, &badgeEvt))
 	assert.Equal(t, model.EventThreadReplyAdded, badgeEvt.Event)

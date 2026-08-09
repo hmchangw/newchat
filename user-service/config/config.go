@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // MongoConfig holds MongoDB connection settings (env prefix: MONGO_).
@@ -13,6 +15,9 @@ type MongoConfig struct {
 	DB       string `env:"DB"       envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
+	// ReadPreference routes staleness-tolerant reads to secondaries per read site;
+	// the client stays on primary for dedup/read-after-write.
+	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
 }
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
@@ -32,6 +37,10 @@ type Config struct {
 	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
 	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
 	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
+	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
+	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
+	// disables the cap (unbounded spawn).
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 	// OIDC settings for the SSO token vault — optional as a unit: unset OIDC_ISSUER_URL disables the endpoints; the rest is validated in Load.
 	OIDCIssuerURL string `env:"OIDC_ISSUER_URL" envDefault:""`
 	// OIDCAudiences must include the access-token `aud` — refresh re-verifies the minted
@@ -75,6 +84,9 @@ func Load() (Config, error) {
 	if cfg.DefaultAppsLimit > cfg.MaxAppsLimit {
 		return Config{}, fmt.Errorf("APPS_DEFAULT_LIMIT (%d) must be <= APPS_MAX_LIMIT (%d)", cfg.DefaultAppsLimit, cfg.MaxAppsLimit)
 	}
+	if cfg.MaxConcurrency < 0 {
+		return Config{}, fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)
+	}
 	if cfg.OIDCIssuerURL != "" {
 		if len(cfg.OIDCAudiences) == 0 {
 			return Config{}, fmt.Errorf("OIDC_AUDIENCES is required when OIDC_ISSUER_URL is set")
@@ -85,6 +97,9 @@ func Load() (Config, error) {
 		if cfg.SSORefreshWindow <= 0 {
 			return Config{}, fmt.Errorf("SSO_REFRESH_WINDOW must be > 0, got %s", cfg.SSORefreshWindow)
 		}
+	}
+	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
+		return Config{}, fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
 	}
 	return cfg, nil
 }

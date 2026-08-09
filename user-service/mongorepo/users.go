@@ -18,12 +18,18 @@ const usersCollection = "users"
 // UserRepo is the Mongo implementation of service.UserRepository.
 type UserRepo struct {
 	users *mongoutil.Collection[model.User]
+	// usersSecondary routes status/HR display reads; SetUserStatus, indexes, and
+	// all writes keep the primary users handle.
+	usersSecondary *mongoutil.Collection[model.User]
 }
 
 // NewUserRepo builds a UserRepo over db.
-func NewUserRepo(db *mongo.Database) *UserRepo {
+func NewUserRepo(db *mongo.Database, opts ...Option) *UserRepo {
+	s := applyOptions(opts)
+	users := mongoutil.NewCollection[model.User](db.Collection(usersCollection))
 	return &UserRepo{
-		users: mongoutil.NewCollection[model.User](db.Collection(usersCollection)),
+		users:          users,
+		usersSecondary: users.WithReadPreference(s.readPref),
 	}
 }
 
@@ -57,7 +63,7 @@ func activeUserFilter(account string) bson.M {
 // GetUserStatus returns the user for account (missing `active` counts as active),
 // or (nil, nil). Projected to the UserStatusView fields; all others are zero-valued.
 func (r *UserRepo) GetUserStatus(ctx context.Context, account string) (*model.User, error) {
-	return r.users.FindOne(ctx, activeUserFilter(account),
+	return r.usersSecondary.FindOne(ctx, activeUserFilter(account),
 		mongoutil.WithProjection(bson.M{
 			"_id": 0, "account": 1, "statusText": 1, "statusIsShow": 1,
 			"chineseName": 1, "engName": 1,
@@ -74,7 +80,7 @@ func (r *UserRepo) GetHRInfoByAccounts(ctx context.Context, accounts []string) (
 		ChineseName string `bson:"chineseName"`
 		EngName     string `bson:"engName"`
 	}
-	col := mongoutil.NewCollection[hrUser](r.users.Raw())
+	col := mongoutil.NewCollection[hrUser](r.usersSecondary.Raw())
 	rows, err := col.FindMany(ctx,
 		bson.M{"account": bson.M{"$in": accounts}},
 		mongoutil.WithProjection(bson.M{"_id": 0, "account": 1, "chineseName": 1, "engName": 1}),
@@ -148,6 +154,40 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	var u model.User
 	if err := res.Decode(&u); err != nil {
 		return nil, fmt.Errorf("decode updated user settings: %w", err)
+	}
+	return &u, nil
+}
+
+// GetUserChatlist returns the user's stored chatlist sub-document (Chatlist is nil
+// when never customized); (nil, nil) when no active user matched.
+func (r *UserRepo) GetUserChatlist(ctx context.Context, account string) (*model.User, error) {
+	return r.users.FindOne(ctx, activeUserFilter(account),
+		mongoutil.WithProjection(bson.M{"_id": 0, "chatlist": 1}),
+	)
+}
+
+// UpdateUserChatlist $sets the whole chatlist sub-document (validated + applied in
+// the service layer, so the origin write is a whole-object replace) and returns the
+// updated user (Chatlist projected) in one round-trip; (nil, nil) when no active
+// user matched.
+func (r *UserRepo) UpdateUserChatlist(ctx context.Context, account string, state *model.ChatlistState) (*model.User, error) {
+	opts := options.FindOneAndUpdate().
+		SetReturnDocument(options.After).
+		SetProjection(bson.M{"_id": 0, "chatlist": 1})
+	// Stamp the top-level chatlistUpdatedAt (= state.LastUpdatedAt, the one the
+	// service shares with both fanouts) so the cross-site high-water guard sees a
+	// local edit; without it an older inbound event could regress local state.
+	res := r.users.Raw().FindOneAndUpdate(ctx, activeUserFilter(account),
+		bson.M{"$set": bson.M{"chatlist": state, "chatlistUpdatedAt": state.LastUpdatedAt}}, opts)
+	if err := res.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("update user chatlist: %w", err)
+	}
+	var u model.User
+	if err := res.Decode(&u); err != nil {
+		return nil, fmt.Errorf("decode updated user chatlist: %w", err)
 	}
 	return &u, nil
 }

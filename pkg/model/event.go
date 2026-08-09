@@ -144,6 +144,8 @@ const (
 	InboxRoomRestricted              InboxEventType = "room_restricted"
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
 	InboxUserSettingsUpdated         InboxEventType = "user_settings_updated"
+	InboxUserChatlistUpdated         InboxEventType = "user_chatlist_updated"
+	InboxSubscriptionSectionMoved    InboxEventType = "subscription_section_moved"
 )
 
 // UserSettingsUpdated is the cross-site inbox event user-service publishes on settings.set, applied
@@ -415,8 +417,9 @@ type RoomRenamedRoomEvent struct {
 	RenamedAt time.Time     `json:"renamedAt" bson:"renamedAt"`
 }
 
-// RoomRestrictedRoomEvent is published when a channel's restricted/externalAccess flags change;
-// OwnerAccount is set only on the unrestricted→restricted transition. Drives the client's subscription update.
+// RoomRestrictedRoomEvent is published when a channel's restricted/externalAccess flags change.
+// OwnerAccount carries whatever the caller designated — set on any restricting call, including
+// an owner rotation on an already-restricted room. Drives the client's subscription update.
 type RoomRestrictedRoomEvent struct {
 	Type           RoomEventType `json:"type" bson:"type"`
 	RoomID         string        `json:"roomId" bson:"roomId"`
@@ -521,6 +524,48 @@ type SubscriptionFavoriteToggledEvent struct {
 	RoomID    string `json:"roomId"               bson:"roomId"`
 	Favorite  bool   `json:"favorite"             bson:"favorite"`
 	Timestamp int64  `json:"timestamp"            bson:"timestamp"`
+}
+
+// MoveChatRequest is the moveChat RPC body: sectionId nil (or JSON null) removes
+// the chat from its custom section; afterRoomId places it just after that room,
+// beforeRoomId just before it (for top-insertion); append when both empty.
+// afterRoomId and beforeRoomId are mutually exclusive. roomId rides the subject,
+// like favorite.toggle.
+type MoveChatRequest struct {
+	SectionID    *string `json:"sectionId"`
+	AfterRoomID  string  `json:"afterRoomId,omitempty"`
+	BeforeRoomID string  `json:"beforeRoomId,omitempty"`
+}
+
+// MoveChatResponse is the sync reply for the moveChat RPC — the post-write
+// membership so the caller doesn't re-fetch.
+type MoveChatResponse struct {
+	Status string `json:"status"`
+	// SectionID nil (JSON omitted) means removed from its section. SectionOrder
+	// has NO omitempty — a top-insertion legitimately yields 0, and dropping it
+	// would leave the client without the new position (afterRoomId never hits 0).
+	SectionID    *string `json:"sectionId,omitempty"`
+	SectionOrder float64 `json:"sectionOrder"`
+}
+
+// SubscriptionSectionMovedEvent is the InboxEvent.Payload for type
+// "subscription_section_moved" — cross-site replica of a sectionId/sectionOrder
+// change, HWM-guarded by Timestamp (== the origin doc's sectionUpdatedAt).
+type SubscriptionSectionMovedEvent struct {
+	Account      string  `json:"account"      bson:"account"`
+	RoomID       string  `json:"roomId"       bson:"roomId"`
+	SectionID    *string `json:"sectionId"    bson:"sectionId"`
+	SectionOrder float64 `json:"sectionOrder" bson:"sectionOrder"`
+	Timestamp    int64   `json:"timestamp"    bson:"timestamp"`
+}
+
+// UserChatlistUpdated is the cross-site inbox event user-service publishes on any
+// chatlist mutation, applied by the remote inbox-worker; Chatlist is the full
+// post-update state — receiver replaces, never merges.
+type UserChatlistUpdated struct {
+	Account   string        `json:"account"   bson:"account"`
+	Chatlist  ChatlistState `json:"chatlist"  bson:"chatlist"`
+	Timestamp int64         `json:"timestamp" bson:"timestamp"`
 }
 
 // OpenRoomResponse is the sync reply for the open RPC. Open is always true.

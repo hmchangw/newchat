@@ -20,7 +20,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
@@ -117,6 +116,7 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 func (h *Handler) Register(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.MuteTogglePattern(h.siteID), h.muteToggle)
 	natsrouter.RegisterNoBody(r, subject.FavoriteTogglePattern(h.siteID), h.favoriteToggle)
+	natsrouter.Register(r, subject.MoveChatPattern(h.siteID), h.moveChat)
 	natsrouter.RegisterNoBody(r, subject.OpenRoomPattern(h.siteID), h.openRoom)
 	natsrouter.RegisterNoBody(r, subject.RoomAppTabsPattern(h.siteID), h.getRoomAppTabs)
 	natsrouter.RegisterNoBody(r, subject.RoomAppCmdMenuPattern(h.siteID), h.getRoomAppCommandMenu)
@@ -1988,8 +1988,9 @@ func (h *Handler) roomRename(c *natsrouter.Context, req model.RoomRenameRequest)
 
 // roomRestricted is the sync chat.server.> RPC. Account in the body is
 // the audit identity (no subject prefix authenticates the caller — this RPC
-// is server-side admin tooling). Mongo writes + sys-message publish + inbox
-// fan-out happen inline; caller retries safely via dedup IDs.
+// is server-side admin tooling). Mongo writes and the inbox fan-out happen
+// inline and the caller retries safely via dedup IDs; the room event that ends
+// the handler is best-effort and carries none.
 func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestrictedRequest) (*model.StatusWithRequestReply, error) {
 	var ctx context.Context = c
 	requestID := natsutil.RequestIDFromContext(c)
@@ -1998,10 +1999,15 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 		return nil, fmt.Errorf("%w: roomId and account are required", errInvalidRestrictedSubject)
 	}
 
-	// Admin-only RPC is rare; info-level audit trail is justified.
+	// Admin-only RPC is rare; info-level audit trail is justified. No system
+	// message is published for a restriction change, so this line is the only
+	// durable record of the flags moving and who was made owner.
 	slog.Info("processing room.restricted",
 		"requester", req.Account,
 		"roomID", req.RoomID,
+		"restricted", req.Restricted,
+		"externalAccess", req.ExternalAccess,
+		"ownerAccount", req.OwnerAccount,
 		"request_id", requestID)
 
 	requesterUser, getUserErr := h.store.GetUser(ctx, req.Account)
@@ -2057,39 +2063,6 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 		return nil, fmt.Errorf("apply subscription restricted: %w", err)
 	}
 
-	sysData, err := json.Marshal(model.RoomRestrictedSysData{
-		Restricted:     req.Restricted,
-		ExternalAccess: req.ExternalAccess,
-		ByAccount:      req.Account,
-		OwnerAccount:   req.OwnerAccount,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal restricted sys data: %w", err)
-	}
-	requesterDisplay := displayfmt.CombineWithFallback(requesterUser.EngName, requesterUser.ChineseName, requesterUser.Account)
-	sysMsg := model.Message{
-		ID:          idgen.MessageIDFromRequestID(requestID, "room_restricted"),
-		RoomID:      req.RoomID,
-		UserAccount: req.Account,
-		Type:        model.MessageTypeRoomRestricted,
-		Content:     fmt.Sprintf("%q changed the channel restricted state", requesterDisplay),
-		SysMsgData:  sysData,
-		CreatedAt:   time.UnixMilli(req.Timestamp).UTC(),
-	}
-	msgEvt := model.MessageEvent{
-		Event:     model.EventCreated,
-		Message:   sysMsg,
-		SiteID:    h.siteID,
-		Timestamp: req.Timestamp,
-	}
-	msgEvtData, err := json.Marshal(msgEvt)
-	if err != nil {
-		return nil, fmt.Errorf("marshal sys message event: %w", err)
-	}
-	if err := h.publishToStream(ctx, subject.MsgCanonicalCreated(h.siteID), msgEvtData, natsutil.CanonicalDedupID(&msgEvt)); err != nil {
-		return nil, fmt.Errorf("publish room_restricted sys message: %w", err)
-	}
-
 	subs, err := h.store.ListSubscriptionsByRoom(ctx, req.RoomID)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
@@ -2131,6 +2104,37 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 			}
 		}
 	}
+
+	// A live room event, not a system message: connected clients refresh their
+	// local restricted/externalAccess state without a re-fetch, and nothing is
+	// rendered in the timeline. The message form was removed outright — a
+	// restriction change is an administrative act, not room content — but
+	// MessageTypeRoomRestricted stays registered in pkg/model.systemMessageTypes,
+	// because rooms still hold messages of that type from before the change and
+	// they must keep being excluded from previews and pushes.
+	//
+	// Published last and best-effort: everything that can still fail the RPC has
+	// committed, so clients are never told a change the caller sees fail, and a
+	// publish failure never fails the caller.
+	roomEvt := model.RoomRestrictedRoomEvent{
+		Type:           model.RoomEventRoomRestricted,
+		RoomID:         req.RoomID,
+		SiteID:         h.siteID,
+		Timestamp:      time.Now().UTC().UnixMilli(),
+		Restricted:     req.Restricted,
+		ExternalAccess: req.ExternalAccess,
+		OwnerAccount:   req.OwnerAccount,
+		ByAccount:      req.Account,
+		ChangedAt:      time.UnixMilli(req.Timestamp).UTC(),
+	}
+	evtData, mErr := json.Marshal(roomEvt)
+	if mErr != nil {
+		slog.ErrorContext(ctx, "marshal room_restricted event failed",
+			"error", mErr, "roomID", req.RoomID, "request_id", requestID)
+		return &model.StatusWithRequestReply{Status: "ok", RequestID: requestID}, nil
+	}
+	h.publishRoomEvent(ctx, req.RoomID, room.CrossSite, room.CrossSiteAt, evtData, "room_restricted",
+		"request_id", requestID)
 
 	return &model.StatusWithRequestReply{Status: "ok", RequestID: requestID}, nil
 }
@@ -2252,6 +2256,137 @@ func (h *Handler) favoriteToggle(c *natsrouter.Context) (*model.FavoriteToggleRe
 	}
 
 	return &model.FavoriteToggleResponse{Status: "ok", Favorite: sub.Favorite}, nil
+}
+
+// moveChat assigns a chat to a chatlist section (+ manual order) or removes it
+// (sectionId == nil). Membership lives on the subscription, mirroring
+// favorite.toggle: one sub write + one subscription-update fanout + one cross-site
+// federation event, HWM-guarded by sectionUpdatedAt. Built-in section ids are
+// rejected — their membership is derived client-side (the migration-only "teams"
+// stamp is written directly at the sub-create, not via this RPC).
+func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*model.MoveChatResponse, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
+	var ctx context.Context = c
+	account := c.Param("account")
+	roomID := c.Param("roomID")
+
+	if req.SectionID != nil {
+		if *req.SectionID == "" {
+			return nil, errcode.BadRequest("sectionId is empty", errcode.WithReason(errcode.UserChatlistSectionNotFound))
+		}
+		if model.IsBuiltinSection(*req.SectionID) {
+			// static built-in check only. A custom section's *existence*
+			// is not verified here (that would couple room-service to the
+			// user-service registry on every move) — orphan tolerance renders an
+			// unknown sectionId under Chats client-side.
+			return nil, errcode.BadRequest("cannot move a chat into a built-in section", errcode.WithReason(errcode.UserChatlistBuiltinTarget))
+		}
+		if req.AfterRoomID != "" && req.BeforeRoomID != "" {
+			return nil, errcode.BadRequest("afterRoomId and beforeRoomId are mutually exclusive")
+		}
+	}
+
+	// One instant shared by the origin write and the published event so remote
+	// replicas guard against the same high-water mark.
+	now := time.Now().UTC()
+
+	var order float64
+	var rebalanced []model.Subscription
+	if req.SectionID != nil {
+		var needRebalance bool
+		var err error
+		order, needRebalance, err = h.store.ComputeSectionOrder(ctx, account, *req.SectionID, req.AfterRoomID, req.BeforeRoomID)
+		if err != nil {
+			return nil, fmt.Errorf("compute section order: %w", err)
+		}
+		if needRebalance {
+			if rebalanced, err = h.store.RebalanceSection(ctx, account, *req.SectionID, now); err != nil {
+				return nil, fmt.Errorf("rebalance section: %w", err)
+			}
+			if order, _, err = h.store.ComputeSectionOrder(ctx, account, *req.SectionID, req.AfterRoomID, req.BeforeRoomID); err != nil {
+				return nil, fmt.Errorf("recompute section order: %w", err)
+			}
+		}
+	}
+
+	sub, err := h.store.MoveSubscriptionSection(ctx, roomID, account, req.SectionID, order, now)
+	if err != nil {
+		if errors.Is(err, model.ErrSubscriptionNotFound) {
+			return nil, errNotRoomMember
+		}
+		return nil, fmt.Errorf("move subscription section: %w", err)
+	}
+
+	userSiteID, err := h.store.GetUserSiteID(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("get user siteId: %w", err)
+	}
+
+	if len(rebalanced) > 0 {
+		// RebalanceSection ran before the final MoveSubscriptionSection write, so
+		// the moved room's entry in rebalanced (if present — it's only a member of
+		// the rebalanced section pre-move when moving within the same section)
+		// still carries its intermediate integer order. Overwrite it with sub, the
+		// authoritative post-move row; if it's not present (moved in from a
+		// different section), append it so the move itself still gets published.
+		moved := false
+		for i := range rebalanced {
+			if rebalanced[i].RoomID == roomID {
+				rebalanced[i] = *sub
+				moved = true
+				break
+			}
+		}
+		if !moved {
+			rebalanced = append(rebalanced, *sub)
+		}
+		// A rebalance renumbered every sibling in the section, not just the moved
+		// chat — fan out one section_moved event per rewritten row (the moved row
+		// is already in this set) instead of the single-row publish below.
+		for i := range rebalanced {
+			row := &rebalanced[i]
+			if _, err := h.publishSubscriptionUpdate(ctx, account, "section_moved", row, "", now); err != nil {
+				return nil, err
+			}
+			if userSiteID != "" && userSiteID != h.siteID {
+				payload := model.SubscriptionSectionMovedEvent{
+					Account:      account,
+					RoomID:       row.RoomID,
+					SectionID:    row.SectionId,
+					SectionOrder: row.SectionOrder,
+					Timestamp:    now.UnixMilli(),
+				}
+				payloadData, err := json.Marshal(payload)
+				if err != nil {
+					return nil, fmt.Errorf("marshal section-moved payload: %w", err)
+				}
+				if err := h.federateOne(ctx, row.RoomID, userSiteID, model.InboxSubscriptionSectionMoved, payloadData, row.RoomID+":"+account, now.UnixMilli()); err != nil {
+					return nil, fmt.Errorf("federate section-moved: %w", err)
+				}
+			}
+		}
+	} else {
+		if _, err := h.publishSubscriptionUpdate(ctx, account, "section_moved", sub, "", now); err != nil {
+			return nil, err
+		}
+		if userSiteID != "" && userSiteID != h.siteID {
+			payload := model.SubscriptionSectionMovedEvent{
+				Account:      account,
+				RoomID:       roomID,
+				SectionID:    sub.SectionId,
+				SectionOrder: sub.SectionOrder,
+				Timestamp:    now.UnixMilli(),
+			}
+			payloadData, err := json.Marshal(payload)
+			if err != nil {
+				return nil, fmt.Errorf("marshal section-moved payload: %w", err)
+			}
+			if err := h.federateOne(ctx, roomID, userSiteID, model.InboxSubscriptionSectionMoved, payloadData, roomID+":"+account, now.UnixMilli()); err != nil {
+				return nil, fmt.Errorf("federate section-moved: %w", err)
+			}
+		}
+	}
+
+	return &model.MoveChatResponse{Status: "ok", SectionID: sub.SectionId, SectionOrder: sub.SectionOrder}, nil
 }
 
 func (h *Handler) openRoom(c *natsrouter.Context) (*model.OpenRoomResponse, error) {

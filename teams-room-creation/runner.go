@@ -80,7 +80,7 @@ func (r *runner) publishBatch(ctx context.Context, b batch) {
 		return
 	}
 	ids := chatIDs(b.chats)
-	subj := subject.RoomCanonicalTeamsCreate(b.siteID)
+	subj := subject.RoomTeamsCanonicalCreate(b.siteID)
 	if err := r.publish(ctx, subj, data); err != nil {
 		slog.WarnContext(ctx, "publish room-creation batch failed; will retry next run",
 			"site_id", b.siteID, "chats", len(ids), "error", err)

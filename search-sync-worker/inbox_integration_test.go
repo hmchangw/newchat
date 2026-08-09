@@ -21,7 +21,7 @@ import (
 
 // --- Shared helpers for inbox-based collection integration tests ---
 
-// createInboxStream creates the INBOX_{siteID} stream using pkg/stream.Inbox
+// createInboxStream creates the INBOX-{siteID} stream using pkg/stream.Inbox
 // as the canonical baseline (name + local/aggregate subject patterns), with
 // no cross-site Sources. Cross-site Sources are a production deployment
 // concern owned by inbox-worker; tests simulate federated events by

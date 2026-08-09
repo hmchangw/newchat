@@ -6,6 +6,9 @@ import (
 	"os"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
@@ -95,11 +98,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref),
+		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
+		mongoutil.WithMinPoolSize(cfg.Mongo.MinPoolSize),
+	)
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	cassSession, err := cassutil.Connect(cassutil.Config{
 		Hosts:    cfg.Cassandra.Hosts,
@@ -124,7 +138,10 @@ func main() {
 			os.Exit(1)
 		}
 		vaultWrapper = w
-		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName)
+		// DEKs are written by other services; pin to primary so a fresh key isn't
+		// missed on a lagging secondary.
+		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName,
+			options.Collection().SetReadPreference(readpref.Primary()))
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
@@ -182,14 +199,33 @@ func main() {
 
 	pub := publisher.New(js)
 	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
-	router := natsrouter.New(nc, "history-service")
+
+	// Bound in-flight handlers so a burst is shed at the door instead of piling
+	// unbounded concurrent work onto the (now explicitly capped) Mongo pool.
+	var routerOpts []natsrouter.Option
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "history-service", routerOpts...)
 	router.Use(natsrouter.Recovery())
 	// RequestID must precede any handler that reads request_id from ctx —
 	// otherwise Classify's log line records an empty value.
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Logging())
+	// Deadline every request so a slow Mongo/Cassandra op is cancelled and its
+	// pooled connection released rather than held until the pool starves.
+	if cfg.RequestTimeout > 0 {
+		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
+	}
 
 	svc.RegisterHandlers(router, cfg.SiteID)
+
+	slog.Info("connection guards configured",
+		"maxPoolSize", cfg.Mongo.MaxPoolSize,
+		"minPoolSize", cfg.Mongo.MinPoolSize,
+		"maxConcurrency", cfg.MaxConcurrency,
+		"requestTimeout", cfg.RequestTimeout,
+	)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),

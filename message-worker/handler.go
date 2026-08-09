@@ -203,7 +203,7 @@ func (h *Handler) reprojectUnverifiedQuote(ctx context.Context, evt *model.Messa
 	// cleared regardless of whether the parent was found.
 	evt.QuotedParentUnverified = false
 	if !found {
-		// Accepted trade-off: MESSAGES_CANONICAL doesn't order the parent's persist
+		// Accepted trade-off: MESSAGES-CANONICAL doesn't order the parent's persist
 		// relative to this reply, so a parent row still in flight reads as not-found
 		// and the quote is dropped permanently (no bounded retry). Quoting a parent
 		// that hasn't landed yet is a narrow race; dropping the quote is preferred
@@ -686,7 +686,7 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 		return fmt.Errorf("marshal thread subscription: %w", err)
 	}
 	// Dedup-ID seed (threadRoomID + userID + msg.ID + hasMention + destSiteID):
-	// msg.ID is stable across MESSAGES_CANONICAL redeliveries so the same publish
+	// msg.ID is stable across MESSAGES-CANONICAL redeliveries so the same publish
 	// yields the same ID; different users on the same destination differ via userID;
 	// hasMention is in the seed so a HasMention=false upsert and a later
 	// HasMention=true update get distinct dedup IDs (else stream-level dedup would
@@ -702,7 +702,7 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 
 // publishThreadReplyEvent fires a badge event via core NATS so broadcast-worker
 // can update the reply-count badge for thread followers. Published to
-// chat.server.broadcast.{siteID}.thread.tcount (not MESSAGES_CANONICAL) because
+// chat.server.broadcast.{siteID}.thread.tcount (not MESSAGES-CANONICAL) because
 // badge updates are best-effort and do not belong in the message CRUD event store.
 func (h *Handler) publishThreadReplyEvent(ctx context.Context, msg *model.Message, newTcount int) error {
 	tlm := msg.CreatedAt

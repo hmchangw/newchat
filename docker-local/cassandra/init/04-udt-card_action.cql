@@ -5,5 +5,6 @@ CREATE TYPE IF NOT EXISTS chat."CardAction" (
   display_text  TEXT,
   hide_exec_log BOOLEAN,
   card_tmid     TEXT,
-  data          BLOB
+  data          BLOB,
+  bot_username  TEXT
 );

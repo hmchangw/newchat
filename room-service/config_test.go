@@ -73,6 +73,32 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
 }
 
+func TestConfig_MaxConcurrency(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	t.Run("default", func(t *testing.T) {
+		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 256, cfg.MaxConcurrency)
+	})
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("MAX_CONCURRENCY", "64")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 64, cfg.MaxConcurrency)
+	})
+
+	t.Run("zero_disables", func(t *testing.T) {
+		t.Setenv("MAX_CONCURRENCY", "0")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 0, cfg.MaxConcurrency)
+	})
+}
+
 func TestConfig_RoomSubjectMode(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")

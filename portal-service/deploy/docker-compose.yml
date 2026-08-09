@@ -37,6 +37,8 @@ services:
       - PORTAL_OTEL_BASE_URL=http://localhost:4318/v1
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
     networks:
       - chat-local
 

@@ -179,8 +179,8 @@ func (s *MongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, e
 }
 
 // GetRoomMeta returns a room with only its stable fields (CreatedAt/UpdatedAt zero),
-// served from the meta cache when enabled. Its CrossSite is the PRIOR state — before
-// processAddMembers' SetRoomCrossSite write, which the local→global nudge gates on.
+// served from the meta cache when enabled. In processAddMembers its CrossSite is the
+// PRIOR state (loaded before the SetRoomCrossSite write), which member-event routing relies on.
 func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (*model.Room, error) {
 	var (
 		meta roommetacache.Meta

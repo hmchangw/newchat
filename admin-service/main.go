@@ -15,6 +15,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
@@ -55,7 +56,12 @@ func run() error {
 		return fmt.Errorf("ensure session indexes: %w", err)
 	}
 
-	h := newHandler(st, sessStore, cfg)
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	if err != nil {
+		return fmt.Errorf("connect nats: %w", err)
+	}
+
+	h := newHandler(st, sessStore, cfg, nc)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -70,7 +76,7 @@ func run() error {
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
 		Handler:      r,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: httpWriteTimeout,
 	}
 
 	srvErr := make(chan error, 1)
@@ -86,6 +92,12 @@ func run() error {
 			func(ctx context.Context) error {
 				slog.Info("shutting down admin-service")
 				err := srv.Shutdown(ctx)
+				// srv.Shutdown has already waited out any in-flight toggle, so
+				// Drain (which returns immediately and finishes in the background)
+				// only closes the idle connection.
+				if drainErr := nc.NatsConn().Drain(); drainErr != nil {
+					slog.Warn("drain nats", "error", drainErr)
+				}
 				mongoutil.Disconnect(ctx, mongoClient)
 				return err
 			},

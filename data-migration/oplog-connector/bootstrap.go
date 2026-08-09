@@ -22,7 +22,7 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams owns the MIGRATION_OPLOG_{siteID} stream — enabled it creates from schema (Name+Subjects), disabled it verifies existence and fails fast. Federation config stays ops/IaC-owned.
+// bootstrapStreams owns the MIGRATION-OPLOG-{siteID} stream — enabled it creates from schema (Name+Subjects), disabled it verifies existence and fails fast. Federation config stays ops/IaC-owned.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	cfg := stream.MigrationOplog(siteID)
 	if enabled {
@@ -30,12 +30,12 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 			Name:     cfg.Name,
 			Subjects: cfg.Subjects,
 		}); err != nil {
-			return fmt.Errorf("create MIGRATION_OPLOG stream: %w", err)
+			return fmt.Errorf("create MIGRATION-OPLOG stream: %w", err)
 		}
 		return nil
 	}
 	if _, err := js.Stream(ctx, cfg.Name); err != nil {
-		return fmt.Errorf("verify MIGRATION_OPLOG stream: %w", err)
+		return fmt.Errorf("verify MIGRATION-OPLOG stream: %w", err)
 	}
 	return nil
 }

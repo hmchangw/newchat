@@ -22,7 +22,7 @@ stream's retention policy — the worker publishes and moves on.
 
 | Property | Value |
 |---|---|
-| Stream | `PUSH_NOTIFICATION_{siteID}` |
+| Stream | `PUSH-NOTIFICATION-{siteID}` |
 | Bound subject filter | `chat.server.notification.push.{siteID}.>` |
 | Publish subject (current leaf) | `chat.server.notification.push.{siteID}.send` |
 | Namespace | `chat.server.*` — server-only; client JWTs have no subscribe permission |
@@ -183,7 +183,7 @@ Set `NATS_MAX_PAYLOAD_BYTES` to match your broker's configured `max_payload`.
 ### Schema departures from the legacy push payload
 
 The push service must read the new tag names (one coordinated cutover — there
-is no dual old/new support, since `PUSH_NOTIFICATION_{siteID}` is a new stream
+is no dual old/new support, since `PUSH-NOTIFICATION-{siteID}` is a new stream
 with no prior consumer):
 
 | Legacy | New |
@@ -214,7 +214,7 @@ canonical consumer's redelivery horizon**:
 dedup_window  ≥  AckWait × MaxDeliver  =  30s × 5  =  150s   (defaults)
 ```
 
-Set the `PUSH_NOTIFICATION_{siteID}` `Duplicates` window to a safe margin
+Set the `PUSH-NOTIFICATION-{siteID}` `Duplicates` window to a safe margin
 above 150s (e.g. 5 min). If the window is shorter, a canonical-message
 redelivery (after a worker NAK) can produce a duplicate push.
 
@@ -331,7 +331,7 @@ invisible to the worker.
 
 Required before a production rollout:
 
-1. **Provision `PUSH_NOTIFICATION_{siteID}`** (the worker only bootstraps it
+1. **Provision `PUSH-NOTIFICATION-{siteID}`** (the worker only bootstraps it
    in dev via `BOOTSTRAP_STREAMS=true`; in prod `BOOTSTRAP_STREAMS=false` and
    the worker only publishes). Set:
    - Subjects: `chat.server.notification.push.{siteID}.>`
@@ -385,7 +385,7 @@ implement a real `Vetoer`:
 
 1. Land this PR; deploy the worker with `PRESENCE_RPC_ENABLED=false`. No pushes
    are delivered yet (push service not consuming) — safe.
-2. Provision the `PUSH_NOTIFICATION_{siteID}` stream (§3.1).
+2. Provision the `PUSH-NOTIFICATION-{siteID}` stream (§3.1).
 3. Ship the push service consumer (§1). Mobile push now flows; presence gating
    is still fail-open (everyone eligible is pushed).
 4. Ship the presence RPC handler (§2), then flip `PRESENCE_RPC_ENABLED=true`.

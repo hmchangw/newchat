@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-resty/resty/v2"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/restyutil"
 )
 
@@ -43,10 +44,10 @@ type streamTranslator struct {
 	tokens *tokenProvider
 }
 
-func newStreamTranslator(endpoint, accessTokenURL, j1Token string, timeout, skew time.Duration) *streamTranslator {
+func newStreamTranslator(endpoint, accessTokenURL string, j1 j1Source, timeout, skew time.Duration) *streamTranslator {
 	return &streamTranslator{
 		client: restyutil.New(endpoint, restyutil.WithTimeout(timeout)),
-		tokens: newTokenProvider(accessTokenURL, j1Token, timeout, skew),
+		tokens: newTokenProvider(accessTokenURL, j1, timeout, skew),
 	}
 }
 
@@ -90,10 +91,20 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 		SetDoNotParseResponse(true).
 		Post("")
 	if err != nil {
-		return "", false, fmt.Errorf("translate request: %w", err)
+		// Transport failure (connection refused / timeout / no response) — the
+		// third-party backend is unreachable, not our bug.
+		return "", false, errcode.Unavailable("translation upstream unavailable",
+			errcode.WithReason(errcode.TranslateUpstreamUnavailable), errcode.WithCause(err))
 	}
 	body := resp.RawBody()
 	defer body.Close()
+
+	// A 5XX is an outage regardless of body — classify before parsing, so a 5XX
+	// carrying data/JWT-shaped content can't read as success or trigger a refresh.
+	if s := resp.StatusCode(); s >= 500 && s < 600 {
+		return "", false, errcode.Unavailable("translation upstream unavailable",
+			errcode.WithReason(errcode.TranslateUpstreamUnavailable))
+	}
 
 	reader := bufio.NewReader(body)
 	var merged strings.Builder
@@ -131,7 +142,10 @@ readLoop:
 			if readErr == io.EOF {
 				break readLoop
 			}
-			return "", false, fmt.Errorf("read stream: %w", readErr)
+			// Transport drop mid-stream (reset/timeout after headers) — same
+			// upstream-unavailable class as a failed request.
+			return "", false, errcode.Unavailable("translation upstream unavailable",
+				errcode.WithReason(errcode.TranslateUpstreamUnavailable), errcode.WithCause(readErr))
 		}
 	}
 

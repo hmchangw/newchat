@@ -45,6 +45,15 @@ type Subscription struct {
 	Alert        bool     `json:"alert" bson:"alert"`
 	Muted        bool     `json:"muted" bson:"muted"`
 	Favorite     bool     `json:"favorite" bson:"favorite"`
+	// SectionId is the custom chatlist section this chat is in; nil = no custom
+	// section (the client derives a built-in placement). SectionOrder is the manual
+	// position within that section, honored only when the section's sortMode ==
+	// custom. Both mirror how favorite lives on the subscription.
+	SectionId *string `json:"sectionId,omitempty" bson:"sectionId,omitempty"`
+	// No JSON omitempty on SectionOrder: a top-inserted chat legitimately has
+	// order 0, and omitempty would drop it from the room-list/reply, losing the
+	// position. bson keeps omitempty — the write path uses an explicit $set.
+	SectionOrder float64 `json:"sectionOrder" bson:"sectionOrder,omitempty"`
 	// Open is the per-user sidebar-visibility flag. New subscriptions are born
 	// open (room-worker's newSub sets it); subscription.list excludes only rows
 	// explicitly closed (open == false). Set true by the room-service open RPC.
@@ -75,6 +84,7 @@ type Subscription struct {
 	RolesUpdatedAt    *time.Time `json:"rolesUpdatedAt,omitempty"    bson:"rolesUpdatedAt,omitempty"`
 	NameUpdatedAt     *time.Time `json:"nameUpdatedAt,omitempty"     bson:"nameUpdatedAt,omitempty"`
 	RestrictUpdatedAt *time.Time `json:"restrictUpdatedAt,omitempty" bson:"restrictUpdatedAt,omitempty"`
+	SectionUpdatedAt  *time.Time `json:"sectionUpdatedAt,omitempty"  bson:"sectionUpdatedAt,omitempty"`
 
 	// Origin identifies where the subscription came from — e.g. OriginTeams for a
 	// Teams-migration import. Server-side provenance (persisted, not client-facing);

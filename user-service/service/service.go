@@ -38,6 +38,8 @@ type UserRepository interface {
 	GetHRInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.SubscriptionHRInfo, error)
 	GetUserSettings(ctx context.Context, account string) (*model.User, error)
 	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error)
+	GetUserChatlist(ctx context.Context, account string) (*model.User, error)
+	UpdateUserChatlist(ctx context.Context, account string, state *model.ChatlistState) (*model.User, error)
 }
 
 // AppRepository is the consumer-defined interface for app catalog reads.
@@ -177,6 +179,12 @@ func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.UserStatusSetPattern(s.siteID), s.SetStatus)
 	natsrouter.RegisterNoBody(r, subject.UserSettingsGetPattern(s.siteID), s.GetSettings)
 	natsrouter.Register(r, subject.UserSettingsSetPattern(s.siteID), s.SetSettings)
+	natsrouter.RegisterNoBody(r, subject.UserChatlistGetPattern(s.siteID), s.GetChatlist)
+	natsrouter.Register(r, subject.UserChatlistSectionCreatePattern(s.siteID), s.CreateChatlistSection)
+	natsrouter.Register(r, subject.UserChatlistSectionDeletePattern(s.siteID), s.DeleteChatlistSection)
+	natsrouter.Register(r, subject.UserChatlistSectionRenamePattern(s.siteID), s.RenameChatlistSection)
+	natsrouter.Register(r, subject.UserChatlistSectionReorderPattern(s.siteID), s.ReorderChatlistSections)
+	natsrouter.Register(r, subject.UserChatlistSectionSetSortModePattern(s.siteID), s.SetChatlistSectionSortMode)
 	natsrouter.Register(r, subject.UserSubscriptionListPattern(s.siteID), s.ListSubscriptions)
 	natsrouter.Register(r, subject.UserThreadListPattern(s.siteID), s.ListUserThreads)
 	natsrouter.Register(r, subject.UserThreadUnreadSummaryPattern(s.siteID), s.GetThreadUnreadSummary)

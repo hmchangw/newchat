@@ -111,9 +111,25 @@ type stubInboxStore struct {
 	userStatusUpdates     []userStatusUpdate
 	userStatusErr         error
 	settingsUpdates       []userSettingsUpdate
+	chatlistUpdates       []userChatlistUpdate
+	sectionMoves          []sectionMove
 	// hasThreadUnreadErr, when set, makes SubscriptionHasThreadUnread fail —
 	// used to exercise handleSubscriptionRead's skip-on-error badge-cache path.
 	hasThreadUnreadErr error
+}
+
+type userChatlistUpdate struct {
+	account   string
+	chatlist  *model.ChatlistState
+	updatedAt int64
+}
+
+type sectionMove struct {
+	roomID    string
+	account   string
+	sectionID *string
+	order     float64
+	updatedAt time.Time
 }
 
 type userSettingsUpdate struct {
@@ -474,6 +490,20 @@ func (s *stubInboxStore) UpdateUserSettings(_ context.Context, account string, s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.settingsUpdates = append(s.settingsUpdates, userSettingsUpdate{account: account, settings: settings, updatedAt: updatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) UpdateUserChatlist(_ context.Context, account string, chatlist *model.ChatlistState, updatedAt int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chatlistUpdates = append(s.chatlistUpdates, userChatlistUpdate{account: account, chatlist: chatlist, updatedAt: updatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) UpdateSubscriptionSection(_ context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sectionMoves = append(s.sectionMoves, sectionMove{roomID: roomID, account: account, sectionID: sectionID, order: order, updatedAt: updatedAt})
 	return nil
 }
 
