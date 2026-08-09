@@ -20,8 +20,8 @@ services:
       - PORT=8080
       - DEV_MODE=${DEV_MODE:-true}
       - SITE_ID=${SITE_ID:-site-local}
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       - MAX_IMAGES=10
       - MAX_ATTACHMENTS=1
       - MAX_IMAGE_SIZE_BYTES=26214400
@@ -29,8 +29,8 @@ services:
       - FILE_UPLOAD_MEDIA_TYPE_BLACKLIST=image/svg+xml
       - FILE_DOWNLOAD_CACHE_MAX_AGE_SECONDS=31536000
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
-      - OIDC_AUDIENCES=nats-chat
-      - TLS_SKIP_VERIFY=false
+      - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
+      - TLS_SKIP_VERIFY=${TLS_SKIP_VERIFY:-false}
       # The frontends call these cross-origin via the gateway. An empty
       # allowlist emits no CORS headers, so uploads fail in the browser.
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001}
@@ -44,7 +44,7 @@ services:
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - MINIO_USE_SSL=false
+      - MINIO_USE_SSL=${MINIO_USE_SSL:-false}
       - MINIO_BUCKET=${MINIO_BUCKET:-chat-${SITE_ID:-site-local}}
     networks:
       - chat-local

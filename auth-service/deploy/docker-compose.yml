@@ -18,8 +18,8 @@ services:
       - DEV_MODE=${DEV_MODE:-true}
       - NATS_JWT_EXPIRY=2h
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
-      - OIDC_AUDIENCES=nats-chat
-      - TLS_SKIP_VERIFY=false
+      - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
+      - TLS_SKIP_VERIFY=${TLS_SKIP_VERIFY:-false}
     networks:
       - chat-local
 

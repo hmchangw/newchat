@@ -15,11 +15,11 @@ services:
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
-      - VALKEY_ADDRS=valkey:6379
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - ROOMSUBCACHE_TTL=5m
       - LARGE_ROOM_THRESHOLD=500
       # Recipients per PUSH-NOTIFICATION event. Default 100; well under FCM's 500-token
@@ -34,8 +34,8 @@ services:
       # Must match the broker's max_payload. Emitter rejects batches larger
       # than this before publish so the failure surfaces with a clear error
       # instead of a NATS NACK.
-      - NATS_MAX_PAYLOAD_BYTES=262144
-      - BOOTSTRAP_STREAMS=true
+      - NATS_MAX_PAYLOAD_BYTES=${NATS_MAX_PAYLOAD_BYTES:-262144}
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
     volumes:
       - ../../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

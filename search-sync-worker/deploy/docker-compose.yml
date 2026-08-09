@@ -12,13 +12,13 @@ services:
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
       # Backs the migrated-Teams-history author lookup (teams_user → account → user _id).
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      - SEARCH_URL=http://elasticsearch:9200
-      - SEARCH_BACKEND=elasticsearch
+      - SEARCH_URL=${SEARCH_URL:-http://elasticsearch:9200}
+      - SEARCH_BACKEND=${SEARCH_BACKEND:-elasticsearch}
       - MSG_INDEX_PREFIX=messages-${SITE_ID:-site-local}-v1
       - SPOTLIGHT_INDEX=spotlight-${SITE_ID:-site-local}-v1
       - SPOTLIGHT_ORG_INDEX=spotlightorg-${SITE_ID:-site-local}-v1
@@ -31,7 +31,7 @@ services:
       # single-cluster local dev (the HR stream is in this cluster's domain).
       # - HR_JETSTREAM_DOMAIN=hr-hub
       - USER_ROOM_INDEX=user-room-mv-${SITE_ID:-site-local}
-      - BOOTSTRAP_STREAMS=true
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       # Optional YYYY-MM-DD (UTC) cutoff for the messages collection.
       # When set, events whose Message.CreatedAt predates the date are
       # skipped — used during legacy-data migration. Leave unset/empty

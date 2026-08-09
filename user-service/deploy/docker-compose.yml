@@ -13,13 +13,13 @@ services:
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
       - ALL_SITE_IDS=${ALL_SITE_IDS:-${SITE_ID:-site-local}}
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - MAX_SUBSCRIPTION_LIMIT=1000
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
-      - OIDC_AUDIENCES=nats-chat
+      - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-nats-chat}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro

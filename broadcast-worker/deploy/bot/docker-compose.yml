@@ -15,8 +15,8 @@ services:
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       # In-process user cache (pkg/userstore.Cache, shared with message-gatekeeper
@@ -27,12 +27,12 @@ services:
       # this grace window keeps a rotated-out previous key valid for decrypt.
       - ROOM_KEY_GRACE_PERIOD=24h
       # Valkey backs the room-meta L2 cache.
-      - VALKEY_ADDRS=valkey:6379
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - ROOM_META_L2_TTL=15m
       # BOT-MESSAGES-CANONICAL is owned by bot-message-handler; consumers only verify.
       # true like the user variants — false means verify-and-exit, and the bot
       # streams' creator (bot-message-handler) is not in compose.services.yaml.
-      - BOOTSTRAP_STREAMS=true
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - ENCRYPTION_ENABLED=${ENCRYPTION_ENABLED:-false}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).

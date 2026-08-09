@@ -14,9 +14,9 @@ services:
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
-      - BOOTSTRAP_STREAMS=true
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

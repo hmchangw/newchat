@@ -22,10 +22,10 @@ make up                   # every microservice (foreground; Ctrl-C stops)
 make ui-up                # chat-frontend :3000, admin-frontend :3001
 ```
 
-`make deps-up` runs `setup.sh` for you if `nats.conf`, `backend.creds` or
-`.env` are missing. `make seed` is safe to re-run — it upserts by stable ID and never drops
-a database or collection, so hand-added dev data survives. `make seed-reset`
-deletes the seeded rows first.
+`make deps-up` runs `setup.sh` for you if `nats.conf`, `backend.creds` or `.env`
+are missing. `make seed` is safe to re-run — it upserts by stable ID and never
+drops a database or collection, so hand-added dev data survives.
+`make seed-reset` deletes the seeded rows first.
 
 Order matters in one place only: `make up` and `make ui-up` both refuse to start
 until the deps stack is up, because every service mounts `backend.creds` and
@@ -63,16 +63,22 @@ Makefile passes `--env-file` explicitly, so `make up`, `make up SERVICE=<name>`
 and `make ui-up` all resolve to the same values — without that flag, the
 per-service path silently falls back to the in-file defaults.
 
-Shared knobs (`setup.sh` writes them commented out): `SITE_ID`, `ALL_SITE_IDS`,
-`DEV_MODE`, `NATS_URL`, `NATS_CREDS_FILE`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`,
-`MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `O11Y_ENABLED`,
-`PPROF_ENABLED`. `SITE_ID` also drives the values derived from it — Elasticsearch
-index names, the MinIO bucket, `PORTAL_SITE_URLS`, `CLUSTER_DOMAINS` — so
-changing it moves the whole stack to a new site id.
+Every setting that is shared between services is overridable and listed
+(commented out) in the generated `.env`: the datastore endpoints (`MONGO_URI`,
+`MONGO_DB`, `CASSANDRA_HOSTS`, `CASSANDRA_KEYSPACE`, `VALKEY_ADDRS`,
+`SEARCH_URL`, `NATS_URL`, `NATS_CREDS_FILE`, `MINIO_*`, `VAULT_ADDR`,
+`VAULT_TOKEN`), the auth settings (`DEV_MODE`, `OIDC_ISSUER_URL`,
+`OIDC_CLIENT_ID`, `OIDC_AUDIENCES`), and the stack-wide toggles
+(`BOOTSTRAP_STREAMS`, `O11Y_ENABLED`, `PPROF_ENABLED`, `SITE_ID`,
+`ALL_SITE_IDS`). `SITE_ID` also drives the values derived from it —
+Elasticsearch index names, the MinIO bucket, `PORTAL_SITE_URLS`,
+`CLUSTER_DOMAINS` — so changing it moves the whole stack to a new site id.
 
-Two variables are deliberately per-service and should NOT go in the env file:
-`OTEL_SERVICE_NAME` (each service names its own telemetry) and `MINIO_BUCKET`
-(upload-service and media-service use different buckets).
+What stays literal is per-service by nature and must differ between services:
+the listen `PORT`, `MODE` (user/bot), `OTEL_SERVICE_NAME`, `MINIO_BUCKET`
+(upload and media use different buckets), and each service's own tuning
+constants — cache sizes, TTLs, batch limits, timeouts. Edit those in the
+service's own compose file, not the env file.
 
 ## Host ports
 

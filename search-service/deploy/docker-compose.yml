@@ -11,12 +11,12 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
-      - SEARCH_URL=http://elasticsearch:9200
-      - SEARCH_BACKEND=elasticsearch
-      - VALKEY_ADDRS=valkey:6379
+      - SEARCH_URL=${SEARCH_URL:-http://elasticsearch:9200}
+      - SEARCH_BACKEND=${SEARCH_BACKEND:-elasticsearch}
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - VALKEY_PASSWORD=
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - USERS_API_URL=http://users-api-mock:8080

@@ -13,9 +13,9 @@ services:
       - SITE_ID=${SITE_ID:-site-local}
       - USER_CACHE_SIZE=10000
       - USER_CACHE_TTL=5m
-      - VALKEY_ADDRS=valkey:6379
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       - PRESENCE_HEARTBEAT_INTERVAL=15s
       - PRESENCE_STALE_THRESHOLD=45s
       - PRESENCE_SWEEP_INTERVAL=5s

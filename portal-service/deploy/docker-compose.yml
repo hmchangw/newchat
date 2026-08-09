@@ -36,8 +36,8 @@ services:
       # the localhost OTEL URL is a dev placeholder; real value set per-deployment.
       - PORTAL_API_VERSION=v2
       - PORTAL_OTEL_BASE_URL=http://localhost:4318/v1
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
     networks:

@@ -19,7 +19,7 @@ services:
       # Dev-only pprof profiling on the health port (off by default).
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       # outbox-worker owns the OUTBOX stream; create it against a fresh dev NATS.
-      - BOOTSTRAP_STREAMS=true
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

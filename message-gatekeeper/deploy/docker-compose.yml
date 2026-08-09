@@ -14,8 +14,8 @@ services:
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       - CHAT_BASE_URL=http://localhost:3000
       # User cache fronts users-collection lookups so the per-message sender
       # display-name composition stays off the hot Mongo path. In-process LRU
@@ -23,9 +23,9 @@ services:
       # entries are tiny so per-pod memory stays in the low MB.
       - USER_CACHE_SIZE=10000
       - USER_CACHE_TTL=5m
-      - VALKEY_ADDRS=valkey:6379
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - ROOM_META_L2_TTL=15m
-      - BOOTSTRAP_STREAMS=true
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
