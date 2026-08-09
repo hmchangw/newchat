@@ -650,7 +650,6 @@ type probeRecord struct {
 	publishedAt time.Time
 	expected    map[string]struct{}
 	received    map[deliveryKey]int
-	leaked      map[string]struct{} // userIDs outside expected, user lane only
 }
 
 // ProbeCounts is the summary surfaced in the report.
@@ -660,7 +659,6 @@ type ProbeCounts struct {
 	Complete   int
 	Partial    int
 	TotalLoss  int
-	Leaked     int
 }
 
 // ProbeTracker records per-recipient delivery for sampled messages and reports
@@ -694,7 +692,6 @@ func (t *ProbeTracker) RegisterProbe(msgID, roomID, senderID string, epoch int, 
 		publishedAt: at,
 		expected:    exp,
 		received:    make(map[deliveryKey]int, len(expected)),
-		leaked:      make(map[string]struct{}),
 	}
 	t.mu.Lock()
 	t.probes[msgID] = rec
@@ -712,12 +709,6 @@ func (t *ProbeTracker) RecordDelivery(userID, msgID, roomID string, ln lane, _ t
 		return
 	}
 	if _, expected := rec.expected[userID]; !expected {
-		// Leakage is only meaningful on the per-user lane, where the system
-		// chooses the address. On the room lane, delivery follows from whoever
-		// subscribed to the topic, which loadgen controls (spec §7.3).
-		if ln == laneUser {
-			rec.leaked[userID] = struct{}{}
-		}
 		return
 	}
 	rec.received[deliveryKey{userID: userID, ln: ln}]++
@@ -747,7 +738,6 @@ func (t *ProbeTracker) Counts() ProbeCounts {
 		default:
 			c.Complete++
 		}
-		c.Leaked += len(rec.leaked)
 	}
 	return c
 }
@@ -821,21 +811,12 @@ func (r *probeRecord) violations() []Violation {
 		})
 	}
 
-	if len(r.leaked) > 0 {
-		leaked := make([]string, 0, len(r.leaked))
-		for u := range r.leaked {
-			leaked = append(leaked, u)
-		}
-		sort.Strings(leaked)
-		out = append(out, Violation{
-			Kind: KindUnexpectedRecipient, MsgID: r.msgID, RoomID: r.roomID,
-			Users: leaked, Epoch: r.epoch, Detail: "delivered to non-member on the per-user lane",
-		})
-	}
-
 	return out
 }
 ```
+
+Leakage detection is deliberately absent here — it lands in Task 3 with its
+own red phase.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -857,11 +838,15 @@ git commit -m "feat(loadgen): ProbeTracker with completeness, dedupe, and leakag
 - Modify: `tools/loadgen/verify_probe_test.go`
 - Test: same file
 
+**Files (revised):**
+- Modify: `tools/loadgen/verify_probe.go`
+- Test: `tools/loadgen/verify_probe_test.go`
+
 **Interfaces:**
 - Consumes: everything from Task 2
-- Produces: no new API — this task proves the leakage branch behaves correctly and is asymmetric by lane
+- Produces: `ProbeCounts.Leaked` field; leakage recording in `RecordDelivery`; `KindUnexpectedRecipient` emission in `probeRecord.violations`
 
-**Context:** This is the highest-severity check (a message reaching a non-member is a privacy incident) and the one most likely to be mis-specified. It runs on `laneUser` only — see spec §7.3.
+**Context:** This is the highest-severity check (a message reaching a non-member is a privacy incident) and the one most likely to be mis-specified. It runs on `laneUser` only — see spec §7.3. Task 2 deliberately left this out so the tests below start red.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -929,23 +914,95 @@ func TestProbeTracker_RepeatedLeakFromSameUser_ReportedOnce(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `make test SERVICE=tools/loadgen -run TestProbeTracker_Leakage`
-Expected: These may already PASS from Task 2's implementation. If so, that is acceptable — they are the regression net for the asymmetry. If `TestProbeTracker_LeakageOnRoomLane_IsIgnored` fails, the lane guard in `RecordDelivery` is wrong; fix it before proceeding.
+Run: `make test SERVICE=tools/loadgen`
+Expected: FAIL. `TestProbeTracker_LeakageOnUserLane_IsViolation` fails with an empty violation list — Task 2 records no leakage. `TestProbeTracker_LeakageOnRoomLane_IsIgnored` passes already; that is the asymmetry guard and it must stay passing after Step 3.
 
-- [ ] **Step 3: Verify the lane guard is correct**
+- [ ] **Step 3: Write minimal implementation**
 
-Confirm `RecordDelivery` records into `rec.leaked` only when `ln == laneUser`. No implementation change expected.
+In `tools/loadgen/verify_probe.go`, add the `leaked` set to `probeRecord`:
 
-- [ ] **Step 4: Run the full package**
+```go
+type probeRecord struct {
+	msgID       string
+	roomID      string
+	senderID    string
+	epoch       int
+	publishedAt time.Time
+	expected    map[string]struct{}
+	received    map[deliveryKey]int
+	leaked      map[string]struct{} // userIDs outside expected, user lane only
+}
+```
+
+Initialise it in `RegisterProbe`:
+
+```go
+	rec := &probeRecord{
+		msgID: msgID, roomID: roomID, senderID: senderID, epoch: epoch,
+		publishedAt: at,
+		expected:    exp,
+		received:    make(map[deliveryKey]int, len(expected)),
+		leaked:      make(map[string]struct{}),
+	}
+```
+
+Record it in `RecordDelivery`, replacing the bare `return`:
+
+```go
+	if _, expected := rec.expected[userID]; !expected {
+		// Leakage is only meaningful on the per-user lane, where the system
+		// chooses the address. On the room lane, delivery follows from whoever
+		// subscribed to the topic, which loadgen controls (spec §7.3).
+		if ln == laneUser {
+			rec.leaked[userID] = struct{}{}
+		}
+		return
+	}
+```
+
+Add the `Leaked` field to `ProbeCounts` and accumulate it in `Counts`:
+
+```go
+type ProbeCounts struct {
+	Tracked    int
+	Suppressed int
+	Complete   int
+	Partial    int
+	TotalLoss  int
+	Leaked     int
+}
+```
+
+```go
+		c.Leaked += len(rec.leaked)
+```
+
+Emit the violation in `probeRecord.violations`, before the final `return out`:
+
+```go
+	if len(r.leaked) > 0 {
+		leaked := make([]string, 0, len(r.leaked))
+		for u := range r.leaked {
+			leaked = append(leaked, u)
+		}
+		sort.Strings(leaked)
+		out = append(out, Violation{
+			Kind: KindUnexpectedRecipient, MsgID: r.msgID, RoomID: r.roomID,
+			Users: leaked, Epoch: r.epoch, Detail: "delivered to non-member on the per-user lane",
+		})
+	}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
 
 Run: `make test SERVICE=tools/loadgen`
-Expected: PASS.
+Expected: PASS, including `TestProbeTracker_LeakageOnRoomLane_IsIgnored` — if that one now fails, the lane guard is wrong and leakage is being recorded on the room lane.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tools/loadgen/verify_probe_test.go
-git commit -m "test(loadgen): pin leakage check to the per-user lane"
+git add tools/loadgen/verify_probe.go tools/loadgen/verify_probe_test.go
+git commit -m "feat(loadgen): leakage detection scoped to the per-user lane"
 ```
 
 ---
@@ -2599,17 +2656,17 @@ git commit -m "feat(loadgen): verify console and JSON report rendering"
 
 ---
 
-## Task 10: Runner, preflight, and subcommand dispatch
+## Task 10a: Flags, preflight, and activation ordering
+
+**Scope note:** Task 10 is split. **10a is this task** — pure, fully-specified, unit-testable functions, reviewed under the normal gate. **10b** is the integration glue (`executeVerify`, dispatch wiring), which cannot be unit-tested without the full stack. Do not implement `runVerify` or `executeVerify` here.
 
 **Files:**
-- Create: `tools/loadgen/verify.go`
-- Modify: `tools/loadgen/main.go:113-143`
-- Modify: `tools/loadgen/daily.go` (activateUsers designated-set seeding)
+- Create: `tools/loadgen/verify.go` (config, flags, preflight, ordering only)
 - Test: `tools/loadgen/verify_test.go`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–9
-- Produces: `verifyConfig` struct, `parseVerifyFlags(args []string) (verifyConfig, error)`, `runVerify(ctx context.Context, cfg *config, args []string) int`, `preflightVerify(ctx context.Context, vc verifyConfig, prs ProbeRoomSet, directSize int) error`
+- Consumes: `ProbeRoomSet` (Task 1)
+- Produces: `verifyConfig` struct, `parseVerifyFlags(args []string) (verifyConfig, error)`, `preflightVerify(ctx context.Context, vc verifyConfig, prs ProbeRoomSet, directSize int) error`, `orderForActivation(users []*userState, designated []string) []string`
 
 **Context:** `dispatch` in `main.go:113` routes subcommands; each returns an int exit code (`runDaily(ctx, cfg, os.Args[2:])` at `main.go:131`). Preflight must fail fast on a large-room-threshold mismatch and on `--direct-only` with insufficient direct budget (spec §6.1, §6.3).
 
@@ -2870,6 +2927,42 @@ func orderForActivation(users []*userState, designated []string) []string {
 	return append(first, rest...)
 }
 
+```
+
+Imports needed in `verify.go` for 10a: `context`, `flag`, `fmt`, `time`.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `make test SERVICE=tools/loadgen`
+Expected: PASS, 9 tests. Every existing `daily_test.go` test must still pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools/loadgen/verify.go tools/loadgen/verify_test.go
+git commit -m "feat(loadgen): verify flags, preflight, and activation ordering"
+```
+
+---
+
+## Task 10b: Lifecycle wiring and subcommand dispatch
+
+**Files:**
+- Modify: `tools/loadgen/verify.go` (add `runVerify` and `executeVerify`)
+- Modify: `tools/loadgen/main.go:113-143`
+- Modify: `tools/loadgen/daily.go` (`activateUsers` designated-set seeding)
+
+**Interfaces:**
+- Consumes: everything from Tasks 1–10a
+- Produces: `runVerify(ctx context.Context, cfg *config, args []string) int`, `executeVerify(...) (VerifyReport, error)`
+
+**Deferral, stated up front:** `executeVerify` is integration glue over `prodEnvFactory`. It cannot be unit-tested without the full docker-compose stack — the same constraint that keeps `daily_integration_test.go` skipped (`daily_integration_test.go:31`). This task therefore has **no red phase and no new unit tests**; its correctness is established by the end-to-end run in Task 11 Step 2. This is a deliberate, spec-acknowledged exception to the plan's TDD constraint, not an oversight. Do not write a stubbed integration test to satisfy the form — a vacuously-passing test is worse than none.
+
+Everything in Tasks 1–10a that *can* be unit-tested already is; this task is only the wiring between them.
+
+- [ ] **Step 1: Add `runVerify` to `verify.go`**
+
+```go
 // runVerify is the verify subcommand entry point.
 func runVerify(ctx context.Context, cfg *config, args []string) int {
 	vc, err := parseVerifyFlags(args)
@@ -2893,7 +2986,6 @@ func runVerify(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 	reserve := selectReserve(fx, prs, vc.ReserveUsers, vc.Seed)
-
 	designated := append(append([]string(nil), prs.Members...), reserve...)
 
 	slog.Info("verify starting",
@@ -2928,32 +3020,49 @@ func runVerify(ctx context.Context, cfg *config, args []string) int {
 }
 ```
 
-`executeVerify` wires the lifecycle (activate → warmup → steady → quiesce → drain → readback → evaluate). Implement it in `verify.go` using the existing `prodEnvFactory` pattern from `daily.go:758` as reference, calling `orderForActivation` to seed the direct pool, attaching the `ProbeTracker` via `directPool.attachSink`, and driving churn from `MembershipModel` when `vc.MemberChurn > 0`. `BuiltinPreset` is the existing lookup helper in `preset.go`.
+Add imports `log/slog` and `os` to `verify.go`.
 
-In `main.go`, add the dispatch case after the `daily` case at line 131:
+- [ ] **Step 2: Implement `executeVerify`**
+
+Read `daily.go:405-460` (`activateUsers`), `daily.go:752-890` (`prodEnvFactory.Build`, `runDailyForTest`), and `daily_pool.go:34-118` (`directPool`) first — `executeVerify` follows the same wiring shape.
+
+Sequence:
+
+1. Build the pools. Honour `vc.DirectOnly` (multiplex size 0) and size the direct cap to at least `len(designated)`.
+2. `tracker := NewProbeTracker()`, then `directPool.attachSink(tracker)` **before** any `Add` call, so no delivery is missed.
+3. `mm := NewMembershipModel(prs)`; `mm.SetSettle(vc.Settle)`.
+4. Activate users in `orderForActivation(env.users, designated)` order so designated users occupy the direct pool.
+5. Call `preflightVerify(ctx, vc, prs, directPool.Size())` **after** activation — it asserts the direct pool actually holds every probe-room member. Return its error unchanged.
+6. Warmup for `vc.Warmup`, then steady for `vc.Steady`. During steady, the action emitter runs as in daily; sends into probe rooms consult `shouldProbe(vc.Seed, userIdx, seqNo, vc.ProbeRate)`. When a send is probed: if `mm.InSettle(roomID, now)` call `tracker.RecordSuppressed()` and skip tracking, otherwise `tracker.RegisterProbe(msgID, roomID, senderID, mm.Epoch(roomID), mm.MembersAtEpoch(roomID, mm.Epoch(roomID)), now)`.
+7. When `vc.MemberChurn > 0`, a churn goroutine issues adds/removes at that per-room-per-minute rate using `subject.MemberAdd` / `subject.MemberRemove`, drawing targets from the reserve. On a successful add, call `directPool.SubscribeRoom(targetID, roomID)` then `mm.ApplyAdd`. After each change's settle window elapses, query `subject.UserSubscriptionList` for the target and call `mm.RecordOracle`, then attempt one send as the target and call `mm.RecordSendResult` with whether it was accepted. The goroutine must exit on `ctx.Done()` and be tracked by a `sync.WaitGroup`.
+8. Quiesce: cancel the emitter context, stop churn, wait on the `WaitGroup`. Keep all subscriptions live.
+9. Drain: wait `vc.Drain`.
+10. Readback: build `[]ReadbackTarget` from the tracked probes and call `NewReadback(request, cfg.SiteID, 4, 4*time.Second).Verify(...)`. Capture the error separately — it feeds `VerifyInputs.ReadbackErr`, it is not a violation.
+11. Assemble `VerifyInputs` (violations from `tracker.Finalize()` plus `mm.Finalize()` plus readback violations; counts; `MultiplexDrops` from the collector; `GCPauseP99` via the existing daily self-metrics helper; `Cancelled` from `ctx.Err() != nil`), call `evaluateVerify`, and return the populated `VerifyReport`.
+
+- [ ] **Step 3: Wire the dispatch**
+
+In `main.go`, add after the `daily` case at line 131:
 
 ```go
 	case "verify":
 		return runVerify(ctx, cfg, os.Args[2:])
 ```
 
-In `daily.go`, change `activateUsers` to walk an order produced by `orderForActivation` rather than indexing `env.users` directly, defaulting `designated` to nil for daily.
+- [ ] **Step 4: Rewire `activateUsers`**
 
-- [ ] **Step 4: Run test to verify it passes**
+In `daily.go`, change `activateUsers` to walk an order produced by `orderForActivation` rather than indexing `env.users` directly. Add a `designated []string` field to `stepEnv`, left nil by `daily`. With a nil designated set the walk order must be identical to today's — `TestActivateUsers_EmptyDesignatedSet_PreservesDailyOrder` from Task 10a pins this.
 
-Run: `make test SERVICE=tools/loadgen`
-Expected: PASS. Every existing `daily_test.go` test must still pass.
+- [ ] **Step 5: Verify the build and the full suite**
 
-- [ ] **Step 5: Verify the binary builds and the subcommand is reachable**
-
-Run: `make build SERVICE=tools/loadgen && ./bin/loadgen verify -h`
-Expected: the flag list prints; exit code 2 for `-h` is acceptable.
+Run: `make test SERVICE=tools/loadgen && make build SERVICE=tools/loadgen && ./bin/loadgen verify -h`
+Expected: all tests pass (no new ones), binary builds, flag list prints.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tools/loadgen/verify.go tools/loadgen/verify_test.go tools/loadgen/main.go tools/loadgen/daily.go
-git commit -m "feat(loadgen): verify runner, preflight, and subcommand dispatch"
+git add tools/loadgen/verify.go tools/loadgen/main.go tools/loadgen/daily.go
+git commit -m "feat(loadgen): verify lifecycle wiring and subcommand dispatch"
 ```
 
 ---
@@ -3046,13 +3155,13 @@ git commit -m "docs(loadgen): verify deploy target, operator guide, and measured
 | Spec section | Covered by |
 |---|---|
 | §3 violation classes | Tasks 1, 2, 3, 6, 7 |
-| §4 lifecycle, exit codes | Tasks 8, 10 |
-| §4.1 CLI flags | Task 10 |
+| §4 lifecycle, exit codes | Tasks 8, 10a, 10b |
+| §4.1 CLI flags | Task 10a |
 | §5 probe sampling | Task 5 |
-| §6.0 probe-room-first activation, reserve | Tasks 1, 10 |
-| §6.1 large-room exclusion + preflight | Tasks 1, 10 |
+| §6.0 probe-room-first activation, reserve | Tasks 1, 10a, 10b |
+| §6.1 large-room exclusion + preflight | Tasks 1, 10a |
 | §6.2 multiplex never probe recipients | Tasks 4, 8 |
-| §6.3 resource budget, `--lane`, `--direct-only` | Tasks 10, 11 |
+| §6.3 resource budget, `--lane`, `--direct-only` | Tasks 10a, 10b, 11 |
 | §7 receiver attribution | Task 4 |
 | §7.1 dual-lane dedupe | Task 2 |
 | §7.2 sender self-delivery | Task 2 |
@@ -3066,4 +3175,4 @@ git commit -m "docs(loadgen): verify deploy target, operator guide, and measured
 | §14 error handling | Global Constraints + all |
 | §16 success criteria | Task 11 |
 
-**Known deferral:** `executeVerify` (the lifecycle wiring in Task 10) is specified prose-first rather than code-first because it is integration glue over `prodEnvFactory`, which cannot be unit-tested without the full stack — the same constraint that keeps `daily_integration_test.go` skipped. Its correctness is established by the Step 2 end-to-end run in Task 11, not by a unit test.
+**Known deferral:** `executeVerify` (Task 10b) is specified prose-first rather than code-first because it is integration glue over `prodEnvFactory`, which cannot be unit-tested without the full stack — the same constraint that keeps `daily_integration_test.go` skipped. Task 10 is split so this deferral is quarantined: **10a** is pure and fully unit-tested under the normal gate, **10b** is the wiring, verified by the Task 11 Step 2 end-to-end run. Task 10b has no red phase by design; a stubbed integration test there would pass vacuously and is explicitly forbidden.
