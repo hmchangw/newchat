@@ -2958,6 +2958,14 @@ git commit -m "feat(loadgen): verify flags, preflight, and activation ordering"
 
 **Deferral, stated up front:** `executeVerify` is integration glue over `prodEnvFactory`. It cannot be unit-tested without the full docker-compose stack — the same constraint that keeps `daily_integration_test.go` skipped (`daily_integration_test.go:31`). This task therefore has **no red phase and no new unit tests**; its correctness is established by the end-to-end run in Task 11 Step 2. This is a deliberate, spec-acknowledged exception to the plan's TDD constraint, not an oversight. Do not write a stubbed integration test to satisfy the form — a vacuously-passing test is worse than none.
 
+> **Amendment (2026-08-09, pre-merge fix wave) — the deferral's verification never happened.**
+>
+> The end-to-end run named above as this task's *only* correctness mechanism was **not performed**: Docker was unavailable in the implementation environment, so Task 11 Step 2 never ran. `executeVerify` and `runVerify` therefore ship with **no executed verification of any kind** — not unit, not integration, not manual. This is recorded, not resolved; the branch is merged with that gap open.
+>
+> Two further points the original wording obscured:
+> - The deferral was scoped to `executeVerify`, but the same commit also landed ~10 pure, trivially unit-testable helpers (`probeSendRate`, `churnInterval`, `churnRooms`, `pickJoinTarget`, `harvest`, `verifyDailyConfig`, `dropAbsentReserve`, `indexUsersByID`, `indexPositions`, `buildVerifyUsers`, `pendingFor`, `roomRequester`) that the blanket "no new unit tests" decision swept along without justification. The pre-merge fix wave adds unit tests for all of them; only `executeVerify` and `runVerify` remain untested.
+> - **Outstanding action:** run `loadgen verify` end-to-end against the docker-compose stack before trusting any verdict it produces. Until that happens, a PASS from this tool is unvalidated.
+
 Everything in Tasks 1–10a that *can* be unit-tested already is; this task is only the wiring between them.
 
 - [ ] **Step 1: Add `runVerify` to `verify.go`**

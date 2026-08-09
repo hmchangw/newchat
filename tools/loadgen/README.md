@@ -1101,7 +1101,7 @@ Every violation carries `roomId`, and where applicable `msgId` / `users` /
 |---|---|---|
 | `missing_recipient` | Some, but not all, expected recipients of a probe received it (a full miss is `total_loss` instead) — `Users` lists exactly which expected recipients were missed | `broadcast-worker` fan-out, or an affected member's own connection |
 | `total_loss` | Zero recipients received the probe at all | The publish→broadcast pipeline end-to-end (gatekeeper, MESSAGES-CANONICAL, `broadcast-worker`), or a room with no live receivers |
-| `duplicate_delivery` | A recipient received the same probe more than once on the per-user lane | Dual-lane de-duplication, or `broadcast-worker`/JetStream redelivery |
+| `duplicate_delivery` | A recipient received the same probe more than once **on a single lane**. Checked on every lane (global, local, per-user): one arrival per subscribed lane is expected — rooms are subscribed on both room lanes to stay `ROOM_SUBJECT_MODE`-agnostic — but two arrivals on the same lane are not | `broadcast-worker`/JetStream redelivery, or a duplicate publish |
 | `unexpected_recipient` | A non-member received the probe on the per-user lane (leakage) — see [Known limitations](#known-limitations-1), this check only runs on that lane | Authorization/routing sending a message to a user it shouldn't have addressed |
 | `persistence_miss` | The sent message ID was not found on readback from history-service after the retry budget | `message-worker` failing to persist to Cassandra, or the history-service read path |
 | `persistence_mismatch` | The message was found on readback but a field (e.g. sender, thread parent) doesn't match what was sent | `message-worker` corrupting a field on write |
