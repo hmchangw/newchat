@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // recordingSink captures deliveries for assertions without a NATS connection.
@@ -74,10 +75,10 @@ func TestDirectPool_Deliver_IgnoresMalformedPayload(t *testing.T) {
 }
 
 // TestDirectPool_AttachSinkDeliver_ConcurrentAccessIsRaceFree pins the
-// locking contract between attachSink (writer) and deliver (reader) of
+// synchronisation contract between attachSink (writer) and deliver (reader) of
 // p.sink: NATS subscription callbacks call deliver from readLoop goroutines
-// concurrently with SubscribeRoom/attachSink mutating pool state. Without
-// p.mu guarding both sides, -race reports a data race on p.sink even though
+// concurrently with SubscribeRoom/attachSink mutating pool state. Without the
+// atomic pointer on both sides, -race reports a data race on p.sink even though
 // no test assertion depends on the interleaving — the race detector catches
 // the unsynchronized access itself.
 func TestDirectPool_AttachSinkDeliver_ConcurrentAccessIsRaceFree(t *testing.T) {
@@ -146,4 +147,103 @@ func TestDirectPool_RecordDisconnect_IgnoresOrderlyShutdown(t *testing.T) {
 	p.Close()
 	p.recordDisconnect()
 	assert.Zero(t, p.DroppedRecipients())
+}
+
+// TestDirectPool_RecordDisconnectFor_IgnoresUnregisteredUser pins the fix for
+// the phantom-drop bug: Add arms the disconnect handler before it subscribes,
+// and every one of its error paths Drains the connection it just opened. Drain
+// closes the conn, the handler fires, and an unregistered connection would be
+// counted as a lost recipient — feeding VerifyInputs.DroppedRecipients and
+// reporting INCONCLUSIVE for a background user's activation hiccup.
+func TestDirectPool_RecordDisconnectFor_IgnoresUnregisteredUser(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	du := &directUser{id: "u-1"} // never reached p.users
+
+	p.recordDisconnectFor(du)
+
+	assert.Zero(t, p.DroppedRecipients(),
+		"a connection Add abandoned was never a tracked recipient")
+}
+
+func TestDirectPool_RecordDisconnectFor_CountsRegisteredUser(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	du := &directUser{id: "u-1"}
+	du.registered.Store(true)
+
+	p.recordDisconnectFor(du)
+
+	assert.Equal(t, int64(1), p.DroppedRecipients(),
+		"a registered recipient going away mid-run does invalidate delivery claims")
+}
+
+func TestDirectPool_RecordDisconnectFor_IgnoresOrderlyShutdown(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	du := &directUser{id: "u-1"}
+	du.registered.Store(true)
+	p.Close()
+
+	p.recordDisconnectFor(du)
+
+	assert.Zero(t, p.DroppedRecipients())
+}
+
+// TestDirectPool_Add_RegistersOnlyOnSuccess pins the other half of the gate:
+// Add must not leave a user's registered flag set unless the user actually
+// entered the pool. A connect failure (no server at this URL) is the cheapest
+// error path to exercise without NATS.
+func TestDirectPool_Add_ConnectFailure_RecordsNoDrop(t *testing.T) {
+	p := newDirectPool("nats://127.0.0.1:1", "", nil)
+
+	err := p.Add(&userState{ID: "u-1", Account: "a-1", Rooms: []string{"r-1"}})
+
+	require.Error(t, err)
+	assert.Zero(t, p.Size())
+	assert.Zero(t, p.DroppedRecipients(),
+		"a failed activation must not be reported as a dropped recipient")
+}
+
+// TestDirectPool_Deliver_DoesNotTakePoolLock pins that the receive hot path is
+// lock-free with respect to the pool-global mutex. `daily` defaults to 20000
+// direct users with no sink attached, so every broadcast every one of them
+// receives runs through deliver; serialising that on one mutex is the ceiling
+// Collector shards 64 ways to avoid (see collector.go). The test holds p.mu and
+// asserts deliver still completes.
+func TestDirectPool_Deliver_DoesNotTakePoolLock(t *testing.T) {
+	tests := []struct {
+		name   string
+		attach bool
+	}{
+		{name: "nil sink (daily)", attach: false},
+		{name: "attached sink (verify)", attach: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newDirectPool("nats://unused", "", nil)
+			sink := &recordingSink{}
+			if tt.attach {
+				p.attachSink(sink)
+			}
+
+			p.mu.Lock()
+			defer p.mu.Unlock()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				p.deliver("u-1", []byte(`{"roomId":"r-1","lastMsgId":"m-1"}`), laneGlobal)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				// The deferred Unlock releases the goroutine after the test.
+				t.Fatal("deliver blocked on the pool-global mutex")
+			}
+
+			if tt.attach {
+				assert.Len(t, sink.calls, 1)
+			} else {
+				assert.Empty(t, sink.calls)
+			}
+		})
+	}
 }
