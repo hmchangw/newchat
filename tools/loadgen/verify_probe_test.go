@@ -181,3 +181,57 @@ func TestProbeTracker_ConcurrentDeliveries(t *testing.T) {
 
 	assert.Empty(t, tr.Finalize(), "all 200 concurrent deliveries must be recorded")
 }
+
+func TestShouldProbe_Deterministic(t *testing.T) {
+	for seq := uint64(0); seq < 100; seq++ {
+		a := shouldProbe(42, 7, seq, 0.5)
+		b := shouldProbe(42, 7, seq, 0.5)
+		assert.Equal(t, a, b, "same inputs must give the same answer at seq %d", seq)
+	}
+}
+
+func TestShouldProbe_RateZeroNeverProbes(t *testing.T) {
+	for seq := uint64(0); seq < 1000; seq++ {
+		assert.False(t, shouldProbe(42, 1, seq, 0))
+	}
+}
+
+func TestShouldProbe_RateOneAlwaysProbes(t *testing.T) {
+	for seq := uint64(0); seq < 1000; seq++ {
+		assert.True(t, shouldProbe(42, 1, seq, 1.0))
+	}
+}
+
+func TestShouldProbe_ApproximatesRate(t *testing.T) {
+	const n = 100000
+	hits := 0
+	for seq := uint64(0); seq < n; seq++ {
+		if shouldProbe(42, 3, seq, 0.01) {
+			hits++
+		}
+	}
+	// 1% of 100k is 1000; allow generous slack for hash distribution.
+	assert.InDelta(t, 1000, hits, 200, "observed rate %d/%d strays from 1%%", hits, n)
+}
+
+func TestShouldProbe_DiffersAcrossUsers(t *testing.T) {
+	// Adjacent user indices must not produce identical probe streams,
+	// otherwise probes cluster on the same senders.
+	same := 0
+	for seq := uint64(0); seq < 1000; seq++ {
+		if shouldProbe(42, 1, seq, 0.1) == shouldProbe(42, 2, seq, 0.1) {
+			same++
+		}
+	}
+	assert.Less(t, same, 1000, "user 1 and user 2 produced identical probe streams")
+}
+
+func TestShouldProbe_DiffersAcrossSeeds(t *testing.T) {
+	diff := 0
+	for seq := uint64(0); seq < 1000; seq++ {
+		if shouldProbe(1, 5, seq, 0.1) != shouldProbe(2, 5, seq, 0.1) {
+			diff++
+		}
+	}
+	assert.Positive(t, diff, "different seeds must produce different probe sets")
+}
