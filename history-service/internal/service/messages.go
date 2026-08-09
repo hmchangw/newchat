@@ -638,6 +638,19 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 	}, nil
 }
 
+// storedPreview reads the room's memoized preview, or nil when none is current.
+// Best-effort: a read failure just sends the caller down the walk it would have
+// taken anyway.
+func (s *HistoryService) storedPreview(ctx context.Context, roomID string) *models.PreviewMessage {
+	rows, err := s.rooms.GetRoomTimesByIDs(ctx, []string{roomID})
+	if err != nil {
+		slog.WarnContext(ctx, "stored preview read failed, falling back to walk", "room_id", roomID,
+			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+		return nil
+	}
+	return rows[roomID].Preview
+}
+
 // previewAfterMutation resolves the room's current last-eligible preview (the same
 // walk as subscription.list), both to carry on the edit/delete fan-out and to refresh
 // the stored copy. Bypasses the preview cache so a mutation always sees fresh state.
@@ -650,6 +663,14 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
 	if msg.ThreadParentID != "" && !msg.TShow {
 		return nil
+	}
+	// A mutation that doesn't touch the stored preview cannot change it, so the
+	// walk is skipped and the preview re-reported unchanged. This is the common
+	// case: most edits and deletes target a message that is not the room's newest
+	// eligible one. One projected room-doc read replaces a Cassandra walk plus a
+	// re-seal and re-write.
+	if stored := s.storedPreview(c, roomID); stored != nil && stored.MessageID != msg.MessageID {
+		return stored
 	}
 	w := s.roomLastPreviewMessage(c, roomID, nil, at)
 	switch w.State {
