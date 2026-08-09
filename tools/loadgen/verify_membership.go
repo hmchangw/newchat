@@ -22,7 +22,6 @@ type membershipChange struct {
 	roomID string
 	userID string
 	epoch  int
-	at     time.Time
 
 	oracleSeen    bool // subscription.list was queried for this epoch
 	oracleHasUser bool // and reported the user as a member
@@ -171,7 +170,7 @@ func (m *MembershipModel) apply(kind changeKind, roomID, userID string, now time
 	rs.settleEnd = now.Add(m.settle)
 
 	m.changes = append(m.changes, &membershipChange{
-		kind: kind, roomID: roomID, userID: userID, epoch: rs.epoch, at: now,
+		kind: kind, roomID: roomID, userID: userID, epoch: rs.epoch,
 	})
 }
 
@@ -208,7 +207,11 @@ func (m *MembershipModel) RecordSendResult(roomID, userID string, accepted bool,
 
 // ChangeCounts summarises churn for the report.
 type ChangeCounts struct {
-	Total, Adds, Removes, Applied, Effective int
+	Total     int `json:"total"`
+	Adds      int `json:"adds"`
+	Removes   int `json:"removes"`
+	Applied   int `json:"applied"`
+	Effective int `json:"effective"`
 }
 
 // Counts returns churn summary counters.

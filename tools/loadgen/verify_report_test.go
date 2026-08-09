@@ -103,6 +103,43 @@ func TestRenderVerifyJSON_RoundTrips(t *testing.T) {
 	assert.Equal(t, []string{"u-1", "u-2"}, back.Result.Violations[0].Users)
 }
 
+// TestRenderVerifyJSON_UsesCamelCaseKeys pins the wire shape of the nested
+// report objects. Without json tags on ProbeCounts/ChangeCounts/VerifyResult,
+// encoding/json falls back to Go field names and emits
+// {"counts":{"Tracked":…},"result":{"Verdict":…}} — PascalCase islands inside
+// an otherwise camelCase artifact that operators grep and diff across runs.
+func TestRenderVerifyJSON_UsesCamelCaseKeys(t *testing.T) {
+	raw, err := renderVerifyJSON(reportForTest())
+	require.NoError(t, err)
+
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &doc))
+
+	nested := func(key string) map[string]json.RawMessage {
+		var out map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(doc[key], &out))
+		return out
+	}
+
+	counts := nested("counts")
+	for _, k := range []string{"tracked", "suppressed", "complete", "partial", "totalLoss", "leaked"} {
+		assert.Contains(t, counts, k)
+	}
+	assert.NotContains(t, counts, "Tracked")
+
+	changes := nested("changes")
+	for _, k := range []string{"total", "adds", "removes", "applied", "effective"} {
+		assert.Contains(t, changes, k)
+	}
+	assert.NotContains(t, changes, "Total")
+
+	result := nested("result")
+	for _, k := range []string{"verdict", "violations"} {
+		assert.Contains(t, result, k)
+	}
+	assert.NotContains(t, result, "Verdict")
+}
+
 func TestRenderVerifyJSON_CarriesAllViolations(t *testing.T) {
 	rep := reportForTest()
 	rep.Result.Violations = nil

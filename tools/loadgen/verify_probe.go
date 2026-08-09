@@ -27,24 +27,23 @@ type deliveryKey struct {
 }
 
 type probeRecord struct {
-	msgID       string
-	roomID      string
-	senderID    string
-	epoch       int
-	publishedAt time.Time
-	expected    map[string]struct{}
-	received    map[deliveryKey]int
-	leaked      map[string]struct{} // userIDs outside expected, user lane only
+	msgID    string
+	roomID   string
+	epoch    int
+	expected map[string]struct{}
+	received map[deliveryKey]int
+	leaked   map[string]struct{} // userIDs outside expected, user lane only
 }
 
-// ProbeCounts is the summary surfaced in the report.
+// ProbeCounts is the summary surfaced in the report. The json tags matter:
+// the --json artifact is what operators grep and diff across runs.
 type ProbeCounts struct {
-	Tracked    int
-	Suppressed int
-	Complete   int
-	Partial    int
-	TotalLoss  int
-	Leaked     int
+	Tracked    int `json:"tracked"`
+	Suppressed int `json:"suppressed"`
+	Complete   int `json:"complete"`
+	Partial    int `json:"partial"`
+	TotalLoss  int `json:"totalLoss"`
+	Leaked     int `json:"leaked"`
 }
 
 // ProbeTracker records per-recipient delivery for sampled messages and reports
@@ -68,17 +67,16 @@ func NewProbeTracker() *ProbeTracker {
 // RegisterProbe records that msgID was published into roomID and is expected to
 // reach every user in expected. The sender is included in expected by the
 // caller — broadcast-worker echoes to the sender (spec §7.2).
-func (t *ProbeTracker) RegisterProbe(msgID, roomID, senderID string, epoch int, expected []string, at time.Time) {
+func (t *ProbeTracker) RegisterProbe(msgID, roomID string, epoch int, expected []string) {
 	exp := make(map[string]struct{}, len(expected))
 	for _, u := range expected {
 		exp[u] = struct{}{}
 	}
 	rec := &probeRecord{
-		msgID: msgID, roomID: roomID, senderID: senderID, epoch: epoch,
-		publishedAt: at,
-		expected:    exp,
-		received:    make(map[deliveryKey]int, len(expected)),
-		leaked:      make(map[string]struct{}),
+		msgID: msgID, roomID: roomID, epoch: epoch,
+		expected: exp,
+		received: make(map[deliveryKey]int, len(expected)),
+		leaked:   make(map[string]struct{}),
 	}
 	t.mu.Lock()
 	t.probes[msgID] = rec

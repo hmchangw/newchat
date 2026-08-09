@@ -41,9 +41,9 @@ type VerifyInputs struct {
 
 // VerifyResult is the evaluated outcome plus human-readable reasons.
 type VerifyResult struct {
-	Verdict    Verdict
-	Reasons    []string
-	Violations []Violation
+	Verdict    Verdict     `json:"verdict"`
+	Reasons    []string    `json:"reasons,omitempty"`
+	Violations []Violation `json:"violations,omitempty"`
 }
 
 // evaluateVerify decides PASS / FAIL / INCONCLUSIVE.

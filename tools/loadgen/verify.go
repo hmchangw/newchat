@@ -79,6 +79,11 @@ func parseVerifyFlags(args []string) (verifyConfig, error) {
 	if vc.ProbeRooms <= 0 {
 		return vc, fmt.Errorf("invalid --probe-rooms %d: want a positive count", vc.ProbeRooms)
 	}
+	if vc.ReserveUsers < 0 {
+		// A negative count reaches r.Perm(len(candidates))[:n] in selectReserve
+		// and panics with a slice bounds error instead of a usage message.
+		return vc, fmt.Errorf("invalid --reserve-users %d: want a non-negative count", vc.ReserveUsers)
+	}
 	if vc.MinProbes < 1 {
 		return vc, fmt.Errorf(
 			"invalid --min-probes %d: must be at least 1 — at 0 the probe floor in evaluateVerify "+
@@ -225,9 +230,13 @@ const (
 	// verifyChurnPoll is how often the churn driver wakes to issue a change or
 	// harvest a settled one. Well below the 5s default --settle.
 	verifyChurnPoll = 500 * time.Millisecond
-	// verifyChurnTailroom stops issuing new changes this far before the steady
-	// window ends, so a change still has its settle window plus observation
-	// time inside the run.
+	// verifyChurnObservation is the budget one settled change needs AFTER its
+	// settle window: harvest has to page subscription.list and run a send/reply
+	// round trip before the steady window closes. The effective tailroom is
+	// this PLUS --settle — see churnTailroom.
+	verifyChurnObservation = 10 * time.Second
+	// verifyChurnTailroom is the floor on that tailroom, so a zero --settle
+	// still leaves room for the two observations.
 	verifyChurnTailroom = 10 * time.Second
 	// verifyReadbackAttempts / verifyReadbackBackoff bound the persistence
 	// retry budget — message-worker is asynchronous, so a first-read miss is
@@ -363,11 +372,12 @@ func executeVerify(
 	if vc.MemberChurn > 0 {
 		// Stop issuing changes before the window closes so the last one still
 		// gets its settle window and its two observations inside the run.
-		if vc.Steady <= verifyChurnTailroom+vc.Settle {
+		tailroom := churnTailroom(vc.Settle)
+		if vc.Steady <= tailroom {
 			slog.Warn("steady window too short for membership churn; no changes will be issued",
-				"steady", vc.Steady, "settle", vc.Settle, "tailroom", verifyChurnTailroom)
+				"steady", vc.Steady, "settle", vc.Settle, "tailroom", tailroom)
 		}
-		issueUntil := time.Now().Add(vc.Steady - verifyChurnTailroom)
+		issueUntil := time.Now().Add(vc.Steady - tailroom)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -634,7 +644,7 @@ func (r *verifyRun) emitOneProbe(ctx context.Context, u *userState, roomID strin
 	// has to traverse MESSAGES → gatekeeper → canonical → broadcast-worker →
 	// back, which no map insert loses to.
 	epoch := r.mm.Epoch(roomID)
-	r.tracker.RegisterProbe(msgID, roomID, u.ID, epoch, r.mm.MembersAtEpoch(roomID, epoch), now)
+	r.tracker.RegisterProbe(msgID, roomID, epoch, r.mm.MembersAtEpoch(roomID, epoch))
 	r.mu.Lock()
 	r.targets = append(r.targets, ReadbackTarget{MsgID: msgID, RoomID: roomID, SenderID: u.ID})
 	r.mu.Unlock()
@@ -682,6 +692,27 @@ func (r *verifyRun) churnRooms() []string {
 		}
 	}
 	return out
+}
+
+// churnTailroom returns how long before the steady window closes driveChurn
+// must stop issuing changes.
+//
+// It has to scale with --settle. A change is only ever observed if its due time
+// (issued + Settle) falls inside the steady window, so a fixed tailroom silently
+// discards every change issued after Steady-Settle: at --steady=120s
+// --settle=30s that is ~18% of them. Those changes still increment
+// ChangeCounts.Total but never Applied or Effective, so the report reads
+// "22 changes / 18 applied / 18 effective" with no violation and verdict PASS —
+// visually identical to a real membership_not_applied symptom, but silent. A
+// correctness tool reporting a false clean is its worst failure mode.
+func churnTailroom(settle time.Duration) time.Duration {
+	if settle < 0 {
+		settle = 0
+	}
+	if tr := settle + verifyChurnObservation; tr > verifyChurnTailroom {
+		return tr
+	}
+	return verifyChurnTailroom
 }
 
 // churnInterval converts --member-churn (changes per room per minute) into the
