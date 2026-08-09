@@ -26,10 +26,12 @@ func (v Verdict) ExitCode() int {
 
 // VerifyInputs is everything the evaluator needs.
 type VerifyInputs struct {
-	Violations        []Violation
-	Counts            ProbeCounts
-	Changes           ChangeCounts
-	MinProbes         int
+	Violations []Violation
+	Counts     ProbeCounts
+	Changes    ChangeCounts
+	MinProbes  int
+	// MultiplexDrops is reported as load context only — it does not gate the
+	// verdict. See evaluateVerify.
 	MultiplexDrops    int64
 	DroppedRecipients int
 	ReadbackErr       error
@@ -57,14 +59,22 @@ type VerifyResult struct {
 // Membership churn (Changes) is deliberately NOT considered here: churn
 // legitimately changes the expected recipient set and is not, on its own,
 // evidence that measurement was untrustworthy.
+//
+// Multiplex drops (MultiplexDrops) are deliberately NOT considered here either,
+// though they were originally. The multiplex pool's per-user inbox channels are
+// write-only by design — nothing in the tree ever receives from them, so a full
+// inbox is their normal steady state under background load, and `daily` has
+// always dropped there without caring. Meanwhile preflightVerify refuses to
+// start unless every probe-room member is in the *direct* pool. A multiplex
+// user is therefore never an expected probe recipient, and a multiplex drop
+// cannot affect probe accounting at all: the loss is on a population probes
+// never touch, which makes it perfectly distinguishable from a delivery bug.
+// Gating on it made PASS unreachable in the default configuration — with
+// `daily-heavy` roughly 7000 users sit on multiplex, so drops are certain
+// within seconds. The count is still reported as load context (VerifyReport).
 func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugeParam: VerifyInputs is 192 bytes, but the by-value signature is fixed by this plan's brief and its pinned test call sites (e.g. evaluateVerify(passingInputs())), not by any interface conformance
 	var reasons []string
 
-	if in.MultiplexDrops > 0 {
-		reasons = append(reasons, fmt.Sprintf(
-			"%d multiplex drop(s) recorded — a harness-side loss is indistinguishable from a delivery bug",
-			in.MultiplexDrops))
-	}
 	if in.DroppedRecipients > 0 {
 		reasons = append(reasons, fmt.Sprintf(
 			"%d tracked recipient connection dropped mid-run — non-delivery cannot be attributed to the system",

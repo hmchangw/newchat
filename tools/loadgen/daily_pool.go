@@ -69,6 +69,10 @@ type directUser struct {
 	id   string
 	nc   *nats.Conn
 	subs []*nats.Subscription
+	// rooms is the set of room IDs this user already holds subscriptions for,
+	// guarded by directPool.mu. It exists so SubscribeRoom is idempotent — see
+	// the comment there.
+	rooms map[string]struct{}
 	// registered flips once the user is in p.users. Until then its connection
 	// is not a tracked recipient, so losing it is not a dropped recipient —
 	// see recordDisconnectFor.
@@ -161,7 +165,7 @@ func (p *directPool) MissingUsers(ids []string) []string {
 // failing loudly. An operator who knows their stack's mode can halve the
 // subscription count via setLanes (`verify --lane`).
 func (p *directPool) Add(u *userState) error {
-	du := &directUser{id: u.ID}
+	du := &directUser{id: u.ID, rooms: make(map[string]struct{})}
 	nc, err := connectWithCreds(p.url, "loadgen-daily-"+u.ID, p.credsFile,
 		nats.DisconnectErrHandler(func(_ *nats.Conn, _ error) { p.recordDisconnectFor(du) }))
 	if err != nil {
@@ -181,6 +185,7 @@ func (p *directPool) Add(u *userState) error {
 			}
 			du.subs = append(du.subs, sub)
 		}
+		du.rooms[roomID] = struct{}{}
 	}
 	// User-scoped subscription for DM broadcasts.
 	userSub, err := nc.Subscribe(subject.UserRoomEvent(u.Account), func(m *nats.Msg) {
@@ -258,12 +263,42 @@ func (p *directPool) deliver(userID string, data []byte, ln lane) {
 // SubscribeRoom adds a room subscription to an already-connected user. Used
 // when a reserve floater is added to a probe room mid-run — the same thing a
 // real client does on joining.
+//
+// Idempotent: a room the user already holds returns nil without opening a
+// second subscription. `verify`'s churn re-adds users it removed earlier —
+// removeMember deliberately leaves the room subscription in place, while
+// applyChange rebuilds its candidate set from the membership model, so the same
+// floater becomes a legitimate join target again. Two live subscriptions on the
+// identical subject deliver every later probe twice on the same lane, which the
+// tracker reports as duplicate_delivery against a system that delivered exactly
+// once.
 func (p *directPool) SubscribeRoom(userID, roomID string) error {
 	p.mu.Lock()
 	du, ok := p.users[userID]
+	if ok {
+		if _, held := du.rooms[roomID]; held {
+			p.mu.Unlock()
+			return nil
+		}
+		// Claim before releasing the lock so two concurrent calls for the same
+		// user-room pair cannot both get past the check and double-subscribe.
+		if du.rooms == nil {
+			du.rooms = make(map[string]struct{})
+		}
+		du.rooms[roomID] = struct{}{}
+	}
 	p.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("subscribe room %s: user %s not in direct pool", roomID, userID)
+	}
+	// Release the claim on failure: the user does not hold a complete
+	// subscription set for this room, and recording otherwise would be a lie in
+	// pool state. A retry is not a duplicate risk in practice — addMember treats
+	// a SubscribeRoom error as fatal and aborts churn rather than retrying.
+	release := func() {
+		p.mu.Lock()
+		delete(du.rooms, roomID)
+		p.mu.Unlock()
 	}
 	for _, global := range p.laneSelection() {
 		subj := subject.RoomEvent(roomID, global)
@@ -271,6 +306,7 @@ func (p *directPool) SubscribeRoom(userID, roomID string) error {
 			p.deliver(userID, m.Data, laneForSubject(m.Subject))
 		})
 		if err != nil {
+			release()
 			return fmt.Errorf("subscribe room %s for %s: %w", roomID, userID, err)
 		}
 		p.mu.Lock()
@@ -278,6 +314,7 @@ func (p *directPool) SubscribeRoom(userID, roomID string) error {
 		p.mu.Unlock()
 	}
 	if err := du.nc.Flush(); err != nil {
+		release()
 		return fmt.Errorf("flush room subscription %s for %s: %w", roomID, userID, err)
 	}
 	return nil

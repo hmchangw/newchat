@@ -16,6 +16,7 @@ type VerifyReport struct {
 	DirectPoolSize int          `json:"directPoolSize"`
 	ReserveSize    int          `json:"reserveSize"`
 	BackgroundSize int          `json:"backgroundSize"`
+	MultiplexDrops int64        `json:"multiplexDrops"`
 	Counts         ProbeCounts  `json:"counts"`
 	Changes        ChangeCounts `json:"changes"`
 	Result         VerifyResult `json:"result"`
@@ -28,7 +29,11 @@ func renderVerifyConsole(rep VerifyReport) string { //nolint:gocritic // hugePar
 
 	fmt.Fprintf(&b, "probe rooms: %d / %d members / direct pool %d (%d reserve)\n",
 		rep.ProbeRooms, rep.ProbeMembers, rep.DirectPoolSize, rep.ReserveSize)
-	fmt.Fprintf(&b, "background:  %d users on multiplex\n", rep.BackgroundSize)
+	// Multiplex drops are load context, not a trust signal: probe recipients are
+	// guaranteed direct-pool by preflight, so a drop there cannot touch probe
+	// accounting (see evaluateVerify).
+	fmt.Fprintf(&b, "background:  %d users on multiplex (%d dropped — inbox full, not a probe signal)\n",
+		rep.BackgroundSize, rep.MultiplexDrops)
 	fmt.Fprintf(&b, "probes:      %d tracked / %d suppressed (settle window)\n",
 		rep.Counts.Tracked, rep.Counts.Suppressed)
 	fmt.Fprintf(&b, "delivery:    %d complete / %d partial / %d total-loss\n",

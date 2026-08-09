@@ -1115,7 +1115,7 @@ Console summary:
 
 ```
 probe rooms: 50 / 1200 members / direct pool 1400 (200 reserve)
-background:  8600 users on multiplex
+background:  8600 users on multiplex (1204 dropped — inbox full, not a probe signal)
 probes:      612 tracked / 8 suppressed (settle window)
 delivery:    608 complete / 3 partial / 1 total-loss
 leakage:     0 unexpected recipients (user lane)
@@ -1129,11 +1129,21 @@ VERDICT: FAIL
 ```
 
 An INCONCLUSIVE run prints a `REASONS` block instead of (or in addition to)
-`VIOLATIONS`, naming which signal made the run untrustworthy (multiplex
-drop, dropped recipient connection, readback/oracle error, probe floor not
-met, GC pressure, or cancellation — see `evaluateVerify` in
+`VIOLATIONS`, naming which signal made the run untrustworthy (dropped
+recipient connection, readback/oracle error, probe floor not met, GC
+pressure, or cancellation — see `evaluateVerify` in
 `tools/loadgen/verify_verdict.go`). The console violation list is capped at
 10; pass `--json=<path>` for the full, uncapped report.
+
+The multiplex drop count on the `background:` line is **load context, not a
+trust signal** — it never makes a run INCONCLUSIVE. The multiplex pool's
+per-user inbox channels are write-only: nothing consumes them, so a full
+inbox is their normal steady state under load (`daily` has always behaved
+this way). Preflight refuses to start unless every probe-room member is in
+the *direct* pool, so a multiplex user is never an expected probe recipient
+and a drop there cannot touch probe accounting. A default run with
+thousands of background drops still reports PASS when no violations were
+recorded; `--direct-only` is not needed to reach PASS.
 
 **Exit codes** (so the run can be scripted without parsing stdout):
 

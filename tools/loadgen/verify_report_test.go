@@ -16,6 +16,7 @@ func reportForTest() VerifyReport {
 		DirectPoolSize: 191,
 		ReserveSize:    20,
 		BackgroundSize: 7383,
+		MultiplexDrops: 1204,
 		Counts:         ProbeCounts{Tracked: 412, Suppressed: 18, Complete: 410, Partial: 2},
 		Changes:        ChangeCounts{Total: 24, Adds: 14, Removes: 10, Applied: 24, Effective: 24},
 		Result: VerifyResult{
@@ -37,6 +38,15 @@ func TestRenderVerifyConsole_ShowsCoverage(t *testing.T) {
 	assert.Contains(t, out, "probe rooms:")
 	assert.Contains(t, out, "412 tracked")
 	assert.Contains(t, out, "18 suppressed")
+}
+
+// TestRenderVerifyConsole_ShowsMultiplexDropsAsContext pins that the drop count
+// stays visible as a load signal even though it no longer gates the verdict —
+// it belongs on the background line, not in REASONS.
+func TestRenderVerifyConsole_ShowsMultiplexDropsAsContext(t *testing.T) {
+	out := renderVerifyConsole(reportForTest())
+	assert.Contains(t, out, "1204 dropped")
+	assert.NotContains(t, out, "REASONS")
 }
 
 func TestRenderVerifyConsole_ShowsViolationDetail(t *testing.T) {

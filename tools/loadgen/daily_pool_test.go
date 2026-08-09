@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -136,4 +137,78 @@ func TestMultiplexPool_DropsCountedOnInboxFull(t *testing.T) {
 	pool.route(&nats.Msg{Subject: subject.RoomEvent("r-1", true), Data: []byte(`{"lastMsgId":"x","roomId":"r-1"}`)})
 
 	require.Equal(t, int64(1), col.MultiplexDrops())
+}
+
+// countingSink tallies deliveries per message ID. Guarded, because NATS
+// subscription callbacks fire from readLoop goroutines.
+type countingSink struct {
+	mu sync.Mutex
+	n  map[string]int
+}
+
+func (s *countingSink) RecordDelivery(_, msgID, _ string, _ lane, _ time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.n == nil {
+		s.n = make(map[string]int)
+	}
+	s.n[msgID]++
+}
+
+func (s *countingSink) count(msgID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n[msgID]
+}
+
+// TestDirectPool_SubscribeRoom_RepeatedJoinDeliversOnce pins the phantom
+// duplicate_delivery fix end-to-end. `verify`'s churn can re-add a floater it
+// removed earlier — removeMember deliberately leaves the room subscription in
+// place, while applyChange rebuilds its candidate set from the membership
+// model, so the same user becomes a join target again and addMember calls
+// SubscribeRoom a second time on the identical subject. Two live subscriptions
+// deliver every later probe twice on the same lane, which the tracker reports
+// as duplicate_delivery against a system that delivered exactly once.
+func TestDirectPool_SubscribeRoom_RepeatedJoinDeliversOnce(t *testing.T) {
+	url := testutil.NATS(t)
+	ncPub, err := nats.Connect(url)
+	require.NoError(t, err)
+	t.Cleanup(func() { ncPub.Close() })
+
+	pool := newDirectPool(url, "" /*no creds: testcontainer NATS allows anonymous*/, NewCollector(NewMetrics(), "test"))
+	t.Cleanup(pool.Close)
+	sink := &countingSink{}
+	pool.attachSink(sink)
+
+	require.NoError(t, pool.Add(&userState{ID: "u-1", Account: "user-1"}))
+
+	// The join, then the remove→re-add cycle's second join on the same room.
+	require.NoError(t, pool.SubscribeRoom("u-1", "room-churn"))
+	require.NoError(t, pool.SubscribeRoom("u-1", "room-churn"))
+
+	pool.mu.Lock()
+	subs := len(pool.users["u-1"].subs)
+	pool.mu.Unlock()
+	// One user-scoped sub from Add, plus exactly one sub per selected room lane.
+	require.Equal(t, 1+len(pool.laneSelection()), subs,
+		"a repeated join must yield one subscription set, not two")
+
+	publish := func(msgID string) {
+		data, err := json.Marshal(model.RoomEvent{
+			Type: model.RoomEventNewMessage, LastMsgID: msgID, RoomID: "room-churn"})
+		require.NoError(t, err)
+		require.NoError(t, ncPub.Publish(subject.RoomEvent("room-churn", true), data))
+	}
+	publish("msg-probe")
+	// Sentinel: NATS preserves per-subscription order, so once this has been
+	// delivered any duplicate of msg-probe would already have landed. That makes
+	// the negative assertion below deterministic without a sleep.
+	publish("msg-sentinel")
+	require.NoError(t, ncPub.Flush())
+
+	require.Eventually(t, func() bool {
+		return sink.count("msg-sentinel") == 1
+	}, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, 1, sink.count("msg-probe"),
+		"a re-added member must not receive the probe twice")
 }

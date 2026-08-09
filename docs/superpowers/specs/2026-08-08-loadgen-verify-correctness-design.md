@@ -255,8 +255,26 @@ subscriptions the broker delivers once and loadgen's own `dispatch` map
 decides who received it, so a completeness check would be partly testing
 loadgen's bookkeeping rather than the system under test.
 
-§6.0 step 2 removes both problems by construction. Any multiplex drop
-recorded during a run still forces INCONCLUSIVE (§10) as a backstop.
+§6.0 step 2 removes both problems by construction.
+
+**Correction (post-review).** An earlier version of this section claimed a
+multiplex drop is indistinguishable from a delivery bug and therefore had
+to force INCONCLUSIVE (§10) as a backstop. That was wrong, and it made PASS
+unreachable in the default configuration: the multiplex pool's per-user
+inbox channels are write-only by design — nothing in the tree ever receives
+from them (`daily_pool.go`'s send loop is their only reference), so filling
+and dropping is their normal steady state, and `daily` has always done it
+without caring. Under `daily-heavy` roughly 7000 users sit on multiplex, so
+drops are certain within seconds and every run would report INCONCLUSIVE
+unless `--direct-only` was passed.
+
+The loss is in fact perfectly distinguishable, because it lands on a
+population probes never touch. `preflightVerify` refuses to start unless
+every probe-room member is in the **direct** pool, and the `MissingUsers`
+assertion checks actual membership rather than a count — so a multiplex
+user is never an expected recipient of a probe, and a multiplex drop cannot
+affect probe accounting at all. The count is reported as load context in
+the run summary; it does not gate the verdict.
 
 ### 6.3 Resource budget
 
@@ -541,7 +559,6 @@ from §3 surviving retries, **or** any membership change shows a
 
 **INCONCLUSIVE** if any of:
 
-- Any multiplex drop was recorded during the run
 - A tracked recipient's connection dropped mid-run, so its non-delivery
   cannot be attributed to the system under test. This is distinct from an
   epoch change: a membership change legitimately alters the expected set
@@ -557,6 +574,11 @@ from §3 surviving retries, **or** any membership change shows a
 - `ctx` cancelled mid-run
 - Loadgen GC pause p99 above the existing self-metric threshold — the load
   box was saturated, so the measurement is not trustworthy
+
+A multiplex drop is deliberately **not** on this list — see the correction
+in §6.2. Probe recipients are guaranteed direct-pool by preflight, so a
+drop on the background pool is irrelevant to probe accounting; the count is
+reported as load context only.
 
 **PASS** otherwise.
 
@@ -679,7 +701,8 @@ test will be added.
 |---|---|
 | Drain too short ⇒ false failures | Generous 30s default; on-demand runs have no CI clock to fight |
 | Large-room gatekeeper rejects ⇒ phantom bugs | Excluded from probe-room selection + preflight threshold check (§6.1) |
-| Multiplex drops ⇒ phantom bugs | Probe-room members forced into direct pool (§6.0); any drop ⇒ INCONCLUSIVE |
+| Multiplex drops ⇒ phantom bugs | Probe-room members forced into direct pool (§6.0), so a background drop cannot reach probe accounting; count reported as load context, not a verdict gate (§6.2) |
+| Re-adding a churn target ⇒ phantom `duplicate_delivery` | `SubscribeRoom` is idempotent per user-room pair — a remove leaves the subscription in place, so a re-add must not open a second one (§6.0 step 3) |
 | Dual-lane subscribe ⇒ phantom duplicates | Dedupe per `(user, msg, lane)`; `--lane` to disambiguate (§7.1) |
 | Coverage collapse at partial activation | Probe-room-first activation decouples coverage from N (§6.0) |
 | Truncation-style fan-out bug hidden by index-correlated sampling | Full room membership tracked, never a subset (§6.0) |

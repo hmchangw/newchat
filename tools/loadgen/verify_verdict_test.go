@@ -39,23 +39,41 @@ func TestEvaluateVerify_MembershipViolation_IsFail(t *testing.T) {
 	assert.Equal(t, VerdictFail, evaluateVerify(in).Verdict)
 }
 
-func TestEvaluateVerify_MultiplexDrop_IsInconclusive(t *testing.T) {
+// TestEvaluateVerify_MultiplexDrops_DoNotGateVerdict pins the fix for the
+// unreachable-PASS bug. The multiplex pool's per-user inbox channels are
+// write-only by design — nothing ever receives from them, so filling and
+// dropping is their normal steady state under background load. Preflight
+// refuses to start unless every probe-room member is in the *direct* pool, so a
+// multiplex user is never an expected probe recipient and a multiplex drop
+// cannot touch probe accounting. Gating on it made PASS unreachable in the
+// default configuration (~7000 multiplex users under `daily-heavy`).
+func TestEvaluateVerify_MultiplexDrops_DoNotGateVerdict(t *testing.T) {
 	in := passingInputs()
-	in.MultiplexDrops = 1
+	in.MultiplexDrops = 4096
 
 	r := evaluateVerify(in)
-	assert.Equal(t, VerdictInconclusive, r.Verdict)
-	assert.Contains(t, r.Reasons[0], "multiplex drop")
-	assert.Equal(t, 2, r.Verdict.ExitCode())
+	assert.Equal(t, VerdictPass, r.Verdict,
+		"probe recipients are guaranteed direct-pool by preflight, so a multiplex drop is irrelevant to probe accounting")
+	assert.Empty(t, r.Reasons)
+	assert.Equal(t, 0, r.Verdict.ExitCode())
+}
+
+func TestEvaluateVerify_MultiplexDropsWithViolations_IsFail(t *testing.T) {
+	in := passingInputs()
+	in.MultiplexDrops = 4096
+	in.Violations = []Violation{{Kind: KindMissingRecipient, MsgID: "m1"}}
+
+	assert.Equal(t, VerdictFail, evaluateVerify(in).Verdict,
+		"a background-pool drop must not downgrade a real delivery violation to INCONCLUSIVE")
 }
 
 func TestEvaluateVerify_InconclusiveOverridesFail(t *testing.T) {
 	in := passingInputs()
 	in.Violations = []Violation{{Kind: KindMissingRecipient, MsgID: "m1"}}
-	in.MultiplexDrops = 1
+	in.DroppedRecipients = 1
 
 	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict,
-		"a drop means the missing delivery cannot be attributed to the system")
+		"a lost recipient connection means the missing delivery cannot be attributed to the system")
 }
 
 func TestEvaluateVerify_TooFewProbes_IsInconclusive(t *testing.T) {
@@ -145,7 +163,7 @@ func TestEvaluateVerify_GCPressure_IsInconclusive(t *testing.T) {
 
 func TestEvaluateVerify_AllReasonsCollected(t *testing.T) {
 	in := passingInputs()
-	in.MultiplexDrops = 2
+	in.DroppedRecipients = 2
 	in.Cancelled = true
 	in.GCPauseP99 = 120
 

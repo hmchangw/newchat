@@ -133,6 +133,47 @@ func TestDirectPool_MissingUsers(t *testing.T) {
 	assert.Empty(t, p.MissingUsers([]string{"u-1", "u-3"}))
 }
 
+// TestDirectPool_SubscribeRoom_IsIdempotent pins the fix for the phantom
+// duplicate_delivery bug. removeMember deliberately leaves the room
+// subscription in place, but applyChange rebuilds its candidate set from
+// mm.Members(roomID) — so the just-removed floater is a legitimate join target
+// again and addMember calls SubscribeRoom a second time on the identical
+// subject. Two live subscriptions deliver every later probe twice on the same
+// lane, which the tracker reports as duplicate_delivery against a system that
+// delivered exactly once.
+//
+// du.nc is nil here: reaching the NATS call at all returns
+// nats.ErrInvalidConnection, so a nil error proves the short-circuit fired.
+func TestDirectPool_SubscribeRoom_IsIdempotent(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	du := &directUser{id: "u-1", rooms: map[string]struct{}{"r-1": {}}}
+	p.users["u-1"] = du
+
+	require.NoError(t, p.SubscribeRoom("u-1", "r-1"))
+	require.NoError(t, p.SubscribeRoom("u-1", "r-1"))
+
+	assert.Empty(t, du.subs, "a room already held must not open a second subscription")
+}
+
+// TestDirectPool_SubscribeRoom_NewRoomStillSubscribes is the other half of the
+// gate: the short-circuit must be keyed on the room, not swallow every call.
+func TestDirectPool_SubscribeRoom_NewRoomStillSubscribes(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	du := &directUser{id: "u-1", rooms: map[string]struct{}{"r-1": {}}}
+	p.users["u-1"] = du
+
+	err := p.SubscribeRoom("u-1", "r-2")
+
+	require.Error(t, err, "a room the user does not hold must reach the subscribe path")
+	assert.NotContains(t, du.rooms, "r-2", "a failed subscribe must not claim the room")
+}
+
+func TestDirectPool_SubscribeRoom_UnknownUserErrors(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+
+	assert.Error(t, p.SubscribeRoom("u-missing", "r-1"))
+}
+
 func TestDirectPool_RecordDisconnect_CountsMidRunLoss(t *testing.T) {
 	p := newDirectPool("nats://unused", "", nil)
 	p.recordDisconnect()
