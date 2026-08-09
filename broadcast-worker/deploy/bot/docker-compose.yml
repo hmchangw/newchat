@@ -21,14 +21,14 @@ services:
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       # In-process user cache (pkg/userstore.Cache, shared with message-gatekeeper
       # and message-worker). Defaults: 10000 entries, 5m TTL.
-      - USER_CACHE_SIZE=10000
-      - USER_CACHE_TTL=5m
+      - USER_CACHE_SIZE=${USER_CACHE_SIZE:-10000}
+      - USER_CACHE_TTL=${USER_CACHE_TTL:-5m}
       # Room keys live in the MongoDB rooms collection (read when ENCRYPTION_ENABLED=true);
       # this grace window keeps a rotated-out previous key valid for decrypt.
-      - ROOM_KEY_GRACE_PERIOD=24h
+      - ROOM_KEY_GRACE_PERIOD=${ROOM_KEY_GRACE_PERIOD:-24h}
       # Valkey backs the room-meta L2 cache.
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
-      - ROOM_META_L2_TTL=15m
+      - ROOM_META_L2_TTL=${ROOM_META_L2_TTL:-15m}
       # BOT-MESSAGES-CANONICAL is owned by bot-message-handler; consumers only verify.
       # true like the user variants — false means verify-and-exit, and the bot
       # streams' creator (bot-message-handler) is not in compose.services.yaml.

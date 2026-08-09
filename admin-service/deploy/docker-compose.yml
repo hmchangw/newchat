@@ -7,7 +7,7 @@ services:
       dockerfile: admin-service/deploy/Dockerfile
     pull_policy: build
     ports:
-      - "8082:8082"
+      - "${ADMIN_SERVICE_HOST_PORT:-8082}:8082"
     environment:
       - OTEL_SERVICE_NAME=admin-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
@@ -17,9 +17,9 @@ services:
       - MONGO_DB=${MONGO_DB:-chat}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
-      - ROOM_RPC_TIMEOUT=5s
-      - BCRYPT_COST=10
-      - SESSIONS_MAX_PER_ACCOUNT=100
+      - ROOM_RPC_TIMEOUT=${ROOM_RPC_TIMEOUT:-5s}
+      - BCRYPT_COST=${BCRYPT_COST:-10}
+      - SESSIONS_MAX_PER_ACCOUNT=${SESSIONS_MAX_PER_ACCOUNT:-100}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

@@ -6,7 +6,7 @@ services:
       context: ../..
       dockerfile: chat-frontend/deploy/Dockerfile
     environment:
-      PORTAL_URL: ${PORTAL_URL:-http://localhost:8085}
+      PORTAL_URL: ${PORTAL_URL:-http://localhost:${PORTAL_SERVICE_HOST_PORT:-8085}}
       # OIDC values are only consumed when DEV_MODE=false. The Keycloak
       # realm at OIDC_ISSUER_URL must serve OIDC_CLIENT_ID with a redirect
       # URI matching this frontend's /oidc-callback.
@@ -24,7 +24,7 @@ services:
       # exercising the disabled-flag path locally.
       BOT_LOGIN_ENABLED: ${BOT_LOGIN_ENABLED:-true}
     ports:
-      - "3000:80"
+      - "${CHAT_FRONTEND_HOST_PORT:-3000}:80"
     networks:
       - chat-local
 

@@ -19,9 +19,9 @@ services:
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - SEARCH_URL=${SEARCH_URL:-http://elasticsearch:9200}
       - SEARCH_BACKEND=${SEARCH_BACKEND:-elasticsearch}
-      - MSG_INDEX_PREFIX=messages-${SITE_ID:-site-local}-v1
-      - SPOTLIGHT_INDEX=spotlight-${SITE_ID:-site-local}-v1
-      - SPOTLIGHT_ORG_INDEX=spotlightorg-${SITE_ID:-site-local}-v1
+      - MSG_INDEX_PREFIX=${MSG_INDEX_PREFIX:-messages-${SITE_ID:-site-local}-v1}
+      - SPOTLIGHT_INDEX=${SPOTLIGHT_INDEX:-spotlight-${SITE_ID:-site-local}-v1}
+      - SPOTLIGHT_ORG_INDEX=${SPOTLIGHT_ORG_INDEX:-spotlightorg-${SITE_ID:-site-local}-v1}
       # hr-syncer runs at one central site; for single-site local dev,
       # point at ourselves.
       - HR_CENTRAL_SITE_ID=${HR_CENTRAL_SITE_ID:-${SITE_ID:-site-local}}
@@ -30,7 +30,7 @@ services:
       # worker's spotlight-org consumer targets that domain. Leave unset for
       # single-cluster local dev (the HR stream is in this cluster's domain).
       # - HR_JETSTREAM_DOMAIN=hr-hub
-      - USER_ROOM_INDEX=user-room-mv-${SITE_ID:-site-local}
+      - USER_ROOM_INDEX=${USER_ROOM_INDEX:-user-room-mv-${SITE_ID:-site-local}}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       # Optional YYYY-MM-DD (UTC) cutoff for the messages collection.
       # When set, events whose Message.CreatedAt predates the date are

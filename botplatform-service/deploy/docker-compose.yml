@@ -19,8 +19,8 @@ services:
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}
-      - SESSIONS_MAX_PER_ACCOUNT=100
-      - BCRYPT_COST=10
+      - SESSIONS_MAX_PER_ACCOUNT=${SESSIONS_MAX_PER_ACCOUNT:-100}
+      - BCRYPT_COST=${BCRYPT_COST:-10}
       - DEV_MODE=${DEV_MODE:-true}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro

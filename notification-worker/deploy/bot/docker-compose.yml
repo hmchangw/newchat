@@ -20,14 +20,14 @@ services:
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
-      - ROOMSUBCACHE_TTL=5m
-      - LARGE_ROOM_THRESHOLD=500
+      - ROOMSUBCACHE_TTL=${ROOMSUBCACHE_TTL:-5m}
+      - LARGE_ROOM_THRESHOLD=${LARGE_ROOM_THRESHOLD:-500}
       # Recipients per BOT-PUSH-NOTIFICATION event. Default 100; well under FCM's 500-token
       # multicast cap and APNs HTTP/2 connection-frame ceiling.
-      - PUSH_RECIPIENT_BATCH_SIZE=100
-      - ROOM_META_CACHE_SIZE=10000
-      - ROOM_META_CACHE_TTL=2m
-      - PRESENCE_RPC_ENABLED=false
+      - PUSH_RECIPIENT_BATCH_SIZE=${PUSH_RECIPIENT_BATCH_SIZE:-100}
+      - ROOM_META_CACHE_SIZE=${ROOM_META_CACHE_SIZE:-10000}
+      - ROOM_META_CACHE_TTL=${ROOM_META_CACHE_TTL:-2m}
+      - PRESENCE_RPC_ENABLED=${PRESENCE_RPC_ENABLED:-false}
       # Must match the broker's max_payload. Emitter rejects batches larger
       # than this before publish so the failure surfaces with a clear error
       # instead of a NATS NACK.

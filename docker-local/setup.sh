@@ -135,8 +135,20 @@ NATS_CREDS_FILE=/etc/nats/backend.creds
 # chat-frontend all read this) to test the OIDC flow.
 DEV_MODE=true
 
-# Every var below is read by all services that use it — set it once here and
-# `make up`, `make up SERVICE=<name>` and `make ui-up` all agree.
+# Every setting in the service compose files is overridable from here — grep a
+# compose file for ${ to see a service's own knobs. The common ones:
+#
+# Published host ports (change one to dodge a conflict; the URLs follow).
+#GATEWAY_HOST_PORT=7777        # baseUrl; portal/media URLs derive from it
+#PORTAL_SERVICE_HOST_PORT=8085
+#CHAT_FRONTEND_HOST_PORT=3000
+#ADMIN_FRONTEND_HOST_PORT=3001
+#ADMIN_SERVICE_HOST_PORT=8082
+#UPLOAD_SERVICE_HOST_PORT=8086
+#TCARD_SERVICE_HOST_PORT=8087
+#SEARCH_SERVICE_HOST_PORT=19090
+#
+# Stack-wide settings.
 #SITE_ID=site-local            # also drives ES index names, buckets, site URLs
 #ALL_SITE_IDS=site-local
 #MONGO_URI=mongodb://mongodb:27017

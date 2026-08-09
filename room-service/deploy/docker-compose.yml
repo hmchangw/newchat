@@ -12,7 +12,7 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
-      - 'LEGACY_ROOM_ORIGINS=[{"siteID":"site-local","origin":"https://legacy.localhost"},{"siteID":"site-a","origin":"https://legacy.site-a.example.com"},{"siteID":"site-b","origin":"https://legacy.site-b.example.com"}]'
+      - 'LEGACY_ROOM_ORIGINS=${LEGACY_ROOM_ORIGINS:-[{"siteID":"site-local","origin":"https://legacy.localhost"},{"siteID":"site-a","origin":"https://legacy.site-a.example.com"},{"siteID":"site-b","origin":"https://legacy.site-b.example.com"}]}'
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
@@ -20,20 +20,20 @@ services:
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
-      - MAX_ROOM_SIZE=1000
-      - MAX_BATCH_SIZE=500
+      - MAX_ROOM_SIZE=${MAX_ROOM_SIZE:-1000}
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-500}
       # Room keys live in the MongoDB rooms collection; this grace window keeps a
       # rotated-out previous key valid for decrypt.
-      - ROOM_KEY_GRACE_PERIOD=24h
+      - ROOM_KEY_GRACE_PERIOD=${ROOM_KEY_GRACE_PERIOD:-24h}
       # Microsoft Teams integration. The deep-link RPCs (calls/room, calls/user)
       # only need TEAMS_EMAIL_DOMAIN; the meetings RPC needs the Azure app creds
       # below and reports not-configured until they are set (live test only).
-      - TEAMS_EMAIL_DOMAIN=dev.local
-      - TEAMS_TENANT_ID=
-      - TEAMS_CLIENT_ID=
-      - TEAMS_CLIENT_SECRET=
-      - ROOM_MEMBERS_LIMIT=500
-      - ROOM_MEMBERS_CALL_LIMIT=20
+      - TEAMS_EMAIL_DOMAIN=${TEAMS_EMAIL_DOMAIN:-dev.local}
+      - TEAMS_TENANT_ID=${TEAMS_TENANT_ID:-}
+      - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID:-}
+      - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET:-}
+      - ROOM_MEMBERS_LIMIT=${ROOM_MEMBERS_LIMIT:-500}
+      - ROOM_MEMBERS_CALL_LIMIT=${ROOM_MEMBERS_CALL_LIMIT:-20}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}

@@ -63,22 +63,25 @@ Makefile passes `--env-file` explicitly, so `make up`, `make up SERVICE=<name>`
 and `make ui-up` all resolve to the same values — without that flag, the
 per-service path silently falls back to the in-file defaults.
 
-Every setting that is shared between services is overridable and listed
-(commented out) in the generated `.env`: the datastore endpoints (`MONGO_URI`,
-`MONGO_DB`, `CASSANDRA_HOSTS`, `CASSANDRA_KEYSPACE`, `VALKEY_ADDRS`,
-`SEARCH_URL`, `NATS_URL`, `NATS_CREDS_FILE`, `MINIO_*`, `VAULT_ADDR`,
-`VAULT_TOKEN`), the auth settings (`DEV_MODE`, `OIDC_ISSUER_URL`,
-`OIDC_CLIENT_ID`, `OIDC_AUDIENCES`), and the stack-wide toggles
-(`BOOTSTRAP_STREAMS`, `O11Y_ENABLED`, `PPROF_ENABLED`, `SITE_ID`,
-`ALL_SITE_IDS`). `SITE_ID` also drives the values derived from it —
+The generated `.env` lists the common knobs commented out — datastore
+endpoints, Vault, the OIDC settings, and the stack-wide toggles (`SITE_ID`,
+`ALL_SITE_IDS`, `DEV_MODE`, `BOOTSTRAP_STREAMS`, `O11Y_ENABLED`,
+`PPROF_ENABLED`). `SITE_ID` also drives everything derived from it —
 Elasticsearch index names, the MinIO bucket, `PORTAL_SITE_URLS`,
-`CLUSTER_DOMAINS` — so changing it moves the whole stack to a new site id.
+`CLUSTER_DOMAINS` — so changing it moves the whole stack to a new site id
+rather than half of it.
 
-What stays literal is per-service by nature and must differ between services:
-the listen `PORT`, `MODE` (user/bot), `OTEL_SERVICE_NAME`, `MINIO_BUCKET`
-(upload and media use different buckets), and each service's own tuning
-constants — cache sizes, TTLs, batch limits, timeouts. Edit those in the
-service's own compose file, not the env file.
+Published host ports are overridable too, as `<SERVICE>_HOST_PORT`, and the
+URLs that reference them follow: moving `GATEWAY_HOST_PORT` rewrites portal's
+`baseUrl` and media's `CLUSTER_DOMAINS`, and moving `CHAT_FRONTEND_HOST_PORT`
+rewrites upload-service's CORS allowlist. The port table below lists defaults.
+
+Only four settings stay literal, because a single shared value would break
+them: the listen `PORT`, `MODE` (user/bot), `OTEL_SERVICE_NAME` (one name per
+service) and `MINIO_BUCKET` (upload and media use different buckets). Everything
+else — including each service's own cache sizes, TTLs, batch limits and
+timeouts — reads `${VAR:-<default>}`; grep a compose file for `${` to see what
+that service exposes.
 
 ## Host ports
 
