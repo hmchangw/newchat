@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -167,6 +168,18 @@ func (r *Readback) queryChunk(ctx context.Context, account, roomID string, ids [
 	if err != nil {
 		return historyResponse{}, fmt.Errorf("history query: %w", err)
 	}
+	// NATS handlers in this repo reply to a request-level error on the same
+	// reply subject with an ordinary message body (errnats.Reply marshals
+	// {"code":...,"error":...}), so requestFn returns it as data with err==nil.
+	// Unmarshalling that straight into historyResponse would silently yield
+	// Messages: nil -- a false persistence_miss for every ID in the chunk. Detect
+	// the envelope first and surface it as a query error instead, since an
+	// errcode reply (e.g. Forbidden from a probe sender since removed from the
+	// room, or an Internal wrapping a Mongo hiccup in history-service) says
+	// nothing about whether the write happened.
+	if envelopeErr, ok := errcode.Parse(raw); ok {
+		return historyResponse{}, fmt.Errorf("history query: %w", envelopeErr)
+	}
 	var resp historyResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return historyResponse{}, fmt.Errorf("decode history response: %w", err)
@@ -201,6 +214,19 @@ func chunkIDs(ids []string, n int) [][]string {
 // never present with a mismatched roomId -- so a roomID check here would be
 // permanently dead code. Do not re-add it; that class of bug surfaces as
 // KindPersistenceMiss instead.
+//
+// A second, independent filter has the same "absent, not wrong" shape:
+// GetMessagesByIDs also drops any row whose CreatedAt is before the caller's
+// access-window floor (accessSince, derived from the subscription's
+// historySharedSince) before the reply ever reaches the client
+// (history-service/internal/service/messages.go). If the account used for
+// readback was removed from the room and rejoined between publish and
+// verify, historySharedSince moves forward past the probe's CreatedAt and a
+// perfectly persisted message reads back as absent -- again a false
+// persistence_miss, not a mismatch, and not something this function can see
+// or correct for. This is why Verify's account parameter MUST be the probe's
+// own sender account, never a different member of the room: the sender's own
+// access window covers everything it published.
 func compareStored(want ReadbackTarget, got historyMessage) (Violation, bool) {
 	var reason string
 	switch {
