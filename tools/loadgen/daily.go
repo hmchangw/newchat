@@ -384,7 +384,6 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 	// scored as good/valid would read optimistically low.
 	attemptedOps := env.collector.AttemptedOps()
 	failedOps := env.collector.FailedOps()
-	broadcastEligibleOps := env.collector.BroadcastEligibleOps()
 
 	// Emitters keep running across steps, so there is no quiet point at which
 	// every unmatched publish is a drop. Wait out the delivery grace, then score
@@ -402,7 +401,7 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 	// holdStartedAt as the lower bound: Reset() races with a still-running
 	// emitter, so a publish recorded just after the shard was cleared keeps its
 	// warm-up timestamp and would otherwise be scored against this step.
-	_, missingBroadcasts := env.collector.MissingInWindow(holdStartedAt, holdEndedAt)
+	broadcastEligibleOps, missingBroadcasts := env.collector.BroadcastStatsInWindow(holdStartedAt, holdEndedAt)
 
 	in := stepInputs{
 		N: n, StartedAt: startedAt, HoldDuration: env.hold,
@@ -411,7 +410,7 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 		ActionSamplesMs:      actionSamples,
 		AttemptedOps:         attemptedOps,
 		FailedOps:            failedOps,
-		BroadcastEligibleOps: broadcastEligibleOps,
+		BroadcastEligibleOps: int64(broadcastEligibleOps),
 		MissingBroadcasts:    int64(missingBroadcasts),
 		ConsumerPending:      pendingDeltas,
 		ServiceErrors:        svcErrors,

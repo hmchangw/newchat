@@ -16,8 +16,27 @@ type rpsThresholds struct {
 
 // seriesSamples is one named latency tape (e.g. "E1","E2" or "history","thread").
 type seriesSamples struct {
-	Name    string
-	Samples []time.Duration
+	Name           string
+	Samples        []time.Duration
+	DiagnosticOnly bool
+}
+
+type latencyBound int
+
+const (
+	latencyBoundP95 latencyBound = iota + 1
+	latencyBoundP99
+)
+
+// eventRatioInput describes an event-based latency SLI. SuccessfulLatencies
+// contains only successful events; Valid is the SLI denominator, which may
+// also include failed eligible events (SLO-3) or only successes (SLO-8).
+type eventRatioInput struct {
+	Name                string
+	Valid               int
+	SuccessfulLatencies []time.Duration
+	Target              float64
+	Bound               latencyBound
 }
 
 // consumerPendingDelta is one durable's NumPending at the hold boundaries.
@@ -45,7 +64,12 @@ type rpsStepInputs struct {
 	MissingReplies    int
 	MissingBroadcasts int
 	Latencies         []seriesSamples
-	Pending           []consumerPendingDelta // empty for history
+	EventRatios       []eventRatioInput
+	// ErrorRateDiagnosticOnly keeps the failed/attempted rate visible without
+	// independently gating a workload whose SLO already includes failures in a
+	// joint good/valid predicate.
+	ErrorRateDiagnosticOnly bool
+	Pending                 []consumerPendingDelta // empty for history
 	// Inconclusive is set by the adapter when measurement itself failed (e.g. a
 	// pending snapshot errored), independent of the system under test.
 	Inconclusive       bool
@@ -73,8 +97,19 @@ func (k verdictKind) String() string {
 
 // seriesPercentile is a named series' computed percentiles, for reporting.
 type seriesPercentile struct {
-	Name string
-	Pct  Percentiles
+	Name           string
+	Pct            Percentiles
+	DiagnosticOnly bool
+}
+
+// eventRatioResult is the evaluated good/valid ratio used for an event-based
+// SLO verdict and exposed in the console/CSV reports.
+type eventRatioResult struct {
+	Name        string
+	Good, Valid int
+	Ratio       float64
+	Target      float64
+	Bound       time.Duration
 }
 
 // rpsStepResult is the verdict for one step.
@@ -94,6 +129,7 @@ type rpsStepResult struct {
 	MissingReplyRate     float64
 	MissingBroadcastRate float64
 	Latencies            []seriesPercentile
+	EventRatios          []eventRatioResult
 	WorstDurable         string
 	WorstDelta           int64
 	Kind                 verdictKind
@@ -137,7 +173,33 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 
 	// Compute percentiles for every series (always, so the report has data).
 	for _, s := range in.Latencies {
-		res.Latencies = append(res.Latencies, seriesPercentile{Name: s.Name, Pct: ComputePercentiles(s.Samples)})
+		res.Latencies = append(res.Latencies, seriesPercentile{
+			Name: s.Name, Pct: ComputePercentiles(s.Samples), DiagnosticOnly: s.DiagnosticOnly,
+		})
+	}
+	measurementIssue := ""
+	for _, ratio := range in.EventRatios {
+		bound, ok := ratio.bound(th)
+		switch {
+		case !ok:
+			measurementIssue = fmt.Sprintf("%s has an invalid latency bound selector", ratio.Name)
+		case ratio.Target <= 0 || ratio.Target > 1:
+			measurementIssue = fmt.Sprintf("%s has invalid target %.6f", ratio.Name, ratio.Target)
+		case ratio.Valid <= 0:
+			measurementIssue = fmt.Sprintf("%s has no valid events", ratio.Name)
+		case len(ratio.SuccessfulLatencies) > ratio.Valid:
+			measurementIssue = fmt.Sprintf("%s has %d successful samples but only %d valid events",
+				ratio.Name, len(ratio.SuccessfulLatencies), ratio.Valid)
+		default:
+			good := countWithin(ratio.SuccessfulLatencies, bound)
+			res.EventRatios = append(res.EventRatios, eventRatioResult{
+				Name: ratio.Name, Good: good, Valid: ratio.Valid,
+				Ratio: float64(good) / float64(ratio.Valid), Target: ratio.Target, Bound: bound,
+			})
+		}
+		if measurementIssue != "" {
+			break
+		}
 	}
 	// Worst pending delta (always, for the report column).
 	for _, p := range in.Pending {
@@ -153,10 +215,18 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 		res.Reasons = []string{in.InconclusiveReason}
 		return res
 	}
+	if measurementIssue != "" {
+		res.Kind = verdictInconclusive
+		res.Reasons = []string{measurementIssue}
+		return res
+	}
 
 	// (2) TRIP conditions (accumulate human-readable reasons).
 	var reasons []string
 	for _, sp := range res.Latencies {
+		if sp.DiagnosticOnly {
+			continue
+		}
 		if sp.Pct.P95 > th.P95 {
 			reasons = append(reasons, fmt.Sprintf("%s p95=%s > %s", sp.Name, sp.Pct.P95, th.P95))
 		}
@@ -164,8 +234,17 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 			reasons = append(reasons, fmt.Sprintf("%s p99=%s > %s", sp.Name, sp.Pct.P99, th.P99))
 		}
 	}
-	if res.ErrorRate > th.ErrorRate {
+	if !in.ErrorRateDiagnosticOnly && res.ErrorRate > th.ErrorRate {
 		reasons = append(reasons, fmt.Sprintf("error rate %.3f%% > %.3f%%", res.ErrorRate*100, th.ErrorRate*100))
+	}
+	for _, ratio := range res.EventRatios {
+		if ratio.Ratio < ratio.Target {
+			reasons = append(reasons, fmt.Sprintf(
+				"%s good ratio %.3f%% < %.3f%% (%d/%d within %s)",
+				ratio.Name, ratio.Ratio*100, ratio.Target*100,
+				ratio.Good, ratio.Valid, ratio.Bound,
+			))
+		}
 	}
 	// Undelivered sends are gated at the same rate as hard errors: from the
 	// sender's side a reply that never lands is indistinguishable from an error
@@ -200,6 +279,27 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 	// (4) PASS.
 	res.Kind = verdictPass
 	return res
+}
+
+func (r eventRatioInput) bound(th rpsThresholds) (time.Duration, bool) {
+	switch r.Bound {
+	case latencyBoundP95:
+		return th.P95, true
+	case latencyBoundP99:
+		return th.P99, true
+	default:
+		return 0, false
+	}
+}
+
+func countWithin(samples []time.Duration, bound time.Duration) int {
+	good := 0
+	for _, d := range samples {
+		if d <= bound {
+			good++
+		}
+	}
+	return good
 }
 
 // shortfallReason explains a healthy-but-short step and names the dominant

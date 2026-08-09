@@ -73,14 +73,20 @@ func TestBuildSearchInputs(t *testing.T) {
 	// Search is synchronous request/reply — no JetStream consumer behind it.
 	assert.Empty(t, in.Pending)
 
-	// Each endpoint gates as its own latency series: an ES query over messages
-	// and a Mongo-backed room lookup have different cost models, so one bound
-	// across both would be meaningless.
+	// Endpoint percentiles remain diagnostic because their cost models differ.
+	// The SLO-8 verdict is the aggregate event ratio defined by the spec.
 	names := make([]string, 0, len(in.Latencies))
 	for _, s := range in.Latencies {
 		names = append(names, s.Name)
+		assert.True(t, s.DiagnosticOnly)
 	}
 	assert.ElementsMatch(t, []string{"messages", "rooms", "users"}, names)
+	require.Len(t, in.EventRatios, 1)
+	assert.Equal(t, "SLO-8", in.EventRatios[0].Name)
+	assert.Equal(t, 92, in.EventRatios[0].Valid, "SLO-8 denominator is successful searches")
+	assert.Len(t, in.EventRatios[0].SuccessfulLatencies, 92)
+	assert.Equal(t, 0.95, in.EventRatios[0].Target)
+	assert.Equal(t, latencyBoundP95, in.EventRatios[0].Bound)
 }
 
 func TestBuildSearchInputs_UnderrunIsNotFailure(t *testing.T) {

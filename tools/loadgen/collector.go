@@ -142,6 +142,15 @@ func (c *Collector) RecordPublishBroadcastOnly(messageID string, t time.Time) {
 	ms.mu.Unlock()
 }
 
+// RecordAcceptedBroadcastPublish records one successfully accepted publish at
+// the acceptance boundary and includes it in the broadcast SLI denominator.
+// Failed publishes never call this method, so numerator and denominator come
+// from the same accepted set.
+func (c *Collector) RecordAcceptedBroadcastPublish(messageID string, acceptedAt time.Time) {
+	c.RecordPublishBroadcastOnly(messageID, acceptedAt)
+	c.broadcastEligible.Add(1)
+}
+
 // RecordPublishFailed removes entries previously stored by RecordPublish.
 // Use when the publish itself failed (message never reached NATS) so the
 // orphans do not inflate Finalize's missing-reply / missing-broadcast counts.
@@ -261,6 +270,30 @@ func (c *Collector) MissingInWindow(start, end time.Time) (replies, broadcasts i
 		ms.mu.Unlock()
 	}
 	return replies, broadcasts
+}
+
+// BroadcastStatsInWindow returns the accepted broadcast-eligible publishes and
+// the still-unmatched subset within [start, end]. It derives both values from
+// the same correlation entries/samples so a hold-boundary race cannot put a
+// publish in the numerator but outside the denominator.
+func (c *Collector) BroadcastStatsInWindow(start, end time.Time) (eligible, missing int) {
+	inWindow := func(t time.Time) bool { return !t.Before(start) && !t.After(end) }
+	for _, ms := range &c.msgShards {
+		ms.mu.Lock()
+		for _, e := range ms.byMsgID {
+			if inWindow(e.publishedAt) {
+				eligible++
+				missing++
+			}
+		}
+		for _, s := range ms.e2 {
+			if inWindow(s.publishedAt) {
+				eligible++
+			}
+		}
+		ms.mu.Unlock()
+	}
+	return eligible, missing
 }
 
 // LatencySamplesUpTo returns broadcast latencies in milliseconds for publishes

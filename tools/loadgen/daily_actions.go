@@ -59,24 +59,14 @@ func sendMessage(a actionCtx, u *userState, content string) error {
 	if err != nil {
 		return fmt.Errorf("marshal send-message: %w", err)
 	}
-	if a.Collector != nil {
-		// Broadcast-only: daily never subscribes to the reply subject, so
-		// registering a request-ID correlation would leave an entry nothing
-		// can ever clear.
-		a.Collector.RecordPublishBroadcastOnly(msgID, time.Now())
-	}
 	if err := a.Publish(a.Ctx, subject.MsgSend(u.Account, roomID, a.SiteID), data); err != nil {
-		if a.Collector != nil {
-			a.Collector.RecordPublishFailed(reqID, msgID)
-		}
 		return fmt.Errorf("publish send-message: %w", err)
 	}
 	if a.Collector != nil {
-		// Counted here, not next to RecordPublishBroadcastOnly above: a failed
-		// publish has its correlation entry removed again, so it can never turn
-		// into a missing broadcast. Numerator and denominator must be drawn from
-		// the same set of publishes or the rate is diluted.
-		a.Collector.RecordBroadcastEligible()
+		// Daily expects no reply, so store only the message-ID correlation. The
+		// correlation timestamp and eligible count share this successful-publish
+		// boundary; failed publishes never enter either side of the ratio.
+		a.Collector.RecordAcceptedBroadcastPublish(msgID, time.Now())
 	}
 	return nil
 }
@@ -192,17 +182,11 @@ func threadReply(a actionCtx, u *userState, parentID, content string) error {
 	if err != nil {
 		return fmt.Errorf("marshal thread-reply: %w", err)
 	}
-	if a.Collector != nil {
-		// Broadcast-only: daily never subscribes to the reply subject, so
-		// registering a request-ID correlation would leave an entry nothing
-		// can ever clear.
-		a.Collector.RecordPublishBroadcastOnly(msgID, time.Now())
-	}
 	if err := a.Publish(a.Ctx, subject.MsgSend(u.Account, roomID, a.SiteID), data); err != nil {
-		if a.Collector != nil {
-			a.Collector.RecordPublishFailed(reqID, msgID)
-		}
 		return fmt.Errorf("publish thread-reply: %w", err)
+	}
+	if a.Collector != nil {
+		a.Collector.RecordAcceptedBroadcastPublish(msgID, time.Now())
 	}
 	return nil
 }

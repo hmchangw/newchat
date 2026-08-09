@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -191,4 +192,32 @@ func TestThreadReply_Publishes(t *testing.T) {
 	var req model.SendMessageRequest
 	require.NoError(t, json.Unmarshal(c.pubs[0].Data, &req))
 	require.Equal(t, "parent-msg-1", req.ThreadParentMessageID)
+}
+
+func TestThreadReply_CountsAcceptedPublishAsBroadcastEligible(t *testing.T) {
+	c := &captured{}
+	col := NewCollector(nil, "test")
+	u := &userState{ID: "u-1", Account: "user-1", Rooms: []string{"room-a"}}
+	ctx := actionCtx{Ctx: context.Background(), Publish: c.publish, SiteID: "site-test", Collector: col}
+	start := time.Now().Add(-time.Second)
+
+	require.NoError(t, threadReply(ctx, u, "parent-msg-1", "reply text"))
+
+	eligible, missing := col.BroadcastStatsInWindow(start, time.Now().Add(time.Second))
+	assert.Equal(t, 1, eligible)
+	assert.Equal(t, 1, missing)
+}
+
+func TestThreadReply_PublishFailureIsNotBroadcastEligible(t *testing.T) {
+	col := NewCollector(nil, "test")
+	u := &userState{ID: "u-1", Account: "user-1", Rooms: []string{"room-a"}}
+	failing := func(context.Context, string, []byte) error { return errors.New("boom") }
+	ctx := actionCtx{Ctx: context.Background(), Publish: failing, SiteID: "site-test", Collector: col}
+	start := time.Now().Add(-time.Second)
+
+	require.Error(t, threadReply(ctx, u, "parent-msg-1", "reply text"))
+
+	eligible, missing := col.BroadcastStatsInWindow(start, time.Now().Add(time.Second))
+	assert.Zero(t, eligible)
+	assert.Zero(t, missing)
 }

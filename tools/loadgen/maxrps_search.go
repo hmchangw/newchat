@@ -173,9 +173,10 @@ func (g *searchQueryGen) build(e searchEndpoint, i int) []byte {
 	return body
 }
 
-// searchCollector accumulates one step's outcomes per endpoint. As with login,
-// only successes are timed: SLO-8 gates on "successful search returns within
-// the bound", so a fast failure must not improve the number (§5).
+// searchCollector accumulates one step's outcomes per endpoint. Only successes
+// are timed because SLO-8's valid denominator is successful searches. The
+// verdict counts successful searches within the p95 bound directly; endpoint
+// percentiles remain diagnostic.
 type searchCollector struct {
 	mu         sync.Mutex
 	samples    map[searchEndpoint][]time.Duration
@@ -255,12 +256,12 @@ func (c *searchCollector) totals() (good, failed int) {
 	return good, failed
 }
 
-// buildSearchInputs assembles step inputs. Each endpoint gates as its own
-// latency series: an ES query over messages and a spotlight-index room lookup
-// have different cost models, so a single bound across both would be
-// meaningless.
+// buildSearchInputs assembles step inputs. Endpoint percentiles stay diagnostic
+// because the cost models differ; SLO-8 is the aggregate event ratio defined by
+// the spec: successful searches within the p95 bound / successful searches.
 func buildSearchInputs(targetRPS int, hold time.Duration, c *searchCollector) rpsStepInputs {
 	good, failed := c.totals()
+	allSuccessful := make([]time.Duration, 0, good)
 	in := rpsStepInputs{
 		TargetRPS:    targetRPS,
 		Hold:         hold,
@@ -270,8 +271,16 @@ func buildSearchInputs(targetRPS int, hold time.Duration, c *searchCollector) rp
 		EmitUnderrun: c.Underrun(),
 	}
 	for _, e := range searchEndpoints {
-		in.Latencies = append(in.Latencies, seriesSamples{Name: e.String(), Samples: c.Samples(e)})
+		samples := c.Samples(e)
+		allSuccessful = append(allSuccessful, samples...)
+		in.Latencies = append(in.Latencies, seriesSamples{
+			Name: e.String(), Samples: samples, DiagnosticOnly: true,
+		})
 	}
+	in.EventRatios = []eventRatioInput{{
+		Name: "SLO-8", Valid: good, SuccessfulLatencies: allSuccessful,
+		Target: 0.95, Bound: latencyBoundP95,
+	}}
 	return in
 }
 

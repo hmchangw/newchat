@@ -237,6 +237,22 @@ func TestCollector_MissingInWindow_BoundariesAreInclusive(t *testing.T) {
 	assert.Equal(t, 2, broadcasts)
 }
 
+func TestCollector_BroadcastStatsInWindowUsesAcceptedPublishBoundary(t *testing.T) {
+	c := NewCollector(NewMetrics(), "test")
+	start := time.Unix(1000, 0)
+	end := start.Add(10 * time.Second)
+
+	c.RecordAcceptedBroadcastPublish("before", start.Add(-time.Second))
+	c.RecordAcceptedBroadcastPublish("delivered", start.Add(time.Second))
+	c.RecordAcceptedBroadcastPublish("missing", start.Add(2*time.Second))
+	c.RecordAcceptedBroadcastPublish("after", end.Add(time.Second))
+	c.RecordBroadcast("delivered", start.Add(3*time.Second))
+
+	eligible, missing := c.BroadcastStatsInWindow(start, end)
+	assert.Equal(t, 2, eligible)
+	assert.Equal(t, 1, missing)
+}
+
 // Broadcast-eligible attempts are the denominator for the missing-broadcast
 // rate. Counting every action would understate the rate by the share of
 // actions that cannot produce a broadcast at all.

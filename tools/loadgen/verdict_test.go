@@ -164,6 +164,54 @@ func TestEvaluateRPSStep_AchievedAndErrorRate(t *testing.T) {
 	assert.InDelta(t, 0.1, got.ErrorRate, 0.0001)   // 100/1000
 }
 
+func TestEvaluateRPSStep_JointRatioTripsWhenIndependentGatesWouldPass(t *testing.T) {
+	th := defaultRPSThresholds()
+	th.ErrorRate = 0.01
+
+	// 8 failures and 8 slow successes each fit inside an independent 1%
+	// failure/latency budget. The actual SLO-3 predicate has only 984 good
+	// events out of 1000 eligible attempts, so it must trip its 99% objective.
+	successes := append(nLatencies(984, ms(20)), nLatencies(8, ms(300))...)
+	in := rpsStepInputs{
+		TargetRPS: 1000, Hold: time.Second, AttemptedOps: 1000, FailedOps: 8,
+		ErrorRateDiagnosticOnly: true,
+		Latencies:               []seriesSamples{{Name: "login", Samples: successes, DiagnosticOnly: true}},
+		EventRatios: []eventRatioInput{{
+			Name: "SLO-3", Valid: 1000, SuccessfulLatencies: successes,
+			Target: 0.99, Bound: latencyBoundP99,
+		}},
+	}
+
+	got := evaluateRPSStep(&in, th)
+
+	require.Equal(t, verdictTrip, got.Kind)
+	require.Len(t, got.EventRatios, 1)
+	assert.Equal(t, 984, got.EventRatios[0].Good)
+	assert.Equal(t, 1000, got.EventRatios[0].Valid)
+	assert.InDelta(t, 0.984, got.EventRatios[0].Ratio, 0.000001)
+	assert.Contains(t, got.Reasons[0], "SLO-3 good ratio")
+}
+
+func TestEvaluateRPSStep_JointRatioPassesAtBoundary(t *testing.T) {
+	th := defaultRPSThresholds()
+	successes := nLatencies(990, ms(20))
+	in := rpsStepInputs{
+		TargetRPS: 1000, Hold: time.Second, AttemptedOps: 1000, FailedOps: 10,
+		ErrorRateDiagnosticOnly: true,
+		Latencies:               []seriesSamples{{Name: "login", Samples: successes, DiagnosticOnly: true}},
+		EventRatios: []eventRatioInput{{
+			Name: "SLO-3", Valid: 1000, SuccessfulLatencies: successes,
+			Target: 0.99, Bound: latencyBoundP99,
+		}},
+	}
+
+	got := evaluateRPSStep(&in, th)
+
+	assert.Equal(t, verdictPass, got.Kind, "reasons=%v", got.Reasons)
+	require.Len(t, got.EventRatios, 1)
+	assert.InDelta(t, 0.99, got.EventRatios[0].Ratio, 0.000001)
+}
+
 func TestEvaluateRPSStep_WorstPendingReported(t *testing.T) {
 	th := defaultRPSThresholds()
 	in := rpsStepInputs{

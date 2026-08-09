@@ -36,9 +36,16 @@ func TestBuildLoginInputs(t *testing.T) {
 	// Excluded events leave the denominator entirely: 90 good + 10 failed.
 	assert.Equal(t, 100, in.AttemptedOps)
 	assert.Equal(t, 10, in.FailedOps)
+	assert.True(t, in.ErrorRateDiagnosticOnly, "SLO-3 must be driven by its joint good/valid predicate")
 	require.Len(t, in.Latencies, 1)
 	assert.Equal(t, "login", in.Latencies[0].Name)
+	assert.True(t, in.Latencies[0].DiagnosticOnly)
 	assert.Len(t, in.Latencies[0].Samples, 90, "only successful logins are timed")
+	require.Len(t, in.EventRatios, 1)
+	assert.Equal(t, eventRatioInput{
+		Name: "SLO-3", Valid: 100, SuccessfulLatencies: in.Latencies[0].Samples,
+		Target: 0.99, Bound: latencyBoundP99,
+	}, in.EventRatios[0])
 	// Login is a synchronous HTTP call with no JetStream consumer behind it.
 	assert.Empty(t, in.Pending)
 }
@@ -159,35 +166,66 @@ func TestLoginRequester_ClassifiesServerError(t *testing.T) {
 // MaxInFlight failures into every step and trip the error-rate SLO on a healthy
 // service.
 func TestLoginRequester_StepDeadlineCancellationIsExcluded(t *testing.T) {
-	// The handler returns on its own rather than blocking on the request
-	// context, so srv.Close() cannot deadlock waiting for it.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+	started := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-releaseHandler:
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	defer close(releaseHandler)
 
-	// Cancelled well before the client's own timeout would fire, so the error
-	// can only come from the caller's context.
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	r := newLoginRequester(srv.URL, 30*time.Second)
-	outcome, _ := r.login(ctx, "alice", "UABC")
+	result := make(chan sloOutcome, 1)
+	go func() {
+		outcome, _ := r.login(ctx, "alice", "UABC")
+		result <- outcome
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("login request did not reach handler")
+	}
+	cancel()
+	outcome := <-result
 	assert.Equal(t, outcomeExcluded, outcome, "a cancelled window edge is not a service failure")
 }
 
 // A timeout of the request itself is still ours — the service did not answer
 // within the budget, which is exactly what the SLO is meant to catch.
 func TestLoginRequester_RequestTimeoutIsFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+	started := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-releaseHandler:
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	defer close(releaseHandler)
 
 	r := newLoginRequester(srv.URL, 20*time.Millisecond)
-	outcome, _ := r.login(context.Background(), "alice", "UABC")
+	result := make(chan sloOutcome, 1)
+	go func() {
+		outcome, _ := r.login(context.Background(), "alice", "UABC")
+		result <- outcome
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("login request did not reach handler")
+	}
+	outcome := <-result
 	assert.Equal(t, outcomeFailed, outcome)
 }
 

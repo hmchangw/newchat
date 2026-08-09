@@ -661,7 +661,7 @@ loadgen seed --workload=read-receipt --preset=history-medium --read-ratio=0.7
 loadgen max-rps --workload=read-receipt --preset=history-medium --steps=200,500,1k,2k
 
 # login: drive auth-service's HTTP leg (no seeding needed)
-loadgen max-rps --workload=login --preset=medium --slo-p95=1s
+loadgen max-rps --workload=login --preset=medium --slo-p99=1s
 
 # search: drive search-service request/reply (reads the existing index)
 loadgen max-rps --workload=search --preset=medium --slo-p95=1s
@@ -688,9 +688,9 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium 
 | `--warmup` | `10s` | per-step warmup (samples discarded) |
 | `--hold` | `30s` | per-step measurement window |
 | `--cooldown` | `5s` | per-step settle gap before next step |
-| `--slo-p95` | `100ms` | applied to **every** gated latency series |
-| `--slo-p99` | `250ms` | applied to **every** gated latency series |
-| `--slo-error-rate` | `0.001` | `failed / attempted` (0.1%) |
+| `--slo-p95` | `100ms` | ordinary p95 bound; also the SLO-8 joint-ratio bound for search |
+| `--slo-p99` | `250ms` | ordinary p99 bound; also the SLO-3 joint-ratio bound for login |
+| `--slo-error-rate` | `0.001` | `failed / attempted` (0.1%); diagnostic-only for login because SLO-3 already includes failures in its joint ratio |
 | `--slo-pending-growth` | `1000` | **messages only**: per-durable end−start `NumPending` delta |
 | `--rate-tolerance` | `0.05` | achieved-vs-target shortfall band for the INCONCLUSIVE guard |
 | `--stop-on-trip` | `true` | stop the ramp at the first TRIP (does **not** stop on INCONCLUSIVE) |
@@ -710,6 +710,12 @@ ANSWER: max RPS = 2000 (workload=messages, preset=medium)
 This is the largest step at which **all** SLO signals passed; the
 `Next limit:` line names why the first failing step tripped. If no step
 passed, the output is `ANSWER: no step passed (workload=…, preset=…)`.
+
+Event-based latency SLOs add a `SLO-N good%` column. The console shows the
+evaluated `good / valid` ratio; CSV adds matching `_good`, `_valid`,
+`_good_ratio`, and `_target` columns so the verdict and error-budget
+consumption are reproducible. Percentile columns remain available as
+diagnostics even when the event ratio is the only latency verdict gate.
 
 **Missing deliveries** get their own `miss% (r/b)` column: the share of
 publishes whose reply (`r`) or broadcast (`b`) never arrived, measured after
@@ -806,7 +812,7 @@ leg, which is why auth was the one already-measurable SLO no workload could
 exercise.
 
 ```bash
-loadgen max-rps --workload=login --preset=medium --slo-p95=1s
+loadgen max-rps --workload=login --preset=medium --slo-p99=1s
 ```
 
 No seeding step: accounts come from the chosen message preset's fixtures, and
@@ -829,11 +835,12 @@ rather than the usual "2xx good, everything else bad":
 | 429, 5xx, timeout, transport error | failed | ours: overload, bug, or capacity |
 
 So `attempted = good + failed`, with excluded attempts dropped from the
-denominator. That matters in a lab: a preset whose accounts auth-service
-rejects yields a small sample and an honest INCONCLUSIVE, instead of a 100%
-error rate that looks like a service failure. Only successful logins are
-timed — SLO-3 gates on *succeeded **and** within the bound*, so timing a
-failure would let it drag the percentile in whichever direction it landed.
+denominator. The SLO-3 gate is the spec's single event predicate:
+`successful login within --slo-p99 / eligible attempts >= 99%`. The reported
+error rate and login p95/p99 remain diagnostic and do not independently gate
+the step. That matters in a lab: a preset whose accounts auth-service rejects
+yields a small sample and an honest INCONCLUSIVE, instead of a 100% error rate
+that looks like a service failure.
 
 ### Search workload (`--workload=search`)
 
@@ -851,18 +858,19 @@ empty index the queries still exercise the full path but every hit list is
 empty, which measures neither scoring nor the enrichment path.
 
 Accounts come from the chosen message preset. `--search-mix` sets the endpoint
-share (default `messages:60,rooms:30,users:10`); each endpoint gates as its own
-latency series, because an ES query over messages and a spotlight-index room
-lookup have different cost models and one bound across both would be
-meaningless.
+share (default `messages:60,rooms:30,users:10`). Per-endpoint p95/p99 values are
+diagnostic because an ES query over messages and a spotlight-index room lookup
+have different cost models. The SLO-8 gate is the aggregate event predicate
+`successful search within --slo-p95 / successful searches >= 95%`.
 
 Outcome classification uses the shared `o11y-slo.md` §0.1 eligibility rule
 (see the login workload above), applied to the reply's `errcode` envelope:
 `bad_request`/`unauthenticated`/`forbidden`/`not_found`/`conflict` leave the
 denominator, while `internal`/`unavailable`/`too_many_requests` and a request
 timeout burn budget. Only successful searches are timed, matching SLO-8's
-"successful search returns within 1 s / **successful** searches" — gating on
-success so a fast failure cannot improve the number.
+"successful search returns within 1 s / **successful** searches". SLO-7
+availability remains a separate `failed / attempted` gate; SLO-8 is evaluated
+from its joint good/valid counts rather than from a percentile threshold.
 
 **What this cannot tell you.** Two limits are worth stating before reading a
 green run as proof search is healthy:

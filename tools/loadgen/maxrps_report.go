@@ -56,6 +56,30 @@ func pctFor(r *rpsStepResult, name string) Percentiles {
 	return Percentiles{}
 }
 
+// eventRatioNames returns the ordered union of event-ratio names across results.
+func eventRatioNames(results []rpsStepResult) []string {
+	var names []string
+	seen := map[string]bool{}
+	for i := range results {
+		for _, ratio := range results[i].EventRatios {
+			if !seen[ratio.Name] {
+				seen[ratio.Name] = true
+				names = append(names, ratio.Name)
+			}
+		}
+	}
+	return names
+}
+
+func eventRatioFor(r *rpsStepResult, name string) (eventRatioResult, bool) {
+	for _, ratio := range r.EventRatios {
+		if ratio.Name == name {
+			return ratio, true
+		}
+	}
+	return eventRatioResult{}, false
+}
+
 // renderRPSReport delegates to renderRPSReportWithBottleneck with no bottleneck block.
 func renderRPSReport(w io.Writer, results []rpsStepResult, workload, preset string) error {
 	return renderRPSReportWithBottleneck(w, results, workload, preset, nil)
@@ -66,11 +90,15 @@ func renderRPSReport(w io.Writer, results []rpsStepResult, workload, preset stri
 func renderRPSReportWithBottleneck(w io.Writer, results []rpsStepResult, workload, preset string, bn *bottleneckVerdict) error {
 	fmt.Fprintf(w, "=== loadgen max-rps complete (workload=%s, preset=%s) ===\n\n", workload, preset)
 	names := seriesNames(results)
+	ratioNames := eventRatioNames(results)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	header := []string{"target_rps", "achieved_rps"}
 	for _, n := range names {
 		header = append(header, n+" p95", n+" p99")
+	}
+	for _, n := range ratioNames {
+		header = append(header, n+" good%")
 	}
 	header = append(header, "err%", "miss% (r/b)", "worst_pending", "verdict")
 	fmt.Fprintln(tw, strings.Join(header, "\t"))
@@ -81,6 +109,14 @@ func renderRPSReportWithBottleneck(w io.Writer, results []rpsStepResult, workloa
 		for _, n := range names {
 			p := pctFor(r, n)
 			row = append(row, p.P95.String(), p.P99.String())
+		}
+		for _, n := range ratioNames {
+			ratio, ok := eventRatioFor(r, n)
+			if !ok {
+				row = append(row, "-")
+				continue
+			}
+			row = append(row, fmt.Sprintf("%.3f", ratio.Ratio*100))
 		}
 		pending := "-"
 		if r.WorstDurable != "" {
@@ -116,10 +152,14 @@ func renderRPSReportWithBottleneck(w io.Writer, results []rpsStepResult, workloa
 func writeRPSCSV(w io.Writer, results []rpsStepResult, bn *bottleneckVerdict) error {
 	cw := csv.NewWriter(w)
 	names := seriesNames(results)
+	ratioNames := eventRatioNames(results)
 
 	header := []string{"target_rps", "achieved_rps"}
 	for _, n := range names {
 		header = append(header, n+"_p95_ms", n+"_p99_ms")
+	}
+	for _, n := range ratioNames {
+		header = append(header, n+"_good", n+"_valid", n+"_good_ratio", n+"_target")
 	}
 	header = append(header,
 		"error_rate", "attempted", "failed",
@@ -140,6 +180,18 @@ func writeRPSCSV(w io.Writer, results []rpsStepResult, bn *bottleneckVerdict) er
 			row = append(row,
 				strconv.FormatInt(p.P95.Milliseconds(), 10),
 				strconv.FormatInt(p.P99.Milliseconds(), 10))
+		}
+		for _, n := range ratioNames {
+			ratio, ok := eventRatioFor(r, n)
+			if !ok {
+				row = append(row, "", "", "", "")
+				continue
+			}
+			row = append(row,
+				strconv.Itoa(ratio.Good), strconv.Itoa(ratio.Valid),
+				strconv.FormatFloat(ratio.Ratio, 'f', 6, 64),
+				strconv.FormatFloat(ratio.Target, 'f', 6, 64),
+			)
 		}
 		row = append(row,
 			strconv.FormatFloat(r.ErrorRate, 'f', 6, 64),

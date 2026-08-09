@@ -21,10 +21,10 @@ import (
 // the HTTP leg entirely — auth was the one already-measurable SLO that no
 // workload could exercise.
 
-// loginCollector accumulates one step's outcomes. Only successful logins
-// contribute latency samples: SLO-3 gates on "succeeded *and* within the
-// bound", so timing a failure would let it move the percentile in whichever
-// direction it happened to land.
+// loginCollector accumulates one step's outcomes. Only successful logins have
+// a latency, while all eligible successes and failures stay in SLO-3's valid
+// denominator. The verdict counts successes within the p99 bound directly;
+// percentiles are diagnostic only.
 type loginCollector struct {
 	mu         sync.Mutex
 	samples    []time.Duration
@@ -96,14 +96,22 @@ func (c *loginCollector) count(read func() int) int {
 // reports a small sample rather than a false failure rate.
 func buildLoginInputs(targetRPS int, hold time.Duration, c *loginCollector) rpsStepInputs {
 	good, failed := c.Good(), c.Failed()
+	samples := c.Samples()
 	return rpsStepInputs{
-		TargetRPS:    targetRPS,
-		Hold:         hold,
-		AttemptedOps: good + failed,
-		FailedOps:    failed,
-		Saturation:   c.Saturation(),
-		EmitUnderrun: c.Underrun(),
-		Latencies:    []seriesSamples{{Name: "login", Samples: c.Samples()}},
+		TargetRPS:               targetRPS,
+		Hold:                    hold,
+		AttemptedOps:            good + failed,
+		FailedOps:               failed,
+		Saturation:              c.Saturation(),
+		EmitUnderrun:            c.Underrun(),
+		ErrorRateDiagnosticOnly: true,
+		Latencies: []seriesSamples{{
+			Name: "login", Samples: samples, DiagnosticOnly: true,
+		}},
+		EventRatios: []eventRatioInput{{
+			Name: "SLO-3", Valid: good + failed, SuccessfulLatencies: samples,
+			Target: 0.99, Bound: latencyBoundP99,
+		}},
 	}
 }
 

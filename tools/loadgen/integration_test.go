@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -175,13 +177,33 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 	// ~100% miss rate — the harness failing, not the system under test.
 	//
 	// Subject shape is chat.user.{account}.room.{roomID}.{siteID}.msg.send.
+	var callbackErrMu sync.Mutex
+	var callbackErr error
+	recordCallbackErr := func(err error) {
+		callbackErrMu.Lock()
+		defer callbackErrMu.Unlock()
+		if callbackErr == nil {
+			callbackErr = err
+		}
+	}
+	callbackFailed := func() bool {
+		callbackErrMu.Lock()
+		defer callbackErrMu.Unlock()
+		return callbackErr != nil
+	}
+
 	gkSub, err := nc.Subscribe(subject.MsgSendWildcard(siteID), func(m *nats.Msg) {
+		if callbackFailed() {
+			return
+		}
 		var req model.SendMessageRequest
 		if err := json.Unmarshal(m.Data, &req); err != nil {
+			recordCallbackErr(fmt.Errorf("unmarshal fake gatekeeper request: %w", err))
 			return
 		}
 		tokens := strings.Split(m.Subject, ".")
 		if len(tokens) < 5 {
+			recordCallbackErr(fmt.Errorf("parse fake gatekeeper subject %q: expected at least 5 tokens", m.Subject))
 			return
 		}
 		account, roomID := tokens[2], tokens[4]
@@ -191,15 +213,36 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 			SiteID:    siteID,
 			Timestamp: time.Now().UnixMilli(),
 		}
-		data, _ := json.Marshal(evt)
-		_, _ = js.Publish(ctx, subject.MsgCanonicalCreated(siteID), data)
+		data, err := json.Marshal(evt)
+		if err != nil {
+			recordCallbackErr(fmt.Errorf("marshal fake canonical event: %w", err))
+			return
+		}
+		if _, err := js.Publish(ctx, subject.MsgCanonicalCreated(siteID), data); err != nil {
+			recordCallbackErr(fmt.Errorf("publish fake canonical event: %w", err))
+			return
+		}
 
 		// E1: reply on the per-request response subject.
-		_ = nc.Publish(subject.UserResponse(account, req.RequestID), []byte(`{}`))
+		if err := nc.Publish(subject.UserResponse(account, req.RequestID), []byte(`{}`)); err != nil {
+			recordCallbackErr(fmt.Errorf("publish fake user response: %w", err))
+			return
+		}
 		// E2: room broadcast carrying lastMsgId, which is what newE2Handler
 		// correlates against the publish.
-		bcast, _ := json.Marshal(map[string]string{"lastMsgId": req.ID})
-		_ = nc.Publish(subject.RoomEvent(roomID, true), bcast)
+		roomEvent := model.RoomEvent{
+			Type:      model.RoomEventNewMessage,
+			Message:   &model.ClientMessage{Message: model.Message{ID: req.ID}},
+			LastMsgID: req.ID,
+		}
+		bcast, err := json.Marshal(roomEvent)
+		if err != nil {
+			recordCallbackErr(fmt.Errorf("marshal fake room event: %w", err))
+			return
+		}
+		if err := nc.Publish(subject.RoomEvent(roomID, true), bcast); err != nil {
+			recordCallbackErr(fmt.Errorf("publish fake room event: %w", err))
+		}
 	})
 	require.NoError(t, err)
 	defer gkSub.Unsubscribe()
@@ -219,6 +262,10 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 		},
 		StopOnTrip: true,
 	})
+	callbackErrMu.Lock()
+	err = callbackErr
+	callbackErrMu.Unlock()
+	require.NoError(t, err)
 
 	require.Len(t, results, 2)
 	for _, r := range results {

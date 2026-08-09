@@ -53,6 +53,32 @@ func TestRenderRPSReport_ShowsMissingRates(t *testing.T) {
 	assert.Contains(t, out, "0.500/1.200", "reply and broadcast miss rates shown separately")
 }
 
+func TestRenderRPSReport_ShowsEventRatio(t *testing.T) {
+	results := []rpsStepResult{{
+		TargetRPS: 100, AchievedRPS: 100, Kind: verdictPass,
+		EventRatios: []eventRatioResult{{Name: "SLO-3", Good: 99, Valid: 100, Ratio: 0.99, Target: 0.99}},
+	}}
+	var buf bytes.Buffer
+	require.NoError(t, renderRPSReport(&buf, results, "login", "medium"))
+
+	out := buf.String()
+	assert.Contains(t, out, "SLO-3 good%")
+	assert.Contains(t, out, "99.000")
+}
+
+func TestWriteRPSCSV_CarriesEventRatioCounts(t *testing.T) {
+	results := []rpsStepResult{{
+		TargetRPS: 100, AchievedRPS: 100, Kind: verdictPass,
+		EventRatios: []eventRatioResult{{Name: "SLO-3", Good: 99, Valid: 100, Ratio: 0.99, Target: 0.99}},
+	}}
+	var buf bytes.Buffer
+	require.NoError(t, writeRPSCSV(&buf, results, nil))
+
+	out := buf.String()
+	assert.Contains(t, out, "SLO-3_good,SLO-3_valid,SLO-3_good_ratio,SLO-3_target")
+	assert.Contains(t, out, ",99,100,0.990000,0.990000,")
+}
+
 func TestWriteRPSCSV_CarriesMissingColumns(t *testing.T) {
 	results := []rpsStepResult{
 		{TargetRPS: 1000, AchievedRPS: 990, Kind: verdictPass,
