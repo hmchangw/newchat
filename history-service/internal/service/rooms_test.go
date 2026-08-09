@@ -675,7 +675,10 @@ func TestHistoryService_RoomsGet_UnhintedRoomAbsentFromBatch_SkippedWithoutPerRo
 // Batch-resolved times are trusted verbatim — even values the hint sanitizer would
 // reject (a pre-2020 lastMsgAt on a legacy room) — because they came from our own
 // rooms collection; the old behavior re-read the very same document per-room just to
-// get the identical values past the sanitizer.
+// get the identical values past the sanitizer. The walk bounds prove the legacy
+// lastMsgAt was consumed: a pre-floor ceiling collapses to the 90-day history floor
+// (before = floor + 1ms), whereas ignoring it (zero times) would emit a now+skew
+// ceiling ~91 days later.
 func TestHistoryService_RoomsGet_BatchTimesTrustedVerbatim(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).Times(0)
@@ -685,10 +688,18 @@ func TestHistoryService_RoomsGet_BatchTimesTrustedVerbatim(t *testing.T) {
 		Return(map[string]mongorepo.RoomTimes{"r1": {LastMsgAt: legacyLast, CreatedAt: legacyLast.Add(-time.Hour)}}, nil).
 		Times(1)
 
+	var gotBefore, gotFloor time.Time
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: legacyLast}}, false), nil)
+		DoAndReturn(func(_ context.Context, _ string, before, floor time.Time, _ cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			gotBefore, gotFloor = before, floor
+			return makePage([]models.Message{{MessageID: "m1", RoomID: "r1", Msg: "hi", CreatedAt: legacyLast}}, false), nil
+		})
 
 	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", resp.Rooms["r1"].MessageID)
+	assert.WithinDuration(t, time.Now().UTC().Add(-90*24*time.Hour), gotFloor, time.Minute,
+		"floor must be the 90-day history clamp")
+	assert.Equal(t, time.Millisecond, gotBefore.Sub(gotFloor),
+		"pre-floor legacy lastMsgAt must collapse the ceiling onto the floor")
 }
