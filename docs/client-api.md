@@ -991,7 +991,7 @@ an earlier survivor; a room with only ineligible messages omits `previewMessage`
 |---|---|---|
 | `messageId` | string | |
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
-| `content` | string | The full message body; the client truncates for display. |
+| `content` | string | Message content snippet, capped at 500 runes (longer bodies are truncated). |
 | `createdAt` | string | RFC 3339 timestamp. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |
