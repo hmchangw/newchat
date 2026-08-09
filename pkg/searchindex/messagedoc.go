@@ -32,6 +32,16 @@ type MessageDoc struct {
 	CardData              string                 `json:"cardData,omitempty"                      es:"text,custom_analyzer"`
 	Attachments           []cassandra.Attachment `json:"attachments,omitempty" es:"object_disabled"`
 	Card                  *cassandra.Card        `json:"card,omitempty"        es:"object_disabled"`
+	// UserName is the sender's pre-composed display name, indexed so free-text
+	// query also matches on sender name (see MessageFields.UserName).
+	UserName string `json:"userName,omitempty" es:"text,custom_analyzer"`
+	// FileTypes is the deduped set of attachment categories on this message
+	// (image/pdf/excel/powerpoint/word/zip/others), derived from Attachments'
+	// FileType MIME (see fileTypeCategory) — this is the field the "file search"
+	// filter matches, folded into the messages index rather than a new subject.
+	FileTypes []string `json:"fileTypes,omitempty" es:"keyword"`
+	// Mentions is the deduped set of mentioned accounts (MessageFields.MentionAccounts).
+	Mentions []string `json:"mentions,omitempty" es:"keyword"`
 }
 
 // MessageFields is the minimal, source-agnostic set of fields needed to
@@ -57,6 +67,10 @@ type MessageFields struct {
 	// model.Message.Attachments — decoded here via cassandra.DecodeAttachments.
 	Attachments [][]byte
 	Card        *cassandra.Card
+	// UserName is the sender's pre-composed display name (Message.UserDisplayName).
+	UserName string
+	// MentionAccounts is the list of mentioned accounts (Message.Mentions[].Account).
+	MentionAccounts []string
 }
 
 // NewMessageDoc builds the ES document for the messages index from f. The
@@ -80,11 +94,14 @@ func NewMessageDoc(f MessageFields) (MessageDoc, error) {
 		ThreadParentID:        f.ThreadParentID,
 		ThreadParentCreatedAt: f.ThreadParentCreatedAt,
 		TShow:                 f.TShow,
+		UserName:              f.UserName,
+		Mentions:              dedupeStrings(f.MentionAccounts),
 	}
 
 	attachments, skipped := cassandra.DecodeAttachments(f.Attachments)
 	doc.Attachments = attachments
 	var attachmentText []string
+	var fileTypes []string
 	for i := range attachments {
 		a := &attachments[i]
 		if a.Title != "" {
@@ -93,8 +110,10 @@ func NewMessageDoc(f MessageFields) (MessageDoc, error) {
 		if a.Description != "" {
 			attachmentText = append(attachmentText, a.Description)
 		}
+		fileTypes = append(fileTypes, fileTypeCategory(a.FileType))
 	}
 	doc.AttachmentText = strings.Join(attachmentText, " ")
+	doc.FileTypes = dedupeStrings(fileTypes)
 
 	if f.Card != nil {
 		doc.Card = f.Card

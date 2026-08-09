@@ -67,7 +67,7 @@ func TestBuildMessageQuery_SearchesAttachmentAndCardFields(t *testing.T) {
 	assert.Equal(t, "bool_prefix", mm["type"])
 	assert.Equal(t, "AND", mm["operator"])
 	assert.Equal(t,
-		[]any{"content", "attachmentText", "cardData"},
+		[]any{"content", "userName", "attachmentText", "cardData"},
 		mm["fields"])
 
 	// Search-only fields never ship on hits: cardData is a (possibly large)
@@ -223,6 +223,78 @@ func TestBuildMessageQuery_RecentWindowDefault(t *testing.T) {
 	rng := filters[0].(map[string]any)["range"].(map[string]any)["createdAt"].(map[string]any)
 	// Zero / negative window defaults to 1 year (365 * 24h = 8760h).
 	assert.Equal(t, "now-8760h", rng["gte"])
+}
+
+func TestBuildMessageQuery_Senders(t *testing.T) {
+	req := model.SearchMessagesRequest{Query: "hi", Senders: []string{"bob", "carol"}}
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
+	require.NoError(t, err)
+
+	filters := filterClauses(t, parseQuery(t, raw))
+	senders := filters[2].(map[string]any)["terms"].(map[string]any)["userAccount"]
+	assert.ElementsMatch(t, []any{"bob", "carol"}, senders)
+}
+
+func TestBuildMessageQuery_DateRange(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+	req := model.SearchMessagesRequest{Query: "hi", DateRange: &model.DateRange{Start: start, End: end}}
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
+	require.NoError(t, err)
+
+	filters := filterClauses(t, parseQuery(t, raw))
+	rng := filters[2].(map[string]any)["range"].(map[string]any)["createdAt"].(map[string]any)
+	assert.Equal(t, start.Format(time.RFC3339), rng["gte"])
+	assert.Equal(t, end.Format(time.RFC3339), rng["lte"])
+}
+
+func TestBuildMessageQuery_HasAttachment(t *testing.T) {
+	yes := true
+	req := model.SearchMessagesRequest{Query: "hi", HasAttachment: &yes}
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
+	require.NoError(t, err)
+
+	filters := filterClauses(t, parseQuery(t, raw))
+	exists := filters[2].(map[string]any)["exists"].(map[string]any)
+	assert.Equal(t, "fileTypes", exists["field"])
+}
+
+func TestBuildMessageQuery_MentionedMe(t *testing.T) {
+	yes := true
+	req := model.SearchMessagesRequest{Query: "hi", MentionedMe: &yes}
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
+	require.NoError(t, err)
+
+	filters := filterClauses(t, parseQuery(t, raw))
+	term := filters[2].(map[string]any)["term"].(map[string]any)
+	assert.Equal(t, "alice", term["mentions"], "mentionedMe filters on the requester's own account")
+}
+
+func TestBuildMessageQuery_FileTypes(t *testing.T) {
+	req := model.SearchMessagesRequest{Query: "hi", FileTypes: []string{"pdf", "zip"}}
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
+	require.NoError(t, err)
+
+	filters := filterClauses(t, parseQuery(t, raw))
+	fileTypes := filters[2].(map[string]any)["terms"].(map[string]any)["fileTypes"]
+	assert.ElementsMatch(t, []any{"pdf", "zip"}, fileTypes)
+}
+
+func TestBuildMessageQuery_CombinedFilters(t *testing.T) {
+	yes := true
+	req := model.SearchMessagesRequest{
+		Query:         "hi",
+		Senders:       []string{"bob"},
+		HasAttachment: &yes,
+		MentionedMe:   &yes,
+		FileTypes:     []string{"image"},
+	}
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
+	require.NoError(t, err)
+
+	// range + should + senders + hasAttachment + mentionedMe + fileTypes
+	filters := filterClauses(t, parseQuery(t, raw))
+	require.Len(t, filters, 6)
 }
 
 func TestRecentWindowToGte_Units(t *testing.T) {

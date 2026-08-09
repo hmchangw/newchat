@@ -227,6 +227,26 @@ func TestNewMessageSearchIndex(t *testing.T) {
 	assert.True(t, doc.TShow)
 }
 
+func TestNewMessageSearchIndex_UserNameAndMentions(t *testing.T) {
+	evt := &model.MessageEvent{
+		Message: model.Message{
+			ID: "msg-1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+			UserDisplayName: "Alice Wong 王愛麗",
+			Content:         "hi @bob @carol",
+			CreatedAt:       time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+			Mentions: []model.Participant{
+				{Account: "bob"},
+				{Account: "carol"},
+			},
+		},
+		SiteID: "site-a",
+	}
+	doc, err := newMessageSearchIndex(evt)
+	require.NoError(t, err)
+	assert.Equal(t, "Alice Wong 王愛麗", doc.UserName)
+	assert.Equal(t, []string{"bob", "carol"}, doc.Mentions)
+}
+
 // Never-edited messages must omit editedAt/updatedAt so index entries stay
 // compact for the common case.
 func TestNewMessageSearchIndex_EditedUpdatedOmittedWhenNil(t *testing.T) {

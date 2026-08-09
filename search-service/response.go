@@ -41,6 +41,7 @@ type messageSearchHit struct {
 	TShow                 bool               `json:"tshow,omitempty"`
 	Attachments           []model.Attachment `json:"attachments,omitempty"`
 	Card                  *model.Card        `json:"card,omitempty"`
+	UserName              string             `json:"userName,omitempty"`
 }
 
 // roomSearchHit is the spotlight ES `_source` shape for a room
@@ -93,6 +94,7 @@ func toSearchMessage(hit *messageSearchHit) model.SearchMessage {
 		TShow:                        hit.TShow,
 		Attachments:                  hit.Attachments,
 		Card:                         hit.Card,
+		UserName:                     hit.UserName,
 	}
 }
 

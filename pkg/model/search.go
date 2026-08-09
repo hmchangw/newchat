@@ -12,6 +12,26 @@ type SearchMessagesRequest struct {
 	RoomIDs []string `json:"roomIds,omitempty"`
 	Size    int      `json:"size,omitempty"`
 	Offset  int      `json:"offset,omitempty"`
+
+	// Senders filters to messages from any of these userAccounts (multi-select From).
+	Senders []string `json:"senders,omitempty"`
+	// DateRange filters createdAt to [Start, End]; either bound may be zero to leave it open.
+	DateRange *DateRange `json:"dateRange,omitempty"`
+	// HasAttachment, set true, filters to messages carrying at least one attachment.
+	HasAttachment *bool `json:"hasAttachment,omitempty"`
+	// MentionedMe, set true, filters to messages that mention the requesting account.
+	MentionedMe *bool `json:"mentionedMe,omitempty"`
+	// FileTypes filters to messages with an attachment in any of these categories
+	// (image/pdf/excel/powerpoint/word/zip/others). This is also how file search
+	// folds into this RPC — no separate subject.
+	FileTypes []string `json:"fileTypes,omitempty"`
+}
+
+// DateRange bounds a createdAt filter; presets (today/thisWeek/…) are resolved
+// client-side into a concrete range before the request is sent.
+type DateRange struct {
+	Start time.Time `json:"start,omitempty"`
+	End   time.Time `json:"end,omitempty"`
 }
 
 // SearchMessagesResponse is the NATS reply for `search.messages`.
@@ -38,6 +58,9 @@ type SearchMessage struct {
 	UpdatedAt                    *time.Time `json:"updatedAt,omitempty"`
 	ThreadParentMessageID        string     `json:"threadParentMessageId,omitempty"`
 	ThreadParentMessageCreatedAt *time.Time `json:"threadParentMessageCreatedAt,omitempty"`
+	// UserName is the sender's pre-composed display name (Message.UserDisplayName),
+	// indexed so free-text query can match on sender name as well as body.
+	UserName string `json:"userName,omitempty"`
 
 	// Render payloads mirrored as-is from the message (same wire shape as
 	// history reads) so the client can render hits without a second lookup.
@@ -93,7 +116,8 @@ type MessageAppInfo struct {
 // SearchRoomsRequest is the NATS payload for
 // `chat.user.{account}.request.search.{siteID}.rooms`.
 //
-// Query is a non-empty substring match on room name (case-insensitive prefix).
+// Query is a substring match on room name (case-insensitive prefix); it may be
+// empty only when Members is set — at least one of the two is required.
 // RoomType filters by subscription type: "all" (default, same as empty),
 // "channel", or "dm". The value "app" and any other value are rejected with
 // ErrBadRequest.
@@ -102,6 +126,10 @@ type SearchRoomsRequest struct {
 	RoomType string `json:"roomType,omitempty"`
 	Size     int    `json:"size,omitempty"`
 	Offset   int    `json:"offset,omitempty"`
+	// Members filters to channels that contain all of these accounts (plus the
+	// requester), resolved via user-service subscription.getChannels. Query may
+	// be empty when Members is set — at least one of the two is required.
+	Members []string `json:"members,omitempty"`
 }
 
 // SearchRoomsResponse is the NATS reply for `search.rooms`.

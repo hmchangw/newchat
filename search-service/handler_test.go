@@ -396,6 +396,53 @@ func TestHandler_SearchRooms_NegativeSizeRejected(t *testing.T) {
 	assert.Equal(t, errcode.CodeBadRequest, rerr.Code)
 }
 
+type fakeMembers struct {
+	roomIDs []string
+	err     error
+	calls   []string // members passed on the last call, for assertions
+}
+
+func (f *fakeMembers) GetChannels(_ context.Context, _, _ string, members []string) ([]string, error) {
+	f.calls = members
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.roomIDs, nil
+}
+
+func TestHandler_SearchRooms_MembersAllowsEmptyQuery(t *testing.T) {
+	store := &fakeStore{
+		searchBody: json.RawMessage(`{"hits":{"total":{"value":1},"hits":[` +
+			`{"_source":{"roomId":"r1","roomName":"general","roomType":"channel","siteId":"site-a"}}]}}`),
+	}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+	h.members = &fakeMembers{roomIDs: []string{"r1"}}
+
+	resp, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Members: []string{"bob"}})
+	require.NoError(t, err)
+	require.Len(t, resp.Rooms, 1)
+}
+
+func TestHandler_SearchRooms_EmptyQueryAndMembersRejected(t *testing.T) {
+	h := newTestHandler(&fakeStore{}, &fakeMongo{}, nil, newFakeCache())
+	h.members = &fakeMembers{}
+	_, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{})
+	require.Error(t, err)
+	var rerr *errcode.Error
+	require.True(t, errors.As(err, &rerr))
+	assert.Equal(t, errcode.CodeBadRequest, rerr.Code)
+}
+
+func TestHandler_SearchRooms_MembersRPCErrorSanitized(t *testing.T) {
+	h := newTestHandler(&fakeStore{}, &fakeMongo{}, nil, newFakeCache())
+	h.members = &fakeMembers{err: errors.New("rpc failed")}
+	_, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Members: []string{"bob"}})
+	require.Error(t, err)
+	classified := errcode.Classify(context.Background(), err)
+	assert.Equal(t, errcode.CodeInternal, classified.Code)
+	assert.NotContains(t, classified.Message, "rpc failed")
+}
+
 func TestHandler_SearchRooms_UsesSpotlightIndex(t *testing.T) {
 	store := &fakeStore{}
 	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())

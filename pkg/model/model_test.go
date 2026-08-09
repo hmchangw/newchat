@@ -2397,6 +2397,49 @@ func TestSearchRoomsRequestJSON(t *testing.T) {
 	})
 }
 
+func TestSearchMessagesRequestJSON_NewFilters(t *testing.T) {
+	senders := true
+	req := model.SearchMessagesRequest{
+		Query:   "hello",
+		Senders: []string{"bob", "carol"},
+		DateRange: &model.DateRange{
+			Start: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+			End:   time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC),
+		},
+		HasAttachment: &senders,
+		MentionedMe:   &senders,
+		FileTypes:     []string{"pdf", "zip"},
+	}
+	roundTrip(t, &req, &model.SearchMessagesRequest{})
+
+	reqBare := model.SearchMessagesRequest{Query: "hello"}
+	data, err := json.Marshal(&reqBare)
+	require.NoError(t, err)
+	for _, key := range []string{"senders", "dateRange", "hasAttachment", "mentionedMe", "fileTypes"} {
+		assert.NotContains(t, string(data), `"`+key+`"`, "%s must be omitted when unset", key)
+	}
+}
+
+func TestSearchMessageJSON_UserName(t *testing.T) {
+	msg := model.SearchMessage{MessageID: "m1", RoomID: "r1", UserName: "Alice Wong 王愛麗"}
+	roundTrip(t, &msg, &model.SearchMessage{})
+
+	bare := model.SearchMessage{MessageID: "m1", RoomID: "r1"}
+	data, err := json.Marshal(&bare)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"userName"`, "userName must be omitted when empty")
+}
+
+func TestSearchRoomsRequestJSON_Members(t *testing.T) {
+	req := model.SearchRoomsRequest{Members: []string{"bob", "carol"}}
+	roundTrip(t, &req, &model.SearchRoomsRequest{})
+
+	bare := model.SearchRoomsRequest{Query: "x"}
+	data, err := json.Marshal(&bare)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"members"`, "members must be omitted when empty")
+}
+
 func TestSearchRoomsResponseJSON(t *testing.T) {
 	resp := model.SearchRoomsResponse{
 		Rooms: []model.SearchRoom{

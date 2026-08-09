@@ -34,12 +34,13 @@ type handlerConfig struct {
 }
 
 type handler struct {
-	store SearchStore
-	mongo MongoStore
-	users SearchUsersClient
-	cache RestrictedRoomCache
-	room  RoomInfoClient
-	cfg   handlerConfig
+	store   SearchStore
+	mongo   MongoStore
+	users   SearchUsersClient
+	cache   RestrictedRoomCache
+	room    RoomInfoClient
+	members MembersClient
+	cfg     handlerConfig
 }
 
 func newHandler(store SearchStore, mongo MongoStore, users SearchUsersClient, cache RestrictedRoomCache, cfg *handlerConfig) *handler {
@@ -73,7 +74,7 @@ func (h *handler) withRequestTimeout(parent context.Context) (context.Context, c
 	return context.WithTimeout(parent, h.cfg.RequestTimeout)
 }
 
-func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessagesRequest) (resp *model.SearchMessagesResponse, err error) {
+func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessagesRequest) (resp *model.SearchMessagesResponse, err error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
 	defer observeRequest(c, metricKindMessages, &err)()
 
 	account, rerr := c.Params.Require("account")
@@ -139,15 +140,26 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 	}
 
 	query := strings.TrimSpace(req.Query)
-	if query == "" {
-		return nil, errcode.BadRequest("query is required")
+	if query == "" && len(req.Members) == 0 {
+		return nil, errcode.BadRequest("query or members is required")
 	}
 	req.Query = query
 
 	ctx, cancel := h.withRequestTimeout(c)
 	defer cancel()
 
-	body, err := buildRoomQuery(req, account)
+	// memberRoomIDs stays nil (no filter) when Members is unset; an empty
+	// non-nil slice means no channel matched every requested member, so the
+	// query is built to match nothing rather than falling back to unfiltered.
+	var memberRoomIDs []string
+	if len(req.Members) > 0 {
+		memberRoomIDs, err = h.members.GetChannels(ctx, account, h.cfg.SiteID, req.Members)
+		if err != nil {
+			return nil, fmt.Errorf("resolving members: %w", err)
+		}
+	}
+
+	body, err := buildRoomQuery(req, account, memberRoomIDs)
 	if err != nil {
 		// A typed errcode error (invalid roomType) passes through;
 		// anything else (marshal failure — unreachable) gets sanitized.

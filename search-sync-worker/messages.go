@@ -309,6 +309,10 @@ func actionableEvent(e model.EventType) bool {
 
 // newMessageSearchIndex maps a MessageEvent to a search index document.
 func newMessageSearchIndex(evt *model.MessageEvent) (searchindex.MessageDoc, error) {
+	mentions := make([]string, 0, len(evt.Message.Mentions))
+	for _, p := range evt.Message.Mentions {
+		mentions = append(mentions, p.Account)
+	}
 	return searchindex.NewMessageDoc(searchindex.MessageFields{
 		MessageID:             evt.Message.ID,
 		RoomID:                evt.Message.RoomID,
@@ -324,6 +328,8 @@ func newMessageSearchIndex(evt *model.MessageEvent) (searchindex.MessageDoc, err
 		TShow:                 evt.Message.TShow,
 		Attachments:           evt.Message.Attachments,
 		Card:                  evt.Message.Card,
+		UserName:              evt.Message.UserDisplayName,
+		MentionAccounts:       mentions,
 	})
 }
 
