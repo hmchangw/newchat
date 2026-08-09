@@ -101,3 +101,49 @@ func TestDirectPool_AttachSinkDeliver_ConcurrentAccessIsRaceFree(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestDirectPool_DefaultLanes_AreBoth(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	// daily must keep subscribing both lanes so it stays ROOM_SUBJECT_MODE-agnostic.
+	assert.Equal(t, []bool{true, false}, p.laneSelection())
+}
+
+func TestDirectPool_SetLanes_NarrowsSelection(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	p.setLanes([]bool{false})
+	assert.Equal(t, []bool{false}, p.laneSelection())
+}
+
+func TestDirectPool_SetLanes_IgnoresEmptySelection(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	// Subscribing to nothing would make every message look lost.
+	p.setLanes(nil)
+	assert.Equal(t, []bool{true, false}, p.laneSelection())
+}
+
+func TestDirectPool_MissingUsers(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	p.users["u-1"] = &directUser{id: "u-1"}
+	p.users["u-3"] = &directUser{id: "u-3"}
+
+	// Size() would report 2 for a designated set of 3 backfilled by a
+	// background user — membership is the assertion that actually holds.
+	assert.Equal(t, []string{"u-2"}, p.MissingUsers([]string{"u-1", "u-2", "u-3"}))
+	assert.Empty(t, p.MissingUsers([]string{"u-1", "u-3"}))
+}
+
+func TestDirectPool_RecordDisconnect_CountsMidRunLoss(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	p.recordDisconnect()
+	p.recordDisconnect()
+	assert.Equal(t, int64(2), p.DroppedRecipients())
+}
+
+func TestDirectPool_RecordDisconnect_IgnoresOrderlyShutdown(t *testing.T) {
+	p := newDirectPool("nats://unused", "", nil)
+	// Close drains every recipient conn; counting those would put every run
+	// on the INCONCLUSIVE branch.
+	p.Close()
+	p.recordDisconnect()
+	assert.Zero(t, p.DroppedRecipients())
+}

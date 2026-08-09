@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -21,8 +22,20 @@ type directPool struct {
 	credsFile string
 	collector *Collector
 
+	// closing suppresses drop accounting once Close has begun — draining every
+	// connection at end of run is not a lost recipient.
+	closing atomic.Bool
+	// dropped counts unexpected disconnects on recipient connections. A
+	// recipient that went away mid-run cannot have its non-delivery attributed
+	// to the system under test (verify spec §10).
+	dropped atomic.Int64
+
 	mu    sync.Mutex
 	users map[string]*directUser
+	// lanes selects which room-broadcast lanes each room is subscribed on:
+	// true = global (chat.room.…), false = local (chat.local.room.…). Both by
+	// default, which is daily's behaviour; `verify --lane` narrows it.
+	lanes []bool
 	sink  deliverySink
 }
 
@@ -54,8 +67,58 @@ type directUser struct {
 
 func newDirectPool(natsURL, credsFile string, c *Collector) *directPool {
 	return &directPool{
-		url: natsURL, credsFile: credsFile, collector: c, users: make(map[string]*directUser),
+		url: natsURL, credsFile: credsFile, collector: c,
+		users: make(map[string]*directUser),
+		lanes: []bool{true, false},
 	}
+}
+
+// setLanes restricts which room-broadcast lanes are subscribed. Must be called
+// before Add; an empty selection is ignored so the pool can never end up
+// subscribed to nothing. Only `verify --lane` calls this — daily keeps the
+// dual-lane default that makes it ROOM_SUBJECT_MODE-agnostic.
+func (p *directPool) setLanes(lanes []bool) {
+	if len(lanes) == 0 {
+		return
+	}
+	p.mu.Lock()
+	p.lanes = append([]bool(nil), lanes...)
+	p.mu.Unlock()
+}
+
+func (p *directPool) laneSelection() []bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lanes
+}
+
+// DroppedRecipients reports how many recipient connections were lost mid-run.
+func (p *directPool) DroppedRecipients() int64 { return p.dropped.Load() }
+
+// recordDisconnect is the connection-lost hook. The closing gate matters: Close
+// drains every connection at end of run, and counting those would make every
+// run report a dropped recipient and land on INCONCLUSIVE.
+func (p *directPool) recordDisconnect() {
+	if p.closing.Load() {
+		return
+	}
+	p.dropped.Add(1)
+}
+
+// MissingUsers returns the subset of ids that are not in the pool. Counting
+// pool size is not enough: activateUsers skips a user whose Add failed and the
+// freed slot is backfilled by the next user, so Size() can reach the expected
+// number with a designated user absent (verify spec §16.5).
+func (p *directPool) MissingUsers(ids []string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, id := range ids {
+		if _, ok := p.users[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // Add opens a connection for u and subscribes to every room in u.Rooms,
@@ -66,17 +129,21 @@ func newDirectPool(natsURL, credsFile string, c *Collector) *directPool {
 // broadcasts arrive on subject.UserRoomEvent(account) — both are needed for
 // realistic IM coverage since daily presets are DM-heavy.
 //
-// Each room is subscribed on BOTH the global and local lanes so a run stays
-// mode-agnostic: under ROOM_SUBJECT_MODE=local, hard-coding the global lane would
-// silently receive nothing and report degraded latency instead of failing loudly.
+// Each room is subscribed on both the global and local lanes by default so a
+// run stays mode-agnostic: under ROOM_SUBJECT_MODE=local, hard-coding the global
+// lane would silently receive nothing and report degraded latency instead of
+// failing loudly. An operator who knows their stack's mode can halve the
+// subscription count via setLanes (`verify --lane`).
 func (p *directPool) Add(u *userState) error {
-	nc, err := connectWithCreds(p.url, "loadgen-daily-"+u.ID, p.credsFile)
+	nc, err := connectWithCreds(p.url, "loadgen-daily-"+u.ID, p.credsFile,
+		nats.DisconnectErrHandler(func(_ *nats.Conn, _ error) { p.recordDisconnect() }))
 	if err != nil {
 		return fmt.Errorf("connect for %s: %w", u.ID, err)
 	}
 	du := &directUser{id: u.ID, nc: nc}
+	lanes := p.laneSelection()
 	for _, roomID := range u.Rooms {
-		for _, global := range []bool{true, false} {
+		for _, global := range lanes {
 			sub, err := nc.Subscribe(subject.RoomEvent(roomID, global), func(m *nats.Msg) {
 				p.onBroadcast(m)
 				p.deliver(u.ID, m.Data, laneForSubject(m.Subject))
@@ -165,7 +232,7 @@ func (p *directPool) SubscribeRoom(userID, roomID string) error {
 	if !ok {
 		return fmt.Errorf("subscribe room %s: user %s not in direct pool", roomID, userID)
 	}
-	for _, global := range []bool{true, false} {
+	for _, global := range p.laneSelection() {
 		subj := subject.RoomEvent(roomID, global)
 		sub, err := du.nc.Subscribe(subj, func(m *nats.Msg) {
 			p.deliver(userID, m.Data, laneForSubject(m.Subject))
@@ -185,6 +252,9 @@ func (p *directPool) SubscribeRoom(userID, roomID string) error {
 
 // Close drains all connections.
 func (p *directPool) Close() {
+	// Set before draining so the disconnect handler doesn't count an orderly
+	// shutdown as a lost recipient.
+	p.closing.Store(true)
 	p.mu.Lock()
 	users := p.users
 	p.users = nil
@@ -235,12 +305,14 @@ func newMultiplexPool(natsURL, credsFile string, c *Collector, size int) (*multi
 // against servers that allow anonymous, e.g. a minimal test setup).
 // Without this, the daily-IM pools were silently dialing anonymous and
 // getting "permissions violation" on subscribe.
-func connectWithCreds(url, name, credsFile string) (*nats.Conn, error) {
+// extra options are appended last, so a caller can attach connection-event
+// handlers without every other caller changing.
+func connectWithCreds(url, name, credsFile string, extra ...nats.Option) (*nats.Conn, error) {
 	opts := []nats.Option{nats.Name(name)}
 	if credsFile != "" {
 		opts = append(opts, nats.UserCredentials(credsFile))
 	}
-	return nats.Connect(url, opts...)
+	return nats.Connect(url, append(opts, extra...)...)
 }
 
 // Add registers a user with the multiplex pool. Subscribes the shared

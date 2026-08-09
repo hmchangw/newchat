@@ -59,7 +59,10 @@ func parseVerifyFlags(args []string) (verifyConfig, error) {
 	fs.IntVar(&vc.LargeRoomThreshold, "large-room-threshold", 500, "must match the gatekeeper's setting")
 	fs.StringVar(&vc.Lane, "lane", "both", "global | local | both")
 	fs.BoolVar(&vc.DirectOnly, "direct-only", false, "disable multiplex; every user gets a dedicated conn")
-	fs.Int64Var(&vc.Seed, "seed", 42, "drives fixtures, probe rooms, and probe selection")
+	fs.Int64Var(&vc.Seed, "seed", 42,
+		"drives probe-room choice and probe selection; same seed ⇒ same probe set. "+
+			"Fixtures are NOT seeded from this — they are pinned to the seed 'loadgen seed' uses, "+
+			"because a different fixture seed regenerates every user and room ID")
 	fs.StringVar(&vc.JSONPath, "json", "", "full violation detail output path")
 
 	if err := fs.Parse(args); err != nil {
@@ -150,7 +153,23 @@ func runVerify(ctx context.Context, cfg *config, args []string) int {
 		preset.Users = vc.Users
 	}
 
-	fx := BuildFixtures(&preset, vc.Seed, cfg.SiteID)
+	// Same preflight daily runs, for the same reason and a worse consequence:
+	// against an unseeded (or mis-seeded) database the gatekeeper rejects every
+	// send with "user X is not subscribed to room Y", yet the publishes still
+	// succeed — so every probe would reach zero recipients and the run would
+	// report a confident FAIL with a total_loss per probe.
+	if err := verifyDailySeeded(ctx, cfg, dailyConfig{Preset: vc.Preset, Users: vc.Users}); err != nil {
+		slog.Error("verify pre-flight", "err", err)
+		return 2
+	}
+
+	// Fixtures are pinned to dailyRunSeed, NOT vc.Seed. BuildFixtures is
+	// deterministic in (preset, seed, siteID), so a different seed here would
+	// generate entirely different user and room IDs from the ones `loadgen
+	// seed` wrote — and verifyDailySeeded cannot catch that, since the user
+	// count still matches. vc.Seed drives probe-room choice and probe
+	// selection only, which is what reproducibility actually needs.
+	fx := BuildFixtures(&preset, dailyRunSeed, cfg.SiteID)
 
 	prs, err := selectProbeRooms(fx, vc.ProbeRooms, vc.LargeRoomThreshold, vc.Seed)
 	if err != nil {
@@ -275,8 +294,10 @@ func executeVerify(
 	env.runSeed = vc.Seed
 	env.designated = designated
 
-	// The delivery sink must be wired before the first Add: directPool.Add
-	// subscribes and flushes, so a broadcast can arrive the instant it returns.
+	// Lane selection and the delivery sink must both be wired before the first
+	// Add: Add subscribes and flushes, so a broadcast can arrive the instant it
+	// returns, and the lane set decides what it subscribes to.
+	env.direct.setLanes(laneFlags(vc.Lane))
 	tracker := NewProbeTracker()
 	env.direct.attachSink(tracker)
 
@@ -309,6 +330,20 @@ func executeVerify(
 	if err := preflightVerify(ctx, *vc, prs, env.direct.Size()); err != nil {
 		return VerifyReport{}, err
 	}
+	// Size alone is not the assertion spec §16.5 promises: activateUsers skips
+	// a user whose Add failed and the next user backfills the slot, so the
+	// count can be right with a probe recipient absent. That user would then
+	// miss every probe in its rooms and register as missing_recipient against
+	// a healthy system. Check the actual membership.
+	if missing := env.direct.MissingUsers(prs.Members); len(missing) > 0 {
+		return VerifyReport{}, fmt.Errorf(
+			"%d of %d probe-room members are absent from the direct pool (first: %s): "+
+				"an unobserved recipient would be reported as missing_recipient",
+			len(missing), len(prs.Members), missing[0])
+	}
+	// A reserve floater that failed to connect cannot be a churn target — its
+	// SubscribeRoom would fail and abort churn. Drop it instead.
+	run.reserve = run.dropAbsentReserve()
 
 	if err := run.openOracleConn(cfg); err != nil {
 		return VerifyReport{}, err
@@ -362,11 +397,14 @@ func executeVerify(
 		Changes:        mm.Counts(),
 		MinProbes:      vc.MinProbes,
 		MultiplexDrops: env.collector.MultiplexDrops(),
-		ReadbackErr:    readbackErr,
-		OracleErr:      run.takeOracleErr(),
-		Cancelled:      ctx.Err() != nil,
-		GCPauseP99:     snapshotSelfMetrics().GCPauseP99Ms,
-		GCPauseMax:     verifyGCPauseMaxMs,
+		// A recipient whose connection went away mid-run cannot have its
+		// non-delivery attributed to the system under test (spec §10).
+		DroppedRecipients: int(env.direct.DroppedRecipients()),
+		ReadbackErr:       readbackErr,
+		OracleErr:         run.takeOracleErr(),
+		Cancelled:         ctx.Err() != nil,
+		GCPauseP99:        snapshotSelfMetrics().GCPauseP99Ms,
+		GCPauseMax:        verifyGCPauseMaxMs,
 	}
 
 	directSize := env.direct.Size()
@@ -399,6 +437,42 @@ func verifyDailyConfig(vc *verifyConfig, totalUsers, designated int) dailyConfig
 		dc.MultiplexPoolSize = 0
 	}
 	return dc
+}
+
+// laneFlags maps --lane onto directPool's lane selection (true = global,
+// false = local). An unrecognised value keeps both lanes; parseVerifyFlags
+// already rejects those, so this is only the safe default.
+func laneFlags(lane string) []bool {
+	switch lane {
+	case "global":
+		return []bool{true}
+	case "local":
+		return []bool{false}
+	default:
+		return []bool{true, false}
+	}
+}
+
+// dropAbsentReserve removes floaters that never made it into the direct pool,
+// so churn only ever targets a user it can observe.
+func (r *verifyRun) dropAbsentReserve() []string {
+	missing := r.env.direct.MissingUsers(r.reserve)
+	if len(missing) == 0 {
+		return r.reserve
+	}
+	absent := make(map[string]struct{}, len(missing))
+	for _, id := range missing {
+		absent[id] = struct{}{}
+	}
+	kept := make([]string, 0, len(r.reserve)-len(missing))
+	for _, id := range r.reserve {
+		if _, ok := absent[id]; !ok {
+			kept = append(kept, id)
+		}
+	}
+	slog.Warn("reserve floaters absent from the direct pool; excluded from membership churn",
+		"absent", len(missing), "remaining", len(kept))
+	return kept
 }
 
 func buildVerifyUsers(fx *Fixtures) []*userState {
