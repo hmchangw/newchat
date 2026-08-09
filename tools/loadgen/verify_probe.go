@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"sync"
 	"time"
@@ -216,4 +218,28 @@ func (r *probeRecord) violations() []Violation {
 	}
 
 	return out
+}
+
+// probeResolution is the denominator for the rate comparison. 1e6 gives
+// six significant digits of rate granularity, far finer than any useful
+// --probe-rate.
+const probeResolution = 1_000_000
+
+// shouldProbe decides deterministically whether one send is tracked.
+// Pure function of (seed, userIdx, seqNo) — no rand, no wall-clock — so two
+// runs with the same seed select exactly the same probe set.
+func shouldProbe(seed int64, userIdx int, seqNo uint64, rate float64) bool {
+	if rate <= 0 {
+		return false
+	}
+	if rate >= 1 {
+		return true
+	}
+	h := fnv.New64a()
+	var buf [24]byte
+	binary.LittleEndian.PutUint64(buf[0:8], uint64(seed))
+	binary.LittleEndian.PutUint64(buf[8:16], uint64(userIdx))
+	binary.LittleEndian.PutUint64(buf[16:24], seqNo)
+	_, _ = h.Write(buf[:])
+	return h.Sum64()%probeResolution < uint64(rate*probeResolution)
 }
