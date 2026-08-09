@@ -1,0 +1,135 @@
+package main
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func passingInputs() VerifyInputs {
+	return VerifyInputs{
+		Counts:     ProbeCounts{Tracked: 100, Complete: 100},
+		MinProbes:  50,
+		GCPauseP99: 5,
+		GCPauseMax: 50,
+	}
+}
+
+func TestEvaluateVerify_Clean_IsPass(t *testing.T) {
+	r := evaluateVerify(passingInputs())
+	assert.Equal(t, VerdictPass, r.Verdict)
+	assert.Empty(t, r.Reasons)
+	assert.Equal(t, 0, r.Verdict.ExitCode())
+}
+
+func TestEvaluateVerify_AnyViolation_IsFail(t *testing.T) {
+	in := passingInputs()
+	in.Violations = []Violation{{Kind: KindMissingRecipient, MsgID: "m1"}}
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictFail, r.Verdict)
+	assert.Equal(t, 1, r.Verdict.ExitCode())
+}
+
+func TestEvaluateVerify_MembershipViolation_IsFail(t *testing.T) {
+	in := passingInputs()
+	in.Violations = []Violation{{Kind: KindMembershipRemoveIneffective, RoomID: "r1"}}
+
+	assert.Equal(t, VerdictFail, evaluateVerify(in).Verdict)
+}
+
+func TestEvaluateVerify_MultiplexDrop_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.MultiplexDrops = 1
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	assert.Contains(t, r.Reasons[0], "multiplex drop")
+	assert.Equal(t, 2, r.Verdict.ExitCode())
+}
+
+func TestEvaluateVerify_InconclusiveOverridesFail(t *testing.T) {
+	in := passingInputs()
+	in.Violations = []Violation{{Kind: KindMissingRecipient, MsgID: "m1"}}
+	in.MultiplexDrops = 1
+
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict,
+		"a drop means the missing delivery cannot be attributed to the system")
+}
+
+func TestEvaluateVerify_TooFewProbes_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.Counts = ProbeCounts{Tracked: 10, Complete: 10}
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	assert.Contains(t, r.Reasons[0], "min-probes")
+}
+
+func TestEvaluateVerify_SuppressedProbesDoNotCountTowardFloor(t *testing.T) {
+	in := passingInputs()
+	in.Counts = ProbeCounts{Tracked: 10, Complete: 10, Suppressed: 500}
+
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict,
+		"suppressed probes must not disguise a starved run as covered")
+}
+
+func TestEvaluateVerify_ReadbackError_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.ReadbackErr = errors.New("history-service unreachable")
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	assert.Contains(t, r.Reasons[0], "readback")
+}
+
+func TestEvaluateVerify_OracleError_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.OracleErr = errors.New("subscription.list timeout")
+
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict)
+}
+
+func TestEvaluateVerify_RecipientDropped_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.DroppedRecipients = 1
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	assert.Contains(t, r.Reasons[0], "connection dropped")
+}
+
+func TestEvaluateVerify_EpochChangeAloneIsNotInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.Changes = ChangeCounts{Total: 12, Adds: 7, Removes: 5, Applied: 12, Effective: 12}
+
+	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict,
+		"membership churn legitimately alters the expected set")
+}
+
+func TestEvaluateVerify_ContextCancelled_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.Cancelled = true
+
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict)
+}
+
+func TestEvaluateVerify_GCPressure_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.GCPauseP99 = 120
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	assert.Contains(t, r.Reasons[0], "GC")
+}
+
+func TestEvaluateVerify_AllReasonsCollected(t *testing.T) {
+	in := passingInputs()
+	in.MultiplexDrops = 2
+	in.Cancelled = true
+	in.GCPauseP99 = 120
+
+	r := evaluateVerify(in)
+	assert.Len(t, r.Reasons, 3, "every failing signal must be reported, not just the first")
+}
