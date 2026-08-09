@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -173,4 +174,85 @@ func TestActivateUsers_DesignatedSetGoesFirst(t *testing.T) {
 	// their original relative order.
 	want := []string{fmtUserID(3), fmtUserID(4), fmtUserID(0), fmtUserID(1), fmtUserID(2)}
 	assert.Equal(t, want, got)
+}
+
+// activationRecorder captures the order activateUsers walks users in. mintJWT
+// is invoked for every user before pool assignment, so with both pools nil the
+// recorder sees the complete walk (every user is then "skipped" for want of a
+// pool, which is exactly what we want — no NATS is involved).
+func activationRecorder(users []*userState, designated []string) (*[]string, *stepEnv) {
+	seen := new([]string)
+	env := &stepEnv{
+		users:      users,
+		designated: designated,
+		mintJWT: func(_ context.Context, account string) error {
+			*seen = append(*seen, account)
+			return nil
+		},
+	}
+	return seen, env
+}
+
+func verifyTestUsers(n int) []*userState {
+	users := make([]*userState, n)
+	for i := range users {
+		users[i] = &userState{ID: fmtUserID(i), Account: fmtAccount(i)}
+	}
+	return users
+}
+
+// TestActivateUsers_NilDesignatedSet_WalksDailyOrder pins the real walk, not
+// just the orderForActivation helper: daily passes no designated set and must
+// activate users in plain index order.
+func TestActivateUsers_NilDesignatedSet_WalksDailyOrder(t *testing.T) {
+	seen, env := activationRecorder(verifyTestUsers(5), nil)
+
+	activateUsers(t.Context(), env, 0, 5)
+
+	assert.Equal(t, []string{
+		fmtAccount(0), fmtAccount(1), fmtAccount(2), fmtAccount(3), fmtAccount(4),
+	}, *seen)
+}
+
+// TestActivateUsers_DesignatedSet_WalksDesignatedFirst pins verify's ordering:
+// probe-room members and reserve floaters must be offered a pool slot before
+// any background user, or they land on multiplex and become unobservable.
+func TestActivateUsers_DesignatedSet_WalksDesignatedFirst(t *testing.T) {
+	seen, env := activationRecorder(verifyTestUsers(5), []string{fmtUserID(3), fmtUserID(1)})
+
+	activateUsers(t.Context(), env, 0, 5)
+
+	// Designated users lead in their env.users order; everyone else follows in
+	// their original relative order.
+	assert.Equal(t, []string{
+		fmtAccount(1), fmtAccount(3), fmtAccount(0), fmtAccount(2), fmtAccount(4),
+	}, *seen)
+}
+
+// TestActivateUsers_RespectsRange pins the [from, to) slice semantics runStep
+// depends on to activate only the delta between ramp steps.
+func TestActivateUsers_RespectsRange(t *testing.T) {
+	seen, env := activationRecorder(verifyTestUsers(5), nil)
+
+	activateUsers(t.Context(), env, 2, 4)
+
+	assert.Equal(t, []string{fmtAccount(2), fmtAccount(3)}, *seen)
+}
+
+func TestLaneFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		lane string
+		want []bool
+	}{
+		{name: "global only", lane: "global", want: []bool{true}},
+		{name: "local only", lane: "local", want: []bool{false}},
+		{name: "both", lane: "both", want: []bool{true, false}},
+		{name: "unknown falls back to both", lane: "", want: []bool{true, false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, laneFlags(tt.lane))
+		})
+	}
 }
