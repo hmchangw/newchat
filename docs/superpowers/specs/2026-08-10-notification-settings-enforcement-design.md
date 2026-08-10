@@ -100,6 +100,29 @@ suppressed. That is what makes fail-open free: a missing user, an unset settings
 sub-document, a Mongo error, and the kill switch all converge on the same struct,
 and none of them need a special case in the gate.
 
+### Why fail-open, not fail-closed
+
+Fail-closed — suppressing pushes when settings are unknown — is the wrong trade
+here, and the choice is deliberate rather than inherited.
+
+A settings read failure is not per-user; it is a Mongo hiccup affecting every
+message in flight. Fail-closed converts that into **total notification silence
+across the site** for its duration, and silence is the failure users cannot detect:
+nobody notices the push that never arrived, so the outage is discovered when
+someone misses something that mattered. Fail-open's worst case is that a muted
+user gets a push during a Mongo incident — visible, self-correcting the moment the
+read recovers, and recoverable by the user in a way silence is not.
+
+It is also the settled convention on this exact path: `PresenceSnapshotter`
+swallows errors and defaults to push, and the hook vetoer logs and allows. A gate
+that fails closed while its two neighbours fail open would make the pipeline's
+behaviour under partial failure incoherent.
+
+Finally, muting is a delivery preference, not an access control. An unwanted push
+to the recipient's own device discloses nothing to anyone else — the recipient is
+already a member of the room the message was sent to — so there is no
+confidentiality argument for treating unknown settings as deny.
+
 ### Mongo implementation
 
 ```go
@@ -116,9 +139,15 @@ projection := bson.M{
 
 - Served by the existing unique `account:1` index on `users`.
 - The `active: {$ne: false}` clause matches `activeUserFilter` in
-  `user-service/mongorepo/users.go` — a deactivated user is not a recipient, and
-  falling through to the zero value means they push as they do today rather than
-  being silently dropped by this change.
+  `user-service/mongorepo/users.go`, so this read agrees with user-service about
+  what an active user is. Note what it does *not* do: candidates come from
+  `subscriptions`, not `users`, so a deactivated account with a live subscription
+  is still in the slice and simply misses the settings map, taking the zero value
+  and pushing. That is today's behaviour — this service consults `users` nowhere
+  at present, so deactivated users already receive pushes. Whether they should is
+  a real pre-existing gap and deliberately **out of scope**: fixing it here would
+  mean this spec silently changing delivery for a population it never set out to
+  touch. It belongs in its own change against the member-loading path.
 - Projection is narrow per the no-whole-documents rule. Note this is deliberately
   *not* the `{"_id":0,"settings":1}` whole-sub-document projection that
   user-service's fanouts depend on — nothing here re-publishes the settings
@@ -237,19 +266,31 @@ the whole cost.
 
 ## Configuration
 
-Two new env vars on `notification-worker`, following the existing presence pair:
+Three new env vars on `notification-worker`, following the existing presence trio:
 
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `USER_SETTINGS_ENABLED` | `true` | `false` → `noopUserSettings`, i.e. today's behaviour exactly. |
 | `USER_SETTINGS_BATCH_SIZE` | `512` | `$in` chunk size, mirroring `PRESENCE_BATCH_SIZE`. |
+| `USER_SETTINGS_TIMEOUT` | `2s` | Per-`Snapshot` deadline, mirroring `PRESENCE_RPC_TIMEOUT`. |
 
-`PRESENCE_RPC_ENABLED` defaults to `false` because presence-service may not exist
-yet; Mongo always does, and a settings gate that ships defaulted off is a gate
-nobody turns on. It defaults **true**, with the flag kept as a kill switch so ops
-can revert the behaviour change without rolling back the binary.
+The two enable flags default differently, so state both explicitly:
+**`PRESENCE_RPC_ENABLED` defaults to `false`** because presence-service may not
+exist yet, whereas **`USER_SETTINGS_ENABLED` defaults to `true`** because Mongo is
+already a hard dependency of this service — and a gate that ships defaulted off is
+a gate nobody turns on. The flag is kept as a kill switch so ops can revert the
+behaviour change without rolling back the binary.
 
-`deploy/docker-compose.yml` sets both explicitly so local dev matches production.
+`USER_SETTINGS_TIMEOUT` bounds the new dependency rather than inheriting whatever
+deadline the consumer context carries. On expiry the snapshotter fails open like
+any other error, so a slow Mongo degrades to today's behaviour instead of stalling
+the fan-out. Latency and error counts come from the existing
+`mongoutil.WithObservability` instrumentation the worker already wires — this adds
+a dependency to an instrumented client, not a new uninstrumented one, so no
+bespoke metrics are needed.
+
+`deploy/user/docker-compose.yml` and `deploy/bot/docker-compose.yml` set all three
+explicitly so local dev matches production.
 
 ## Testing
 
