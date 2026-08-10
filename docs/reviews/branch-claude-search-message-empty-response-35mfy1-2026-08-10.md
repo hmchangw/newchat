@@ -60,3 +60,37 @@ could not run in this environment — both are blocking CI gates and must pass i
 (f) Client-API doc rule
 
 - Not applicable — no violation. The touched publish targets `chat.inbox.{siteID}.internal.{eventType}`, a server-internal search feed consumed by search-sync-worker; the handler's inbound subject is the ROOMS-TEAMS migration stream (main.go:181-186), not `chat.user.{account}.…` or the msg.send route, and no `pkg/model` client-facing request/reply or server→client event struct changed in this diff (`InboxEvent` is inter-service, not client-facing). docs/client-api.md correctly untouched.
+
+## Service: search-service
+
+(a) Diff correctness vs conventions
+
+- Verified the rename motive is real: the writer side is unprefixed — `search-sync-worker/main.go:47-53` (`SPOTLIGHT_INDEX`, `USER_ROOM_INDEX`) and `data-migration/es-index-migrator/config.go:19-20` (`required,notEmpty`). Moving the three fields off `SearchConfig` (which injects `envPrefix:"SEARCH_"`) to root `Config` (`search-service/main.go:94-96`) makes reader==writer spelling, and `required,notEmpty` matches the migrator's precedent. Failure mode is good: old-name deployments fail startup loudly naming the missing var, not silently reading an empty index. Correct.
+- **medium** — `search-service/handler.go:185-187`: the zero-shard WARN logs the raw user `query` (and fires on every empty request while the config is broken — unbounded repeat). CLAUDE.md forbids logging message bodies; a search query is adjacent user content. `kind`+`pattern` alone diagnose the misconfig; keep `query` on the flow line only (which is X-Debug-gated).
+- **low** — `search-service/response.go:35-37`: malformed/`_shards`-absent JSON returns 0, which `logEmptyResult` classifies as "always broken". Unreachable in production (parseRooms/parseOrgs already parsed `raw`, and ES always emits `_shards`), but the comment overclaims.
+- **low** — `searchMessages` (`handler.go:78-128`) is the third ES read yet gets no `logEmptyResult`, despite the branch being named "search-message-empty-response". Risk is lower (`MessageIndexPattern` is hardcoded, `query_messages.go:18`), but on a fresh site `messages-*` matches nothing and the same silent-empty applies. Note the asymmetry or extend.
+- **nitpick** — `handler_test.go:340-343`: the `wantWarn:false` leg only proves no WARN; the FLOW line is never asserted anywhere.
+
+(b) Scope drift
+
+Clean within scope: rename + `notEmpty` + tests + compose + the `query_messages.go:140-143` comment that referenced the old var name. Comment-only commit 4b9df6d is tidy-up of this branch's own comments. No unrelated refactoring. (The diff also touches search-sync-worker/room-worker/pkg/model — outside this reviewer's scope.)
+
+(c) Abstraction changes
+
+Both helpers are justified: two call sites for `logEmptyResult`, and `searchShardTotal` is genuine envelope parsing so `response.go:29` is the right file; the log helper in `handler.go:183` is a handler concern. Free function over method is right — `pattern` differs per caller so nothing on `h` is needed, and it stays independently testable. **nitpick**: six positional params is at the readability edge.
+
+(d) Design coherence
+
+The `_shards.total==0` discriminator is the correct ES signal for wildcard + `allow_no_indices=true` (both read patterns end in `-*`, `main.go:118,125`). Two-tier WARN/FLOW severity split is sound. Double-parsing `raw` only on empty results is negligible. Test-side `slog.SetDefault` swap follows the existing `debug_log_test.go` precedent in five other services, and no test in the package uses `t.Parallel()`.
+
+(e) Project-pattern adherence
+
+- "Never log AND return" — not violated: `logEmptyResult` runs only on the nil-error success path (`handler.go:174-177,237-239`), so `Classify` never sees these requests.
+- `slog.WarnContext(ctx, …)`/`slog.Log(ctx, logctx.LevelFlow, …)` is correct and matches `pkg/natsrouter/middleware.go:117-124` (`Logging()` uses the same FLOW-level, ctx-aware call), so request_id attaches via the logctx handler — actually stricter than the pre-existing ctx-less `slog.Warn` at `handler.go:249,279` (not this diff's problem). *(Editor's note: the observability lens verified the plumbing deeper and found request_id does NOT attach via ctx — see the Observability chapter; that finding supersedes this line.)*
+- Config, fail-fast, structured KV logging: all conform.
+
+(f) Client-API doc rule
+
+- No `docs/client-api.md` update needed — correct call. The rule triggers on schema/error-case/event changes; this diff changes none (same wire types, same errors, log-only). Env names are ops-facing, not client-facing.
+- Env-rename staleness: the live doc `docs/search_index_migration_spec.md` already uses the unprefixed names (its subject is the migrator). Old `SEARCH_SPOTLIGHT_INDEX`/`SEARCH_USER_ROOM_INDEX` spellings survive only in dated planning/spec archives (`docs/superpowers/plans/2026-05-13-*.md`, `docs/superpowers/specs/2026-04-21-search-service-design.md`) — historical records, acceptable to leave.
+- **medium** — the rename is still a breaking ops change for out-of-repo prod manifests (compose is fixed in-diff, `deploy/docker-compose.yml:34-36`; IaC is not). The PR description must carry an explicit migration note: set the three unprefixed vars before rolling this image, or the service exits at startup.
