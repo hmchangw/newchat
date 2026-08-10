@@ -99,3 +99,8 @@ func TestLoadMapping_BadJSON(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse mapping")
 }
+
+func TestMappingExampleFileIsValid(t *testing.T) {
+	_, err := loadMapping("mapping.example.json")
+	assert.NoError(t, err)
+}

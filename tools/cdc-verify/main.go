@@ -1,8 +1,25 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
 	"time"
+
+	"github.com/caarlos0/env/v11"
+	"github.com/gocql/gocql"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
+	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type config struct {
@@ -68,4 +85,164 @@ func (c *config) validate() error {
 	return nil
 }
 
-func main() {}
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
+	cfg, err := env.ParseAs[config]()
+	if err != nil {
+		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if cfg.CredsFile != "" {
+		if _, err := os.Stat(cfg.CredsFile); err != nil {
+			slog.Error("nats creds file not accessible", "path", cfg.CredsFile, "error", err)
+			os.Exit(1)
+		}
+	}
+
+	mapping, err := loadMapping(cfg.MappingFile)
+	if err != nil {
+		slog.Error("load mapping", "error", err)
+		os.Exit(1)
+	}
+	if mapping.NeedsCassandra() && (cfg.CassandraHosts == "" || cfg.CassandraKeyspace == "") {
+		slog.Error("mapping references cassandra targets but CASSANDRA_HOSTS/CASSANDRA_KEYSPACE are unset")
+		os.Exit(1)
+	}
+
+	// ctx is needed by the connection calls below, but cancel is deliberately
+	// not deferred until after the last os.Exit-guarded block: os.Exit skips
+	// deferred calls entirely, so a defer ahead of a fail-fast exit is dead
+	// cleanup (gocritic: exitAfterDefer) — match the repo's other long-lived
+	// services (e.g. oplog-connector/main.go).
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// --- connections (fail fast, read-only use) ---
+	natsOpts := []nats.Option{nats.Name("cdc-verify")}
+	if cfg.CredsFile != "" {
+		natsOpts = append(natsOpts, nats.UserCredentials(cfg.CredsFile))
+	}
+	nc, err := nats.Connect(cfg.NATSURL, natsOpts...)
+	if err != nil {
+		slog.Error("connect nats", "error", err)
+		os.Exit(1)
+	}
+	js, err := jetstream.New(nc)
+	if err != nil {
+		slog.Error("create jetstream context", "error", err)
+		os.Exit(1)
+	}
+	streamName := stream.MigrationOplog(cfg.SiteID).Name
+	s, err := js.Stream(ctx, streamName)
+	if err != nil {
+		slog.Error("open stream", "stream", streamName, "error", err)
+		os.Exit(1)
+	}
+
+	srcClient, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceMongoUsername, cfg.SourceMongoPassword,
+		mongoutil.WithReadPreference(readpref.PrimaryPreferred()))
+	if err != nil {
+		slog.Error("connect source mongo", "error", err)
+		os.Exit(1)
+	}
+	tgtClient, err := mongoutil.Connect(ctx, cfg.TargetMongoURI, cfg.TargetMongoUsername, cfg.TargetMongoPassword)
+	if err != nil {
+		slog.Error("connect target mongo", "error", err)
+		os.Exit(1)
+	}
+
+	var cass CassStore
+	var cassSession *gocql.Session
+	if mapping.NeedsCassandra() {
+		cassSession, err = cassutil.Connect(cassutil.Config{
+			Hosts: cfg.CassandraHosts, Keyspace: cfg.CassandraKeyspace,
+			Username: cfg.CassandraUsername, Password: cfg.CassandraPassword,
+		})
+		if err != nil {
+			slog.Error("connect cassandra", "error", err)
+			os.Exit(1)
+		}
+		cass = newCassStore(cassSession)
+	}
+
+	defer cancel()
+
+	// --- pipeline ---
+	sizer := msgbucket.New(time.Duration(cfg.MessageBucketHours) * time.Hour)
+	reg := newTransformRegistry(sizer)
+	sseHub := newHub()
+	results := newResultsStore(cfg.RecentCap, cfg.FailedCap, sseHub.broadcastResult)
+	v := newVerifier(mapping,
+		newMongoStore(srcClient.Database(cfg.SourceDB)),
+		newMongoStore(tgtClient.Database(cfg.TargetDB)),
+		cass, reg, results, verifierConfig{
+			Poll: cfg.VerifyPoll, Timeout: cfg.VerifyTimeout,
+			MaxChecks: cfg.MaxChecks, SamplePercent: cfg.SamplePercent,
+		})
+
+	var startAt time.Time
+	if cfg.StartAtTime != "" {
+		startAt, _ = time.Parse(time.RFC3339, cfg.StartAtTime) // validated already
+	}
+	w := newWatcher(js, streamName, startAt, v)
+	go func() {
+		if err := w.Run(ctx); err != nil {
+			slog.Error("watcher stopped", "error", err)
+			os.Exit(1) // a dead feed makes the dashboard lie; die loudly
+		}
+	}()
+
+	filter := subject.MigrationOplogWildcard(cfg.SiteID)
+	poller := newStatsPoller(streamName,
+		func(ctx context.Context) (*jetstream.StreamInfo, error) {
+			return s.Info(ctx, jetstream.WithSubjectFilter(filter))
+		},
+		func(ctx context.Context, name string) (*jetstream.ConsumerInfo, error) {
+			c, err := s.Consumer(ctx, name)
+			if err != nil {
+				return nil, fmt.Errorf("open consumer %s: %w", name, err)
+			}
+			return c.Info(ctx)
+		},
+		cfg.TrackConsumers, cfg.StatsInterval, w.Live, sseHub.broadcastStats)
+	go poller.Run(ctx)
+
+	// --- HTTP ---
+	h := newHandler(sseHub, results, poller)
+	mux := http.NewServeMux()
+	h.registerRoutes(mux)
+	srv := &http.Server{
+		Addr:        fmt.Sprintf(":%d", cfg.Port),
+		Handler:     mux,
+		ReadTimeout: 30 * time.Second,
+		// WriteTimeout deliberately omitted — SSE connections are long-lived.
+		IdleTimeout: 60 * time.Second,
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("http server", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	slog.Info("cdc-verify started", "port", cfg.Port, "stream", streamName,
+		"site", cfg.SiteID, "sample_percent", cfg.SamplePercent)
+
+	shutdown.Wait(context.Background(), 25*time.Second,
+		func(sctx context.Context) error { return srv.Shutdown(sctx) },
+		func(sctx context.Context) error { cancel(); v.Shutdown(sctx); return nil },
+		func(_ context.Context) error { return nc.Drain() },
+		func(sctx context.Context) error {
+			mongoutil.Disconnect(sctx, srcClient)
+			mongoutil.Disconnect(sctx, tgtClient)
+			if cassSession != nil {
+				cassutil.Close(cassSession)
+			}
+			return nil
+		},
+	)
+}

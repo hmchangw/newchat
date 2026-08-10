@@ -22,7 +22,6 @@ type watcher struct {
 	live    atomic.Bool
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 func newWatcher(js jetstream.JetStream, streamName string, startAt time.Time, sub submitter) *watcher {
 	return &watcher{js: js, stream: streamName, startAt: startAt, sub: sub}
 }

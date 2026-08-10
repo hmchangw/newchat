@@ -13,7 +13,6 @@ type cassStore struct {
 	session *gocql.Session
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 func newCassStore(session *gocql.Session) *cassStore { return &cassStore{session: session} }
 
 var cqlIdent = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)

@@ -1,0 +1,47 @@
+# CDC Migration Verification Tool — local demo stack
+#
+# Starts NATS+JetStream, a source Mongo, a target Mongo, a Cassandra node, and
+# the tool itself, wired together for a local dry run of the mapping file.
+#
+# Usage:
+#   cp tools/cdc-verify/mapping.example.json tools/cdc-verify/deploy/mapping.local.json
+#   docker compose -f tools/cdc-verify/deploy/docker-compose.yml up
+#   Open http://localhost:8091
+#
+# mapping.local.json is operator-provided next to this file (gitignored) — a
+# copy of ../mapping.example.json works out of the box. It is bind-mounted
+# read-only into the container so it can be edited without a rebuild.
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--http_port", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+  source-mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+  target-mongo:
+    image: mongo:7
+    ports: ["27018:27017"]
+  cassandra:
+    image: cassandra:4.1
+    ports: ["9042:9042"]
+    environment:
+      - HEAP_NEWSIZE=128M
+      - MAX_HEAP_SIZE=512M
+  cdc-verify:
+    build:
+      context: ../../..
+      dockerfile: tools/cdc-verify/deploy/Dockerfile
+    depends_on: [nats, source-mongo, target-mongo, cassandra]
+    ports: ["8091:8091"]
+    volumes:
+      - ./mapping.local.json:/etc/cdc-verify/mapping.json:ro
+    environment:
+      SITE_ID: site1
+      NATS_URL: nats://nats:4222
+      SOURCE_MONGO_URI: mongodb://source-mongo:27017
+      TARGET_MONGO_URI: mongodb://target-mongo:27017
+      CASSANDRA_HOSTS: cassandra:9042
+      CASSANDRA_KEYSPACE: chat
+      MAPPING_FILE: /etc/cdc-verify/mapping.json

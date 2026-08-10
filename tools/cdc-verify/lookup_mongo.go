@@ -15,7 +15,6 @@ type mongoStore struct {
 	db *mongo.Database
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 func newMongoStore(db *mongo.Database) *mongoStore { return &mongoStore{db: db} }
 
 func (s *mongoStore) FindByID(ctx context.Context, collection, id string) (map[string]any, error) {

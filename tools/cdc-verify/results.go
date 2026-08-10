@@ -68,7 +68,6 @@ type Counters struct {
 	Evicted    uint64 `json:"evicted"` // failures dropped by FAILED_CAP
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 type resultsStore struct {
 	mu        sync.Mutex
 	recent    []CheckResult // newest at index 0
@@ -80,7 +79,6 @@ type resultsStore struct {
 	onUpdate  func(CheckResult)
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 func newResultsStore(recentCap, failedCap int, onUpdate func(CheckResult)) *resultsStore {
 	return &resultsStore{
 		counted:   map[string]bool{},
@@ -90,7 +88,7 @@ func newResultsStore(recentCap, failedCap int, onUpdate func(CheckResult)) *resu
 	}
 }
 
-//nolint:unused,gocritic // wired into main.go's dependency graph by a later task; value receiver matches the package-wide CheckResult convention
+//nolint:gocritic // value receiver matches the package-wide CheckResult convention
 func (s *resultsStore) Upsert(r CheckResult) {
 	// Deep-copy the incoming result to own its slices and protect from caller mutations
 	r = deepCopyResult(r)
@@ -167,7 +165,6 @@ func evictedIDIfUncounted(others []CheckResult, r CheckResult) string {
 	return r.ID
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 func (s *resultsStore) Recent() []CheckResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -176,7 +173,6 @@ func (s *resultsStore) Recent() []CheckResult {
 	return out
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 func (s *resultsStore) Failures() []CheckResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -185,7 +181,6 @@ func (s *resultsStore) Failures() []CheckResult {
 	return out
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 func (s *resultsStore) Snapshot() ([]CheckResult, []CheckResult, Counters) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

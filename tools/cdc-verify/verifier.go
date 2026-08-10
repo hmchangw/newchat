@@ -14,7 +14,6 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 )
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 type verifierConfig struct {
 	Poll          time.Duration
 	Timeout       time.Duration
@@ -42,7 +41,6 @@ type checkHandle struct {
 	superseded atomic.Bool
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 type verifier struct {
 	compiled map[string]*compiledSource // by source collection
 	source   SourceStore
@@ -67,7 +65,6 @@ type verifier struct {
 	sampleFn func() int
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
 func newVerifier(m *Mapping, src SourceStore, tgt TargetStore, cass CassStore,
 	reg transformRegistry, results *resultsStore, cfg verifierConfig,
 ) *verifier {
@@ -239,8 +236,6 @@ func sortedMapKeys[V any](m map[string]V) []string {
 // Submit classifies the event synchronously and spawns the check goroutine for
 // everything it does not skip. It never blocks on the check-concurrency
 // semaphore — the spawned goroutine acquires that itself.
-//
-//nolint:unused // wired into main.go's dependency graph by a later task
 func (v *verifier) Submit(ev CDCEvent) {
 	nowMs := v.now().UTC().UnixMilli()
 	row := CheckResult{
@@ -646,8 +641,6 @@ func (v *verifier) finishCancelled(h *checkHandle, row *CheckResult) {
 
 // Shutdown cancels every in-flight check and waits for the goroutines, bounded
 // by ctx.
-//
-//nolint:unused // wired into main.go's dependency graph by a later task
 func (v *verifier) Shutdown(ctx context.Context) {
 	v.mu.Lock()
 	v.closed = true
