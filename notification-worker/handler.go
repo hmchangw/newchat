@@ -198,10 +198,11 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		return nil
 	}
 
-	// Both lookups run over the narrowed candidate set, and settings must be in
-	// hand before presence is evaluated because showNotificationsInCall modifies
-	// the presence decision. TestHandle_SettingsFetchedOnlyForSurvivingCandidates
-	// pins this placement.
+	// Both lookups run over the narrowed candidate set — only accounts that survived
+	// the exclusion filters, never every member of a large room.
+	// TestHandle_SettingsFetchedOnlyForSurvivingCandidates pins that narrowing.
+	// shouldPush combines the two results, which is where showNotificationsInCall
+	// modifies the presence decision.
 	settings, _ := h.deps.Settings.Snapshot(ctx, accounts) // fail-open: error → empty map
 	snapshot, _ := h.deps.Presence.Snapshot(ctx, accounts) // fail-open: error → empty map
 

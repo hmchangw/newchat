@@ -1199,10 +1199,13 @@ func TestHandle_SettingsPartialMapFailsOpenForAbsentAccounts(t *testing.T) {
 		"bob is muted; carol is absent from the map and takes the zero value")
 }
 
-// TestHandle_BotAuthoredMessagePiercesMute is the Spec 1 affordance that only pays
-// off because the gate runs in bot mode too: a .bot account listed as a priority
-// contact pierces muteAllNotifications.
-func TestHandle_BotAuthoredMessagePiercesMute(t *testing.T) {
+// TestHandle_PriorityContactSenderPiercesMute pins the Spec 1 affordance: a
+// recipient who muted everything still gets pushed when the *sender's* account
+// is in their priority-contact set (ns.isPriority(msg.UserAccount) — keyed on the
+// sender, not the recipient, an easy-to-invert wiring detail). The sender here
+// happens to be a .bot account, which works because priority contacts hold raw
+// accounts — users and .bot alike — not because any bot-specific branch exists.
+func TestHandle_PriorityContactSenderPiercesMute(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
 			{ID: "helper", Account: "helper.bot", IsBot: true},
