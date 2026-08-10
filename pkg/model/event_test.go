@@ -49,11 +49,20 @@ func TestSystemMessageTypesCoverEveryConstant(t *testing.T) {
 					continue
 				}
 				for i, cname := range vs.Names {
-					if !strings.HasPrefix(cname.Name, "MessageType") || i >= len(vs.Values) {
+					if !strings.HasPrefix(cname.Name, "MessageType") {
+						continue
+					}
+					// Fail closed on forms this walk cannot evaluate — a valueless
+					// constant (inheriting the previous expression) or a non-literal
+					// would otherwise slip through the registry check unnoticed,
+					// which is the exact failure this guard exists to prevent.
+					if i >= len(vs.Values) {
+						t.Errorf("%s: MessageType constants must declare an explicit value", cname.Name)
 						continue
 					}
 					lit, ok := vs.Values[i].(*ast.BasicLit)
 					if !ok || lit.Kind != token.STRING {
+						t.Errorf("%s: MessageType constants must be string literals so this guard can read them", cname.Name)
 						continue
 					}
 					value, uerr := strconv.Unquote(lit.Value)

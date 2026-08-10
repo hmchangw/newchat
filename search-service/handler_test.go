@@ -13,8 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 const testSpotlightIndex = "spotlight-*"
@@ -336,25 +338,38 @@ func TestHandler_SearchRooms_EmptyResultLogsReadPattern(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Capture at flow level so both branches are observable — a
+			// WARN-only handler would make "no WARN" indistinguishable from
+			// "logged nothing at all".
 			var buf bytes.Buffer
 			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: logctx.LevelFlow})))
 			t.Cleanup(func() { slog.SetDefault(prev) })
 
+			ctx := ctxWithAccount("alice")
+			// Derive from Background, not from ctx itself — SetContext documents
+			// that using the *Context as parent creates a Value-lookup cycle.
+			// NewContext seeds Background, so this is equivalent.
+			ctx.SetContext(natsutil.WithRequestID(context.Background(), "req-abc"))
+
 			h := newTestHandler(&fakeStore{searchBody: json.RawMessage(tt.body)}, &fakeMongo{}, nil, newFakeCache())
-			resp, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Query: "general"})
+			resp, err := h.searchRooms(ctx, model.SearchRoomsRequest{Query: "general"})
 			require.NoError(t, err)
 			require.NotNil(t, resp)
 			assert.Empty(t, resp.Rooms)
 
 			logged := buf.String()
+			assert.Contains(t, logged, `"request_id":"req-abc"`, "both branches must be request-correlated")
+			assert.Contains(t, logged, testSpotlightIndex, "both branches name the pattern actually searched")
+
 			if !tt.wantWarn {
-				assert.Empty(t, logged, "a routine empty result must not WARN")
+				assert.NotContains(t, logged, `"level":"WARN"`, "a routine empty result must not WARN")
+				assert.Contains(t, logged, "index present, no document matched")
+				assert.Contains(t, logged, `"query":"general"`, "the flow line keeps the query for debugging")
 				return
 			}
+			assert.Contains(t, logged, `"level":"WARN"`)
 			assert.Contains(t, logged, "read pattern matched no index")
-			assert.Contains(t, logged, testSpotlightIndex, "the WARN names the pattern actually searched")
-			assert.Contains(t, logged, "request_id", "the WARN must be request-correlated")
 			assert.NotContains(t, logged, "general", "user-typed query text must stay off the WARN line")
 		})
 	}
