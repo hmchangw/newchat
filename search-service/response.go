@@ -25,7 +25,8 @@ type rawResponse[T any] struct {
 
 // searchShardTotal reports how many shards the search ran against. 0 means the
 // read pattern matched no concrete index (allow_no_indices=true turns that into
-// 200 + empty hits) — always a misconfiguration, never a normal empty result.
+// 200 + empty hits). A malformed body also reports 0 — its decode error already
+// surfaced from the typed parse, so this stays a plain diagnostic read.
 func searchShardTotal(raw json.RawMessage) int {
 	var envelope struct {
 		Shards struct {

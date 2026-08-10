@@ -5,58 +5,77 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// Parses event.go (constants aren't enumerable at runtime) and asserts every
-// MessageType* constant is in systemMessageTypes or exempted in nonSystem with
-// a reason — an unregistered one silently changes behaviour in four services.
+// Parses the whole package (constants aren't enumerable at runtime) and asserts
+// every MessageType* constant is in systemMessageTypes or exempted in nonSystem
+// with a reason — an unregistered one silently changes behaviour in four services.
 func TestSystemMessageTypesCoverEveryConstant(t *testing.T) {
 	nonSystem := map[string]string{
 		"MessageTypeImportant": "client-settable (重要訊息): previews and notifies like a normal message",
 	}
 
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "event.go", nil, 0)
+	// Whole-directory walk so a MessageType* constant moved or added in any
+	// other pkg/model file stays guarded; a single-file parse would silently
+	// un-guard it while found>0 keeps the test green.
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse event.go: %v", err)
+		t.Fatalf("read package dir: %v", err)
 	}
 
 	var found int
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
+		file, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", name, perr)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
 				continue
 			}
-			for i, name := range vs.Names {
-				if !strings.HasPrefix(name.Name, "MessageType") || i >= len(vs.Values) {
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
 					continue
 				}
-				lit, ok := vs.Values[i].(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					continue
-				}
-				found++
-				value := strings.Trim(lit.Value, `"`)
-
-				if reason, exempt := nonSystem[name.Name]; exempt {
-					if IsSystemMessageType(value) {
-						t.Errorf("%s (%q) is in systemMessageTypes but marked non-system: %s",
-							name.Name, value, reason)
+				for i, cname := range vs.Names {
+					if !strings.HasPrefix(cname.Name, "MessageType") || i >= len(vs.Values) {
+						continue
 					}
-					continue
-				}
-				if !IsSystemMessageType(value) {
-					t.Errorf("%s (%q) is missing from systemMessageTypes.\n"+
-						"Add it there, or add %s to this test's nonSystem map with a reason.\n"+
-						"Left unregistered it will be indexed as searchable content, trigger push "+
-						"notifications, and show up in room history.", name.Name, value, name.Name)
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					value, uerr := strconv.Unquote(lit.Value)
+					if uerr != nil {
+						t.Errorf("%s: cannot unquote value %s: %v", cname.Name, lit.Value, uerr)
+						continue
+					}
+					found++
+
+					if reason, exempt := nonSystem[cname.Name]; exempt {
+						if IsSystemMessageType(value) {
+							t.Errorf("%s (%q) is in systemMessageTypes but marked non-system: %s",
+								cname.Name, value, reason)
+						}
+						continue
+					}
+					if !IsSystemMessageType(value) {
+						t.Errorf("%s (%q) is missing from systemMessageTypes.\n"+
+							"Add it there, or add %s to this test's nonSystem map with a reason.\n"+
+							"Left unregistered it will be indexed as searchable content, trigger push "+
+							"notifications, and show up in room history.", cname.Name, value, cname.Name)
+					}
 				}
 			}
 		}

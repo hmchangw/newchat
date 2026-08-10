@@ -74,6 +74,11 @@ func TestParseMemberEvent(t *testing.T) {
 			wantErr: "missing timestamp",
 		},
 		{
+			name:    "negative timestamp",
+			data:    envelope(func(e *model.InboxEvent) { e.Timestamp = -1 }),
+			wantErr: "missing timestamp",
+		},
+		{
 			name:    "malformed inner payload",
 			data:    envelope(func(e *model.InboxEvent) { e.Payload = []byte("{") }),
 			wantErr: "unmarshal inbox member event",

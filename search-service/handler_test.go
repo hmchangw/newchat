@@ -41,7 +41,7 @@ func (f *fakeStore) Search(_ context.Context, indices []string, body json.RawMes
 		return nil, f.searchErr
 	}
 	if f.searchBody == nil {
-		return json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`), nil
+		return json.RawMessage(`{"_shards":{"total":1},"hits":{"total":{"value":0},"hits":[]}}`), nil
 	}
 	return f.searchBody, nil
 }
@@ -354,8 +354,32 @@ func TestHandler_SearchRooms_EmptyResultLogsReadPattern(t *testing.T) {
 			}
 			assert.Contains(t, logged, "read pattern matched no index")
 			assert.Contains(t, logged, testSpotlightIndex, "the WARN names the pattern actually searched")
+			assert.Contains(t, logged, "request_id", "the WARN must be request-correlated")
+			assert.NotContains(t, logged, "general", "user-typed query text must stay off the WARN line")
 		})
 	}
+}
+
+// The orgs empty path shares logEmptyResult with rooms but passes its own
+// kind/pattern — a swapped argument would misattribute the misconfiguration.
+func TestHandler_SearchOrgs_EmptyResultLogsOrgReadPattern(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	store := &fakeStore{searchBody: json.RawMessage(`{"_shards":{"total":0},"hits":{"total":{"value":0},"hits":[]}}`)}
+	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
+	resp, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "finance"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Empty(t, resp.Orgs)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "read pattern matched no index")
+	assert.Contains(t, logged, `"kind":"orgs"`)
+	assert.Contains(t, logged, testSpotlightOrgIndex, "the WARN names the org pattern, not the rooms one")
+	assert.NotContains(t, logged, "finance", "user-typed query text must stay off the WARN line")
 }
 
 func TestHandler_SearchRooms_EmptyQueryRejected(t *testing.T) {
@@ -407,7 +431,7 @@ func TestHandler_SearchRooms_ESErrorSanitized(t *testing.T) {
 
 func TestHandler_SearchRooms_EmptyESResult(t *testing.T) {
 	store := &fakeStore{
-		searchBody: json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`),
+		searchBody: json.RawMessage(`{"_shards":{"total":1},"hits":{"total":{"value":0},"hits":[]}}`),
 	}
 	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
 
@@ -871,7 +895,7 @@ func TestHandler_SearchOrgs_ESErrorSanitized(t *testing.T) {
 }
 
 func TestHandler_SearchOrgs_EmptyESResultReturnsEmptySlice(t *testing.T) {
-	store := &fakeStore{searchBody: json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`)}
+	store := &fakeStore{searchBody: json.RawMessage(`{"_shards":{"total":1},"hits":{"total":{"value":0},"hits":[]}}`)}
 	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
 
 	resp, err := h.searchOrgs(ctxWithAccount("alice"), model.SearchOrgsRequest{Query: "nope"})

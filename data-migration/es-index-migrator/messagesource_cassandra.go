@@ -20,7 +20,9 @@ var errEncryptedMessage = errors.New("message has an at-rest-encrypted payload; 
 // messageColumns is the explicit set of messages_by_room columns this
 // service needs, excluding columns no search doc ever uses (mentions,
 // quoted_parent_message, card_action, sys_msg_data, pinned_at/pinned_by,
-// visible_to, reactions, type). enc_payload is included solely so
+// visible_to, reactions). `type` IS selected — runMessages filters system
+// messages on it, so omitting it would turn that filter into a silent
+// no-op. enc_payload is included solely so
 // rejectEncryptedMessage can detect and hard-fail on encrypted rows below —
 // this job otherwise reads only the plaintext msg/attachments/card columns.
 // It relies on an operational assumption, not a structural guarantee: the
@@ -30,7 +32,7 @@ var errEncryptedMessage = errors.New("message has an at-rest-encrypted payload; 
 // This service is not intended to be re-run once a site is taking live
 // traffic with ATREST_ENABLED=true — see docs/search_index_migration_spec.md.
 const messageColumns = "room_id, created_at, message_id, sender, msg, attachments, card, " +
-	"tshow, thread_parent_id, thread_parent_created_at, deleted, site_id, edited_at, updated_at, enc_payload"
+	"tshow, thread_parent_id, thread_parent_created_at, deleted, site_id, edited_at, updated_at, enc_payload, type"
 
 // rejectEncryptedMessage fails loudly instead of silently indexing blank
 // content when a row's plaintext columns were never populated (i.e. it was
@@ -78,7 +80,7 @@ func (s *cassandraMessageSource) StreamMessages(
 		var row cassandra.Message
 		for iter.Scan(&row.RoomID, &row.CreatedAt, &row.MessageID, &row.Sender, &row.Msg, &row.Attachments,
 			&row.Card, &row.TShow, &row.ThreadParentID, &row.ThreadParentCreatedAt, &row.Deleted, &row.SiteID,
-			&row.EditedAt, &row.UpdatedAt, &row.EncPayload) {
+			&row.EditedAt, &row.UpdatedAt, &row.EncPayload, &row.Type) {
 
 			if row.Deleted {
 				row = cassandra.Message{}

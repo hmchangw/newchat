@@ -180,15 +180,19 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 // logEmptyResult names the searched pattern on a zero-result query, since
 // allow_no_indices=true makes a misconfigured index look like a normal miss.
 // WARN only for zero shards (always broken); routine misses log at flow level.
+// The WARN omits the user-typed query — the fault is index config, and the
+// line repeats for every empty search while broken. The flow line keeps it
+// and is X-Debug-gated.
 func logEmptyResult(ctx context.Context, kind, pattern, account, query string, raw json.RawMessage) {
+	requestID := natsutil.RequestIDFromContext(ctx)
 	if shards := searchShardTotal(raw); shards == 0 {
 		slog.WarnContext(ctx, "empty search result: read pattern matched no index",
-			"kind", kind, "pattern", pattern, "account", account, "query", query,
+			"kind", kind, "pattern", pattern, "account", account, "request_id", requestID,
 			"hint", "the index this service reads is not the one search-sync-worker writes")
 		return
 	}
 	slog.Log(ctx, logctx.LevelFlow, "empty search result: index present, no document matched",
-		"kind", kind, "pattern", pattern, "account", account, "query", query)
+		"kind", kind, "pattern", pattern, "account", account, "request_id", requestID, "query", query)
 }
 
 // searchOrgs runs a prefix search over the company-wide spotlight-org ES
