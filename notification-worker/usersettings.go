@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // UserSettingsSnapshotter batches notification-settings lookups for push-eligible
@@ -96,10 +97,15 @@ func (m *mongoUserSettings) Snapshot(ctx context.Context, accounts []string) (ma
 	qctx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 
+	// Chunks run sequentially under one shared timeout, unlike bulkPresenceSource's
+	// concurrent fan-out — deliberate, since this read is a single indexed $in and
+	// not worth a goroutine per chunk. Consequence: if the shared timeout expires
+	// mid-loop, chunks nearer the end of a very large recipient list are the ones
+	// that never get read and fail open.
 	for _, chunk := range chunkStrings(accounts, m.batchSize) {
 		if err := m.appendChunk(qctx, chunk, out); err != nil {
 			slog.Warn("user settings lookup failed, defaulting to push",
-				"error", err, "chunk", len(chunk))
+				"error", err, "chunk", len(chunk), "request_id", natsutil.RequestIDFromContext(ctx))
 			return out, nil
 		}
 	}

@@ -37,14 +37,18 @@ of the room. In a 500-member room where three people are actually push-eligible,
 that reads 500 user documents to use three. The fetch belongs *after* the
 candidate loop, where the account list is already narrowed to survivors.
 
-**The fetch cannot go after presence.** `showNotificationsInCall` modifies the
-presence decision, so settings must be in hand when presence is evaluated. Step
-3.5 leaves the two gates independent, which silently drops the setting on the
-floor.
+**The fetch must be in hand before the survivor loop.** `shouldPush` combines
+the settings snapshot and the presence snapshot to decide each survivor, so
+both must be resolved before that loop runs. This does *not* mean the settings
+fetch has to precede `Presence.Snapshot` specifically — the two calls take the
+same `accounts` slice, share no state, and aren't combined until the survivor
+loop reads both maps, so their relative order is a no-op. What matters is that
+neither fetch is deferred past the point where the survivor loop needs it.
 
 Both constraints resolve to a single placement: **after the candidate loop,
-before `Presence.Snapshot`.** That is a narrow window and it is not obvious from
-reading the handler, so a test pins it (see Testing).
+before the survivor loop** (order relative to `Presence.Snapshot` is
+unconstrained). That is a narrow window and it is not obvious from reading the
+handler, so a test pins it (see Testing).
 
 ## Source and caching
 
