@@ -68,17 +68,22 @@ CREATE TYPE IF NOT EXISTS "ForwardedMessage"(
   created_at TIMESTAMP,
   mentions SET<FROZEN<"Participant">>,
   message_id TEXT,
-  message_link TEXT,
   msg TEXT,
   room_id TEXT,
+  room_type TEXT,                      // source room's type, frozen at forward time (types never change)
   sender FROZEN<"Participant">,
   thread_parent_created_at TIMESTAMP,  // source's thread-parent createdAt (source was a thread reply)
-  thread_parent_id TEXT                // set when the forwarded source is a thread reply
+  thread_parent_id TEXT,               // set when the forwarded source is a thread reply
+  thread_room_id TEXT,                 // source's own thread room, when the source is a thread reply
+  tshow BOOLEAN                        // source's "also shown in channel" flag
 );
 ```
 Immutable snapshot of a forwarded source message, built server-side by
 message-gatekeeper at forward time. Text-only — no attachments column
-(sources with attachments/cards are rejected). Present in
+(sources with attachments/cards are rejected). Deliberately carries the source
+room's `room_type` but **not** its name: a room's type is fixed at creation and
+snapshots cleanly, while its name is mutable and would force a per-read lookup.
+Present in
 `messages_by_room`, `messages_by_id`, `pinned_messages_by_room` only;
 `thread_messages_by_thread` is excluded because forwards always land in
 the destination room's main timeline. See

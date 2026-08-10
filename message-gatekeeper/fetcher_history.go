@@ -121,6 +121,8 @@ type forwardSourceProjection struct {
 	Mentions              []cassandra.Participant `json:"mentions"`
 	ThreadParentID        string                  `json:"threadParentId"`
 	ThreadParentCreatedAt *time.Time              `json:"threadParentCreatedAt"`
+	ThreadRoomID          string                  `json:"threadRoomId"`
+	TShow                 bool                    `json:"tshow"`
 	Deleted               bool                    `json:"deleted"`
 	Type                  string                  `json:"type"`
 	Attachments           json.RawMessage         `json:"attachments"`      // presence-only

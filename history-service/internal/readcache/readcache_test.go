@@ -176,10 +176,6 @@ func (f *fakeRoomSource) GetRoomUserCount(_ context.Context, _ string) (int, err
 	return 0, nil
 }
 
-func (f *fakeRoomSource) GetRoomsNameType(_ context.Context, _ []string) (map[string]mongorepo.RoomNameType, error) {
-	return nil, nil
-}
-
 func (f *fakeRoomSource) GetRoomTimesByIDs(_ context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
 	f.timesByIDsCalls.Add(1)
 	f.timesByIDsIDs = ids

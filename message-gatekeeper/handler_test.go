@@ -2286,6 +2286,10 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 	subscribed := func(s *MockStore) {
 		s.EXPECT().GetSubscription(gomock.Any(), validAccount, validRoomID).Return(sub, nil)
 		s.EXPECT().GetRoomMeta(gomock.Any(), validRoomID).Return(roommetacache.Meta{ID: validRoomID, UserCount: 1}, nil)
+		// Source-room meta backs the snapshot's immutable roomType. AnyTimes:
+		// cases that reject the forward never reach the lookup.
+		s.EXPECT().GetRoomMeta(gomock.Any(), srcRoomID).
+			Return(roommetacache.Meta{ID: srcRoomID, Type: model.RoomTypeChannel}, nil).AnyTimes()
 	}
 	fwdReq := func(content string) []byte {
 		data, _ := json.Marshal(model.SendMessageRequest{
@@ -2661,6 +2665,72 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				require.True(t, errors.As(err, &ee))
 				assert.Equal(t, strconv.Itoa(maxContentBytes), ee.Metadata["maxContentBytes"])
 				assert.Equal(t, strconv.Itoa(maxContentBytes+1), ee.Metadata["attempted"])
+			},
+		},
+		{
+			name:       "snapshot captures the source room type and thread context",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				src := okSource()
+				src.ThreadRoomID = "01970a4f8c2d7c9aTHRM"
+				src.TShow = true
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(src, nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.Equal(t, model.RoomTypeChannel, msg.ForwardedMessage.RoomType)
+				assert.Equal(t, "01970a4f8c2d7c9aTHRM", msg.ForwardedMessage.ThreadRoomID)
+				assert.True(t, msg.ForwardedMessage.TShow)
+				// The snapshot never carries a room name — that field is mutable
+				// and would force a per-read lookup.
+				assert.NotContains(t, string(data), `"name"`)
+			},
+		},
+		{
+			name:      "source room meta failure degrades to empty roomType, forward still succeeds",
+			buildData: func() []byte { return fwdReq("check this") },
+			setupStore: func(s *MockStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), validAccount, validRoomID).Return(sub, nil)
+				s.EXPECT().GetRoomMeta(gomock.Any(), validRoomID).Return(roommetacache.Meta{ID: validRoomID, UserCount: 1}, nil)
+				s.EXPECT().GetRoomMeta(gomock.Any(), srcRoomID).
+					Return(roommetacache.Meta{}, fmt.Errorf("mongo down"))
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage, "a meta failure must not drop the forward")
+				assert.Empty(t, msg.ForwardedMessage.RoomType)
+				assert.Equal(t, "original body", msg.ForwardedMessage.Msg)
+				require.Len(t, published, 1)
+			},
+		},
+		{
+			name:       "non-thread source leaves thread fields unset",
+			buildData:  func() []byte { return fwdReq("check this") },
+			setupStore: subscribed,
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
+					Return(okSource(), nil)
+			},
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ForwardedMessage)
+				assert.Empty(t, msg.ForwardedMessage.ThreadRoomID)
+				assert.False(t, msg.ForwardedMessage.TShow)
+				assert.NotContains(t, string(data), `"threadRoomId"`)
+				assert.NotContains(t, string(data), `"tshow"`)
 			},
 		},
 		{

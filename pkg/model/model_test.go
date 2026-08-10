@@ -2689,12 +2689,17 @@ func TestMessage_ForwardedMessage_JSON(t *testing.T) {
 			Mentions:              []cassandra.Participant{{ID: "u-carol", Account: "carol", EngName: "Carol Lee"}},
 			ThreadParentID:        "thread-parent-uuid",
 			ThreadParentCreatedAt: &threadParentTS,
-			Room:                  &model.MessageRoom{ID: "r-src", Name: "source room", Type: model.RoomTypeChannel},
+			RoomType:              model.RoomTypeChannel,
+			ThreadRoomID:          "thread-room-uuid",
+			TShow:                 true,
 		},
 	}
 	data, err := json.Marshal(&m)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"forwardedMessage"`)
+	assert.Contains(t, string(data), `"roomType":"channel"`)
+	assert.Contains(t, string(data), `"threadRoomId":"thread-room-uuid"`)
+	assert.Contains(t, string(data), `"tshow":true`)
 	roundTrip(t, &m, &model.Message{})
 }
 

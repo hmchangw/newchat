@@ -36,21 +36,15 @@ func TestMessageRoom_JSON_IDTypeOnly(t *testing.T) {
 	assert.JSONEq(t, `{"id":"dm-1","type":"dm"}`, string(b))
 }
 
-func TestForwardedMessage_JSON_WithRoom(t *testing.T) {
-	fm := ForwardedMessage{
-		MessageID: "m-src",
-		RoomID:    "room-src",
-		Sender:    Participant{ID: "u1", Account: "alice"},
-		Msg:       "hello",
-		Room:      &MessageRoom{ID: "room-src", Name: "prj-alpha", Type: RoomType("channel")},
-	}
-	got := roundTrip(t, fm)
-	require.NotNil(t, got.Room)
-	assert.Equal(t, "prj-alpha", got.Room.Name)
-}
-
-func TestForwardedMessage_JSON_RoomOmittedWhenNil(t *testing.T) {
-	b, err := json.Marshal(ForwardedMessage{MessageID: "m-src", RoomID: "room-src"})
+// A forwarded snapshot carries the source room's type inline and never a
+// nested room object — the name it would have held is mutable, so the snapshot
+// deliberately does not reproduce it.
+func TestForwardedMessage_JSON_RoomTypeInlineNoRoomObject(t *testing.T) {
+	b, err := json.Marshal(ForwardedMessage{
+		MessageID: "m-src", RoomID: "room-src", RoomType: RoomType("channel"),
+	})
 	require.NoError(t, err)
-	assert.NotContains(t, string(b), `"room"`)
+	assert.Contains(t, string(b), `"roomType":"channel"`)
+	assert.NotContains(t, string(b), `"room":`)
+	assert.NotContains(t, string(b), `"name"`)
 }

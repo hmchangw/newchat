@@ -1,5 +1,13 @@
 # Forwarded-Message Room Enrichment — Design
 
+> **⚠️ SUPERSEDED (2026-08-10).** The read-time room-enrichment approach described
+> below was implemented and then removed. Only `roomId` + `roomType` (plus the
+> source's `tshow`/`threadRoomId`) are needed, and all of those are immutable —
+> so they are now captured once at forward time into the `ForwardedMessage`
+> snapshot by `message-gatekeeper`, and there is no read-time lookup at all.
+> Kept for the decision record; do not implement from this document.
+
+
 **Date:** 2026-08-06
 **Base:** `claude/message-forwarding-impl-deq7za` (message-forwarding implementation)
 **Branch:** `claude/message-room-enrichment-krp5m3`

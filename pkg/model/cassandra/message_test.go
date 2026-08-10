@@ -262,16 +262,24 @@ func TestForwardedMessage_JSON(t *testing.T) {
 	f := ForwardedMessage{
 		MessageID:             "01970a4f8c2d7c9aQRST",
 		RoomID:                "r-src",
+		RoomType:              "channel",
 		Sender:                Participant{ID: "u1", Account: "alice"},
 		CreatedAt:             time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC),
 		Msg:                   "the forwarded body",
 		Mentions:              []Participant{{ID: "u2", Account: "bob"}},
 		ThreadParentID:        "01970a4f8c2d7c9aTHRD",
 		ThreadParentCreatedAt: &threadParent,
+		ThreadRoomID:          "01970a4f8c2d7c9aTHRM",
+		TShow:                 true,
 	}
 	got := roundTrip(t, f)
 	assert.Equal(t, "01970a4f8c2d7c9aTHRD", got.ThreadParentID)
 	require.NotNil(t, got.ThreadParentCreatedAt)
+	// Snapshotted at forward time — all three are immutable properties of the
+	// source, so they survive the round trip rather than being re-resolved.
+	assert.Equal(t, RoomType("channel"), got.RoomType)
+	assert.Equal(t, "01970a4f8c2d7c9aTHRM", got.ThreadRoomID)
+	assert.True(t, got.TShow)
 }
 
 func TestForwardedMessage_JSON_Minimal(t *testing.T) {
@@ -284,6 +292,9 @@ func TestForwardedMessage_JSON_Minimal(t *testing.T) {
 	assert.Nil(t, got.Mentions)
 	assert.Empty(t, got.ThreadParentID)
 	assert.Nil(t, got.ThreadParentCreatedAt)
+	assert.Empty(t, got.RoomType)
+	assert.Empty(t, got.ThreadRoomID)
+	assert.False(t, got.TShow)
 }
 
 func TestMessage_ForwardedMessage_JSON(t *testing.T) {

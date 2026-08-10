@@ -576,15 +576,32 @@ func (h *Handler) resolveForwardSnapshot(ctx context.Context, account, siteID st
 	if req.ForwardedContent != "" {
 		msg = req.ForwardedContent
 	}
+	// Freeze the source room's type into the snapshot. A room's type never
+	// changes after creation, so capturing it here (rather than resolving it on
+	// every read) keeps the snapshot self-contained and makes the send echo,
+	// broadcast events and history reads agree. Best-effort by design: the
+	// forward itself is already fully validated, so a meta lookup failure —
+	// including a source room this site has no doc for — degrades to an empty
+	// roomType instead of rejecting an otherwise-valid forward.
+	var roomType model.RoomType
+	if meta, mErr := h.store.GetRoomMeta(ctx, src.RoomID); mErr != nil {
+		slog.WarnContext(ctx, "forward source room meta lookup failed; snapshot omits roomType",
+			"request_id", req.RequestID, "forwarded_room_id", src.RoomID, "error", mErr)
+	} else {
+		roomType = meta.Type
+	}
 	return &cassandra.ForwardedMessage{
 		MessageID:             req.ForwardedMessageID,
 		RoomID:                src.RoomID,
+		RoomType:              roomType,
 		Sender:                src.Sender,
 		CreatedAt:             src.CreatedAt,
 		Msg:                   msg,
 		Mentions:              src.Mentions,
 		ThreadParentID:        src.ThreadParentID,
 		ThreadParentCreatedAt: src.ThreadParentCreatedAt,
+		ThreadRoomID:          src.ThreadRoomID,
+		TShow:                 src.TShow,
 	}, nil
 }
 

@@ -211,34 +211,3 @@ func TestRoomRepo_GetRoomUserCount_RoomMissing(t *testing.T) {
 
 	require.ErrorIs(t, err, mongo.ErrNoDocuments)
 }
-
-func TestRoomRepo_GetRoomsNameType(t *testing.T) {
-	db := setupMongo(t)
-	repo := NewRoomRepo(db)
-	ctx := context.Background()
-
-	rooms := []any{
-		model.Room{ID: "nt-ch-1", Name: "prj-alpha", Type: model.RoomTypeChannel, SiteID: "site-A", CreatedAt: time.Now()},
-		model.Room{ID: "nt-dm-1", Name: "bob", Type: model.RoomTypeDM, SiteID: "site-A", CreatedAt: time.Now()},
-	}
-	_, err := db.Collection("rooms").InsertMany(ctx, rooms)
-	require.NoError(t, err)
-
-	got, err := repo.GetRoomsNameType(ctx, []string{"nt-ch-1", "nt-dm-1", "nt-missing"})
-	require.NoError(t, err)
-
-	assert.Len(t, got, 2) // missing ID absent from the map, not an error
-	assert.Equal(t, RoomNameType{Name: "prj-alpha", Type: model.RoomTypeChannel}, got["nt-ch-1"])
-	assert.Equal(t, RoomNameType{Name: "bob", Type: model.RoomTypeDM}, got["nt-dm-1"])
-	_, ok := got["nt-missing"]
-	assert.False(t, ok)
-}
-
-func TestRoomRepo_GetRoomsNameType_EmptyInput(t *testing.T) {
-	db := setupMongo(t)
-	repo := NewRoomRepo(db)
-
-	got, err := repo.GetRoomsNameType(context.Background(), nil)
-	require.NoError(t, err)
-	assert.Empty(t, got)
-}

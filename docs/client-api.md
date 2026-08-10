@@ -2870,19 +2870,21 @@ When the reader is in a restricted access window and the quoted parent falls out
 
 Immutable snapshot of the forwarded source message, built server-side at forward time. Text-only — never carries attachments or cards. Never redacted by the reader's access window (the source room's window was enforced once, at forward time) — except that on [List Pinned Messages](#list-pinned-messages), a pin outside the reader's access window is redacted entirely, dropping `forwardedMessage` along with the rest of the message body.
 
-On history reads the snapshot additionally carries a best-effort `room` object resolved from `roomId` at read time (see the field note).
+Every field is captured once, at forward time, and is byte-identical on the `msg.send` echo, on broadcast events and on every history read — there is no read-time resolution. The snapshot deliberately carries no source-room **name**: a name is mutable, so it cannot be frozen, and resolving it per read would leak a `dm` counterpart's name to readers outside the source room. Clients that display a name resolve it themselves from `roomId`.
 
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | The source message's ID. |
 | `roomId` | string | The source room. |
+| `roomType` | string | Optional. `channel` \| `dm` \| `botDM` \| `discussion` — the source room's type, frozen at forward time (a room's type never changes after creation). Omitted when the source room's metadata could not be resolved at forward time; the forward is still delivered. |
 | `sender` | [MessageParticipant](#messageparticipant) | The source message's author. |
 | `createdAt` | string | RFC 3339. The source message's send time. |
 | `msg` | string | Optional. Body snapshot — the source's text, or the sender's `forwardedContent` when that override was supplied at forward time (the two are not distinguishable here). |
 | `mentions` | [MessageParticipant](#messageparticipant)[] | Optional. |
 | `threadParentId` | string | Optional. Set when the source is a thread reply. |
 | `threadParentCreatedAt` | string | Optional. RFC 3339. |
-| `room` | [MessageRoom](#messageroom) | Optional. Read-time enrichment of `roomId`, resolved server-side on the history read paths (`msg.history` / `msg.next` / `msg.surrounding` / `msg.get` / `msg.get.ids` / `msg.pinned.list` / thread reads) — NOT set on the `msg.send` echo or on broadcast events. Best-effort: omitted when the source room could not be resolved (fall back to `roomId`). Channel/discussion sources carry `id`+`name`+`type`; `dm`/`botDM` sources carry `id`+`type` only (never `name`/`hrInfo`/`appInfo`). Names resolve at read time, so a rename is reflected on the next read. |
+| `threadRoomId` | string | Optional. The source message's own thread room, set when the source is a thread reply. Frozen at forward time. |
+| `tshow` | boolean | Optional. Mirrors the source's "also shown in the channel" flag. Omitted when `false`. |
 
 ##### ReactionUser
 
@@ -2949,17 +2951,13 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
       "forwardedMessage": {
         "messageId": "zY8xW6vU4tS2rQ0pN9mL",
         "roomId": "src-room",
+        "roomType": "channel",
         "sender": {
           "id": "u2",
           "account": "bob"
         },
         "createdAt": "2026-08-01T12:00:00Z",
-        "msg": "original text",
-        "room": {
-          "id": "src-room",
-          "name": "prj-alpha",
-          "type": "channel"
-        }
+        "msg": "original text"
       }
     },
     {
@@ -4127,7 +4125,6 @@ See [Error envelope](#6-error-envelope-reference).
 | `hrInfo` | [MessageHRInfo](#messagehrinfo) | present **only for `dm` rooms** |
 | `appInfo` | [MessageAppInfo](#messageappinfo) | present **only for `botDM` rooms**; `isSubscribed` always set here |
 
-On a `forwardedMessage.room` (history reads), `dm`/`botDM` rooms carry only `id` and `type`.
 
 ##### MessageHRInfo
 

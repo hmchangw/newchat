@@ -74,19 +74,27 @@ type QuotedParentMessage struct {
 // Never redacted on read (self-contained; the source room's access window was
 // enforced once, at forward time).
 type ForwardedMessage struct {
-	MessageID             string        `json:"messageId"                       cql:"message_id"`
-	RoomID                string        `json:"roomId"                          cql:"room_id"`
-	Sender                Participant   `json:"sender"                          cql:"sender"`
-	CreatedAt             time.Time     `json:"createdAt"                       cql:"created_at"`
+	MessageID string      `json:"messageId"          cql:"message_id"`
+	RoomID    string      `json:"roomId"             cql:"room_id"`
+	Sender    Participant `json:"sender"             cql:"sender"`
+	CreatedAt time.Time   `json:"createdAt"          cql:"created_at"`
+	// RoomType is the source room's type, captured at forward time rather than
+	// resolved on read: a room's type never changes after creation (unlike its
+	// name), so freezing it keeps the snapshot self-contained and identical on
+	// the send echo, broadcast events and history reads. Deliberately no room
+	// name — that IS mutable, and carrying it would drag a per-read lookup back
+	// in (it would also leak a dm counterpart's name to readers outside the
+	// source room). Empty when the source room's meta could not be resolved.
+	RoomType              RoomType      `json:"roomType,omitempty"              cql:"room_type"`
 	Msg                   string        `json:"msg,omitempty"                   cql:"msg"`
 	Mentions              []Participant `json:"mentions,omitempty"              cql:"mentions"`
 	ThreadParentID        string        `json:"threadParentId,omitempty"        cql:"thread_parent_id"`
 	ThreadParentCreatedAt *time.Time    `json:"threadParentCreatedAt,omitempty" cql:"thread_parent_created_at"`
-	// Room is read-time enrichment of RoomID (name/type resolved from the
-	// local rooms collection by history-service read paths); transient
-	// (cql:"-"), never persisted into the UDT. dm/botDM sources carry only
-	// ID and Type. Omitted when the room could not be resolved.
-	Room *MessageRoom `json:"room,omitempty" cql:"-"`
+	// ThreadRoomID and TShow mirror the source message's own thread context so
+	// a client can place the forward without re-fetching the source. Both are
+	// fixed at the source's send time, so they snapshot cleanly.
+	ThreadRoomID string `json:"threadRoomId,omitempty" cql:"thread_room_id"`
+	TShow        bool   `json:"tshow,omitempty"        cql:"tshow"`
 }
 
 // Message represents a message row in the Cassandra message tables

@@ -1,5 +1,13 @@
 # Forwarded-Message Room Enrichment Implementation Plan
 
+> **⚠️ SUPERSEDED (2026-08-10).** The read-time room-enrichment approach described
+> below was implemented and then removed. Only `roomId` + `roomType` (plus the
+> source's `tshow`/`threadRoomId`) are needed, and all of those are immutable —
+> so they are now captured once at forward time into the `ForwardedMessage`
+> snapshot by `message-gatekeeper`, and there is no read-time lookup at all.
+> Kept for the decision record; do not implement from this document.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** History-service read paths return each forwarded snapshot with an inline `room` object (`{id, name, type}`; dm/botDM: `{id, type}`) resolved read-time from the local Mongo `rooms` collection.

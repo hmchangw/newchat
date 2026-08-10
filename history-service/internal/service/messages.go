@@ -93,7 +93,6 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
-	s.enrichForwardedRooms(c, page.Data)
 	return &models.LoadHistoryResponse{
 		Messages:          page.Data,
 		MinUserLastSeenAt: minMs,
@@ -153,7 +152,6 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
-	s.enrichForwardedRooms(c, page.Data)
 	return &models.LoadNextMessagesResponse{
 		Messages:          page.Data,
 		NextCursor:        page.NextCursor,
@@ -224,7 +222,6 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 		only := *centralMsg
 		redactUnavailableQuote(&only, accessSince)
 		decodeMessageAttachments(c, &only)
-		s.enrichForwardedRoom(c, &only)
 		// Serial best-effort read — this path issues no page reads to parallelise against.
 		return &models.LoadSurroundingMessagesResponse{
 			Messages:          []models.Message{only},
@@ -377,7 +374,6 @@ func (s *HistoryService) assembleSurrounding(
 
 	redactUnavailableQuotes(messages, accessSince)
 	setDecodedAttachments(c, messages)
-	s.enrichForwardedRooms(c, messages)
 	return &models.LoadSurroundingMessagesResponse{
 		Messages:          messages,
 		MoreBefore:        beforePage.HasNext,
@@ -438,7 +434,6 @@ func (s *HistoryService) GetMessageByID(c *natsrouter.Context, req models.GetMes
 
 	redactUnavailableQuote(msg, accessSince)
 	decodeMessageAttachments(c, msg)
-	s.enrichForwardedRoom(c, msg)
 	return msg, nil
 }
 
@@ -483,7 +478,6 @@ func (s *HistoryService) GetMessagesByIDs(c *natsrouter.Context, req models.GetM
 
 	redactUnavailableQuotes(kept, accessSince)
 	setDecodedAttachments(c, kept)
-	s.enrichForwardedRooms(c, kept)
 	return &models.GetMessagesByIDsResponse{Messages: kept}, nil
 }
 
