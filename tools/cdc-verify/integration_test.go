@@ -1,0 +1,388 @@
+//go:build integration
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"testing"
+	"time"
+
+	"github.com/gocql/gocql"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+
+	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/testutil"
+)
+
+func TestMain(m *testing.M) { testutil.RunTests(m) }
+
+// testSiteID derives a per-test site id from t.Name() so every test (and
+// subtest) gets its own MIGRATION-OPLOG stream/consumer and never collides
+// with a sibling running concurrently.
+func testSiteID(t *testing.T) string {
+	t.Helper()
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(t.Name())) // hash.Hash.Write never returns an error.
+	return fmt.Sprintf("it-%x", h.Sum32())
+}
+
+// startPipeline wires a real verifier + watcher against the given stores and
+// a fresh, test-owned MIGRATION-OPLOG-{siteID} stream, then starts the
+// watcher consuming it. cass may be nil for mappings with no cassandra
+// target. cfgOverride, if non-nil, tweaks the default fast-poll config
+// before the verifier is built. Cleanup (consumer stop, NATS drain) is
+// registered via t.Cleanup.
+func startPipeline(t *testing.T, mapping *Mapping, srcDB, tgtDB *mongo.Database, cass CassStore,
+	cfgOverride func(*verifierConfig),
+) (results *resultsStore, siteID string, publish func(subject string, ev model.OplogEvent)) {
+	t.Helper()
+
+	nc, err := nats.Connect(testutil.NATS(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nc.Drain() })
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	siteID = testSiteID(t)
+	streamCfg := stream.MigrationOplog(siteID)
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer setupCancel()
+	_, err = js.CreateOrUpdateStream(setupCtx, jetstream.StreamConfig{
+		Name:     streamCfg.Name,
+		Subjects: streamCfg.Subjects,
+	})
+	require.NoError(t, err)
+
+	cfg := verifierConfig{Poll: 200 * time.Millisecond, Timeout: 5 * time.Second, MaxChecks: 8, SamplePercent: 100}
+	if cfgOverride != nil {
+		cfgOverride(&cfg)
+	}
+
+	reg := newTransformRegistry(msgbucket.New(72 * time.Hour))
+	results = newResultsStore(200, 1000, nil)
+	v := newVerifier(mapping, newMongoStore(srcDB), newMongoStore(tgtDB), cass, reg, results, cfg)
+
+	w := newWatcher(js, streamCfg.Name, time.Time{}, v)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(runCtx) }()
+	t.Cleanup(func() {
+		runCancel()
+		select {
+		case err := <-runErr:
+			assert.NoError(t, err, "watcher must exit cleanly on cancel")
+		case <-time.After(5 * time.Second):
+			t.Error("watcher did not exit after cancel")
+		}
+	})
+
+	require.Eventually(t, w.Live, 5*time.Second, 20*time.Millisecond, "watcher must come up live before publishing")
+
+	publish = func(subj string, ev model.OplogEvent) {
+		data, merr := json.Marshal(ev)
+		require.NoError(t, merr)
+		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer pubCancel()
+		_, perr := js.Publish(pubCtx, subj, data)
+		require.NoError(t, perr)
+	}
+	return results, siteID, publish
+}
+
+// oplogEvent builds a minimal, valid CDC envelope for docID: a documentKey
+// only, matching what the real oplog-connector sends for update/delete (and
+// enough for the verifier, which always re-reads current state rather than
+// trusting the event payload).
+func oplogEvent(siteID, collection, op, docID string) model.OplogEvent {
+	nowMs := time.Now().UTC().UnixMilli()
+	return model.OplogEvent{
+		EventID:     idgen.GenerateID(),
+		Op:          op,
+		DB:          "rocketchat",
+		Collection:  collection,
+		DocumentKey: json.RawMessage(fmt.Sprintf(`{"_id":%q}`, docID)),
+		ClusterTime: nowMs,
+		SiteID:      siteID,
+		Timestamp:   nowMs,
+	}
+}
+
+// findResult returns the most recent row for docID, if any.
+func findResult(results *resultsStore, docID string) (CheckResult, bool) {
+	for _, r := range results.Recent() {
+		if r.DocID == docID {
+			return r, true
+		}
+	}
+	return CheckResult{}, false
+}
+
+// awaitState polls results (via require.Eventually) until docID's row
+// reaches want, and returns that row. Fails the test if timeout elapses
+// first.
+func awaitState(t *testing.T, results *resultsStore, docID string, want CheckState, timeout time.Duration) CheckResult {
+	t.Helper()
+	var got CheckResult
+	require.Eventually(t, func() bool {
+		r, ok := findResult(results, docID)
+		if !ok || r.State != want {
+			return false
+		}
+		got = r
+		return true
+	}, timeout, 100*time.Millisecond, "expected doc %q to reach state %q", docID, want)
+	return got
+}
+
+// mongoOnlyMapping is a single-source, single-mongo-target mapping comparing
+// one "name" field, used by the plain match/mismatch/delayed scenarios.
+func mongoOnlyMapping(collection, targetColl string) *Mapping {
+	return &Mapping{Sources: []SourceMapping{{
+		Collection: collection,
+		Ops: map[string]OpAction{
+			"insert": OpVerify, "update": OpVerify, "replace": OpVerify, "delete": OpVerifyAbsent,
+		},
+		Targets: map[string]Target{
+			"target": {Kind: "mongo", Collection: targetColl,
+				Key: map[string]KeyFrom{"_id": {From: []string{"_id"}}}},
+		},
+		Fields: map[string][]DestRef{"name": {{Dest: "target.name"}}},
+	}}}
+}
+
+// TestEndToEnd_Match publishes an insert whose source and target already
+// agree — full pipeline: NATS publish -> watcher -> verifier -> results.
+func TestEndToEnd_Match(t *testing.T) {
+	srcDB := testutil.MongoDB(t, "cdcverify_src")
+	tgtDB := testutil.MongoDB(t, "cdcverify_tgt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := srcDB.Collection("rocketchat_room").InsertOne(ctx, bson.M{"_id": "r1", "name": "general"})
+	require.NoError(t, err)
+	_, err = tgtDB.Collection("rooms").InsertOne(ctx, bson.M{"_id": "r1", "name": "general"})
+	require.NoError(t, err)
+
+	results, siteID, publish := startPipeline(t, mongoOnlyMapping("rocketchat_room", "rooms"), srcDB, tgtDB, nil, nil)
+
+	publish(subject.MigrationOplog(siteID, "rocketchat_room", "insert"),
+		oplogEvent(siteID, "rocketchat_room", "insert", "r1"))
+
+	got := awaitState(t, results, "r1", StateMatched, 15*time.Second)
+	require.Len(t, got.Targets, 1)
+	assert.True(t, got.Targets[0].Matched)
+}
+
+// TestEndToEnd_DelayedConvergence inserts the target doc only after the
+// verifier has already polled a couple of times, asserting it still
+// converges to matched (with Attempts > 1) rather than failing early.
+func TestEndToEnd_DelayedConvergence(t *testing.T) {
+	srcDB := testutil.MongoDB(t, "cdcverify_src")
+	tgtDB := testutil.MongoDB(t, "cdcverify_tgt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := srcDB.Collection("rocketchat_room").InsertOne(ctx, bson.M{"_id": "r2", "name": "general"})
+	require.NoError(t, err)
+	// Target doc intentionally not inserted yet.
+
+	const poll = 200 * time.Millisecond
+	results, siteID, publish := startPipeline(t, mongoOnlyMapping("rocketchat_room", "rooms"), srcDB, tgtDB, nil,
+		func(cfg *verifierConfig) { cfg.Poll = poll; cfg.Timeout = 10 * time.Second })
+
+	publish(subject.MigrationOplog(siteID, "rocketchat_room", "insert"),
+		oplogEvent(siteID, "rocketchat_room", "insert", "r2"))
+
+	// Give the verifier a couple of poll cycles to observe the target still
+	// missing before the doc lands, so the test genuinely exercises
+	// convergence rather than a same-attempt match.
+	time.Sleep(2 * poll)
+	_, err = tgtDB.Collection("rooms").InsertOne(context.Background(), bson.M{"_id": "r2", "name": "general"})
+	require.NoError(t, err)
+
+	got := awaitState(t, results, "r2", StateMatched, 15*time.Second)
+	assert.Greater(t, got.Attempts, 1, "must have polled more than once before converging")
+}
+
+// TestEndToEnd_MismatchFailure asserts a genuinely differing target field
+// fails at VerifyTimeout with a per-target diff carrying want/got.
+func TestEndToEnd_MismatchFailure(t *testing.T) {
+	srcDB := testutil.MongoDB(t, "cdcverify_src")
+	tgtDB := testutil.MongoDB(t, "cdcverify_tgt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := srcDB.Collection("rocketchat_room").InsertOne(ctx, bson.M{"_id": "r3", "name": "general"})
+	require.NoError(t, err)
+	_, err = tgtDB.Collection("rooms").InsertOne(ctx, bson.M{"_id": "r3", "name": "wrong-name"})
+	require.NoError(t, err)
+
+	results, siteID, publish := startPipeline(t, mongoOnlyMapping("rocketchat_room", "rooms"), srcDB, tgtDB, nil,
+		func(cfg *verifierConfig) { cfg.Poll = 200 * time.Millisecond; cfg.Timeout = 5 * time.Second })
+
+	publish(subject.MigrationOplog(siteID, "rocketchat_room", "insert"),
+		oplogEvent(siteID, "rocketchat_room", "insert", "r3"))
+
+	got := awaitState(t, results, "r3", StateFailed, 15*time.Second)
+	require.Len(t, got.Targets, 1)
+	tr := got.Targets[0]
+	assert.False(t, tr.Matched)
+	assert.Equal(t, "mismatch", tr.LastCause)
+	require.Len(t, tr.Diffs, 1)
+	assert.Equal(t, "general", tr.Diffs[0].Want)
+	assert.Equal(t, "wrong-name", tr.Diffs[0].Got)
+}
+
+// cassTargetHandle bundles the CassStore the pipeline consumes with the raw
+// session the test uses to seed rows directly.
+type cassTargetHandle struct {
+	store CassStore
+	raw   *gocql.Session
+}
+
+// setupCassandraTarget creates an isolated keyspace + messages_by_id table
+// and returns a keyspace-scoped session (mirroring how main.go connects).
+func setupCassandraTarget(t *testing.T) *cassTargetHandle {
+	t.Helper()
+	keyspace, admin, host := testutil.CassandraKeyspace(t, "cdcverify")
+	require.NoError(t, admin.Query(
+		`CREATE TABLE IF NOT EXISTS `+keyspace+`.messages_by_id (message_id text PRIMARY KEY, body text, created_at bigint)`,
+	).Exec())
+
+	session, err := cassutil.Connect(cassutil.Config{Hosts: host, Keyspace: keyspace})
+	require.NoError(t, err)
+	t.Cleanup(func() { cassutil.Close(session) })
+	return &cassTargetHandle{store: newCassStore(session), raw: session}
+}
+
+// TestEndToEnd_CassandraTarget covers the cassandra lookup path end to end.
+func TestEndToEnd_CassandraTarget(t *testing.T) {
+	cass := setupCassandraTarget(t)
+	require.NoError(t, cass.raw.Query(
+		`INSERT INTO messages_by_id (message_id, body, created_at) VALUES (?, ?, ?)`,
+		"m4", "hello", int64(1700000000000),
+	).Exec())
+
+	srcDB := testutil.MongoDB(t, "cdcverify_src")
+	tgtDB := testutil.MongoDB(t, "cdcverify_tgt") // unused by this mapping (no mongo target)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := srcDB.Collection("rocketchat_message").InsertOne(ctx, bson.M{"_id": "m4", "msg": "hello"})
+	require.NoError(t, err)
+
+	mapping := &Mapping{Sources: []SourceMapping{{
+		Collection: "rocketchat_message",
+		Ops:        map[string]OpAction{"insert": OpVerify},
+		Targets: map[string]Target{
+			"byId": {Kind: "cassandra", Table: "messages_by_id",
+				Key: map[string]KeyFrom{"message_id": {From: []string{"_id"}}}},
+		},
+		Fields: map[string][]DestRef{"msg": {{Dest: "byId.body"}}},
+	}}}
+
+	results, siteID, publish := startPipeline(t, mapping, srcDB, tgtDB, cass.store, nil)
+
+	publish(subject.MigrationOplog(siteID, "rocketchat_message", "insert"),
+		oplogEvent(siteID, "rocketchat_message", "insert", "m4"))
+
+	got := awaitState(t, results, "m4", StateMatched, 15*time.Second)
+	require.Len(t, got.Targets, 1)
+	assert.True(t, got.Targets[0].Matched)
+}
+
+// TestEndToEnd_VerifyAbsentDelete publishes a delete for a doc whose target
+// row was never present, asserting it is verified matched by absence.
+func TestEndToEnd_VerifyAbsentDelete(t *testing.T) {
+	srcDB := testutil.MongoDB(t, "cdcverify_src")
+	tgtDB := testutil.MongoDB(t, "cdcverify_tgt")
+	// Target row intentionally absent — a delete verifies the dest is gone;
+	// no source read happens for verify-absent.
+
+	results, siteID, publish := startPipeline(t, mongoOnlyMapping("rocketchat_room", "rooms"), srcDB, tgtDB, nil, nil)
+
+	publish(subject.MigrationOplog(siteID, "rocketchat_room", "delete"),
+		oplogEvent(siteID, "rocketchat_room", "delete", "r5"))
+
+	got := awaitState(t, results, "r5", StateMatched, 15*time.Second)
+	require.Len(t, got.Targets, 1)
+	assert.True(t, got.Targets[0].Matched)
+}
+
+// resolverMapping exercises a resolver hop: the target key is built from
+// "@user.username", resolved from a "users" lookup keyed by "u._id".
+func resolverMapping() *Mapping {
+	return &Mapping{Sources: []SourceMapping{{
+		Collection: "rocketchat_subscription",
+		Ops:        map[string]OpAction{"insert": OpVerify},
+		Resolvers: map[string]Resolver{
+			"user": {DB: "source", Collection: "users",
+				Key: map[string]KeyFrom{"_id": {From: []string{"u._id"}}}, Fields: []string{"username"}},
+		},
+		Targets: map[string]Target{
+			"byUser": {Kind: "mongo", Collection: "userdocs",
+				Key: map[string]KeyFrom{"_id": {From: []string{"@user.username"}}}},
+		},
+	}}}
+}
+
+// TestEndToEnd_ResolverHop covers both the resolved-match path and the
+// resolver-miss failure path.
+func TestEndToEnd_ResolverHop(t *testing.T) {
+	t.Run("match", func(t *testing.T) {
+		srcDB := testutil.MongoDB(t, "cdcverify_src")
+		tgtDB := testutil.MongoDB(t, "cdcverify_tgt")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := srcDB.Collection("rocketchat_subscription").InsertOne(ctx,
+			bson.M{"_id": "s1", "u": bson.M{"_id": "u1"}})
+		require.NoError(t, err)
+		_, err = srcDB.Collection("users").InsertOne(ctx, bson.M{"_id": "u1", "username": "alice"})
+		require.NoError(t, err)
+		_, err = tgtDB.Collection("userdocs").InsertOne(ctx, bson.M{"_id": "alice"})
+		require.NoError(t, err)
+
+		results, siteID, publish := startPipeline(t, resolverMapping(), srcDB, tgtDB, nil, nil)
+		publish(subject.MigrationOplog(siteID, "rocketchat_subscription", "insert"),
+			oplogEvent(siteID, "rocketchat_subscription", "insert", "s1"))
+
+		got := awaitState(t, results, "s1", StateMatched, 15*time.Second)
+		require.Len(t, got.Targets, 1)
+		assert.True(t, got.Targets[0].Matched)
+	})
+
+	t.Run("missing user fails with resolver-miss", func(t *testing.T) {
+		srcDB := testutil.MongoDB(t, "cdcverify_src")
+		tgtDB := testutil.MongoDB(t, "cdcverify_tgt")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := srcDB.Collection("rocketchat_subscription").InsertOne(ctx,
+			bson.M{"_id": "s2", "u": bson.M{"_id": "u-missing"}})
+		require.NoError(t, err)
+		// "users" collection intentionally has no matching doc.
+
+		results, siteID, publish := startPipeline(t, resolverMapping(), srcDB, tgtDB, nil,
+			func(cfg *verifierConfig) { cfg.Poll = 200 * time.Millisecond; cfg.Timeout = 3 * time.Second })
+		publish(subject.MigrationOplog(siteID, "rocketchat_subscription", "insert"),
+			oplogEvent(siteID, "rocketchat_subscription", "insert", "s2"))
+
+		got := awaitState(t, results, "s2", StateFailed, 15*time.Second)
+		require.Len(t, got.Targets, 1)
+		assert.Equal(t, "resolver-miss: user", got.Targets[0].LastCause)
+	})
+}
