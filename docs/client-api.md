@@ -2194,6 +2194,8 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 Synchronous RPC. `room-service` flips `Subscription.favorite` for the requester in a single atomic Mongo `FindOneAndUpdate`, replies with the resulting value, and fans out a `subscription.update` event to the user's other client sessions. Used by the client to render the per-user "favorited" sidebar section; backend treats the flag as a render hint only — no downstream behaviour (notifications, routing, retention) is gated on it.
 
+Favorites membership is also manually orderable via [Move Chat to Section](#move-chat-to-section) (`sectionId: "favorites"`) — the two RPCs stay in sync: toggling favorite **off** also clears `sectionId`/`sectionOrder` when they were `"favorites"` (toggling **on** leaves any existing `sectionId` alone); moving a chat **into** `"favorites"` sets `favorite: true`, moving it to any other section (or removing it) sets `favorite: false`. Clients keep reading membership from `favorite`, unchanged.
+
 Idempotency: this is a toggle, not a set — every successful call flips the bit. Clients must debounce the user-visible action; redelivery of the same RPC will flip back.
 
 ##### Request body
@@ -2250,7 +2252,7 @@ Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual
 
 | Field | Type | Notes |
 |---|---|---|
-| `sectionId` | string \| null | The custom section to move the chat into. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in) — the two are indistinguishable at the wire layer and handled identically. A **built-in** id (`favorites`/`apps`/`teams`/`chats`) is rejected — built-in membership is derived, not user-set. |
+| `sectionId` | string \| null | The custom section to move the chat into, or `"favorites"`. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in, and clears `favorite` if it was set) — the two are indistinguishable at the wire layer and handled identically. The other built-in ids (`apps`/`teams`/`chats`) are rejected — their membership is derived, not user-set. `favorites` is the one built-in target: moving in sets `Subscription.favorite = true` (mirroring [Toggle Favorite](#toggle-favorite)); moving to any other section sets it `false`. |
 | `afterRoomId` | string | Optional. Place the chat just after this room within the section. Omit to append at the end. Mutually exclusive with `beforeRoomId`. |
 | `beforeRoomId` | string | Optional. Place the chat just before this room within the section (top-insertion when it is the section head). Mutually exclusive with `afterRoomId`. |
 
@@ -2270,7 +2272,7 @@ Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual
 
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
-- reason `chatlist_builtin_target` — `sectionId` is a built-in section.
+- reason `chatlist_builtin_target` — `sectionId` is a built-in section other than `favorites`.
 - reason `chatlist_section_not_found` — `sectionId` is empty.
 - `"only room members can list members"` — the user has no subscription in the room.
 

@@ -133,13 +133,17 @@ type RoomStore interface {
 	ToggleSubscriptionMute(ctx context.Context, roomID, account string, muteUpdatedAt time.Time) (*model.Subscription, error)
 	// ToggleSubscriptionFavorite atomically flips favorite via a single FindOneAndUpdate,
 	// stamping favoriteUpdatedAt so the origin doc carries the same high-water mark the
-	// federated event publishes (inbox-worker guards remote applies against it).
+	// federated event publishes (inbox-worker guards remote applies against it). Toggling
+	// OFF also clears sectionId/sectionOrder when they were "favorites".
 	// Returns the post-flip subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
 	ToggleSubscriptionFavorite(ctx context.Context, roomID, account string, favoriteUpdatedAt time.Time) (*model.Subscription, error)
 	// MoveSubscriptionSection sets sectionId+sectionOrder (or clears both when
 	// sectionID==nil, a remove) on (roomID, account), stamping sectionUpdatedAt as
-	// the high-water mark the federated event carries. Returns the post-write
-	// subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.
+	// the high-water mark the federated event carries. Also mirrors
+	// subscription.favorite: true when sectionID == "favorites", false otherwise
+	// (including a remove) — favorites membership stays derived from the flag.
+	// Returns the post-write subscription, or model.ErrSubscriptionNotFound
+	// (wrapped) when no match.
 	MoveSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, sectionUpdatedAt time.Time) (*model.Subscription, error)
 	// ComputeSectionOrder returns the fractional sectionOrder for placing (account's)
 	// chat within sectionID: just after afterRoomID, just before beforeRoomID (for

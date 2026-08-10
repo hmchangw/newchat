@@ -620,7 +620,10 @@ clients must debounce. No request body required.
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
 Synchronous RPC. Flips `Subscription.favorite`. Every successful call toggles the bit —
-clients must debounce. No request body required.
+clients must debounce. No request body required. Also orderable via
+[Move Chat to Section](#move-chat-to-section) (`sectionId: "favorites"`) — the two stay in
+sync: toggling off clears `sectionId`/`sectionOrder` if they were `"favorites"`; toggling on
+leaves any existing `sectionId` alone.
 
 #### Success response
 
@@ -650,7 +653,7 @@ mirroring favorite. Full detail + read model: [Chatlist Sections](../client-api.
 
 | Field | Type | Notes |
 |---|---|---|
-| `sectionId` | string \| null | Custom section to move into; `null` or omitting the field both remove it (indistinguishable at the wire layer). A built-in id (`favorites`/`apps`/`teams`/`chats`) is rejected. |
+| `sectionId` | string \| null | Custom section to move into, or `"favorites"`; `null` or omitting the field both remove it (indistinguishable at the wire layer) and clear `favorite` too. The other built-in ids (`apps`/`teams`/`chats`) are rejected. Moving into `"favorites"` sets `Subscription.favorite = true`; moving elsewhere sets it `false`. |
 | `afterRoomId` | string | Optional. Place just after this room; omit to append. Mutually exclusive with `beforeRoomId`. |
 | `beforeRoomId` | string | Optional. Place just before this room (top-insertion at the section head). Mutually exclusive with `afterRoomId`. |
 

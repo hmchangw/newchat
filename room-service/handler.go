@@ -2226,7 +2226,9 @@ func (h *Handler) favoriteToggle(c *natsrouter.Context) (*model.FavoriteToggleRe
 // favorite.toggle: one sub write + one subscription-update fanout + one cross-site
 // federation event, HWM-guarded by sectionUpdatedAt. Built-in section ids are
 // rejected — their membership is derived client-side (the migration-only "teams"
-// stamp is written directly at the sub-create, not via this RPC).
+// stamp is written directly at the sub-create, not via this RPC) — EXCEPT
+// favorites, which is manually move-managed: moving into it sets
+// subscription.favorite (store.MoveSubscriptionSection mirrors the flag).
 func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*model.MoveChatResponse, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
 	var ctx context.Context = c
 	account := c.Param("account")
@@ -2236,11 +2238,12 @@ func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*m
 		if *req.SectionID == "" {
 			return nil, errcode.BadRequest("sectionId is empty", errcode.WithReason(errcode.UserChatlistSectionNotFound))
 		}
-		if model.IsBuiltinSection(*req.SectionID) {
+		if model.IsBuiltinSection(*req.SectionID) && *req.SectionID != model.SectionFavorites {
 			// static built-in check only. A custom section's *existence*
 			// is not verified here (that would couple room-service to the
 			// user-service registry on every move) — orphan tolerance renders an
-			// unknown sectionId under Chats client-side.
+			// unknown sectionId under Chats client-side. Favorites is the one
+			// built-in that's a valid moveChat target (see func comment).
 			return nil, errcode.BadRequest("cannot move a chat into a built-in section", errcode.WithReason(errcode.UserChatlistBuiltinTarget))
 		}
 		if req.AfterRoomID != "" && req.BeforeRoomID != "" {
