@@ -4698,10 +4698,10 @@ The stored settings object. All ten fields are optional and appear only when the
 | `themePreference` | string | Theme: `"system"` \| `"light"` \| `"dark"`. |
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
 | `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
-| `muteAllNotifications` | boolean | Mute all notifications. |
-| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. |
+| `muteAllNotifications` | boolean | Mute all notifications. Enforced server-side by `notification-worker`: push delivery is suppressed for this user unless pierced — see `alwaysAllowPriorityNotifications`. |
+| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) pierces `muteAllNotifications` in **any** room type — DM and channel alike — and for `.bot` senders as well as users. The pierce does not override `showNotificationsInCall`. |
 | `showPreviewsInNotifications` | boolean | Show previews in notifications. |
-| `showNotificationsInCall` | boolean | Show notifications in call. |
+| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce of `muteAllNotifications` does not bypass this — set both to receive priority pushes while in a call. |
 | `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
 | `priorityContacts` | string[] | Read-only here — raw contact accounts (not enriched), stored order. Written only by [`settings.priorityContacts.add`](#settingsprioritycontactsadd) / [`settings.priorityContacts.remove`](#settingsprioritycontactsremove), never by `settings.set`. |
 
