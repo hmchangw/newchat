@@ -92,6 +92,32 @@ func TestDiffFields_TransformError(t *testing.T) {
 	assert.Contains(t, diffs[0].Cause, "transform-error")
 }
 
+func TestDiffFields_AbsentSourcePresentDest(t *testing.T) {
+	reg := newTransformRegistry(msgbucket.New(72 * time.Hour))
+	src := map[string]any{}
+	dst := map[string]any{"field": "value"}
+
+	// Optional pair: source absent, dest present non-nil → 1 diff with "absent in source, present in dest"
+	optional := []fieldPair{{SourcePaths: []string{"gone"}, DestField: "field", Required: false}}
+	diffs := diffFields(src, dst, optional, reg)
+	assert.Len(t, diffs, 1)
+	assert.Equal(t, "gone", diffs[0].SourcePath)
+	assert.Equal(t, "field", diffs[0].DestField)
+	assert.Equal(t, nil, diffs[0].Want)
+	assert.Equal(t, "value", diffs[0].Got)
+	assert.Equal(t, "absent in source, present in dest", diffs[0].Cause)
+
+	// Required pair: source absent, dest present non-nil → 1 diff with "absent in source, present in dest"
+	required := []fieldPair{{SourcePaths: []string{"gone"}, DestField: "field", Required: true}}
+	diffs = diffFields(src, dst, required, reg)
+	assert.Len(t, diffs, 1)
+	assert.Equal(t, "gone", diffs[0].SourcePath)
+	assert.Equal(t, "field", diffs[0].DestField)
+	assert.Equal(t, nil, diffs[0].Want)
+	assert.Equal(t, "value", diffs[0].Got)
+	assert.Equal(t, "absent in source, present in dest", diffs[0].Cause)
+}
+
 func TestDiffVerbatim(t *testing.T) {
 	src := map[string]any{"_id": "a", "n": int64(1), "_updatedAt": "x"}
 	dst := map[string]any{"_id": "a", "n": float64(1), "_updatedAt": "y"}

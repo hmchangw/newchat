@@ -112,10 +112,10 @@ func diffFields(src, dst map[string]any, pairs []fieldPair, reg transformRegistr
 			if p.Required && (!gotOK || got == nil) {
 				diffs = append(diffs, FieldDiff{SourcePath: strings.Join(p.SourcePaths, ","),
 					DestField: p.DestField, Cause: "required field absent on both sides"})
-			}
-			// optional + absent in source: matches absent or any dest value? No —
-			// matches only absent/nil dest (spec §5.3).
-			if !p.Required && gotOK && got != nil {
+			} else if gotOK && got != nil {
+				// source absent + dest present non-nil: diff for both required and optional.
+				// spec §5.3: optional field matches only absent/nil dest; required field
+				// must not be absent in source if present in dest.
 				diffs = append(diffs, FieldDiff{SourcePath: strings.Join(p.SourcePaths, ","),
 					DestField: p.DestField, Want: nil, Got: got, Cause: "absent in source, present in dest"})
 			}
