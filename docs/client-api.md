@@ -4757,9 +4757,9 @@ The stored settings object. All ten fields are optional and appear only when the
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
 | `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
 | `muteAllNotifications` | boolean | Mute all notifications. Enforced server-side by `notification-worker`: push delivery is suppressed for this user unless pierced — see `alwaysAllowPriorityNotifications`. |
-| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) pierces `muteAllNotifications` in **any** room type — DM and channel alike — and for `.bot` senders as well as users. The pierce does not override `showNotificationsInCall`. |
+| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) is pushed regardless of `muteAllNotifications`, of a `"busy"` (do-not-disturb) presence, and of an `"in-call"` presence — in **any** room type, DM and channel alike, and for `.bot` senders as well as users. This setting is the only opt-in for that pierce; listing a priority contact without enabling it changes nothing. Per-room mute is not pierced. |
 | `showPreviewsInNotifications` | boolean | Show previews in notifications. |
-| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce of `muteAllNotifications` does not bypass this — set both to receive priority pushes while in a call. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
+| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"in-call"`. It does **not** govern `"busy"` (do-not-disturb), which suppresses push either way — see `alwaysAllowPriorityNotifications` for the only exemption. A priority-contact pierce does bypass this setting. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
 | `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
 | `priorityContacts` | string[] | Read-only here — raw contact accounts (not enriched), stored order. Written only by [`settings.priorityContacts.add`](#settingsprioritycontactsadd) / [`settings.priorityContacts.remove`](#settingsprioritycontactsremove), never by `settings.set`. |
 
@@ -6446,8 +6446,12 @@ The worker filters recipients per message:
 - In rooms with more than `LARGE_ROOM_THRESHOLD` members (default 500),
   pushes only to mentioned recipients (`@user`, `@all`, `@here`).
 - Bots never receive a mobile push.
-- Presence-busy / in-call recipients are not pushed; everyone else
-  (online, offline, away, missing) receives one.
+- Recipients whose presence is `busy` (do-not-disturb) are not pushed; `in-call`
+  recipients are not pushed unless they set `showNotificationsInCall`. Everyone
+  else (online, offline, away, missing) receives one.
+- A sender in the recipient's `priorityContacts` bypasses `muteAllNotifications`,
+  `busy` and `in-call`, but only when the recipient enabled
+  `alwaysAllowPriorityNotifications`. Per-room mute is never bypassed.
 
 ---
 

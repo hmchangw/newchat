@@ -1,5 +1,11 @@
 # Notification Settings Enforcement (Spec 2 of 2)
 
+> **Partly superseded** by `2026-08-10-priority-contact-presence-gating-design.md`
+> (Spec 3, issue #221), which reverses two decisions below: the priority-contact
+> pierce now *does* cross the in-call gate, and `showNotificationsInCall` no longer
+> governs `busy`/do-not-disturb. Everything else here — placement, fail-open, the
+> no-cache reasoning, config — still describes the shipped code.
+
 Spec 1 (`2026-08-08-priority-contacts-storage-api-design.md`) gave users a place to
 store notification preferences. Nothing reads them. This spec makes
 `notification-worker` honour three of them when deciding whether to push.
