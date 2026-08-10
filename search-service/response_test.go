@@ -11,6 +11,42 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
+// TestSearchShardTotal: pkg/searchengine searches with allow_no_indices=true,
+// so a read pattern that matches nothing returns 200 + empty hits instead of a
+// 404 — indistinguishable from "no results" at the call site. `_shards.total`
+// is the one field that separates them, and it rides the response we already
+// parse, so no extra ES round-trip is needed.
+func TestSearchShardTotal(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{
+			name: "pattern matched no index",
+			raw:  `{"took":1,"_shards":{"total":0,"successful":0},"hits":{"total":{"value":0},"hits":[]}}`,
+			want: 0,
+		},
+		{
+			name: "index exists, no matching docs",
+			raw:  `{"took":1,"_shards":{"total":3,"successful":3},"hits":{"total":{"value":0},"hits":[]}}`,
+			want: 3,
+		},
+		{
+			name: "malformed response reports zero rather than panicking",
+			raw:  `{`,
+			want: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := searchShardTotal(json.RawMessage(tt.raw)); got != tt.want {
+				t.Fatalf("searchShardTotal() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseMessagesResponse_HappyPath(t *testing.T) {
 	body := json.RawMessage(`{
 		"hits": {

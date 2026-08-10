@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -169,7 +171,34 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 	if err != nil {
 		return nil, fmt.Errorf("parsing spotlight rooms: %w", err)
 	}
+	if len(rooms) == 0 {
+		logEmptyResult(ctx, "rooms", h.cfg.SpotlightReadPattern, account, req.Query, raw)
+	}
 	return &model.SearchRoomsResponse{Rooms: rooms}, nil
+}
+
+// logEmptyResult explains an empty result set at the point it happens.
+//
+// An index name that no writer uses is invisible otherwise: the read pattern is
+// a wildcard and pkg/searchengine passes allow_no_indices=true, so the query
+// returns 200 with zero hits and the caller sees a plain empty list — the same
+// thing a genuinely unmatched query produces. Logging the resolved pattern here
+// means a single line answers "why is this empty" without correlating against
+// startup output.
+//
+// WARN only when the pattern matched no index at all, which is always broken
+// and therefore never noisy. An ordinary miss (index present, nothing matched)
+// is a routine typeahead outcome and logs at flow level, off in production but
+// available through DEBUG_LOG_* when someone is actually investigating.
+func logEmptyResult(ctx context.Context, kind, pattern, account, query string, raw json.RawMessage) {
+	if shards := searchShardTotal(raw); shards == 0 {
+		slog.WarnContext(ctx, "empty search result: read pattern matched no index",
+			"kind", kind, "pattern", pattern, "account", account, "query", query,
+			"hint", "the index this service reads is not the one search-sync-worker writes")
+		return
+	}
+	slog.Log(ctx, logctx.LevelFlow, "empty search result: index present, no document matched",
+		"kind", kind, "pattern", pattern, "account", account, "query", query)
 }
 
 // searchOrgs runs a prefix search over the company-wide spotlight-org ES
@@ -214,6 +243,9 @@ func (h *handler) searchOrgs(c *natsrouter.Context, req model.SearchOrgsRequest)
 	orgs, err := parseOrgs(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parsing spotlight orgs: %w", err)
+	}
+	if len(orgs) == 0 {
+		logEmptyResult(ctx, "orgs", h.cfg.SpotlightOrgReadPattern, account, req.Query, raw)
 	}
 	return &model.SearchOrgsResponse{Orgs: orgs}, nil
 }

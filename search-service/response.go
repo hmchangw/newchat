@@ -23,6 +23,29 @@ type rawResponse[T any] struct {
 	} `json:"hits"`
 }
 
+// searchShardTotal reports how many shards the search actually ran against.
+//
+// pkg/searchengine searches with `allow_no_indices=true`, so a read pattern
+// matching no index comes back as a 200 with empty hits — identical, at the
+// call site, to a query that legitimately matched nothing. `_shards.total` is
+// the field that separates the two: 0 means the pattern resolved to no concrete
+// index, which is always a misconfiguration and never a normal empty result.
+//
+// It rides the response body already being parsed, so this costs no extra ES
+// round-trip. A malformed body reports 0 shards; the caller is on the zero-hit
+// path already and the real decode error surfaces from the typed parse.
+func searchShardTotal(raw json.RawMessage) int {
+	var envelope struct {
+		Shards struct {
+			Total int `json:"total"`
+		} `json:"_shards"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return 0
+	}
+	return envelope.Shards.Total
+}
+
 // messageSearchHit is the internal staging type produced by parseMessagesResponse.
 // Fields mirror the ES messages-* index; the public reply type
 // (model.SearchMessage) is a projection of this struct with `UserID` dropped.

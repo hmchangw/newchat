@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -309,6 +311,54 @@ func TestHandler_SearchRooms_HappyPath(t *testing.T) {
 
 	require.Len(t, store.searchCalls, 1)
 	assert.Equal(t, []string{testSpotlightIndex}, store.searchCalls[0].indices)
+}
+
+// TestHandler_SearchRooms_EmptyResultLogsReadPattern: a misconfigured index
+// name is otherwise invisible — the read pattern is a wildcard and the engine
+// passes allow_no_indices=true, so pointing at an index nobody writes returns a
+// plain empty list, exactly like a query that matched nothing. The WARN fires
+// only for _shards.total == 0, which is always broken, so it cannot spam a
+// typeahead; the line carries the resolved pattern so one log answers "why".
+func TestHandler_SearchRooms_EmptyResultLogsReadPattern(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantWarn bool
+	}{
+		{
+			name:     "pattern matched no index",
+			body:     `{"_shards":{"total":0},"hits":{"total":{"value":0},"hits":[]}}`,
+			wantWarn: true,
+		},
+		{
+			name:     "index present, nothing matched",
+			body:     `{"_shards":{"total":3},"hits":{"total":{"value":0},"hits":[]}}`,
+			wantWarn: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			h := newTestHandler(&fakeStore{searchBody: json.RawMessage(tt.body)}, &fakeMongo{}, nil, newFakeCache())
+			resp, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Query: "general"})
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			assert.Empty(t, resp.Rooms)
+
+			logged := buf.String()
+			if !tt.wantWarn {
+				assert.Empty(t, logged, "a routine empty result must not WARN")
+				return
+			}
+			assert.Contains(t, logged, "read pattern matched no index")
+			assert.Contains(t, logged, testSpotlightIndex, "the WARN names the pattern actually searched")
+		})
+	}
 }
 
 func TestHandler_SearchRooms_EmptyQueryRejected(t *testing.T) {
