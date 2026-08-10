@@ -78,7 +78,27 @@ type SubscriptionUpdateEvent struct {
 	Subscription Subscription `json:"subscription"`
 	Action       string       `json:"action"` // "added" | "removed" | "role_updated" | "mute_toggled" | "favorite_toggled" | "read"
 	RoomName     string       `json:"roomName,omitempty"`
-	Timestamp    int64        `json:"timestamp" bson:"timestamp"`
+	// The DM counterpart, resolved at publish time alongside RoomName. Mutually
+	// exclusive, "added" dm/botDM only, both nil on a lookup miss (best-effort).
+	HRInfo    *CounterpartHRInfo  `json:"hrInfo,omitempty"`
+	AppInfo   *CounterpartAppInfo `json:"appInfo,omitempty"`
+	Timestamp int64               `json:"timestamp" bson:"timestamp"`
+}
+
+// CounterpartHRInfo is the DM counterpart's HR record on a subscription.update.
+// Kept apart from MessageHRInfo so search-only fields can't widen this event.
+type CounterpartHRInfo struct {
+	Account     string `json:"account"`
+	ChineseName string `json:"chineseName,omitempty"`
+	EngName     string `json:"engName,omitempty"`
+}
+
+// CounterpartAppInfo is the botDM counterpart's app record on a subscription.update.
+// AssistantName is the bot account the app answers on.
+type CounterpartAppInfo struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	AssistantName string `json:"assistantName"`
 }
 
 // CanonicalMemberEventMuted is the only event type currently published on this stream.
