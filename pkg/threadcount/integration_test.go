@@ -40,18 +40,25 @@ func setupThreadTable(t *testing.T) *gocql.Session {
 // seedReplies inserts count rows for threadRoomID. message_id is prefixed so two
 // calls in the same thread never collide on the (created_at, message_id) key.
 // deleted may be nil to mimic message-worker's INSERT, which never writes it.
+// Chunked UnloggedBatch: every row lands in the one partition, so this is a
+// single-partition write, and the paging tests seed thousands of rows.
 func seedReplies(t *testing.T, sess *gocql.Session, threadRoomID, idPrefix string, count int, deleted *bool) {
 	t.Helper()
+	const chunk = 100
 	base := time.Now().UTC()
-	for i := 0; i < count; i++ {
-		require.NoError(t, sess.Query(
-			`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, deleted) VALUES (?, ?, ?, ?)`,
-			threadRoomID, base.Add(time.Duration(i)*time.Millisecond), fmt.Sprintf("%s-%d", idPrefix, i), deleted,
-		).Exec())
+	for start := 0; start < count; start += chunk {
+		batch := sess.NewBatch(gocql.UnloggedBatch)
+		for i := start; i < start+chunk && i < count; i++ {
+			batch.Query(
+				`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id, deleted) VALUES (?, ?, ?, ?)`,
+				threadRoomID, base.Add(time.Duration(i)*time.Millisecond), fmt.Sprintf("%s-%d", idPrefix, i), deleted,
+			)
+		}
+		require.NoError(t, sess.ExecuteBatch(batch))
 	}
 }
 
-func TestCount_UnderCap_Exact(t *testing.T) {
+func TestCount_ShortThread_Exact(t *testing.T) {
 	ctx := context.Background()
 	sess := setupThreadTable(t)
 	seedReplies(t, sess, "thread-1", "live", 5, nil)
@@ -61,14 +68,17 @@ func TestCount_UnderCap_Exact(t *testing.T) {
 	assert.Equal(t, 5, n)
 }
 
-func TestCount_OverCap_ReturnsCap(t *testing.T) {
+// A thread longer than one driver page is still counted exactly: the scan pages
+// to the end of the partition rather than stopping at any ceiling.
+func TestCount_LongerThanOnePage_ExactCount(t *testing.T) {
 	ctx := context.Background()
 	sess := setupThreadTable(t)
-	seedReplies(t, sess, "thread-1", "live", Cap+10, nil)
+	total := cassPageSize + 25
+	seedReplies(t, sess, "thread-1", "live", total, nil)
 
 	n, err := Count(ctx, sess, "thread-1")
 	require.NoError(t, err)
-	assert.Equal(t, Cap, n)
+	assert.Equal(t, total, n)
 }
 
 func TestCount_ExcludesDeleted(t *testing.T) {
@@ -83,20 +93,21 @@ func TestCount_ExcludesDeleted(t *testing.T) {
 	assert.Equal(t, 10, n)
 }
 
-// TestCount_ExcludesDeleted_OverCap locks in the no-CQL-LIMIT guarantee: with
-// soft-deleted rows interspersed AND a live total above Cap, the scan must page
-// past the deleted rows to reach Cap live ones and still return exactly Cap. A
-// hard LIMIT Cap would undercount here by counting deleted rows toward the limit.
-func TestCount_ExcludesDeleted_OverCap(t *testing.T) {
+// Locks in the no-CQL-LIMIT guarantee: with soft-deleted rows interspersed
+// across more than one page, the scan must walk past them and still return the
+// exact live total. A hard LIMIT would undercount by spending the limit on
+// deleted rows.
+func TestCount_ExcludesDeleted_MultiPage(t *testing.T) {
 	ctx := context.Background()
 	sess := setupThreadTable(t)
 	deleted := true
-	seedReplies(t, sess, "thread-1", "del", Cap, &deleted)
-	seedReplies(t, sess, "thread-1", "live", Cap+5, nil)
+	live := cassPageSize + 5
+	seedReplies(t, sess, "thread-1", "del", 200, &deleted)
+	seedReplies(t, sess, "thread-1", "live", live, nil)
 
 	n, err := Count(ctx, sess, "thread-1")
 	require.NoError(t, err)
-	assert.Equal(t, Cap, n)
+	assert.Equal(t, live, n)
 }
 
 func TestCount_EmptyPartition_Zero(t *testing.T) {
@@ -161,13 +172,28 @@ func TestCountAndLatest_AllDeleted_NilLatest(t *testing.T) {
 	assert.Nil(t, latest)
 }
 
-func TestCountAndLatest_OverCap_ReturnsCap(t *testing.T) {
+func TestCountAndLatest_LongThread_ExactCount(t *testing.T) {
 	ctx := context.Background()
 	sess := setupThreadTable(t)
-	seedReplies(t, sess, "thread-1", "live", Cap+10, nil)
+	const replies = 150
+	seedReplies(t, sess, "thread-1", "live", replies, nil)
 
 	n, latest, err := CountAndLatest(ctx, sess, "thread-1")
 	require.NoError(t, err)
-	assert.Equal(t, Cap, n)
+	assert.Equal(t, replies, n)
 	require.NotNil(t, latest)
+}
+
+// The internal scanTimeout must not mask a caller's own cancellation, and an
+// aborted scan must surface an error rather than leak the rows counted so far.
+func TestCountAndLatest_CanceledContext_NoPartialCount(t *testing.T) {
+	sess := setupThreadTable(t)
+	seedReplies(t, sess, "thread-1", "live", 10, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	n, latest, err := CountAndLatest(ctx, sess, "thread-1")
+	require.Error(t, err)
+	assert.Equal(t, 0, n)
+	assert.Nil(t, latest)
 }
