@@ -9,17 +9,21 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // stubMembersRequester replays canned getChannels response pages in order and
-// records each request's decoded body.
+// records each request's subject + decoded body.
 type stubMembersRequester struct {
-	pages [][]byte
-	calls []getChannelsRequest
-	i     int
+	pages    [][]byte
+	subjects []string
+	calls    []getChannelsRequest
+	i        int
 }
 
-func (s *stubMembersRequester) Request(_ context.Context, _ string, data []byte, _ time.Duration) (*nats.Msg, error) {
+func (s *stubMembersRequester) Request(_ context.Context, subj string, data []byte, _ time.Duration) (*nats.Msg, error) {
+	s.subjects = append(s.subjects, subj)
 	var req getChannelsRequest
 	_ = json.Unmarshal(data, &req)
 	s.calls = append(s.calls, req)
@@ -53,6 +57,8 @@ func TestMembersClient_GetChannels_PagesUntilExhausted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"r1", "r2", "r3"}, rooms, "all pages accumulated, not just page 1")
 	require.Len(t, stub.calls, 2, "paged twice")
+	assert.Equal(t, subject.UserSubscriptionGetChannels("alice", "site-a"), stub.subjects[0],
+		"subject derived from the requester account + site")
 	assert.Equal(t, 0, stub.calls[0].Offset)
 	assert.Equal(t, 2, stub.calls[1].Offset, "second-page offset advances by the first page's count")
 	assert.Equal(t, []string{"bob"}, stub.calls[0].AccountNames)
