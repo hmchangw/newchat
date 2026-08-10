@@ -1301,7 +1301,7 @@ separate subject.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `query` | string | yes | Full-text query. Empty string rejected. Matches `content` and `userName`. |
+| `query` | string | yes | Full-text query. Empty string rejected. Matches `content`, `userName`, attachment text, and tcard data. |
 | `roomIds` | string[] | no | Scope to specific rooms. Unknown or inaccessible rooms silently excluded. Stays a list (single-select sends a 1-element list — no rename). |
 | `senders` | string[] | no | Filter to these `userAccount`s (multi-select From). |
 | `dateRange` | `{start, end}` | no | Filter `createdAt`; either bound may be omitted. Presets resolved client-side. |
@@ -1359,7 +1359,7 @@ ES index.
 |---|---|---|---|
 | `query` | string | conditionally | Case-insensitive prefix/substring on room name. May be omitted only when `members` is set — at least one of the two is required. |
 | `roomType` | string | no | `"all"` (default), `"channel"`, or `"dm"`. `"app"` (MVP-unsupported) and unknown values rejected. |
-| `members` | string[] | no | Filter to channels containing all of these accounts plus the requester (via `subscription.getChannels`). Works with an empty `query`. |
+| `members` | string[] | no | Filter to channels containing all of these accounts plus the requester (via `subscription.getChannels`). Works with an empty `query`, but must itself be non-empty to be a room-search criterion. |
 | `size` | number | no | Default 25, max 100. |
 | `offset` | number | no | Default 0. |
 
