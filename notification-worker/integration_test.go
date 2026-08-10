@@ -290,8 +290,10 @@ func TestMongoUserSettings_Snapshot_Integration(t *testing.T) {
 	assert.False(t, partial.muteAll)
 	assert.True(t, partial.showInCall)
 
+	assert.Contains(t, got, "nosettings-user", "an active user always appears in the map, even when zero-filled")
 	assert.Equal(t, notifSettings{}, got["nosettings-user"], "no settings sub-document → zero value")
 	assert.Contains(t, got, "noactive-user", "missing active field counts as active")
+	assert.Equal(t, notifSettings{}, got["noactive-user"], "no settings sub-document → zero value")
 
 	assert.NotContains(t, got, "inactive-user", "active:false is treated as absent, not zero-filled")
 	assert.NotContains(t, got, "absent-user", "unknown account is absent, not zero-filled")
@@ -324,4 +326,20 @@ func TestMongoUserSettings_ChunkingBoundary_Integration(t *testing.T) {
 	for _, a := range accounts {
 		assert.True(t, got[a].muteAll, "account %s", a)
 	}
+}
+
+func TestMongoUserSettings_FailsOpenOnReadError_Integration(t *testing.T) {
+	db := testutil.MongoDB(t, "notification_worker_settings_failopen")
+	ctx := context.Background()
+	usersCol := db.Collection("users")
+	seedUserSettings(t, ctx, usersCol)
+
+	s := newMongoUserSettings(usersCol, 512, 5*time.Second)
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	got, err := s.Snapshot(cancelCtx, []string{"muted-user", "partial-user"})
+	require.NoError(t, err, "Snapshot must never return an error, even when the read fails")
+	assert.Empty(t, got, "a failed read yields an empty map so every account defaults to push")
 }

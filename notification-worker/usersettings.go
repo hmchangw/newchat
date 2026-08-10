@@ -114,6 +114,9 @@ func (m *mongoUserSettings) appendChunk(ctx context.Context, chunk []string, out
 	if err != nil {
 		return fmt.Errorf("find user settings: %w", err)
 	}
+	// Close error intentionally discarded: the cursor is being abandoned either
+	// way, and Snapshot is fail-open by contract, so a close failure here
+	// changes nothing observable to the caller.
 	defer cur.Close(ctx)
 
 	for cur.Next(ctx) {
