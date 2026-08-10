@@ -204,6 +204,24 @@ where the dest record lives and how to locate it from the source doc — and
       }
     },
     {
+      "collection": "company_thread_subscriptions",
+      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "skip" },
+      "resolvers": {                       // intermediate lookups when the key isn't in the source doc
+        "user":       { "db": "source", "collection": "users",
+                        "key": { "_id": "u._id" }, "fields": [ "username" ] },
+        "threadRoom": { "db": "target", "collection": "thread_rooms",
+                        "key": { "parentMessageId": "parentMessage._id" }, "fields": [ "_id" ] }
+      },
+      "targets": {
+        "threadSubs": { "kind": "mongo", "collection": "thread_subscriptions",
+                        "key": { "threadRoomId": "@threadRoom._id",   // @alias.field = resolved value
+                                 "userId":       "@user.username" } }
+      },
+      "fields": {
+        "lastSeenAt": [ { "dest": "threadSubs.lastSeenAt", "transform": "unixMilli" } ]
+      }
+    },
+    {
       "collection": "rocketchat_avatar",
       "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "verify-absent" },
       "targets": {
@@ -222,7 +240,21 @@ Schema rules:
   The **key spec** maps *dest* key fields ← *source* dot-paths (optionally through a
   transform, e.g. `msgBucket` for the bucketed partition key via `pkg/msgbucket`).
   Mongo lookup = filter + projection limited to compared fields (per CLAUDE.md);
-  Cassandra lookup = `SELECT <cols> … WHERE <key>` on the named table.
+  Cassandra lookup = `SELECT <cols> … WHERE <key>` on the named table. A dest
+  lookup that matches **more than one** document/row fails the sub-check
+  immediately with cause `ambiguous-key` (a mapping bug, not a convergence issue).
+- **Resolvers — when the lookup key isn't in the source doc.** Locating a dest
+  record is not always by id: a dest may key by `username` while the source doc
+  carries only `u._id`, or by a target-side generated id (e.g. `threadRoomId`).
+  A per-source `resolvers` block declares named **intermediate point lookups**
+  against `db: "source"` or `db: "target"` Mongo (one hop, read-only, projected
+  to the listed `fields`, cached per poll attempt). Resolved values are
+  addressable as `@alias.field` anywhere a source path is accepted — key specs,
+  `fields` sources, and `derived.from`. Resolver key specs use plain source
+  paths only (no chaining in v1). A resolver that finds nothing marks dependent
+  sub-checks' current attempt as `resolver-miss: <alias>` — they keep polling
+  (the target-side doc may simply not exist *yet*) and, on deadline, fail with
+  that cause, distinguishable from a field mismatch.
 - **Fields map** = `sourcePath: [destRef, …]` — fan-out is the normal case. A
   `destRef` is either the shorthand string `"<targetAlias>.<destFieldPath>"`
   (alias is the first dot-segment; aliases must not contain dots) or the object
@@ -245,8 +277,9 @@ Schema rules:
   `documentKey._id` (never trusted from the event payload — updates carry only
   deltas anyway). Read preference `primaryPreferred`, same rationale as the transformer.
 - **Startup validation, fail-fast:** unknown transform names, `destRef` aliases
-  with no matching target, empty key specs, a `cassandra` target without a
-  `table`, a verbatim target that is also referenced by `fields`. Collections
+  with no matching target, `@alias` references with no matching resolver, a
+  resolver key using `@` chaining, empty key specs, a `cassandra` target without
+  a `table`, a verbatim target that is also referenced by `fields`. Collections
   observed on the stream with no `sources` entry are classified SKIPPED
   (`unmapped`) and counted — coverage gaps are visible, never silent.
 - The shipped default lives at `tools/cdc-verify/mapping.example.json`, covering
@@ -316,7 +349,9 @@ Fail-fast on all required vars; missing mapping file or invalid JSON exits non-z
 ## 10. Testing (TDD throughout)
 
 - **Unit** (mocked lookups + fake clock): mapping load/validation table tests
-  (fan-out refs, derived multi-`from`, alias resolution, verbatim rules);
+  (fan-out refs, derived multi-`from`, alias/resolver resolution, verbatim rules);
+  resolver behavior (source/target hop, miss → keep polling → `resolver-miss`
+  failure cause, per-attempt caching, `ambiguous-key`);
   comparison/normalization table tests (types, absent/null, transforms, verbatim
   ignore); check lifecycle (multi-target fan-out — partial then full match,
   per-target freeze, one-target timeout→failed with per-target diff, supersede,
