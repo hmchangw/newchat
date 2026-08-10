@@ -130,3 +130,25 @@ func TestResultsStore_DeepCopyTargets(t *testing.T) {
 	assert.False(t, recent[0].Targets[0].Matched, "stored Matched should not be mutated")
 	assert.Equal(t, "p", recent[0].Targets[0].Diffs[0].SourcePath, "stored SourcePath should not be changed")
 }
+
+func TestResultsStore_FailuresEvictionDoesNotPruneIfInRecent(t *testing.T) {
+	// Test that when a row is evicted from failures but still in recent,
+	// it remains in counted (not pruned unconditionally).
+	// With recentCap=10, failedCap=1: upsert "a" (StateFailed), then "b" (StateFailed).
+	// "a" is evicted from failures (stays in recent), but should remain in counted.
+	s := newResultsStore(10, 1, nil)
+	s.Upsert(mkResult("a", StateFailed))
+	s.Upsert(mkResult("b", StateFailed))
+
+	// Lock to inspect internal state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// At this point:
+	// - recent has both: b, a (newest first)
+	// - failures has only newest: b (a was evicted)
+	// - counted should have both a and b (a is still in recent, so not pruned)
+	assert.Len(t, s.counted, 2, "counted map should have 2 entries (a still in recent, not pruned)")
+	assert.True(t, s.counted["a"], "a should still be in counted (in recent)")
+	assert.True(t, s.counted["b"], "b should be in counted")
+}

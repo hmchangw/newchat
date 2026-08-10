@@ -105,7 +105,7 @@ func (s *resultsStore) Upsert(r CheckResult) {
 		if len(s.recent) > s.recentCap {
 			evicted := s.recent[len(s.recent)-1]
 			s.recent = s.recent[:s.recentCap]
-			delete(s.counted, evictedIDIfUncounted(s, evicted))
+			delete(s.counted, evictedIDIfUncounted(s.failures, evicted))
 		}
 	}
 	if isTerminal(r.State) && !s.counted[r.ID] {
@@ -122,7 +122,7 @@ func (s *resultsStore) Upsert(r CheckResult) {
 				s.failures = s.failures[:s.failedCap]
 				s.counters.Evicted++
 				// Symmetric pruning: remove from counted if also not in recent
-				delete(s.counted, evictedIDIfUncounted(s, evictedFromFailures))
+				delete(s.counted, evictedIDIfUncounted(s.recent, evictedFromFailures))
 			}
 		case StateSkipped:
 			s.counters.Skipped++
@@ -141,12 +141,16 @@ func isTerminal(st CheckState) bool {
 	return st == StateMatched || st == StateFailed || st == StateSkipped || st == StateSuperseded
 }
 
-// evictedIDIfUncounted lets the counted set shrink with the window: an ID
-// evicted from recent that is also gone from failures can never be upserted
-// again (checks are single-writer), so its dedup entry is dropped.
-func evictedIDIfUncounted(s *resultsStore, r CheckResult) string {
-	for i := range s.failures {
-		if s.failures[i].ID == r.ID {
+// evictedIDIfUncounted checks if the evicted ID is still present in the "other" list.
+// If found in the other list, returns "" (no delete); if not found, returns the ID for deletion.
+// Called at both eviction sites:
+// - recent-eviction: check if ID is still in failures (passed as others)
+// - failures-eviction: check if ID is still in recent (passed as others)
+// An ID evicted from both windows can never be upserted again (checks are single-writer),
+// so its dedup entry is dropped.
+func evictedIDIfUncounted(others []CheckResult, r CheckResult) string {
+	for i := range others {
+		if others[i].ID == r.ID {
 			return "" // still referenced; deleting "" is a no-op
 		}
 	}
