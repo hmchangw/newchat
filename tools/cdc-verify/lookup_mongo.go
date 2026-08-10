@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -20,7 +21,7 @@ func newMongoStore(db *mongo.Database) *mongoStore { return &mongoStore{db: db} 
 func (s *mongoStore) FindByID(ctx context.Context, collection, id string) (map[string]any, error) {
 	var doc bson.M
 	err := s.db.Collection(collection).FindOne(ctx, bson.M{"_id": id}).Decode(&doc)
-	if err == mongo.ErrNoDocuments {
+	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, errNotFound
 	}
 	if err != nil {
