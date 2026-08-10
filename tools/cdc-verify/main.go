@@ -41,7 +41,7 @@ type config struct {
 	Port               int           `env:"PORT" envDefault:"8091"`
 }
 
-func (c config) validate() error {
+func (c *config) validate() error {
 	if c.SamplePercent < 0 || c.SamplePercent > 100 {
 		return fmt.Errorf("SAMPLE_PERCENT must be 0..100, got %d", c.SamplePercent)
 	}
