@@ -6,6 +6,9 @@ import (
 	"os"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
@@ -95,8 +98,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)
+		os.Exit(1)
+	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
 		mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref),
 		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
 		mongoutil.WithMinPoolSize(cfg.Mongo.MinPoolSize),
 	)
@@ -104,6 +113,7 @@ func main() {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	cassSession, err := cassutil.Connect(cassutil.Config{
 		Hosts:    cfg.Cassandra.Hosts,
@@ -128,7 +138,10 @@ func main() {
 			os.Exit(1)
 		}
 		vaultWrapper = w
-		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName)
+		// DEKs are written by other services; pin to primary so a fresh key isn't
+		// missed on a lagging secondary.
+		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName,
+			options.Collection().SetReadPreference(readpref.Primary()))
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 

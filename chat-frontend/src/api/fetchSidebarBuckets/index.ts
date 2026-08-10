@@ -104,17 +104,24 @@ export async function fetchSidebarBuckets({ user, request }: Nats): Promise<Side
 
   const subscriptions: Record<string, DMSubscription> = {}
   const rooms: Room[] = []
-  const collect = (subs: DMSubscription[]) => {
+  const collect = (subs: DMSubscription[], markFavorite = false) => {
     for (const s of subs) {
       if (!s?.roomId) continue
       // Later sources overwrite earlier ones, but the three responses
       // describe the same Subscription record so collisions are benign.
-      const first = subscriptions[s.roomId] === undefined
-      subscriptions[s.roomId] = s
-      if (first) rooms.push(subToRoom(s, user.siteId))
+      // `favorite` is sticky: the favorite bucket means "favorited", so stamp
+      // it here; a later bucket's copy (which omits the flag on the current
+      // backend) must not clear it. The chatlist v2 read model derives the
+      // Favorites section from this field. Idempotent once #134 sets it natively.
+      const prev = subscriptions[s.roomId]
+      const favorite = markFavorite || s.favorite || prev?.favorite
+      const merged = favorite ? { ...s, favorite: true } : s
+      const first = prev === undefined
+      subscriptions[s.roomId] = merged
+      if (first) rooms.push(subToRoom(merged, user.siteId))
     }
   }
-  collect(favSubs)
+  collect(favSubs, true)
   collect(appSubs)
   collect(roomSubs)
   return {

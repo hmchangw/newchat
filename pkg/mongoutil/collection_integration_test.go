@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/testutil"
 )
@@ -244,4 +245,28 @@ func TestCollection_AggregatePagedHasMore_EmptyCollection(t *testing.T) {
 	assert.False(t, page.HasMore)
 	assert.NotNil(t, page.Data, "Data must be non-nil so JSON marshals to []")
 	assert.Empty(t, page.Data)
+}
+
+func TestCollection_WithReadPreference_RoundTrips(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	base := NewCollection[testDoc](db.Collection("readpref_docs"))
+
+	_, err := db.Collection("readpref_docs").InsertOne(ctx, testDoc{ID: "r1", Name: "Rhea", Age: 40})
+	require.NoError(t, err)
+
+	// The clone reads the same data and leaves the base handle untouched.
+	sec := base.WithReadPreference(readpref.SecondaryPreferred())
+	require.NotSame(t, base.Raw(), sec.Raw())
+
+	got, err := sec.FindByID(ctx, "r1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "Rhea", got.Name)
+
+	// The base handle still works independently.
+	gotBase, err := base.FindByID(ctx, "r1")
+	require.NoError(t, err)
+	require.NotNil(t, gotBase)
+	assert.Equal(t, "Rhea", gotBase.Name)
 }

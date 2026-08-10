@@ -76,10 +76,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Client stays on primary; each repo opts into secondary reads via
+	// WithReadPreference (already validated in config).
+	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo secondary-read preference configured", "readPreference", readPref.Mode().String())
+	readFromSecondary := mongorepo.WithReadPreference(readPref)
+
 	db := mongoClient.Database(cfg.Mongo.DB)
-	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID)
-	userRepo := mongorepo.NewUserRepo(db)
-	appRepo := mongorepo.NewAppRepo(db)
+	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID, readFromSecondary)
+	userRepo := mongorepo.NewUserRepo(db, readFromSecondary)
+	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	ssoTokenRepo := mongorepo.NewSSOTokenRepo(db)
 	if err := subRepo.EnsureIndexes(ctx); err != nil {

@@ -20,6 +20,7 @@ func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID st
 	admin.GET("/users/:account", h.getUser)
 	admin.PATCH("/users/:account", h.updateUser)
 	admin.POST("/users/:account/password", h.setPassword)
+	admin.POST("/rooms/:roomId/onduty", h.setRoomOnDuty)
 	admin.GET("/sessions", h.listSessions)
 	admin.DELETE("/sessions", h.revokeAllSessions)
 	admin.DELETE("/sessions/:sessionId", h.revokeSession)

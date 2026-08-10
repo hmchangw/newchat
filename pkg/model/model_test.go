@@ -1235,6 +1235,110 @@ func TestSubscriptionUpdateEventJSON(t *testing.T) {
 	}
 }
 
+func TestSubscriptionUpdateEventCounterpartJSON(t *testing.T) {
+	base := model.Subscription{
+		ID:       "s1",
+		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID:   "r1",
+		SiteID:   "site-a",
+		JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	tests := []struct {
+		name     string
+		src      model.SubscriptionUpdateEvent
+		wantKeys []string
+		absent   []string
+	}{
+		{
+			name: "dm carries hrInfo",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				RoomName:     "Bob Chan",
+				HRInfo:       &model.CounterpartHRInfo{Account: "bob", ChineseName: "陳大文", EngName: "Bob Chan"},
+				Timestamp:    1735689600000,
+			},
+			wantKeys: []string{`"hrInfo"`, `"account":"bob"`, `"chineseName":"陳大文"`, `"engName":"Bob Chan"`},
+			absent:   []string{`"appInfo"`},
+		},
+		{
+			name: "botDM carries appInfo",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				RoomName:     "Helper",
+				AppInfo:      &model.CounterpartAppInfo{ID: "app-1", Name: "Helper", AssistantName: "helper.bot"},
+				Timestamp:    1735689600000,
+			},
+			wantKeys: []string{`"appInfo"`, `"id":"app-1"`, `"name":"Helper"`, `"assistantName":"helper.bot"`},
+			absent:   []string{`"hrInfo"`},
+		},
+		{
+			name: "both omitted when unresolved",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				Timestamp:    1735689600000,
+			},
+			absent: []string{`"hrInfo"`, `"appInfo"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(&tt.src)
+			require.NoError(t, err)
+			for _, k := range tt.wantKeys {
+				assert.Contains(t, string(data), k)
+			}
+			for _, k := range tt.absent {
+				assert.NotContains(t, string(data), k)
+			}
+			var dst model.SubscriptionUpdateEvent
+			require.NoError(t, json.Unmarshal(data, &dst))
+			assert.Equal(t, tt.src, dst)
+		})
+	}
+}
+
+// Payloads written before hrInfo/appInfo existed must still decode — both fields
+// are omitempty pointers, so absent and explicit null both mean "no counterpart".
+func TestSubscriptionUpdateEventCounterpartDecodesLegacyPayload(t *testing.T) {
+	for _, raw := range []string{
+		`{"userId":"u1","action":"added","roomName":"eng","timestamp":1735689600000}`,
+		`{"userId":"u1","action":"added","hrInfo":null,"appInfo":null,"timestamp":1735689600000}`,
+	} {
+		var evt model.SubscriptionUpdateEvent
+		require.NoError(t, json.Unmarshal([]byte(raw), &evt))
+		assert.Nil(t, evt.HRInfo)
+		assert.Nil(t, evt.AppInfo)
+	}
+}
+
+func TestCounterpartHRInfoJSON(t *testing.T) {
+	src := model.CounterpartHRInfo{Account: "bob", ChineseName: "陳大文", EngName: "Bob Chan"}
+	roundTrip(t, &src, &model.CounterpartHRInfo{})
+
+	// Both names are omitempty; a directory record without them keeps only account.
+	data, err := json.Marshal(model.CounterpartHRInfo{Account: "dave"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"account":"dave"}`, string(data))
+}
+
+func TestCounterpartAppInfoJSON(t *testing.T) {
+	src := model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}
+	roundTrip(t, &src, &model.CounterpartAppInfo{})
+
+	// No field is omitempty, so a nameless app still ships all three keys.
+	data, err := json.Marshal(model.CounterpartAppInfo{ID: "app-2", AssistantName: "solo.bot"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"id":"app-2","name":"","assistantName":"solo.bot"}`, string(data))
+}
+
 func TestInboxEventJSON(t *testing.T) {
 	src := model.InboxEvent{
 		Type:       "member_added",
@@ -4028,13 +4132,6 @@ func TestRoomRestrictedRoomEventJSON(t *testing.T) {
 		ChangedAt:      time.UnixMilli(1700000000000).UTC(),
 	}
 	roundTrip(t, &e, &model.RoomRestrictedRoomEvent{})
-}
-
-func TestRoomRestrictedSysDataJSON(t *testing.T) {
-	d := model.RoomRestrictedSysData{
-		Restricted: true, ExternalAccess: false, ByAccount: "admin1", OwnerAccount: "alice",
-	}
-	roundTrip(t, &d, &model.RoomRestrictedSysData{})
 }
 
 func TestRoomRenamedInboxPayloadJSON(t *testing.T) {

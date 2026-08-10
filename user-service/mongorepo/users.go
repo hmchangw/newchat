@@ -20,12 +20,18 @@ const usersCollection = "users"
 // UserRepo is the Mongo implementation of service.UserRepository.
 type UserRepo struct {
 	users *mongoutil.Collection[model.User]
+	// usersSecondary routes status/HR display reads; SetUserStatus, indexes, and
+	// all writes keep the primary users handle.
+	usersSecondary *mongoutil.Collection[model.User]
 }
 
 // NewUserRepo builds a UserRepo over db.
-func NewUserRepo(db *mongo.Database) *UserRepo {
+func NewUserRepo(db *mongo.Database, opts ...Option) *UserRepo {
+	s := applyOptions(opts)
+	users := mongoutil.NewCollection[model.User](db.Collection(usersCollection))
 	return &UserRepo{
-		users: mongoutil.NewCollection[model.User](db.Collection(usersCollection)),
+		users:          users,
+		usersSecondary: users.WithReadPreference(s.readPref),
 	}
 }
 
@@ -59,7 +65,7 @@ func activeUserFilter(account string) bson.M {
 // GetUserStatus returns the user for account (missing `active` counts as active),
 // or (nil, nil). Projected to the UserStatusView fields; all others are zero-valued.
 func (r *UserRepo) GetUserStatus(ctx context.Context, account string) (*model.User, error) {
-	return r.users.FindOne(ctx, activeUserFilter(account),
+	return r.usersSecondary.FindOne(ctx, activeUserFilter(account),
 		mongoutil.WithProjection(bson.M{
 			"_id": 0, "account": 1, "statusText": 1, "statusIsShow": 1,
 			"chineseName": 1, "engName": 1,
@@ -76,7 +82,7 @@ func (r *UserRepo) GetHRInfoByAccounts(ctx context.Context, accounts []string) (
 		ChineseName string `bson:"chineseName"`
 		EngName     string `bson:"engName"`
 	}
-	col := mongoutil.NewCollection[hrUser](r.users.Raw())
+	col := mongoutil.NewCollection[hrUser](r.usersSecondary.Raw())
 	rows, err := col.FindMany(ctx,
 		bson.M{"account": bson.M{"$in": accounts}},
 		mongoutil.WithProjection(bson.M{"_id": 0, "account": 1, "chineseName": 1, "engName": 1}),

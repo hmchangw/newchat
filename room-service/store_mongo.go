@@ -11,9 +11,11 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/pipelines"
 )
@@ -34,19 +36,63 @@ type MongoStore struct {
 	apps                *mongo.Collection
 	botCmdMenus         *mongo.Collection
 	teamsMeetings       *mongo.Collection
+	// *Secondary serve only staleness-tolerant display/list reads; every authz,
+	// dedup, read-modify-write, and read-after-write read keeps the primary handle.
+	roomsSecondary               *mongo.Collection
+	subscriptionsSecondary       *mongo.Collection
+	threadSubscriptionsSecondary *mongo.Collection
+	threadRoomsSecondary         *mongo.Collection
+	usersSecondary               *mongo.Collection
+	appsSecondary                *mongo.Collection
+	botCmdMenusSecondary         *mongo.Collection
 }
 
-func NewMongoStore(db *mongo.Database) *MongoStore {
+// StoreOption customizes MongoStore construction.
+type StoreOption func(*storeSettings)
+
+type storeSettings struct {
+	readPref *readpref.ReadPref
+}
+
+// WithReadPreference routes the store's staleness-tolerant reads to rp; a nil rp
+// keeps every read on the default.
+func WithReadPreference(rp *readpref.ReadPref) StoreOption {
+	return func(s *storeSettings) { s.readPref = rp }
+}
+
+func NewMongoStore(db *mongo.Database, opts ...StoreOption) *MongoStore {
+	var st storeSettings
+	for _, o := range opts {
+		o(&st)
+	}
+	secondary := func(coll *mongo.Collection) *mongo.Collection {
+		return mongoutil.CollectionWithReadPreference(coll, st.readPref)
+	}
+	rooms := db.Collection("rooms")
+	subscriptions := db.Collection("subscriptions")
+	threadSubscriptions := db.Collection("thread_subscriptions")
+	threadRooms := db.Collection("thread_rooms")
+	users := db.Collection("users")
+	apps := db.Collection("apps")
+	botCmdMenus := db.Collection("bot_cmd_menu")
 	return &MongoStore{
-		rooms:               db.Collection("rooms"),
-		subscriptions:       db.Collection("subscriptions"),
-		threadSubscriptions: db.Collection("thread_subscriptions"),
-		threadRooms:         db.Collection("thread_rooms"),
+		rooms:               rooms,
+		subscriptions:       subscriptions,
+		threadSubscriptions: threadSubscriptions,
+		threadRooms:         threadRooms,
 		roomMembers:         db.Collection("room_members"),
-		users:               db.Collection("users"),
-		apps:                db.Collection("apps"),
-		botCmdMenus:         db.Collection("bot_cmd_menu"),
+		users:               users,
+		apps:                apps,
+		botCmdMenus:         botCmdMenus,
 		teamsMeetings:       db.Collection("teams_meetings"),
+
+		roomsSecondary:               secondary(rooms),
+		subscriptionsSecondary:       secondary(subscriptions),
+		threadSubscriptionsSecondary: secondary(threadSubscriptions),
+		threadRoomsSecondary:         secondary(threadRooms),
+		usersSecondary:               secondary(users),
+		appsSecondary:                secondary(apps),
+		botCmdMenusSecondary:         secondary(botCmdMenus),
 	}
 }
 
@@ -138,6 +184,13 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 		Keys: bson.D{{Key: "u.account", Value: 1}, {Key: "name", Value: 1}},
 	}); err != nil {
 		return fmt.Errorf("ensure subscriptions (u.account,name) index: %w", err)
+	}
+	// Backs ComputeSectionOrder + section rebalance (filter u.account+sectionId,
+	// sort sectionOrder); without it, section moves fall back to an in-memory sort.
+	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "u.account", Value: 1}, {Key: "sectionId", Value: 1}, {Key: "sectionOrder", Value: 1}},
+	}); err != nil {
+		return fmt.Errorf("ensure subscriptions (u.account,sectionId,sectionOrder) index: %w", err)
 	}
 	// Backs getRoomSubscriptions: filter roomId, sort {joinedAt, _id} with
 	// skip/limit pagination. Including the sort keys lets Mongo return ordered
@@ -469,7 +522,11 @@ func (s *MongoStore) ListRoomsByIDs(ctx context.Context, ids []string) ([]model.
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	cursor, err := s.rooms.Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+	cursor, err := s.roomsSecondary.Find(ctx, bson.M{"_id": bson.M{"$in": ids}},
+		options.Find().SetProjection(bson.M{
+			"_id": 1, "siteId": 1, "name": 1, "userCount": 1, "appCount": 1,
+			"lastMsgId": 1, "lastMsgAt": 1, "lastMentionAllAt": 1, "minUserLastSeenAt": 1, "crossSite": 1,
+		}))
 	if err != nil {
 		return nil, fmt.Errorf("list rooms by ids: %w", err)
 	}
@@ -959,7 +1016,7 @@ func (s *MongoStore) ListOrgMembers(ctx context.Context, orgID string) ([]model.
 			"chineseName": 1,
 			"siteId":      1,
 		})
-	cursor, err := s.users.Find(ctx, bson.M{"$or": []bson.M{
+	cursor, err := s.usersSecondary.Find(ctx, bson.M{"$or": []bson.M{
 		{"sectId": orgID},
 		{"deptId": orgID},
 	}}, opts)
@@ -1126,7 +1183,8 @@ func (s *MongoStore) MoveSubscriptionSection(ctx context.Context, roomID, accoun
 
 // ComputeSectionOrder midpoints a new position within (account, sectionID). Two
 // small indexed reads in the placed case (the afterRoomID sub, then the next
-// higher order); one in the append case (the section max).
+// higher order); one in the append case (the section max). Both afterRoomID and
+// beforeRoomID empty ⇒ append at the section end (max order + 1).
 func (s *MongoStore) ComputeSectionOrder(ctx context.Context, account, sectionID, afterRoomID, beforeRoomID string) (float64, bool, error) {
 	secFilter := bson.M{"u.account": account, "sectionId": sectionID}
 	if beforeRoomID != "" {
@@ -1242,7 +1300,8 @@ func (s *MongoStore) RebalanceSection(ctx context.Context, account, sectionID st
 	}
 	models := make([]mongo.WriteModel, 0, len(subs))
 	for i := range subs {
-		subs[i].SectionOrder = float64(i + 1)
+		// Space by 10, not 1, so later midpoint inserts rarely exhaust the gap and re-rebalance.
+		subs[i].SectionOrder = float64((i + 1) * 10)
 		subs[i].SectionUpdatedAt = &now
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"roomId": subs[i].RoomID, "u.account": account}).
@@ -1302,7 +1361,7 @@ func (s *MongoStore) GetUserSiteID(ctx context.Context, account string) (string,
 	var doc struct {
 		SiteID string `bson:"siteId"`
 	}
-	err := s.users.FindOne(ctx, bson.M{"account": account},
+	err := s.usersSecondary.FindOne(ctx, bson.M{"account": account},
 		options.FindOne().SetProjection(bson.M{"siteId": 1, "_id": 0})).Decode(&doc)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
@@ -1400,6 +1459,9 @@ func (s *MongoStore) ListReadReceipts(
 			"u.account": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: platformAdminRegex()}},
 			"u.isBot":   bson.M{"$ne": true},
 		}}},
+		// $lookup justification: joins each reader's users doc for display fields
+		// (name), keyed by the indexed _id and bounded by the $limit below;
+		// app-side composition would be one extra round-trip per reader.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "users",
 			"let":  bson.M{"uid": "$u._id"},
@@ -1416,7 +1478,7 @@ func (s *MongoStore) ListReadReceipts(
 		{{Key: "$replaceWith", Value: "$user"}},
 		{{Key: "$limit", Value: int64(limit)}},
 	}
-	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
+	cursor, err := s.subscriptionsSecondary.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate read receipts for room %q: %w", roomID, err)
 	}
@@ -1455,6 +1517,9 @@ func (s *MongoStore) ListThreadReadReceipts(
 			// addition to excluding the sender.
 			"userAccount": bson.M{"$ne": excludeAccount, "$not": bson.Regex{Pattern: botOrPlatformAdminRegex()}},
 		}}},
+		// $lookup justification: joins each reader's users doc for display fields
+		// (name), keyed by the indexed _id and bounded by the $limit below;
+		// app-side composition would be one extra round-trip per reader.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "users",
 			"let":  bson.M{"uid": "$userId"},
@@ -1471,7 +1536,7 @@ func (s *MongoStore) ListThreadReadReceipts(
 		{{Key: "$replaceWith", Value: "$user"}},
 		{{Key: "$limit", Value: int64(limit)}},
 	}
-	cursor, err := s.threadSubscriptions.Aggregate(ctx, pipeline)
+	cursor, err := s.threadSubscriptionsSecondary.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate thread read receipts for thread room %q: %w", threadRoomID, err)
 	}
@@ -1554,7 +1619,7 @@ func (s *MongoStore) ListDefaultChannelTabApps(ctx context.Context) ([]model.App
 			"assistant":  1,
 			"channelTab": 1,
 		})
-	cursor, err := s.apps.Find(ctx, bson.M{
+	cursor, err := s.appsSecondary.Find(ctx, bson.M{
 		"channelTab.enabled": true,
 		"channelTab.default": true,
 	}, opts)
@@ -1576,6 +1641,9 @@ func (s *MongoStore) ListDefaultChannelTabApps(ctx context.Context) ([]model.App
 func (s *MongoStore) ListRoomBotApps(ctx context.Context, roomID string) ([]RoomBotAppEntry, error) {
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"roomId": roomID, "u.isBot": true}}},
+		// $lookup justification: resolves each bot subscription's apps doc (assistant
+		// metadata) keyed by the indexed account; the room's bot set is tiny and
+		// app-side composition would be one extra query per bot.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "apps",
 			"let":  bson.M{"acct": "$u.account"},
@@ -1596,7 +1664,7 @@ func (s *MongoStore) ListRoomBotApps(ctx context.Context, roomID string) ([]Room
 		{{Key: "$replaceRoot", Value: bson.M{"newRoot": "$app"}}},
 		{{Key: "$sort", Value: bson.D{{Key: "assistantName", Value: 1}}}},
 	}
-	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
+	cursor, err := s.subscriptionsSecondary.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("list room bot apps for %q: %w", roomID, err)
 	}
@@ -1622,7 +1690,7 @@ func (s *MongoStore) ListActiveCmdMenus(ctx context.Context, assistantNames []st
 			"name":      1,
 			"cmdBlocks": 1,
 		})
-	cursor, err := s.botCmdMenus.Find(ctx, bson.M{
+	cursor, err := s.botCmdMenusSecondary.Find(ctx, bson.M{
 		"activeStatus": true,
 		"name":         bson.M{"$in": assistantNames},
 	}, opts)
@@ -1675,7 +1743,7 @@ func (s *MongoStore) ListMemberStatuses(ctx context.Context, roomID string, limi
 		}}},
 		{{Key: "$limit", Value: int64(limit)}},
 	}
-	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
+	cursor, err := s.subscriptionsSecondary.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate member statuses for %q: %w", roomID, err)
 	}
@@ -1708,6 +1776,9 @@ func (s *MongoStore) ListMentionableSubscriptions(
 				"$not": bson.M{"$regex": platformAdminRegex()},
 			},
 		}}},
+		// $lookup justification: joins each candidate's users doc for mention display
+		// fields (name/site), keyed by the indexed account and capped at $limit 1;
+		// app-side composition would be one extra query per mentionable.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "users",
 			"let":  bson.M{"acct": "$u.account"},
@@ -1720,6 +1791,9 @@ func (s *MongoStore) ListMentionableSubscriptions(
 			},
 			"as": "_users",
 		}}},
+		// $lookup justification: joins the bot's apps doc for mention display, keyed
+		// by the indexed assistant.name and capped at $limit 1; app-side composition
+		// would be one extra query per mentionable bot.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "apps",
 			"let":  bson.M{"acct": "$u.account"},
@@ -1781,7 +1855,7 @@ func (s *MongoStore) ListMentionableSubscriptions(
 		}}},
 	}
 
-	cursor, err := s.subscriptions.Aggregate(ctx, pipeline)
+	cursor, err := s.subscriptionsSecondary.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate mentionable subscriptions for %q: %w", roomID, err)
 	}
@@ -1869,8 +1943,9 @@ func (s *MongoStore) UpdateRoomVisibility(ctx context.Context, roomID string, re
 // flags to every subscription of the room. When restricted=true and ownerAccount
 // is non-empty, an aggregation-pipeline $cond also rewrites roles so only
 // ownerAccount holds RoleOwner — atomically, so the restrict transition cannot
-// land in a zero-owner state. Returns ErrOwnerNotSubscribed when ownerAccount
-// has no active subscription in the room.
+// land in a zero-owner state. An empty ownerAccount writes the flags alone and
+// leaves roles untouched. Returns ErrOwnerNotSubscribed when ownerAccount has no
+// active subscription in the room.
 func (s *MongoStore) ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error {
 	filter := bson.M{"roomId": roomID}
 
@@ -1914,6 +1989,8 @@ func (s *MongoStore) ApplySubscriptionRestriction(ctx context.Context, roomID st
 // ListSubscriptionsByRoom returns every subscription in the room. Callers only
 // read the subscriber account, so project just that field.
 func (s *MongoStore) ListSubscriptionsByRoom(ctx context.Context, roomID string) ([]model.Subscription, error) {
+	// Primary: this list drives event fan-out and room-restrict right after
+	// membership/message writes, so a lagging secondary could miss a just-added member.
 	cursor, err := s.subscriptions.Find(ctx,
 		bson.M{"roomId": roomID},
 		options.Find().SetProjection(bson.M{"_id": 0, "u.account": 1}),
@@ -1935,7 +2012,7 @@ func (s *MongoStore) FindUsersByAccounts(ctx context.Context, accounts []string)
 	if len(accounts) == 0 {
 		return nil, nil
 	}
-	cursor, err := s.users.Find(ctx,
+	cursor, err := s.usersSecondary.Find(ctx,
 		bson.M{"account": bson.M{"$in": accounts}},
 		options.Find().SetProjection(bson.M{"_id": 0, "siteId": 1}),
 	)
@@ -2022,7 +2099,7 @@ func (s *MongoStore) UpdateThreadRoomMinUserLastSeenAt(ctx context.Context, thre
 // GetThreadRoomInfos returns each existing thread room's lastMsgAt via a single
 // projected find; missing thread rooms are omitted.
 func (s *MongoStore) GetThreadRoomInfos(ctx context.Context, threadRoomIDs []string) ([]ThreadRoomInfoRow, error) {
-	cursor, err := s.threadRooms.Find(ctx,
+	cursor, err := s.threadRoomsSecondary.Find(ctx,
 		bson.M{"_id": bson.M{"$in": threadRoomIDs}},
 		options.Find().SetProjection(bson.M{"_id": 1, "lastMsgAt": 1}),
 	)

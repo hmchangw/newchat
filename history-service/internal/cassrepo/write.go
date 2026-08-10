@@ -370,12 +370,11 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 	return deletedAt, true, newTcount, newTlm, nil
 }
 
-// countThreadReplies returns the bounded, soft-delete-aware reply count and the
+// countThreadReplies returns the exact, soft-delete-aware reply count and the
 // latest surviving reply's created_at (tlm; nil when none survive) for the
 // thread. It delegates to pkg/threadcount so this delete-path writer and the
-// message-worker add-path writer compute an identical, identically-capped count
-// (see pkg/threadcount.Cap). tlm is the newest survivor — the partition's DESC
-// clustering order surfaces it within the bounded scan.
+// message-worker add-path writer compute an identical count. tlm is the newest
+// survivor — the partition's DESC clustering order surfaces it first.
 func (r *Repository) countThreadReplies(ctx context.Context, threadRoomID string) (int, *time.Time, error) {
 	return threadcount.CountAndLatest(ctx, r.session, threadRoomID)
 }

@@ -1,0 +1,13 @@
+name: chat-local-ui
+
+# chat-frontend :3000, admin-frontend :3001. Kept out of compose.services.yaml
+# because chat-frontend's port is the one `npm run dev` binds.
+#
+# Start: make ui-up   Stop: make ui-down   Needs: make deps-up, make up
+include:
+  - ../chat-frontend/deploy/docker-compose.yml
+  - ../admin-frontend/deploy/docker-compose.yml
+
+networks:
+  chat-local:
+    external: true

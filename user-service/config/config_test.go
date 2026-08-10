@@ -1,11 +1,26 @@
 package config
 
 import (
+	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// unsetEnv removes key for the duration of the test and restores its prior
+// presence/value on cleanup, so a default-value test can't be perturbed by an
+// externally set variable.
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	prev, had := os.LookupEnv(key)
+	require.NoError(t, os.Unsetenv(key))
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, prev)
+		}
+	})
+}
 
 func TestLoad(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
@@ -34,6 +49,7 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
 	t.Setenv("SITE_ID", "site-a")
+	unsetEnv(t, "MONGO_READ_PREFERENCE") // the default only applies when unset
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, 1000, cfg.MaxSubscriptionLimit)
@@ -42,6 +58,7 @@ func TestLoad_Defaults(t *testing.T) {
 	require.Equal(t, 20, cfg.DefaultAppsLimit)
 	require.Equal(t, 15*time.Second, cfg.HandlerTimeout)
 	require.Equal(t, 256, cfg.MaxConcurrency)
+	require.Equal(t, "secondaryPreferred", cfg.Mongo.ReadPreference)
 }
 
 func TestLoad_MaxConcurrency(t *testing.T) {
@@ -70,6 +87,29 @@ func TestLoad_MaxConcurrency(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "MAX_CONCURRENCY")
 	})
+}
+
+func TestLoad_RejectsInvalidReadPreference(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_READ_PREFERENCE", "quorum")
+	_, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "MONGO_READ_PREFERENCE")
+}
+
+func TestLoad_AcceptsValidReadPreferences(t *testing.T) {
+	for _, rp := range []string{"primary", "primaryPreferred", "secondary", "secondaryPreferred", "nearest"} {
+		t.Run(rp, func(t *testing.T) {
+			t.Setenv("MONGO_URI", "mongodb://x")
+			t.Setenv("NATS_URL", "nats://x")
+			t.Setenv("SITE_ID", "site-a")
+			t.Setenv("MONGO_READ_PREFERENCE", rp)
+			_, err := Load()
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestLoad_MissingRequired(t *testing.T) {

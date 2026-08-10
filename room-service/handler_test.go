@@ -5370,7 +5370,9 @@ func TestHandleRoomRestricted_Validation(t *testing.T) {
 				tt.setupStore(store)
 			}
 			h := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
-				func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, nil, 0, subject.RouteGlobal)
+				func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+				func(_ context.Context, _ string, _ []byte) error { return nil },
+				nil, 0, subject.RouteGlobal)
 
 			resp, err := h.roomRestricted(ctxParams(map[string]string{}), tt.req)
 			if tt.wantErr == nil {
@@ -5384,6 +5386,81 @@ func TestHandleRoomRestricted_Validation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A restriction change publishes a flat room event so clients refresh their local
+// state, but no system message, so nothing is rendered in the timeline. The
+// cross-site fan-out still carries the state to remote sites.
+func TestHandleRoomRestricted_PublishesEventNotSysMessage(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().GetUser(gomock.Any(), "admin1").Return(&model.User{Account: "admin1", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, Restricted: false, UserCount: 10}, nil)
+	store.EXPECT().CheckMembership(gomock.Any(), "owner1", "r1").Return(nil)
+	store.EXPECT().UpdateRoomVisibility(gomock.Any(), "r1", true, true).Return(nil)
+	store.EXPECT().ApplySubscriptionRestriction(gomock.Any(), "r1", true, true, "owner1", gomock.Any()).Return(nil)
+	// A member homed elsewhere, so the cross-site fan-out actually runs and the
+	// "state still propagates" half of the claim is testable.
+	store.EXPECT().ListSubscriptionsByRoom(gomock.Any(), "r1").Return([]model.Subscription{
+		{User: model.SubscriptionUser{Account: "bob"}},
+	}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
+		{Account: "bob", SiteID: "site-b"},
+	}, nil)
+
+	var published []string
+	type corePub struct {
+		subj string
+		data []byte
+	}
+	var cores []corePub
+	h := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
+		func(_ context.Context, subj string, _ []byte, _ string) error {
+			published = append(published, subj)
+			return nil
+		},
+		func(_ context.Context, subj string, data []byte) error {
+			cores = append(cores, corePub{subj: subj, data: append([]byte(nil), data...)})
+			return nil
+		}, nil, 0, subject.RouteGlobal)
+
+	_, err := h.roomRestricted(ctxParams(map[string]string{}), model.RoomRestrictedRequest{
+		RoomID: "r1", Account: "admin1", Restricted: true, ExternalAccess: true,
+		OwnerAccount: "owner1",
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, published, subject.MsgCanonicalCreated("site-a"),
+		"a restriction change must not reach the canonical message stream")
+
+	// The flat room event carries the new state to connected clients.
+	var evt *model.RoomRestrictedRoomEvent
+	for _, p := range cores {
+		if p.subj != subject.RoomEvent("r1", true) {
+			continue
+		}
+		var got model.RoomRestrictedRoomEvent
+		require.NoError(t, json.Unmarshal(p.data, &got))
+		if got.Type == model.RoomEventRoomRestricted {
+			evt = &got
+		}
+	}
+	require.NotNil(t, evt, "expected a room_restricted room event on the room subject")
+	assert.Equal(t, "r1", evt.RoomID)
+	assert.Equal(t, "site-a", evt.SiteID)
+	assert.True(t, evt.Restricted)
+	assert.True(t, evt.ExternalAccess)
+	assert.Equal(t, "owner1", evt.OwnerAccount)
+	assert.Equal(t, "admin1", evt.ByAccount)
+
+	var federated bool
+	for _, subj := range published {
+		if _, dest, e, ok := subject.ParseOutbox(subj); ok && dest == "site-b" && e == model.InboxRoomRestricted {
+			federated = true
+		}
+	}
+	assert.True(t, federated, "cross-site fan-out must still run")
 }
 
 // TestHandleRoomRestricted_MultiSite_FederatesPerDestination verifies the
@@ -5417,7 +5494,9 @@ func TestHandleRoomRestricted_MultiSite_FederatesPerDestination(t *testing.T) {
 		func(_ context.Context, subj string, data []byte, _ string) error {
 			publishes = append(publishes, pub{subj: subj, data: append([]byte(nil), data...)})
 			return nil
-		}, nil, nil, 0, subject.RouteGlobal)
+		},
+		func(_ context.Context, _ string, _ []byte) error { return nil },
+		nil, 0, subject.RouteGlobal)
 
 	req := model.RoomRestrictedRequest{RoomID: "r1", Account: "admin1", Restricted: false}
 	resp, err := h.roomRestricted(ctxParams(map[string]string{}), req)

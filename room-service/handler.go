@@ -20,7 +20,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
@@ -1952,8 +1951,9 @@ func (h *Handler) roomRename(c *natsrouter.Context, req model.RoomRenameRequest)
 
 // roomRestricted is the sync chat.server.> RPC. Account in the body is
 // the audit identity (no subject prefix authenticates the caller — this RPC
-// is server-side admin tooling). Mongo writes + sys-message publish + inbox
-// fan-out happen inline; caller retries safely via dedup IDs.
+// is server-side admin tooling). Mongo writes and the inbox fan-out happen
+// inline and the caller retries safely via dedup IDs; the room event that ends
+// the handler is best-effort and carries none.
 func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestrictedRequest) (*model.StatusWithRequestReply, error) {
 	var ctx context.Context = c
 	requestID := natsutil.RequestIDFromContext(c)
@@ -1962,10 +1962,15 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 		return nil, fmt.Errorf("%w: roomId and account are required", errInvalidRestrictedSubject)
 	}
 
-	// Admin-only RPC is rare; info-level audit trail is justified.
+	// Admin-only RPC is rare; info-level audit trail is justified. No system
+	// message is published for a restriction change, so this line is the only
+	// durable record of the flags moving and who was made owner.
 	slog.Info("processing room.restricted",
 		"requester", req.Account,
 		"roomID", req.RoomID,
+		"restricted", req.Restricted,
+		"externalAccess", req.ExternalAccess,
+		"ownerAccount", req.OwnerAccount,
 		"request_id", requestID)
 
 	requesterUser, getUserErr := h.store.GetUser(ctx, req.Account)
@@ -2021,39 +2026,6 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 		return nil, fmt.Errorf("apply subscription restricted: %w", err)
 	}
 
-	sysData, err := json.Marshal(model.RoomRestrictedSysData{
-		Restricted:     req.Restricted,
-		ExternalAccess: req.ExternalAccess,
-		ByAccount:      req.Account,
-		OwnerAccount:   req.OwnerAccount,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal restricted sys data: %w", err)
-	}
-	requesterDisplay := displayfmt.CombineWithFallback(requesterUser.EngName, requesterUser.ChineseName, requesterUser.Account)
-	sysMsg := model.Message{
-		ID:          idgen.MessageIDFromRequestID(requestID, "room_restricted"),
-		RoomID:      req.RoomID,
-		UserAccount: req.Account,
-		Type:        model.MessageTypeRoomRestricted,
-		Content:     fmt.Sprintf("%q changed the channel restricted state", requesterDisplay),
-		SysMsgData:  sysData,
-		CreatedAt:   time.UnixMilli(req.Timestamp).UTC(),
-	}
-	msgEvt := model.MessageEvent{
-		Event:     model.EventCreated,
-		Message:   sysMsg,
-		SiteID:    h.siteID,
-		Timestamp: req.Timestamp,
-	}
-	msgEvtData, err := json.Marshal(msgEvt)
-	if err != nil {
-		return nil, fmt.Errorf("marshal sys message event: %w", err)
-	}
-	if err := h.publishToStream(ctx, subject.MsgCanonicalCreated(h.siteID), msgEvtData, natsutil.CanonicalDedupID(&msgEvt)); err != nil {
-		return nil, fmt.Errorf("publish room_restricted sys message: %w", err)
-	}
-
 	subs, err := h.store.ListSubscriptionsByRoom(ctx, req.RoomID)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
@@ -2095,6 +2067,37 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 			}
 		}
 	}
+
+	// A live room event, not a system message: connected clients refresh their
+	// local restricted/externalAccess state without a re-fetch, and nothing is
+	// rendered in the timeline. The message form was removed outright — a
+	// restriction change is an administrative act, not room content — but
+	// MessageTypeRoomRestricted stays registered in pkg/model.systemMessageTypes,
+	// because rooms still hold messages of that type from before the change and
+	// they must keep being excluded from previews and pushes.
+	//
+	// Published last and best-effort: everything that can still fail the RPC has
+	// committed, so clients are never told a change the caller sees fail, and a
+	// publish failure never fails the caller.
+	roomEvt := model.RoomRestrictedRoomEvent{
+		Type:           model.RoomEventRoomRestricted,
+		RoomID:         req.RoomID,
+		SiteID:         h.siteID,
+		Timestamp:      time.Now().UTC().UnixMilli(),
+		Restricted:     req.Restricted,
+		ExternalAccess: req.ExternalAccess,
+		OwnerAccount:   req.OwnerAccount,
+		ByAccount:      req.Account,
+		ChangedAt:      time.UnixMilli(req.Timestamp).UTC(),
+	}
+	evtData, mErr := json.Marshal(roomEvt)
+	if mErr != nil {
+		slog.ErrorContext(ctx, "marshal room_restricted event failed",
+			"error", mErr, "roomID", req.RoomID, "request_id", requestID)
+		return &model.StatusWithRequestReply{Status: "ok", RequestID: requestID}, nil
+	}
+	h.publishRoomEvent(ctx, req.RoomID, room.CrossSite, room.CrossSiteAt, evtData, "room_restricted",
+		"request_id", requestID)
 
 	return &model.StatusWithRequestReply{Status: "ok", RequestID: requestID}, nil
 }

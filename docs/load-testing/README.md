@@ -6,6 +6,9 @@ component-specific and system-wide test plans.
 
 ## Current Plans
 
+- [`system/sli-slo.md`](system/sli-slo.md) is the platform's user-facing
+  SLI/SLO specification — the acceptance criteria all system-level load tests
+  assert against.
 - [`cassandra/soak-test-plan.md`](cassandra/soak-test-plan.md) is the
   authoritative specification for the Cassandra Run A pre-production soak.
 - [`cassandra/run-a-implementation-plan.md`](cassandra/run-a-implementation-plan.md)

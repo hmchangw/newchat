@@ -74,6 +74,22 @@ func (r *Repository) scanMessagesUpTo(ctx context.Context) func(iter *gocql.Iter
 	}
 }
 
+// fillMessagePage runs a bucketed message-table walk with the repository's
+// shared walk parameters (bucket sizer, max-walk depth, fan-out, row scan) bound
+// in, so each reader supplies only what varies: direction, bounds, and the
+// per-bucket query builder. A new walk-level parameter is then a one-line change
+// here rather than an edit at every reader.
+func (r *Repository) fillMessagePage(ctx context.Context, direction walkDirection, startBucket, floorBucket int64, pageReq PageRequest, initialPageState []byte, queryFn bucketQueryFn) (Page[models.Message], error) {
+	res, err := fillPage[models.Message](
+		ctx, r.bucket, direction, startBucket, floorBucket, r.maxBuckets,
+		pageReq.PageSize, initialPageState, r.walkFanout, queryFn, r.scanMessagesUpTo(ctx),
+	)
+	if err != nil {
+		return Page[models.Message]{}, err
+	}
+	return res.toPage(), nil
+}
+
 func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, before time.Time, floor time.Time, pageReq PageRequest) (Page[models.Message], error) {
 	floorBucket := r.bucket.Of(floor)
 	startBucket, initialPageState, err := startBucketFromCursor(pageReq, walkDesc, r.bucket.Of(before), floorBucket)
@@ -94,14 +110,11 @@ func (r *Repository) GetMessagesBefore(ctx context.Context, roomID string, befor
 		)
 	}
 
-	res, err := fillPage[models.Message](
-		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
-	)
+	page, err := r.fillMessagePage(ctx, walkDesc, startBucket, floorBucket, pageReq, initialPageState, queryFn)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages before: %w", err)
 	}
-	return res.toPage(), nil
+	return page, nil
 }
 
 func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, since, before time.Time, pageReq PageRequest) (Page[models.Message], error) {
@@ -141,14 +154,11 @@ func (r *Repository) GetMessagesBetweenDesc(ctx context.Context, roomID string, 
 		}
 	}
 
-	res, err := fillPage[models.Message](
-		ctx, r.bucket, walkDesc, startBucket, floorBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
-	)
+	page, err := r.fillMessagePage(ctx, walkDesc, startBucket, floorBucket, pageReq, initialPageState, queryFn)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages between desc: %w", err)
 	}
-	return res.toPage(), nil
+	return page, nil
 }
 
 func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after time.Time, ceiling time.Time, pageReq PageRequest) (Page[models.Message], error) {
@@ -171,14 +181,11 @@ func (r *Repository) GetMessagesAfter(ctx context.Context, roomID string, after 
 		)
 	}
 
-	res, err := fillPage[models.Message](
-		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
-	)
+	page, err := r.fillMessagePage(ctx, walkAsc, startBucket, ceilingBucket, pageReq, initialPageState, queryFn)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get messages after: %w", err)
 	}
-	return res.toPage(), nil
+	return page, nil
 }
 
 func (r *Repository) GetAllMessagesAsc(ctx context.Context, roomID string, floor time.Time, ceiling time.Time, pageReq PageRequest) (Page[models.Message], error) {
@@ -195,12 +202,9 @@ func (r *Repository) GetAllMessagesAsc(ctx context.Context, roomID string, floor
 		)
 	}
 
-	res, err := fillPage[models.Message](
-		ctx, r.bucket, walkAsc, startBucket, ceilingBucket, r.maxBuckets,
-		pageReq.PageSize, initialPageState, queryFn, r.scanMessagesUpTo(ctx),
-	)
+	page, err := r.fillMessagePage(ctx, walkAsc, startBucket, ceilingBucket, pageReq, initialPageState, queryFn)
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("get all messages asc: %w", err)
 	}
-	return res.toPage(), nil
+	return page, nil
 }

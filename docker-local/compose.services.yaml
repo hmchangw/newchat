@@ -61,6 +61,7 @@ services:
   room-worker: *local-o11y
   search-service: *local-o11y
   search-sync-worker: *local-o11y
+  tcard-service: *local-o11y
   upload-service: *local-o11y
   user-presence-service: *local-o11y
   user-service: *local-o11y
@@ -80,7 +81,7 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
     ports:
-      - "7777:7777"
+      - "${GATEWAY_HOST_PORT:-7777}:7777"
     volumes:
       - ./traefik/dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro
     healthcheck:

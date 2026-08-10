@@ -34,6 +34,7 @@ func TestDryRunSummary_HasAllRowCounts(t *testing.T) {
 	got := dryRunSummary()
 	for _, want := range []string{
 		"users 11",
+		"hr_employee 10",
 		"rooms 6",
 		"subscriptions 23",
 		"room_members 19",

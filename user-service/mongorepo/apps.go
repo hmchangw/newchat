@@ -26,6 +26,11 @@ type AppRepo struct {
 	items *mongoutil.Collection[models.AppListItem]
 	// categories is the fab-domain → site mapping backing apps.categories.
 	categories *mongoutil.Collection[appCategoryDoc]
+	// *Secondary route browse/list/enrichment reads; GetApp (gates
+	// create-vs-reactivate) keeps the primary apps handle.
+	appsSecondary       *mongoutil.Collection[model.App]
+	itemsSecondary      *mongoutil.Collection[models.AppListItem]
+	categoriesSecondary *mongoutil.Collection[appCategoryDoc]
 }
 
 // appCategoryDoc decodes a fab_domain_mapping row. _id is a native Mongo
@@ -39,12 +44,19 @@ type appCategoryDoc struct {
 }
 
 // NewAppRepo builds an AppRepo over db.
-func NewAppRepo(db *mongo.Database) *AppRepo {
+func NewAppRepo(db *mongo.Database, opts ...Option) *AppRepo {
+	s := applyOptions(opts)
 	col := db.Collection(appsCollection)
+	apps := mongoutil.NewCollection[model.App](col)
+	items := mongoutil.NewCollection[models.AppListItem](col)
+	categories := mongoutil.NewCollection[appCategoryDoc](db.Collection(fabDomainMappingCollection))
 	return &AppRepo{
-		apps:       mongoutil.NewCollection[model.App](col),
-		items:      mongoutil.NewCollection[models.AppListItem](col),
-		categories: mongoutil.NewCollection[appCategoryDoc](db.Collection(fabDomainMappingCollection)),
+		apps:                apps,
+		items:               items,
+		categories:          categories,
+		appsSecondary:       apps.WithReadPreference(s.readPref),
+		itemsSecondary:      items.WithReadPreference(s.readPref),
+		categoriesSecondary: categories.WithReadPreference(s.readPref),
 	}
 }
 
@@ -78,6 +90,9 @@ func (r *AppRepo) GetApp(ctx context.Context, appID string) (*model.App, error) 
 // hasMore flag (the query over-fetches by one).
 func (r *AppRepo) ListApps(ctx context.Context, account string, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[models.AppListItem], error) {
 	pipeline := bson.A{
+		// $lookup justification: derives isSubscribed per app from the caller's
+		// subscriptions in a single paged query; app-side composition would need a
+		// second round-trip per page and can't feed the $addFields/$sort below.
 		bson.M{"$lookup": bson.M{
 			"from": subscriptionsCollection,
 			"let":  bson.M{"botName": "$assistant.name"},
@@ -94,7 +109,7 @@ func (r *AppRepo) ListApps(ctx context.Context, account string, page mongoutil.O
 		bson.M{"$project": bson.M{"sub": 0}},
 		bson.M{"$sort": bson.M{"name": 1}},
 	}
-	out, err := r.items.AggregatePagedHasMore(ctx, pipeline, page)
+	out, err := r.itemsSecondary.AggregatePagedHasMore(ctx, pipeline, page)
 	if err != nil {
 		return mongoutil.OffsetPageHasMore[models.AppListItem]{}, fmt.Errorf("aggregate apps page: %w", err)
 	}
@@ -104,7 +119,7 @@ func (r *AppRepo) ListApps(ctx context.Context, account string, page mongoutil.O
 // ListAppCategories returns all mappings sorted by name; the collection is small, so no pagination.
 // The _id tiebreaker makes ordering deterministic when two rows share a name.
 func (r *AppRepo) ListAppCategories(ctx context.Context) ([]models.AppCategory, error) {
-	docs, err := r.categories.FindMany(ctx, bson.M{},
+	docs, err := r.categoriesSecondary.FindMany(ctx, bson.M{},
 		mongoutil.WithSort(bson.D{{Key: "name", Value: 1}, {Key: "_id", Value: 1}}),
 		mongoutil.WithProjection(bson.D{
 			{Key: "_id", Value: 1},
@@ -123,7 +138,7 @@ func (r *AppRepo) ListAppCategories(ctx context.Context) ([]models.AppCategory, 
 
 // GetAppsByAssistants maps bot account (assistant.name) → the full app document for the given accounts.
 func (r *AppRepo) GetAppsByAssistants(ctx context.Context, botAccounts []string) (map[string]*model.App, error) {
-	apps, err := r.apps.FindMany(ctx, bson.M{"assistant.name": bson.M{"$in": botAccounts}})
+	apps, err := r.appsSecondary.FindMany(ctx, bson.M{"assistant.name": bson.M{"$in": botAccounts}})
 	if err != nil {
 		return nil, fmt.Errorf("find apps by assistant names: %w", err)
 	}
