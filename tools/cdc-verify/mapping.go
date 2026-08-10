@@ -138,9 +138,3 @@ func loadMapping(path string) (*Mapping, error) {
 	}
 	return &m, nil
 }
-
-// validateMapping is a temporary stub for Task 3. Task 4 will move this to
-// mapping_validate.go and implement the actual validation logic.
-func validateMapping(*Mapping) error {
-	return nil
-}
