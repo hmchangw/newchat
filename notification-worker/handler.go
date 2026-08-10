@@ -38,6 +38,7 @@ type HandlerDeps struct {
 	Followers          ThreadFollowerLister
 	Parent             ParentFetcher // resolves a thread's parent author + createdAt from history-service
 	Presence           PresenceSnapshotter
+	Settings           UserSettingsSnapshotter // nil → noopUserSettings (pre-enforcement behaviour)
 	Hook               Vetoer
 	Emitter            Emitter
 	RoomMeta           RoomMetaGetter // nil → title falls back to sender.Account
@@ -46,7 +47,7 @@ type HandlerDeps struct {
 }
 
 // Handler runs the per-message fan-out pipeline: exclusion filters, hook veto, EligibleForPush
-// routing, then presence-gated shouldPush — one Emitter.Emit per surviving recipient.
+// routing, then the settings- and presence-gated shouldPush — one Emitter.Emit per surviving recipient.
 type Handler struct {
 	deps HandlerDeps
 }
@@ -65,6 +66,9 @@ func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one
 	}
 	if deps.RecipientBatchSize <= 0 {
 		deps.RecipientBatchSize = defaultRecipientBatchSize
+	}
+	if deps.Settings == nil {
+		deps.Settings = noopUserSettings{}
 	}
 	return &Handler{deps: deps}
 }
@@ -194,13 +198,18 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		return nil
 	}
 
+	// Both lookups run over the narrowed candidate set, and settings must be in
+	// hand before presence is evaluated because showNotificationsInCall modifies
+	// the presence decision. TestHandle_SettingsFetchedOnlyForSurvivingCandidates
+	// pins this placement.
+	settings, _ := h.deps.Settings.Snapshot(ctx, accounts) // fail-open: error → empty map
 	snapshot, _ := h.deps.Presence.Snapshot(ctx, accounts) // fail-open: error → empty map
 
 	// Sort survivors so batch N has a deterministic account set across redeliveries — required for the {messageID}-b{N} Nats-Msg-Id to dedup correctly.
 	survivors := make([]string, 0, len(candidates))
 	for _, c := range candidates {
-		// Task 4 replaces the zero value with the recipient's real settings.
-		if !shouldPush(snapshot[c.Account], notifSettings{}, false) {
+		ns := settings[c.Account]
+		if !shouldPush(snapshot[c.Account], ns, ns.isPriority(msg.UserAccount)) {
 			continue
 		}
 		survivors = append(survivors, c.Account)

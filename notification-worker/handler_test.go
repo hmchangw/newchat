@@ -94,6 +94,62 @@ func (rejectHook) Allow(context.Context, *model.Message, roomsubcache.Member) (b
 	return false, nil
 }
 
+// stubSettings records the accounts slice it was called with so tests can pin
+// where in the pipeline the fetch runs.
+type stubSettings struct {
+	mu       sync.Mutex
+	out      map[string]notifSettings
+	err      error
+	gotCalls [][]string
+}
+
+func (s *stubSettings) Snapshot(_ context.Context, accounts []string) (map[string]notifSettings, error) {
+	s.mu.Lock()
+	got := make([]string, len(accounts))
+	copy(got, accounts)
+	s.gotCalls = append(s.gotCalls, got)
+	s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.out, nil
+}
+
+func (s *stubSettings) lastAccounts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.gotCalls) == 0 {
+		return nil
+	}
+	return s.gotCalls[len(s.gotCalls)-1]
+}
+
+// accountVetoer rejects exactly the named accounts, so a test can exercise the
+// hook-veto exclusion without rejectHook's all-or-nothing behaviour.
+type accountVetoer struct {
+	deny map[string]struct{}
+}
+
+func (a accountVetoer) Allow(_ context.Context, _ *model.Message, m roomsubcache.Member) (bool, error) {
+	_, denied := a.deny[m.Account]
+	return !denied, nil
+}
+
+// newTestHandlerWithSettings mirrors newTestHandler but injects a settings
+// snapshotter and a caller-supplied Vetoer.
+func newTestHandlerWithSettings(members MemberCache, presence PresenceSnapshotter, settings UserSettingsSnapshotter, hook Vetoer, emit Emitter) *Handler {
+	return NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          &stubFollowers{},
+		Parent:             stubParent{},
+		Presence:           presence,
+		Settings:           settings,
+		Hook:               hook,
+		Emitter:            emit,
+		LargeRoomThreshold: 500,
+	})
+}
+
 type recordingEmitter struct {
 	mu      sync.Mutex
 	emitted []model.PushNotificationEvent
@@ -1079,3 +1135,98 @@ func TestHandle_DoesNotInvalidateOnRegularMessage(t *testing.T) {
 		assert.NotContains(t, c, "inval:", "regular messages must not invalidate cache")
 	}
 }
+
+// TestHandle_SettingsFetchedOnlyForSurvivingCandidates pins the design: the fetch
+// sits after the candidate loop, so it must never see accounts that an upstream
+// filter already excluded. Hoisting it above the loop fails this loudly.
+func TestHandle_SettingsFetchedOnlyForSurvivingCandidates(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},              // sender — excluded
+			{ID: "bob", Account: "bob", Muted: true},     // muted — excluded
+			{ID: "carol", Account: "carol", IsBot: true}, // bot — excluded by EligibleForPush
+			{ID: "dave", Account: "dave", HistorySharedSince: int64Ptr(time.Now().Add(time.Hour).UnixMilli())}, // restricted — excluded
+			{ID: "frank", Account: "frank"}, // hook veto — excluded
+			{ID: "erin", Account: "erin"},   // survivor
+		},
+	}}
+	settings := &stubSettings{out: map[string]notifSettings{}}
+	emit := &recordingEmitter{}
+	hook := accountVetoer{deny: map[string]struct{}{"frank": {}}}
+	h := newTestHandlerWithSettings(members, noopPresenceSnapshotter{}, settings, hook, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		CreatedAt: time.Now(),
+	})))
+
+	assert.Equal(t, []string{"erin"}, settings.lastAccounts(),
+		"settings must be fetched only for accounts that survived the candidate loop")
+	assert.Equal(t, []string{"erin"}, emit.accounts())
+}
+
+func TestHandle_SettingsErrorFailsOpen(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob"}, {ID: "carol", Account: "carol"}},
+	}}
+	settings := &stubSettings{err: errors.New("mongo: connection refused")}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithSettings(members, noopPresenceSnapshotter{}, settings, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"bob", "carol"}, emit.accounts(),
+		"a settings read failure must not silence pushes")
+}
+
+func TestHandle_SettingsPartialMapFailsOpenForAbsentAccounts(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob"}, {ID: "carol", Account: "carol"}},
+	}}
+	settings := &stubSettings{out: map[string]notifSettings{
+		"bob": {muteAll: true}, // carol is absent → zero value → pushes
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithSettings(members, noopPresenceSnapshotter{}, settings, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"carol"}, emit.accounts(),
+		"bob is muted; carol is absent from the map and takes the zero value")
+}
+
+// TestHandle_BotAuthoredMessagePiercesMute is the Spec 1 affordance that only pays
+// off because the gate runs in bot mode too: a .bot account listed as a priority
+// contact pierces muteAllNotifications.
+func TestHandle_BotAuthoredMessagePiercesMute(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "helper", Account: "helper.bot", IsBot: true},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	settings := &stubSettings{out: map[string]notifSettings{
+		"bob": {
+			muteAll:          true,
+			allowPriority:    true,
+			priorityContacts: map[string]struct{}{"helper.bot": {}},
+		},
+		"carol": {muteAll: true, allowPriority: true}, // no priority contacts → stays muted
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithSettings(members, noopPresenceSnapshotter{}, settings, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "helper", UserAccount: "helper.bot",
+		CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"bob"}, emit.accounts(),
+		"bob listed helper.bot as priority; carol did not")
+}
+
+func int64Ptr(v int64) *int64 { return &v }
