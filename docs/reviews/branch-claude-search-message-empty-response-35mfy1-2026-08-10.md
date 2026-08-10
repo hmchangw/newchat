@@ -222,3 +222,16 @@ No goroutine leaks introduced (no new goroutines), no blocking calls added to NA
 **5. LOW — migrator silently uncounts skipped system messages.** `data-migration/es-index-migrator/runner.go:63-65`. Agree `RecordSkipped` is wrong (it feeds `FailedCount`/exit semantics), but the skip is invisible: an operator diffing Cassandra rows vs ES docs post-backfill sees an unexplained shortfall. `main.go:86` already logs a "migration run complete" summary — a separate mutex-guarded `skippedSystem` count logged there would explain the delta at near-zero cost.
 
 **Clean:** severity split WARN vs FLOW consistent with repo conventions; "never log AND return" not violated (success path only, Classify never runs); room-worker marshal-error paths properly wrapped, publish-failure observability unchanged.
+
+## Prioritized action list
+
+1. **[high]** Fix the dead migrator filter — add `type` to `messageColumns` and `iter.Scan` (`data-migration/es-index-migrator/messagesource_cassandra.go:32,79-81`). Without it the backfill re-indexes every system message; the branch's own test masks the bug via mock-injected `Type`.
+2. **[medium]** Add `request_id` to `logEmptyResult`'s lines and drop raw `query` from the WARN branch (`search-service/handler.go:183-192`). One log line should be both correlated and free of user-typed content.
+3. **[medium]** Add `"subject", msg.Subject()` + `slog.ErrorContext` to the poison-drop logs (`search-sync-worker/handler.go:86,92`), and state the "all build errors are poison" invariant in a comment — the new contract-violation errors are only as operable as this line.
+4. **[medium]** Test the `searchOrgs` empty path (asserts `kind="orgs"` + `SpotlightOrgReadPattern`) and add `"_shards"` to pre-existing empty-hit fixtures so they stop traversing the WARN branch (`search-service/handler_test.go`).
+5. **[medium]** Close the AST guard's partial-move hole — parse every non-test file in `pkg/model` (`parser.ParseDir`), and use `strconv.Unquote` (`pkg/model/event_test.go:91,116`).
+6. **[medium]** Put the env-rename migration note in the PR description: ops must set `USER_ROOM_INDEX` / `SPOTLIGHT_INDEX` / `SPOTLIGHT_ORG_INDEX` before rolling this image or search-service exits at startup.
+7. **[low]** Reorder `parseMemberEvent` guards payload→type→timestamp so a bare publish always reports "unwrapped publish?" (`search-sync-worker/inbox_stream.go:70-79`); add a negative-timestamp test row.
+8. **[low]** Note in the PR: previously-indexed system messages stay in ES (no `type` field to delete by; `EventDeleted` for them is now filtered too) — cleanup requires the post-fix reindex; and the 2-min dedup-window edge during rolling deploy is accepted (migrator can rebuild).
+9. **[low]** Consider `logEmptyResult` for `searchMessages` (same allow_no_indices failure class, hardcoded pattern lowers risk) — follow-up, not this PR.
+10. **[low]** Migrator: count skipped system messages into the end-of-run summary — follow-up.
