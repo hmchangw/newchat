@@ -94,3 +94,32 @@ The `_shards.total==0` discriminator is the correct ES signal for wildcard + `al
 - No `docs/client-api.md` update needed — correct call. The rule triggers on schema/error-case/event changes; this diff changes none (same wire types, same errors, log-only). Env names are ops-facing, not client-facing.
 - Env-rename staleness: the live doc `docs/search_index_migration_spec.md` already uses the unprefixed names (its subject is the migrator). Old `SEARCH_SPOTLIGHT_INDEX`/`SEARCH_USER_ROOM_INDEX` spellings survive only in dated planning/spec archives (`docs/superpowers/plans/2026-05-13-*.md`, `docs/superpowers/specs/2026-04-21-search-service-design.md`) — historical records, acceptable to leave.
 - **medium** — the rename is still a breaking ops change for out-of-repo prod manifests (compose is fixed in-diff, `deploy/docker-compose.yml:34-36`; IaC is not). The PR description must carry an explicit migration note: set the three unprefixed vars before rolling this image, or the service exits at startup.
+
+## Service: search-sync-worker
+
+(a) Diff correctness
+
+- Guard order is correct. inbox_stream.go:70-81 checks timestamp → payload → type. Payload-before-type matters: `model.InboxMemberEvent` (pkg/model/event.go:106-115) has neither `type` nor `payload` fields, so an unwrapped publish trips the payload guard first and gets the diagnostic "unwrapped publish?" message. Test `TestParseMemberEvent` (inbox_stream_test.go:60) pins this. Wording follows the sibling guard's `parse member event:` prefix; no `%w` is correct since there's no underlying error. [ok]
+- Redelivery semantics unchanged — verified. Before the diff, a bare payload produced `json.Unmarshal(nil, &payload)` → error at inbox_stream.go:83-84 → Ack at handler.go:91-95; an empty `Type` with valid payload errored later in the collection switch (spotlight.go:96, user_room.go:96) → Ack. After the diff, both fail earlier in parse → same error+Ack. No previously-tolerated message becomes rejected; no previously-rejected message becomes retried. In-flight bare publishes from old room-worker during a rolling deploy were already dropped (that loss is the bug the room-worker commit fixes); the new guards only improve the log line. Deploy order between the two services doesn't matter — wrapped envelopes were always parseable. [ok]
+- `(nil, nil)` from BuildAction is the established filtered idiom: syncFrom (messages.go:185-187) and actionableEvent (messages.go:190-192) both use it, and handler.go:97-99 Acks zero-action messages. The new filter (messages.go:196-198) matches, and sits after actionableEvent / before the ES parent lookup — no wasted resolver call. [ok]
+- **low** (messages.go:196): system messages indexed before this fix stay in ES; an `EventDeleted` for such a doc is now also filtered, so the stale doc can never be removed via the stream. The branch's es-index-migrator filter handles reindex-time cleanup, but live indices keep stale sys-docs until a reindex. Worth a note in the PR.
+
+(b) Scope drift / refactor-readiness
+
+Within `search-sync-worker/` the diff is tight: two guards + filter + tests, nothing unrelated touched. The branch bundles three distinct fixes (room-worker envelope, this worker, search-service) but in separate commits — acceptable. **nitpick** (inbox_stream_test.go:106-126): `TestParseMemberEvent_UnwrappedInnerEventClearsTimestampGuard` asserts stdlib decode behavior on model structs, not worker code; it's a documentation pin, arguably belongs next to the model types.
+
+(c) Abstraction — errcode.Permanent
+
+The handler does not distinguish permanent from transient at all: every BuildAction error is hard-coded Ack (handler.go:90-95); Nak is reserved for ES bulk failures (handler.go:132, 171). No `errcode` import exists in the service. Since every current BuildAction error path is a parse/validation poison (the one transient-ish dependency, `teamsUsers.ResolveIdentities`, is swallowed at messages.go:295-299, never returned), plain `fmt.Errorf` + unconditional Ack is coherent, and adopting `errcode.Permanent` here would add machinery with a single caller. The diff correctly follows the file's existing convention. **low**: if BuildAction ever gains a genuinely transient error, the Ack-all becomes silently lossy — a comment on handler.go:90 stating the "all build errors are poison" invariant would future-proof it.
+
+(d) Design coherence
+
+Good. The filter closes a real outlier — message-worker/handler.go:90, notification-worker/handler.go:59, and history-service already gate on `IsSystemMessageType`; the teams-batch branch (messages.go:243) already applied the equivalent rule against its own type field. One filter covers user/bot/teams collections since they share `*messageCollection.BuildAction`. The envelope guards convert an opaque decode failure into a named contract violation, with a regression test pinning why a timestamp-only guard can't catch it.
+
+(e) Project-pattern adherence
+
+`pkg/subject`/`pkg/stream` usage untouched and correct (inbox_stream.go:28, 36). Codec: search-sync-worker is not one of the four sonic hot-path workers; all touched code uses `encoding/json` — correct per CLAUDE.md. Tests are table-driven, `package main`, testify — compliant. **nitpick** (messages_test.go:320): `data, _ := json.Marshal(evt)` discards the error; prefer `require.NoError` as inbox_stream_test.go:42 does.
+
+(f) Client-API doc rule
+
+n/a — the worker is a pure JetStream consumer; no `chat.user.*` subscriptions, no natsrouter, no HTTP routes (verified by grep across non-test files). No `docs/client-api.md` update required.
