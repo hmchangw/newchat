@@ -200,6 +200,41 @@ control at all and no setting to add one. `isInCall` is extracted as a named
 predicate over both statuses so the coupling is visible at the call site rather
 than implied by a `switch`.
 
+## Both deployments
+
+`notification-worker` ships as **two** deployments of one binary, selected by
+`MODE` (`pkg/stream.Pipeline`): `user` consumes `MESSAGES-CANONICAL` and publishes
+`PUSH-NOTIFICATION`, `bot` consumes `BOT-MESSAGES-CANONICAL` and publishes
+`BOT-PUSH-NOTIFICATION`. They share `handler.go`, so the gate lands in both.
+
+That is intended, not incidental. `EligibleForPush` drops bots as *recipients*
+(`m.IsBot → false`), so both pipelines fan out to human room members — bot mode is
+bot-*authored* messages reaching people. Spec 1 deliberately allowed `.bot`
+accounts in `priorityContacts` ("holds raw accounts — users and `.bot` alike"),
+and that allowance only ever pays off here: a user who mutes everything, enables
+`alwaysAllowPriorityNotifications`, and lists `helper.bot` as a priority contact
+gets pierced by a message travelling the **bot** deployment. Gating user mode
+only would leave that Spec 1 affordance permanently dead.
+
+Because the kill switch is per-deployment env, ops can still disable the gate for
+one pipeline independently if bot-mode throughput makes the extra query hurt.
+
+### An invariant this breaks
+
+`deploy/user/docker-compose.yml` carries a deliberate comment:
+
+> Title is resolved here from the rooms collection; sender display name is
+> pre-composed by message-gatekeeper and propagated on the canonical message,
+> so no users-collection lookup runs in this service.
+
+This spec introduces exactly that lookup. The design is still right — settings
+live on the user document and there is nowhere else to read them — but the
+invariant was written down on purpose, so the comment must be corrected in the
+same change rather than left to contradict the code. Whoever implements this
+should treat the comment as a prompt to double-check the throughput assumption it
+was protecting: one indexed `$in` per message, on the narrowed candidate set, is
+the whole cost.
+
 ## Configuration
 
 Two new env vars on `notification-worker`, following the existing presence pair:
@@ -235,6 +270,12 @@ issue's step 3.5 would have shipped.
 
 **Fail-open (`handler_test.go`).** Snapshotter returns an error → every candidate
 still pushes. Snapshotter returns a partial map → accounts absent from it push.
+
+**Bot-authored pierce (`handler_test.go`).** A muted recipient with
+`alwaysAllowPriorityNotifications` and `helper.bot` in `priorityContacts`, receiving
+a message whose `UserAccount` is `helper.bot`, is pushed. This is the Spec 1
+affordance that only works if the gate runs in bot mode, so it is worth a named
+test rather than a row in the `shouldPush` table.
 
 **Integration (`integration_test.go`, `//go:build integration`).** Against
 `testutil.MongoDB`: seed users with settings set, partially set, absent entirely,
@@ -286,5 +327,6 @@ so the change lands as a known number rather than a surprise.
 | `notification-worker/handler_test.go` | Placement + fail-open tests. |
 | `notification-worker/integration_test.go` | Mongo-backed snapshotter tests. |
 | `notification-worker/main.go` | Config vars; wire snapshotter or noop. |
-| `notification-worker/deploy/docker-compose.yml` | Set both new vars. |
+| `notification-worker/deploy/user/docker-compose.yml` | Set both new vars; correct the "no users-collection lookup" comment. |
+| `notification-worker/deploy/bot/docker-compose.yml` | Set both new vars. |
 | `docs/client-api.md` | Note enforcement on the three settings. |
