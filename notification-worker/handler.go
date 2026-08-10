@@ -201,8 +201,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	// Both lookups run over the narrowed candidate set — only accounts that survived
 	// the exclusion filters, never every member of a large room.
 	// TestHandle_SettingsFetchedOnlyForSurvivingCandidates pins that narrowing.
-	// shouldPush combines the two results, which is where showNotificationsInCall
-	// modifies the presence decision.
+	// shouldPush combines the two, keyed on the sender's account for the priority pierce.
 	settings, _ := h.deps.Settings.Snapshot(ctx, accounts) // fail-open: error → empty map
 	snapshot, _ := h.deps.Presence.Snapshot(ctx, accounts) // fail-open: error → empty map
 

@@ -32,7 +32,8 @@ func TestShouldPush(t *testing.T) {
 		isPrioritySender bool
 		want             bool
 	}{
-		// Zero notifSettings must reproduce the pre-enforcement truth table exactly.
+		// Zero notifSettings must reproduce pre-Spec-3 behaviour on every status:
+		// no stored settings means no behaviour change from this deploy.
 		{"zero settings online", "online", notifSettings{}, false, true},
 		{"zero settings offline", "offline", notifSettings{}, false, true},
 		{"zero settings away", "away", notifSettings{}, false, true},
@@ -48,16 +49,26 @@ func TestShouldPush(t *testing.T) {
 		{"muted, pierce enabled and sender is priority", "online", notifSettings{muteAll: true, allowPriority: true}, true, true},
 		{"unmuted, pierce enabled, non-priority sender", "online", notifSettings{allowPriority: true}, false, true},
 
-		// showNotificationsInCall governs both suppressed statuses.
+		// DND is no longer governed by showNotificationsInCall. This row is the one
+		// population whose pushes this change removes.
+		{"busy, opted in to in-call notifications, still suppressed", "busy", notifSettings{showInCall: true}, false, false},
+		{"busy, no opt-in", "busy", notifSettings{}, false, false},
+
+		// showNotificationsInCall still governs in-call, for every non-priority sender.
 		{"in-call, opted in", "in-call", notifSettings{showInCall: true}, false, true},
-		{"busy, opted in", "busy", notifSettings{showInCall: true}, false, true},
 		{"in-call, not opted in", "in-call", notifSettings{}, false, false},
 
-		// The pierce does not cross the in-call gate.
-		{"muted+pierced but in-call without opt-in", "in-call", notifSettings{muteAll: true, allowPriority: true}, true, false},
-		{"muted+pierced and in-call with opt-in", "in-call", notifSettings{muteAll: true, allowPriority: true, showInCall: true}, true, true},
+		// The pierce now crosses the presence gate too — the Spec 3 reversal.
+		{"busy, priority pierce", "busy", notifSettings{allowPriority: true}, true, true},
+		{"in-call, priority pierce without in-call opt-in", "in-call", notifSettings{allowPriority: true}, true, true},
+		{"muted+pierced, in-call without opt-in", "in-call", notifSettings{muteAll: true, allowPriority: true}, true, true},
+		{"muted+pierced, in-call with opt-in", "in-call", notifSettings{muteAll: true, allowPriority: true, showInCall: true}, true, true},
 
-		// Both suppressors clear.
+		// ...but only with its opt-in. A priority sender alone pierces nothing.
+		{"busy, priority sender but pierce disabled", "busy", notifSettings{}, true, false},
+		{"in-call, priority sender but pierce disabled", "in-call", notifSettings{}, true, false},
+
+		// Every suppressor clear.
 		{"muted+pierced, online", "online", notifSettings{muteAll: true, allowPriority: true, showInCall: true}, true, true},
 	}
 	for _, tt := range tests {
@@ -68,13 +79,33 @@ func TestShouldPush(t *testing.T) {
 	}
 }
 
-func TestIsInCall(t *testing.T) {
+func TestIsDND(t *testing.T) {
 	tests := []struct {
 		status string
 		want   bool
 	}{
 		{"busy", true},
+		{"in-call", false},
+		{"online", false},
+		{"offline", false},
+		{"away", false},
+		{"", false},
+		{"unknown", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			assert.Equal(t, tt.want, isDND(model.Presence{AggregatedStatus: tt.status}))
+		})
+	}
+}
+
+func TestIsInCall(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
 		{"in-call", true},
+		{"busy", false},
 		{"online", false},
 		{"offline", false},
 		{"away", false},

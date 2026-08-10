@@ -1232,4 +1232,61 @@ func TestHandle_PriorityContactSenderPiercesMute(t *testing.T) {
 		"bob listed helper.bot as priority; carol did not")
 }
 
+// TestHandle_PriorityContactPiercesDND pins the Spec 3 reversal end-to-end: the
+// pierce crosses the presence gate, and it is keyed on the sender's account —
+// bob lists the sender, carol lists someone else, and both are equally in DND.
+func TestHandle_PriorityContactPiercesDND(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	presence := &stubPresence{out: map[string]model.Presence{
+		"bob":   {AggregatedStatus: "busy"},
+		"carol": {AggregatedStatus: "busy"},
+	}}
+	settings := &stubSettings{out: map[string]notifSettings{
+		"bob":   {allowPriority: true, priorityContacts: map[string]struct{}{"alice": {}}},
+		"carol": {allowPriority: true, priorityContacts: map[string]struct{}{"dave": {}}},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithSettings(members, presence, settings, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"bob"}, emit.accounts(),
+		"bob lists the sender as a priority contact and is pierced out of DND; carol does not")
+}
+
+// TestHandle_DNDIgnoresShowNotificationsInCall pins the other half of the split:
+// the in-call opt-in must not rescue a recipient who is in do-not-disturb.
+func TestHandle_DNDIgnoresShowNotificationsInCall(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	presence := &stubPresence{out: map[string]model.Presence{
+		"bob":   {AggregatedStatus: "busy"},
+		"carol": {AggregatedStatus: "in-call"},
+	}}
+	settings := &stubSettings{out: map[string]notifSettings{
+		"bob":   {showInCall: true},
+		"carol": {showInCall: true},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithSettings(members, presence, settings, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"carol"}, emit.accounts(),
+		"showNotificationsInCall covers in-call only; bob stays suppressed by DND")
+}
+
 func int64Ptr(v int64) *int64 { return &v }

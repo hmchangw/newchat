@@ -116,24 +116,30 @@ func chunkStrings(in []string, size int) [][]string {
 	return out
 }
 
-// isInCall reports whether presence alone suppresses push. "busy" and "in-call"
-// are deliberately one bucket: showNotificationsInCall is the only user-facing
-// control over either, so splitting them would leave "busy" ungovernable.
-func isInCall(p model.Presence) bool {
-	switch p.AggregatedStatus {
-	case "busy", "in-call":
-		return true
-	default:
-		return false
-	}
+// isDND reports manual do-not-disturb. Split from isInCall because
+// showNotificationsInCall governs only the latter — DND means DND.
+func isDND(p model.Presence) bool {
+	return p.AggregatedStatus == string(model.StatusBusy)
 }
 
-// shouldPush applies the two independent suppressors. Mute is pierced by a
-// priority sender only when the recipient enabled alwaysAllowPriorityNotifications;
-// the pierce deliberately does not cross the in-call gate, which
-// showNotificationsInCall governs on its own. Unknown presence fails open.
+// isInCall reports an active call. Teams "Presenting" arrives here too:
+// user-presence-service folds it into in-call rather than modelling it separately.
+func isInCall(p model.Presence) bool {
+	return p.AggregatedStatus == string(model.StatusInCall)
+}
+
+// shouldPush applies the priority-contact pierce, then three independent
+// suppressors. alwaysAllowPriorityNotifications is the single opt-in for
+// "priority contacts reach me anyway", so the pierce crosses all three.
+// Unknown presence fails open.
 func shouldPush(p model.Presence, ns notifSettings, isPrioritySender bool) bool {
-	if ns.muteAll && (!ns.allowPriority || !isPrioritySender) {
+	if ns.allowPriority && isPrioritySender {
+		return true
+	}
+	if ns.muteAll {
+		return false
+	}
+	if isDND(p) {
 		return false
 	}
 	if isInCall(p) && !ns.showInCall {
