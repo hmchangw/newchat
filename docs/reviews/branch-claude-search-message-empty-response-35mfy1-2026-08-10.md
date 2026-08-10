@@ -192,3 +192,19 @@ Unit tests for all changed packages pass with `-race`. Builds clean.
 **NITPICKS:** `searchShardTotal` returns 0 on malformed JSON → mislabeled "no index" WARN (unreachable today — `parseRooms` parsed the same bytes first). `TestSystemMessageTypesCoverEveryConstant` silently skips constants not defined by string literal (e.g. aliasing another const).
 
 **SAST:** `make sast-gosec` — clean, zero findings. `make sast-semgrep` — fails: semgrep not installed. `make sast-vuln` — fails: govulncheck egress blocked (`vuln.go.dev … Forbidden`). Both are blocking CI gates that could not be evaluated in this environment; run them in CI before merge.
+
+## Performance
+
+Overall: no critical or high findings. The branch is performance-positive on the hot path (system messages now short-circuit before expensive work) and adds one small, bounded cost on a cold-ish path (zero-result searches).
+
+**[low]** search-service/handler.go:183-192, response.go — `logEmptyResult` re-unmarshals the full ES response on every zero-result search. Typeahead misses are common, so this runs often. Quantified: a zero-hit ES body is a few hundred bytes; a stdlib Unmarshal into a 2-field struct with field-skipping is single-digit microseconds and zero retained allocations, vs the milliseconds already spent on the ES round-trip immediately above. ~0.1% of request cost, and only on the empty branch. The parse cannot be gated behind `logctx.Enabled(LevelFlow)` because its result decides WARN-vs-FLOW (the misconfig detection is the feature). The cleaner shape would be adding `Shards` to `rawResponse[T]` so the existing parse carries it — one parse, but it threads a diagnostic-only value through two parse signatures used by four callers. The double-parse is the simpler design and the cost is acceptable; fold `_shards` into `rawResponse` only if this ever extends to searchMessages. FLOW-level miss logging itself is near-free: logctx's handler drops sub-INFO records unless debug-admitted, so nothing is serialized in production.
+
+**[low]** search-sync-worker/messages.go:196-198 — `IsSystemMessageType` is a map lookup (~10ns), negligible; and search-sync-worker is not one of the sonic hot-path services anyway. The interesting part checks out: the filter sits after the cheap validation guards and before `resolveThreadParentCreatedAt` (messages.go:199), which can issue an ES round-trip. System messages therefore skip both the potential ES lookup and buildMessageAction. Correct placement; strictly a throughput win on MESSAGES-CANONICAL.
+
+**[low]** search-sync-worker/inbox_stream.go:74-82 — the two new guards are a len() check and a string compare; fmt.Errorf allocates only on the failure path. This consumer is filtered to member_added/member_removed subjects — membership churn, orders of magnitude below message volume — so encoding/json remains the correct codec per CLAUDE.md (verified by grep).
+
+**[low]** room-worker/teamsroomcreate.go:261-271 — one extra json.Marshal per membership event on the Teams-migration path: a 5-field envelope embedding the already-marshaled payload as bytes (one memcpy, low-KB worst case). Microseconds vs the synchronous JetStream publish it precedes (~ms). Negligible, correct.
+
+**[nitpick]** data-migration/es-index-migrator/runner.go:63-65 — skip returns before buildMessageAction and before mu.Lock. Invariant check: the skip touches neither the flusher nor RecordSkipped, so no counter is owed and no lock is required. Actually reduces lock traffic and skips a marshal per system message. Correct as written.
+
+No goroutine leaks introduced (no new goroutines), no blocking calls added to NATS handlers beyond the slog writes discussed, no N+1 patterns (the only per-item ES call, parent resolution, pre-exists and is now invoked less often).
