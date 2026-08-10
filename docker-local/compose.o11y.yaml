@@ -7,7 +7,7 @@
 #   Traces  : services → OTLP → otel-collector → Tempo
 #   Metrics : Prometheus scrapes each service's :2112 (Docker SD)
 #   Logs    : services → OTLP → otel-collector → Loki
-#   UI      : Grafana (http://localhost:3001, anonymous admin) with all three
+#   UI      : Grafana (http://localhost:3003, anonymous admin) with all three
 #             datasources + trace↔log correlation pre-provisioned.
 #
 # Services default OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318, so
@@ -43,9 +43,11 @@ services:
     networks:
       - chat-local
 
+  # -o11y- infix: tools/observability (`make obs-up`) owns the plain
+  # chat-local-prometheus / chat-local-grafana names, and both stacks co-run.
   prometheus:
     image: prom/prometheus:v3.0.1
-    container_name: chat-local-prometheus
+    container_name: chat-local-o11y-prometheus
     # Local-dev only: Docker SD reads /var/run/docker.sock, which is root-owned
     # on Docker Desktop/WSL. Run as root so Prometheus can discover service
     # containers without chmod'ing the host socket.
@@ -75,7 +77,7 @@ services:
 
   grafana:
     image: grafana/grafana:11.4.0
-    container_name: chat-local-grafana
+    container_name: chat-local-o11y-grafana
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
@@ -83,7 +85,8 @@ services:
     volumes:
       - ./o11y/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
     ports:
-      - "3001:3000"
+      # :3000/:3001 are the UIs, :3002 the obs-up Grafana.
+      - "3003:3000"
     depends_on:
       - tempo
       - prometheus

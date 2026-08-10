@@ -57,6 +57,15 @@ func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
 			Options: options.Index().SetName("needCreateRoom_pending").
 				SetPartialFilterExpression(bson.M{"needCreateRoom": true}),
 		},
+		{
+			// teams-room-verify: ListChatsNeedingVerify —
+			// find({needVerify: true}).sort({_id: 1}). Same shape as
+			// needCreateRoom_pending above, for the same reason: the trailing _id
+			// key avoids an in-memory sort.
+			Keys: bson.D{{Key: "needVerify", Value: 1}, {Key: "_id", Value: 1}},
+			Options: options.Index().SetName("needVerify_pending").
+				SetPartialFilterExpression(bson.M{"needVerify": true}),
+		},
 	}); err != nil {
 		return fmt.Errorf("ensure teams_chat pending-work indexes: %w", err)
 	}

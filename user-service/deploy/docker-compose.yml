@@ -9,18 +9,20 @@ services:
     environment:
       - OTEL_SERVICE_NAME=user-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - SITE_ID=site-local
-      - ALL_SITE_IDS=site-local
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
-      - MAX_SUBSCRIPTION_LIMIT=1000
-      - OIDC_ISSUER_URL=http://keycloak:8080/realms/chatapp
-      - OIDC_AUDIENCES=nats-chat
-      - OIDC_CLIENT_ID=nats-chat
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
+      - ALL_SITE_IDS=${ALL_SITE_IDS:-${SITE_ID:-site-local}}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
+      # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
+      - MAX_SUBSCRIPTION_LIMIT=${MAX_SUBSCRIPTION_LIMIT:-1000}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
+      - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-nats-chat}
     volumes:
-      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

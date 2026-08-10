@@ -31,6 +31,8 @@ services:
       - SITE_ID=site1
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - INPUT_STREAM=MESSAGES-CANONICAL-site1
       - INPUT_SUBJECT_FILTER=chat.msg.canonical.site1.*
     depends_on:

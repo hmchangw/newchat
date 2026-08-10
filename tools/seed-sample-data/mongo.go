@@ -75,10 +75,29 @@ func threadSubscriptionIDs() []string {
 	return out
 }
 
+func hrEmployeeAccounts() []string {
+	rows := BuildHREmployees()
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].Account)
+	}
+	return out
+}
+
+func hrEmployeeIDs() []string {
+	rows := BuildHREmployees()
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].ID)
+	}
+	return out
+}
+
 // mongoCounts captures per-collection upsert counts for the final
 // "seed complete" log line.
 type mongoCounts struct {
 	Users               int64
+	HREmployees         int64
 	Rooms               int64
 	Subscriptions       int64
 	RoomMembers         int64
@@ -97,6 +116,12 @@ func upsertAll(ctx context.Context, db *mongo.Database) (mongoCounts, error) {
 		return c, fmt.Errorf("seed users: %w", err)
 	}
 	c.Users = touched(res)
+
+	hrCount, err := upsertHREmployees(ctx, db)
+	if err != nil {
+		return c, err
+	}
+	c.HREmployees = hrCount
 
 	rooms := mongoutil.NewCollection[model.Room](db.Collection("rooms"))
 	res, err = rooms.BulkUpsertByID(ctx, BuildRoomsWithLastMsg(), func(r model.Room) string { return r.ID })
@@ -143,6 +168,24 @@ func upsertAll(ctx context.Context, db *mongo.Database) (mongoCounts, error) {
 	return c, nil
 }
 
+// upsertHREmployees drops rows holding a seeded account under a foreign _id
+// (the unique account index would collide), then upserts.
+func upsertHREmployees(ctx context.Context, db *mongo.Database) (int64, error) {
+	if _, err := db.Collection("hr_employee").DeleteMany(ctx, bson.M{
+		"account": bson.M{"$in": hrEmployeeAccounts()},
+		"_id":     bson.M{"$nin": hrEmployeeIDs()},
+	}); err != nil {
+		return 0, fmt.Errorf("prune stale hr_employee rows: %w", err)
+	}
+
+	employees := mongoutil.NewCollection[model.IEmployee](db.Collection("hr_employee"))
+	res, err := employees.BulkUpsertByID(ctx, BuildHREmployees(), func(e model.IEmployee) string { return e.EmployeeID })
+	if err != nil {
+		return 0, fmt.Errorf("seed hr_employee: %w", err)
+	}
+	return touched(res), nil
+}
+
 // touched returns docs affected (upserted + modified). A pure re-run
 // reports 0 modified — that's the idempotent no-op path.
 func touched(res *mongoutil.BulkResult) int64 {
@@ -161,6 +204,7 @@ func deleteAll(ctx context.Context, db *mongo.Database) error {
 	}
 	tasks := []del{
 		{"users", usersIDs()},
+		{"hr_employee", hrEmployeeIDs()},
 		{"rooms", roomIDs()},
 		{"subscriptions", subscriptionIDs()},
 		{"room_members", roomMemberIDs()},

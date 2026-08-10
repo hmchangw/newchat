@@ -4,6 +4,8 @@ datasources:
     type: prometheus
     uid: prometheus
     access: proxy
-    url: http://prometheus:9090
+    # By container name: compose.o11y.yaml also aliases `prometheus` on
+    # chat-local, so that alias resolves to both instances.
+    url: http://chat-local-prometheus:9090
     isDefault: true
     editable: false

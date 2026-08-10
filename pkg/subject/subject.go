@@ -254,6 +254,13 @@ func SettingsUpdate(account string) string {
 	return fmt.Sprintf("chat.user.%s.event.settings.update", account)
 }
 
+// ChatlistUpdate is the client-facing fanout subject published by user-service
+// after any successful chatlist section-definition mutation (same delivery
+// pattern as settings.update — ephemeral, core NATS).
+func ChatlistUpdate(account string) string {
+	return fmt.Sprintf("chat.user.%s.event.chatlist.update", account)
+}
+
 func RoomMetadataChanged(account string) string {
 	return fmt.Sprintf("chat.user.%s.event.room.metadata.update", account)
 }
@@ -860,6 +867,13 @@ func FavoriteToggleWildcard(siteID string) string {
 	return fmt.Sprintf("chat.user.*.request.room.*.%s.favorite.toggle", siteID)
 }
 
+// MoveChat returns the concrete subject for the per-user chat.move RPC (assign a
+// chat to a chatlist section + set its manual order). roomId rides the subject,
+// like favorite.toggle.
+func MoveChat(account, roomID, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.chat.move", account, roomID, siteID)
+}
+
 // OpenRoom returns the concrete subject for the per-user open RPC.
 func OpenRoom(account, roomID, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.open", account, roomID, siteID)
@@ -1074,6 +1088,10 @@ func MuteTogglePattern(siteID string) string {
 
 func FavoriteTogglePattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.favorite.toggle", siteID)
+}
+
+func MoveChatPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.room.{roomID}.%s.chat.move", siteID)
 }
 
 func OpenRoomPattern(siteID string) string {
@@ -1344,6 +1362,80 @@ func UserSettingsSet(account, siteID string) string {
 
 func UserSettingsSetPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.set", siteID)
+}
+
+// Chatlist section-definition registry subjects — get + five mutations. The
+// concrete forms panic on a wildcard account (same guard as the settings
+// helpers). Membership/order is NOT here — that rides the room-service moveChat
+// RPC onto the subscription.
+
+func UserChatlistGet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.chatlist.get", account, siteID)
+}
+
+func UserChatlistGetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.chatlist.get", siteID)
+}
+
+func UserChatlistSectionCreate(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.chatlist.section.create", account, siteID)
+}
+
+func UserChatlistSectionCreatePattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.chatlist.section.create", siteID)
+}
+
+func UserChatlistSectionDelete(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.chatlist.section.delete", account, siteID)
+}
+
+func UserChatlistSectionDeletePattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.chatlist.section.delete", siteID)
+}
+
+func UserChatlistSectionRename(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.chatlist.section.rename", account, siteID)
+}
+
+func UserChatlistSectionRenamePattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.chatlist.section.rename", siteID)
+}
+
+// UserChatlistSectionReorder reorders the SECTIONS themselves (a permutation of
+// every section id).
+func UserChatlistSectionReorder(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.chatlist.section.reorder", account, siteID)
+}
+
+func UserChatlistSectionReorderPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.chatlist.section.reorder", siteID)
+}
+
+// UserChatlistSectionSetSortMode sets one section's sortMode (custom|mostRecent).
+func UserChatlistSectionSetSortMode(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.chatlist.section.setsortmode", account, siteID)
+}
+
+func UserChatlistSectionSetSortModePattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.chatlist.section.setsortmode", siteID)
 }
 
 // UserThreadList is the concrete client-facing subject for the cross-site thread

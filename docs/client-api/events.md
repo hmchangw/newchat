@@ -45,6 +45,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.response.{requestID}` | AsyncJobResult (one-shot async job completion) |
 | `chat.user.{account}.event.subscription.update` | SubscriptionUpdateEvent / SubscriptionRemovedEvent |
 | `chat.user.{account}.event.settings.update` | SettingsUpdateEvent |
+| `chat.user.{account}.event.chatlist.update` | ChatlistUpdateEvent |
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above, per-user fan-out for DM/botDM rooms |
@@ -103,9 +104,11 @@ Two shapes exist — discriminated by `action`:
 | Field | Type | Notes |
 |---|---|---|
 | `userId` | string | The affected user's internal user ID. Omitted on the org-removal path. |
-| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](../client-api.md#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms — so clients can render the sidebar entry and store the room key from this single event. On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
-| `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
-| `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. |
+| `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `section_moved` / `opened` / `read`. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](../client-api.md#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms — so clients can render the sidebar entry and store the room key from this single event. On `section_moved`, `sectionId` / `sectionOrder` carry the new placement (both absent = removed from its section). On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
+| `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"section_moved"`, `"opened"`, or `"read"`. |
+| `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `section_moved` / `opened` / `read`. |
+| `hrInfo` | [CounterpartHRInfo](../client-api.md#counterparthrinfo) | `{account, chineseName, engName}` — the DM counterpart's HR record, so a newly created DM renders from this event alone. Sent on `added` `dm` / `botDM` when the counterpart account does **not** end in `.bot`; on a self-DM it carries the recipient's own record. Both name fields are `omitempty`. Omitted on `channel` / `discussion` rooms and on a lookup miss. |
+| `appInfo` | [CounterpartAppInfo](../client-api.md#counterpartappinfo) | `{id, name, assistantName}` — the counterpart's app record, sent on `added` `botDM` when the counterpart account ends in `.bot`. `name` is empty when the app document has none, and `roomName` then falls back to the bot account. Mutually exclusive with `hrInfo`; omitted on a lookup miss. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 ```json
@@ -135,6 +138,30 @@ Two shapes exist — discriminated by `action`:
   },
   "action": "added",
   "roomName": "engineering-announcements",
+  "timestamp": 1778054483000
+}
+```
+
+A newly created **DM** carries the counterpart's `hrInfo`; a **botDM** carries `appInfo`
+on the human member's copy (the bot's copy carries the human's `hrInfo`):
+
+```json
+{
+  "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+  "subscription": {
+    "id": "01970a4f8c2d7c9a01970a4f8c2d7c9c",
+    "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice", "isBot": false },
+    "roomId": "01970a4f8c2d7c9a01970a4f8c2d7c9b",
+    "roomType": "dm",
+    "siteId": "siteA",
+    "roles": null,
+    "name": "bob",
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": { "siteId": "siteA", "crossSite": false, "userCount": 2 }
+  },
+  "action": "added",
+  "roomName": "Bob Chan 陳大文",
+  "hrInfo": { "account": "bob", "chineseName": "陳大文", "engName": "Bob Chan" },
   "timestamp": 1778054483000
 }
 ```
@@ -216,6 +243,43 @@ UserSettings — every field optional, present only when explicitly set:
 {
   "timestamp": 1737000000000,
   "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
+}
+```
+
+---
+
+## chatlist.update — chatlist section sync
+
+**Subject:** `chat.user.{account}.event.chatlist.update`
+
+Published by user-service after every successful chatlist section-definition
+mutation ([Chatlist Sections](../client-api.md#chatlist-sections)) — ephemeral
+core-NATS fan-out to the caller's own connected devices, the same delivery pattern
+as settings.update. Best-effort. Note this carries only the section **definitions**,
+never per-chat membership — a chat moving section fires a `subscription.update`
+(`action: "section_moved"`) instead, so `chatlist.update` stays O(sections).
+
+The payload carries the **full post-update state** — receivers replace their local
+copy, they never merge deltas.
+
+### Schema (ChatlistUpdateEvent)
+
+| Field | Type | Notes |
+|---|---|---|
+| `timestamp` | number | Publish time, Unix ms (the state's high-water mark). |
+| `chatlist` | [ChatlistState](../client-api.md#chatliststate) | Full post-update section definitions. |
+
+```json
+{
+  "timestamp": 1737000000000,
+  "chatlist": {
+    "sectionOrder": ["favorites", "apps", "teams", "work", "chats"],
+    "sections": [
+      { "id": "favorites", "name": "Favorites", "builtIn": true, "sortMode": "mostRecent" },
+      { "id": "work", "name": "Work", "builtIn": false, "sortMode": "custom" }
+    ],
+    "lastUpdatedAt": 1737000000000
+  }
 }
 ```
 
@@ -598,7 +662,7 @@ independently.
 | `eventTimestamp` | number | Optional. Epoch ms (UTC). When message-worker published the canonical event. Prefer over `timestamp` for ordering. |
 | `parentMessageId` | string | The thread parent message's ID. Use to locate the message in your cache and update its badge. |
 | `replyMessageId` | string | The reply that was added or deleted. |
-| `newTcount` | number | Authoritative reply count for the parent message, capped at 99 (99 means "99 or more"). Apply directly — do not delta. |
+| `newTcount` | number | Authoritative exact reply count for the parent message. Apply directly — do not delta. |
 | `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent when `newTcount` is 0. |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 
@@ -724,7 +788,14 @@ Flat event. Emitted when a channel's `restricted` / `externalAccess` flags chang
 This is a **server-internal admin RPC** — not a client-callable request. Clients receive
 the event on the same room stream they already subscribe to.
 
-**Subject:** `chat.room.{roomID}.event`.
+This is a **state update, not a message**: apply it to the local subscription and render
+nothing. No system message accompanies it, so a restriction change never appears in the room
+timeline and never notifies.
+
+**Subject:** `chat.room.{roomID}.event` — or `chat.local.room.{roomID}.event` for a
+same-site room, depending on the deployment's room-subject routing mode (see
+[client-api.md §Subscriptions](../client-api.md#2-nats-subjects)). Subscribe to whichever
+subject you already use for that room's messages.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -734,9 +805,23 @@ the event on the same room stream they already subscribe to.
 | `timestamp` | number | Publish time (UTC ms). |
 | `restricted` | boolean | The new restricted state. |
 | `externalAccess` | boolean | The new external-access state. |
-| `ownerAccount` | string | Optional. Omitted unless this was an unrestricted→restricted transition with a designated owner. |
+| `ownerAccount` | string | Optional. The account designated as sole owner by this call. Present on any restricting call that named one — including an owner rotation on an already-restricted room; omitted when none was sent. |
 | `byAccount` | string | The admin who made the change. |
 | `changedAt` | string | ISO-8601 timestamp of when the change was applied. |
+
+```json
+{
+  "type": "room_restricted",
+  "roomId": "01970a4f8c2d7c9aQ",
+  "siteId": "siteA",
+  "timestamp": 1778054483000,
+  "restricted": true,
+  "externalAccess": true,
+  "ownerAccount": "alice",
+  "byAccount": "p_admin",
+  "changedAt": "2026-08-03T09:41:23Z"
+}
+```
 
 ---
 

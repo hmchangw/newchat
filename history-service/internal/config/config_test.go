@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -147,4 +148,51 @@ func TestValidate_RejectsNegativePreviewCacheTTL(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HISTORY_PREVIEW_CACHE_TTL")
+}
+
+func TestValidate_RejectsInvalidReadPreference(t *testing.T) {
+	cfg := baseValid()
+	cfg.Mongo.ReadPreference = "quorum"
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_READ_PREFERENCE")
+}
+
+func TestValidate_AcceptsValidReadPreferences(t *testing.T) {
+	for _, rp := range []string{"", "primary", "primaryPreferred", "secondary", "secondaryPreferred", "nearest"} {
+		name := rp
+		if name == "" {
+			name = "empty defaults to primary"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := baseValid()
+			cfg.Mongo.ReadPreference = rp
+			require.NoError(t, validate(&cfg))
+		})
+	}
+}
+
+func TestLoad_DefaultsReadPreferenceToSecondaryPreferred(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	unsetEnv(t, "MONGO_READ_PREFERENCE") // the default only applies when unset
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "secondaryPreferred", cfg.Mongo.ReadPreference)
+}
+
+// unsetEnv removes key for the duration of the test and restores its prior
+// presence/value on cleanup, so a default-value test can't be perturbed by an
+// externally set variable.
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	prev, had := os.LookupEnv(key)
+	require.NoError(t, os.Unsetenv(key))
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, prev)
+		}
+	})
 }

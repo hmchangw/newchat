@@ -30,6 +30,10 @@ import (
 // (e.g. model.Room.CrossSite) in test literals.
 func ptrBool(b bool) *bool { return &b }
 
+// strPtr returns a pointer to s, for constructing *string fields
+// (e.g. model.Subscription.SectionId) in test literals.
+func strPtr(s string) *string { return &s }
+
 // expectAllAccountsExist registers a FindExistingAccounts expectation that
 // echoes its input back — i.e. "every account being asked about exists".
 // Used by every add-member / create-channel happy-path test that doesn't
@@ -5366,7 +5370,9 @@ func TestHandleRoomRestricted_Validation(t *testing.T) {
 				tt.setupStore(store)
 			}
 			h := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
-				func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, nil, 0, subject.RouteGlobal)
+				func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+				func(_ context.Context, _ string, _ []byte) error { return nil },
+				nil, 0, subject.RouteGlobal)
 
 			resp, err := h.roomRestricted(ctxParams(map[string]string{}), tt.req)
 			if tt.wantErr == nil {
@@ -5380,6 +5386,81 @@ func TestHandleRoomRestricted_Validation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A restriction change publishes a flat room event so clients refresh their local
+// state, but no system message, so nothing is rendered in the timeline. The
+// cross-site fan-out still carries the state to remote sites.
+func TestHandleRoomRestricted_PublishesEventNotSysMessage(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().GetUser(gomock.Any(), "admin1").Return(&model.User{Account: "admin1", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, Restricted: false, UserCount: 10}, nil)
+	store.EXPECT().CheckMembership(gomock.Any(), "owner1", "r1").Return(nil)
+	store.EXPECT().UpdateRoomVisibility(gomock.Any(), "r1", true, true).Return(nil)
+	store.EXPECT().ApplySubscriptionRestriction(gomock.Any(), "r1", true, true, "owner1", gomock.Any()).Return(nil)
+	// A member homed elsewhere, so the cross-site fan-out actually runs and the
+	// "state still propagates" half of the claim is testable.
+	store.EXPECT().ListSubscriptionsByRoom(gomock.Any(), "r1").Return([]model.Subscription{
+		{User: model.SubscriptionUser{Account: "bob"}},
+	}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
+		{Account: "bob", SiteID: "site-b"},
+	}, nil)
+
+	var published []string
+	type corePub struct {
+		subj string
+		data []byte
+	}
+	var cores []corePub
+	h := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
+		func(_ context.Context, subj string, _ []byte, _ string) error {
+			published = append(published, subj)
+			return nil
+		},
+		func(_ context.Context, subj string, data []byte) error {
+			cores = append(cores, corePub{subj: subj, data: append([]byte(nil), data...)})
+			return nil
+		}, nil, 0, subject.RouteGlobal)
+
+	_, err := h.roomRestricted(ctxParams(map[string]string{}), model.RoomRestrictedRequest{
+		RoomID: "r1", Account: "admin1", Restricted: true, ExternalAccess: true,
+		OwnerAccount: "owner1",
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, published, subject.MsgCanonicalCreated("site-a"),
+		"a restriction change must not reach the canonical message stream")
+
+	// The flat room event carries the new state to connected clients.
+	var evt *model.RoomRestrictedRoomEvent
+	for _, p := range cores {
+		if p.subj != subject.RoomEvent("r1", true) {
+			continue
+		}
+		var got model.RoomRestrictedRoomEvent
+		require.NoError(t, json.Unmarshal(p.data, &got))
+		if got.Type == model.RoomEventRoomRestricted {
+			evt = &got
+		}
+	}
+	require.NotNil(t, evt, "expected a room_restricted room event on the room subject")
+	assert.Equal(t, "r1", evt.RoomID)
+	assert.Equal(t, "site-a", evt.SiteID)
+	assert.True(t, evt.Restricted)
+	assert.True(t, evt.ExternalAccess)
+	assert.Equal(t, "owner1", evt.OwnerAccount)
+	assert.Equal(t, "admin1", evt.ByAccount)
+
+	var federated bool
+	for _, subj := range published {
+		if _, dest, e, ok := subject.ParseOutbox(subj); ok && dest == "site-b" && e == model.InboxRoomRestricted {
+			federated = true
+		}
+	}
+	assert.True(t, federated, "cross-site fan-out must still run")
 }
 
 // TestHandleRoomRestricted_MultiSite_FederatesPerDestination verifies the
@@ -5413,7 +5494,9 @@ func TestHandleRoomRestricted_MultiSite_FederatesPerDestination(t *testing.T) {
 		func(_ context.Context, subj string, data []byte, _ string) error {
 			publishes = append(publishes, pub{subj: subj, data: append([]byte(nil), data...)})
 			return nil
-		}, nil, nil, 0, subject.RouteGlobal)
+		},
+		func(_ context.Context, _ string, _ []byte) error { return nil },
+		nil, 0, subject.RouteGlobal)
 
 	req := model.RoomRestrictedRequest{RoomID: "r1", Account: "admin1", Restricted: false}
 	resp, err := h.roomRestricted(ctxParams(map[string]string{}), req)
@@ -5986,6 +6069,87 @@ func TestHandler_FavoriteToggle_CorePublishFailureIsNonFatal(t *testing.T) {
 
 	assert.Equal(t, "ok", resp.Status)
 	assert.True(t, resp.Favorite)
+}
+
+// TestHandler_MoveChat_Rebalance_PublishesAndFederatesAllRows covers the
+// needRebalance path: RebalanceSection renumbers every sibling in the
+// section, so moveChat must fan out one section_moved subscription.update
+// (+ cross-site federation event) per rewritten row, not just the moved one.
+func TestHandler_MoveChat_Rebalance_PublishesAndFederatesAllRows(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		ComputeSectionOrder(gomock.Any(), "alice", "sec1", "", "").
+		Return(0.0, true, nil) // needRebalance
+
+	var rebalanceNow time.Time
+	store.EXPECT().
+		RebalanceSection(gomock.Any(), "alice", "sec1", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _, _ string, now time.Time) ([]model.Subscription, error) {
+			rebalanceNow = now
+			ts := now
+			return []model.Subscription{
+				{User: model.SubscriptionUser{ID: "u-sib", Account: "alice"}, RoomID: "sibling", SiteID: "site-a", SectionId: strPtr("sec1"), SectionOrder: 1, SectionUpdatedAt: &ts},
+				{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", SiteID: "site-a", SectionId: strPtr("sec1"), SectionOrder: 2, SectionUpdatedAt: &ts},
+			}, nil
+		})
+	store.EXPECT().
+		ComputeSectionOrder(gomock.Any(), "alice", "sec1", "", "").
+		Return(3.0, false, nil) // recompute after rebalance
+
+	store.EXPECT().
+		MoveSubscriptionSection(gomock.Any(), "r1", "alice", gomock.Any(), 3.0, gomock.Any()).
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", SiteID: "site-a", SectionId: strPtr("sec1"), SectionOrder: 3}, nil)
+	store.EXPECT().
+		GetUserSiteID(gomock.Any(), "alice").
+		Return("site-b", nil) // cross-site → federates
+
+	var coreBodies [][]byte
+	var streamSubjects []string
+	var streamBodies [][]byte
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishCore: func(_ context.Context, _ string, data []byte) error {
+			coreBodies = append(coreBodies, data)
+			return nil
+		},
+		publishToStream: func(_ context.Context, subj string, data []byte, _ string) error {
+			streamSubjects = append(streamSubjects, subj)
+			streamBodies = append(streamBodies, data)
+			return nil
+		},
+	}
+
+	sectionID := "sec1"
+	resp, err := h.moveChat(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MoveChatRequest{SectionID: &sectionID})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Status)
+	assert.Equal(t, 3.0, resp.SectionOrder)
+	assert.False(t, rebalanceNow.IsZero())
+
+	// One local publish + one federation event per rewritten row (sibling + the
+	// moved chat itself, with its FINAL order — not the rebalance's intermediate one).
+	require.Len(t, coreBodies, 2)
+	require.Len(t, streamSubjects, 2)
+
+	gotRooms := map[string]float64{}
+	for _, body := range coreBodies {
+		var evt model.SubscriptionUpdateEvent
+		require.NoError(t, json.Unmarshal(body, &evt))
+		assert.Equal(t, "section_moved", evt.Action)
+		gotRooms[evt.Subscription.RoomID] = evt.Subscription.SectionOrder
+	}
+	assert.Equal(t, map[string]float64{"sibling": 1, "r1": 3}, gotRooms, "moved chat's row must carry its final post-move order, not the rebalance intermediate")
+
+	for i, subj := range streamSubjects {
+		assert.Equal(t, subject.Outbox("site-a", "site-b", model.InboxSubscriptionSectionMoved), subj)
+		var fed model.OutboxEvent
+		require.NoError(t, json.Unmarshal(streamBodies[i], &fed))
+		var inboxEnv model.InboxEvent
+		require.NoError(t, json.Unmarshal(fed.Envelope, &inboxEnv))
+		assert.Equal(t, model.InboxSubscriptionSectionMoved, inboxEnv.Type)
+	}
 }
 
 func TestHandler_OpenRoom_Success(t *testing.T) {

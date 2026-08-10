@@ -62,6 +62,7 @@ func envFromOS() map[string]string {
 func dryRunSummary() string {
 	lines := []string{
 		fmt.Sprintf("users %d", len(BuildUsers())),
+		fmt.Sprintf("hr_employee %d", len(BuildHREmployees())),
 		fmt.Sprintf("rooms %d", len(BuildRooms())),
 		fmt.Sprintf("subscriptions %d", len(BuildSubscriptions())),
 		fmt.Sprintf("room_members %d", len(BuildRoomMembers())),
@@ -142,6 +143,7 @@ func run(reset bool) error {
 
 	slog.Info("seed complete",
 		"users", mc.Users,
+		"hrEmployees", mc.HREmployees,
 		"rooms", mc.Rooms,
 		"subscriptions", mc.Subscriptions,
 		"roomMembers", mc.RoomMembers,

@@ -60,6 +60,7 @@ paths.
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
      - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
+     - [Chatlist Sections](#chatlist-sections)
      - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
@@ -936,6 +937,8 @@ it is absent on every other action.
 | `alert` | boolean | Whether the room has an unread alert for the user. Authoritative subscription state maintained by the write path (set on new message, cleared on read receipt); **not** modified by read enrichment. |
 | `muted` | boolean | Whether the user muted the room. |
 | `favorite` | boolean | Whether the user favorited the room. |
+| `sectionId` | string | Optional. The custom chatlist section this room is in; absent = no custom section (the client derives a built-in placement). Set/cleared via [Move Chat to Section](#move-chat-to-section). |
+| `sectionOrder` | number | Optional. Manual fractional position within `sectionId`'s section; honored only when that section's `sortMode == "custom"`. |
 | `open` | boolean | Sidebar-visibility flag; false hides the room from subscription.list. |
 | `isSubscribed` | boolean | Optional. Whether the user is actively subscribed. |
 | `historySharedSince` | RFC3339 timestamp | Optional. Boundary before which prior history is shared. |
@@ -1268,6 +1271,8 @@ Shared by Add Members, Remove Member, and Update Member Role.
 | `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
 | `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
+| `hrInfo` | [CounterpartHRInfo](#counterparthrinfo) | The DM counterpart's HR record, so the client can render the new sidebar row without a `subscription.list` refetch. Sent on `added` `dm` / `botDM` events when the counterpart account does **not** end in `.bot` — i.e. to both sides of a `dm`, and to the bot's own copy of a `botDM`. On a self-DM (note-to-self) the counterpart is the recipient, so the event carries their own record. Omitted on `channel` / `discussion` rooms and when the user lookup missed. |
+| `appInfo` | [CounterpartAppInfo](#counterpartappinfo) | The counterpart's app record, sent on `added` `botDM` events when the counterpart account ends in `.bot` — i.e. to the human member. Mutually exclusive with `hrInfo`; omitted when the app lookup missed. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is `omitempty`: set on `added` / `role_updated`, omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` the nested `room` object matches a `subscription.list` row (minus `previewMessage`), so clients can render the sidebar entry — and store the room key — from this single event. `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
@@ -1303,6 +1308,40 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 }
 ```
 
+On a newly created **DM** the event additionally carries the counterpart's `hrInfo` — everything the client needs to render the sidebar row on its own:
+
+```json
+{
+  "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+  "subscription": {
+    "id": "01970a4f8c2d7c9a01970a4f8c2d7c9c",
+    "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice", "isBot": false },
+    "roomId": "01970a4f8c2d7c9a01970a4f8c2d7c9b",
+    "roomType": "dm",
+    "siteId": "siteA",
+    "roles": null,
+    "name": "bob",
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": { "siteId": "siteA", "crossSite": false, "userCount": 2 }
+  },
+  "action": "added",
+  "roomName": "Bob Chan 陳大文",
+  "hrInfo": { "account": "bob", "chineseName": "陳大文", "engName": "Bob Chan" },
+  "timestamp": 1778054483000
+}
+```
+
+For a **botDM**, the human member's event carries `appInfo` instead (the bot's own copy of the event carries the human's `hrInfo`):
+
+```json
+{
+  "action": "added",
+  "roomName": "Helper Bot",
+  "appInfo": { "id": "01970a4f8c2d7c9aA1", "name": "Helper Bot", "assistantName": "helper.bot" },
+  "timestamp": 1778054483000
+}
+```
+
 **3.** ~~`chat.user.{newMember}.event.room.key`~~ — **no longer fired on add.** The room key is delivered inline on the `added` event above (`subscription.room.privateKey` / `keyVersion`); `room.key` events now fire only on key rotation (member removal). See [§5 Room Encryption](#5-room-encryption).
 
 **4. `chat.room.{roomID}.event.member` / `chat.local.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Routed on the room's namespace exactly like `chat.room.{roomID}.event` — pick the subject by the room's `crossSite` flag (`chat.local.room.{roomID}.event.member` when `crossSite: false`, `chat.room.{roomID}.event.member` when `crossSite: true`/unknown). Delivered to clients subscribed to the room on that namespace.
@@ -1324,6 +1363,28 @@ The event carries no separate account list — member identities are in `members
 
 > [!NOTE]
 > **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
+
+###### CounterpartHRInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | Counterpart's account. |
+| `chineseName` | string | Counterpart's native (Chinese) name. Omitted when empty. |
+| `engName` | string | Counterpart's English name. Omitted when empty. |
+
+> Both name fields are `omitempty`, so a directory record with neither yields `{"account": "..."}` alone — and `roomName` then falls back to the account.
+>
+> Same wire shape as the search hit's [MessageHRInfo](#messagehrinfo). The key is `chineseName` here, whereas [SubscriptionHRInfo](#subscriptionhrinfo) — the `hrInfo` nested on a `subscription.list` DM row — still uses the legacy `name`.
+>
+> **This divergence is deliberate.** PR #165 scoped the `chineseName` rekey to "search response only; other payloads untouched", deliberately leaving `subscription.list` on the legacy key. New and reshaped surfaces take `chineseName`; existing ones are not rekeyed. A client must therefore **not** reuse one `hrInfo` parser across the event and the list — it would silently drop the name on one of them.
+
+###### CounterpartAppInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | App ID. |
+| `name` | string | App display name. Empty string when the app document has no name — `roomName` then falls back to the bot account. |
+| `assistantName` | string | The bot account the app answers on. |
 
 ##### Triggered events — error path
 
@@ -1612,12 +1673,12 @@ When the synchronous reply is an error envelope, the request was rejected before
 > **Server-internal — not a client RPC.** The "Set Room Restricted" RPC (formerly "Set Room Visibility") is admin-only and lives outside the client API surface. It is a **synchronous** server-to-server NATS request/reply on `chat.server.request.room.{siteID}.restricted`. Admin tooling sends a `RoomRestrictedRequest` (`pkg/model/room.go`) carrying:
 >
 > - `roomId` — channel room to mutate
-> - `account` — the admin caller (used for the sys-message authorship + audit log)
-> - `restricted` — whether the room is members-only; on the `false → true` transition `ownerAccount` is required and that account is promoted to sole owner
+> - `account` — the admin caller; carried as `byAccount` on the room event and recorded in room-service's log line
+> - `restricted` — whether the room is members-only
 > - `externalAccess` — whether the room is reachable from outside the company network (e.g. internet-side / off-VPN clients). This is a network-access gate, NOT a cross-site federation flag
-> - `ownerAccount` — required on the unrestricted-to-restricted transition
+> - `ownerAccount` — **required** on the `false → true` transition. Whenever it is supplied together with `restricted: true` — transition or not — that account is promoted to **sole** owner and every other member is reset to plain member, so an already-restricted room can have its owner rotated. Omit it to change the flags without touching anyone's roles
 >
-> room-service does the Mongo writes, emits a single `OutboxEvent` on the OUTBOX stream (one target per remote federated site), and replies `{"status":"ok","requestId":"…"}` once the work is committed. `outbox-worker` forwards the cross-site `room_restricted` event (at-least-once) to each remote site's `chat.inbox.{remoteSiteID}.external.room_restricted`. No `AsyncJobResult` is emitted — the reply *is* the result.
+> room-service does the Mongo writes, emits one `OutboxEvent` on the OUTBOX stream per remote federated site, and replies `{"status":"ok","requestId":"…"}` once the work is committed. `outbox-worker` forwards the cross-site `room_restricted` event (at-least-once) to each remote site's `chat.inbox.{remoteSiteID}.external.room_restricted`. No `AsyncJobResult` is emitted — the reply *is* the result.
 >
 > Clients learn about the change via a **`RoomRestrictedRoomEvent`** (`type: "room_restricted"`) on the same `chat.room.{roomID}.event` stream they already subscribe to for chat messages. Like `RoomRenamedRoomEvent`, it's a flat struct with no zero-valued envelope fields:
 >
@@ -1629,7 +1690,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 > | `timestamp` | number | Publish time (UTC ms). |
 > | `restricted` | bool | The new restricted state. |
 > | `externalAccess` | bool | The new external-access state. |
-> | `ownerAccount` | string | Omitted unless this was an unrestricted→restricted transition with a designated owner. |
+> | `ownerAccount` | string | The account designated sole owner by this call. Present on any restricting call that named one, including an owner rotation on an already-restricted room; omitted when none was sent. |
 > | `byAccount` | string | The admin who made the change. |
 > | `changedAt` | string | ISO-8601 timestamp of when the change was applied. |
 
@@ -2135,6 +2196,51 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 ##### Cross-site behaviour
 
 When the requester's home site differs from the room's site, `room-service` emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `subscription_favorite_toggled` event (at-least-once) to `chat.inbox.{userSite}.external.subscription_favorite_toggled`. `inbox-worker` on the user's home site mirrors the flip onto the local `Subscription` document. Missing-subscription on the home site (e.g., a federation race) is a silent no-op — no NACK, no redelivery loop.
+
+---
+
+#### Move Chat to Section
+
+**Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.chat.move`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+- `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
+
+Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual order, or removes it from its section. Membership + order live on the **subscription** (`sectionId` / `sectionOrder`) — the exact storage + fanout model as `favorite.toggle`, so the per-user section overlay never carries per-chat data (see [Chatlist Sections](#chatlist-sections)). `room-service` writes one subscription, replies with the result, and fans out a `subscription.update` (`action: "section_moved"`).
+
+**Order key.** `sectionOrder` is a `float64`. `afterRoomId` places the chat just after that room (midpoint between its order and the next member's); `beforeRoomId` places it just before that room (top-insertion when the target is the section head); omit both to append (last + 1). `afterRoomId` and `beforeRoomId` are mutually exclusive — supplying both is rejected. A single move is one subscription write. When repeated inserts into one gap exhaust float precision, `room-service` transparently re-spaces that section's members and retries — the client sees nothing.
+
+##### Request body
+
+| Field | Type | Notes |
+|---|---|---|
+| `sectionId` | string \| null | The custom section to move the chat into. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in) — the two are indistinguishable at the wire layer and handled identically. A **built-in** id (`favorites`/`apps`/`teams`/`chats`) is rejected — built-in membership is derived, not user-set. |
+| `afterRoomId` | string | Optional. Place the chat just after this room within the section. Omit to append at the end. Mutually exclusive with `beforeRoomId`. |
+| `beforeRoomId` | string | Optional. Place the chat just before this room within the section (top-insertion when it is the section head). Mutually exclusive with `afterRoomId`. |
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `sectionId` | string | Omitted on a remove. The section the chat is now in. |
+| `sectionOrder` | number | Omitted on a remove. The chat's new manual position. |
+
+```json
+{ "status": "ok", "sectionId": "0192...uuid", "sectionOrder": 3.5 }
+```
+
+##### Error response
+
+See [Error envelope](#6-error-envelope-reference). Common errors:
+
+- reason `chatlist_builtin_target` — `sectionId` is a built-in section.
+- reason `chatlist_section_not_found` — `sectionId` is empty.
+- `"only room members can list members"` — the user has no subscription in the room.
+
+##### Triggered events — success path
+
+**`chat.user.{account}.event.subscription.update`** — `action: "section_moved"`; `subscription` carries the updated `sectionId` / `sectionOrder`. Cross-site, the `subscription_section_moved` inbox event mirrors it onto the user's home-site subscription (HWM-guarded by `sectionUpdatedAt`), the same lane `favorite_toggled` uses.
 
 ---
 
@@ -2698,7 +2804,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `card` | [MessageCard](#messagecard) | Optional. |
 | `cardAction` | [MessageCardAction](#messagecardaction) | Optional. |
 | `tshow` | boolean | Optional. Whether a thread reply is also shown in the parent room. |
-| `tcount` | number | Optional. Number of non-deleted replies on a thread parent, capped at 99; a value of 99 means "99 or more". |
+| `tcount` | number | Optional. Exact number of non-deleted replies on a thread parent. |
 | `threadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent reply in the thread. Absent if no replies or not a thread parent. |
 | `threadParentId` | string | Optional. Set when this message is a thread reply. |
 | `threadParentCreatedAt` | string | Optional. RFC 3339. |
@@ -2706,7 +2812,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `visibleTo` | string | Optional. Visibility scope. |
 | `reactions` | map<emoji, [ReactionUser](#reactionuser)[]> | Optional. Omitted when absent; `{}` when present but empty. |
 | `deleted` | boolean | Optional. `true` for tombstoned messages. |
-| `type` | string | Optional. System-message type when set; regular messages omit it. Known values: `"room_created"`, `"members_added"`, `"member_removed"`, `"member_left"`, `"room_renamed"`, `"room_restricted"`. For all six, `msg` is populated with a server-rendered human-readable body and `sender.account` is the responsible actor (the requester for adds/removes-by-other / room-creates / renames / restricted changes, the leaving user for self-leave). |
+| `type` | string | Optional. System-message type when set; regular messages omit it. Known values: `"room_created"`, `"members_added"`, `"member_removed"`, `"member_left"`, `"room_renamed"`. For all five, `msg` is populated with a server-rendered human-readable body and `sender.account` is the responsible actor (the requester for adds/removes-by-other / room-creates / renames, the leaving user for self-leave). `"room_restricted"` also appears on historical messages: it is no longer produced — a restriction change emits a [room event](client-api/events.md#room_restricted-roomrestrictedroomevent) instead — but rows written before that change remain readable. |
 | `sysMsgData` | string | Optional. Base64-encoded JSON payload for system messages; shape depends on `type` (see [System-message `sysMsgData` payloads](#system-message-sysmsgdata-payloads)). |
 | `siteId` | string | Optional. The site that owns the message. |
 | `editedAt` | string | Optional. RFC 3339. Set after an edit. |
@@ -4394,6 +4500,12 @@ See [Error envelope](#6-error-envelope-reference).
 | `chat.user.{account}.request.user.{siteID}.status.set` | [`status.set`](#statusset) |
 | `chat.user.{account}.request.user.{siteID}.settings.get` | [`settings.get`](#settingsget) |
 | `chat.user.{account}.request.user.{siteID}.settings.set` | [`settings.set`](#settingsset) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.get` | [`chatlist.get`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.create` | [`chatlist.section.create`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.rename` | [`chatlist.section.rename`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.delete` | [`chatlist.section.delete`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.reorder` | [`chatlist.section.reorder`](#chatlist-sections) |
+| `chat.user.{account}.request.user.{siteID}.chatlist.section.setsortmode` | [`chatlist.section.setSortMode`](#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.subscription.list` | [`subscription.list`](#subscriptionlist) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getChannels` | [`subscription.getChannels`](#subscriptiongetchannels) |
 | `chat.user.{account}.request.user.{siteID}.subscription.getDM` | [`subscription.getDM`](#subscriptiongetdm) |
@@ -4701,6 +4813,72 @@ The payload carries the **full post-update settings** (replace, don't merge):
   "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
 }
 ```
+
+---
+
+#### Chatlist Sections
+
+The per-user chatlist is split into **sections**. A chat's section **membership**
+and manual **order** live on its subscription (`sectionId` / `sectionOrder`, set via
+[Move Chat to Section](#move-chat-to-section)); the section **definitions** (names,
+display order, sort mode) live in a small per-user overlay owned by `user-service`.
+So the overlay is O(number of sections), never O(number of chats) — a rename or
+reorder fans a few-KB event no matter how many chats a section holds.
+
+**Built-in sections** (membership derived client-side, never user-set): `favorites`
+(from `subscription.favorite`), `apps` (from `isBot`), `teams` (from
+`subscription.sectionId == "teams"`), `chats` (everything else — no `sectionId`, not
+favorite, not a bot). All built-ins default to `sortMode: "mostRecent"`.
+
+**sortMode**: `"custom"` (sort the section's chats by `subscription.sectionOrder`) or
+`"mostRecent"` (sort by last message — the default and fallback).
+
+##### Client read model
+
+1. Load the paginated room list ([`subscription.list`](#subscriptionlist)) — each sub
+   already carries `favorite`, `sectionId`, `sectionOrder`.
+2. Load `chatlist.get` once — the section definitions (names, order, sortMode).
+3. Group each sub: `favorites` (favorite) · `apps` (bot) · `teams` (`sectionId == "teams"`)
+   · each custom section (`sectionId == <that id>`) · `chats` (no `sectionId`, not
+   favorite/bot). A `sectionId` pointing at a section not in the definitions renders in
+   **chats** (orphan tolerance — a deleted section leaves its members orphaned, no cascade).
+4. Within a section: `sortMode == "custom"` → order by `sectionOrder`; else by last message.
+5. Live updates: `subscription.update` (a chat's membership/order changed) and
+   `chatlist.update` (a section def changed) each replace their own scope, guarded by
+   their timestamp (last-write-wins, no deltas).
+
+##### RPCs
+
+| Subject action | Body | Notes |
+|---|---|---|
+| `chatlist.get` | — (no body) | Returns the [ChatlistState](#chatliststate). Defaults (the built-ins) when never customized. |
+| `chatlist.section.create` | `{ "name": string, "sortMode"?: "custom"\|"mostRecent" }` | Adds a custom section above `chats`. `sortMode` defaults to `custom`. |
+| `chatlist.section.rename` | `{ "sectionId": string, "name": string }` | Custom sections only. |
+| `chatlist.section.delete` | `{ "sectionId": string }` | Custom sections only; members orphan to `chats`. |
+| `chatlist.section.reorder` | `{ "sectionOrder": string[] }` | A permutation of **every** section id (built-in + custom). |
+| `chatlist.section.setSortMode` | `{ "sectionId": string, "sortMode": "custom"\|"mostRecent" }` | Any section (a built-in may be flipped to `custom`). |
+
+Every mutation returns the full post-update [ChatlistState](#chatliststate) and fans out
+[`chatlist.update`](events.md#chatlistupdate--chatlist-section-sync) to the caller's other
+devices (and cross-site, HWM-guarded by `chatlistUpdatedAt`).
+
+**Section name validation** (create / rename): 1–50 characters after trimming, no
+consecutive spaces, only letters/digits (any script), spaces, or `-_./()`. Names are
+case-sensitive and unique across a user's custom sections. Errors carry a reason:
+`chatlist_invalid_name`, `chatlist_duplicate_name`, `chatlist_section_not_found`,
+`chatlist_builtin_immutable` (rename/delete a built-in), `chatlist_invalid_order`,
+`chatlist_invalid_sort_mode`.
+
+##### ChatlistState
+
+| Field | Type | Notes |
+|---|---|---|
+| `sectionOrder` | string[] | Section display order — every section id, built-in + custom. |
+| `sections` | ChatlistSection[] | The section definitions. |
+| `lastUpdatedAt` | number | Unix-millis high-water mark (last-write-wins). |
+
+**ChatlistSection**: `{ "id": string, "name": string, "builtIn": boolean, "sortMode": "custom"|"mostRecent" }`.
+There is **no** member list on a section — membership rides the subscriptions.
 
 ---
 
@@ -5315,7 +5493,8 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `hasMention` | boolean | The user was @-mentioned in the thread. |
 | `unread` | boolean | `true` when `lastMsgAt` is newer than `lastSeenAt` (or the thread was never opened). |
 | `lastMsgAt` | number | UTC ms of the thread's last activity — the global sort key. |
-| `parentMessage` | [Message](#message-schema) | Optional. The hydrated parent message; reply count rides on its `tcount`. |
+| `tcount` | number | Exact non-deleted reply count. Always present; `0` also covers threads whose count was never written — migrated threads, and briefly a just-created thread whose first reply has not yet been counted. During a mixed-version rollout, rows from a not-yet-upgraded site read `0` (their leaf omits the field), and the key is absent entirely behind a not-yet-upgraded aggregator. |
+| `parentMessage` | [Message](#message-schema) | Optional. The hydrated parent message. |
 | `lastMessage` | [Message](#message-schema) | Optional. The hydrated last reply. |
 | `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | Optional. Present **only on `dm` rows** — the counterpart's HR record, resolved from `roomName`. Omitted when the directory lookup degrades. |
 
@@ -5332,6 +5511,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
       "hasMention": true,
       "unread": true,
       "lastMsgAt": 1746518400000,
+      "tcount": 3,
       "parentMessage": {
         "roomId": "01970a4f8c2d7c9aQ",
         "messageId": "01970a4f8c2d7c9aQRST",
@@ -5353,9 +5533,24 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
       "roomType": "dm",
       "threadRoomId": "01970a4f8c2d7c9aTHR2",
       "parentMessageId": "01970a4f8c2d7c9aPQRS",
+      "lastSeenAt": 1746518200000,
       "hasMention": false,
       "unread": false,
       "lastMsgAt": 1746518100000,
+      "tcount": 1,
+      "parentMessage": {
+        "roomId": "01970a4f8c2d7c9aDM",
+        "messageId": "01970a4f8c2d7c9aPQRS",
+        "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9b", "account": "bob" },
+        "msg": "lunch?",
+        "tcount": 1
+      },
+      "lastMessage": {
+        "roomId": "01970a4f8c2d7c9aDM",
+        "messageId": "01970a4f8c2d7c9aTUVW",
+        "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+        "msg": "sure"
+      },
       "hrInfo": { "account": "bob", "name": "鮑伯", "engName": "Bob" }
     }
   ],
@@ -5743,7 +5938,8 @@ See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code
 | `bad_request` | `empty_text` | `text` is empty. |
 | `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
 | `unavailable` | — | Handler saturation — the concurrency cap is full; retry. |
-| `internal` | — | Translation backend failure. The raw cause is logged server-side, never returned. |
+| `unavailable` | `upstream_unavailable` | The third-party translation backend returned a 5XX or was unreachable (transport failure). Clients should show a "translation service temporarily unavailable" message and allow a retry. |
+| `internal` | — | Other translation backend failure (e.g. malformed stream, 4XX, non-success returnCode). The raw cause is logged server-side, never returned. |
 
 ```json
 {
@@ -6052,7 +6248,7 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 | `roomId` | string | The room the thread lives in. |
 | `siteId` | string | |
 | `parentMessageId` | string | The thread parent message's ID. Clients use this to locate the message in their cache and update its badge. |
-| `newTcount` | number | Authoritative reply count for the parent message, capped at 99 (99 means "99 or more"). Replaces any locally-computed count — do not delta. |
+| `newTcount` | number | Authoritative exact reply count for the parent message. Replaces any locally-computed count — do not delta. |
 | `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent when `newTcount` is 0 (all replies deleted). |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 | `replyMessageId` | string | The reply that was added or deleted. |
@@ -7063,6 +7259,69 @@ Lets the logged-in admin change their own password. Verifies `oldPassword` again
 #### Triggered events — success path
 
 `None — HTTP-only.`
+
+#### Triggered events — error path
+
+`None.`
+
+### 9.12 Set room on-duty
+
+**Endpoint:** `POST /v1/admin/rooms/:roomId/onduty`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Toggles a channel room's on-duty state. On-duty staff work off the company network, so `onDuty: true` narrows who may change the roster (`restricted` — only owners may add members) and permits the connection from outside (`externalAccess`); `onDuty: false` clears both. No room or subscription field named `onDuty` exists — the parameter maps onto those two flags, which are owned by room-service.
+
+**Nothing is displayed.** A restriction change publishes no system message, so no chat entry appears in the room and no notification is sent. Clients are still told: a flat `room_restricted` **room event** carries the new flags on the room's event subject, so open sessions refresh their state without a re-fetch and without rendering anything. No audit row is written — room-service's `processing room.restricted` log line, carrying actor, room, both flags and the designated owner, is the only durable server-side record.
+
+Turning duty **on** designates `ownerAccount` as the room's owner: that account becomes the sole owner and every other member is reset to plain member. Turning duty **off** sends no owner, so roles are left exactly as they are.
+
+Channel rooms only. The caller must also hold the platform `admin` user role, which room-service verifies independently of the session check.
+
+The member floor and the require-an-owner rule apply **only to the unrestricted → restricted transition**. Calling with `onDuty: true` against a room that is *already* restricted rotates the owner — the new account is still validated as a member and still becomes sole owner — but the `RESTRICTED_ROOM_MIN_MEMBERS` floor (default 5) is not re-checked.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `onDuty` | boolean | yes | `true` sets `restricted` and `externalAccess`; `false` clears both. An absent field is rejected; an explicit `false` is accepted. |
+| `ownerAccount` | string | when `onDuty` is `true` | Account that becomes the room's sole owner. Must be a member of the room. Surrounding whitespace is trimmed, and a whitespace-only value counts as absent. Ignored when `onDuty` is `false`. |
+
+```json
+{ "onDuty": true, "ownerAccount": "alice" }
+```
+
+#### Success response
+
+`HTTP 200`
+
+```json
+{ "status": "ok" }
+```
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | `onDuty` absent, not a boolean, body not valid JSON, or `ownerAccount` absent/blank while `onDuty` is `true`. |
+| 400 | `bad_request` | `non_channel_operation` | Target room is not a channel. |
+| 400 | `bad_request` | — | `ownerAccount` is not a member of the room. |
+| 401 | `unauthenticated` | `invalid_token` | Bearer token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Session lacks the `admin` role or its `siteId` does not match. |
+| 403 | `forbidden` | — | Caller does not hold the platform `admin` user role (raised by room-service). |
+| 404 | `not_found` | — | Room not found. |
+| 409 | `conflict` | — | Room has fewer members than `RESTRICTED_ROOM_MIN_MEMBERS`. Only on the unrestricted → restricted transition. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+| 503 | `unavailable` | — | room-service did not answer within `ROOM_RPC_TIMEOUT`, no responder was reachable, the client disconnected mid-call, room-service shed the request under load, or admin-service has no room-service client configured. The toggle is idempotent and may have applied — retry is safe. |
+
+#### Triggered events — success path
+
+[`room_restricted`](client-api/events.md#room_restricted-roomrestrictedroomevent) — a flat room event on the room's event subject carrying the new `restricted` / `externalAccess` values, the designated `ownerAccount`, and the acting admin. It is a state update, **not** a message: clients apply it to their local subscription and render nothing.
+
+No system message is published, so nothing appears in the room timeline and no push notification is sent.
+
+The event is published last, after every step that can still fail the call, so a non-2xx response means no event went out.
+
+For a room with members homed on other sites, room-service still fans the state change out to each remote site's inbox so their subscription copies stay in step. That is a server-to-server sync, not a client-visible event.
 
 #### Triggered events — error path
 

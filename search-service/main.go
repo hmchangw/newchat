@@ -50,6 +50,8 @@ type MongoConfig struct {
 	DB       string `env:"DB"       envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
+	// ReadPreference: read-only service; secondaryPreferred offloads the primary.
+	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
 }
 
 // UsersAPIConfig carries the third-party HR endpoint settings.
@@ -165,11 +167,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	mongoDB := mongoClient.Database(cfg.Mongo.DB)
 
 	usersRC := restyutil.New(

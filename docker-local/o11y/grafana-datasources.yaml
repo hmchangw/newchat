@@ -20,7 +20,9 @@ datasources:
     type: prometheus
     uid: prometheus
     access: proxy
-    url: http://prometheus:9090
+    # By container name: tools/observability also aliases `prometheus` on
+    # chat-local, so that alias resolves to both instances.
+    url: http://chat-local-o11y-prometheus:9090
     isDefault: true
     jsonData:
       exemplarTraceIdDestinations:

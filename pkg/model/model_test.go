@@ -1235,6 +1235,110 @@ func TestSubscriptionUpdateEventJSON(t *testing.T) {
 	}
 }
 
+func TestSubscriptionUpdateEventCounterpartJSON(t *testing.T) {
+	base := model.Subscription{
+		ID:       "s1",
+		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID:   "r1",
+		SiteID:   "site-a",
+		JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	tests := []struct {
+		name     string
+		src      model.SubscriptionUpdateEvent
+		wantKeys []string
+		absent   []string
+	}{
+		{
+			name: "dm carries hrInfo",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				RoomName:     "Bob Chan",
+				HRInfo:       &model.CounterpartHRInfo{Account: "bob", ChineseName: "陳大文", EngName: "Bob Chan"},
+				Timestamp:    1735689600000,
+			},
+			wantKeys: []string{`"hrInfo"`, `"account":"bob"`, `"chineseName":"陳大文"`, `"engName":"Bob Chan"`},
+			absent:   []string{`"appInfo"`},
+		},
+		{
+			name: "botDM carries appInfo",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				RoomName:     "Helper",
+				AppInfo:      &model.CounterpartAppInfo{ID: "app-1", Name: "Helper", AssistantName: "helper.bot"},
+				Timestamp:    1735689600000,
+			},
+			wantKeys: []string{`"appInfo"`, `"id":"app-1"`, `"name":"Helper"`, `"assistantName":"helper.bot"`},
+			absent:   []string{`"hrInfo"`},
+		},
+		{
+			name: "both omitted when unresolved",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				Timestamp:    1735689600000,
+			},
+			absent: []string{`"hrInfo"`, `"appInfo"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(&tt.src)
+			require.NoError(t, err)
+			for _, k := range tt.wantKeys {
+				assert.Contains(t, string(data), k)
+			}
+			for _, k := range tt.absent {
+				assert.NotContains(t, string(data), k)
+			}
+			var dst model.SubscriptionUpdateEvent
+			require.NoError(t, json.Unmarshal(data, &dst))
+			assert.Equal(t, tt.src, dst)
+		})
+	}
+}
+
+// Payloads written before hrInfo/appInfo existed must still decode — both fields
+// are omitempty pointers, so absent and explicit null both mean "no counterpart".
+func TestSubscriptionUpdateEventCounterpartDecodesLegacyPayload(t *testing.T) {
+	for _, raw := range []string{
+		`{"userId":"u1","action":"added","roomName":"eng","timestamp":1735689600000}`,
+		`{"userId":"u1","action":"added","hrInfo":null,"appInfo":null,"timestamp":1735689600000}`,
+	} {
+		var evt model.SubscriptionUpdateEvent
+		require.NoError(t, json.Unmarshal([]byte(raw), &evt))
+		assert.Nil(t, evt.HRInfo)
+		assert.Nil(t, evt.AppInfo)
+	}
+}
+
+func TestCounterpartHRInfoJSON(t *testing.T) {
+	src := model.CounterpartHRInfo{Account: "bob", ChineseName: "陳大文", EngName: "Bob Chan"}
+	roundTrip(t, &src, &model.CounterpartHRInfo{})
+
+	// Both names are omitempty; a directory record without them keeps only account.
+	data, err := json.Marshal(model.CounterpartHRInfo{Account: "dave"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"account":"dave"}`, string(data))
+}
+
+func TestCounterpartAppInfoJSON(t *testing.T) {
+	src := model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}
+	roundTrip(t, &src, &model.CounterpartAppInfo{})
+
+	// No field is omitempty, so a nameless app still ships all three keys.
+	data, err := json.Marshal(model.CounterpartAppInfo{ID: "app-2", AssistantName: "solo.bot"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"id":"app-2","name":"","assistantName":"solo.bot"}`, string(data))
+}
+
 func TestInboxEventJSON(t *testing.T) {
 	src := model.InboxEvent{
 		Type:       "member_added",
@@ -4030,13 +4134,6 @@ func TestRoomRestrictedRoomEventJSON(t *testing.T) {
 	roundTrip(t, &e, &model.RoomRestrictedRoomEvent{})
 }
 
-func TestRoomRestrictedSysDataJSON(t *testing.T) {
-	d := model.RoomRestrictedSysData{
-		Restricted: true, ExternalAccess: false, ByAccount: "admin1", OwnerAccount: "alice",
-	}
-	roundTrip(t, &d, &model.RoomRestrictedSysData{})
-}
-
 func TestRoomRenamedInboxPayloadJSON(t *testing.T) {
 	p := model.RoomRenamedInboxPayload{RoomID: "r1", NewName: "x", Timestamp: 1700000000000}
 	roundTrip(t, &p, &model.RoomRenamedInboxPayload{})
@@ -5074,6 +5171,112 @@ func TestSearchMessageEnrichmentJSON(t *testing.T) {
 	assert.NotContains(t, string(b), "\"room\"")
 	assert.NotContains(t, string(b), "\"sender\"")
 	assert.NotContains(t, string(b), "\"tshow\"")
+}
+
+func TestTeamsChatJSON_NeedVerify(t *testing.T) {
+	c := model.TeamsChat{ID: "19:abc@thread.v2", SiteID: "site-a", NeedVerify: true}
+	roundTrip(t, &c, &model.TeamsChat{})
+
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"needVerify":true`) {
+		t.Errorf("needVerify missing from JSON: %s", data)
+	}
+}
+
+func TestTeamsRoomVerifyRequestJSON(t *testing.T) {
+	r := model.TeamsRoomVerifyRequest{ChatIDs: []string{"19:abc@thread.v2", "19:def@unq.gbl.spaces"}}
+	roundTrip(t, &r, &model.TeamsRoomVerifyRequest{})
+}
+
+func TestTeamsRoomVerifyResponseJSON(t *testing.T) {
+	r := model.TeamsRoomVerifyResponse{
+		SiteID:         "site-a",
+		RequestedCount: 2,
+		FoundCount:     1,
+		Chats: []model.TeamsRoomVerifyResult{
+			{ChatID: "19:abc@thread.v2", RoomID: "7bQ1kR2mN8xY4pL0v", RoomExists: true, SubscriptionCount: 5, RoomUserCount: 5},
+			{ChatID: "19:def@unq.gbl.spaces", RoomID: "9xV4jP7sD2fG6bT1m"},
+		},
+	}
+	roundTrip(t, &r, &model.TeamsRoomVerifyResponse{})
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"siteId"`, `"requestedCount"`, `"foundCount"`, `"chatId"`, `"roomExists"`, `"subscriptionCount"`, `"roomUserCount"`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("key %s missing from JSON: %s", key, data)
+		}
+	}
+}
+
+// TestTeamsChatBSON_NeedVerify checks the raw BSON key for NeedVerify — a
+// typo'd tag here would silently break teams-room-verify's flag-clear filter
+// (ListChatsNeedingVerify / MarkVerified both filter on this exact key), and a
+// JSON-only round-trip cannot catch that.
+func TestTeamsChatBSON_NeedVerify(t *testing.T) {
+	c := model.TeamsChat{ID: "19:abc@thread.v2", SiteID: "site-a", NeedVerify: true}
+	data, err := bson.Marshal(&c)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	require.Contains(t, rawDoc, "needVerify", "BSON doc must have needVerify key")
+	assert.Equal(t, true, rawDoc["needVerify"])
+}
+
+// TestTeamsRoomVerifyRequestBSON checks the raw BSON key for
+// TeamsRoomVerifyRequest.ChatIDs. This type isn't persisted, but
+// teams-room-verify's client and pkg/model share this struct, so a tag typo
+// here is worth catching the same way as the persisted types.
+func TestTeamsRoomVerifyRequestBSON(t *testing.T) {
+	r := model.TeamsRoomVerifyRequest{ChatIDs: []string{"19:abc@thread.v2"}}
+	data, err := bson.Marshal(&r)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	assert.Contains(t, rawDoc, "chatIds", "BSON doc must have chatIds key")
+}
+
+// TestTeamsRoomVerifyResultBSON checks the raw BSON keys for
+// TeamsRoomVerifyResult, one element of TeamsRoomVerifyResponse.Chats.
+func TestTeamsRoomVerifyResultBSON(t *testing.T) {
+	res := model.TeamsRoomVerifyResult{
+		ChatID: "19:abc@thread.v2", RoomID: "7bQ1kR2mN8xY4pL0v",
+		RoomExists: true, SubscriptionCount: 5, RoomUserCount: 5,
+	}
+	data, err := bson.Marshal(&res)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	for _, key := range []string{"chatId", "roomId", "roomExists", "subscriptionCount", "roomUserCount"} {
+		assert.Contains(t, rawDoc, key, "BSON doc must have %q key", key)
+	}
+	assert.Equal(t, true, rawDoc["roomExists"])
+}
+
+// TestTeamsRoomVerifyResponseBSON checks the raw BSON keys for
+// TeamsRoomVerifyResponse, including the misroute-guard field SiteID.
+func TestTeamsRoomVerifyResponseBSON(t *testing.T) {
+	resp := model.TeamsRoomVerifyResponse{
+		SiteID: "site-a", RequestedCount: 2, FoundCount: 1,
+		Chats: []model.TeamsRoomVerifyResult{{ChatID: "19:abc@thread.v2"}},
+	}
+	data, err := bson.Marshal(&resp)
+	require.NoError(t, err)
+
+	var rawDoc bson.M
+	require.NoError(t, bson.Unmarshal(data, &rawDoc))
+	for _, key := range []string{"siteId", "requestedCount", "foundCount", "chats"} {
+		assert.Contains(t, rawDoc, key, "BSON doc must have %q key", key)
+	}
+	assert.Equal(t, "site-a", rawDoc["siteId"])
 }
 
 func TestMessageAppInfoJSON(t *testing.T) {

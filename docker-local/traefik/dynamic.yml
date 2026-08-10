@@ -7,6 +7,8 @@
 #
 # Portal-service's own /api/v1/login is deliberately NOT routed here — portal
 # stays "portal-direct" (its own host port, 8085), not behind the gateway.
+#
+# No password-change router: that endpoint lives on admin-service, not botplatform.
 http:
   routers:
     auth:
@@ -27,12 +29,6 @@ http:
         - web
       service: media-service
 
-    password-change:
-      rule: "PathPrefix(`/api/v1/password/change`)"
-      entryPoints:
-        - web
-      service: botplatform-service
-
   services:
     auth-service:
       loadBalancer:
@@ -48,8 +44,3 @@ http:
       loadBalancer:
         servers:
           - url: "http://media-service:8080"
-
-    botplatform-service:
-      loadBalancer:
-        servers:
-          - url: "http://botplatform-service:8080"

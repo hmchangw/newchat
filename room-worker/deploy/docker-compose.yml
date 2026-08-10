@@ -9,28 +9,28 @@ services:
     environment:
       - OTEL_SERVICE_NAME=room-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - SITE_ID=site-local
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Room keys live in the MongoDB rooms collection; this grace window keeps a
       # rotated-out previous key valid for decrypt.
-      - ROOM_KEY_GRACE_PERIOD=24h
-      - BOOTSTRAP_STREAMS=true
-      - ATREST_ENABLED=true
-      - VAULT_ADDR=http://vault:8200
-      - VAULT_TOKEN=dev-only-token
-      - ATREST_VAULT_TRANSIT_KEY=chat-kek
+      - ROOM_KEY_GRACE_PERIOD=${ROOM_KEY_GRACE_PERIOD:-24h}
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      - ATREST_ENABLED=${ATREST_ENABLED:-true}
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}
+      - ATREST_VAULT_TRANSIT_KEY=${ATREST_VAULT_TRANSIT_KEY:-chat-kek}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
       - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
     volumes:
-      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

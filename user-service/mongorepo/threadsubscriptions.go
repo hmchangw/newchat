@@ -23,7 +23,8 @@ type ThreadSubscriptionRepo struct {
 	threadSubs *mongoutil.Collection[model.ThreadUnreadRow]
 }
 
-// NewThreadSubscriptionRepo builds a ThreadSubscriptionRepo over db.
+// NewThreadSubscriptionRepo builds a ThreadSubscriptionRepo over db. The badge/tally
+// read stays on the primary so it reflects a just-changed thread subscription.
 func NewThreadSubscriptionRepo(db *mongo.Database) *ThreadSubscriptionRepo {
 	return &ThreadSubscriptionRepo{
 		threadSubs: mongoutil.NewCollection[model.ThreadUnreadRow](db.Collection(threadSubscriptionsCollection)),

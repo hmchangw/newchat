@@ -342,7 +342,7 @@ func TestHandler_createUser(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, emptySessionStore(), testCfg())
+			h := newHandler(m, emptySessionStore(), testCfg(), nil)
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
@@ -434,7 +434,7 @@ func TestHandler_listUsers(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, emptySessionStore(), testCfg())
+			h := newHandler(m, emptySessionStore(), testCfg(), nil)
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
@@ -526,7 +526,7 @@ func TestHandler_getUser(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, emptySessionStore(), testCfg())
+			h := newHandler(m, emptySessionStore(), testCfg(), nil)
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
@@ -713,7 +713,7 @@ func TestHandler_updateUser(t *testing.T) {
 				tc.setupSessions(sess)
 			}
 
-			h := newHandler(m, sess, testCfg())
+			h := newHandler(m, sess, testCfg(), nil)
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
@@ -741,7 +741,7 @@ func TestHandler_updateUser_DeactivateAndRevoke_TxError_Returns500(t *testing.T)
 	m.EXPECT().DeactivateAndRevoke(gomock.Any(), "site-A", "u2b").Return(fmt.Errorf("mongo dead"))
 	// no AppendAudit expectation — must not fire
 
-	h := newHandler(m, emptySessionStore(), testCfg())
+	h := newHandler(m, emptySessionStore(), testCfg(), nil)
 	r := setupRouter(h)
 
 	w := httptest.NewRecorder()
@@ -866,7 +866,7 @@ func TestHandler_listSessions(t *testing.T) {
 				tc.setupSessions(sess)
 			}
 
-			h := newHandler(m, sess, testCfg())
+			h := newHandler(m, sess, testCfg(), nil)
 			r := setupSessionRouter(h)
 
 			w := httptest.NewRecorder()
@@ -946,7 +946,7 @@ func TestHandler_revokeAllSessions(t *testing.T) {
 				tc.setupSessions(sess)
 			}
 
-			h := newHandler(m, sess, testCfg())
+			h := newHandler(m, sess, testCfg(), nil)
 			r := setupSessionRouter(h)
 
 			w := httptest.NewRecorder()
@@ -1028,7 +1028,7 @@ func TestHandler_revokeSession(t *testing.T) {
 				tc.setupSessions(sess)
 			}
 
-			h := newHandler(m, sess, testCfg())
+			h := newHandler(m, sess, testCfg(), nil)
 			r := setupSessionRouter(h)
 
 			w := httptest.NewRecorder()
@@ -1105,7 +1105,7 @@ func TestHandler_listAudit(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 			tc.setupMock(m)
 
-			h := newHandler(m, emptySessionStore(), testCfg())
+			h := newHandler(m, emptySessionStore(), testCfg(), nil)
 			r := setupSessionRouter(h)
 
 			w := httptest.NewRecorder()
@@ -1129,7 +1129,7 @@ func TestHandler_healthz(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	m := NewMockAdminStore(ctrl)
 
-	h := newHandler(m, emptySessionStore(), testCfg())
+	h := newHandler(m, emptySessionStore(), testCfg(), nil)
 	r := setupSessionRouter(h)
 
 	w := httptest.NewRecorder()
@@ -1147,7 +1147,7 @@ func TestHandler_readyz(t *testing.T) {
 		m := NewMockAdminStore(ctrl)
 		m.EXPECT().Ping(gomock.Any()).Return(nil)
 
-		h := newHandler(m, emptySessionStore(), testCfg())
+		h := newHandler(m, emptySessionStore(), testCfg(), nil)
 		r := setupSessionRouter(h)
 
 		w := httptest.NewRecorder()
@@ -1164,7 +1164,7 @@ func TestHandler_readyz(t *testing.T) {
 		m := NewMockAdminStore(ctrl)
 		m.EXPECT().Ping(gomock.Any()).Return(fmt.Errorf("mongo unreachable"))
 
-		h := newHandler(m, emptySessionStore(), testCfg())
+		h := newHandler(m, emptySessionStore(), testCfg(), nil)
 		r := setupSessionRouter(h)
 
 		w := httptest.NewRecorder()
@@ -1279,7 +1279,7 @@ func TestHandler_setPassword(t *testing.T) {
 				tc.setupSessions(sess)
 			}
 
-			h := newHandler(m, sess, testCfg())
+			h := newHandler(m, sess, testCfg(), nil)
 			r := setupRouter(h)
 
 			w := httptest.NewRecorder()
@@ -1308,7 +1308,7 @@ func TestHandler_setPassword_TxError_Returns500(t *testing.T) {
 		Return(fmt.Errorf("mongo dead"))
 	// no AppendAudit expectation — must not fire
 
-	h := newHandler(m, emptySessionStore(), testCfg())
+	h := newHandler(m, emptySessionStore(), testCfg(), nil)
 	r := setupRouter(h)
 
 	w := httptest.NewRecorder()

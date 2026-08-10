@@ -16,7 +16,6 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	cassmodel "github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
-	"github.com/hmchangw/chat/pkg/threadcount"
 )
 
 func TestRepository_UpdateMessageContent_TopLevel(t *testing.T) {
@@ -1749,12 +1748,15 @@ func TestRepository_SoftDeleteMessage_TShowThreadReply(t *testing.T) {
 	assert.True(t, gotDeleted, "TShow reply soft-delete must propagate to the messages_by_room copy")
 }
 
-func TestRepository_countThreadReplies_CapsAtThreadcountCap(t *testing.T) {
+// A thread well past the old 99 ceiling counts exactly, and tlm is still the
+// newest reply — the DESC clustering order surfaces it first.
+func TestRepository_countThreadReplies_LongThreadExact(t *testing.T) {
 	ctx := context.Background()
 	session := setupCassandra(t)
 
+	const replies = 150
 	base := time.Now().UTC()
-	for i := 0; i < threadcount.Cap+10; i++ {
+	for i := 0; i < replies; i++ {
 		require.NoError(t, session.Query(
 			`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id) VALUES (?, ?, ?)`,
 			"thread-1", base.Add(time.Duration(i)*time.Millisecond), fmt.Sprintf("reply-%d", i),
@@ -1764,10 +1766,8 @@ func TestRepository_countThreadReplies_CapsAtThreadcountCap(t *testing.T) {
 	repo := NewRepository(session, msgbucket.New(24*time.Hour), 10, nil)
 	n, tlm, err := repo.countThreadReplies(ctx, "thread-1")
 	require.NoError(t, err)
-	assert.Equal(t, threadcount.Cap, n)
-	// Even over Cap, tlm must be the newest reply — the DESC clustering order
-	// surfaces it first, so the bounded scan still observes the true maximum.
+	assert.Equal(t, replies, n)
 	require.NotNil(t, tlm)
-	newest := base.Add(time.Duration(threadcount.Cap+9) * time.Millisecond)
+	newest := base.Add(time.Duration(replies-1) * time.Millisecond)
 	assert.Equal(t, newest.UnixMilli(), tlm.UnixMilli())
 }

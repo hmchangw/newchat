@@ -2104,9 +2104,9 @@ func validateSyncCreateDMShape(req *model.SyncCreateDMRequest) error {
 	return nil
 }
 
-// resolveSubUpdateRoomName computes a subscription.update's roomName: the room name for
-// channels; for dm/botDM, app.Name when the counterpart is a bot account, else its display name.
-func (h *Handler) resolveSubUpdateRoomName(ctx context.Context, sub *model.Subscription, userByAccount map[string]*model.User) string {
+// resolveSubUpdateCounterpart computes a subscription.update's roomName plus the
+// counterpart: appInfo for a bot, hrInfo for a human, neither elsewhere. Best-effort.
+func (h *Handler) resolveSubUpdateCounterpart(ctx context.Context, sub *model.Subscription, userByAccount map[string]*model.User) (string, *model.CounterpartHRInfo, *model.CounterpartAppInfo) {
 	switch sub.RoomType {
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		cp := sub.Name
@@ -2115,21 +2115,36 @@ func (h *Handler) resolveSubUpdateRoomName(ctx context.Context, sub *model.Subsc
 		// resolves via the user map.
 		if model.IsBot(cp) {
 			app, err := h.store.GetApp(ctx, cp)
-			if err == nil && app.Name != "" {
-				return app.Name
+			if err != nil {
+				// ErrAppNotFound is discarded silently by decision: the account fallback
+				// is a fine label and the miss is not actionable per event.
+				if !errors.Is(err, ErrAppNotFound) {
+					slog.WarnContext(ctx, "resolve counterpart: GetApp failed; roomName falls back to bot account, appInfo omitted",
+						"request_id", natsutil.RequestIDFromContext(ctx), "botAccount", cp, "error", err)
+				}
+				return cp, nil, nil
 			}
-			if err != nil && !errors.Is(err, ErrAppNotFound) {
-				slog.WarnContext(ctx, "resolve roomName: GetApp failed, using account fallback",
-					"request_id", natsutil.RequestIDFromContext(ctx), "botAccount", cp, "error", err)
+			// AssistantName is cp by construction — GetApp filters on assistant.name == cp,
+			// and the doc can't supply it anyway (projection leaves Assistant nil).
+			appInfo := &model.CounterpartAppInfo{ID: app.ID, Name: app.Name, AssistantName: cp}
+			if app.Name == "" {
+				// Apps are always named, so this is a bad document; ship appInfo for its
+				// id but log which one, since roomName and appInfo.name now disagree.
+				slog.WarnContext(ctx, "resolve counterpart: app has no name; roomName falls back to bot account, appInfo.name empty",
+					"request_id", natsutil.RequestIDFromContext(ctx), "botAccount", cp, "app_id", app.ID)
+				return cp, nil, appInfo
 			}
-			return cp
+			return app.Name, nil, appInfo
 		}
 		if u, ok := userByAccount[cp]; ok {
-			return displayName(u)
+			hr := &model.CounterpartHRInfo{Account: u.Account, ChineseName: u.ChineseName, EngName: u.EngName}
+			return displayName(u), hr, nil
 		}
-		return cp
+		// Map miss is silent by decision — callers build it from users they already
+		// fetched, so the account fallback covers it.
+		return cp, nil, nil
 	default:
-		return sub.Name
+		return sub.Name, nil, nil
 	}
 }
 
@@ -2154,11 +2169,14 @@ func (h *Handler) publishSubscriptionAdded(ctx context.Context, subs []*model.Su
 	for _, sub := range subs {
 		subCopy := *sub
 		subCopy.Room = subRoom
+		roomName, hrInfo, appInfo := h.resolveSubUpdateCounterpart(ctx, sub, userByAccount)
 		evt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,
 			Subscription: subCopy,
 			Action:       "added",
-			RoomName:     h.resolveSubUpdateRoomName(ctx, sub, userByAccount),
+			RoomName:     roomName,
+			HRInfo:       hrInfo,
+			AppInfo:      appInfo,
 			Timestamp:    tsMillis,
 		}
 		data, err := json.Marshal(evt)

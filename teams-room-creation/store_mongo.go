@@ -42,8 +42,11 @@ func (s *mongoStore) ListChatsNeedingRoom(ctx context.Context) ([]model.TeamsCha
 	return chats, nil
 }
 
-// MarkRoomsCreated clears needCreateRoom for the given ids. Written by the
-// primary client. A nil/empty id slice is a no-op.
+// MarkRoomsCreated clears needCreateRoom and raises needVerify for the given
+// refs, in one write. Written by the primary client. A nil/empty ref slice is a
+// no-op. Because this runs only after JetStream acknowledged the batch,
+// needVerify=true means the creation event was durably published — which is
+// exactly the precondition teams-room-verify audits.
 func (s *mongoStore) MarkRoomsCreated(ctx context.Context, refs []RoomCreatedRef) error {
 	if len(refs) == 0 {
 		return nil
@@ -55,7 +58,7 @@ func (s *mongoStore) MarkRoomsCreated(ctx context.Context, refs []RoomCreatedRef
 		// it. A stale ref matches nothing, leaving the chat for the next run.
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": r.ID, "updatedAt": r.UpdatedAt}).
-			SetUpdate(bson.M{"$set": bson.M{"needCreateRoom": false}}))
+			SetUpdate(bson.M{"$set": bson.M{"needCreateRoom": false, "needVerify": true}}))
 	}
 	if _, err := s.writeChats.BulkWrite(ctx, models); err != nil {
 		return fmt.Errorf("mark rooms created: %w", err)
