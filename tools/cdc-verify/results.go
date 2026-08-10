@@ -1,6 +1,25 @@
 package main
 
-import "sync"
+import (
+	"sync"
+)
+
+// deepCopyResult creates a deep copy of a CheckResult with fresh backing arrays
+// for Targets and Diffs slices.
+func deepCopyResult(r CheckResult) CheckResult {
+	result := r
+	if len(r.Targets) > 0 {
+		result.Targets = make([]TargetResult, len(r.Targets))
+		for i := range r.Targets {
+			result.Targets[i] = r.Targets[i]
+			if len(r.Targets[i].Diffs) > 0 {
+				result.Targets[i].Diffs = make([]FieldDiff, len(r.Targets[i].Diffs))
+				copy(result.Targets[i].Diffs, r.Targets[i].Diffs)
+			}
+		}
+	}
+	return result
+}
 
 type CheckState string
 
@@ -68,6 +87,9 @@ func newResultsStore(recentCap, failedCap int, onUpdate func(CheckResult)) *resu
 
 //nolint:unused // wired into main.go's dependency graph by a later task
 func (s *resultsStore) Upsert(r CheckResult) {
+	// Deep-copy the incoming result to own its slices and protect from caller mutations
+	r = deepCopyResult(r)
+
 	s.mu.Lock()
 	idx := -1
 	for i := range s.recent {
@@ -96,8 +118,11 @@ func (s *resultsStore) Upsert(r CheckResult) {
 			s.counters.Failed++
 			s.failures = append([]CheckResult{r}, s.failures...)
 			if len(s.failures) > s.failedCap {
+				evictedFromFailures := s.failures[s.failedCap]
 				s.failures = s.failures[:s.failedCap]
 				s.counters.Evicted++
+				// Symmetric pruning: remove from counted if also not in recent
+				delete(s.counted, evictedIDIfUncounted(s, evictedFromFailures))
 			}
 		case StateSkipped:
 			s.counters.Skipped++
