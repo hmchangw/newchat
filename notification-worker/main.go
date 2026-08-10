@@ -15,6 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/health"
@@ -157,7 +158,10 @@ func main() {
 	subCol := db.Collection("subscriptions")
 	threadRoomCol := db.Collection("thread_rooms")
 	roomsCol := db.Collection("rooms")
-	usersCol := db.Collection("users")
+	// Settings gate push delivery, so a stale read means a user who just muted
+	// still gets notified; route to primary regardless of the client-wide
+	// preference. The other collections here tolerate replica lag and keep it.
+	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 
 	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 		valkeyutil.WithObservability(sdk),

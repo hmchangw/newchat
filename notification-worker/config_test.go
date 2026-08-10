@@ -55,6 +55,10 @@ func TestConfig_UserSettingsDefaults(t *testing.T) {
 	require.NoError(t, os.Unsetenv("USER_SETTINGS_ENABLED"))
 	t.Setenv("PRESENCE_RPC_ENABLED", "")
 	require.NoError(t, os.Unsetenv("PRESENCE_RPC_ENABLED"))
+	t.Setenv("USER_SETTINGS_BATCH_SIZE", "")
+	require.NoError(t, os.Unsetenv("USER_SETTINGS_BATCH_SIZE"))
+	t.Setenv("USER_SETTINGS_TIMEOUT", "")
+	require.NoError(t, os.Unsetenv("USER_SETTINGS_TIMEOUT"))
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
