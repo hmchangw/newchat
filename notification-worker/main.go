@@ -51,7 +51,10 @@ type config struct {
 	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
-	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"`  // false → noopPresenceSnapshotter; set true once presence service is available
+	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
+	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
+	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
+	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
 	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
 	Mode                   stream.Pipeline         `env:"MODE,required"`                                 // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -144,6 +147,7 @@ func main() {
 	subCol := db.Collection("subscriptions")
 	threadRoomCol := db.Collection("thread_rooms")
 	roomsCol := db.Collection("rooms")
+	usersCol := db.Collection("users")
 
 	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 		valkeyutil.WithObservability(sdk),
@@ -207,11 +211,17 @@ func main() {
 		)
 	}
 
+	var settings UserSettingsSnapshotter = noopUserSettings{}
+	if cfg.UserSettingsEnabled {
+		settings = newMongoUserSettings(usersCol, cfg.UserSettingsBatchSize, cfg.UserSettingsTimeout)
+	}
+
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
 		Parent:             newHistoryParentFetcher(nc),
 		Presence:           presence,
+		Settings:           settings,
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
@@ -328,6 +338,7 @@ func main() {
 		"push_recipient_batch_size", cfg.PushRecipientBatchSize,
 		"valkey_addrs", cfg.ValkeyAddrs,
 		"presence_enabled", cfg.PresenceEnabled,
+		"user_settings_enabled", cfg.UserSettingsEnabled,
 	)
 
 	shutdown.Wait(ctx, 25*time.Second,
