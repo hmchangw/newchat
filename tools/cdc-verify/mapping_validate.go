@@ -5,10 +5,6 @@ import (
 	"strings"
 )
 
-// knownTransform is replaced by the transform registry in transform.go
-// (Task 5). Until then every name is accepted.
-func knownTransform(string) bool { return true }
-
 var validOps = map[string]bool{"insert": true, "update": true, "replace": true, "delete": true}
 
 func validateMapping(m *Mapping) error {
@@ -52,7 +48,7 @@ func validateSource(src *SourceMapping) error {
 		}
 	}
 	for alias, t := range src.Targets {
-		if err := validateTarget(alias, t, src.Resolvers); err != nil {
+		if err := validateTarget(alias, &t, src.Resolvers); err != nil {
 			return err
 		}
 	}
@@ -87,7 +83,7 @@ func validateSource(src *SourceMapping) error {
 	return nil
 }
 
-func validateTarget(alias string, t Target, resolvers map[string]Resolver) error {
+func validateTarget(alias string, t *Target, resolvers map[string]Resolver) error {
 	switch t.Kind {
 	case "mongo":
 		if t.Collection == "" {

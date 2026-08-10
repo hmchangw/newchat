@@ -68,6 +68,9 @@ func TestValidateMapping(t *testing.T) {
 		{"derived missing transform", func(s *SourceMapping) {
 			s.Derived = []Derived{{From: []string{"a"}, Dest: []string{"msgById.x"}}}
 		}, "transform"},
+		{"unknown transform", func(s *SourceMapping) {
+			s.Fields["msg"] = []DestRef{{Dest: "msgById.body", Transform: "nope"}}
+		}, "unknown transform"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
