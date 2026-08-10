@@ -119,6 +119,13 @@ event observed ──▶ PENDING ── poll compare every VERIFY_POLL (default 
                               matches CDC_COVERAGE.md's ❌ rows; counted, not failed)
 ```
 
+- **Fan-out sub-checks:** because a source collection maps to *multiple*
+  destination targets (§6), one check fans out into **one sub-check per target**.
+  Each sub-check looks up its own dest record and compares only the fields
+  mapped to that target, polls independently, and **freezes on its own match**.
+  The row is MATCHED (and frozen) when *all* sub-checks have matched; it is
+  FAILED when the deadline passes with any sub-check unmatched — the failure
+  records which targets failed and their per-field diffs.
 - **Freeze on match:** a MATCHED row is immutable. Later events for the same key
   start *new* checks with new rows.
 - **First comparison happens immediately**, then polls — most events verify on
@@ -148,78 +155,104 @@ event observed ──▶ PENDING ── poll compare every VERIFY_POLL (default 
 
 ## 6. Mapping configuration (JSON)
 
-Path via `MAPPING_FILE`. Validated at startup — unknown transform names, empty
-key specs, or a `cassandra` dest without a `table` fail fast. Collections
-observed on the stream with no mapping entry are classified SKIPPED
-(`unmapped`) and counted, so coverage gaps are visible, never silent.
+The mapping is **cross-table and cross-DB with fan-out**: one source field may be
+verified against fields in *several* destination tables, and several source
+collections may each verify their own slice of *one* destination table. Source
+is always Mongo; each destination target is Mongo **or** Cassandra.
+
+Shape: per source collection, (a) a set of named **targets** — each declaring
+where the dest record lives and how to locate it from the source doc — and
+(b) a field-centric **fields** map in exactly the requested form,
+`source field → [dest table.field, …]`:
 
 ```jsonc
 {
-  "mappings": [
+  "sources": [
     {
-      "sourceCollection": "rocketchat_room",
-      "dest": { "kind": "mongo", "collection": "rooms" },
-      "key": [ { "destField": "_id", "from": "_id" } ],
-      "mode": "fields",
-      "fields": [
-        { "source": "name",  "dest": "name" },
-        { "source": "t",     "dest": "type", "transform": "roomType" },
-        { "source": "ts",    "dest": "createdAt", "transform": "unixMilli" }
-      ],
-      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "skip" }
+      "collection": "rocketchat_message",
+      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "verify-absent" },
+      "targets": {
+        "msgById":   { "kind": "cassandra", "table": "messages_by_id",
+                       "key": { "message_id": "_id" } },
+        "msgByRoom": { "kind": "cassandra", "table": "messages_by_room",
+                       "key": { "room_id": "rid",
+                                "bucket":     { "from": "ts", "transform": "msgBucket" },
+                                "created_at": { "from": "ts", "transform": "unixMilli" },
+                                "message_id": "_id" } }
+      },
+      "fields": {
+        "msg":   [ "msgById.body", "msgByRoom.body" ],          // 1 source field → 2 dest tables
+        "u._id": [ "msgById.sender_account", "msgByRoom.sender_account" ],
+        "ts":    [ { "dest": "msgById.created_at",   "transform": "unixMilli" },
+                   { "dest": "msgByRoom.created_at", "transform": "unixMilli" } ]
+      }
     },
     {
-      "sourceCollection": "rocketchat_subscription",
-      "dest": { "kind": "mongo", "collection": "subscriptions" },
-      "key": [                                  // re-keyed dest: query by fields, not _id
-        { "destField": "roomId",  "from": "rid" },
-        { "destField": "account", "from": "u.username" }
-      ],
-      "mode": "fields",
-      "fields": [ { "source": "open", "dest": "joined" }, { "source": "f", "dest": "favorite" } ],
-      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "skip" }
+      "collection": "rocketchat_subscription",
+      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "skip" },
+      "targets": {
+        "subs": { "kind": "mongo", "collection": "subscriptions",   // re-keyed dest: located by
+                  "key": { "roomId": "rid", "account": "u.username" } }, // field query, not _id
+        "members": { "kind": "mongo", "collection": "room_members",
+                     "key": { "roomId": "rid", "member.id": "u.username" } }
+      },
+      "fields": {
+        "open": [ "subs.joined" ],
+        "f":    [ "subs.favorite" ],
+        "ts":   [ { "dest": "subs.createdAt", "transform": "unixMilli" },
+                  { "dest": "members.joinedAt", "transform": "unixMilli" } ]
+      }
     },
     {
-      "sourceCollection": "rocketchat_message",
-      "dest": { "kind": "cassandra", "table": "messages_by_id" },
-      "key": [ { "destField": "message_id", "from": "_id" } ],
-      "mode": "fields",
-      "fields": [
-        { "source": "msg",   "dest": "body" },
-        { "source": "u._id", "dest": "sender_account" },
-        { "source": "ts",    "dest": "created_at", "transform": "unixMilli" }
-      ],
-      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "verify-absent" }
-    },
-    {
-      "sourceCollection": "rocketchat_avatar",
-      "dest": { "kind": "mongo", "collection": "rocketchat_avatar" },
-      "key": [ { "destField": "_id", "from": "_id" } ],
-      "mode": "verbatim",
-      "ignore": [ "_updatedAt" ],
-      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "verify-absent" }
+      "collection": "rocketchat_avatar",
+      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "verify-absent" },
+      "targets": {
+        "avatar": { "kind": "mongo", "collection": "rocketchat_avatar",
+                    "key": { "_id": "_id" },
+                    "mode": "verbatim", "ignore": [ "_updatedAt" ] }   // direct-transfer: whole-doc
+      }
     }
   ]
 }
 ```
 
-- **Key spec** = how to locate the dest record from the *source doc* (dot-paths).
-  For Mongo it becomes a filter (with projection limited to compared fields, per
-  CLAUDE.md); for Cassandra a `SELECT <cols> ... WHERE` on the named table.
-  Messages use `messages_by_id` (a point-lookup table — no bucket math needed;
-  legacy 17-char ids are valid message ids per `pkg/idgen`).
+Schema rules:
+
+- **Target** = `{ kind: "mongo"|"cassandra", collection|table, key, mode?, ignore? }`.
+  The **key spec** maps *dest* key fields ← *source* dot-paths (optionally through a
+  transform, e.g. `msgBucket` for the bucketed partition key via `pkg/msgbucket`).
+  Mongo lookup = filter + projection limited to compared fields (per CLAUDE.md);
+  Cassandra lookup = `SELECT <cols> … WHERE <key>` on the named table.
+- **Fields map** = `sourcePath: [destRef, …]` — fan-out is the normal case. A
+  `destRef` is either the shorthand string `"<targetAlias>.<destFieldPath>"`
+  (alias is the first dot-segment; aliases must not contain dots) or the object
+  form `{ "dest": "...", "transform": "...", "required": true }`.
+- **Many→one (derived values):** an optional `derived` list per source supports
+  multiple source fields combining into one dest field through a named transform,
+  e.g. `{ "from": ["u._id", "peer._id"], "transform": "dmRoomID", "dest": ["rooms._id"] }`.
+  Key specs accept the same multi-`from` form.
+- **Two source collections → one dest table** needs no special syntax: each
+  source entry declares its own target pointing at the same dest table, with its
+  own key spec, and verifies only the fields it maps. (No cross-collection joins
+  in v1 — each event verifies from its own source doc.)
+- **Verbatim mode** is per-target (`mode: "verbatim"` + `ignore` list) for the
+  `oplog-direct-transfer` collections; a verbatim target takes no `fields` entries.
+- **Transform vocabulary (initial, deliberately small):** `unixMilli`,
+  `toString`, `msgBucket`, plus named domain transforms registered in Go (e.g.
+  `roomType`, `dmRoomID`). Adding one = a Go function + registry entry; the JSON
+  references it by name only.
 - **Source doc for the check** is always re-read from source Mongo by
   `documentKey._id` (never trusted from the event payload — updates carry only
-  deltas anyway). Source read preference: `primaryPreferred`, same rationale as
-  the transformer.
-- **Transform vocabulary (initial, deliberately small):** `unixMilli`,
-  `toString`, plus named domain transforms registered in Go (e.g. `roomType`)
-  when a pure-JSON expression can't express it. Adding a transform = one Go
-  function + registry entry; the JSON only references it by name.
-- The shipped default mapping file lives at `tools/cdc-verify/mapping.example.json`,
-  covering the pairs in `CDC_COVERAGE.md`; ops teams tune per environment.
-  *(Field lists above are illustrative — exact per-collection field lists are an
-  implementation-plan task, derived from the transformers + `SOURCE_DATA.md`.)*
+  deltas anyway). Read preference `primaryPreferred`, same rationale as the transformer.
+- **Startup validation, fail-fast:** unknown transform names, `destRef` aliases
+  with no matching target, empty key specs, a `cassandra` target without a
+  `table`, a verbatim target that is also referenced by `fields`. Collections
+  observed on the stream with no `sources` entry are classified SKIPPED
+  (`unmapped`) and counted — coverage gaps are visible, never silent.
+- The shipped default lives at `tools/cdc-verify/mapping.example.json`, covering
+  the pairs in `CDC_COVERAGE.md`; ops teams tune per environment. *(Field lists
+  above are illustrative — exact per-collection lists are an implementation-plan
+  task, derived from the transformers + `SOURCE_DATA.md`.)*
 
 ## 7. UI
 
@@ -230,11 +263,13 @@ Single static page (`static/index.html`, vanilla JS like nats-debug), three pane
    (green/amber/red thresholds).
 2. **Recent verifications** — capped tailing table (newest first): time,
    collection, op, key, state badge (PENDING spinner / MATCHED green frozen /
-   FAILED red / SKIPPED grey / SUPERSEDED grey), duration-to-match, attempts.
-   Rows update in place via SSE until frozen. Filter box by collection/key.
+   FAILED red / SKIPPED grey / SUPERSEDED grey), duration-to-match, attempts,
+   and one per-target chip per sub-check (e.g. `msgById ✓ msgByRoom …`) so
+   partial convergence is visible. Rows update in place via SSE until frozen.
+   Filter box by collection/key.
 3. **Failures** — separate accumulated table: everything from the recent-row plus
-   expandable field-level diff; counters for total failed / evicted; a
-   **Download JSON** button (`/failures.json`).
+   expandable **per-target** field-level diff; counters for total failed /
+   evicted; a **Download JSON** button (`/failures.json`).
 
 Also `GET /healthz` and a summary counters strip (checked / matched / failed /
 skipped / superseded since start).
@@ -252,6 +287,7 @@ skipped / superseded since start).
 | `TARGET_DB` | | `chat` | destination database |
 | `CASSANDRA_HOSTS` / `CASSANDRA_KEYSPACE` | ◐ | — | destination Cassandra (via `pkg/cassutil`); required only when the mapping file references a `cassandra` dest — validated at startup |
 | `MAPPING_FILE` | ✓ | — | JSON mapping path |
+| `MESSAGE_BUCKET_HOURS` | | `72` | bucket window for the `msgBucket` transform — MUST match the services writing `messages_by_room` |
 | `TRACK_CONSUMERS` | | `""` | comma list of durable consumer names to show lag for |
 | `START_AT_TIME` | | `""` | optional replay start (RFC3339) instead of deliver-new |
 | `VERIFY_POLL` / `VERIFY_TIMEOUT` | | `2s` / `60s` | check polling cadence / failure deadline |
@@ -279,9 +315,11 @@ Fail-fast on all required vars; missing mapping file or invalid JSON exits non-z
 
 ## 10. Testing (TDD throughout)
 
-- **Unit** (mocked lookups + fake clock): mapping load/validation table tests;
+- **Unit** (mocked lookups + fake clock): mapping load/validation table tests
+  (fan-out refs, derived multi-`from`, alias resolution, verbatim rules);
   comparison/normalization table tests (types, absent/null, transforms, verbatim
-  ignore); check lifecycle (pending→matched freeze, timeout→failed, supersede,
+  ignore); check lifecycle (multi-target fan-out — partial then full match,
+  per-target freeze, one-target timeout→failed with per-target diff, supersede,
   skip, sampling); ring-buffer caps + eviction counters; stats rate math;
   subject parsing.
 - **Integration** (`//go:build integration`, `pkg/testutil` containers:
@@ -312,7 +350,9 @@ Fail-fast on all required vars; missing mapping file or invalid JSON exits non-z
    the freeze rationale in the request but is worth an explicit yes.
 3. **Env-configured connections** with the browser as pure viewer (vs
    nats-debug's connect-from-the-UI sessions).
-4. **`messages_by_id`** as the Cassandra verification table (point lookup; no
-   bucket math). Room/bucket-level verification could be added later.
+4. ~~`messages_by_id` as the sole Cassandra verification table~~ — resolved by
+   the fan-out mapping: messages verify against both `messages_by_id` and
+   `messages_by_room` (bucket key derived via the `msgBucket` transform;
+   `MESSAGE_BUCKET_HOURS` added to config to keep bucket math aligned).
 5. **Failure retention** — in-memory capped at `FAILED_CAP` with JSON export;
    no persistence.
