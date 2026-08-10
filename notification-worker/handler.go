@@ -199,7 +199,8 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	// Sort survivors so batch N has a deterministic account set across redeliveries — required for the {messageID}-b{N} Nats-Msg-Id to dedup correctly.
 	survivors := make([]string, 0, len(candidates))
 	for _, c := range candidates {
-		if !shouldPush(snapshot[c.Account]) {
+		// Task 4 replaces the zero value with the recipient's real settings.
+		if !shouldPush(snapshot[c.Account], notifSettings{}, false) {
 			continue
 		}
 		survivors = append(survivors, c.Account)
