@@ -2,9 +2,78 @@ package model
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 )
+
+// TestSystemMessageTypesCoverEveryConstant guards the one list four services
+// depend on. systemMessageTypes is hand-maintained, and a new MessageType*
+// constant that nobody adds to it changes behaviour silently and everywhere at
+// once: search-sync-worker indexes it as searchable content, notification-worker
+// sends a push for it, history-service stops hiding it, message-worker treats a
+// missing sender as fatal. None of those catch it — they all read this list.
+//
+// The source has to be parsed because Go constants are not enumerable at
+// runtime, so a test cannot otherwise notice that a new one exists. Anything
+// deliberately not a system message goes in nonSystem below, which makes the
+// decision explicit and reviewable rather than an omission.
+func TestSystemMessageTypesCoverEveryConstant(t *testing.T) {
+	nonSystem := map[string]string{
+		"MessageTypeImportant": "client-settable (重要訊息): previews and notifies like a normal message",
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "event.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse event.go: %v", err)
+	}
+
+	var found int
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if !strings.HasPrefix(name.Name, "MessageType") || i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				found++
+				value := strings.Trim(lit.Value, `"`)
+
+				if reason, exempt := nonSystem[name.Name]; exempt {
+					if IsSystemMessageType(value) {
+						t.Errorf("%s (%q) is in systemMessageTypes but marked non-system: %s",
+							name.Name, value, reason)
+					}
+					continue
+				}
+				if !IsSystemMessageType(value) {
+					t.Errorf("%s (%q) is missing from systemMessageTypes.\n"+
+						"Add it there, or add %s to this test's nonSystem map with a reason.\n"+
+						"Left unregistered it will be indexed as searchable content, trigger push "+
+						"notifications, and show up in room history.", name.Name, value, name.Name)
+				}
+			}
+		}
+	}
+
+	if found == 0 {
+		t.Fatal("no MessageType* constants found — the parser stopped matching, so this test guards nothing")
+	}
+}
 
 func TestIsSystemMessageType(t *testing.T) {
 	cases := []struct {
