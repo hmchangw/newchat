@@ -127,6 +127,36 @@ func TestDiffFields_TransformError(t *testing.T) {
 	assert.Contains(t, diffs[0].Cause, "transform-error")
 }
 
+func TestDiffFields_ZeroValueSemantics(t *testing.T) {
+	reg := newTransformRegistry(msgbucket.New(72 * time.Hour))
+	src := map[string]any{}
+
+	tests := []struct {
+		name      string
+		dst       any
+		required  bool
+		wantDiffs int
+	}{
+		{"optional absent-source vs dest false", false, false, 0},
+		{"optional absent-source vs dest zero int", 0, false, 0},
+		{"optional absent-source vs dest empty string", "", false, 0},
+		{"optional absent-source vs dest true", true, false, 1},
+		{"optional absent-source vs dest nonzero int", 1, false, 1},
+		{"optional absent-source vs dest nonempty string", "x", false, 1},
+		{"required absent-source vs dest false", false, true, 1},
+		{"required absent-source vs dest zero int", 0, true, 1},
+		{"required absent-source vs dest empty string", "", true, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dst := map[string]any{"field": tt.dst}
+			pairs := []fieldPair{{SourcePaths: []string{"gone"}, DestField: "field", Required: tt.required}}
+			diffs := diffFields(src, dst, pairs, reg)
+			assert.Len(t, diffs, tt.wantDiffs)
+		})
+	}
+}
+
 func TestDiffFields_AbsentSourcePresentDest(t *testing.T) {
 	reg := newTransformRegistry(msgbucket.New(72 * time.Hour))
 	src := map[string]any{}

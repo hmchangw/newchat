@@ -75,6 +75,24 @@ func valuesEqual(a, b any) bool {
 	return reflect.DeepEqual(normalize(a), normalize(b))
 }
 
+// isZeroValue reports whether an already-normalized value is the zero value
+// of its comparison form: nil, false, 0, or "". Used to decide whether a dest
+// value counts as "absent" when its paired source field is absent (spec §5.3).
+func isZeroValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case bool:
+		return !t
+	case float64:
+		return t == 0
+	case string:
+		return t == ""
+	default:
+		return false
+	}
+}
+
 // FieldDiff is one mismatched field in a failed sub-check.
 type FieldDiff struct {
 	SourcePath string `json:"sourcePath"`
@@ -109,15 +127,20 @@ func diffFields(src, dst map[string]any, pairs []fieldPair, reg transformRegistr
 		got, gotOK := getPath(dst, p.DestField)
 
 		if !anyPresent {
-			if p.Required && (!gotOK || got == nil) {
-				diffs = append(diffs, FieldDiff{SourcePath: strings.Join(p.SourcePaths, ","),
-					DestField: p.DestField, Cause: "required field absent on both sides"})
-			} else if gotOK && got != nil {
-				// source absent + dest present non-nil: diff for both required and optional.
-				// spec §5.3: optional field matches only absent/nil dest; required field
-				// must not be absent in source if present in dest.
+			// spec §5.3: an absent/null source field matches a dest value that is
+			// itself absent/nil or the zero value of its normalized form (false,
+			// 0, ""), unless the mapping marks the field required. A required
+			// field still needs a genuine dest value — a zero-value dest counts
+			// as absent for that check too, so it's diagnosed the same as a
+			// fully-absent dest rather than silently passing.
+			destZero := !gotOK || got == nil || isZeroValue(normalize(got))
+			switch {
+			case !destZero:
 				diffs = append(diffs, FieldDiff{SourcePath: strings.Join(p.SourcePaths, ","),
 					DestField: p.DestField, Want: nil, Got: got, Cause: "absent in source, present in dest"})
+			case p.Required:
+				diffs = append(diffs, FieldDiff{SourcePath: strings.Join(p.SourcePaths, ","),
+					DestField: p.DestField, Cause: "required field absent on both sides"})
 			}
 			continue
 		}

@@ -2,7 +2,7 @@
   "sources": [
     {
       "collection": "rocketchat_message",
-      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "verify-absent" },
+      "ops": { "insert": "verify", "update": "verify", "replace": "verify", "delete": "skip" },
       "targets": {
         "msgById": { "kind": "cassandra", "table": "messages_by_id",
                      "key": { "message_id": "_id" } },
@@ -13,11 +13,11 @@
                                 "message_id": "_id" } }
       },
       "fields": {
-        "msg": [ "msgById.body", "msgByRoom.body" ],
+        "msg": [ "msgById.msg", "msgByRoom.msg" ],
         "ts":  [ { "dest": "msgById.created_at", "transform": "unixMilli" } ]
       },
       "derived": [
-        { "from": ["u._id"], "transform": "toString", "dest": ["msgById.sender_account", "msgByRoom.sender_account"] }
+        { "from": ["u._id"], "transform": "toString", "dest": ["msgById.sender.account", "msgByRoom.sender.account"] }
       ]
     },
     {

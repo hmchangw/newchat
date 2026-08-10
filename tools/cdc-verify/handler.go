@@ -17,13 +17,14 @@ type statsProvider interface {
 }
 
 type handler struct {
-	hub     *hub
-	results stateProvider
-	stats   statsProvider
+	hub       *hub
+	results   stateProvider
+	stats     statsProvider
+	recentCap int
 }
 
-func newHandler(hub *hub, results stateProvider, stats statsProvider) *handler {
-	return &handler{hub: hub, results: results, stats: stats}
+func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap int) *handler {
+	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap}
 }
 
 func (h *handler) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -33,10 +34,11 @@ func (h *handler) healthz(w http.ResponseWriter, _ *http.Request) {
 func (h *handler) state(w http.ResponseWriter, _ *http.Request) {
 	recent, failures, counters := h.results.Snapshot()
 	writeJSON(w, map[string]any{
-		"stats":    h.stats.Last(),
-		"recent":   recent,
-		"failures": failures,
-		"counters": counters,
+		"stats":     h.stats.Last(),
+		"recent":    recent,
+		"failures":  failures,
+		"counters":  counters,
+		"recentCap": h.recentCap,
 	})
 }
 

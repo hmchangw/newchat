@@ -38,6 +38,15 @@ docker compose -f tools/cdc-verify/deploy/docker-compose.yml up
 
 Open http://localhost:8091.
 
+First boot takes **about a minute**: Cassandra is slow to initialize, and a
+`cassandra-init` one-shot service waits for its healthcheck before applying
+the repo's real schema (keyspace `chat` plus the `messages_by_id` /
+`messages_by_room` tables `mapping.example.json` references) — the same
+`docker-local/cassandra/init/*.cql` files the main dev stack uses.
+`cdc-verify` itself waits on that init job to complete (and on NATS's
+healthcheck) before starting, and restarts on failure, so it comes up clean
+instead of racing a not-yet-ready Cassandra.
+
 `mapping.local.json` is operator-provided next to the compose file (bind-mounted
 read-only, gitignored) — the copied `mapping.example.json` works as the
 mapping input out of the box. The compose stack sets `BOOTSTRAP_STREAMS=true`
@@ -128,6 +137,12 @@ event observed ──▶ PENDING ── poll compare every VERIFY_POLL (default 
   **absence** in the destination (`verify-absent`, cause `still-present` if
   the record hasn't been removed yet). Collections where delete is
   intentionally not migrated mark the op `skip`.
+  - **`verify-absent` constraint:** a delete event carries only the source
+    document's `_id` — no other fields — so `verify-absent` only works for a
+    target whose `key` derives entirely from `_id`. A target keyed on other
+    source fields (e.g. `messages_by_room`'s `room_id`/`bucket`/`created_at`,
+    derived from the now-gone document) can't build a lookup key on delete;
+    map that collection's `delete` op to `skip` instead.
 - **Concurrency:** a worker pool (`MAX_CHECKS`) bounds concurrent checks;
   per-key pending dedup keeps DB load bounded to distinct hot keys.
 - **Sampling:** `SAMPLE_PERCENT` (default 100) is applied per event after
@@ -202,7 +217,7 @@ transformers, then tuned per environment.
   `{"dest": "...", "transform": "...", "required": true}`.
 - **`derived`** — for many→one values: several source fields combine into
   one destination field through a named transform, e.g.
-  `{"from": ["u._id"], "transform": "toString", "dest": ["msgById.sender_account"]}`.
+  `{"from": ["u._id"], "transform": "toString", "dest": ["msgById.sender.account"]}`.
 - **Transform vocabulary:** `unixMilli` (coerce a time/int/float to Unix
   milliseconds), `toString` (stringify a scalar), `msgBucket` (bucket a
   timestamp via `pkg/msgbucket`, keyed off `MESSAGE_BUCKET_HOURS` — MUST

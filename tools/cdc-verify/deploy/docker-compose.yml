@@ -19,12 +19,25 @@
 # the stream yet, the stack starts idle — an empty dashboard — until you seed
 # matching documents in source/target and publish oplog events (or run
 # oplog-connector against the same NATS/Mongo).
+#
+# Cassandra is slow to boot (~a minute) and ships with no keyspace, so
+# cassandra-init (idiom borrowed from docker-local/compose.deps.yaml) waits
+# for its healthcheck, then applies the repo's real schema — the same
+# docker-local/cassandra/init/*.cql that creates keyspace `chat` and the
+# messages_by_id / messages_by_room tables mapping.example.json references —
+# so cdc-verify's cassutil.Connect has something to connect to on first boot.
 
 services:
   nats:
     image: nats:2.10-alpine
     command: ["--jetstream", "--http_port", "8222"]
     ports: ["4222:4222", "8222:8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
   source-mongo:
     image: mongo:7
     ports: ["27017:27017"]
@@ -37,11 +50,47 @@ services:
     environment:
       - HEAP_NEWSIZE=128M
       - MAX_HEAP_SIZE=512M
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "DESCRIBE KEYSPACES"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+  # Schema bootstrap. One-shot: applies every *.cql under docker-local's real
+  # Cassandra init directory (keyspace `chat` + messages_by_id/messages_by_room
+  # + their UDTs) in sorted order, then exits 0.
+  cassandra-init:
+    image: cassandra:4.1
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ../../../docker-local/cassandra/init:/init:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        shopt -s nullglob
+        for f in /init/*.cql; do
+          echo "==> applying $$f"
+          cqlsh cassandra -f "$$f"
+        done
+        echo "Schema initialized successfully"
   cdc-verify:
     build:
       context: ../../..
       dockerfile: tools/cdc-verify/deploy/Dockerfile
-    depends_on: [nats, source-mongo, target-mongo, cassandra]
+    depends_on:
+      nats:
+        condition: service_healthy
+      source-mongo:
+        condition: service_started
+      target-mongo:
+        condition: service_started
+      cassandra-init:
+        condition: service_completed_successfully
+    restart: on-failure
     ports: ["8091:8091"]
     volumes:
       - ./mapping.local.json:/etc/cdc-verify/mapping.json:ro

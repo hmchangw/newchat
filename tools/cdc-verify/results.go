@@ -4,11 +4,11 @@ import (
 	"sync"
 )
 
-// deepCopyResult creates a deep copy of a CheckResult with fresh backing arrays
-// for Targets and Diffs slices.
-//
-// (Upsert, Snapshot) to match the JSON-serializable value semantics of the
-// type; switching to a pointer here alone would be inconsistent.
+// deepCopyResult creates a deep copy of a CheckResult with fresh backing
+// arrays for Targets and Diffs slices. CheckResult is passed by value
+// throughout this package (Upsert, Snapshot) to match the JSON-serializable
+// value semantics of the type; switching to a pointer here alone would be
+// inconsistent.
 //
 //nolint:gocritic // CheckResult is passed by value throughout this package
 func deepCopyResult(r CheckResult) CheckResult {

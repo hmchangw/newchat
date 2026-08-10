@@ -102,6 +102,9 @@ func validateTarget(alias string, t *Target, resolvers map[string]Resolver) erro
 	if t.Mode != "" && t.Mode != "verbatim" {
 		return fmt.Errorf("target %q: mode must be empty or verbatim, got %q", alias, t.Mode)
 	}
+	if t.Mode == "verbatim" && t.Kind == "cassandra" {
+		return fmt.Errorf("target %q: verbatim requires a mongo target; whole-row cassandra reads are unsupported", alias)
+	}
 	for kf, k := range t.Key {
 		if err := checkKeyFrom(k, resolvers); err != nil {
 			return fmt.Errorf("target %q key %q: %w", alias, kf, err)

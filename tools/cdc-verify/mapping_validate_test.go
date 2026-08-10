@@ -105,6 +105,10 @@ func TestValidateMapping(t *testing.T) {
 		{"destref no dot", func(s *SourceMapping) {
 			s.Fields["msg"] = []DestRef{{Dest: "justalias"}}
 		}, "must be alias.field"},
+		{"cassandra verbatim rejected", func(s *SourceMapping) {
+			s.Targets["bad"] = Target{Kind: "cassandra", Table: "t", Mode: "verbatim",
+				Key: map[string]KeyFrom{"k": {From: []string{"_id"}}}}
+		}, "verbatim requires a mongo target"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -27,7 +27,7 @@ func (fakeStats) Last() StreamStats { return StreamStats{Stream: "S", Msgs: 42} 
 func testServer(t *testing.T) (*httptest.Server, *hub) {
 	t.Helper()
 	h := newHub()
-	handler := newHandler(h, fakeState{}, fakeStats{})
+	handler := newHandler(h, fakeState{}, fakeStats{}, 200)
 	mux := http.NewServeMux()
 	handler.registerRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -49,16 +49,18 @@ func TestAPIState(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	var body struct {
-		Stats    StreamStats   `json:"stats"`
-		Recent   []CheckResult `json:"recent"`
-		Failures []CheckResult `json:"failures"`
-		Counters Counters      `json:"counters"`
+		Stats     StreamStats   `json:"stats"`
+		Recent    []CheckResult `json:"recent"`
+		Failures  []CheckResult `json:"failures"`
+		Counters  Counters      `json:"counters"`
+		RecentCap int           `json:"recentCap"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	assert.Equal(t, uint64(42), body.Stats.Msgs)
 	require.Len(t, body.Recent, 1)
 	require.Len(t, body.Failures, 1)
 	assert.Equal(t, uint64(2), body.Counters.Checked)
+	assert.Equal(t, 200, body.RecentCap)
 }
 
 func TestFailuresDownload(t *testing.T) {
@@ -124,7 +126,7 @@ func (n *noFlushWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (n *noFlushWriter) WriteHeader(status int)      { n.status = status }
 
 func TestEventsHandler_StreamingUnsupported(t *testing.T) {
-	h := newHandler(newHub(), fakeState{}, fakeStats{})
+	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200)
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	w := &noFlushWriter{}
 	h.events(w, req)

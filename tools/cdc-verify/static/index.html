@@ -195,7 +195,8 @@
 
   var recentMap = new Map();   // id -> CheckResult
   var recentOrder = [];        // ids, newest first
-  var recentCap = Infinity;    // learned from the initial /api/state payload length
+  var DEFAULT_RECENT_CAP = 200; // fallback if the server omits recentCap
+  var recentCap = DEFAULT_RECENT_CAP;
 
   var failuresMap = new Map();
   var failuresOrder = [];
@@ -419,7 +420,7 @@
     var recent = data.recent || [];
     var failures = data.failures || [];
 
-    recentCap = recent.length || Infinity;
+    recentCap = data.recentCap > 0 ? data.recentCap : DEFAULT_RECENT_CAP;
     recentOrder = recent.map(function (r) { return r.id; });
     recentMap = new Map(recent.map(function (r) { return [r.id, r]; }));
 
