@@ -123,3 +123,30 @@ Good. The filter closes a real outlier — message-worker/handler.go:90, notific
 (f) Client-API doc rule
 
 n/a — the worker is a pure JetStream consumer; no `chat.user.*` subscriptions, no natsrouter, no HTTP routes (verified by grep across non-test files). No `docs/client-api.md` update required.
+
+## Go expert
+
+All touched packages compile; `go test -race` green across the five packages. Findings, ordered by severity:
+
+**[medium] pkg/model/event_test.go:91 — AST guard only covers event.go.** Parsing by relative filename is robust (`go test` runs with cwd = package dir), and the `found == 0` fatal at event_test.go:135 correctly catches a wholesale move of the constants. But the guard has a partial-move hole: a *new* `MessageType*` constant added in another file of the package (message.go already exists) escapes silently while `found > 0` keeps the test green — exactly the drift class the test exists to prevent. Parse every non-`_test.go` file in the package dir instead. Also, aliased constants (`MessageTypeX = MessageTypeY`) or non-literal values are silently skipped by the `BasicLit` filter.
+
+**[medium] search-service/main.go:91-96 — breaking env rename needs coordinated rollout.** `SEARCH_USER_ROOM_INDEX` → `USER_ROOM_INDEX` etc. is the right fix (aligns reader with writer; `required,notEmpty` fails fast; stale `SEARCH_`-prefixed values proven inert in config_test.go:310). But existing prod deployments will crash-loop at startup until IaC is updated. Compose is updated; the PR description must flag the ops-side lockstep change.
+
+**[low] search-service/handler.go:186-192 — WARN logs the user's query text.** Not a §3 hard violation (not a token/body), but `query` and `account` are user content shipped to ops logs; `kind`+`pattern` alone identify the misconfiguration. Consider dropping `query` from the WARN. The routine-miss line is flow-level-gated — fine.
+
+**[low] search-service/handler.go:115 — searchMessages left uninstrumented.** It reads a wildcard `MessageIndexPattern` with the identical allow_no_indices failure class but gets no `logEmptyResult`. If intentional scope, fine; otherwise a cheap follow-up.
+
+**[low] search-service/response.go — `searchShardTotal` swallows the unmarshal error.** Returning 0 routes a malformed body to the "matched no index" WARN — a slightly misleading message. Practically unreachable (the same `raw` already parsed upstream) and pinned by response_test.go, but the doc comment should state the swallow, not just the test.
+
+**[nitpick] search-sync-worker/inbox_stream.go:73 — guard order.** Timestamp is checked before the envelope-only fields, so an unwrapped publish with zero timestamp reports "missing timestamp" instead of the far more diagnostic "unwrapped publish?". Check payload/type first.
+
+**[nitpick] pkg/model/event_test.go:116 — use `strconv.Unquote`** instead of `strings.Trim(lit.Value, "\"")`; correct for escapes and backtick strings.
+
+**[nitpick] search-service/handler_test.go:465-467 — `slog.SetDefault` is process-global state.** Restored via `t.Cleanup` and no `t.Parallel` in the package, so safe today, but fragile if parallelism is added. Note the Warn-level handler means the "no WARN" assertion also passes if code logged at Info — matches the stated intent, acceptable.
+
+**Resolved review questions:**
+- `logEmptyResult` as a package-level free function (handler.go:183) is correct: it touches no handler state (pattern passed explicitly), stays independently testable, and matches the Go idiom that state-free helpers shouldn't be methods.
+- The checked marshal error in room-worker/teamsroomcreate.go:258-266 diverges from the sibling `internalData, _ := json.Marshal(...)` at room-worker/handler.go:475 — but in the stricter direction CLAUDE.md mandates ("never ignore errors silently"). Justified; the pre-existing ignored-error sites (handler.go:447,462,475, no justifying comment) are the noncompliant ones, out of this diff's scope. Naming (`internalData`) matches the siblings; both wrap texts describe the operation performed.
+- Test helpers (`membershipEvents`, `envelope`, `mkEvent`) all live in `_test.go` files — compliant.
+
+**§3 sweep:** no error-by-string comparison in production code (test `err.Error()` Contains at inbox_stream_test.go:763 is acceptable, sentinels would be sturdier); no tokens/bodies logged (query flagged above); all logging is structured slog KV; no struct-tag changes; error wraps describe the calling function's action throughout. The migrator skip (runner.go:60-64) and its "skip ≠ RecordSkipped" rationale are well-documented and test-pinned.
