@@ -326,10 +326,9 @@ func buildCassandraMessage(msg *model.Message) cassandra.Message {
 	return cm
 }
 
-// countThreadReplies returns the bounded, soft-delete-aware reply count for the
+// countThreadReplies returns the exact, soft-delete-aware reply count for the
 // thread. It delegates to pkg/threadcount so this add-path writer and the
-// history-service delete-path writer compute an identical, identically-capped
-// value (see pkg/threadcount.Cap).
+// history-service delete-path writer compute an identical value.
 func (s *CassandraStore) countThreadReplies(ctx context.Context, threadRoomID string) (int, error) {
 	return threadcount.Count(ctx, s.cassSession, threadRoomID)
 }

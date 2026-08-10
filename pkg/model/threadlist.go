@@ -22,8 +22,8 @@ type ThreadListItem struct {
 	// key for the inbox. Reply count is surfaced as TCount below.
 	LastMsgAt int64 `json:"lastMsgAt" bson:"lastMsgAt"`
 
-	// TCount is the parent's non-deleted reply count, capped at pkg/threadcount.Cap
-	// (99 = "99 or more"). Always serialized; 0 when the column was never written.
+	// TCount is the parent's exact non-deleted reply count. Always serialized;
+	// 0 when the column was never written.
 	TCount int `json:"tcount" bson:"tcount"`
 
 	// Hydrated message bodies, subject to the thread access window. Carried opaque:

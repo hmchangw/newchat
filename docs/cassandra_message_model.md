@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS messages_by_room(
   sender FROZEN<"Participant">,
   site_id TEXT,
   sys_msg_data BLOB,
-  tcount INT, // bounded non-deleted thread reply count, capped at 99 (pkg/threadcount.Cap); FE renders >= 99 as "99+"
+  tcount INT, // exact non-deleted thread reply count (pkg/threadcount)
   thread_last_msg_at TIMESTAMP, // timestamp of most recent thread reply; null until first reply
   thread_parent_created_at TIMESTAMP, // for FE to query thread parent message when also sent to channel (tshow=true)
   thread_parent_id TEXT,
@@ -258,7 +258,7 @@ CREATE TABLE IF NOT EXISTS messages_by_id(
   sender FROZEN<"Participant">,
   site_id TEXT,
   sys_msg_data BLOB,
-  tcount INT, // bounded non-deleted thread reply count, capped at 99 (pkg/threadcount.Cap); FE renders >= 99 as "99+"
+  tcount INT, // exact non-deleted thread reply count (pkg/threadcount)
   thread_last_msg_at TIMESTAMP, // timestamp of most recent thread reply; null until first reply
   thread_parent_created_at TIMESTAMP,
   thread_parent_id TEXT,
