@@ -63,7 +63,8 @@ Valkey because its key is per-*room*: one key, one Get, one message.) Adding
 to different cluster slots and go-redis's `ClusterClient` returns `CROSSSLOT`
 rather than splitting the read.
 
-So: one indexed `$in` query per message, no cache, no TTL staleness. The read is
+So: an indexed `$in` per 512-account chunk — one query per message for almost
+every room — no cache, no TTL staleness. The read is
 comparable to the per-message work the pipeline already does (a Valkey read for
 members, a NATS RPC for presence). If Mongo load later justifies a cache, it goes
 behind the unchanged `UserSettingsSnapshotter` interface — most likely as an
@@ -261,8 +262,8 @@ live on the user document and there is nowhere else to read them — but the
 invariant was written down on purpose, so the comment must be corrected in the
 same change rather than left to contradict the code. Whoever implements this
 should treat the comment as a prompt to double-check the throughput assumption it
-was protecting: one indexed `$in` per message, on the narrowed candidate set, is
-the whole cost.
+was protecting: an indexed `$in` per 512-account chunk, on the narrowed candidate
+set — one query for almost every room — is the whole cost.
 
 ## Configuration
 

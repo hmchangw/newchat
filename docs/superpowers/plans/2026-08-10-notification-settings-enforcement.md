@@ -4,7 +4,7 @@
 
 **Goal:** Make `notification-worker` honour three stored user settings — `muteAllNotifications`, `alwaysAllowPriorityNotifications`, `showNotificationsInCall` — when deciding whether to emit a push.
 
-**Architecture:** A new `UserSettingsSnapshotter` batches one indexed Mongo `$in` per message against the `users` collection, placed in `handler.go` after the candidate loop (so it reads only push-eligible accounts) and before `Presence.Snapshot` (so `showNotificationsInCall` can modify the presence decision). The lookup resolves the stored `*bool` fields into a pointer-free `notifSettings` whose zero value is exactly today's behaviour, which is what makes the fail-open contract free of special cases. `shouldPush` grows two parameters and consumes it.
+**Architecture:** A new `UserSettingsSnapshotter` batches indexed Mongo `$in` reads against the `users` collection — one `Find` per chunk of `USER_SETTINGS_BATCH_SIZE` (512) accounts, so `ceil(candidates/512)` queries per message: one for almost every room, more only where a large room's candidate set survives the `EligibleForPush` throttle (an `@all` in a several-thousand-member room). It is placed in `handler.go` after the candidate loop (so it reads only push-eligible accounts) and before `Presence.Snapshot` (so `showNotificationsInCall` can modify the presence decision). The lookup resolves the stored `*bool` fields into a pointer-free `notifSettings` whose zero value is exactly today's behaviour, which is what makes the fail-open contract free of special cases. `shouldPush` grows two parameters and consumes it.
 
 **Tech Stack:** Go 1.25, MongoDB (`go.mongodb.org/mongo-driver/v2`), testify, testcontainers via `pkg/testutil`, `caarlos0/env`.
 
@@ -19,6 +19,7 @@
 - **No new wire surface.** No new RPC, no `pkg/model` field, no event struct change. Therefore `docs/client-api/request-reply.md` and `docs/client-api/events.md` are NOT touched — the CLAUDE.md same-PR derived-views rule is not triggered.
 - **Projection is narrow** (CLAUDE.md §6 "always project precisely"): the four gated fields plus `account`, never `{"settings": 1}`.
 - **Active-user filter is `{"active": {"$ne": false}}`** — matches `activeUserFilter` in `user-service/mongorepo/users.go:55`. Missing `active` counts as active.
+- **The index this read depends on is owned by another service.** `users.account` is a unique index created by `UserRepo.EnsureIndexes` (`user-service/mongorepo/users.go:33-36`), which fails startup with an operator-facing message if it cannot be created. `notification-worker` must NOT create it — but whoever ships this should confirm it exists in each target environment (`db.users.getIndexes()`) before leaving `USER_SETTINGS_ENABLED=true`, because an unindexed `$in` here would collection-scan `users` once per message.
 - **Test files are `package main`** in the service directory; integration tests carry `//go:build integration`.
 - Coverage floor 80%; the gate and snapshotter are core logic — target 90%+.
 - Error wrapping: `fmt.Errorf("short description: %w", err)` describing what the current function was doing.
@@ -935,6 +936,14 @@ Append to `notification-worker/config_test.go`:
 func TestConfig_UserSettingsDefaults(t *testing.T) {
 	t.Setenv("VALKEY_ADDRS", "valkey:6379")
 	t.Setenv("MODE", "user")
+	// env.ParseAs reads os.Environ(), so an inherited USER_SETTINGS_ENABLED or
+	// PRESENCE_RPC_ENABLED on the host would shadow the envDefault this test
+	// exists to pin. t.Setenv first so the original value is restored on cleanup,
+	// then unset — caarlos0/env treats a defined-but-empty var as set.
+	t.Setenv("USER_SETTINGS_ENABLED", "")
+	require.NoError(t, os.Unsetenv("USER_SETTINGS_ENABLED"))
+	t.Setenv("PRESENCE_RPC_ENABLED", "")
+	require.NoError(t, os.Unsetenv("PRESENCE_RPC_ENABLED"))
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
@@ -959,7 +968,10 @@ func TestConfig_UserSettingsKillSwitch(t *testing.T) {
 }
 ```
 
-Add `"time"` to that file's imports.
+`os` and `env` are already imported in that file; add `"time"`.
+
+This unset-then-restore dance is the same shape `TestConfig_Mode` already uses for
+`MODE` at `notification-worker/config_test.go:31-34`, and for the same reason.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1027,9 +1039,10 @@ with:
 ```yaml
       # Title is resolved here from the rooms collection; sender display name is
       # pre-composed by message-gatekeeper and propagated on the canonical message.
-      # The users collection IS read, but only for notification settings: one
-      # indexed $in per message over the already-narrowed candidate set, never a
-      # per-recipient lookup and never on the sender-name path.
+      # The users collection IS read, but only for notification settings: an
+      # indexed $in per 512-account chunk over the already-narrowed candidate
+      # set — one query for almost every room — never a per-recipient lookup and
+      # never on the sender-name path.
 ```
 
 Then add the three vars after `PRESENCE_RPC_ENABLED=false`:
