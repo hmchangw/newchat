@@ -301,6 +301,59 @@ func TestMessageCollection_BuildAction(t *testing.T) {
 	})
 }
 
+// TestMessageCollection_BuildAction_SystemMessagesNotIndexed: room-worker
+// publishes membership/rename sys-messages to MESSAGES-CANONICAL via
+// publishCanonical, so they arrive here like any other message. They are UI
+// chrome, not searchable content — message-worker, notification-worker and
+// history-service all gate on IsSystemMessageType already; this collection was
+// the outlier that indexed them.
+func TestMessageCollection_BuildAction_SystemMessagesNotIndexed(t *testing.T) {
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
+
+	mkEvent := func(msgType string) []byte {
+		evt := model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				Type:      msgType,
+				Content:   "hello",
+				CreatedAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		data, _ := json.Marshal(evt)
+		return data
+	}
+
+	systemTypes := []string{
+		model.MessageTypeRoomCreated,
+		model.MessageTypeMembersAdded,
+		model.MessageTypeMemberRemoved,
+		model.MessageTypeMemberLeft,
+		model.MessageTypeRoomRenamed,
+		model.MessageTypeRoomRestricted,
+		model.MessageTypeTeamsMeetStarted,
+	}
+	for _, st := range systemTypes {
+		t.Run("system: "+st, func(t *testing.T) {
+			actions, err := coll.BuildAction(mkEvent(st))
+			require.NoError(t, err, "a system message is filtered, not an error")
+			assert.Empty(t, actions)
+		})
+	}
+
+	// A normal message has Type "" and an `important` message is client-set, not
+	// system — both stay searchable.
+	for _, keep := range []string{"", model.MessageTypeImportant} {
+		t.Run("indexed: "+keep, func(t *testing.T) {
+			actions, err := coll.BuildAction(mkEvent(keep))
+			require.NoError(t, err)
+			require.Len(t, actions, 1)
+			assert.Equal(t, "m1", actions[0].DocID)
+		})
+	}
+}
+
 func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	coll := newMessageCollection("msgs-v1", "site-a", cutoff, false)

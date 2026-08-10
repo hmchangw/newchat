@@ -57,6 +57,13 @@ func runMessages(ctx context.Context, subs SubscriptionSource, messages MessageS
 	var mu sync.Mutex
 	runErr := runWithWorkerPool(ctx, cfg.WorkerConcurrency, roomIDs, func(ctx context.Context, roomID string) error {
 		err := messages.StreamMessages(ctx, cfg.SiteID, roomID, cfg.MigrationStartAt, cfg.MigrationEndAt, func(msg cassandra.Message) error {
+			// Sys-messages are UI chrome, not searchable content — the live path
+			// drops them in messageCollection.BuildAction and a backfill must
+			// match, or it re-introduces every one of them. Not a skip-with-error:
+			// nothing failed, so RecordSkipped stays for genuine build failures.
+			if model.IsSystemMessageType(msg.Type) {
+				return nil
+			}
 			action, err := buildMessageAction(msg, cfg.MsgIndexPrefix)
 			mu.Lock()
 			defer mu.Unlock()
