@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +78,47 @@ func TestStatsPoller_SequenceResetClearsWindow(t *testing.T) {
 	seq = 5 // purge
 	p.pollOnce(context.Background(), time.Unix(10, 0))
 	assert.Equal(t, float64(0), last.RatePerSec)
+}
+
+func TestStatsPoller_NilConsumerInfoFnSkipsTrackedConsumers(t *testing.T) {
+	si := func(ctx context.Context) (*jetstream.StreamInfo, error) { return fakeStreamInfo(1, 1, nil), nil }
+	var last StreamStats
+	p := newStatsPoller("S", si, nil, []string{"tracked"}, time.Millisecond, func() bool { return true },
+		func(s StreamStats) { last = s })
+	p.pollOnce(context.Background(), time.Unix(0, 0))
+	assert.Empty(t, last.Consumers)
+}
+
+func TestStatsPoller_ZeroDurationWindowYieldsZeroRate(t *testing.T) {
+	si := func(ctx context.Context) (*jetstream.StreamInfo, error) { return fakeStreamInfo(5, 5, nil), nil }
+	var last StreamStats
+	p := newStatsPoller("S", si, nil, nil, time.Millisecond, func() bool { return true },
+		func(s StreamStats) { last = s })
+	same := time.Unix(100, 0)
+	p.pollOnce(context.Background(), same)
+	p.pollOnce(context.Background(), same)
+	assert.Equal(t, float64(0), last.RatePerSec)
+}
+
+func TestStatsPoller_Run(t *testing.T) {
+	si := func(ctx context.Context) (*jetstream.StreamInfo, error) { return fakeStreamInfo(1, 1, nil), nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	var mu sync.Mutex
+	count := 0
+	p := newStatsPoller("S", si, nil, nil, time.Millisecond, func() bool { return true },
+		func(s StreamStats) {
+			mu.Lock()
+			count++
+			done := count >= 2
+			mu.Unlock()
+			if done {
+				cancel()
+			}
+		})
+	p.Run(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.GreaterOrEqual(t, count, 2)
 }
 
 func TestStatsPoller_ConsumerError(t *testing.T) {

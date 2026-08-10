@@ -23,6 +23,41 @@ func TestGetPath(t *testing.T) {
 	assert.False(t, ok)
 	_, ok = getPath(doc, "missing.b")
 	assert.False(t, ok)
+
+	// "top" is a scalar (not a map), so continuing the walk into "top.b" must
+	// fail the type assertion rather than panic.
+	_, ok = getPath(doc, "top.b")
+	assert.False(t, ok)
+}
+
+func TestNormalize(t *testing.T) {
+	ts := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"int", int(5), float64(5)},
+		{"int8", int8(5), float64(5)},
+		{"int16", int16(5), float64(5)},
+		{"int32", int32(5), float64(5)},
+		{"int64", int64(5), float64(5)},
+		{"uint", uint(5), float64(5)},
+		{"uint8", uint8(5), float64(5)},
+		{"uint16", uint16(5), float64(5)},
+		{"uint32", uint32(5), float64(5)},
+		{"uint64", uint64(5), float64(5)},
+		{"float32", float32(5.5), float64(float32(5.5))},
+		{"time.Time", ts, float64(ts.UnixMilli())},
+		{"[]byte", []byte("x"), "x"},
+		{"string passthrough", "x", "x"},
+		{"nested slice", []any{int64(1), "a"}, []any{float64(1), "a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalize(tt.in))
+		})
+	}
 }
 
 func TestValuesEqual(t *testing.T) {

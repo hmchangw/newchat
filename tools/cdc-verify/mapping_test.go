@@ -29,6 +29,25 @@ func TestKeyFrom_UnmarshalJSON(t *testing.T) {
 	}
 }
 
+func TestKeyFrom_UnmarshalJSON_Errors(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		wantErr string
+	}{
+		{"neither string nor object", `123`, "must be a string or object"},
+		{"from neither string nor array", `{"from":123}`, `"from" must be a string or string array`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got KeyFrom
+			err := json.Unmarshal([]byte(tt.in), &got)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestDestRef_UnmarshalJSON(t *testing.T) {
 	var short DestRef
 	require.NoError(t, json.Unmarshal([]byte(`"msgById.body"`), &short))
@@ -37,6 +56,13 @@ func TestDestRef_UnmarshalJSON(t *testing.T) {
 	var full DestRef
 	require.NoError(t, json.Unmarshal([]byte(`{"dest":"msgById.created_at","transform":"unixMilli","required":true}`), &full))
 	assert.Equal(t, DestRef{Dest: "msgById.created_at", Transform: "unixMilli", Required: true}, full)
+}
+
+func TestDestRef_UnmarshalJSON_Error(t *testing.T) {
+	var d DestRef
+	err := json.Unmarshal([]byte(`123`), &d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a string or object")
 }
 
 func TestDestRef_Split(t *testing.T) {
@@ -103,4 +129,10 @@ func TestLoadMapping_BadJSON(t *testing.T) {
 func TestMappingExampleFileIsValid(t *testing.T) {
 	_, err := loadMapping("mapping.example.json")
 	assert.NoError(t, err)
+}
+
+func TestLoadMapping_ValidatesContent(t *testing.T) {
+	_, err := loadMapping(writeMapping(t, `{"sources":[{"collection":"c","targets":{}}]}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "validate mapping")
 }

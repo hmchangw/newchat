@@ -38,6 +38,9 @@ func TestTransform_ToString(t *testing.T) {
 
 	_, err = r.apply("toString", []any{map[string]any{}})
 	assert.Error(t, err)
+
+	_, err = r.apply("toString", nil)
+	assert.ErrorContains(t, err, "toString takes 1 arg")
 }
 
 func TestTransform_MsgBucket(t *testing.T) {
@@ -47,6 +50,9 @@ func TestTransform_MsgBucket(t *testing.T) {
 	got, err := r.apply("msgBucket", []any{ts})
 	require.NoError(t, err)
 	assert.Equal(t, sizer.Of(ts), got)
+
+	_, err = r.apply("msgBucket", []any{"not-a-time"})
+	assert.Error(t, err)
 }
 
 func TestTransform_IdentityAndUnknown(t *testing.T) {
@@ -60,6 +66,15 @@ func TestTransform_IdentityAndUnknown(t *testing.T) {
 
 	_, err = r.apply("unixMilli", nil)
 	assert.Error(t, err)
+
+	_, err = r.apply("", nil)
+	assert.ErrorContains(t, err, "identity transform takes 1 arg")
+}
+
+func TestCoerceUnixMilli_Int64(t *testing.T) {
+	ms, err := coerceUnixMilli([]any{int64(1700000000000)})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1700000000000), ms)
 }
 
 func TestKnownTransform(t *testing.T) {

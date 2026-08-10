@@ -71,6 +71,40 @@ func TestValidateMapping(t *testing.T) {
 		{"unknown transform", func(s *SourceMapping) {
 			s.Fields["msg"] = []DestRef{{Dest: "msgById.body", Transform: "nope"}}
 		}, "unknown transform"},
+		{"resolver missing required parts", func(s *SourceMapping) {
+			s.Resolvers = map[string]Resolver{"u": {DB: "source", Collection: "",
+				Key: map[string]KeyFrom{"_id": {From: []string{"u._id"}}}, Fields: nil}}
+		}, "all required"},
+		{"fields path undeclared resolver", func(s *SourceMapping) {
+			s.Fields["@ghost.x"] = []DestRef{{Dest: "msgById.body"}}
+		}, "undeclared resolver"},
+		{"fields path malformed resolver ref", func(s *SourceMapping) {
+			s.Fields["@"] = []DestRef{{Dest: "msgById.body"}}
+		}, "malformed resolver reference"},
+		{"derived unknown transform", func(s *SourceMapping) {
+			s.Derived = []Derived{{From: []string{"a"}, Dest: []string{"msgById.x"}, Transform: "nope"}}
+		}, "unknown transform"},
+		{"derived bad source path", func(s *SourceMapping) {
+			s.Derived = []Derived{{From: []string{"@ghost.x"}, Dest: []string{"msgById.x"}, Transform: "toString"}}
+		}, "undeclared resolver"},
+		{"derived bad dest ref", func(s *SourceMapping) {
+			s.Derived = []Derived{{From: []string{"a"}, Dest: []string{"ghost.x"}, Transform: "toString"}}
+		}, "unknown target"},
+		{"target bad mode", func(s *SourceMapping) {
+			s.Targets["bad"] = Target{Kind: "mongo", Collection: "c", Mode: "weird",
+				Key: map[string]KeyFrom{"k": {From: []string{"_id"}}}}
+		}, "mode must be empty or verbatim"},
+		{"keyfrom empty from", func(s *SourceMapping) {
+			s.Targets["bad"] = Target{Kind: "mongo", Collection: "c",
+				Key: map[string]KeyFrom{"k": {From: nil}}}
+		}, "empty from"},
+		{"keyfrom unknown transform", func(s *SourceMapping) {
+			s.Targets["bad"] = Target{Kind: "mongo", Collection: "c",
+				Key: map[string]KeyFrom{"k": {From: []string{"_id"}, Transform: "bogus"}}}
+		}, "unknown transform"},
+		{"destref no dot", func(s *SourceMapping) {
+			s.Fields["msg"] = []DestRef{{Dest: "justalias"}}
+		}, "must be alias.field"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

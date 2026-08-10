@@ -106,6 +106,36 @@ func TestSSEDeliversEvents(t *testing.T) {
 	assert.Contains(t, chunk, `"r1"`)
 }
 
+// noFlushWriter implements http.ResponseWriter but not http.Flusher, to
+// exercise the "streaming unsupported" branch of events().
+type noFlushWriter struct {
+	header http.Header
+	status int
+}
+
+func (n *noFlushWriter) Header() http.Header {
+	if n.header == nil {
+		n.header = http.Header{}
+	}
+	return n.header
+}
+
+func (n *noFlushWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (n *noFlushWriter) WriteHeader(status int)      { n.status = status }
+
+func TestEventsHandler_StreamingUnsupported(t *testing.T) {
+	h := newHandler(newHub(), fakeState{}, fakeStats{})
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	w := &noFlushWriter{}
+	h.events(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.status)
+}
+
+func TestWriteJSON_EncodeError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	assert.NotPanics(t, func() { writeJSON(rec, make(chan int)) })
+}
+
 func TestHub_RegisterUnregisterAndDrop(t *testing.T) {
 	h := newHub()
 	id, ch := h.register()
