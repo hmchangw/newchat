@@ -98,6 +98,28 @@ func TestStreamTranslator_NonSuccessCodeErrors(t *testing.T) {
 	assert.NotErrorAs(t, err, &ec)
 }
 
+// A 429 from the backend is a rate limit: return a too_many_requests errcode
+// (reason rate_limited) and do NOT retry (unlike a jwt failure).
+func TestStreamTranslator_RateLimitedReturnsTooManyRequests(t *testing.T) {
+	var translateCalls int32
+	tSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&translateCalls, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"message":"rate limit exceeded"}`)
+	}))
+	defer tSrv.Close()
+
+	tr := streamTranslatorTo(t, tSrv.URL)
+	_, err := tr.Translate(context.Background(), "hi", "en")
+	require.Error(t, err)
+
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeTooManyRequests, ec.Code)
+	assert.Equal(t, errcode.TranslateRateLimited, ec.Reason)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&translateCalls)) // not retried
+}
+
 func TestStreamTranslator_MissingDoneErrors(t *testing.T) {
 	srv := sseServer(t, []string{
 		`data: {"returnCode":96200,"returnMessage":"success","returnData":{"translation":"partial"}}`,

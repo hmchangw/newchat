@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -99,6 +100,12 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 	body := resp.RawBody()
 	defer body.Close()
 
+	// A 429 is a rate limit — surface too_many_requests and do NOT retry (a jwt
+	// failure would; this is not that). Classified before parsing the body.
+	if resp.StatusCode() == http.StatusTooManyRequests {
+		return "", false, errcode.TooManyRequests("translation rate limited",
+			errcode.WithReason(errcode.TranslateRateLimited))
+	}
 	// A 5XX is an outage regardless of body — classify before parsing, so a 5XX
 	// carrying data/JWT-shaped content can't read as success or trigger a refresh.
 	if s := resp.StatusCode(); s >= 500 && s < 600 {

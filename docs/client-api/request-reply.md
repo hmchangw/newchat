@@ -2128,7 +2128,7 @@ with a `TranslateResult`, or the standard error envelope on failure.
 
 #### Error response
 
-Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `unavailable` / `upstream_unavailable` when the third-party backend returns a 5XX or is unreachable; `internal` for other backend failures. See [../client-api.md §3.6](../client-api.md#36-translation-service).
+Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `unavailable` / `upstream_unavailable` when the third-party backend returns a 5XX or is unreachable; `too_many_requests` / `rate_limited` when the backend rate-limits (429, not retried); `internal` for other backend failures. See [../client-api.md §3.6](../client-api.md#36-translation-service).
 
 **Emits:** none — the reply is the only output.
 
