@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CDC Verify</title>
+<style>
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --surface2:  #21262d;
+    --border:    #30363d;
+    --text:      #c9d1d9;
+    --muted:     #8b949e;
+    --success:   #3fb950;
+    --warning:   #d29922;
+    --danger:    #f85149;
+    --grey:      #6e7681;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 18px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .stat-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .stream-name { font-size: 15px; font-weight: 700; color: var(--text); }
+  .stat-item { color: var(--muted); font-size: 12px; }
+  .stat-item b { color: var(--text); }
+
+  .watcher { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+  .dot.on { background: var(--success); box-shadow: 0 0 6px var(--success); }
+
+  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  .chip.ok   { color: var(--success); border-color: var(--success); }
+  .chip.wait { color: var(--warning); border-color: var(--warning); }
+  .counter-chip { color: var(--muted); }
+
+  .lag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--border); }
+  .lag.green { color: var(--success); border-color: var(--success); }
+  .lag.amber { color: var(--warning); border-color: var(--warning); }
+  .lag.red   { color: var(--danger);  border-color: var(--danger); background: rgba(248,81,73,0.1); }
+
+  .error-banner {
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: rgba(248,81,73,0.12);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .error-banner[hidden] { display: none; }
+
+  section { padding: 18px; }
+  section h2 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  section h2 a {
+    color: var(--success);
+    text-decoration: none;
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: normal;
+    border: 1px solid var(--border);
+    padding: 3px 8px;
+    border-radius: 6px;
+  }
+  section h2 a:hover { border-color: var(--success); }
+
+  #filter {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 4px 8px;
+    outline: none;
+    width: 220px;
+  }
+  #filter:focus { border-color: var(--success); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--surface2); color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--surface2); }
+  tbody tr.hidden-row { display: none; }
+
+  .targets-cell { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+  .badge.pending    { color: var(--warning); background: rgba(210,153,34,0.12); animation: pulse 1.4s ease-in-out infinite; }
+  .badge.matched    { color: var(--success); background: rgba(63,185,80,0.12); }
+  .badge.failed     { color: var(--danger);  background: rgba(248,81,73,0.12); }
+  .badge.skipped    { color: var(--grey);    background: rgba(110,118,129,0.12); }
+  .badge.superseded { color: var(--grey);    background: rgba(110,118,129,0.12); text-decoration: line-through; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+  details.diff-details summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+  details.diff-details summary:hover { color: var(--text); }
+  .diff-table { margin-top: 6px; width: 100%; border: 1px solid var(--border); background: var(--bg); }
+  .diff-table th, .diff-table td { font-size: 11px; padding: 4px 8px; }
+  .diff-cell { font-family: inherit; white-space: pre-wrap; word-break: break-word; max-width: 220px; }
+
+  .empty-row td { color: var(--muted); text-align: center; padding: 14px; }
+</style>
+</head>
+<body>
+
+<header id="stats">
+  <div class="stat-row">
+    <span id="stream-name" class="stream-name">—</span>
+    <span class="stat-item">msgs: <b id="stat-msgs">0</b></span>
+    <span class="stat-item">rate: <b id="stat-rate">0.0</b>/s</span>
+    <span class="watcher"><span id="watcher-dot" class="dot"></span>watcher</span>
+  </div>
+  <div id="counters-row" class="chip-row"></div>
+  <div id="subject-chips" class="chip-row"></div>
+  <div id="lag-badges" class="chip-row"></div>
+  <div id="error-banner" class="error-banner" hidden></div>
+</header>
+
+<section>
+  <h2>Recent verifications <input id="filter" placeholder="filter collection/doc"></h2>
+  <table id="recent">
+    <thead><tr>
+      <th>Time</th><th>Collection</th><th>Op</th><th>Doc</th><th>State</th><th>Targets</th><th>Attempts</th><th>Duration</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Failures <a href="/failures.json" download>Download JSON</a></h2>
+  <table id="failures">
+    <thead><tr>
+      <th>Time</th><th>Collection</th><th>Op</th><th>Doc</th><th>Targets</th><th>Diff</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<script>
+(function () {
+  'use strict';
+
+  var TERMINAL = { matched: true, failed: true, skipped: true, superseded: true };
+
+  var recentMap = new Map();   // id -> CheckResult
+  var recentOrder = [];        // ids, newest first
+  var recentCap = Infinity;    // learned from the initial /api/state payload length
+
+  var failuresMap = new Map();
+  var failuresOrder = [];
+
+  var localCounters = { checked: 0, matched: 0, failed: 0, skipped: 0, superseded: 0, evicted: 0 };
+  var countedIds = new Set();
+
+  var filterText = '';
+
+  // ── DOM helpers (textContent only — never innerHTML with server data) ──
+  function textEl(tag, text, className) {
+    var e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
+  }
+
+  function fmtTime(ms) {
+    if (!ms) return '—';
+    return new Date(ms).toLocaleTimeString('en-US', { hour12: false });
+  }
+
+  function fmtDuration(r) {
+    if (r.endedAtMs && r.startedAtMs) return (r.endedAtMs - r.startedAtMs) + 'ms';
+    return '…';
+  }
+
+  function stateBadge(state) {
+    return textEl('span', state, 'badge ' + state);
+  }
+
+  function targetChip(t) {
+    var span = document.createElement('span');
+    span.className = 'chip ' + (t.matched ? 'ok' : 'wait');
+    span.textContent = t.alias + (t.matched ? ' ✓' : ' …');
+    if (!t.matched && t.lastCause) span.title = t.lastCause;
+    return span;
+  }
+
+  function targetsCell(r) {
+    var td = document.createElement('td');
+    td.className = 'targets-cell';
+    (r.targets || []).forEach(function (t) { td.appendChild(targetChip(t)); });
+    return td;
+  }
+
+  // ── counters (server pushes StreamStats/CheckResult only, never Counters,
+  // so we tally terminal transitions client-side to keep the strip live) ──
+  function seedCounted(list) {
+    list.forEach(function (r) { if (TERMINAL[r.state]) countedIds.add(r.id); });
+  }
+
+  function tallyIfNew(r) {
+    if (!TERMINAL[r.state] || countedIds.has(r.id)) return;
+    countedIds.add(r.id);
+    localCounters.checked++;
+    if (localCounters[r.state] !== undefined) localCounters[r.state]++;
+  }
+
+  function renderCounters() {
+    var el = document.getElementById('counters-row');
+    el.replaceChildren();
+    ['checked', 'matched', 'failed', 'skipped', 'superseded', 'evicted'].forEach(function (label) {
+      el.appendChild(textEl('span', label + ': ' + (localCounters[label] || 0), 'chip counter-chip'));
+    });
+  }
+
+  // ── header / stats ──
+  function renderHeader(stats) {
+    document.getElementById('stream-name').textContent = stats.stream || '—';
+    document.getElementById('stat-msgs').textContent = stats.msgs != null ? stats.msgs : 0;
+    document.getElementById('stat-rate').textContent = (stats.ratePerSec != null ? stats.ratePerSec : 0).toFixed(1);
+
+    var dot = document.getElementById('watcher-dot');
+    dot.className = 'dot' + (stats.watcherLive ? ' on' : '');
+
+    var subjEl = document.getElementById('subject-chips');
+    subjEl.replaceChildren();
+    var perSubject = stats.perSubject || {};
+    Object.keys(perSubject).sort().forEach(function (subj) {
+      subjEl.appendChild(textEl('span', subj + ' ' + perSubject[subj], 'chip'));
+    });
+
+    var lagEl = document.getElementById('lag-badges');
+    lagEl.replaceChildren();
+    (stats.consumers || []).forEach(function (c) {
+      var cls = 'red';
+      if (c.numPending === 0) cls = 'green';
+      else if (c.numPending < 1000) cls = 'amber';
+      var badge = textEl('span', c.name + ': ' + c.numPending, 'lag ' + cls);
+      if (c.error) badge.title = c.error;
+      lagEl.appendChild(badge);
+    });
+
+    var errBanner = document.getElementById('error-banner');
+    if (stats.error) {
+      errBanner.hidden = false;
+      errBanner.textContent = 'Error: ' + stats.error;
+    } else {
+      errBanner.hidden = true;
+      errBanner.textContent = '';
+    }
+  }
+
+  // ── recent table ──
+  function rowMatchesFilter(r) {
+    if (!filterText) return true;
+    var hay = ((r.collection || '') + ' ' + (r.docId || '')).toLowerCase();
+    return hay.indexOf(filterText) !== -1;
+  }
+
+  function buildRow(r, includeState) {
+    var tr = document.createElement('tr');
+    tr.dataset.id = r.id;
+    tr.appendChild(textEl('td', fmtTime(r.startedAtMs)));
+    tr.appendChild(textEl('td', r.collection || ''));
+    tr.appendChild(textEl('td', r.op || ''));
+    tr.appendChild(textEl('td', r.docId || ''));
+    if (includeState) {
+      var stateTd = document.createElement('td');
+      stateTd.appendChild(stateBadge(r.state));
+      tr.appendChild(stateTd);
+    }
+    tr.appendChild(targetsCell(r));
+    return tr;
+  }
+
+  function renderRecent() {
+    var tbody = document.querySelector('#recent tbody');
+    tbody.replaceChildren();
+    if (recentOrder.length === 0) {
+      var empty = document.createElement('tr');
+      empty.className = 'empty-row';
+      var td = textEl('td', 'No verifications yet.');
+      td.colSpan = 8;
+      empty.appendChild(td);
+      tbody.appendChild(empty);
+      return;
+    }
+    recentOrder.forEach(function (id) {
+      var r = recentMap.get(id);
+      if (!r) return;
+      var tr = buildRow(r, true);
+      tr.appendChild(textEl('td', r.attempts != null ? r.attempts : 0));
+      tr.appendChild(textEl('td', fmtDuration(r)));
+      if (!rowMatchesFilter(r)) tr.classList.add('hidden-row');
+      tbody.appendChild(tr);
+    });
+  }
+
+  // ── failures table ──
+  function diffTable(targets) {
+    var table = document.createElement('table');
+    table.className = 'diff-table';
+    var thead = document.createElement('thead');
+    var htr = document.createElement('tr');
+    ['Target', 'Source Path', 'Want', 'Got', 'Cause'].forEach(function (h) {
+      htr.appendChild(textEl('th', h));
+    });
+    thead.appendChild(htr);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    (targets || []).forEach(function (t) {
+      (t.diffs || []).forEach(function (d) {
+        var tr = document.createElement('tr');
+        tr.appendChild(textEl('td', t.alias));
+        tr.appendChild(textEl('td', d.sourcePath || ''));
+        tr.appendChild(textEl('td', jsonOrDash(d.want), 'diff-cell'));
+        tr.appendChild(textEl('td', jsonOrDash(d.got), 'diff-cell'));
+        tr.appendChild(textEl('td', d.cause || ''));
+        tbody.appendChild(tr);
+      });
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function jsonOrDash(v) {
+    if (v === undefined || v === null) return '—';
+    if (typeof v === 'string') return v;
+    try { return JSON.stringify(v); } catch (e) { return String(v); }
+  }
+
+  function buildFailureRow(r) {
+    var tr = buildRow(r, false);
+
+    var diffTd = document.createElement('td');
+    var details = document.createElement('details');
+    details.className = 'diff-details';
+    var diffCount = (r.targets || []).reduce(function (n, t) { return n + (t.diffs ? t.diffs.length : 0); }, 0);
+    var summary = textEl('summary', diffCount + ' diff' + (diffCount === 1 ? '' : 's'));
+    details.appendChild(summary);
+    details.appendChild(diffTable(r.targets));
+    diffTd.appendChild(details);
+    tr.appendChild(diffTd);
+    return tr;
+  }
+
+  function renderFailures() {
+    var tbody = document.querySelector('#failures tbody');
+    tbody.replaceChildren();
+    if (failuresOrder.length === 0) {
+      var empty = document.createElement('tr');
+      empty.className = 'empty-row';
+      var td = textEl('td', 'No failures.');
+      td.colSpan = 6;
+      empty.appendChild(td);
+      tbody.appendChild(empty);
+      return;
+    }
+    failuresOrder.forEach(function (id) {
+      var r = failuresMap.get(id);
+      if (!r) return;
+      tbody.appendChild(buildFailureRow(r));
+    });
+  }
+
+  // ── state application ──
+  function applyInitialState(data) {
+    var recent = data.recent || [];
+    var failures = data.failures || [];
+
+    recentCap = recent.length || Infinity;
+    recentOrder = recent.map(function (r) { return r.id; });
+    recentMap = new Map(recent.map(function (r) { return [r.id, r]; }));
+
+    failuresOrder = failures.map(function (r) { return r.id; });
+    failuresMap = new Map(failures.map(function (r) { return [r.id, r]; }));
+
+    localCounters = Object.assign({ checked: 0, matched: 0, failed: 0, skipped: 0, superseded: 0, evicted: 0 }, data.counters || {});
+    countedIds = new Set();
+    seedCounted(recent);
+    seedCounted(failures);
+
+    renderHeader(data.stats || {});
+    renderCounters();
+    renderRecent();
+    renderFailures();
+  }
+
+  function upsertResult(r) {
+    var known = recentMap.has(r.id);
+    recentMap.set(r.id, r);
+    if (!known) {
+      recentOrder.unshift(r.id);
+      if (recentOrder.length > recentCap) {
+        var evictedId = recentOrder.pop();
+        if (!failuresMap.has(evictedId)) recentMap.delete(evictedId);
+      }
+    }
+
+    if (r.state === 'failed') {
+      var knownF = failuresMap.has(r.id);
+      failuresMap.set(r.id, r);
+      if (!knownF) failuresOrder.unshift(r.id);
+    } else if (failuresMap.has(r.id)) {
+      failuresMap.set(r.id, r);
+    }
+
+    tallyIfNew(r);
+    renderCounters();
+    renderRecent();
+    if (r.state === 'failed' || failuresMap.has(r.id)) renderFailures();
+  }
+
+  // ── filter ──
+  document.getElementById('filter').addEventListener('input', function (e) {
+    filterText = e.target.value.trim().toLowerCase();
+    renderRecent();
+  });
+
+  // ── initial fill ──
+  fetch('/api/state')
+    .then(function (res) { return res.json(); })
+    .then(applyInitialState)
+    .catch(function (err) { console.error('failed to load initial state', err); });
+
+  // ── live updates ──
+  var es = new EventSource('/api/events');
+  es.onmessage = function (e) {
+    var ev;
+    try { ev = JSON.parse(e.data); } catch (err) { return; }
+    if (ev.kind === 'stats') {
+      renderHeader(ev.data);
+    } else if (ev.kind === 'result') {
+      upsertResult(ev.data);
+    }
+  };
+  es.onerror = function () {};
+})();
+</script>
+</body>
+</html>

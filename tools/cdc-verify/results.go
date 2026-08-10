@@ -6,6 +6,11 @@ import (
 
 // deepCopyResult creates a deep copy of a CheckResult with fresh backing arrays
 // for Targets and Diffs slices.
+//
+// (Upsert, Snapshot) to match the JSON-serializable value semantics of the
+// type; switching to a pointer here alone would be inconsistent.
+//
+//nolint:gocritic // CheckResult is passed by value throughout this package
 func deepCopyResult(r CheckResult) CheckResult {
 	result := r
 	if len(r.Targets) > 0 {
@@ -85,7 +90,7 @@ func newResultsStore(recentCap, failedCap int, onUpdate func(CheckResult)) *resu
 	}
 }
 
-//nolint:unused // wired into main.go's dependency graph by a later task
+//nolint:unused,gocritic // wired into main.go's dependency graph by a later task; value receiver matches the package-wide CheckResult convention
 func (s *resultsStore) Upsert(r CheckResult) {
 	// Deep-copy the incoming result to own its slices and protect from caller mutations
 	r = deepCopyResult(r)
@@ -128,6 +133,9 @@ func (s *resultsStore) Upsert(r CheckResult) {
 			s.counters.Skipped++
 		case StateSuperseded:
 			s.counters.Superseded++
+		default:
+			// StatePending is not terminal and never reaches this switch
+			// (guarded by isTerminal above); no counter to bump.
 		}
 	}
 	cb := s.onUpdate
@@ -148,6 +156,8 @@ func isTerminal(st CheckState) bool {
 // - failures-eviction: check if ID is still in recent (passed as others)
 // An ID evicted from both windows can never be upserted again (checks are single-writer),
 // so its dedup entry is dropped.
+//
+//nolint:gocritic // value receiver matches the package-wide CheckResult convention
 func evictedIDIfUncounted(others []CheckResult, r CheckResult) string {
 	for i := range others {
 		if others[i].ID == r.ID {
