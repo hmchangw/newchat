@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -235,4 +237,91 @@ func TestMongoMemberLoader_Load_HistorySharedSince(t *testing.T) {
 	assert.Equal(t, "botty", botty.ID)
 	assert.True(t, botty.IsBot, "nested u.isBot maps to flat IsBot")
 	assert.Nil(t, botty.HistorySharedSince, "full-access member must have nil HistorySharedSince")
+}
+
+func seedUserSettings(t *testing.T, ctx context.Context, col *mongo.Collection) {
+	t.Helper()
+	docs := []any{
+		bson.M{
+			"_id": "u-muted", "account": "muted-user", "active": true,
+			"settings": bson.M{
+				"muteAllNotifications":             true,
+				"alwaysAllowPriorityNotifications": true,
+				"priorityContacts":                 []string{"alice", "helper.bot"},
+			},
+		},
+		bson.M{
+			"_id": "u-partial", "account": "partial-user", "active": true,
+			"settings": bson.M{"showNotificationsInCall": true},
+		},
+		bson.M{"_id": "u-nosettings", "account": "nosettings-user", "active": true},
+		bson.M{"_id": "u-nofield", "account": "noactive-user"}, // missing active → active
+		bson.M{
+			"_id": "u-inactive", "account": "inactive-user", "active": false,
+			"settings": bson.M{"muteAllNotifications": true},
+		},
+	}
+	_, err := col.InsertMany(ctx, docs)
+	require.NoError(t, err)
+}
+
+func TestMongoUserSettings_Snapshot_Integration(t *testing.T) {
+	db := testutil.MongoDB(t, "notification_worker_settings")
+	ctx := context.Background()
+	usersCol := db.Collection("users")
+	seedUserSettings(t, ctx, usersCol)
+
+	s := newMongoUserSettings(usersCol, 512, 5*time.Second)
+	got, err := s.Snapshot(ctx, []string{
+		"muted-user", "partial-user", "nosettings-user", "noactive-user",
+		"inactive-user", "absent-user",
+	})
+	require.NoError(t, err)
+
+	muted := got["muted-user"]
+	assert.True(t, muted.muteAll)
+	assert.True(t, muted.allowPriority)
+	assert.False(t, muted.showInCall, "unset field resolves to false")
+	assert.True(t, muted.isPriority("alice"))
+	assert.True(t, muted.isPriority("helper.bot"), "bot accounts are valid priority contacts")
+	assert.False(t, muted.isPriority("bob"))
+
+	partial := got["partial-user"]
+	assert.False(t, partial.muteAll)
+	assert.True(t, partial.showInCall)
+
+	assert.Equal(t, notifSettings{}, got["nosettings-user"], "no settings sub-document → zero value")
+	assert.Contains(t, got, "noactive-user", "missing active field counts as active")
+
+	assert.NotContains(t, got, "inactive-user", "active:false is treated as absent, not zero-filled")
+	assert.NotContains(t, got, "absent-user", "unknown account is absent, not zero-filled")
+}
+
+func TestMongoUserSettings_ChunkingBoundary_Integration(t *testing.T) {
+	db := testutil.MongoDB(t, "notification_worker_settings_chunk")
+	ctx := context.Background()
+	usersCol := db.Collection("users")
+
+	accounts := make([]string, 0, 7)
+	docs := make([]any, 0, 7)
+	for i := 0; i < 7; i++ {
+		account := fmt.Sprintf("chunk-user-%d", i)
+		accounts = append(accounts, account)
+		docs = append(docs, bson.M{
+			"_id": account, "account": account, "active": true,
+			"settings": bson.M{"muteAllNotifications": true},
+		})
+	}
+	_, err := usersCol.InsertMany(ctx, docs)
+	require.NoError(t, err)
+
+	// Batch size below the seeded count forces ceil(7/3) = 3 chunked $in queries.
+	s := newMongoUserSettings(usersCol, 3, 5*time.Second)
+	got, err := s.Snapshot(ctx, accounts)
+	require.NoError(t, err)
+
+	assert.Len(t, got, 7, "every chunk's results must be merged into one map")
+	for _, a := range accounts {
+		assert.True(t, got[a].muteAll, "account %s", a)
+	}
 }
