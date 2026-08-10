@@ -6,8 +6,7 @@
 > so they are now captured once at forward time into the `ForwardedMessage`
 > snapshot by `message-gatekeeper`, and there is no read-time lookup at all.
 > Kept for the decision record; do not implement from this document.
-
-
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** History-service read paths return each forwarded snapshot with an inline `room` object (`{id, name, type}`; dm/botDM: `{id, type}`) resolved read-time from the local Mongo `rooms` collection.

@@ -7,7 +7,6 @@
 > snapshot by `message-gatekeeper`, and there is no read-time lookup at all.
 > Kept for the decision record; do not implement from this document.
 
-
 **Date:** 2026-08-06
 **Base:** `claude/message-forwarding-impl-deq7za` (message-forwarding implementation)
 **Branch:** `claude/message-room-enrichment-krp5m3`
