@@ -36,7 +36,16 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 1000, cfg.FailedCap)
 	assert.Equal(t, 5*time.Second, cfg.StatsInterval)
 	assert.Equal(t, 72, cfg.MessageBucketHours)
+	assert.False(t, cfg.Bootstrap.Enabled)
 	assert.NoError(t, cfg.validate())
+}
+
+func TestConfig_BootstrapEnabled(t *testing.T) {
+	kv := fullEnv()
+	kv["BOOTSTRAP_STREAMS"] = "true"
+	cfg, err := parseFrom(t, kv)
+	require.NoError(t, err)
+	assert.True(t, cfg.Bootstrap.Enabled)
 }
 
 func TestConfig_MissingRequired(t *testing.T) {

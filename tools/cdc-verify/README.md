@@ -39,9 +39,15 @@ docker compose -f tools/cdc-verify/deploy/docker-compose.yml up
 Open http://localhost:8091.
 
 `mapping.local.json` is operator-provided next to the compose file (bind-mounted
-read-only, gitignored) — the copied `mapping.example.json` works out of the
-box against the compose stack's empty databases, though nothing will verify
-until you seed matching documents in source/target.
+read-only, gitignored) — the copied `mapping.example.json` works as the
+mapping input out of the box. The compose stack sets `BOOTSTRAP_STREAMS=true`
+so the tool creates `MIGRATION-OPLOG-{siteID}` itself (this stack has no
+`oplog-connector` standing it up); in production that stream already exists
+and the gate stays off (see Configuration below). With no `oplog-connector`
+or seeded data feeding it, the stack starts **idle** — an empty dashboard —
+until you seed matching documents in source/target and publish oplog events
+onto the stream (or point `NATS_URL`/`SOURCE_MONGO_URI`/`TARGET_MONGO_URI` at
+a real migration environment instead).
 
 ### Option 2 — Run the binary directly
 
@@ -227,6 +233,7 @@ transformers, then tuned per environment.
 | `CASSANDRA_HOSTS` / `CASSANDRA_KEYSPACE` | conditional | `""` | Destination Cassandra, via `pkg/cassutil`; required only when the mapping file references a `cassandra` target — validated at startup |
 | `CASSANDRA_USERNAME` / `CASSANDRA_PASSWORD` | no | `""` | Cassandra auth |
 | `MAPPING_FILE` | yes | — | Path to the JSON mapping file |
+| `BOOTSTRAP_STREAMS` | no | `false` | Dev-only: create `MIGRATION-OPLOG-{siteID}` (schema only — Name+Subjects) if it doesn't exist. In production this stays off — the stream is owned by `oplog-connector`/ops (CLAUDE.md "Stream bootstrap is opt-in"), and the tool stays strictly read-only there. `docker-compose.yml` sets this `true` since the local stack has no `oplog-connector`. |
 | `MESSAGE_BUCKET_HOURS` | no | `72` | Bucket window for the `msgBucket` transform — MUST match the services writing `messages_by_room` |
 | `TRACK_CONSUMERS` | no | `""` | Comma-separated durable consumer names to show lag for |
 | `START_AT_TIME` | no | `""` | Optional replay start (RFC3339) instead of deliver-new |

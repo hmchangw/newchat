@@ -44,18 +44,19 @@ type config struct {
 	CassandraUsername string `env:"CASSANDRA_USERNAME" envDefault:""`
 	CassandraPassword string `env:"CASSANDRA_PASSWORD" envDefault:""`
 
-	MappingFile        string        `env:"MAPPING_FILE,required"`
-	MessageBucketHours int           `env:"MESSAGE_BUCKET_HOURS" envDefault:"72"`
-	TrackConsumers     []string      `env:"TRACK_CONSUMERS" envDefault:""`
-	StartAtTime        string        `env:"START_AT_TIME" envDefault:""`
-	VerifyPoll         time.Duration `env:"VERIFY_POLL" envDefault:"2s"`
-	VerifyTimeout      time.Duration `env:"VERIFY_TIMEOUT" envDefault:"60s"`
-	MaxChecks          int           `env:"MAX_CHECKS" envDefault:"32"`
-	SamplePercent      int           `env:"SAMPLE_PERCENT" envDefault:"100"`
-	RecentCap          int           `env:"RECENT_CAP" envDefault:"200"`
-	FailedCap          int           `env:"FAILED_CAP" envDefault:"1000"`
-	StatsInterval      time.Duration `env:"STATS_INTERVAL" envDefault:"5s"`
-	Port               int           `env:"PORT" envDefault:"8091"`
+	MappingFile        string          `env:"MAPPING_FILE,required"`
+	Bootstrap          bootstrapConfig `envPrefix:"BOOTSTRAP_"`
+	MessageBucketHours int             `env:"MESSAGE_BUCKET_HOURS" envDefault:"72"`
+	TrackConsumers     []string        `env:"TRACK_CONSUMERS" envDefault:""`
+	StartAtTime        string          `env:"START_AT_TIME" envDefault:""`
+	VerifyPoll         time.Duration   `env:"VERIFY_POLL" envDefault:"2s"`
+	VerifyTimeout      time.Duration   `env:"VERIFY_TIMEOUT" envDefault:"60s"`
+	MaxChecks          int             `env:"MAX_CHECKS" envDefault:"32"`
+	SamplePercent      int             `env:"SAMPLE_PERCENT" envDefault:"100"`
+	RecentCap          int             `env:"RECENT_CAP" envDefault:"200"`
+	FailedCap          int             `env:"FAILED_CAP" envDefault:"1000"`
+	StatsInterval      time.Duration   `env:"STATS_INTERVAL" envDefault:"5s"`
+	Port               int             `env:"PORT" envDefault:"8091"`
 }
 
 func (c *config) validate() error {
@@ -137,6 +138,10 @@ func main() {
 		os.Exit(1)
 	}
 	streamName := stream.MigrationOplog(cfg.SiteID).Name
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+		slog.Error("bootstrap streams", "error", err)
+		os.Exit(1)
+	}
 	s, err := js.Stream(ctx, streamName)
 	if err != nil {
 		slog.Error("open stream", "stream", streamName, "error", err)

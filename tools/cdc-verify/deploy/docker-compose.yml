@@ -11,6 +11,14 @@
 # mapping.local.json is operator-provided next to this file (gitignored) — a
 # copy of ../mapping.example.json works out of the box. It is bind-mounted
 # read-only into the container so it can be edited without a rebuild.
+#
+# BOOTSTRAP_STREAMS=true below is dev-only: it makes the tool create
+# MIGRATION-OPLOG-{siteID} itself since this stack has no oplog-connector to
+# do it. In production the stream already exists (owned by
+# oplog-connector/ops) and this gate stays off. With nothing publishing to
+# the stream yet, the stack starts idle — an empty dashboard — until you seed
+# matching documents in source/target and publish oplog events (or run
+# oplog-connector against the same NATS/Mongo).
 
 services:
   nats:
@@ -45,3 +53,4 @@ services:
       CASSANDRA_HOSTS: cassandra:9042
       CASSANDRA_KEYSPACE: chat
       MAPPING_FILE: /etc/cdc-verify/mapping.json
+      BOOTSTRAP_STREAMS: "true"
