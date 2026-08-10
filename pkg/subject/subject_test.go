@@ -625,6 +625,9 @@ func TestUserServiceBuilders(t *testing.T) {
 		{"me", subject.UserMe("alice", "s1"), "chat.user.alice.request.user.s1.me"},
 		{"settings.get", subject.UserSettingsGet("alice", "s1"), "chat.user.alice.request.user.s1.settings.get"},
 		{"settings.set", subject.UserSettingsSet("alice", "s1"), "chat.user.alice.request.user.s1.settings.set"},
+		{"priorityContacts.get", subject.UserPriorityContactsGet("alice", "s1"), "chat.user.alice.request.user.s1.settings.priorityContacts.get"},
+		{"priorityContacts.add", subject.UserPriorityContactsAdd("alice", "s1"), "chat.user.alice.request.user.s1.settings.priorityContacts.add"},
+		{"priorityContacts.remove", subject.UserPriorityContactsRemove("alice", "s1"), "chat.user.alice.request.user.s1.settings.priorityContacts.remove"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -797,6 +800,9 @@ func TestUserServiceBuildersRejectWildcardAccounts(t *testing.T) {
 		{"UserMe", func() { subject.UserMe("*", "s1") }},
 		{"UserSettingsGet", func() { subject.UserSettingsGet("*", "s1") }},
 		{"UserSettingsSet", func() { subject.UserSettingsSet(">", "s1") }},
+		{"UserPriorityContactsGet", func() { subject.UserPriorityContactsGet("*", "s1") }},
+		{"UserPriorityContactsAdd", func() { subject.UserPriorityContactsAdd("*", "s1") }},
+		{"UserPriorityContactsRemove", func() { subject.UserPriorityContactsRemove("*", "s1") }},
 	}
 	for _, b := range builders {
 		t.Run(b.name, func(t *testing.T) {
@@ -939,6 +945,9 @@ func TestUserServicePatternBuilders(t *testing.T) {
 		{"me", subject.UserMePattern("s1"), "chat.user.{account}.request.user.s1.me"},
 		{"settings.get", subject.UserSettingsGetPattern("s1"), "chat.user.{account}.request.user.s1.settings.get"},
 		{"settings.set", subject.UserSettingsSetPattern("s1"), "chat.user.{account}.request.user.s1.settings.set"},
+		{"priorityContacts.get", subject.UserPriorityContactsGetPattern("s1"), "chat.user.{account}.request.user.s1.settings.priorityContacts.get"},
+		{"priorityContacts.add", subject.UserPriorityContactsAddPattern("s1"), "chat.user.{account}.request.user.s1.settings.priorityContacts.add"},
+		{"priorityContacts.remove", subject.UserPriorityContactsRemovePattern("s1"), "chat.user.{account}.request.user.s1.settings.priorityContacts.remove"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -64,7 +64,7 @@ for future siblings (`.silent`, `.priority`) without restructuring the stream.
 
 Field notes:
 
-- **`id`** = `{messageId}-b{batchIndex}` (zero-based). Also set as the `Nats-Msg-Id` header — see Dedup. `batchIndex` is stable across redeliveries because the worker sorts survivors lexicographically before chunking.
+- **`id`** = `{messageId}-b{batchIndex}` (zero-based). Also set as the `Nats-Msg-Id` header — see Dedup. Sorting survivors lexicographically before chunking makes batch *ordering* deterministic across redeliveries; it does not by itself guarantee the same accounts land in the same `batchIndex` on every redelivery — see the caveat under Dedup.
 - **`accounts`** = recipient accounts in this batch, lexicographically sorted, capped by `PUSH_RECIPIENT_BATCH_SIZE` (default 100). The push service iterates this list, resolves device tokens per account, and is expected to use the provider's native multicast (e.g. FCM `send_each_for_multicast` — up to 500 tokens per call) so one batch becomes one outbound HTTP request.
 - **`title`** is resolved by the worker so push-service needs no DB lookup. The rule mirrors the legacy implementation: `room.Name` if present, otherwise the sender's account (DM rooms have no name). Room metadata is served from an LRU+TTL cache (`pkg/roommetacache`) sized via `ROOM_META_CACHE_SIZE` / `ROOM_META_CACHE_TTL`.
 - **`body`** is the raw message content, **untruncated**. The push service should truncate to the APNs/FCM payload limit (~4 KB total) before delivery. (Truncation/PII-scrubbing on the worker side is tracked as follow-up.)
@@ -129,11 +129,11 @@ canonical event, the worker re-runs fan-out and re-publishes push events
 with the same content.
 
 The worker sets the JetStream `Nats-Msg-Id` header to `{messageId}-b{batchIndex}`.
-Batches are content-stable across redeliveries because the worker sorts
-survivors before chunking, so the same canonical message always produces the
-same `Nats-Msg-Id` set and JetStream drops the duplicates at the stream. For
-this to suppress duplicate pushes, the **stream's dedup window must be ≥ the
-canonical consumer's redelivery horizon**:
+Sorting survivors before chunking makes the batch *order* deterministic across
+redeliveries, and for an unchanged batch the same `Nats-Msg-Id` still causes
+JetStream to drop the duplicate at the stream. For this to suppress duplicate
+pushes, the **stream's dedup window must be ≥ the canonical consumer's
+redelivery horizon**:
 
 ```text
 dedup_window  ≥  AckWait × MaxDeliver  =  30s × 5  =  150s   (defaults)
@@ -142,6 +142,21 @@ dedup_window  ≥  AckWait × MaxDeliver  =  30s × 5  =  150s   (defaults)
 Set the `PUSH-NOTIFICATION-{siteID}` `Duplicates` window to a safe margin
 above 150s (e.g. 5 min). If the window is shorter, a canonical-message
 redelivery (after a worker NAK) can produce a duplicate push.
+
+> **Known accepted risk — survivor set is not guaranteed stable across
+> redeliveries.** `batchIndex` assignment depends on the sorted survivor list,
+> and survivorship now depends on a live user-settings read (`usersettings.go`)
+> that fails open and can change between a NAK and its redelivery (a setting
+> read that failed the first time can succeed the second, or the user can
+> change a setting in between). If the survivor count shifts between
+> attempts, later batches shift with it: e.g. 250 survivors at batch size 100
+> — attempt 1 publishes `b0`/`b1` and fails on `b2`, so the message is NAKed;
+> attempt 2 resolves one more account (now 249 survivors), shifting what was
+> `b2`'s first account into `b1`. Re-publishing `b1` carries the same
+> `Nats-Msg-Id` as before, so JetStream drops it as a duplicate — and the
+> shifted-in account never receives its push. A content-derived `Nats-Msg-Id`
+> would close this gap; that is a contract change tracked separately, not
+> addressed here.
 
 ### Consumer guidance
 
@@ -226,9 +241,18 @@ it's live.
   (`{"error": "...", "code": "..."}`) via `natsutil.ReplyError`. The worker
   detects this envelope, logs it, and fails open for that chunk.
 
-### Status → push decision (worker-side, for reference)
+### Status → push decision — presence alone (worker-side, for reference)
 
-| `aggregatedStatus` | Push? | Rationale |
+Presence is one of two independent suppressors the worker evaluates, not the
+whole push decision. The table below is what presence alone implies; the
+worker also consults the recipient's stored notification settings
+(`notification-worker/usersettings.go`), which can move the outcome either
+way: `muteAllNotifications` can suppress a push at **any** status (including
+`online`), and `showNotificationsInCall` can allow one through at `busy` /
+`in-call`. See `shouldPush` (`notification-worker/presence.go`) for the
+combined gate.
+
+| `aggregatedStatus` | Push? (presence alone) | Rationale |
 |---|:--:|---|
 | `online`  | yes | multi-device — push fires alongside the client desktop banner |
 | `offline` | yes | not connected — reach by push |

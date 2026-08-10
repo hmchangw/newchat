@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/user-service/models"
 )
 
 const usersCollection = "users"
@@ -112,7 +114,7 @@ func (r *UserRepo) GetUserSettings(ctx context.Context, account string) (*model.
 // updated user (Settings projected) in one round-trip via
 // FindOneAndUpdate(After); returns (nil, nil) when no active user matched.
 // The caller guarantees at least one field is non-nil (an empty $set errors).
-func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error) {
+func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings, at time.Time) (*model.User, error) {
 	fields := bson.M{}
 	if set.FullWidth != nil {
 		fields["settings.fullWidth"] = *set.FullWidth
@@ -141,6 +143,12 @@ func (r *UserRepo) UpdateUserSettings(ctx context.Context, account string, set *
 	if set.InitialChatScrollPosition != nil {
 		fields["settings.initialChatScrollPosition"] = *set.InitialChatScrollPosition
 	}
+	// Stamp the top-level settingsUpdatedAt (the same timestamp the service shares
+	// with both fanouts) so the cross-site high-water guard sees a local edit;
+	// without it an older inbound event could regress local state. Mirrors
+	// UpdateUserChatlist. PriorityContacts is deliberately never referenced here —
+	// the dedicated add/remove RPCs own it.
+	fields["settingsUpdatedAt"] = at
 	opts := options.FindOneAndUpdate().
 		SetReturnDocument(options.After).
 		SetProjection(bson.M{"_id": 0, "settings": 1})
@@ -213,6 +221,118 @@ func (r *UserRepo) SetUserStatus(ctx context.Context, account, text string, isSh
 	var u model.User
 	if err := res.Decode(&u); err != nil {
 		return nil, fmt.Errorf("decode updated user status: %w", err)
+	}
+	return &u, nil
+}
+
+// GetUserPriorityContacts returns the user's stored priority-contact list (Settings
+// is nil when the user never set any settings); (nil, nil) when no active user
+// matched. The narrow projection is safe here — unlike Add/Remove, this result never
+// feeds a settings fanout.
+func (r *UserRepo) GetUserPriorityContacts(ctx context.Context, account string) (*model.User, error) {
+	return r.users.FindOne(ctx, activeUserFilter(account),
+		mongoutil.WithProjection(bson.M{"_id": 0, "settings.priorityContacts": 1}),
+	)
+}
+
+// UserExists reports whether account names an active user. Backs the add-time
+// existence check; active-only by design — a deactivated user cannot be added.
+func (r *UserRepo) UserExists(ctx context.Context, account string) (bool, error) {
+	u, err := r.users.FindOne(ctx, activeUserFilter(account),
+		mongoutil.WithProjection(bson.M{"_id": 0, "account": 1}),
+	)
+	if err != nil {
+		return false, fmt.Errorf("check user exists: %w", err)
+	}
+	return u != nil, nil
+}
+
+// GetPriorityContactUsers maps account → the display fields the priority-contacts
+// list renders. GetHRInfoByAccounts is unusable here: it carries no employeeId or
+// sectName, and widening it would change every DM subscription payload. Deliberately
+// NOT active-filtered — a contact deactivated after being added still renders.
+// Accounts with no users doc are omitted.
+func (r *UserRepo) GetPriorityContactUsers(ctx context.Context, accounts []string) (map[string]*models.PriorityContactUser, error) {
+	type contactUser struct {
+		Account     string `bson:"account"`
+		EngName     string `bson:"engName"`
+		ChineseName string `bson:"chineseName"`
+		EmployeeID  string `bson:"employeeId"`
+		SectName    string `bson:"sectName"`
+	}
+	col := mongoutil.NewCollection[contactUser](r.users.Raw())
+	rows, err := col.FindMany(ctx,
+		bson.M{"account": bson.M{"$in": accounts}},
+		mongoutil.WithProjection(bson.M{
+			"_id": 0, "account": 1, "engName": 1, "chineseName": 1, "employeeId": 1, "sectName": 1,
+		}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find priority contact users: %w", err)
+	}
+	out := make(map[string]*models.PriorityContactUser, len(rows))
+	for i := range rows {
+		out[rows[i].Account] = &models.PriorityContactUser{
+			EngName:     rows[i].EngName,
+			ChineseName: rows[i].ChineseName,
+			EmployeeID:  rows[i].EmployeeID,
+			SectName:    rows[i].SectName,
+		}
+	}
+	return out, nil
+}
+
+// AddPriorityContact appends contact via $addToSet and stamps settingsUpdatedAt in
+// one atomic update whose filter also enforces the cap — a read-then-check-then-write
+// guard would let two concurrent adds both pass at limit-1 and overshoot. Returns
+// (nil, nil) when nothing matched; the caller disambiguates "no such user" from
+// "at cap".
+//
+// The projection MUST stay {"_id":0,"settings":1} — the whole sub-document. This
+// result feeds publishSettingsFanouts, and the cross-site apply is a whole-object
+// $set of settings, so narrowing it to settings.priorityContacts would wipe every
+// other setting at every remote site.
+func (r *UserRepo) AddPriorityContact(ctx context.Context, account, contact string, limit int, at time.Time) (*model.User, error) {
+	filter := activeUserFilter(account)
+	filter["$expr"] = bson.M{"$lt": bson.A{
+		bson.M{"$size": bson.M{"$ifNull": bson.A{"$settings.priorityContacts", bson.A{}}}},
+		limit,
+	}}
+	update := bson.M{
+		"$addToSet": bson.M{"settings.priorityContacts": contact},
+		"$set":      bson.M{"settingsUpdatedAt": at},
+	}
+	return r.mutatePriorityContacts(ctx, filter, update, "add priority contact")
+}
+
+// RemovePriorityContact removes contact via $pull and stamps settingsUpdatedAt.
+// Idempotent — removing an absent entry is a no-op that still returns the list.
+// Returns (nil, nil) when no active user matched. Same whole-settings projection
+// requirement as AddPriorityContact, for the same cross-site reason.
+func (r *UserRepo) RemovePriorityContact(ctx context.Context, account, contact string, at time.Time) (*model.User, error) {
+	update := bson.M{
+		"$pull": bson.M{"settings.priorityContacts": contact},
+		"$set":  bson.M{"settingsUpdatedAt": at},
+	}
+	return r.mutatePriorityContacts(ctx, activeUserFilter(account), update, "remove priority contact")
+}
+
+// mutatePriorityContacts runs a priority-contact update and decodes the post-update
+// settings, so Add and Remove share one copy of the projection the fanouts depend on.
+func (r *UserRepo) mutatePriorityContacts(ctx context.Context, filter, update bson.M, op string) (*model.User, error) {
+	opts := options.FindOneAndUpdate().
+		SetReturnDocument(options.After).
+		SetProjection(bson.M{"_id": 0, "settings": 1})
+	res := r.users.Raw().FindOneAndUpdate(ctx, filter, update, opts)
+	if err := res.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	var u model.User
+	if err := res.Decode(&u); err != nil {
+		return nil, fmt.Errorf("decode user after %s: %w", op, err)
 	}
 	return &u, nil
 }

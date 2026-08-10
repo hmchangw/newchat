@@ -33,9 +33,14 @@ type UserRepository interface {
 	SetUserStatus(ctx context.Context, account, text string, isShow *bool) (*model.User, error)
 	GetHRInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.SubscriptionHRInfo, error)
 	GetUserSettings(ctx context.Context, account string) (*model.User, error)
-	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error)
+	UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings, at time.Time) (*model.User, error)
 	GetUserChatlist(ctx context.Context, account string) (*model.User, error)
 	UpdateUserChatlist(ctx context.Context, account string, state *model.ChatlistState) (*model.User, error)
+	GetUserPriorityContacts(ctx context.Context, account string) (*model.User, error)
+	GetPriorityContactUsers(ctx context.Context, accounts []string) (map[string]*models.PriorityContactUser, error)
+	UserExists(ctx context.Context, account string) (bool, error)
+	AddPriorityContact(ctx context.Context, account, contact string, limit int, at time.Time) (*model.User, error)
+	RemovePriorityContact(ctx context.Context, account, contact string, at time.Time) (*model.User, error)
 }
 
 // AppRepository is the consumer-defined interface for app catalog reads.
@@ -158,6 +163,9 @@ func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.Register(r, subject.UserStatusSetPattern(s.siteID), s.SetStatus)
 	natsrouter.RegisterNoBody(r, subject.UserSettingsGetPattern(s.siteID), s.GetSettings)
 	natsrouter.Register(r, subject.UserSettingsSetPattern(s.siteID), s.SetSettings)
+	natsrouter.RegisterNoBody(r, subject.UserPriorityContactsGetPattern(s.siteID), s.GetPriorityContacts)
+	natsrouter.Register(r, subject.UserPriorityContactsAddPattern(s.siteID), s.AddPriorityContact)
+	natsrouter.Register(r, subject.UserPriorityContactsRemovePattern(s.siteID), s.RemovePriorityContact)
 	natsrouter.RegisterNoBody(r, subject.UserChatlistGetPattern(s.siteID), s.GetChatlist)
 	natsrouter.Register(r, subject.UserChatlistSectionCreatePattern(s.siteID), s.CreateChatlistSection)
 	natsrouter.Register(r, subject.UserChatlistSectionDeletePattern(s.siteID), s.DeleteChatlistSection)
