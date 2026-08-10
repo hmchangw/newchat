@@ -150,3 +150,22 @@ All touched packages compile; `go test -race` green across the five packages. Fi
 - Test helpers (`membershipEvents`, `envelope`, `mkEvent`) all live in `_test.go` files — compliant.
 
 **§3 sweep:** no error-by-string comparison in production code (test `err.Error()` Contains at inbox_stream_test.go:763 is acceptable, sentinels would be sturdier); no tokens/bodies logged (query flagged above); all logging is structured slog KV; no struct-tag changes; error wraps describe the calling function's action throughout. The migrator skip (runner.go:60-64) and its "skip ≠ RecordSkipped" rationale are well-documented and test-pinned.
+
+## Test-automation
+
+Working tree verified clean before and after (no mock regeneration was needed — `git diff 9a9f7646...HEAD -- '*store*.go'` is empty and no interface changed in the diff).
+
+**TDD heuristic — PASS.** Every new function/branch has a same-diff test: `searchShardTotal` → `TestSearchShardTotal` (search-service/response_test.go:14), `logEmptyResult` → `TestHandler_SearchRooms_EmptyResultLogsReadPattern` (handler_test.go:319), `parseMemberEvent` guards → `TestParseMemberEvent` + `TestParseMemberEvent_UnwrappedInnerEventClearsTimestampGuard` (search-sync-worker/inbox_stream_test.go:15,113), `BuildAction` filter → `TestMessageCollection_BuildAction_SystemMessagesNotIndexed` (messages_test.go:307), runner skip → `TestRunMessages_SkipsSystemMessages` (runner_test.go:29), room-worker envelope both lanes → teamsroomcreate_test.go:209,248, config change → config_test.go:304,322. No TDD violations.
+
+**Findings**
+
+- **medium** — search-service/handler.go:237-239: the `searchOrgs` empty-result branch is untested. The rooms-path test covers `logEmptyResult` internals, but nothing asserts orgs passes `SpotlightOrgReadPattern`/`kind="orgs"` — a swapped pattern argument here would go uncaught. CLAUDE.md §4 requires per-handler scenario coverage.
+- **medium** — search-service/handler_test.go:874 (`TestHandler_SearchOrgs_EmptyESResultReturnsEmptySlice`) and any empty-hit fixture lacking `_shards`: `searchShardTotal` now returns 0 for these bodies, so pre-existing tests traverse the new WARN branch ("read pattern matched no index") on the real default logger — the fixtures now model the *broken-config* state and emit unasserted log noise. Add `"_shards":{"total":N}` to empty-result fixtures so they represent the state they claim to test.
+- **low** — search-service/handler_test.go:465-467: the `slog.SetDefault` swap is safe today — no test in search-service (or any affected package) calls `t.Parallel()`, restore is via `t.Cleanup`, and `go test -race` passes on all five packages (verified). It becomes a data-race/cross-talk hazard the day parallelism is introduced; precedent exists (room-worker/debug_log_test.go:70), so consider a shared serialized helper if the pattern spreads.
+- **low** — pkg/model/event_test.go:91: `parser.ParseFile(fset, "event.go", …)` is correct — `go test` runs with cwd = package dir. The `found==0` guard (line 135) covers wholesale rename/move of event.go, but a *partial* move (some `MessageType*` constants relocated to another pkg/model file) keeps `found>0` and silently un-guards the moved constants. Parsing the package dir (`parser.ParseDir`) would close this; all constants live in event.go today (verified — message.go only references one in a comment).
+- **nitpick** — search-sync-worker/inbox_stream_test.go: the guard in inbox_stream.go:70 is `Timestamp <= 0` but the table only tests `0`; add a negative-timestamp case.
+- **nitpick** — pkg/model/event_test.go:111: constants whose values aren't string `BasicLit`s (concatenation, typed consts) are silently skipped by the AST walk; harmless today, invisible tomorrow.
+
+**Checks passed:** table-driven structure with descriptive subtest names throughout; `searchShardTotal` malformed-body case covered; parseMemberEvent error paths all covered incl. the unwrapped-inner case; Makefile `test` target uses `-race` (all affected packages pass with `-race -count=1`); no mock staleness.
+
+**Untestable in this diff:** the producer→consumer envelope contract is pinned only by two independent unit tests in separate packages; search-sync-worker/inbox_integration_test.go:67-81 builds its *own* envelope, so it would not catch renewed drift — a true end-to-end check needs Docker (testcontainers NATS+ES) and is absent. Compose/main.go wiring is untestable by repo convention.
