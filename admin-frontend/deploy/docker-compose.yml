@@ -6,9 +6,9 @@ services:
       context: ../..
       dockerfile: admin-frontend/deploy/Dockerfile
     environment:
-      ADMIN_SERVICE_URL: ${ADMIN_SERVICE_URL:-http://localhost:8082}
+      ADMIN_SERVICE_URL: ${ADMIN_SERVICE_URL:-http://localhost:${ADMIN_SERVICE_HOST_PORT:-8082}}
     ports:
-      - "3001:80"
+      - "${ADMIN_FRONTEND_HOST_PORT:-3001}:80"
     networks:
       - chat-local
 

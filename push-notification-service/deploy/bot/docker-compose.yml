@@ -8,16 +8,15 @@ services:
     environment:
       - OTEL_SERVICE_NAME=bot-push-notification-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - SITE_ID=site-local
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
       - MODE=bot
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
-      - BOOTSTRAP_STREAMS=false
     volumes:
-      - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

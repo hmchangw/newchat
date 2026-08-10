@@ -8,31 +8,31 @@ services:
     environment:
       - OTEL_SERVICE_NAME=search-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - SITE_ID=site-local
-      - SEARCH_URL=http://elasticsearch:9200
-      - SEARCH_BACKEND=elasticsearch
-      - VALKEY_ADDRS=valkey:6379
-      - VALKEY_PASSWORD=
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
+      - SEARCH_URL=${SEARCH_URL:-http://elasticsearch:9200}
+      - SEARCH_BACKEND=${SEARCH_BACKEND:-elasticsearch}
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
+      - VALKEY_PASSWORD=${VALKEY_PASSWORD:-}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
-      - USERS_API_URL=http://users-api-mock:8080
-      - USERS_API_TIMEOUT=5s
-      - SEARCH_DOC_COUNTS=25
-      - SEARCH_MAX_DOC_COUNTS=100
-      - SEARCH_RESTRICTED_ROOMS_CACHE_TTL=5m
-      - SEARCH_RECENT_WINDOW=8760h
-      - SEARCH_REQUEST_TIMEOUT=10s
+      - USERS_API_URL=${USERS_API_URL:-http://users-api-mock:8080}
+      - USERS_API_TIMEOUT=${USERS_API_TIMEOUT:-5s}
+      - SEARCH_DOC_COUNTS=${SEARCH_DOC_COUNTS:-25}
+      - SEARCH_MAX_DOC_COUNTS=${SEARCH_MAX_DOC_COUNTS:-100}
+      - SEARCH_RESTRICTED_ROOMS_CACHE_TTL=${SEARCH_RESTRICTED_ROOMS_CACHE_TTL:-5m}
+      - SEARCH_RECENT_WINDOW=${SEARCH_RECENT_WINDOW:-8760h}
+      - SEARCH_REQUEST_TIMEOUT=${SEARCH_REQUEST_TIMEOUT:-10s}
       # Health-only listener. App metrics are on the SDK Prometheus endpoint
       # (OTEL_EXPORTER_PROMETHEUS_PORT, default :2112), not here.
-      - SEARCH_HEALTH_ADDR=:9090
+      - SEARCH_HEALTH_ADDR=${SEARCH_HEALTH_ADDR:-:9090}
       # Local dev pins to site-suffixed indices; prod uses aliases owned by ops/IaC.
-      - SEARCH_USER_ROOM_INDEX=user-room-mv-site-local
-      - SEARCH_SPOTLIGHT_INDEX=spotlight-site-local-v1
-      - SEARCH_SPOTLIGHT_ORG_INDEX=spotlightorg-site-local-v1
+      - SEARCH_USER_ROOM_INDEX=${SEARCH_USER_ROOM_INDEX:-user-room-mv-${SITE_ID:-site-local}}
+      - SEARCH_SPOTLIGHT_INDEX=${SEARCH_SPOTLIGHT_INDEX:-spotlight-${SITE_ID:-site-local}-v1}
+      - SEARCH_SPOTLIGHT_ORG_INDEX=${SEARCH_SPOTLIGHT_ORG_INDEX:-spotlightorg-${SITE_ID:-site-local}-v1}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
@@ -40,9 +40,9 @@ services:
     ports:
       # Expose /healthz + /readyz so the host can probe liveness during local
       # dev. The listener is bound on 0.0.0.0:9090 inside the container.
-      - "19090:9090"
+      - "${SEARCH_SERVICE_HOST_PORT:-19090}:9090"
     volumes:
-      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

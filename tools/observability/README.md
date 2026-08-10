@@ -19,7 +19,7 @@ make up          # if you want to see service containers in the dashboard
 make obs-up
 ```
 
-Then open Grafana: **http://localhost:3001**
+Then open Grafana: **http://localhost:3002**
 
 Three dashboards are pre-loaded and refresh every 5 seconds (Anonymous Admin is
 enabled, so no login is required):
@@ -61,10 +61,10 @@ run `make obs-down && make obs-up` to reload.
 
 | Port  | Service       | Notes                                                       |
 |-------|---------------|-------------------------------------------------------------|
-| 3001  | Grafana UI    | `:3001` avoids collision with the frontend dev server :3000 |
+| 3002  | Grafana UI    | `:3001` is admin-frontend, `:3000` chat-frontend            |
 | 9091  | Prometheus    | `:9091` avoids collision with `search-service`'s :9090      |
 | 8088  | cAdvisor      | `:8088` avoids collision with `auth-service`'s :8080        |
-| 7777  | NATS exporter | Raw `prometheus-nats-exporter` `/metrics` for debugging     |
+| 7778  | NATS exporter | `:7777` is the Traefik `/api/v1` gateway (`make up`)        |
 
 ## What's instrumented
 
