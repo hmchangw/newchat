@@ -70,6 +70,17 @@ export interface Subscription {
   hasMention: boolean
   threadUnread?: string[]
   alert: boolean
+  /** Whether the user favorited the room. Drives the derived Favorites
+   *  section. Optional on the wire (absent = false). */
+  favorite?: boolean
+  /** Custom chatlist section this room is in; absent = no custom section
+   *  (the client derives a built-in placement). A `sectionId` pointing at
+   *  a section not in the definitions renders in Chats (orphan tolerance).
+   *  Set/cleared via the chat.move RPC. */
+  sectionId?: string
+  /** Manual fractional position within `sectionId`'s section; honored only
+   *  when that section's `sortMode == "custom"`. */
+  sectionOrder?: number
   /** Room-level metadata nested under `room` after enrichment by
    *  user-service. Present on `subscription.list` replies; absent on
    *  live `subscription.update` events. Default to 0 / null at the
@@ -329,11 +340,53 @@ export type SubscriptionCallback = (event: unknown) => void
 
 /** Known values of `SubscriptionUpdateEvent.action`. Backend (room-worker
  *  `handler.go`) emits `"added"` on member-add / room-create / DM-sync,
- *  `"removed"` on member-remove, and `"role_updated"` on role change.
- *  Typed as a union ∪ `string` so consumers get autocomplete for the
- *  known values but forward-compat with any new action the backend
- *  introduces. */
-export type SubscriptionUpdateAction = 'added' | 'removed' | 'role_updated' | (string & {})
+ *  `"removed"` on member-remove, `"role_updated"` on role change, and
+ *  `"section_moved"` when a chat's chatlist section membership/order
+ *  changes (the subscription carries the new `sectionId` / `sectionOrder`,
+ *  both absent = removed from its section). Typed as a union ∪ `string`
+ *  so consumers get autocomplete for the known values but forward-compat
+ *  with any new action the backend introduces. */
+export type SubscriptionUpdateAction =
+  | 'added'
+  | 'removed'
+  | 'role_updated'
+  | 'section_moved'
+  | (string & {})
+
+/** Sort mode for a chatlist section: `"custom"` orders by the members'
+ *  `subscription.sectionOrder`; `"mostRecent"` orders by last message (the
+ *  default + fallback). Mirrors the backend's section sortMode. */
+export type ChatlistSortMode = 'custom' | 'mostRecent'
+
+/** One chatlist section DEFINITION. Membership is NOT here — it rides each
+ *  subscription's `sectionId`. Built-ins (`favorites`/`apps`/`teams`/`chats`)
+ *  are derived client-side; the overlay still carries their definition so
+ *  their order + sortMode round-trip. Mirrors pkg/model.ChatlistSection. */
+export interface ChatlistSection {
+  id: string
+  name: string
+  builtIn: boolean
+  sortMode: ChatlistSortMode
+}
+
+/** The per-user chatlist section overlay — definitions + display order only,
+ *  O(sections) not O(chats). Mirrors pkg/model.ChatlistState. `sectionOrder`
+ *  is a permutation of every section id (built-in + custom). `lastUpdatedAt`
+ *  is the LWW high-water mark for the chatlist.update event. */
+export interface ChatlistState {
+  sectionOrder: string[]
+  sections: ChatlistSection[]
+  lastUpdatedAt: number
+}
+
+/** Wire shape of `chat.user.{account}.event.chatlist.update`. Carries the
+ *  FULL post-update section definitions — receivers replace their local
+ *  copy wholesale (guarded by `chatlist.lastUpdatedAt`), never merge deltas.
+ *  Mirrors pkg/model.ChatlistUpdateEvent. */
+export interface ChatlistUpdateEvent {
+  timestamp: number
+  chatlist: ChatlistState
+}
 
 /** Wire shape of `chat.user.{account}.event.subscription.update` events.
  *  Mirrors `pkg/model.SubscriptionUpdateEvent`. Subscription is typed

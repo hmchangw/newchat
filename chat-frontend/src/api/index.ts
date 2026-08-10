@@ -12,6 +12,17 @@
 // is re-exported here.
 
 export { addMembers } from './addMembers'
+export {
+  getChatlist,
+  seedChatlistDemo,
+  createChatlistSection,
+  renameChatlistSection,
+  deleteChatlistSection,
+  reorderChatlistSections,
+  setChatlistSectionSortMode,
+} from './chatlist'
+export { moveChat } from './moveChat'
+export { subscribeToChatlistUpdates } from './subscribeToChatlistUpdates'
 export { createRoom } from './createRoom'
 export { deleteMessage } from './deleteMessage'
 export { editMessage } from './editMessage'
@@ -77,4 +88,8 @@ export type {
   HistoryConfig,
   HistoryMode,
   RoomKeyEvent,
+  ChatlistSortMode,
+  ChatlistSection,
+  ChatlistState,
+  ChatlistUpdateEvent,
 } from './types'
