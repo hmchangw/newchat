@@ -416,11 +416,13 @@ func TestHandler_SearchRooms_MembersAllowsEmptyQuery(t *testing.T) {
 			`{"_source":{"roomId":"r1","roomName":"general","roomType":"channel","siteId":"site-a"}}]}}`),
 	}
 	h := newTestHandler(store, &fakeMongo{}, nil, newFakeCache())
-	h.members = &fakeMembers{roomIDs: []string{"r1"}}
+	fake := &fakeMembers{roomIDs: []string{"r1"}}
+	h.members = fake
 
 	resp, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Members: []string{"bob"}})
 	require.NoError(t, err)
 	require.Len(t, resp.Rooms, 1)
+	assert.Equal(t, []string{"bob"}, fake.calls, "handler forwards the requested members to GetChannels")
 }
 
 func TestHandler_SearchRooms_EmptyQueryAndMembersRejected(t *testing.T) {
