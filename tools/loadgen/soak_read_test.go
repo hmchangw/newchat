@@ -91,7 +91,7 @@ func TestSoakReader_LoadHistoryStopsOnNonProgressingPage(t *testing.T) {
 
 func TestSoakReader_ThreadCursorPagination(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0))
-	catalog := acceptedSoakReadMessage(t, clock, "room-1", "parent", "")
+	catalog := acceptedSoakReadThread(t, clock, "room-1", "parent")
 	transport := &soakReadTransport{replies: []soakRPCFakeReply{
 		{data: soakThreadReply(t, []string{"reply-1"}, "cursor-2", true)},
 		{data: soakThreadReply(t, []string{"reply-2"}, "", false)},
@@ -393,6 +393,21 @@ func acceptedSoakReadMessage(
 		ThreadReplyLimit: 10,
 	}))
 	require.True(t, catalog.Accept(roomID, messageID))
+	return catalog
+}
+
+// acceptedSoakReadThread returns a catalog whose message already carries a
+// reply, so it is eligible for soakCatalogThreadRead. A zero-reply parent has
+// no thread room and the reader skips it by design.
+func acceptedSoakReadThread(
+	t *testing.T,
+	clock *fakeSoakClock,
+	roomID string,
+	messageID string,
+) *soakCatalog {
+	t.Helper()
+	catalog := acceptedSoakReadMessage(t, clock, roomID, messageID, "")
+	require.True(t, catalog.IncrementThreadReplies(roomID, messageID))
 	return catalog
 }
 

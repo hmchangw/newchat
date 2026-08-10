@@ -49,13 +49,13 @@ func TestParseSoakArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			seed, err := parseSoakArgs(tt.args)
+			opts, err := parseSoakArgs(tt.args)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantSeed, seed)
+			assert.Equal(t, tt.wantSeed, opts.Seed)
 		})
 	}
 }
@@ -81,10 +81,10 @@ func TestWarmSoakPinnedCatalog_UsesPinnedListPath(t *testing.T) {
 }
 
 func TestSoakMeasuredReadConfig_OneScheduledReadEqualsOneRPC(t *testing.T) {
-	cfg := soakMeasuredReadConfig("site-1")
+	cfg := soakMeasuredReadConfig("site-1", soakDefaultPageLimit)
 
 	assert.Equal(t, "site-1", cfg.SiteID)
-	assert.Equal(t, 50, cfg.PageLimit)
+	assert.Equal(t, soakDefaultPageLimit, cfg.PageLimit)
 	assert.Equal(t, 1, cfg.MaxPages)
 	assert.Equal(t, soakRequestTimeout, cfg.RequestTimeout)
 }
@@ -185,4 +185,33 @@ func TestSoakCollectorRecorders_MapComponentSamples(t *testing.T) {
 		snapshot.Verifications[soakRPCGetMessage][soakVerifyMismatch],
 	)
 	assert.Equal(t, uint64(1), snapshot.Actions[soakRPCGetMessage].Failed)
+}
+
+// The page size was hardcoded at 50 in three places. A page of 50 messages at
+// history-service's 20 KB content cap is ~1 MB, well past this deployment's
+// 256 KB max_payload, so a soak run would take oversize replies instead of
+// measuring reads. It is a flag now so an operator can match the broker.
+func TestParseSoakArgs_PageLimitDefaultsBelowTheBrokerCap(t *testing.T) {
+	opts, err := parseSoakArgs(nil)
+	require.NoError(t, err)
+	assert.Equal(t, soakDefaultPageLimit, opts.PageLimit)
+	assert.LessOrEqual(t, opts.PageLimit, 15,
+		"the default must leave headroom under a 256 KB max_payload")
+}
+
+func TestParseSoakArgs_PageLimitOverride(t *testing.T) {
+	opts, err := parseSoakArgs([]string{"-page-limit", "8"})
+	require.NoError(t, err)
+	assert.Equal(t, 8, opts.PageLimit)
+}
+
+func TestParseSoakArgs_RejectsNonPositivePageLimit(t *testing.T) {
+	_, err := parseSoakArgs([]string{"-page-limit", "0"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "page-limit")
+}
+
+func TestSoakMeasuredReadConfig_UsesTheConfiguredPageLimit(t *testing.T) {
+	cfg := soakMeasuredReadConfig("site-test", 12)
+	assert.Equal(t, 12, cfg.PageLimit)
 }

@@ -170,6 +170,16 @@ export SOAK_WARMUP=30s
 /loadgen teardown --workload=soak
 ```
 
+`soak` accepts `--page-limit` (default 15) for how many messages each read
+fetches per page. It is a broker-payload knob, not a throughput one: a message
+can carry up to history-service's 20 KB content cap, and this deployment's
+`max_payload` is 256 KB (`notification-worker`'s `NATS_MAX_PAYLOAD_BYTES`), so a
+page of 50 could reach ~1 MB. history-service then replies with `pkg/natsutil`'s
+compact oversize envelope instead of data, and the run measures rejections
+rather than reads. Those replies are counted under the `response_too_large`
+error class — if it appears, lower `--page-limit` rather than reading it as a
+service fault.
+
 Seed and run are restart-safe at the process level. Seed replaces only
 partial topology owned by the same run ID. `duration` mode stores the run
 deadline in the manifest, so a replacement process resumes the remaining

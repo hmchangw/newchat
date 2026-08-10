@@ -539,12 +539,14 @@ func TestSoakReader_RecordsRPCFailuresByEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clock := newFakeSoakClock(time.Unix(100, 0))
-			catalog := acceptedSoakReadMessage(
+			// The parent carries a reply so the thread-read subtest has a
+			// thread to fetch; a zero-reply parent is skipped by design and
+			// would never reach the transport.
+			catalog := acceptedSoakReadThread(
 				t,
 				clock,
 				"room-1",
 				"AAAAAAAAAAAAAAAAAAAA",
-				"",
 			)
 			recorder := &soakReadRecorder{}
 			reader := newTestSoakReader(

@@ -165,7 +165,7 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	parentsPerRoom := fs.Int("parents-per-room", 0, "thread workload: parent messages seeded per room (0 = default 8; must match the runtime default used by `loadgen max-rps`)")
 	_ = fs.Parse(args)
 	if *workload == "soak" {
-		return runSoakPhase(ctx, cfg, soakPhaseSeed, *seed)
+		return runSoakPhase(ctx, cfg, soakPhaseSeed, soakOptions{Seed: *seed, PageLimit: soakDefaultPageLimit})
 	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
@@ -318,7 +318,7 @@ func runTeardown(ctx context.Context, cfg *config, args []string) int {
 	seed := fs.Int64("seed", 42, "RNG seed (must match the seed used at seed time)")
 	_ = fs.Parse(args)
 	if *workload == "soak" {
-		return runSoakPhase(ctx, cfg, soakPhaseTeardown, soakDefaultSeed)
+		return runSoakPhase(ctx, cfg, soakPhaseTeardown, soakOptions{Seed: soakDefaultSeed, PageLimit: soakDefaultPageLimit})
 	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
@@ -354,19 +354,19 @@ const (
 )
 
 func runSoak(ctx context.Context, cfg *config, args []string) int {
-	seed, err := parseSoakArgs(args)
+	opts, err := parseSoakArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	return runSoakPhase(ctx, cfg, soakPhaseRun, seed)
+	return runSoakPhase(ctx, cfg, soakPhaseRun, opts)
 }
 
 func runSoakPhase(
 	ctx context.Context,
 	cfg *config,
 	phase soakPhase,
-	seed int64,
+	opts soakOptions,
 ) int {
 	var validationErr error
 	if phase == soakPhaseTeardown {
@@ -390,9 +390,9 @@ func runSoakPhase(
 	}
 	logSoakAssumptions(&cfg.Soak)
 	if phase == soakPhaseSeed {
-		return runSoakSeed(ctx, cfg, seed)
+		return runSoakSeed(ctx, cfg, opts.Seed)
 	}
-	return runSoakWorkload(ctx, cfg, seed)
+	return runSoakWorkload(ctx, cfg, opts)
 }
 
 func runSoakTeardown(ctx context.Context, cfg *config) int {

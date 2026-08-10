@@ -19,6 +19,11 @@ const (
 	soakCatalogPin          soakCatalogAction = "pin"
 	soakCatalogReaction     soakCatalogAction = "reaction"
 	soakCatalogThreadParent soakCatalogAction = "thread_parent"
+	// soakCatalogThreadRead picks a message whose thread actually exists.
+	// Deliberately not the same predicate as soakCatalogThreadParent: that one
+	// asks "can a new reply be attached here?", which is true of a message with
+	// zero replies — precisely the case that has no thread room yet.
+	soakCatalogThreadRead soakCatalogAction = "thread_read"
 )
 
 type soakClock interface {
@@ -562,6 +567,14 @@ func (c *soakCatalog) eligible(
 		return entry.Author == actor
 	case soakCatalogThreadParent:
 		return entry.ThreadParentID == "" && entry.threadReplies < entry.ThreadReplyLimit
+	case soakCatalogThreadRead:
+		// A thread room is created by message-worker when the first reply
+		// lands, so a zero-reply message has none. Reading it makes
+		// history-service log `empty thread_room_id` and short-circuit before
+		// touching the Cassandra thread partition — a fast no-op that would sit
+		// in the GetThreadMessages latency tape and pull the percentiles down.
+		// The reply budget is irrelevant here: a full thread is still readable.
+		return entry.ThreadParentID == "" && entry.threadReplies > 0
 	case soakCatalogPin, soakCatalogReaction:
 		return true
 	default:

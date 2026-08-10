@@ -35,17 +35,38 @@ type soakRuntimeStore interface {
 	LoadTopology(context.Context, string, string) (soakTopology, error)
 }
 
-func parseSoakArgs(args []string) (int64, error) {
+// soakDefaultPageLimit is how many messages a soak read asks for per page.
+//
+// It is deliberately well under history-service's maxPageSize (100). Each
+// message may carry up to maxContentBytes (20 KB), and this deployment's broker
+// max_payload is 256 KB (see notification-worker's NATS_MAX_PAYLOAD_BYTES), so
+// a page of 50 could reach ~1 MB and come back as an oversize envelope instead
+// of data. 15 keeps the worst case within reach of the cap while still
+// exercising multi-row reads; lower it further if the broker is tighter.
+const soakDefaultPageLimit = 15
+
+// soakOptions are the soak run's command-line knobs.
+type soakOptions struct {
+	Seed      int64
+	PageLimit int
+}
+
+func parseSoakArgs(args []string) (soakOptions, error) {
 	fs := flag.NewFlagSet("soak", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	seed := fs.Int64("seed", soakDefaultSeed, "RNG seed")
+	pageLimit := fs.Int("page-limit", soakDefaultPageLimit,
+		"messages requested per read page; keep it under broker max_payload / message size")
 	if err := fs.Parse(args); err != nil {
-		return 0, fmt.Errorf("parse soak arguments: %w", err)
+		return soakOptions{}, fmt.Errorf("parse soak arguments: %w", err)
 	}
 	if fs.NArg() != 0 {
-		return 0, fmt.Errorf("soak does not accept positional arguments")
+		return soakOptions{}, fmt.Errorf("soak does not accept positional arguments")
 	}
-	return *seed, nil
+	if *pageLimit <= 0 {
+		return soakOptions{}, fmt.Errorf("page-limit must be > 0, got %d", *pageLimit)
+	}
+	return soakOptions{Seed: *seed, PageLimit: *pageLimit}, nil
 }
 
 func waitForSoakWrappedDEK(
@@ -293,8 +314,9 @@ func runSoakSeed(
 func runSoakWorkload(
 	ctx context.Context,
 	cfg *config,
-	seed int64,
+	opts soakOptions,
 ) int {
+	seed := opts.Seed
 	client, err := mongoutil.Connect(
 		ctx,
 		cfg.MongoURI,
@@ -434,7 +456,7 @@ func runSoakWorkload(
 	)
 	warmReader := newSoakReader(
 		soakReadConfig{
-			SiteID: cfg.SiteID, PageLimit: 50, MaxPages: 100,
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: 100,
 			RequestTimeout: soakRequestTimeout,
 		},
 		&topology,
@@ -454,7 +476,7 @@ func runSoakWorkload(
 		return 1
 	}
 	reader := newSoakReader(
-		soakMeasuredReadConfig(cfg.SiteID),
+		soakMeasuredReadConfig(cfg.SiteID, opts.PageLimit),
 		&topology,
 		catalog,
 		rpc,
@@ -482,7 +504,7 @@ func runSoakWorkload(
 	)
 	verifier := newSoakVerifier(
 		&soakVerifyConfig{
-			SiteID: cfg.SiteID, PageLimit: 50, MaxPages: 100,
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: 100,
 			RequestTimeout: soakRequestTimeout,
 		},
 		catalog,
@@ -586,11 +608,11 @@ func runSoakWorkload(
 	return 0
 }
 
-func soakMeasuredReadConfig(siteID string) soakReadConfig {
+func soakMeasuredReadConfig(siteID string, pageLimit int) soakReadConfig {
 	// Workload Model v1 defines the read rate in RPCs/second. Scheduled reads
 	// therefore fetch one page; the independent verifier owns bucket-walks.
 	return soakReadConfig{
-		SiteID: siteID, PageLimit: 50, MaxPages: 1,
+		SiteID: siteID, PageLimit: pageLimit, MaxPages: 1,
 		RequestTimeout: soakRequestTimeout,
 	}
 }
