@@ -9,17 +9,9 @@ import (
 	"testing"
 )
 
-// TestSystemMessageTypesCoverEveryConstant guards the one list four services
-// depend on. systemMessageTypes is hand-maintained, and a new MessageType*
-// constant that nobody adds to it changes behaviour silently and everywhere at
-// once: search-sync-worker indexes it as searchable content, notification-worker
-// sends a push for it, history-service stops hiding it, message-worker treats a
-// missing sender as fatal. None of those catch it — they all read this list.
-//
-// The source has to be parsed because Go constants are not enumerable at
-// runtime, so a test cannot otherwise notice that a new one exists. Anything
-// deliberately not a system message goes in nonSystem below, which makes the
-// decision explicit and reviewable rather than an omission.
+// Parses event.go (constants aren't enumerable at runtime) and asserts every
+// MessageType* constant is in systemMessageTypes or exempted in nonSystem with
+// a reason — an unregistered one silently changes behaviour in four services.
 func TestSystemMessageTypesCoverEveryConstant(t *testing.T) {
 	nonSystem := map[string]string{
 		"MessageTypeImportant": "client-settable (重要訊息): previews and notifies like a normal message",

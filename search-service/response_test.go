@@ -11,11 +11,9 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// TestSearchShardTotal: pkg/searchengine searches with allow_no_indices=true,
-// so a read pattern that matches nothing returns 200 + empty hits instead of a
-// 404 — indistinguishable from "no results" at the call site. `_shards.total`
-// is the one field that separates them, and it rides the response we already
-// parse, so no extra ES round-trip is needed.
+// With allow_no_indices=true a pattern matching nothing returns 200 + empty
+// hits, indistinguishable from "no results" — `_shards.total` is the one field
+// that separates them, riding the response we already parse.
 func TestSearchShardTotal(t *testing.T) {
 	tests := []struct {
 		name string

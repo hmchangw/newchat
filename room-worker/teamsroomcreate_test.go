@@ -44,11 +44,9 @@ func membershipEvents(t *testing.T, published []publishedMsg, subjMatch string) 
 		if !strings.Contains(p.subj, subjMatch) {
 			continue
 		}
-		// Both lanes carry the member event inside an InboxEvent envelope; outbox
-		// adds one more layer (OutboxEvent.Envelope = InboxEvent). Decoding through
-		// the envelope — rather than straight into InboxMemberEvent — is what makes
-		// this assert the consumer's contract instead of whatever shape we happen
-		// to publish.
+		// Both lanes wrap the member event in an InboxEvent envelope; outbox adds
+		// one more layer (OutboxEvent.Envelope = InboxEvent). Decoding through the
+		// envelope asserts the consumer's contract, not whatever shape we publish.
 		envelope := p.data
 		if strings.Contains(p.subj, "outbox") {
 			var ob model.OutboxEvent
@@ -444,11 +442,9 @@ func TestFederateTeamsMembership_MigrationHeaderStamped(t *testing.T) {
 	assert.True(t, gotHeader)
 }
 
-// TestFederateTeamsMembership_InternalLaneCarriesInboxEventEnvelope pins the
-// INBOX internal-lane contract: search-sync-worker is the sole consumer and
-// decodes InboxEvent.Payload, so publishing a bare InboxMemberEvent is dropped.
-// A timestamp-only assertion cannot catch that — `timestamp` is a field on both
-// structs — so this asserts Type and Payload explicitly.
+// Pins the internal-lane contract: search-sync-worker decodes InboxEvent.Payload,
+// so a bare InboxMemberEvent is dropped. `timestamp` exists on both structs, so
+// this asserts Type and Payload explicitly, not just the timestamp.
 func TestFederateTeamsMembership_InternalLaneCarriesInboxEventEnvelope(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -485,10 +481,9 @@ func TestFederateTeamsMembership_InternalLaneCarriesInboxEventEnvelope(t *testin
 	assert.ElementsMatch(t, []string{"alice", "bob"}, inner.Accounts)
 }
 
-// TestFederateTeamsMembership_FederatedLaneStaysSingleWrapped guards the other
-// direction: h.federate -> outbox.Publish builds the envelope itself, so the
-// cross-site branch must keep passing the INNER event. Wrapping both lanes the
-// same way would double-wrap and break federation.
+// Guards the other direction: h.federate -> outbox.Publish builds the envelope
+// itself, so the cross-site branch must keep passing the INNER event — wrapping
+// both lanes the same way would double-wrap and break federation.
 func TestFederateTeamsMembership_FederatedLaneStaysSingleWrapped(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)

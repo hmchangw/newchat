@@ -177,19 +177,9 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 	return &model.SearchRoomsResponse{Rooms: rooms}, nil
 }
 
-// logEmptyResult explains an empty result set at the point it happens.
-//
-// An index name that no writer uses is invisible otherwise: the read pattern is
-// a wildcard and pkg/searchengine passes allow_no_indices=true, so the query
-// returns 200 with zero hits and the caller sees a plain empty list — the same
-// thing a genuinely unmatched query produces. Logging the resolved pattern here
-// means a single line answers "why is this empty" without correlating against
-// startup output.
-//
-// WARN only when the pattern matched no index at all, which is always broken
-// and therefore never noisy. An ordinary miss (index present, nothing matched)
-// is a routine typeahead outcome and logs at flow level, off in production but
-// available through DEBUG_LOG_* when someone is actually investigating.
+// logEmptyResult names the searched pattern on a zero-result query, since
+// allow_no_indices=true makes a misconfigured index look like a normal miss.
+// WARN only for zero shards (always broken); routine misses log at flow level.
 func logEmptyResult(ctx context.Context, kind, pattern, account, query string, raw json.RawMessage) {
 	if shards := searchShardTotal(raw); shards == 0 {
 		slog.WarnContext(ctx, "empty search result: read pattern matched no index",

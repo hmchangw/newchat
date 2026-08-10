@@ -301,12 +301,9 @@ func TestMessageCollection_BuildAction(t *testing.T) {
 	})
 }
 
-// TestMessageCollection_BuildAction_SystemMessagesNotIndexed: room-worker
-// publishes membership/rename sys-messages to MESSAGES-CANONICAL via
-// publishCanonical, so they arrive here like any other message. They are UI
-// chrome, not searchable content — message-worker, notification-worker and
-// history-service all gate on IsSystemMessageType already; this collection was
-// the outlier that indexed them.
+// Sys-messages arrive on MESSAGES-CANONICAL like any other message but are UI
+// chrome, not searchable content — every other consumer already gates on
+// IsSystemMessageType; this collection was the outlier that indexed them.
 func TestMessageCollection_BuildAction_SystemMessagesNotIndexed(t *testing.T) {
 	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 

@@ -28,10 +28,9 @@ services:
       # (OTEL_EXPORTER_PROMETHEUS_PORT, default :2112), not here.
       - SEARCH_HEALTH_ADDR=:9090
       # Local dev pins to site-suffixed indices; prod uses aliases owned by ops/IaC.
-      # Unprefixed names are canonical and MUST match search-sync-worker's
-      # SPOTLIGHT_INDEX / USER_ROOM_INDEX exactly — a mismatch reads an index
-      # nobody writes and returns empty hits with no error. The SEARCH_-prefixed
-      # spelling is still accepted for one release; see IndexConfig in main.go.
+      # Unprefixed, and MUST match search-sync-worker's SPOTLIGHT_INDEX /
+      # USER_ROOM_INDEX exactly — a mismatch reads an index nobody writes and
+      # returns empty hits with no error.
       - USER_ROOM_INDEX=user-room-mv-site-local
       - SPOTLIGHT_INDEX=spotlight-site-local-v1
       - SPOTLIGHT_ORG_INDEX=spotlightorg-site-local-v1

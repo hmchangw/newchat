@@ -313,12 +313,9 @@ func TestHandler_SearchRooms_HappyPath(t *testing.T) {
 	assert.Equal(t, []string{testSpotlightIndex}, store.searchCalls[0].indices)
 }
 
-// TestHandler_SearchRooms_EmptyResultLogsReadPattern: a misconfigured index
-// name is otherwise invisible — the read pattern is a wildcard and the engine
-// passes allow_no_indices=true, so pointing at an index nobody writes returns a
-// plain empty list, exactly like a query that matched nothing. The WARN fires
-// only for _shards.total == 0, which is always broken, so it cannot spam a
-// typeahead; the line carries the resolved pattern so one log answers "why".
+// A misconfigured index name returns a plain empty list (allow_no_indices=true),
+// identical to a query that matched nothing. The WARN fires only for
+// _shards.total == 0 — always broken — and names the searched pattern.
 func TestHandler_SearchRooms_EmptyResultLogsReadPattern(t *testing.T) {
 	tests := []struct {
 		name     string

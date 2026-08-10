@@ -190,12 +190,9 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	if !actionableEvent(evt.Event) {
 		return nil, nil
 	}
-	// Membership/rename sys-messages reach MESSAGES-CANONICAL like any other
-	// message (room-worker publishes them via publishCanonical), but they are UI
-	// chrome, not searchable content. Filtered before resolveThreadParentCreatedAt
-	// so a sys-message never costs an ES parent lookup. The teams-batch path above
-	// applies the same rule against its own type field. `important` is
-	// client-settable, not system, so it stays indexed.
+	// Sys-messages (membership/rename) arrive on MESSAGES-CANONICAL like any
+	// other message but are UI chrome, not searchable content. Filtered before
+	// the parent lookup; `important` is client-set, not system, and stays.
 	if model.IsSystemMessageType(evt.Message.Type) {
 		return nil, nil
 	}

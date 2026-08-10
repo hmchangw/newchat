@@ -10,11 +10,9 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// TestParseMemberEvent covers the INBOX envelope contract every internal- and
-// external-lane publisher must satisfy. The unwrapped case is the one that
-// matters: a bare InboxMemberEvent shares `timestamp` and `siteId` with
-// InboxEvent, so it decodes far enough to clear a timestamp-only guard and
-// then fails deep in the payload decode with an opaque JSON error.
+// Covers the INBOX envelope contract. The unwrapped case matters most: a bare
+// InboxMemberEvent shares `timestamp`/`siteId` with InboxEvent, so it clears a
+// timestamp-only guard and then fails opaquely in the payload decode.
 func TestParseMemberEvent(t *testing.T) {
 	const ts int64 = 1735689600000
 
@@ -106,8 +104,7 @@ func TestParseMemberEvent(t *testing.T) {
 	}
 }
 
-// TestParseMemberEvent_UnwrappedInnerEventClearsTimestampGuard pins the exact
-// reason a timestamp-only guard cannot catch an unwrapped publish: `timestamp`
+// Pins why a timestamp-only guard cannot catch an unwrapped publish: `timestamp`
 // is a field on BOTH structs, so it survives the mis-decode with a valid value
 // while `type` and `payload` are silently lost.
 func TestParseMemberEvent_UnwrappedInnerEventClearsTimestampGuard(t *testing.T) {

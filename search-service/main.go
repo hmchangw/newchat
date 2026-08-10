@@ -88,15 +88,9 @@ type Config struct {
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
 	UsersAPI UsersAPIConfig `envPrefix:"USERS_API_"`
 	DebugLog logctx.Config  `envPrefix:"DEBUG_LOG_"`
-	// The ES index names are UNPREFIXED and must match search-sync-worker and
-	// es-index-migrator exactly — the three services share these indices. They
-	// live here rather than on SearchConfig precisely because SearchConfig
-	// carries envPrefix:"SEARCH_": a field there resolves to
-	// SEARCH_SPOTLIGHT_INDEX and can drift from the writer's SPOTLIGHT_INDEX
-	// without anyone noticing, since the read pattern is a wildcard searched
-	// with allow_no_indices=true — reading an index nobody writes returns empty
-	// hits, not an error. notEmpty because an empty value is as broken as a
-	// missing one and there is no safe default.
+	// UNPREFIXED on purpose — must match search-sync-worker / es-index-migrator
+	// exactly. On SearchConfig they would pick up envPrefix:"SEARCH_" and drift
+	// from the writer silently (wildcard read + allow_no_indices ⇒ empty hits).
 	UserRoomIndex     string `env:"USER_ROOM_INDEX,required,notEmpty"`
 	SpotlightIndex    string `env:"SPOTLIGHT_INDEX,required,notEmpty"`
 	SpotlightOrgIndex string `env:"SPOTLIGHT_ORG_INDEX,required,notEmpty"`

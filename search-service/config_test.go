@@ -24,12 +24,9 @@ func setRequiredSearchEnv(t *testing.T) {
 	t.Setenv("USERS_API_URL", "http://localhost:8080")
 }
 
-// TestConfig_IndexNamesAreUnprefixed pins the three ES index vars to the
-// unprefixed spelling shared with search-sync-worker and es-index-migrator.
-// Putting them on SearchConfig would silently re-apply envPrefix:"SEARCH_" and
-// let the reader drift from the writer — a drift that surfaces as empty search
-// results rather than an error, because the read pattern is a wildcard searched
-// with allow_no_indices=true.
+// Pins the three ES index vars to the unprefixed spelling shared with
+// search-sync-worker and es-index-migrator. On SearchConfig they would silently
+// pick up envPrefix:"SEARCH_" and the reader could drift from the writer.
 func TestConfig_IndexNamesAreUnprefixed(t *testing.T) {
 	setRequiredSearchEnv(t)
 	t.Setenv("USER_ROOM_INDEX", "userroom-site-a")
@@ -45,10 +42,9 @@ func TestConfig_IndexNamesAreUnprefixed(t *testing.T) {
 	assert.Equal(t, "spotlightorg-site-a-v1", cfg.SpotlightOrgIndex)
 }
 
-// TestConfig_IndexNamesRequired: an unset or empty index name has no safe
-// default — an empty USER_ROOM_INDEX in particular used to parse cleanly and
-// then fail per-request inside the terms-lookup, so notEmpty moves that to
-// startup.
+// An unset or empty index name has no safe default — an empty USER_ROOM_INDEX
+// used to parse cleanly and fail per-request inside the terms-lookup; notEmpty
+// moves that failure to startup.
 func TestConfig_IndexNamesRequired(t *testing.T) {
 	for _, missing := range []string{"USER_ROOM_INDEX", "SPOTLIGHT_INDEX", "SPOTLIGHT_ORG_INDEX"} {
 		t.Run("unset "+missing, func(t *testing.T) {
