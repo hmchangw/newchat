@@ -70,7 +70,7 @@ func validSoakErrorClass(class soakErrorClass) bool {
 		soakErrorUnavailable, soakErrorInternal, soakErrorNotFound,
 		soakErrorForbidden, soakErrorBadRequest, soakErrorConflict,
 		soakErrorDecode, soakErrorAssertion, soakErrorAmbiguous,
-		soakErrorMutationTargetMissing:
+		soakErrorMutationTargetMissing, soakErrorResponseTooLarge:
 		return true
 	default:
 		return false

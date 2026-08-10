@@ -171,14 +171,20 @@ export SOAK_WARMUP=30s
 ```
 
 `soak` accepts `--page-limit` (default 15) for how many messages each read
-fetches per page. It is a broker-payload knob, not a throughput one: a message
-can carry up to history-service's 20 KB content cap, and this deployment's
-`max_payload` is 256 KB (`notification-worker`'s `NATS_MAX_PAYLOAD_BYTES`), so a
-page of 50 could reach ~1 MB. history-service then replies with `pkg/natsutil`'s
-compact oversize envelope instead of data, and the run measures rejections
-rather than reads. Those replies are counted under the `response_too_large`
-error class — if it appears, lower `--page-limit` rather than reading it as a
-service fault.
+fetches per page. It is a broker-payload knob, not a throughput one: a reply
+carries `--page-limit` messages of up to `SOAK_PAYLOAD_MAX_BYTES` each (10 KB by
+default — well under history-service's 20 KB content cap, which this workload
+never reaches), against a 256 KB `max_payload` (`notification-worker`'s
+`NATS_MAX_PAYLOAD_BYTES`). The old hardcoded 50 was ~500 KB and came back as
+`pkg/natsutil`'s compact oversize envelope instead of data, so the run measured
+rejections rather than reads.
+
+The two settings multiply, so neither is safe alone — raising
+`SOAK_PAYLOAD_MAX_BYTES` without lowering `--page-limit` reintroduces the
+problem. The run validates the pair at startup and exits before generating load
+if it cannot fit. Oversize replies that still occur are counted under the
+`response_too_large` error class rather than folded into `internal`, so they
+read as "lower the page size", not "the service is broken".
 
 Seed and run are restart-safe at the process level. Seed replaces only
 partial topology owned by the same run ID. `duration` mode stores the run

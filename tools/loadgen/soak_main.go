@@ -37,12 +37,15 @@ type soakRuntimeStore interface {
 
 // soakDefaultPageLimit is how many messages a soak read asks for per page.
 //
-// It is deliberately well under history-service's maxPageSize (100). Each
-// message may carry up to maxContentBytes (20 KB), and this deployment's broker
-// max_payload is 256 KB (see notification-worker's NATS_MAX_PAYLOAD_BYTES), so
-// a page of 50 could reach ~1 MB and come back as an oversize envelope instead
-// of data. 15 keeps the worst case within reach of the cap while still
-// exercising multi-row reads; lower it further if the broker is tighter.
+// The binding constraint is the broker's max_payload, not history-service's
+// maxPageSize (100). A read reply carries pageLimit messages, each up to
+// SOAK_PAYLOAD_MAX_BYTES — 10 KB by default, well under history-service's 20 KB
+// content cap, which this workload never reaches. At those defaults a page of
+// 15 is ~150 KB, inside the 256 KB budget; the old hardcoded 50 was ~500 KB and
+// came back as pkg/natsutil's oversize envelope instead of data.
+//
+// Because SOAK_PAYLOAD_MAX_BYTES is configurable, no constant is safe on its
+// own: validateSoakPageBudget checks the actual pair at startup.
 const soakDefaultPageLimit = 15
 
 // soakOptions are the soak run's command-line knobs.
@@ -317,6 +320,13 @@ func runSoakWorkload(
 	opts soakOptions,
 ) int {
 	seed := opts.Seed
+	// Fail before any load is generated: an oversize page would come back as
+	// rejections, and the run would record them as read failures rather than as
+	// a misconfiguration the operator can fix.
+	if err := validateSoakPageBudget(opts.PageLimit, cfg.Soak.PayloadMaxBytes); err != nil {
+		slog.Error("soak page budget rejected", "error", err)
+		return 2
+	}
 	client, err := mongoutil.Connect(
 		ctx,
 		cfg.MongoURI,

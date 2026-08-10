@@ -294,3 +294,96 @@ func TestEvaluateRPSStep_CopiesPending(t *testing.T) {
 	assert.Equal(t, "message-worker", res.Pending[0].Durable)
 	assert.Equal(t, int64(5000), res.Pending[0].Delta())
 }
+
+// A malformed ratio means the harness cannot compute the SLI, which is a
+// measurement failure — not a service failure. Each branch must reach
+// INCONCLUSIVE and must not publish a ratio result, or the report would show a
+// number derived from inputs the evaluator already rejected.
+func TestEvaluateRPSStep_InvalidEventRatioIsInconclusive(t *testing.T) {
+	th := rpsThresholds{P95: time.Second, P99: 2 * time.Second, ErrorRate: 0.5}
+	fast := []time.Duration{10 * time.Millisecond}
+
+	tests := []struct {
+		name        string
+		ratio       eventRatioInput
+		wantInclude string
+	}{
+		{
+			name: "unset bound selector",
+			ratio: eventRatioInput{
+				Name: "SLO-X", Valid: 10, SuccessfulLatencies: fast, Target: 0.99,
+			},
+			wantInclude: "invalid latency bound",
+		},
+		{
+			name: "target above one",
+			ratio: eventRatioInput{
+				Name: "SLO-X", Valid: 10, SuccessfulLatencies: fast,
+				Target: 1.5, Bound: latencyBoundP99,
+			},
+			wantInclude: "invalid target",
+		},
+		{
+			name: "target of zero",
+			ratio: eventRatioInput{
+				Name: "SLO-X", Valid: 10, SuccessfulLatencies: fast,
+				Target: 0, Bound: latencyBoundP99,
+			},
+			wantInclude: "invalid target",
+		},
+		{
+			name: "no valid events",
+			ratio: eventRatioInput{
+				Name: "SLO-X", Valid: 0, Target: 0.99, Bound: latencyBoundP99,
+			},
+			wantInclude: "no valid events",
+		},
+		{
+			// good/valid could exceed 1.0 — arithmetically impossible for a
+			// ratio, so the inputs are wrong rather than the service.
+			name: "more successes than valid events",
+			ratio: eventRatioInput{
+				Name:                "SLO-X",
+				Valid:               1,
+				SuccessfulLatencies: []time.Duration{time.Millisecond, time.Millisecond},
+				Target:              0.99, Bound: latencyBoundP99,
+			},
+			wantInclude: "but only",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := rpsStepInputs{
+				TargetRPS: 100, Hold: time.Second,
+				AttemptedOps: 100, FailedOps: 0,
+				EventRatios: []eventRatioInput{tt.ratio},
+			}
+			res := evaluateRPSStep(&in, th)
+
+			assert.Equal(t, verdictInconclusive, res.Kind)
+			require.Len(t, res.Reasons, 1)
+			assert.Contains(t, res.Reasons[0], tt.wantInclude)
+			assert.Empty(t, res.EventRatios,
+				"a rejected ratio must not surface a computed number")
+		})
+	}
+}
+
+// A measurement failure outranks a TRIP: an unusable SLI cannot prove the
+// service breached anything.
+func TestEvaluateRPSStep_InvalidRatioOutranksLatencyTrip(t *testing.T) {
+	slow := make([]time.Duration, 100)
+	for i := range slow {
+		slow[i] = 10 * time.Second
+	}
+	in := rpsStepInputs{
+		TargetRPS: 100, Hold: time.Second,
+		AttemptedOps: 100, FailedOps: 100,
+		Latencies:   []seriesSamples{{Name: "E2", Samples: slow}},
+		EventRatios: []eventRatioInput{{Name: "SLO-X", Valid: 0, Target: 0.99, Bound: latencyBoundP99}},
+	}
+	res := evaluateRPSStep(&in, rpsThresholds{P95: time.Millisecond, P99: time.Millisecond, ErrorRate: 0.001})
+
+	assert.Equal(t, verdictInconclusive, res.Kind)
+}

@@ -371,3 +371,13 @@ func TestClassifySoakRPCError_PlainInternalStaysInternal(t *testing.T) {
 func TestSoakAllErrorClasses_IncludesResponseTooLarge(t *testing.T) {
 	assert.Contains(t, soakAllErrorClasses[:], soakErrorResponseTooLarge)
 }
+
+// A class that aggregate reporting counts but validation rejects would be
+// dropped somewhere between the two. Assert the two sets agree rather than
+// spot-checking one entry.
+func TestValidSoakErrorClass_AgreesWithTheReportedSet(t *testing.T) {
+	for _, class := range soakAllErrorClasses {
+		assert.True(t, validSoakErrorClass(class),
+			"%q is reported but rejected by validation", class)
+	}
+}

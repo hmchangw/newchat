@@ -277,3 +277,51 @@ func validSoakConfig(t *testing.T) soakConfig {
 	cfg.TeardownBatchDelay = 0
 	return cfg
 }
+
+// The page limit is a payload knob, so its safe value depends on how large the
+// soak's own messages are — SOAK_PAYLOAD_MAX_BYTES, not history-service's 20 KB
+// content cap, which the soak never reaches. Raising the payload size without
+// lowering the page size silently reintroduces oversize replies, so the two are
+// validated together.
+func TestValidateSoakPageBudget(t *testing.T) {
+	tests := []struct {
+		name      string
+		pageLimit int
+		maxBytes  int
+		wantErr   bool
+	}{
+		{
+			name:      "defaults fit the broker budget",
+			pageLimit: soakDefaultPageLimit,
+			maxBytes:  10240,
+		},
+		{
+			name:      "raised payload size with the default page limit overflows",
+			pageLimit: soakDefaultPageLimit,
+			maxBytes:  64 * 1024,
+			wantErr:   true,
+		},
+		{
+			name:      "the old hardcoded 50 overflows even at the default payload size",
+			pageLimit: 50,
+			maxBytes:  10240,
+			wantErr:   true,
+		},
+		{
+			name:      "a small page keeps a large payload legal",
+			pageLimit: 2,
+			maxBytes:  64 * 1024,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSoakPageBudget(tt.pageLimit, tt.maxBytes)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "page-limit")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
