@@ -558,3 +558,79 @@ func TestVerifier_SubmitAfterShutdownIsDropped(t *testing.T) {
 	// A second Shutdown is a no-op and must not block on the dropped check.
 	v.Shutdown(context.Background())
 }
+
+// A verbatim target deep-compares whole documents, so it must see the source
+// document as stored — never the resolver overlay. The overlay's "@alias" keys
+// are not part of the document and would each surface as a phantom diff the
+// destination can never satisfy. The overlay is shared across all targets in an
+// attempt, so a resolver pulled in by a *sibling* target is enough to trigger it.
+func overlayVerbatimMapping() *Mapping {
+	return &Mapping{Sources: []SourceMapping{{
+		Collection: "rocketchat_room",
+		Ops:        map[string]OpAction{"insert": OpVerify},
+		Resolvers: map[string]Resolver{
+			"user": {DB: "source", Collection: "users",
+				Key: map[string]KeyFrom{"_id": {From: []string{"u._id"}}}, Fields: []string{"username"}},
+		},
+		Targets: map[string]Target{
+			// Plain key, no resolver reference — but it shares the attempt's view.
+			"whole": {Kind: "mongo", Collection: "rooms", Mode: "verbatim",
+				Key: map[string]KeyFrom{"_id": {From: []string{"_id"}}}},
+			// Sibling whose key resolves the resolver, so the overlay is non-empty.
+			"byUser": {Kind: "mongo", Collection: "userdocs",
+				Key: map[string]KeyFrom{"_id": {From: []string{"@user.username"}}}},
+		},
+		Fields: map[string][]DestRef{"name": {{Dest: "byUser.name"}}},
+	}}}
+}
+
+func TestVerifier_VerbatimIgnoresResolverOverlay(t *testing.T) {
+	srcRoom := func() map[string]any {
+		return map[string]any{"_id": "r1", "name": "general", "u": map[string]any{"_id": "u1"}}
+	}
+
+	// The sibling matches immediately, so the overlay only exists on attempt 1.
+	t.Run("verbatim matches on the first attempt", func(t *testing.T) {
+		v, src, tgt, _, results := customVerifier(t, overlayVerbatimMapping(),
+			verifierConfig{Poll: time.Second, Timeout: 2 * time.Second, MaxChecks: 4, SamplePercent: 100})
+		src.EXPECT().FindByID(gomock.Any(), "rocketchat_room", "r1").Return(srcRoom(), nil).AnyTimes()
+		src.EXPECT().FindOne(gomock.Any(), "users", map[string]any{"_id": "u1"}, []string{"username"}).
+			Return(map[string]any{"username": "alice"}, nil).AnyTimes()
+		// The verbatim destination is byte-for-byte the source document.
+		tgt.EXPECT().FindOne(gomock.Any(), "rooms", map[string]any{"_id": "r1"}, gomock.Nil()).
+			Return(srcRoom(), nil).AnyTimes()
+		tgt.EXPECT().FindOne(gomock.Any(), "userdocs", map[string]any{"_id": "alice"}, gomock.Any()).
+			Return(map[string]any{"name": "general"}, nil).AnyTimes()
+
+		v.Submit(CDCEvent{Collection: "rocketchat_room", Op: "insert", DocID: "r1"})
+		r := waitState(t, results, "r1", StateMatched)
+		assert.Equal(t, 1, r.Attempts, "the overlay must not delay the verbatim match")
+	})
+
+	// The sibling never freezes, so the resolver stays needed and the overlay is
+	// rebuilt on every attempt — the verbatim target must still match, forever.
+	t.Run("verbatim matches while the sibling keeps the overlay alive", func(t *testing.T) {
+		v, src, tgt, _, results := customVerifier(t, overlayVerbatimMapping(),
+			verifierConfig{Poll: time.Second, Timeout: 2 * time.Second, MaxChecks: 4, SamplePercent: 100})
+		src.EXPECT().FindByID(gomock.Any(), "rocketchat_room", "r1").Return(srcRoom(), nil).AnyTimes()
+		src.EXPECT().FindOne(gomock.Any(), "users", map[string]any{"_id": "u1"}, []string{"username"}).
+			Return(map[string]any{"username": "alice"}, nil).AnyTimes()
+		tgt.EXPECT().FindOne(gomock.Any(), "rooms", map[string]any{"_id": "r1"}, gomock.Nil()).
+			Return(srcRoom(), nil).AnyTimes()
+		tgt.EXPECT().FindOne(gomock.Any(), "userdocs", map[string]any{"_id": "alice"}, gomock.Any()).
+			Return(nil, errNotFound).AnyTimes()
+
+		v.Submit(CDCEvent{Collection: "rocketchat_room", Op: "insert", DocID: "r1"})
+		r := waitState(t, results, "r1", StateFailed) // fails only on the sibling
+		require.Len(t, r.Targets, 2)
+		for i := range r.Targets {
+			switch r.Targets[i].Alias {
+			case "whole":
+				assert.True(t, r.Targets[i].Matched, "verbatim must not diff the @alias overlay keys")
+				assert.Empty(t, r.Targets[i].Diffs)
+			case "byUser":
+				assert.Equal(t, "dest-missing", r.Targets[i].LastCause)
+			}
+		}
+	})
+}

@@ -402,7 +402,7 @@ func (v *verifier) attempt(ctx context.Context, cs *compiledSource, action OpAct
 	}
 
 	resolved, resolveCauses := v.resolveAll(ctx, cs, srcDoc, states)
-	view := sourceView(srcDoc, resolved)
+	docs := attemptDocs{raw: srcDoc, view: sourceView(srcDoc, resolved)}
 
 	for i := range states {
 		st := &states[i]
@@ -414,23 +414,35 @@ func (v *verifier) attempt(ctx context.Context, cs *compiledSource, action OpAct
 			continue
 		}
 		t := cs.src.Targets[st.alias]
-		k, err := buildKey(&t, view, v.reg)
+		k, err := buildKey(&t, docs.view, v.reg)
 		if err != nil {
 			st.cause, st.diffs = "key-unresolvable", nil
 			continue
 		}
 		rec, err := v.lookupDest(ctx, &t, k, cs.destCols[st.alias])
-		if v.applyLookup(st, &t, cs.pairs[st.alias], action, view, rec, err) {
+		if v.applyLookup(st, &t, cs.pairs[st.alias], action, docs, rec, err) {
 			return true
 		}
 	}
 	return false
 }
 
+// attemptDocs holds the two views of the source document an attempt works with.
+// raw is the document as stored; view additionally overlays resolved docs under
+// "@alias" keys so key building and fields-mode compares can reach them with a
+// single getPath walk. A verbatim compare must use raw: it ranges over every
+// source key, so each overlay key would surface as a diff the destination can
+// never satisfy. Verbatim targets provably never need resolver values —
+// validation forbids field refs onto them, and their keys are built from view.
+type attemptDocs struct {
+	raw  map[string]any
+	view map[string]any
+}
+
 // applyLookup folds one dest lookup outcome into the sub-check state and
 // reports whether the whole check must fail now.
 func (v *verifier) applyLookup(st *targetState, t *Target, pairs []fieldPair, action OpAction,
-	view, rec map[string]any, err error,
+	docs attemptDocs, rec map[string]any, err error,
 ) bool {
 	st.diffs = nil
 	switch {
@@ -454,9 +466,9 @@ func (v *verifier) applyLookup(st *targetState, t *Target, pairs []fieldPair, ac
 	}
 	var diffs []FieldDiff
 	if t.Mode == "verbatim" {
-		diffs = diffVerbatim(view, rec, t.Ignore)
+		diffs = diffVerbatim(docs.raw, rec, t.Ignore) // raw: the overlay is not part of the document
 	} else {
-		diffs = diffFields(view, rec, pairs, v.reg)
+		diffs = diffFields(docs.view, rec, pairs, v.reg)
 	}
 	if len(diffs) == 0 {
 		st.matched, st.cause = true, ""
