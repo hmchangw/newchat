@@ -230,3 +230,41 @@ func TestRepository_GetPinnedMessages_Paginates(t *testing.T) {
 	assert.Len(t, seen, 5, "every pin returned exactly once across pages")
 	assert.ElementsMatch(t, []string{"a", "b", "c", "d", "e"}, seen)
 }
+
+// TestRepository_PinMessage_CarriesForwardedMessage verifies that pinning a
+// message with a populated ForwardedMessage snapshot carries the UDT through
+// to the pinned_messages_by_room row (Task 7 — insertPinnedMsg/pinnedColumns).
+func TestRepository_PinMessage_CarriesForwardedMessage(t *testing.T) {
+	session := setupCassandra(t)
+	repo := NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	ctx := context.Background()
+
+	created := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	sourceCreatedAt := created.Add(-time.Hour)
+	forwarded := &models.ForwardedMessage{
+		MessageID: "m-src", RoomID: "r-src",
+		Sender:    models.Participant{ID: "u-src", Account: "carol"},
+		CreatedAt: sourceCreatedAt,
+		Msg:       "original body",
+	}
+	msg := &models.Message{
+		MessageID: "m-fwd", RoomID: "r1", CreatedAt: created,
+		Sender:           models.Participant{ID: "u1", Account: "alice"},
+		Msg:              "fwd",
+		ForwardedMessage: forwarded,
+	}
+	seedMessageFull(t, repo, msg)
+
+	pinnedAt := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	pinnedBy := models.Participant{ID: "u2", Account: "mod"}
+	require.NoError(t, repo.PinMessage(ctx, msg, pinnedAt, pinnedBy))
+
+	pinned, err := repo.GetAllPinnedMessages(ctx, "r1")
+	require.NoError(t, err)
+	require.Len(t, pinned, 1)
+	require.NotNil(t, pinned[0].ForwardedMessage, "pinned row must carry the forwarded_message UDT")
+	assert.Equal(t, "m-src", pinned[0].ForwardedMessage.MessageID)
+	assert.Equal(t, "carol", pinned[0].ForwardedMessage.Sender.Account)
+	assert.Equal(t, "original body", pinned[0].ForwardedMessage.Msg)
+	assert.True(t, pinned[0].ForwardedMessage.CreatedAt.Equal(sourceCreatedAt))
+}

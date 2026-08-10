@@ -26,4 +26,7 @@ type PushNotificationData struct {
 	ParentRoomID      string       `json:"parentRoomId,omitempty"      bson:"parentRoomId,omitempty"`
 	PushTime          string       `json:"pushTime"                    bson:"pushTime"`
 	AlsoSendToChannel bool         `json:"alsoSendToChannel,omitempty" bson:"alsoSendToChannel,omitempty"`
+	// Forwarded marks the message as a forward so clients can render
+	// "forwarded a message" even when Body (the comment) is empty.
+	Forwarded bool `json:"forwarded,omitempty" bson:"forwarded,omitempty"`
 }

@@ -23,15 +23,15 @@ const (
 	// callers that need them side-fetch from messages_by_id.
 	insertPinnedMsg = `INSERT INTO pinned_messages_by_room (
 		room_id, pinned_at, message_id, sender, msg, mentions,
-		attachments, card, card_action, quoted_parent_message, visible_to,
+		attachments, card, card_action, quoted_parent_message, forwarded_message, visible_to,
 		deleted, type, sys_msg_data, site_id, edited_at, updated_at, pinned_by,
 		created_at, tshow, thread_parent_id, thread_parent_created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	deletePinnedRow = `DELETE FROM pinned_messages_by_room WHERE room_id = ? AND pinned_at = ? AND message_id = ?`
 
 	pinnedColumns = "room_id, pinned_at, message_id, sender, " +
-		"msg, mentions, attachments, card, card_action, quoted_parent_message, " +
+		"msg, mentions, attachments, card, card_action, quoted_parent_message, forwarded_message, " +
 		"visible_to, deleted, type, sys_msg_data, site_id, edited_at, " +
 		"updated_at, pinned_by, created_at, tshow, thread_parent_id, thread_parent_created_at"
 
@@ -67,7 +67,7 @@ func (r *Repository) PinMessage(ctx context.Context, msg *models.Message, pinned
 	batch.Query(pinMsgByID, pinnedAt, pinnedBy, msg.MessageID)
 	batch.Query(insertPinnedMsg,
 		msg.RoomID, pinnedAt, msg.MessageID, msg.Sender, msg.Msg, msg.Mentions,
-		msg.Attachments, msg.Card, msg.CardAction, msg.QuotedParentMessage, msg.VisibleTo,
+		msg.Attachments, msg.Card, msg.CardAction, msg.QuotedParentMessage, msg.ForwardedMessage, msg.VisibleTo,
 		msg.Deleted, msg.Type, msg.SysMsgData, msg.SiteID, msg.EditedAt, msg.UpdatedAt, pinnedBy,
 		msg.CreatedAt, msg.TShow, msg.ThreadParentID, msg.ThreadParentCreatedAt,
 	)

@@ -156,6 +156,24 @@ func TestHandler_ProcessMessage(t *testing.T) {
 		Mentions:  []model.Participant{{Account: "all", EngName: "all"}},
 	}
 
+	// Forwarded message: the incoming event carries a ForwardedMessage snapshot
+	// pointer that must reach SaveMessage unchanged (strict &msg argument match).
+	forwardedMsg := model.Message{
+		ID:          "msg-fwd",
+		RoomID:      "r1",
+		UserID:      "u-1",
+		UserAccount: "alice",
+		Content:     "comment",
+		CreatedAt:   now,
+		ForwardedMessage: &cassandra.ForwardedMessage{
+			MessageID: "01970a4f8c2d7c9aSRCM", RoomID: "r-src",
+			Sender:    cassandra.Participant{ID: "u5", Account: "eve"},
+			CreatedAt: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC), Msg: "original body",
+		},
+	}
+	forwardedEvt := model.MessageEvent{Message: forwardedMsg, SiteID: "site-a", Timestamp: now.UnixMilli()}
+	forwardedData, _ := json.Marshal(forwardedEvt)
+
 	expectedSender := cassParticipant{
 		ID:          user.ID,
 		EngName:     user.EngName,
@@ -255,6 +273,14 @@ func TestHandler_ProcessMessage(t *testing.T) {
 					Return((*int)(nil), errors.New("cassandra: write timeout"))
 			},
 			wantErr: true,
+		},
+		{
+			name: "forwarded message — snapshot pointer reaches SaveMessage",
+			data: forwardedData,
+			setupMocks: func(store *MockStore, us *MockUserStore, ts *MockThreadStore) {
+				us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+				store.EXPECT().SaveMessage(gomock.Any(), &forwardedMsg, &expectedSender, "site-a").Return(nil)
+			},
 		},
 		{
 			name: "mention resolved to Participant and stored",
@@ -2556,4 +2582,21 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 	h := NewHandler(mockStore, mockUserStore, mockThreadStore, "site-a",
 		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
 	require.NoError(t, h.processMessage(context.Background(), data, false))
+}
+
+// TestBuildCassandraMessage_ClonesForwardedMessage verifies buildCassandraMessage
+// projects ForwardedMessage into a fresh struct, matching the QuotedParentMessage
+// clone contract: stripping the copy (StripEncryptedFields nulling Msg) must not
+// mutate the caller's *model.Message.
+func TestBuildCassandraMessage_ClonesForwardedMessage(t *testing.T) {
+	src := &model.Message{
+		ID: "m1", RoomID: "r1", Content: "comment",
+		ForwardedMessage: &cassandra.ForwardedMessage{MessageID: "m-src", Msg: "body"},
+	}
+	cm := buildCassandraMessage(src)
+	require.NotNil(t, cm.ForwardedMessage)
+	assert.Equal(t, "body", cm.ForwardedMessage.Msg)
+	// Fresh struct: stripping the copy must not mutate the caller's message.
+	cm.ForwardedMessage.Msg = ""
+	assert.Equal(t, "body", src.ForwardedMessage.Msg)
 }

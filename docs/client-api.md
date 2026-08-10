@@ -2809,6 +2809,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `threadParentId` | string | Optional. Set when this message is a thread reply. |
 | `threadParentCreatedAt` | string | Optional. RFC 3339. |
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Optional. Embedded snapshot of the quoted message. |
+| `forwardedMessage` | [ForwardedMessage](#forwardedmessage) | Optional. Embedded snapshot of a forwarded source message. |
 | `visibleTo` | string | Optional. Visibility scope. |
 | `reactions` | map<emoji, [ReactionUser](#reactionuser)[]> | Optional. Omitted when absent; `{}` when present but empty. |
 | `deleted` | boolean | Optional. `true` for tombstoned messages. |
@@ -2923,6 +2924,26 @@ Embedded snapshot of the quoted message at the time of quoting.
 
 When the reader is in a restricted access window and the quoted parent falls outside it, the embedded snapshot is redacted to `{ "msg": "This message is unavailable" }` — all other quote fields are dropped.
 
+##### ForwardedMessage
+
+Immutable snapshot of the forwarded source message, built server-side at forward time. Text-only — never carries attachments or cards. Never redacted by the reader's access window (the source room's window was enforced once, at forward time) — except that on [List Pinned Messages](#list-pinned-messages), a pin outside the reader's access window is redacted entirely, dropping `forwardedMessage` along with the rest of the message body.
+
+Every field is captured once, at forward time, and is byte-identical on the `msg.send` echo, on broadcast events and on every history read — there is no read-time resolution. The snapshot deliberately carries no source-room **name**: a name is mutable, so it cannot be frozen, and resolving it per read would leak a `dm` counterpart's name to readers outside the source room. Clients that display a name resolve it themselves from `roomId`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `messageId` | string | The source message's ID. |
+| `roomId` | string | The source room. |
+| `roomType` | string | Optional. `channel` \| `dm` \| `botDM` \| `discussion` — the source room's type, frozen at forward time (a room's type never changes after creation). Omitted when the source room's metadata could not be resolved at forward time; the forward is still delivered. |
+| `sender` | [MessageParticipant](#messageparticipant) | The source message's author. |
+| `createdAt` | string | RFC 3339. The source message's send time. |
+| `msg` | string | Optional. Body snapshot — the source's text, or the sender's `forwardedContent` when that override was supplied at forward time (the two are not distinguishable here). |
+| `mentions` | [MessageParticipant](#messageparticipant)[] | Optional. |
+| `threadParentId` | string | Optional. Set when the source is a thread reply. |
+| `threadParentCreatedAt` | string | Optional. RFC 3339. |
+| `threadRoomId` | string | Optional. The source message's own thread room, set when the source is a thread reply. Frozen at forward time. |
+| `tshow` | boolean | Optional. Mirrors the source's "also shown in the channel" flag. Omitted when `false`. |
+
 ##### ReactionUser
 
 `reactions` is keyed by emoji; each value is the list of users who reacted with that emoji. The inner record is intentionally minimal — the FE composes any further presentation it needs from these two fields:
@@ -2976,6 +2997,27 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
 ```json
 {
   "messages": [
+    {
+      "roomId": "dest-room",
+      "createdAt": "2026-08-06T09:00:00Z",
+      "messageId": "aB3dE5fG7hJ9kL1mN0pQ",
+      "sender": {
+        "id": "u1",
+        "account": "alice"
+      },
+      "msg": "check this out",
+      "forwardedMessage": {
+        "messageId": "zY8xW6vU4tS2rQ0pN9mL",
+        "roomId": "src-room",
+        "roomType": "channel",
+        "sender": {
+          "id": "u2",
+          "account": "bob"
+        },
+        "createdAt": "2026-08-01T12:00:00Z",
+        "msg": "original text"
+      }
+    },
     {
       "roomId": "01970a4f8c2d7c9aQ",
       "createdAt": "2026-05-06T07:55:00Z",
@@ -4140,6 +4182,7 @@ See [Error envelope](#6-error-envelope-reference).
 | `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
 | `hrInfo` | [MessageHRInfo](#messagehrinfo) | present **only for `dm` rooms** |
 | `appInfo` | [MessageAppInfo](#messageappinfo) | present **only for `botDM` rooms**; `isSubscribed` always set here |
+
 
 ##### MessageHRInfo
 
@@ -5973,12 +6016,15 @@ The same subject and request body cover three send variants: plain message, thre
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `id` | string | yes | The message's ID. Must be 20-char base62. The client generates this and uses it for client-side optimistic rendering. |
-| `content` | string | yes* | The message body, ≤ 20 KiB. *Required unless `attachments` is present — a message with attachments may have empty `content`. |
+| `content` | string | yes* | The message body, ≤ 20 KiB. *Required unless `attachments` is present or the message is a forward (`forwardedMessageId` set) — both may have empty `content`. |
 | `requestId` | string | yes | A 36-char hyphenated UUID (v4 or v7) the client generates. **Validated** — an empty or malformed `requestId` is rejected with no message published. The async reply is delivered to `chat.user.{account}.response.{requestId}`. |
 | `attachments` | string[] | no | Optional. Each entry is base64-encoded bytes — the JSON of one [Attachment](#attachment) from the upload endpoint ([§2.3](#23-http--protected-image-uploaddownload)). Max 1 entry, ≤ 8 KiB total. Stored opaquely and returned **decoded** (as `Attachment[]`) in message payloads. |
 | `threadParentMessageId` | string | no | Set when posting a thread reply. Must be a valid 20-char base62 message ID. |
 | `tshow` | boolean | no | The "Also send to channel" option. Only meaningful on a thread reply (`threadParentMessageId` set): the reply is persisted into the parent room's channel timeline as well as the thread (dual-write into `messages_by_room` in addition to `thread_messages_by_thread` + `messages_by_id`), and is surfaced with `tshow: true` on the persisted message. On a non-thread send the flag is **ignored and normalized to `false`** — the request is not rejected. |
 | `quotedParentMessageId` | string | no | Set when posting a quoted message. The gatekeeper fetches the authoritative parent snapshot from message history and embeds it in the persisted message. If that fetch fails *transiently* (history briefly unavailable), the message is not dropped: the gatekeeper inserts a placeholder snapshot for live delivery (body `"Content temporarily unavailable"`), and `message-worker` re-projects the authoritative snapshot (or drops the quote) from history before the durable write, so the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
+| `forwardedMessageId` | string | no | Set together with `forwardedRoomId` to forward a message. Must be a valid 17/20-char base62 message ID. The gatekeeper fetches the source from the **source room** (the sender must be subscribed there and inside its access window) and embeds an immutable text-only snapshot. Any fetch failure **rejects the send** — there is no placeholder. Mutually exclusive with `threadParentMessageId`, `quotedParentMessageId`, and `attachments`. `content` (the forward comment) becomes optional. To forward into several rooms, send one `msg.send` per destination room. |
+| `forwardedRoomId` | string | no | The source message's room ID. Required with `forwardedMessageId`. |
+| `forwardedContent` | string | no | Optional body override for the embedded snapshot, ≤ 20 KiB. Intended for client-side redaction: when the source body references a restricted image the destination room's members cannot access, the client substitutes a safe body before the snapshot is persisted. Requires `forwardedMessageId`. The source is still fetched and every authorization and forwardability rule still runs against it; only `forwardedMessage.msg` is substituted, and all other snapshot fields (`sender`, `createdAt`, `roomId`, `mentions`, thread identity) stay server-derived. Empty is treated as absent. **The stored snapshot does not record that the body was client-supplied** — it is shown under the source author's identity and is indistinguishable from the real body. |
 | `type` | string | no | Optional client-settable message type. The only accepted value is `"important"` (an important message — previews and notifies like a normal message). Any other value, including a system type (`room_created`, etc.), is rejected with `bad_request`. Omitted = a normal message. |
 
 ##### Plain message
@@ -6015,6 +6061,39 @@ The same subject and request body cover three send variants: plain message, thre
 
 The client sends `quotedParentMessageId`; the server fetches and embeds the authoritative quoted-parent snapshot. During a transient history outage the server fills the live copy with a `"Content temporarily unavailable"` placeholder and re-projects the authoritative quote (or drops it) before persisting, so the placeholder never persists.
 
+##### Forwarded message
+
+```json
+{
+  "id": "01970a4f8c2d7c9aQFWD",
+  "content": "sharing from #general",
+  "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789d",
+  "forwardedMessageId": "01970a4f8c2d7c9aQRST",
+  "forwardedRoomId": "01970a4f8c2d7c9aR"
+}
+```
+
+##### Forwarded message with a redacted body
+
+The source body references a restricted image the destination room's members cannot open, so the client substitutes a safe body:
+
+```json
+{
+  "id": "01970a4f8c2d7c9aQFWE",
+  "content": "sharing the decision from #design",
+  "requestId": "01970a4f-8c2d-7c9a-abcd-e0123456789e",
+  "forwardedMessageId": "01970a4f8c2d7c9aQRST",
+  "forwardedRoomId": "01970a4f8c2d7c9aR",
+  "forwardedContent": "Going with option B. [image removed]"
+}
+```
+
+The reply's `forwardedMessage.msg` carries `forwardedContent` verbatim; every other snapshot field still comes from the fetched source.
+
+Because the snapshot is immutable, redaction must happen **before** the send — there is no edit path for a persisted snapshot. Note the substitution is not recorded anywhere: a reader cannot tell a redacted body from the source's real text.
+
+`content` is the optional forward comment — it may be empty. The server builds the `forwardedMessage` snapshot from the source at forward time; the snapshot is immutable (later edits/deletes of the source do not touch it) and is never access-window-redacted for readers. Forwarding a message that is itself a forward captures only that message's own comment (chain depth stays 1). Not forwardable: messages with attachments, card messages, system messages, deleted messages, and forwards whose own comment is empty.
+
 ##### Thread reply quoting the thread-starter
 
 A thread reply may quote the thread's own parent message (the message that started the thread) by setting both `threadParentMessageId` and `quotedParentMessageId` to the same ID. The quoted snapshot is embedded in the response like any other quote.
@@ -6046,6 +6125,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. The body is the persist
 | `threadParentMessageCreatedAt` | string | Optional. RFC 3339. Server-resolved best-effort for a thread reply; absent when the parent's createdAt could not be resolved at send time. |
 | `tshow` | boolean | Present only when the request set `tshow: true` on a thread reply (absent when the flag was normalized away on a non-thread send). |
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Present only for a quoted send — the server-fetched snapshot of the quoted parent. |
+| `forwardedMessage` | [ForwardedMessage](#forwardedmessage) | Present only for a forward — the server-built snapshot of the source message. |
 
 The gatekeeper does **not** populate `mentions`, `editedAt`/`updatedAt`, `type`, or `sysMsgData` on this reply (all `omitempty`, so they are absent). Mention resolution and the enriched `sender` happen in the broadcast fan-out event ([§4 triggered events](#triggered-events--success-path)), not in this reply.
 
@@ -6070,13 +6150,23 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 | `invalid requestId "…": must be a hyphenated UUID` | `bad_request` | — | Empty/malformed `requestId`. (Reachable only when `requestId` is non-empty but malformed; an empty `requestId` leaves no reply subject, so the client just times out.) |
 | `invalid message ID "…": must be a 20-char base62 string` | `bad_request` | — | `id` is not valid base62. |
 | `invalid thread parent message ID "…": …` | `bad_request` | — | `threadParentMessageId` is not a valid message ID. |
-| `content must not be empty` | `bad_request` | — | Empty `content`. |
+| `content must not be empty` | `bad_request` | — | Empty `content` (unless `attachments` is present or the message is a forward). |
 | `invalid message type "…"` | `bad_request` | — | `type` is set to something other than `"important"` (e.g. a system type). |
 | `content exceeds maximum size of 20480 bytes` | `bad_request` | — | `content` > 20 KiB. |
 | `not subscribed` | `forbidden` | `not_subscribed` | Sender is not a member of the room. |
 | `posting is restricted to owners and admins in this room` | `forbidden` | `large_room_post_restricted` | Non-owner/admin/bot posting a top-level message in a room above the large-room threshold (thread replies are exempt). |
 | `quoted parent {id} not found` | `not_found` | — | The quoted message lookup failed (deleted, cross-room, …). |
 | `quoted parent {id} thread context mismatch: …` | `bad_request` | — | A quoted message must be in the same thread context (main-room or the same thread) as the new message — except a `tshow: true` thread reply, which may also be quoted from its parent channel room. |
+| `forwardedMessageId and forwardedRoomId must be set together` | `bad_request` | — | One forward field without the other. |
+| `invalid forwarded message ID "…": …` | `bad_request` | — | `forwardedMessageId` is not a valid message ID. |
+| `forwardedContent requires forwardedMessageId` | `bad_request` | — | `forwardedContent` set on a non-forward send. |
+| `forwardedContent exceeds maximum size of 20480 bytes` | `bad_request` | — | `forwardedContent` > 20 KiB. |
+| `a forward cannot also quote a message` / `a forward cannot target a thread` / `a forward cannot carry attachments` | `bad_request` | — | Forward combined with `quotedParentMessageId`, `threadParentMessageId`, or `attachments`. |
+| `message not found` | `not_found` | — | Forward source missing, or `forwardedRoomId` doesn't match the source's room. |
+| `not subscribed to room` | `forbidden` | `not_subscribed` | Sender is not a member of the **source** room. |
+| `message is outside access window` | `forbidden` | `outside_access_window` | The source predates the sender's history window in the source room. |
+| `cannot forward a deleted message` / `cannot forward a system message` / `cannot forward a message with attachments` / `cannot forward a card message` / `source forward has no forwardable content` | `bad_request` | — | Source not forwardable (text-only snapshot; chain depth 1). |
+| `forward source temporarily unavailable` | `unavailable` | — | History could not be reached — the send is rejected (hard-fail, no placeholder); retry with a fresh message ID. |
 
 **Delivery guarantee:** every validation/authorization failure — including a `siteID` mismatch and a malformed `msg.send` subject — is replied to the client on the response subject and the JetStream message is acked (not retried). The error reply requires a routable response subject, so it can only be sent when the `{account}` segment is recoverable from the subject and the payload carries a valid hyphenated-UUID `requestId`; if neither is recoverable (a truly malformed subject or missing/invalid `requestId`) no reply is possible and the client falls back to a request timeout. **Only infrastructure failures** (store/publish errors) are nak'd and **redelivered by JetStream** — these produce no immediate reply.
 

@@ -2060,12 +2060,15 @@ and quoted message; variant determined by optional fields.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `id` | string | yes | 20-char base62 client-generated message ID. |
-| `content` | string | yes* | Message body, ≤ 20 KiB. *Required unless `attachments` is present. |
+| `content` | string | yes* | Message body, ≤ 20 KiB. *Required unless `attachments` is present or the message is a forward (`forwardedMessageId` set). |
 | `requestId` | string | yes | 36-char hyphenated UUID (v4 or v7). Async reply delivered to `…response.{requestId}`. |
 | `attachments` | string[] | no | Optional. Each entry is base64-encoded JSON of one [Attachment](../client-api.md#attachment) from the upload endpoint. Max 1 entry, ≤ 8 KiB total; returned decoded as `Attachment[]` in message payloads. |
 | `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). |
 | `tshow` | boolean | no | "Also send to channel". Only meaningful on a thread reply; ignored on non-thread sends. |
 | `quotedParentMessageId` | string | no | Quoted message: the parent's message ID. Server fetches and embeds the authoritative snapshot from message history. On a *transient* history outage the live copy gets a `"Content temporarily unavailable"` placeholder, re-projected to the authoritative snapshot (or dropped) before the durable write — the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
+| `forwardedMessageId` | string | no | Forward: the source message's ID. Set with `forwardedRoomId`. The server fetches the source from the source room (subscription + access window enforced there) and embeds an immutable text-only snapshot; any fetch failure rejects the send (hard-fail, no placeholder). Mutually exclusive with `threadParentMessageId` / `quotedParentMessageId` / `attachments`; `content` becomes optional. One `msg.send` per destination room. |
+| `forwardedRoomId` | string | no | The source message's room ID. Required with `forwardedMessageId`. |
+| `forwardedContent` | string | no | Optional body override for the embedded snapshot, ≤ 20 KiB. For client-side redaction — substituting a safe body when the source references a restricted image the destination room cannot access. Requires `forwardedMessageId`. The source is still fetched and all authorization/forwardability rules still run against it; only `forwardedMessage.msg` is substituted — every other snapshot field stays server-derived. Empty = absent. The stored snapshot does not record that the body was client-supplied. |
 
 #### Async success response
 
@@ -2084,6 +2087,7 @@ Delivered on `chat.user.{account}.response.{requestId}`.
 | `threadParentMessageCreatedAt` | string | Optional. RFC 3339. Server-resolved best-effort; absent when unresolved at send time. |
 | `tshow` | boolean | Present only when `tshow: true` on a thread reply. |
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Present only for a quoted send. |
+| `forwardedMessage` | [ForwardedMessage](../client-api.md#forwardedmessage) | Present only for a forward. |
 
 #### Async error response
 
@@ -2091,7 +2095,7 @@ Same subject. See [../client-api.md §4](../client-api.md#4-message-send) for th
 error table. Key errors:
 
 - `"invalid requestId"` (`bad_request`)
-- `"content must not be empty"` / `"content exceeds maximum size of 20480 bytes"`
+- `"content must not be empty"` (unless `attachments` is present or the message is a forward) / `"content exceeds maximum size of 20480 bytes"`
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
 

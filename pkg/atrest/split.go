@@ -20,6 +20,9 @@ func SplitForEncryption(msg *cassandra.Message) EncryptedFields {
 			}
 		}
 	}
+	if msg.ForwardedMessage != nil && msg.ForwardedMessage.Msg != "" {
+		out.ForwardedContent = &ForwardedEncrypted{Msg: msg.ForwardedMessage.Msg}
+	}
 	return out
 }
 
@@ -28,8 +31,8 @@ func SplitForEncryption(msg *cassandra.Message) EncryptedFields {
 // that gets written to Cassandra alongside enc_payload. sys_msg_data is left
 // intact — it is not encrypted and stays in its plaintext column.
 //
-// quoted_parent_message metadata (sender, IDs, timestamps) is preserved;
-// only its body fields (msg, attachments) are nulled.
+// quoted_parent_message and forwarded_message metadata (sender, IDs, timestamps)
+// are preserved; only their body fields (msg, attachments) are nulled.
 func StripEncryptedFields(msg *cassandra.Message) {
 	msg.Msg = ""
 	msg.Attachments = nil
@@ -38,6 +41,9 @@ func StripEncryptedFields(msg *cassandra.Message) {
 	if msg.QuotedParentMessage != nil {
 		msg.QuotedParentMessage.Msg = ""
 		msg.QuotedParentMessage.Attachments = nil
+	}
+	if msg.ForwardedMessage != nil {
+		msg.ForwardedMessage.Msg = ""
 	}
 }
 
@@ -55,5 +61,11 @@ func ApplyDecryptedFields(msg *cassandra.Message, enc *EncryptedFields) {
 		}
 		msg.QuotedParentMessage.Msg = enc.QuotedParentContent.Msg
 		msg.QuotedParentMessage.Attachments = enc.QuotedParentContent.Attachments
+	}
+	if enc.ForwardedContent != nil {
+		if msg.ForwardedMessage == nil {
+			msg.ForwardedMessage = &cassandra.ForwardedMessage{}
+		}
+		msg.ForwardedMessage.Msg = enc.ForwardedContent.Msg
 	}
 }

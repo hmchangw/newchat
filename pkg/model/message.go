@@ -33,6 +33,7 @@ type Message struct {
 	Type                         string                         `json:"type,omitempty"                         bson:"type,omitempty"`
 	SysMsgData                   []byte                         `json:"sysMsgData,omitempty"                   bson:"sysMsgData,omitempty"`
 	QuotedParentMessage          *cassandra.QuotedParentMessage `json:"quotedParentMessage,omitempty"          bson:"quotedParentMessage,omitempty"`
+	ForwardedMessage             *cassandra.ForwardedMessage    `json:"forwardedMessage,omitempty"             bson:"forwardedMessage,omitempty"`
 	PinnedAt                     *time.Time                     `json:"pinnedAt,omitempty"                     bson:"pinnedAt,omitempty"`
 	PinnedBy                     *Participant                   `json:"pinnedBy,omitempty"                     bson:"pinnedBy,omitempty"`
 }
@@ -73,6 +74,26 @@ type SendMessageRequest struct {
 	// MessageTypeImportant; message-gatekeeper rejects any system type or unknown
 	// value so a client can't inject a system event. Empty = a normal message.
 	Type string `json:"type,omitempty"`
+	// ForwardedMessageID + ForwardedRoomID request a forward: the gatekeeper
+	// fetches the source message from ForwardedRoomID (enforcing the sender's
+	// subscription + access window there), embeds an immutable text-only
+	// snapshot on the new message, and hard-fails the send when the source
+	// can't be fetched or is not forwardable. Both must be set together.
+	// Mutually exclusive with ThreadParentMessageID, QuotedParentMessageID,
+	// and Attachments; Content becomes optional on a forward.
+	ForwardedMessageID string `json:"forwardedMessageId,omitempty"`
+	ForwardedRoomID    string `json:"forwardedRoomId,omitempty"`
+	// ForwardedContent optionally replaces the snapshot body the gatekeeper
+	// would otherwise copy from the fetched source. Primary use is client-side
+	// redaction: the source body may reference a restricted image the
+	// destination room's members cannot access, so the client substitutes a
+	// safe body before the snapshot is persisted. The source is still fetched
+	// and every authorization and forwardability rule still runs against it;
+	// only ForwardedMessage.Msg is substituted. Requires ForwardedMessageID.
+	// Note this is caller-supplied text stored under the source author's
+	// identity, and the stored snapshot does not distinguish it from the real
+	// body.
+	ForwardedContent string `json:"forwardedContent,omitempty"`
 }
 
 // SenderDisplayName returns the canonical render-ready name for the message's

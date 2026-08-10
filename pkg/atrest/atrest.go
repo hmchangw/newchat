@@ -29,6 +29,7 @@ type EncryptedFields struct {
 	Card                *cassandra.Card        `json:"card,omitempty"`
 	CardAction          *cassandra.CardAction  `json:"cardAction,omitempty"`
 	QuotedParentContent *QuotedParentEncrypted `json:"quotedParentContent,omitempty"`
+	ForwardedContent    *ForwardedEncrypted    `json:"forwardedContent,omitempty"`
 }
 
 // QuotedParentEncrypted holds the user-authored fields of a quoted parent
@@ -37,6 +38,13 @@ type EncryptedFields struct {
 type QuotedParentEncrypted struct {
 	Msg         string   `json:"msg,omitempty"`
 	Attachments [][]byte `json:"attachments,omitempty"`
+}
+
+// ForwardedEncrypted holds the user-authored body of a forwarded-message
+// snapshot. Sender, IDs, timestamps and mentions stay plaintext on the
+// forwarded_message UDT. No attachments field — the snapshot is text-only.
+type ForwardedEncrypted struct {
+	Msg string `json:"msg,omitempty"`
 }
 
 // EncMeta is the per-row metadata stored alongside the ciphertext.

@@ -223,6 +223,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 			ThreadMessageID:   msg.ThreadParentMessageID,
 			PushTime:          now.Format(time.RFC3339),
 			AlsoSendToChannel: msg.TShow,
+			Forwarded:         msg.ForwardedMessage != nil,
 		},
 		Timestamp: now.UnixMilli(),
 	}

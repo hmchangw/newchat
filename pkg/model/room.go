@@ -1,8 +1,14 @@
 package model
 
-import "time"
+import (
+	"time"
 
-type RoomType string
+	"github.com/hmchangw/chat/pkg/model/cassandra"
+)
+
+// RoomType lives in pkg/model/cassandra (see MessageRoom); aliased here so
+// consumers keep using model.RoomType and the constants below.
+type RoomType = cassandra.RoomType
 
 const (
 	RoomTypeChannel    RoomType = "channel"

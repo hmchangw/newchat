@@ -62,6 +62,32 @@ CREATE TYPE IF NOT EXISTS "QuotedParentMessage"(
   thread_parent_id TEXT                // set by message-worker when quoted message is a TShow reply
 );
 ```
+#### ForwardedMessage
+```cql
+CREATE TYPE IF NOT EXISTS "ForwardedMessage"(
+  created_at TIMESTAMP,
+  mentions SET<FROZEN<"Participant">>,
+  message_id TEXT,
+  msg TEXT,
+  room_id TEXT,
+  room_type TEXT,                      // source room's type, frozen at forward time (types never change)
+  sender FROZEN<"Participant">,
+  thread_parent_created_at TIMESTAMP,  // source's thread-parent createdAt (source was a thread reply)
+  thread_parent_id TEXT,               // set when the forwarded source is a thread reply
+  thread_room_id TEXT,                 // source's own thread room, when the source is a thread reply
+  tshow BOOLEAN                        // source's "also shown in channel" flag
+);
+```
+Immutable snapshot of a forwarded source message, built server-side by
+message-gatekeeper at forward time. Text-only — no attachments column
+(sources with attachments/cards are rejected). Deliberately carries the source
+room's `room_type` but **not** its name: a room's type is fixed at creation and
+snapshots cleanly, while its name is mutable and would force a per-read lookup.
+Present in
+`messages_by_room`, `messages_by_id`, `pinned_messages_by_room` only;
+`thread_messages_by_thread` is excluded because forwards always land in
+the destination room's main timeline. See
+`docs/superpowers/specs/2026-08-03-message-forwarding-design.md`.
 #### reaction_key
 ```cql
 CREATE TYPE IF NOT EXISTS chat.reaction_key (
@@ -132,6 +158,7 @@ CREATE TABLE IF NOT EXISTS messages_by_room(
   enc_meta FROZEN<"EncMeta">,       // 12-byte AES-GCM nonce; null for legacy plaintext rows
   enc_payload BLOB,                 // bundled JSON ciphertext of user-authored content; non-null for rows
                                     //   written after the at-rest encryption rollout
+  forwarded_message FROZEN<"ForwardedMessage">,
   mentions SET<FROZEN<"Participant">>,
   msg TEXT,
   pinned_at TIMESTAMP,              // pin indicator for the channel timeline; null when not pinned.
@@ -215,6 +242,7 @@ CREATE TABLE IF NOT EXISTS pinned_messages_by_room(
   enc_meta FROZEN<"EncMeta">,       // 12-byte AES-GCM nonce; null for legacy plaintext rows
   enc_payload BLOB,                 // bundled JSON ciphertext of user-authored content; non-null for rows
                                     //   written after the at-rest encryption rollout
+  forwarded_message FROZEN<"ForwardedMessage">,
   mentions SET<FROZEN<"Participant">>,
   msg TEXT,
   pinned_by FROZEN<"Participant">,
@@ -248,6 +276,7 @@ CREATE TABLE IF NOT EXISTS messages_by_id(
   enc_meta FROZEN<"EncMeta">,       // 12-byte AES-GCM nonce; null for legacy plaintext rows
   enc_payload BLOB,                 // bundled JSON ciphertext of user-authored content; non-null for rows
                                     //   written after the at-rest encryption rollout
+  forwarded_message FROZEN<"ForwardedMessage">,
   mentions SET<FROZEN<"Participant">>,
   msg TEXT,
   pinned_at TIMESTAMP,
@@ -276,7 +305,7 @@ CREATE TABLE IF NOT EXISTS messages_by_id(
 Rows written after the at-rest encryption rollout encrypt user-authored
 content into a single `enc_payload` blob and leave the encrypted legacy
 plaintext columns (`msg`, `attachments`, `card`, `card_action`, and the
-body fields of `quoted_parent_message`) null. `sys_msg_data` is **not** encrypted —
+body fields of `quoted_parent_message` / `forwarded_message`) null. `sys_msg_data` is **not** encrypted —
 it carries system-generated metadata (e.g. the room members being added), not
 user-authored secrets, so it stays in its plaintext column. Rows written before
 the rollout retain their plaintext columns and have `enc_payload IS NULL`. The
