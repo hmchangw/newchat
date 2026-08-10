@@ -113,9 +113,6 @@ type stubInboxStore struct {
 	settingsUpdates       []userSettingsUpdate
 	chatlistUpdates       []userChatlistUpdate
 	sectionMoves          []sectionMove
-	// hasThreadUnreadErr, when set, makes SubscriptionHasThreadUnread fail —
-	// used to exercise handleSubscriptionRead's skip-on-error badge-cache path.
-	hasThreadUnreadErr error
 }
 
 type userChatlistUpdate struct {
@@ -355,23 +352,6 @@ func (s *stubInboxStore) getSubReads() []subRead {
 	cp := make([]subRead, len(s.subReads))
 	copy(cp, s.subReads)
 	return cp
-}
-
-// SubscriptionHasThreadUnread scans the seeded subscriptions for (roomID,
-// account) and reports whether its ThreadUnread is non-empty; a missing
-// subscription reports false, nil (mirrors the Mongo impl's FindOne miss).
-func (s *stubInboxStore) SubscriptionHasThreadUnread(_ context.Context, roomID, account string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.hasThreadUnreadErr != nil {
-		return false, s.hasThreadUnreadErr
-	}
-	for i := range s.subscriptions {
-		if s.subscriptions[i].RoomID == roomID && s.subscriptions[i].User.Account == account {
-			return len(s.subscriptions[i].ThreadUnread) > 0, nil
-		}
-	}
-	return false, nil
 }
 
 func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error {
@@ -1391,13 +1371,15 @@ func subscriptionReadInboxPayload(t *testing.T, account, roomID string) []byte {
 	return data
 }
 
-// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearsWhenNoThreadUnread:
-// the post-apply subscription has no threadUnread left -> ClearRoom fires.
-func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearsWhenNoThreadUnread(t *testing.T) {
+// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearAll: a federated
+// read invalidates the account's WHOLE badge set — no post-apply thread-state
+// check; the next count/push recomputes from Mongo.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearAll(t *testing.T) {
 	store := &stubInboxStore{}
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions, model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		ThreadUnread: []string{"p1"}, // remaining threads must NOT prevent the drop
 	})
 	store.mu.Unlock()
 	h := NewHandler(store)
@@ -1406,45 +1388,7 @@ func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearsWhenNoThreadUnrea
 
 	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
 
-	require.Len(t, badge.getClearRooms(), 1)
-	assert.Equal(t, clearRoomCall{account: "alice", roomID: "r1"}, badge.getClearRooms()[0])
-}
-
-// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_NoClearWhenThreadUnreadRemains:
-// the post-apply subscription still carries unread threads -> no ClearRoom.
-func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_NoClearWhenThreadUnreadRemains(t *testing.T) {
-	store := &stubInboxStore{}
-	store.mu.Lock()
-	store.subscriptions = append(store.subscriptions, model.Subscription{
-		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
-		ThreadUnread: []string{"p1"},
-	})
-	store.mu.Unlock()
-	h := NewHandler(store)
-	badge := &fakeBadgeCache{}
-	h.badge = badge
-
-	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
-
-	assert.Empty(t, badge.getClearRooms())
-}
-
-// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_SkipsOnLookupError: a
-// SubscriptionHasThreadUnread error must skip ClearRoom without failing the
-// already-applied read.
-func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_SkipsOnLookupError(t *testing.T) {
-	store := &stubInboxStore{hasThreadUnreadErr: fmt.Errorf("mongo down")}
-	store.mu.Lock()
-	store.subscriptions = append(store.subscriptions, model.Subscription{
-		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
-	})
-	store.mu.Unlock()
-	h := NewHandler(store)
-	badge := &fakeBadgeCache{}
-	h.badge = badge
-
-	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
-
+	assert.Equal(t, []string{"alice"}, badge.getClearAlls())
 	assert.Empty(t, badge.getClearRooms())
 }
 
@@ -1891,13 +1835,15 @@ func TestHandler_HandleEvent_ThreadRead_StoreError(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenPostStateEmpty: the
-// live post-apply subscription state (not the event's NewThreadUnread field)
-// has no threadUnread left -> ClearRoom fires.
-func TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenPostStateEmpty(t *testing.T) {
+// TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearAll: a federated thread
+// read invalidates the account's WHOLE badge set — no post-apply thread-state
+// check (remaining threads must not prevent the drop); the next count/push
+// recomputes from Mongo.
+func TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearAll(t *testing.T) {
 	store := &stubInboxStore{}
 	store.subscriptions = append(store.subscriptions, model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		ThreadUnread: []string{"p3"}, // remaining threads must NOT prevent the drop
 	})
 	h := NewHandler(store)
 	badge := &fakeBadgeCache{}
@@ -1911,83 +1857,7 @@ func TestHandler_HandleEvent_ThreadRead_BadgeCache_ClearsWhenPostStateEmpty(t *t
 
 	require.NoError(t, h.HandleEvent(context.Background(), data))
 
-	require.Len(t, badge.getClearRooms(), 1)
-	assert.Equal(t, clearRoomCall{account: "alice", roomID: "r1"}, badge.getClearRooms()[0])
-}
-
-// TestHandler_HandleEvent_ThreadRead_BadgeCache_NoClearWhenPostStateNonEmpty:
-// the live post-apply subscription still carries unread threads (e.g. a
-// racing thread_unread_added re-added one after this event was published,
-// or ApplyThreadRead's own write left some) -> no ClearRoom, regardless of
-// what the event's NewThreadUnread said.
-func TestHandler_HandleEvent_ThreadRead_BadgeCache_NoClearWhenPostStateNonEmpty(t *testing.T) {
-	store := &stubInboxStore{}
-	store.subscriptions = append(store.subscriptions, model.Subscription{
-		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
-		ThreadUnread: []string{"p3"},
-	})
-	h := NewHandler(store)
-	badge := &fakeBadgeCache{}
-	h.badge = badge
-	// Event itself claims NewThreadUnread is empty, but the store's live
-	// post-state (seeded above) says otherwise — post-state must win.
-	payload := model.ThreadReadEvent{Account: "alice", RoomID: "r1", ThreadRoomID: "tr1", LastSeenAt: 1735689600000}
-	inner, err := json.Marshal(&payload)
-	require.NoError(t, err)
-	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
-	data, err := json.Marshal(&outer)
-	require.NoError(t, err)
-
-	require.NoError(t, h.HandleEvent(context.Background(), data))
-
-	assert.Empty(t, badge.getClearRooms())
-}
-
-// TestHandler_HandleEvent_ThreadRead_BadgeCache_StaleRedeliveredEvent_NoClear:
-// ApplyThreadRead's $lt guard rejected a stale/redelivered event (the store
-// left the subscription's threadUnread untouched, non-empty) -> no ClearRoom,
-// even though the stale event's own NewThreadUnread is empty.
-func TestHandler_HandleEvent_ThreadRead_BadgeCache_StaleRedeliveredEvent_NoClear(t *testing.T) {
-	store := &stubInboxStore{}
-	store.subscriptions = append(store.subscriptions, model.Subscription{
-		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
-		ThreadUnread: []string{"p9"}, // untouched by the rejected stale apply
-	})
-	h := NewHandler(store)
-	badge := &fakeBadgeCache{}
-	h.badge = badge
-	payload := model.ThreadReadEvent{
-		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
-		NewThreadUnread: nil, LastSeenAt: 1735689600000, // stale event claims empty
-	}
-	inner, err := json.Marshal(&payload)
-	require.NoError(t, err)
-	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
-	data, err := json.Marshal(&outer)
-	require.NoError(t, err)
-
-	require.NoError(t, h.HandleEvent(context.Background(), data))
-
-	assert.Empty(t, badge.getClearRooms())
-}
-
-// TestHandler_HandleEvent_ThreadRead_BadgeCache_SkipsOnPostStateLookupError: a
-// SubscriptionHasThreadUnread error after the apply must skip ClearRoom
-// without failing the already-applied thread read.
-func TestHandler_HandleEvent_ThreadRead_BadgeCache_SkipsOnPostStateLookupError(t *testing.T) {
-	store := &stubInboxStore{hasThreadUnreadErr: fmt.Errorf("mongo down")}
-	h := NewHandler(store)
-	badge := &fakeBadgeCache{}
-	h.badge = badge
-	payload := model.ThreadReadEvent{Account: "alice", RoomID: "r1", ThreadRoomID: "tr1", LastSeenAt: 1735689600000}
-	inner, err := json.Marshal(&payload)
-	require.NoError(t, err)
-	outer := model.InboxEvent{Type: model.InboxThreadRead, Payload: inner}
-	data, err := json.Marshal(&outer)
-	require.NoError(t, err)
-
-	require.NoError(t, h.HandleEvent(context.Background(), data))
-
+	assert.Equal(t, []string{"alice"}, badge.getClearAlls())
 	assert.Empty(t, badge.getClearRooms())
 }
 
@@ -2162,6 +2032,54 @@ func TestHandler_SubscriptionMuteToggled(t *testing.T) {
 	updates := store.getMuteUpdates()
 	require.Len(t, updates, 1)
 	assert.Equal(t, int64(12345), updates[0].updatedAt.UnixMilli())
+}
+
+// muteToggledInboxPayload builds the federated mute-toggle envelope.
+func muteToggledInboxPayload(t *testing.T, account, roomID string, muted bool) []byte {
+	t.Helper()
+	payload, err := json.Marshal(model.SubscriptionMuteToggledEvent{
+		Account: account, RoomID: roomID, Muted: muted, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxSubscriptionMuteToggled, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	return evt
+}
+
+// TestHandler_SubscriptionMuteToggled_Muted_BadgeClearRoom: muting is an exact
+// removal — only the muted room leaves the home replica's badge set.
+func TestHandler_SubscriptionMuteToggled_Muted_BadgeClearRoom(t *testing.T) {
+	store := &stubInboxStore{subscriptions: []model.Subscription{
+		{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1"},
+	}}
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), muteToggledInboxPayload(t, "alice", "r1", true)))
+
+	assert.Equal(t, []clearRoomCall{{account: "alice", roomID: "r1"}}, badge.getClearRooms())
+	assert.Empty(t, badge.getClearAlls())
+}
+
+// TestHandler_SubscriptionMuteToggled_Unmuted_BadgeClearAll: unmuting drops
+// the set so the next count/push recomputes and re-includes the room iff
+// unread.
+func TestHandler_SubscriptionMuteToggled_Unmuted_BadgeClearAll(t *testing.T) {
+	store := &stubInboxStore{subscriptions: []model.Subscription{
+		{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", Muted: true},
+	}}
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), muteToggledInboxPayload(t, "alice", "r1", false)))
+
+	assert.Equal(t, []string{"alice"}, badge.getClearAlls())
+	assert.Empty(t, badge.getClearRooms())
 }
 
 func TestHandler_SubscriptionMuteToggled_Forwarded(t *testing.T) {

@@ -62,9 +62,16 @@ type Config struct {
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 	// BadgeCountCap caps every badge unread-room count returned to clients and
 	// the push pipeline (the UI renders the cap as "N-1+", e.g. 10 → "9+").
-	BadgeCountCap int         `env:"BADGE_COUNT_CAP" envDefault:"10"`
-	Mongo         MongoConfig `envPrefix:"MONGO_"`
-	NATS          NATSConfig  `envPrefix:"NATS_"`
+	BadgeCountCap int `env:"BADGE_COUNT_CAP" envDefault:"10"`
+	// BadgeCountCacheFirst serves subscription.count (unread=true) from the
+	// Valkey badge set on freshness-marker hit. Rollout gate: flip to true only
+	// after ALL badge writers (room-service, inbox-worker, user-service,
+	// notification-worker path) run the marker-aware pkg/badgecache — an old
+	// writer's set-only ClearAll would leave a stale marker reading as "fresh
+	// zero" for up to the badge TTL.
+	BadgeCountCacheFirst bool        `env:"BADGE_COUNT_CACHE_FIRST" envDefault:"false"`
+	Mongo                MongoConfig `envPrefix:"MONGO_"`
+	NATS                 NATSConfig  `envPrefix:"NATS_"`
 }
 
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.

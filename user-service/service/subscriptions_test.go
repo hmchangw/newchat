@@ -739,6 +739,69 @@ func TestCountUnread_AllRead(t *testing.T) {
 	assert.Empty(t, badge.reseedRoomIDs[0], "an all-read account must reseed with an empty room-ID set")
 }
 
+// TestCountUnread_GateOff_NoCacheRead: with BADGE_COUNT_CACHE_FIRST off
+// (default — newSvc's cfg leaves it false), Count is never consulted and the
+// Mongo path runs.
+func TestCountUnread_GateOff_NoCacheRead(t *testing.T) {
+	svc, subs, _, _, _, _, _ := newSvc(t)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]model.EnrichedSubscription{}, nil)
+	yes := true
+	_, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Empty(t, svc.badge.(*fakeBadgeCache).countCalls, "gate off must not touch the cache read path")
+}
+
+// TestCountUnread_CacheFirst_Fresh: gate on + fresh marker → served from the
+// cache with no repo call and no reseed.
+func TestCountUnread_CacheFirst_Fresh(t *testing.T) {
+	svc, _, _, _, _, _, _ := newSvc(t)
+	svc.badgeCacheFirst = true
+	badge := svc.badge.(*fakeBadgeCache)
+	badge.count = func(string) (int, bool) { return 7, true }
+	// No GetActiveSubscriptions expectation — a repo call fails the strict mock.
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 7, resp.Count)
+	assert.Equal(t, []string{"alice"}, badge.countCalls)
+	assert.Empty(t, badge.reseedCalls, "cache hit must not reseed")
+}
+
+// TestCountUnread_CacheFirst_FreshZero: fresh zero is a legitimate served
+// answer — the all-read state, not a miss.
+func TestCountUnread_CacheFirst_FreshZero(t *testing.T) {
+	svc, _, _, _, _, _, _ := newSvc(t)
+	svc.badgeCacheFirst = true
+	badge := svc.badge.(*fakeBadgeCache)
+	badge.count = func(string) (int, bool) { return 0, true }
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count)
+	assert.Empty(t, badge.reseedCalls)
+}
+
+// TestCountUnread_CacheFirst_Stale_Computes: gate on + stale → today's
+// compute-from-Mongo path, which reseeds (writing the marker).
+func TestCountUnread_CacheFirst_Stale_Computes(t *testing.T) {
+	svc, subs, _, _, _, _, _ := newSvc(t)
+	svc.badgeCacheFirst = true
+	badge := svc.badge.(*fakeBadgeCache) // count defaults to (0, false) — stale
+	seen := time.UnixMilli(100).UTC()
+	newer := time.UnixMilli(200).UTC()
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]model.EnrichedSubscription{
+			{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer},
+		}, nil)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count)
+	assert.Equal(t, []string{"alice"}, badge.countCalls, "stale path consults the cache exactly once")
+	assert.Equal(t, []string{"alice"}, badge.reseedCalls, "stale path must reseed from the Mongo truth")
+}
+
 func TestCountUnread_EmptyActive(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).

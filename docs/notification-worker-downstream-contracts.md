@@ -144,11 +144,20 @@ Request / reply (`pkg/model/subscription.go`):
   badge-count failure never NAKs or delays the push.
 
 **Accuracy model:** the triggering room is exact at notify time — the RPC's
-`SADD` is atomic with the size read. Everything else the count reflects (rooms
-marked unread by other activity, rooms read since the account's set was last
-seeded) can drift by about **±1 room**, bounded by the set's TTL
-(`BADGE_CACHE_TTL`, default 24h, identical across its writers) and by
-reseed-on-`subscription.count` — both eventually reconcile any divergence.
+`SADD` is atomic with the size read. The set is maintained on both edges:
+every message bumps the **full badge audience** (all members past the
+sender/muted/restricted/thread-scope filters — including members who won't be
+pushed), and every read / thread-read / unmute drops the account's whole set
+(plus its `badge:fresh` marker) so the next count or push recomputes from
+Mongo; a mute and a member-removal remove exactly that room. Residual drift
+(a missed bump, a drop racing a concurrent bump) is bounded by the next
+read-driven recompute, reseed-on-`subscription.count`, and the set's TTL
+(`BADGE_CACHE_TTL`, default 24h, identical across its writers) — failure
+direction is undercount-until-recompute, never a stuck overcount.
+`subscription.count` (unread=true) may itself be served from this set when
+user-service's `BADGE_COUNT_CACHE_FIRST` is enabled — flip it to true only
+after all badge writers run the marker-aware `pkg/badgecache`, or an old
+writer's set-only clear can leave a marker reading as a stale "fresh zero".
 
 ### Payload decoding
 

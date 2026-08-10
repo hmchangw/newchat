@@ -22,6 +22,7 @@ type fakeBadgeCache struct {
 	bumpBatch func(accounts []string, roomID string) map[string]int
 	seed      func(account string, roomIDs []string, trigger string) (int, bool)
 	reseed    func(account string, roomIDs []string)
+	count     func(account string) (int, bool)
 
 	// bumpCalls records one entry per BumpBatch call, holding that call's
 	// accounts — so both the call count and the batching shape are asserted
@@ -29,6 +30,7 @@ type fakeBadgeCache struct {
 	bumpCalls   [][]string
 	seedCalls   []string
 	reseedCalls []string
+	countCalls  []string
 	// reseedRoomIDs holds the roomIDs argument passed to each Reseed call, in
 	// call order and parallel-indexed with reseedCalls.
 	reseedRoomIDs [][]string
@@ -46,6 +48,14 @@ func (f *fakeBadgeCache) Seed(_ context.Context, account string, roomIDs []strin
 	f.seedCalls = append(f.seedCalls, account)
 	if f.seed != nil {
 		return f.seed(account, roomIDs, trigger)
+	}
+	return 0, false
+}
+
+func (f *fakeBadgeCache) Count(_ context.Context, account string) (int, bool) {
+	f.countCalls = append(f.countCalls, account)
+	if f.count != nil {
+		return f.count(account)
 	}
 	return 0, false
 }

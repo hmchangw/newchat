@@ -90,6 +90,9 @@ type badgeCache interface {
 	BumpBatch(ctx context.Context, accounts []string, roomID string) map[string]int
 	Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (int, bool)
 	Reseed(ctx context.Context, account string, roomIDs []string)
+	// Count serves the account's unread-room count from the cache; fresh=false
+	// (marker absent or Valkey error) means the caller must recompute from Mongo.
+	Count(ctx context.Context, account string) (int, bool)
 }
 
 // EventPublisher is the consumer-defined interface for fire-and-forget
@@ -138,7 +141,10 @@ type UserService struct {
 	allSiteIDs       []string
 	// badgeCap caps badge unread-room counts on the cache-down fallback path
 	// (BADGE_COUNT_CAP; pkg/badgecache applies the same cap on cache hits).
-	badgeCap        int
+	badgeCap int
+	// badgeCacheFirst gates serving subscription.count (unread=true) from the
+	// badge cache on freshness-marker hit (BADGE_COUNT_CACHE_FIRST).
+	badgeCacheFirst bool
 	maxSubs         int
 	defaultLimit    int
 	maxApps         int
@@ -166,6 +172,7 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		siteID:           cfg.SiteID,
 		allSiteIDs:       cfg.AllSiteIDs,
 		badgeCap:         cfg.BadgeCountCap,
+		badgeCacheFirst:  cfg.BadgeCountCacheFirst,
 		maxSubs:          cfg.MaxSubscriptionLimit,
 		defaultLimit:     cfg.DefaultSubscriptionLimit,
 		maxApps:          cfg.MaxAppsLimit,

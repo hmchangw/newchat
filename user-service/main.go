@@ -50,6 +50,7 @@ type badgeCache interface {
 	BumpBatch(ctx context.Context, accounts []string, roomID string) map[string]int
 	Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (int, bool)
 	Reseed(ctx context.Context, account string, roomIDs []string)
+	Count(ctx context.Context, account string) (int, bool)
 }
 
 // noopBadgeCache is the badge cache used when VALKEY_ADDRS is empty:
@@ -62,7 +63,8 @@ func (noopBadgeCache) BumpBatch(context.Context, []string, string) map[string]in
 func (noopBadgeCache) Seed(context.Context, string, []string, string) (int, bool) {
 	return 0, false
 }
-func (noopBadgeCache) Reseed(context.Context, string, []string) {}
+func (noopBadgeCache) Reseed(context.Context, string, []string)  {}
+func (noopBadgeCache) Count(context.Context, string) (int, bool) { return 0, false }
 
 func main() {
 	cfg, err := config.Load()

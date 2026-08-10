@@ -4097,37 +4097,23 @@ func messageReadHappyExpectStore(f *messageReadFixture, threadUnread []string, u
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(nil, nil)
 }
 
-// TestHandler_MessageRead_BadgeCache_ClearsWhenThreadUnreadEmpty is the positive
-// case: a home-local reader whose fetched subscription has no threadUnread left
-// clears the room from the badge cache.
-func TestHandler_MessageRead_BadgeCache_ClearsWhenThreadUnreadEmpty(t *testing.T) {
-	f := newMessageReadFixture(t)
-	messageReadHappyExpectStore(f, nil, "site-a")
-
-	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
-	require.NoError(t, err)
-
-	require.Len(t, f.badge.clearRooms, 1)
-	assert.Equal(t, clearRoomCall{account: "alice", roomID: "r1"}, f.badge.clearRooms[0])
-}
-
-// TestHandler_MessageRead_BadgeCache_NoClearWhenThreadUnreadNonEmpty is the
-// explicit negative case called out in the task brief: a fetched subscription
-// still carrying unread threads must NOT clear the room badge.
-func TestHandler_MessageRead_BadgeCache_NoClearWhenThreadUnreadNonEmpty(t *testing.T) {
+// TestHandler_MessageRead_BadgeCache_ClearAll_EvenWithThreadUnread: reading the
+// main room invalidates the reader's WHOLE badge set — no thread-state guard;
+// the next count/push recomputes from Mongo.
+func TestHandler_MessageRead_BadgeCache_ClearAll_EvenWithThreadUnread(t *testing.T) {
 	f := newMessageReadFixture(t)
 	messageReadHappyExpectStore(f, []string{"p1"}, "site-a")
 
 	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	require.NoError(t, err)
 
+	assert.Equal(t, []string{"alice"}, f.badge.clearAlls, "read must drop the whole set regardless of ThreadUnread")
 	assert.Empty(t, f.badge.clearRooms)
 }
 
-// TestHandler_MessageRead_BadgeCache_NoClearWhenCrossSite: even with an empty
-// ThreadUnread, a non-home-local reader must not clear the local badge cache —
-// the reader's home replica is cleared by inbox-worker once the federated
-// subscription_read event lands there.
+// TestHandler_MessageRead_BadgeCache_NoClearWhenCrossSite: a non-home-local
+// reader must not touch the local badge cache — the reader's home replica is
+// invalidated by inbox-worker once the federated subscription_read event lands.
 func TestHandler_MessageRead_BadgeCache_NoClearWhenCrossSite(t *testing.T) {
 	f := newMessageReadFixture(t)
 	messageReadHappyExpectStore(f, nil, "site-b")
@@ -4136,6 +4122,7 @@ func TestHandler_MessageRead_BadgeCache_NoClearWhenCrossSite(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, f.badge.clearRooms)
+	assert.Empty(t, f.badge.clearAlls)
 }
 
 // TestHandler_MessageRead_BadgeCache_NilBadgeNoPanic: a disabled cache (nil
@@ -4404,31 +4391,11 @@ func TestHandler_MessageThreadRead_UpdateThreadSubscriptionError(t *testing.T) {
 
 // --- message.thread.read badge cache clear tests ---
 
-// TestHandler_MessageThreadRead_BadgeCache_ClearsWhenArrayEmpty: the store's
-// $pull left no threadUnread entries (nil return) and the reader is home-local
-// -> the room clears from the badge cache.
-func TestHandler_MessageThreadRead_BadgeCache_ClearsWhenArrayEmpty(t *testing.T) {
-	f := newThreadReadFixture(t)
-	withNopFloor(f)
-	f.store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
-	f.store.EXPECT().GetThreadSubscriptionByParent(gomock.Any(), "alice", "p1", "r1").
-		Return(baseThreadSub("alice", "r1", "p1", "tr1"), nil)
-	f.store.EXPECT().UpdateSubscriptionThreadRead(gomock.Any(), "r1", "alice", "p1").
-		Return(nil, nil)
-	f.store.EXPECT().UpdateThreadSubscriptionRead(gomock.Any(), "tr1", "alice", gomock.Any()).
-		Return(nil)
-	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
-
-	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
-	require.NoError(t, err)
-
-	require.Len(t, f.badge.clearRooms, 1)
-	assert.Equal(t, clearRoomCall{account: "alice", roomID: "r1"}, f.badge.clearRooms[0])
-}
-
-// TestHandler_MessageThreadRead_BadgeCache_NoClearWhenArrayNonEmpty: the store
-// still returns unread threads after the $pull, so the room must NOT clear.
-func TestHandler_MessageThreadRead_BadgeCache_NoClearWhenArrayNonEmpty(t *testing.T) {
+// TestHandler_MessageThreadRead_BadgeCache_ClearAll_EvenWhenThreadsRemain: a
+// thread read invalidates the reader's WHOLE badge set even when the $pull
+// left other unread threads — no drained guard; the next count/push
+// recomputes from Mongo.
+func TestHandler_MessageThreadRead_BadgeCache_ClearAll_EvenWhenThreadsRemain(t *testing.T) {
 	f := newThreadReadFixture(t)
 	withNopFloor(f)
 	f.store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
@@ -4443,13 +4410,14 @@ func TestHandler_MessageThreadRead_BadgeCache_NoClearWhenArrayNonEmpty(t *testin
 	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
 	require.NoError(t, err)
 
+	assert.Equal(t, []string{"alice"}, f.badge.clearAlls, "thread read must drop the whole set regardless of remaining threads")
 	assert.Empty(t, f.badge.clearRooms)
 }
 
-// TestHandler_MessageThreadRead_BadgeCache_NoClearWhenCrossSite: an empty
-// post-$pull array on a non-home-local reader must not clear the local badge
-// cache — inbox-worker clears the reader's home replica once the federated
-// thread_read event lands there.
+// TestHandler_MessageThreadRead_BadgeCache_NoClearWhenCrossSite: a
+// non-home-local reader must not touch the local badge cache — inbox-worker
+// invalidates the reader's home replica once the federated thread_read event
+// lands there.
 func TestHandler_MessageThreadRead_BadgeCache_NoClearWhenCrossSite(t *testing.T) {
 	f := newThreadReadFixture(t)
 	withNopFloor(f)
@@ -4466,6 +4434,7 @@ func TestHandler_MessageThreadRead_BadgeCache_NoClearWhenCrossSite(t *testing.T)
 	require.NoError(t, err)
 
 	assert.Empty(t, f.badge.clearRooms)
+	assert.Empty(t, f.badge.clearAlls)
 }
 
 // --- clear-all-thread-read (bulk) tests ---
@@ -4932,6 +4901,66 @@ func TestHandler_MuteToggle_Success(t *testing.T) {
 	assert.Equal(t, "r1", canon.RoomID)
 	assert.Equal(t, "alice", canon.Account)
 	assert.True(t, canon.Muted)
+}
+
+// muteToggleBadgeFixture wires the minimal muteToggle harness with a badge
+// fake; muted is the POST-toggle state the store reports, userSiteID drives
+// the home-local guard.
+func muteToggleBadgeFixture(t *testing.T, muted bool, userSiteID string) (*Handler, *fakeBadgeCache) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().
+		ToggleSubscriptionMute(gomock.Any(), "r1", "alice", gomock.Any()).
+		Return(&model.Subscription{
+			ID:     "s1",
+			User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+			RoomID: "r1",
+			SiteID: "site-a",
+			Muted:  muted,
+		}, nil)
+	store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return(userSiteID, nil)
+	badge := &fakeBadgeCache{}
+	h := &Handler{
+		store:           store,
+		siteID:          "site-a",
+		badge:           badge,
+		publishToStream: func(context.Context, string, []byte, string) error { return nil },
+		publishCore:     func(context.Context, string, []byte) error { return nil },
+	}
+	return h, badge
+}
+
+// TestHandler_MuteToggle_Muted_BadgeClearRoom: muting is an exact removal —
+// only the muted room leaves the badge set; the marker/set stay fresh.
+func TestHandler_MuteToggle_Muted_BadgeClearRoom(t *testing.T) {
+	h, badge := muteToggleBadgeFixture(t, true, "site-a")
+	_, err := h.muteToggle(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.NoError(t, err)
+	assert.Equal(t, []clearRoomCall{{account: "alice", roomID: "r1"}}, badge.clearRooms)
+	assert.Empty(t, badge.clearAlls)
+}
+
+// TestHandler_MuteToggle_Unmuted_BadgeClearAll: unmuting needs an unread check
+// we don't do inline — drop the set so the next count/push recomputes and
+// re-includes the room iff unread.
+func TestHandler_MuteToggle_Unmuted_BadgeClearAll(t *testing.T) {
+	h, badge := muteToggleBadgeFixture(t, false, "site-a")
+	_, err := h.muteToggle(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alice"}, badge.clearAlls)
+	assert.Empty(t, badge.clearRooms)
+}
+
+// TestHandler_MuteToggle_CrossSiteUser_NoBadgeCall: a remote-home account's
+// replica is invalidated by inbox-worker via the federated event — the local
+// badge cache must stay untouched.
+func TestHandler_MuteToggle_CrossSiteUser_NoBadgeCall(t *testing.T) {
+	h, badge := muteToggleBadgeFixture(t, true, "site-b")
+	_, err := h.muteToggle(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.NoError(t, err)
+	assert.Empty(t, badge.clearRooms)
+	assert.Empty(t, badge.clearAlls)
 }
 
 func TestHandler_MuteToggle_CrossSitePublishesInbox(t *testing.T) {

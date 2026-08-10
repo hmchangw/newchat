@@ -385,25 +385,6 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 	return nil
 }
 
-// SubscriptionHasThreadUnread reports whether the home-replica subscription
-// (roomID, account) currently has any threadUnread entries. Used by
-// handleSubscriptionRead, after UpdateSubscriptionRead applies, to decide
-// whether the badge cache's ClearRoom is safe to fire. A missing subscription
-// is not an error here — the caller's read already succeeded — and reports false.
-func (s *mongoInboxStore) SubscriptionHasThreadUnread(ctx context.Context, roomID, account string) (bool, error) {
-	err := s.subCol.FindOne(ctx,
-		bson.M{"roomId": roomID, "u.account": account, "threadUnread.0": bson.M{"$exists": true}},
-		options.FindOne().SetProjection(bson.M{"_id": 1}),
-	).Err()
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("check subscription thread-unread for %q in room %q: %w", account, roomID, err)
-	}
-	return true, nil
-}
-
 // ensureIndexes creates the unique index on (threadRoomId, userAccount) used by
 // UpsertThreadSubscription. The shape matches what room-service, message-worker,
 // and history-service create so every service that touches thread_subscriptions

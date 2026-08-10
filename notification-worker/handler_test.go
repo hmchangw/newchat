@@ -1108,6 +1108,91 @@ func (f *fakeBadgeClient) callsFor(siteID string) []badgeCall {
 	return out
 }
 
+// TestHandle_BadgeAudience_WiderThanSurvivors: a member excluded from push by
+// presence (busy) still has their unread state changed by the message — they
+// must be in the badge RPC audience (their set gets bumped) while staying
+// absent from the push payload's accounts.
+func TestHandle_BadgeAudience_WiderThanSurvivors(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+			{ID: "carol", Account: "carol", HomeSiteID: "site-a"},
+		},
+	}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"bob": 2, "carol": 3}}}
+	presence := &stubPresence{out: map[string]model.Presence{
+		"bob": {AggregatedStatus: "busy"}, // push-excluded, badge-included
+	}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: presence,
+		Hook: noopVetoer{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	calls := badge.callsFor("site-a")
+	require.Len(t, calls, 1)
+	assert.ElementsMatch(t, []string{"bob", "carol"}, calls[0].accounts, "badge audience includes the push-excluded member")
+	assert.ElementsMatch(t, []string{"carol"}, emit.accounts(), "push payload stays survivor-only")
+}
+
+// TestHandle_BadgeAudience_ExcludesMuted: muted members are outside the badge
+// audience entirely — their room must never enter their set via a bump.
+func TestHandle_BadgeAudience_ExcludesMuted(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a", Muted: true},
+			{ID: "carol", Account: "carol", HomeSiteID: "site-a"},
+		},
+	}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"carol": 1}}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: noopVetoer{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	calls := badge.callsFor("site-a")
+	require.Len(t, calls, 1)
+	assert.ElementsMatch(t, []string{"carol"}, calls[0].accounts, "muted member excluded from the badge audience")
+}
+
+// TestHandle_BadgeBumpWithoutPush: when every candidate is hook-vetoed (zero
+// push survivors), the badge RPC must still fire — the members' unread state
+// changed even though nobody gets pushed.
+func TestHandle_BadgeBumpWithoutPush(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+		},
+	}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"bob": 1}}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: rejectHook{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	calls := badge.callsFor("site-a")
+	require.Len(t, calls, 1)
+	assert.ElementsMatch(t, []string{"bob"}, calls[0].accounts, "hook-vetoed member still gets bumped")
+	assert.Empty(t, emit.emitted, "no push survivors → no batches emitted")
+}
+
 // Survivors on two distinct home sites must trigger exactly one RPC per
 // site, each carrying only that site's accounts, merged into one map
 // stamped on the outgoing batch. HomeSiteID is the member's home site as

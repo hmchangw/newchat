@@ -40,13 +40,6 @@ type InboxStore interface {
 	// earlier than the supplied value. Older or duplicate events are silent no-ops.
 	// A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
-	// SubscriptionHasThreadUnread reports whether the home-replica subscription
-	// (roomID, account) currently has any threadUnread entries. Called AFTER
-	// UpdateSubscriptionRead applies, so handleSubscriptionRead can gate its
-	// best-effort badge ClearRoom on the post-apply state. A missing
-	// subscription is not an error here — the read already succeeded — and
-	// reports false.
-	SubscriptionHasThreadUnread(ctx context.Context, roomID, account string) (bool, error)
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead advances the home-replica ThreadSubscription read state
 	// (lastSeenAt, updatedAt, hasMention=false) under a $lt lastSeenAt guard, and
@@ -335,16 +328,11 @@ func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.InboxEv
 	if err := h.store.UpdateSubscriptionRead(ctx, e.RoomID, e.Account, lastSeenAt, e.Alert); err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", e.Account, e.RoomID, err)
 	}
-	// Best-effort badge cache clear: read the post-apply threadUnread state
-	// (UpdateSubscriptionRead itself doesn't report it) and skip on any
-	// unread threads left or a lookup error — never fail the already-applied read.
+	// Best-effort badge invalidation: a read decreases the unread-room set —
+	// drop it wholesale (freshness marker included); the next count/push
+	// recomputes from Mongo.
 	if h.badge != nil {
-		hasUnread, err := h.store.SubscriptionHasThreadUnread(ctx, e.RoomID, e.Account)
-		if err != nil {
-			slog.WarnContext(ctx, "check thread unread for badge clear failed", "error", err, "account", e.Account, "room_id", e.RoomID)
-		} else if !hasUnread {
-			h.badge.ClearRoom(ctx, e.Account, e.RoomID)
-		}
+		h.badge.ClearAll(ctx, e.Account)
 	}
 	return nil
 }
@@ -357,6 +345,17 @@ func (h *Handler) handleSubscriptionMuteToggled(ctx context.Context, evt *model.
 	}
 	if err := h.store.UpdateSubscriptionMute(ctx, e.RoomID, e.Account, e.Muted, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription mute for %q in room %q: %w", e.Account, e.RoomID, err)
+	}
+	// Best-effort badge invalidation on the home replica: muting is an exact
+	// removal (set stays a fresh materialization); unmuting needs an unread
+	// check we don't do inline, so drop the set — the next count/push
+	// recomputes and re-includes the room iff unread.
+	if h.badge != nil {
+		if e.Muted {
+			h.badge.ClearRoom(ctx, e.Account, e.RoomID)
+		} else {
+			h.badge.ClearAll(ctx, e.Account)
+		}
 	}
 	return nil
 }
@@ -411,18 +410,12 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 		return fmt.Errorf("apply thread read (thread %q, account %q): %w",
 			e.ThreadRoomID, e.Account, err)
 	}
-	// Best-effort badge cache clear: gate on live post-apply state, not the
-	// event's NewThreadUnread — ApplyThreadRead's $lt guard may have rejected
-	// a stale/redelivered event (leaving the subscription untouched), or a
-	// racing thread_unread_added may have re-added unread state since this
-	// event was published. Mirrors handleSubscriptionRead's post-state check.
+	// Best-effort badge invalidation: a thread read decreases the unread-room
+	// set — drop it wholesale (freshness marker included); the next count/push
+	// recomputes from Mongo, which also absorbs stale/redelivered events and
+	// racing thread_unread_added writes without any post-state check.
 	if h.badge != nil {
-		hasUnread, err := h.store.SubscriptionHasThreadUnread(ctx, e.RoomID, e.Account)
-		if err != nil {
-			slog.WarnContext(ctx, "check thread unread for badge clear failed", "error", err, "account", e.Account, "room_id", e.RoomID)
-		} else if !hasUnread {
-			h.badge.ClearRoom(ctx, e.Account, e.RoomID)
-		}
+		h.badge.ClearAll(ctx, e.Account)
 	}
 	return nil
 }

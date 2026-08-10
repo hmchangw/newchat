@@ -28,6 +28,14 @@ func TestKey_DifferentAccountsDifferentKeys(t *testing.T) {
 	assert.NotEqual(t, Key("alice"), Key("bob"))
 }
 
+func TestMarkerKey_SameSlotAsKey(t *testing.T) {
+	assert.Equal(t, "badge:fresh:{alice}", MarkerKey("alice"))
+	// Same {…} hash tag content as Key → same cluster slot (scripts and DELs
+	// can address both keys atomically).
+	assert.Contains(t, Key("alice"), "{alice}")
+	assert.Contains(t, MarkerKey("alice"), "{alice}")
+}
+
 func TestNew_MaxCount(t *testing.T) {
 	tests := []struct {
 		name    string

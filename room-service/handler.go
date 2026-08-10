@@ -1361,16 +1361,13 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil, err
 	}
 
-	// Best-effort badge cache clear. The badge set holds rooms unread for ANY
-	// reason (main messages or threads); reading the main room ends the room's
-	// message-level unread, so it must leave the set now or the badge stays
-	// inflated until TTL/reseed. Guarded on ThreadUnread (fetched before the
-	// read applied): a room with unread followed threads stays unread, so its
-	// entry must survive a main-room read. Home-local readers only — a
-	// cross-site reader's home replica is cleared by inbox-worker once the
-	// federated subscription_read event lands.
-	if len(sub.ThreadUnread) == 0 && userSiteID == h.siteID && h.badge != nil {
-		h.badge.ClearRoom(ctx, account, roomID)
+	// Best-effort badge invalidation: reading the room decreases the account's
+	// unread-room set, so drop the whole set (freshness marker included) and
+	// let the next count/push recompute from Mongo — no thread-state guard
+	// needed. Home-local readers only; a cross-site reader's home replica is
+	// invalidated by inbox-worker once the federated subscription_read lands.
+	if userSiteID == h.siteID && h.badge != nil {
+		h.badge.ClearAll(ctx, account)
 	}
 
 	switch {
@@ -1671,12 +1668,13 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		return nil, err
 	}
 
-	// Best-effort badge cache clear: only when the $pull left no threadUnread
-	// entries on this subscription and the reader is home-local — a cross-site
-	// reader's home replica is cleared by inbox-worker once the federated
-	// thread_read event lands.
-	if len(newThreadUnread) == 0 && userSiteID == h.siteID && h.badge != nil {
-		h.badge.ClearRoom(ctx, account, roomID)
+	// Best-effort badge invalidation: a thread read decreases the account's
+	// unread-room set, so drop the whole set (freshness marker included) — no
+	// drained guard needed; the next count/push recomputes from Mongo.
+	// Home-local readers only; a cross-site reader's home replica is
+	// invalidated by inbox-worker once the federated thread_read lands.
+	if userSiteID == h.siteID && h.badge != nil {
+		h.badge.ClearAll(ctx, account)
 	}
 
 	switch {
@@ -2190,6 +2188,18 @@ func (h *Handler) muteToggle(c *natsrouter.Context) (*model.MuteToggleResponse, 
 	userSiteID, err := h.store.GetUserSiteID(ctx, account)
 	if err != nil {
 		return nil, fmt.Errorf("get user siteId: %w", err)
+	}
+	// Best-effort badge invalidation (home-local actor; inbox-worker handles
+	// cross-site replicas via the federated event): muting is an exact removal,
+	// so the set stays a fresh materialization; unmuting needs an unread check
+	// we don't do inline, so drop the set and let the next count/push recompute
+	// — the room re-enters iff unread.
+	if userSiteID == h.siteID && h.badge != nil {
+		if sub.Muted {
+			h.badge.ClearRoom(ctx, account, roomID)
+		} else {
+			h.badge.ClearAll(ctx, account)
+		}
 	}
 	if userSiteID != "" && userSiteID != h.siteID {
 		payload := model.SubscriptionMuteToggledEvent{

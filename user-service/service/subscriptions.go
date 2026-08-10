@@ -554,7 +554,16 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 		}
 		return &models.CountResponse{Count: total}, nil
 	}
-	// Unread path: the total is not needed — go straight to the unread set.
+	// Unread path: the total is not needed — only the unread set matters.
+	// Cache-first (gated): serve the badge set's size on freshness-marker hit —
+	// reads/mutes invalidate it wholesale and every message bumps it, so a hit
+	// is current. Miss/stale falls through to the Mongo compute, whose Reseed
+	// below rewrites the set and its marker.
+	if s.badgeCacheFirst {
+		if n, fresh := s.badge.Count(c, account); fresh {
+			return &models.CountResponse{Count: n}, nil
+		}
+	}
 	ids, err := s.unreadRooms(c, account)
 	if err != nil {
 		return nil, err

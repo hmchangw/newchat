@@ -92,9 +92,10 @@ func TestBadgeCache_Reseed_ReplacesPriorContents(t *testing.T) {
 	assert.ElementsMatch(t, []string{"roomX", "roomY"}, members)
 }
 
-// TestBadgeCache_Reseed_EmptyRoomIDs_JustDeletes confirms an empty roomIDs
-// slice degrades Reseed to a plain delete (no key recreated).
-func TestBadgeCache_Reseed_EmptyRoomIDs_JustDeletes(t *testing.T) {
+// TestBadgeCache_Reseed_EmptyRoomIDs_DeletesSetKeepsFresh confirms an empty
+// roomIDs slice deletes the set (no stale members survive) while stamping the
+// freshness marker — the recorded state is "fresh, zero unread", not absence.
+func TestBadgeCache_Reseed_EmptyRoomIDs_DeletesSetKeepsFresh(t *testing.T) {
 	rdb := testutil.SharedValkeyCluster(t)
 	t.Cleanup(func() { testutil.FlushValkey(t) })
 	c := New(rdb, time.Hour, DefaultMaxCount)
@@ -105,7 +106,12 @@ func TestBadgeCache_Reseed_EmptyRoomIDs_JustDeletes(t *testing.T) {
 
 	c.Reseed(ctx, "dave", nil)
 
-	assert.Empty(t, c.BumpBatch(ctx, []string{"dave"}, "roomA"), "reseeding with no rooms leaves the key deleted")
+	exists, err := rdb.Exists(ctx, Key("dave")).Result()
+	require.NoError(t, err)
+	assert.Zero(t, exists, "empty reseed must delete the set key")
+	n, fresh := c.Count(ctx, "dave")
+	require.True(t, fresh, "empty reseed records fresh zero, not absence")
+	assert.Equal(t, 0, n)
 }
 
 // TestBadgeCache_Bump_RefreshesTTL confirms a bump on an existing key extends
@@ -184,6 +190,84 @@ func TestBadgeCache_BumpBatch_EmptyAccounts(t *testing.T) {
 	assert.Empty(t, counts)
 }
 
+// TestBadgeCache_Marker_FreshZeroAfterEmptyReseed: an empty reseed records
+// "fresh, zero unread" — Count serves 0 without a recompute, and a bump on the
+// marker-only state creates the set (count 1) instead of missing.
+func TestBadgeCache_Marker_FreshZeroAfterEmptyReseed(t *testing.T) {
+	rdb := testutil.SharedValkeyCluster(t)
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	c := New(rdb, time.Hour, DefaultMaxCount)
+	ctx := context.Background()
+
+	c.Reseed(ctx, "alice", nil)
+
+	n, fresh := c.Count(ctx, "alice")
+	require.True(t, fresh, "empty reseed must leave a fresh marker")
+	assert.Equal(t, 0, n)
+
+	counts := c.BumpBatch(ctx, []string{"alice"}, "roomA")
+	assert.Equal(t, map[string]int{"alice": 1}, counts, "marker-only state must be a hit that creates the set")
+
+	n, fresh = c.Count(ctx, "alice")
+	require.True(t, fresh)
+	assert.Equal(t, 1, n)
+}
+
+// TestBadgeCache_Count_StaleWithoutMarker: no marker → fresh=false regardless
+// of set contents (legacy sets self-migrate via the caller's recompute).
+func TestBadgeCache_Count_StaleWithoutMarker(t *testing.T) {
+	rdb := testutil.SharedValkeyCluster(t)
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	c := New(rdb, time.Hour, DefaultMaxCount)
+	ctx := context.Background()
+
+	_, fresh := c.Count(ctx, "bob")
+	assert.False(t, fresh, "no state at all → stale")
+
+	// Simulate a legacy set written without a marker.
+	require.NoError(t, rdb.SAdd(ctx, Key("bob"), "roomA").Err())
+	_, fresh = c.Count(ctx, "bob")
+	assert.False(t, fresh, "set without marker → stale")
+}
+
+// TestBadgeCache_ClearSemantics_Marker: ClearRoom is an exact removal so the
+// marker survives; ClearAll must delete the marker with the set.
+func TestBadgeCache_ClearSemantics_Marker(t *testing.T) {
+	rdb := testutil.SharedValkeyCluster(t)
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	c := New(rdb, time.Hour, DefaultMaxCount)
+	ctx := context.Background()
+
+	_, ok := c.Seed(ctx, "carol", []string{"roomA", "roomB"}, "")
+	require.True(t, ok)
+
+	c.ClearRoom(ctx, "carol", "roomA")
+	n, fresh := c.Count(ctx, "carol")
+	require.True(t, fresh, "ClearRoom is an exact removal — marker must survive")
+	assert.Equal(t, 1, n)
+
+	c.ClearAll(ctx, "carol")
+	_, fresh = c.Count(ctx, "carol")
+	assert.False(t, fresh, "ClearAll must delete the marker with the set")
+}
+
+// TestBadgeCache_Count_Uncapped: Count reports the true set size — the 10-cap
+// applies only to Bump/Seed returns.
+func TestBadgeCache_Count_Uncapped(t *testing.T) {
+	rdb := testutil.SharedValkeyCluster(t)
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	c := New(rdb, time.Hour, DefaultMaxCount)
+	rooms := make([]string, 15)
+	for i := range rooms {
+		rooms[i] = fmt.Sprintf("room%02d", i)
+	}
+	_, ok := c.Seed(context.Background(), "dave", rooms, "")
+	require.True(t, ok)
+	n, fresh := c.Count(context.Background(), "dave")
+	require.True(t, fresh)
+	assert.Equal(t, 15, n)
+}
+
 // TestBadgeCache_ValkeyError_FailsOpen points the cache at a port nothing
 // listens on so every call fails at the transport layer, exercising the
 // fail-open contract (no error return, no panic, ok=false for count methods)
@@ -195,6 +279,9 @@ func TestBadgeCache_ValkeyError_FailsOpen(t *testing.T) {
 	ctx := context.Background()
 
 	assert.Empty(t, c.BumpBatch(ctx, []string{"frank", "grace"}, "roomA"), "batch fails open to all-absent")
+
+	_, fresh := c.Count(ctx, "frank")
+	assert.False(t, fresh, "Valkey error → stale (caller recomputes)")
 
 	_, ok := c.Seed(ctx, "frank", []string{"roomA"}, "roomB")
 	assert.False(t, ok)

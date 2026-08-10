@@ -299,6 +299,21 @@ func TestLoad_BadgeInvalidRejected(t *testing.T) {
 	require.ErrorContains(t, err, "BADGE_COUNT_CAP")
 }
 
+func TestLoad_BadgeCountCacheFirst(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	unsetEnv(t, "BADGE_COUNT_CACHE_FIRST")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.False(t, cfg.BadgeCountCacheFirst, "cache-first count must be opt-in (rollout gate)")
+
+	t.Setenv("BADGE_COUNT_CACHE_FIRST", "true")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.True(t, cfg.BadgeCountCacheFirst)
+}
+
 func TestLoad_SSORefreshWindowMustBePositive(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
