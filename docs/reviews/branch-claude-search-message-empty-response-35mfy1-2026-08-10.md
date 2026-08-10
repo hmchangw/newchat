@@ -169,3 +169,26 @@ Working tree verified clean before and after (no mock regeneration was needed �
 **Checks passed:** table-driven structure with descriptive subtest names throughout; `searchShardTotal` malformed-body case covered; parseMemberEvent error paths all covered incl. the unwrapped-inner case; Makefile `test` target uses `-race` (all affected packages pass with `-race -count=1`); no mock staleness.
 
 **Untestable in this diff:** the producer→consumer envelope contract is pinned only by two independent unit tests in separate packages; search-sync-worker/inbox_integration_test.go:67-81 builds its *own* envelope, so it would not catch renewed drift — a true end-to-end check needs Docker (testcontainers NATS+ES) and is absent. Compose/main.go wiring is untestable by repo convention.
+
+## Bug & security
+
+Unit tests for all changed packages pass with `-race`. Builds clean.
+
+**HIGH — es-index-migrator system-message filter is a silent no-op on real backfills.**
+`data-migration/es-index-migrator/runner.go:62` gates on `model.IsSystemMessageType(msg.Type)`, but the Cassandra projection deliberately excludes `type`: `messagesource_cassandra.go:32` (`messageColumns` — the comment at lines 21–23 even lists `type` among excluded columns) and the `iter.Scan` at lines 79–81 never populates `row.Type`. So on a real backfill `msg.Type == ""` always, `IsSystemMessageType("")` is false, and system messages are still re-indexed — exactly what commit 74bc82b set out to prevent. `TestRunMessages_SkipsSystemMessages` passes only because the mock injects `Type` directly; it gives false confidence. Fix: add `type` to `messageColumns` + Scan into `&row.Type` (and ideally an integration-test assertion through the real source). *(Independently re-verified by the synthesizer against the source before this chapter was written: confirmed.)*
+
+**MEDIUM — env rename is an undocumented crash-loop for ops-owned deployments.**
+`SEARCH_USER_ROOM_INDEX`/`SEARCH_SPOTLIGHT_INDEX`/`SEARCH_SPOTLIGHT_ORG_INDEX` → unprefixed `required,notEmpty` (`search-service/main.go`). Any deployment still setting only the old names fails at startup. In-repo stragglers: none (only `search-service/deploy/docker-compose.yml`, updated, plus historical docs — `docs/superpowers/plans/2026-05-13-search-index-env-vars.md:599` now states the old operator contract and is stale). Fail-fast is the right behavior, but no migration/release note exists anywhere; prod manifests are ops-owned and out of repo. Add a deploy note to the PR/docs.
+
+**LOW — WARN path logs account + raw query.** `search-service/handler.go:185-187`. A room/org typeahead query is not a token or message body, so no hard CLAUDE.md violation; the routine-miss line is safely gated at `logctx.LevelFlow` (sub-INFO, X-Debug-admitted only). But during an index misconfiguration the WARN fires on *every* empty search, bulk-persisting user-typed query strings keyed by account, unbounded/un-ratelimited. Suggest logging query length (or dropping `query`) on the WARN path — `pattern` + `hint` carry the diagnostic value.
+
+**LOW — dedup-window hazard is real but tiny.** Seed unchanged (`teamsroomcreate.go:271`); `InboxDedupID` (pkg/natsutil/request_id.go:130) bases on X-Request-ID, which a JetStream redelivery preserves (room-worker/main.go:364-373). No stream sets `Duplicates`, so the window is the JetStream default 2 min. Loss requires: old worker publishes bare event, fails to Ack, redelivery to a new worker within 2 min → enveloped publish deduped away, source Ack'd, event never indexed. Teams redeliveries are "minutes-to-hours later" (`teams-room-creation/publisher.go:25`), and the migrator can rebuild spotlight/user-room from Mongo. Accept; note in PR.
+
+**VERIFIED OK (no findings):**
+- Rolling deploy both directions: old `parseMemberEvent` (base `9a9f7646`) already errored on empty `Payload` ("unexpected end of JSON input") → Ack; new code Acks with a clearer error — same drop, no regression. Old worker decodes new enveloped events fine.
+- `pkg/model/event_test.go:21` `parser.ParseFile("event.go")`: `go test` runs the binary in the package source dir — safe under `make test`.
+- Index env names now consistent with `search-sync-worker/main.go:47,53` and `es-index-migrator/config.go:19-20`.
+
+**NITPICKS:** `searchShardTotal` returns 0 on malformed JSON → mislabeled "no index" WARN (unreachable today — `parseRooms` parsed the same bytes first). `TestSystemMessageTypesCoverEveryConstant` silently skips constants not defined by string literal (e.g. aliasing another const).
+
+**SAST:** `make sast-gosec` — clean, zero findings. `make sast-semgrep` — fails: semgrep not installed. `make sast-vuln` — fails: govulncheck egress blocked (`vuln.go.dev … Forbidden`). Both are blocking CI gates that could not be evaluated in this environment; run them in CI before merge.
