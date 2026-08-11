@@ -44,3 +44,10 @@ func TestBuildSelect(t *testing.T) {
 	_, _, err = buildSelect("t", map[string]any{"a": 1}, []string{"c*"})
 	assert.Error(t, err)
 }
+
+func TestBuildSelect_AllColumns(t *testing.T) {
+	q, args, err := buildSelect("messages_by_id", map[string]any{"message_id": "m1"}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM messages_by_id WHERE message_id = ?", q)
+	assert.Equal(t, []any{"m1"}, args)
+}

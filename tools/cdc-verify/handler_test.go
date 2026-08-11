@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,7 +34,7 @@ var testPairs = []TargetPair{
 func testServer(t *testing.T) (*httptest.Server, *hub) {
 	t.Helper()
 	h := newHub()
-	handler := newHandler(h, fakeState{}, fakeStats{}, 200, testPairs)
+	handler := newHandler(h, fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{})
 	mux := http.NewServeMux()
 	handler.registerRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -133,7 +135,7 @@ func (n *noFlushWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (n *noFlushWriter) WriteHeader(status int)      { n.status = status }
 
 func TestEventsHandler_StreamingUnsupported(t *testing.T) {
-	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200, testPairs)
+	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{})
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	w := &noFlushWriter{}
 	h.events(w, req)
@@ -161,4 +163,54 @@ func TestHub_RegisterUnregisterAndDrop(t *testing.T) {
 	}
 	h.unregister(id)
 	assert.Equal(t, 0, h.clientCount())
+}
+
+type fakeInspector struct{}
+
+func (fakeInspector) Inspect(_ context.Context, collection, docID string) (InspectResult, error) {
+	if collection == "unmapped_coll" {
+		return InspectResult{}, fmt.Errorf("%w: %q", errUnmapped, collection)
+	}
+	return InspectResult{
+		Collection: collection,
+		DocID:      docID,
+		Source:     map[string]any{"_id": docID, "name": "general"},
+		Targets: []InspectTarget{
+			{Alias: "rooms", Kind: "mongo", Dest: "rooms", Key: map[string]any{"_id": docID},
+				Doc: map[string]any{"_id": docID, "name": "general"}},
+		},
+	}, nil
+}
+
+func TestAPIInspect(t *testing.T) {
+	srv, _ := testServer(t)
+	resp, err := http.Get(srv.URL + "/api/inspect?collection=rocketchat_room&doc=r1")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var body InspectResult
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, "rocketchat_room", body.Collection)
+	assert.Equal(t, "r1", body.DocID)
+	assert.Equal(t, "general", body.Source["name"])
+	require.Len(t, body.Targets, 1)
+	assert.Equal(t, "rooms", body.Targets[0].Alias)
+}
+
+func TestAPIInspect_BadRequest(t *testing.T) {
+	srv, _ := testServer(t)
+	for _, q := range []string{"", "?collection=x", "?doc=y"} {
+		resp, err := http.Get(srv.URL + "/api/inspect" + q)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "query %q", q)
+	}
+}
+
+func TestAPIInspect_UnmappedIs404(t *testing.T) {
+	srv, _ := testServer(t)
+	resp, err := http.Get(srv.URL + "/api/inspect?collection=unmapped_coll&doc=x")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }

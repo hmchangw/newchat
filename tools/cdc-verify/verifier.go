@@ -634,3 +634,97 @@ func (v *verifier) Shutdown(ctx context.Context) {
 	case <-ctx.Done():
 	}
 }
+
+// InspectTarget is one destination's live view in an on-demand inspection.
+type InspectTarget struct {
+	Alias string         `json:"alias"`
+	Kind  string         `json:"kind"`
+	Dest  string         `json:"dest"`
+	Key   map[string]any `json:"key,omitempty"`
+	Doc   map[string]any `json:"doc,omitempty"`
+	Error string         `json:"error,omitempty"`
+}
+
+// InspectResult is the live source + destination state for one document,
+// fetched at request time — independent of any past check.
+type InspectResult struct {
+	Collection string          `json:"collection"`
+	DocID      string          `json:"docId"`
+	Source     map[string]any  `json:"source,omitempty"`
+	SourceErr  string          `json:"sourceError,omitempty"`
+	Targets    []InspectTarget `json:"targets"`
+}
+
+// errUnmapped marks an inspect request for a collection the mapping doesn't cover.
+var errUnmapped = errors.New("unmapped collection")
+
+// Inspect fetches the current source doc and every mapped destination record
+// for (collection, docID), live. A missing source falls back to a bare
+// {"_id": docID} view so _id-keyed targets stay inspectable after a delete.
+func (v *verifier) Inspect(ctx context.Context, collection, docID string) (InspectResult, error) {
+	cs, ok := v.compiled[collection]
+	if !ok {
+		return InspectResult{}, fmt.Errorf("%w: %q", errUnmapped, collection)
+	}
+	res := InspectResult{Collection: collection, DocID: docID}
+
+	srcDoc, err := v.source.FindByID(ctx, collection, docID)
+	switch {
+	case errors.Is(err, errNotFound):
+		res.SourceErr = "not-found"
+		srcDoc = map[string]any{"_id": docID}
+	case err != nil:
+		res.SourceErr = "lookup-error: " + err.Error()
+		srcDoc = map[string]any{"_id": docID}
+	default:
+		res.Source = srcDoc
+	}
+
+	states := make([]targetState, len(cs.aliases))
+	for i, alias := range cs.aliases {
+		states[i] = targetState{alias: alias}
+	}
+	resolved, resolveCauses := v.resolveAll(ctx, cs, srcDoc, states)
+	view := sourceView(srcDoc, resolved)
+
+	for _, alias := range cs.aliases {
+		t := cs.src.Targets[alias]
+		it := InspectTarget{Alias: alias, Kind: t.Kind}
+		if t.Kind == "cassandra" {
+			it.Dest = t.Table
+		} else {
+			it.Dest = t.Collection
+		}
+		if c := firstResolverCause(cs.deps[alias], resolveCauses); c != "" {
+			it.Error = c
+			res.Targets = append(res.Targets, it)
+			continue
+		}
+		key, err := buildKey(&t, view, v.reg)
+		if err != nil {
+			it.Error = "key-unresolvable: " + err.Error()
+			res.Targets = append(res.Targets, it)
+			continue
+		}
+		it.Key = key
+		// nil columns/fields => whole doc / SELECT * — the inspect view wants everything
+		var doc map[string]any
+		if t.Kind == "cassandra" {
+			doc, err = v.cass.SelectOne(ctx, t.Table, key, nil)
+		} else {
+			doc, err = v.target.FindOne(ctx, t.Collection, key, nil)
+		}
+		switch {
+		case errors.Is(err, errNotFound):
+			it.Error = "not-found"
+		case errors.Is(err, errAmbiguous):
+			it.Error = "ambiguous-key"
+		case err != nil:
+			it.Error = "lookup-error: " + err.Error()
+		default:
+			it.Doc = doc
+		}
+		res.Targets = append(res.Targets, it)
+	}
+	return res, nil
+}

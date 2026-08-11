@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,16 +18,47 @@ type statsProvider interface {
 	Last() StreamStats
 }
 
+// docInspector fetches the live source + destination view of one document —
+// satisfied by *verifier.
+type docInspector interface {
+	Inspect(ctx context.Context, collection, docID string) (InspectResult, error)
+}
+
 type handler struct {
 	hub       *hub
 	results   stateProvider
 	stats     statsProvider
 	recentCap int
 	pairs     []TargetPair
+	inspector docInspector
 }
 
-func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap int, pairs []TargetPair) *handler {
-	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap, pairs: pairs}
+func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap int,
+	pairs []TargetPair, inspector docInspector,
+) *handler {
+	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap,
+		pairs: pairs, inspector: inspector}
+}
+
+// inspect serves the live source/destination view for one document. Reads go
+// straight to the stores at request time — nothing is cached from past checks.
+func (h *handler) inspect(w http.ResponseWriter, r *http.Request) {
+	collection := r.URL.Query().Get("collection")
+	docID := r.URL.Query().Get("doc")
+	if collection == "" || docID == "" {
+		http.Error(w, "collection and doc query params are required", http.StatusBadRequest)
+		return
+	}
+	res, err := h.inspector.Inspect(r.Context(), collection, docID)
+	switch {
+	case errors.Is(err, errUnmapped):
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, res)
 }
 
 func (h *handler) healthz(w http.ResponseWriter, _ *http.Request) {

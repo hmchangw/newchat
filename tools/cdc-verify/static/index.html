@@ -167,6 +167,61 @@
   .diff-cell { font-family: inherit; white-space: pre-wrap; word-break: break-word; max-width: 220px; }
 
   .empty-row td { color: var(--muted); text-align: center; padding: 14px; }
+
+  tr.clickable { cursor: pointer; }
+
+  .modal { position: fixed; inset: 0; z-index: 100; }
+  .modal[hidden] { display: none; }
+  .modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.65); }
+  .modal-box {
+    position: relative;
+    margin: 5vh auto;
+    width: min(1200px, 94vw);
+    max-height: 88vh;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-title { font-weight: 700; }
+  .modal-live { color: var(--muted); font-size: 11px; }
+  .modal-head button {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  .modal-head button:hover { border-color: var(--success); }
+  #modal-close { margin-left: 0; }
+  #modal-refresh { margin-left: auto; }
+  .modal-body { padding: 14px; overflow: auto; }
+  .inspect-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+  .inspect-pane { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .inspect-pane h4 { font-size: 12px; margin-bottom: 6px; }
+  .inspect-pane h4 .arrow { color: var(--muted); padding: 0 5px; }
+  .inspect-pane .meta { color: var(--muted); font-size: 11px; margin-bottom: 6px; word-break: break-all; }
+  .inspect-pane pre {
+    font-family: inherit;
+    font-size: 11.5px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 55vh;
+    overflow: auto;
+  }
+  .inspect-err { color: var(--danger); font-size: 12px; }
+  .inspect-note { color: var(--muted); font-size: 11px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -245,6 +300,19 @@
     </table>
   </section>
 </main>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-backdrop" id="modal-backdrop"></div>
+  <div class="modal-box">
+    <div class="modal-head">
+      <span class="modal-title" id="modal-title">Inspect</span>
+      <span class="modal-live" id="modal-live"></span>
+      <button type="button" id="modal-refresh">refresh</button>
+      <button type="button" id="modal-close">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -400,9 +468,21 @@
     return stateBadge(r.state);
   }
 
+  // markInspectable makes a row click-to-inspect (skipped for unmapped
+  // collections — there is nothing to look up for them).
+  function markInspectable(tr, r) {
+    if (r.skipReason === 'unmapped') return tr;
+    tr.classList.add('clickable');
+    tr.dataset.collection = r.collection || '';
+    tr.dataset.doc = r.docId || '';
+    tr.title = 'Click to inspect live source + destination docs';
+    return tr;
+  }
+
   function buildFeedRow(r) {
     var tr = document.createElement('tr');
     tr.dataset.id = r.id;
+    markInspectable(tr, r);
     tr.appendChild(textEl('td', fmtTime(r.startedAtMs)));
     tr.appendChild(textEl('td', r.collection || ''));
     tr.appendChild(textEl('td', r.op || ''));
@@ -517,6 +597,7 @@
   function buildPairRow(r, target) {
     var tr = document.createElement('tr');
     tr.dataset.id = r.id;
+    markInspectable(tr, r);
     tr.appendChild(textEl('td', fmtTime(r.startedAtMs)));
     tr.appendChild(textEl('td', r.op || ''));
     tr.appendChild(textEl('td', r.docId || ''));
@@ -610,6 +691,7 @@
   function buildFailureRow(r) {
     var tr = document.createElement('tr');
     tr.dataset.id = r.id;
+    markInspectable(tr, r);
     tr.appendChild(textEl('td', fmtTime(r.startedAtMs)));
     tr.appendChild(textEl('td', r.collection || ''));
     tr.appendChild(textEl('td', r.op || ''));
@@ -702,7 +784,103 @@
     renderCounters();
   }
 
+  // ── inspect modal: live source + destination docs for one row ──
+  var currentInspect = null; // {collection, doc}
+
+  function prettyJSON(obj) {
+    try { return JSON.stringify(obj, null, 2); } catch (e) { return String(obj); }
+  }
+
+  function inspectPane(title, arrowTitle, meta, doc, errText) {
+    var pane = document.createElement('div');
+    pane.className = 'inspect-pane';
+    var h4 = document.createElement('h4');
+    h4.appendChild(textEl('span', title));
+    if (arrowTitle) {
+      h4.appendChild(textEl('span', '→', 'arrow'));
+      h4.appendChild(textEl('span', arrowTitle));
+    }
+    pane.appendChild(h4);
+    if (meta) pane.appendChild(textEl('div', meta, 'meta'));
+    if (errText) pane.appendChild(textEl('div', errText, 'inspect-err'));
+    else pane.appendChild(textEl('pre', prettyJSON(doc)));
+    return pane;
+  }
+
+  function renderInspect(data) {
+    var body = document.getElementById('modal-body');
+    body.replaceChildren();
+    var grid = document.createElement('div');
+    grid.className = 'inspect-grid';
+
+    grid.appendChild(inspectPane(
+      'Source: ' + data.collection, null, 'doc: ' + data.docId,
+      data.source, data.sourceError ? 'source ' + data.sourceError : null));
+
+    var right = document.createElement('div');
+    (data.targets || []).forEach(function (t, i) {
+      var meta = t.kind + (t.key ? ' · key ' + prettyJSON(t.key).replace(/\n\s*/g, ' ') : '');
+      var pane = inspectPane(t.alias, t.dest, meta, t.doc, t.error || null);
+      if (i > 0) pane.style.marginTop = '12px';
+      right.appendChild(pane);
+    });
+    if (!(data.targets || []).length) right.appendChild(textEl('div', 'No targets mapped.', 'inspect-note'));
+    grid.appendChild(right);
+    body.appendChild(grid);
+    document.getElementById('modal-live').textContent = 'fetched live at ' + fmtTime(Date.now());
+  }
+
+  function loadInspect() {
+    if (!currentInspect) return;
+    var body = document.getElementById('modal-body');
+    body.replaceChildren(textEl('div', 'Loading live docs…', 'inspect-note'));
+    fetch('/api/inspect?collection=' + encodeURIComponent(currentInspect.collection) +
+          '&doc=' + encodeURIComponent(currentInspect.doc))
+      .then(function (resp) {
+        if (!resp.ok) return resp.text().then(function (t) { throw new Error(t || resp.status); });
+        return resp.json();
+      })
+      .then(renderInspect)
+      .catch(function (err) {
+        body.replaceChildren(textEl('div', 'Inspect failed: ' + err.message, 'inspect-err'));
+      });
+  }
+
+  function openInspect(collection, doc) {
+    currentInspect = { collection: collection, doc: doc };
+    document.getElementById('modal-title').textContent = collection + ' / ' + doc;
+    document.getElementById('modal-live').textContent = '';
+    document.getElementById('modal').hidden = false;
+    loadInspect();
+  }
+
+  function closeInspect() {
+    document.getElementById('modal').hidden = true;
+    currentInspect = null;
+  }
+
+  document.getElementById('modal-close').addEventListener('click', closeInspect);
+  document.getElementById('modal-backdrop').addEventListener('click', closeInspect);
+  document.getElementById('modal-refresh').addEventListener('click', loadInspect);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeInspect();
+  });
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('details') || e.target.closest('a') || e.target.closest('.modal')) return;
+    var tr = e.target.closest('tr.clickable');
+    if (tr && tr.dataset.collection && tr.dataset.doc) {
+      openInspect(tr.dataset.collection, tr.dataset.doc);
+    }
+  });
+
   // ── boot ──
+  // ?inspect=collection:docId deep-links straight into the popup.
+  var inspectParam = new URLSearchParams(window.location.search).get('inspect');
+  if (inspectParam && inspectParam.indexOf(':') > 0) {
+    var sep = inspectParam.indexOf(':');
+    openInspect(inspectParam.slice(0, sep), inspectParam.slice(sep + 1));
+  }
+
   fetch('/api/state')
     .then(function (resp) { return resp.json(); })
     .then(applyInitialState)

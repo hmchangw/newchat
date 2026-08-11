@@ -17,15 +17,20 @@ func newCassStore(session *gocql.Session) *cassStore { return &cassStore{session
 
 var cqlIdent = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
-// buildSelect assembles a point-select; identifiers are re-checked here, values always bound.
+// buildSelect assembles a point-select; identifiers are re-checked here, values
+// always bound. Empty cols selects the whole row (live-inspect view).
 func buildSelect(table string, key map[string]any, cols []string) (string, []any, error) {
 	if !cqlIdent.MatchString(table) {
 		return "", nil, fmt.Errorf("invalid table identifier %q", table)
 	}
-	for _, c := range cols {
-		if !cqlIdent.MatchString(c) {
-			return "", nil, fmt.Errorf("invalid column identifier %q", c)
+	colList := "*"
+	if len(cols) > 0 {
+		for _, c := range cols {
+			if !cqlIdent.MatchString(c) {
+				return "", nil, fmt.Errorf("invalid column identifier %q", c)
+			}
 		}
+		colList = strings.Join(cols, ", ")
 	}
 	var conds []string
 	var args []any
@@ -37,7 +42,7 @@ func buildSelect(table string, key map[string]any, cols []string) (string, []any
 		args = append(args, key[k])
 	}
 	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s", //nolint:gocritic
-		strings.Join(cols, ", "), table, strings.Join(conds, " AND "))
+		colList, table, strings.Join(conds, " AND "))
 	return q, args, nil
 }
 

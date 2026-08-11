@@ -627,3 +627,71 @@ func TestVerifier_VerbatimIgnoresResolverOverlay(t *testing.T) {
 		}
 	})
 }
+
+// Inspect fetches live source + dest docs on demand, independent of any check.
+func TestVerifier_Inspect(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	src := NewMockSourceStore(ctrl)
+	tgt := NewMockTargetStore(ctrl)
+	cass := NewMockCassStore(ctrl)
+	results := newResultsStore(10, 10, nil)
+	v := newVerifier(verifierMapping(), src, tgt, cass,
+		newTransformRegistry(msgbucket.New(72*time.Hour)), results,
+		verifierConfig{Poll: time.Second, Timeout: time.Minute, MaxChecks: 4, SamplePercent: 100})
+
+	doc := srcDoc()
+	src.EXPECT().FindByID(gomock.Any(), "rocketchat_message", "m1").Return(doc, nil)
+	cass.EXPECT().SelectOne(gomock.Any(), "messages_by_id", map[string]any{"message_id": "m1"}, nil).
+		Return(map[string]any{"message_id": "m1", "body": "hi"}, nil)
+	tgt.EXPECT().FindOne(gomock.Any(), "rooms", map[string]any{"_id": "r1"}, nil).
+		Return(nil, errNotFound)
+
+	got, err := v.Inspect(context.Background(), "rocketchat_message", "m1")
+	require.NoError(t, err)
+	assert.Equal(t, doc, got.Source)
+	assert.Empty(t, got.SourceErr)
+	require.Len(t, got.Targets, 2) // sorted: byId, room
+	assert.Equal(t, "byId", got.Targets[0].Alias)
+	assert.Equal(t, "cassandra", got.Targets[0].Kind)
+	assert.Equal(t, "messages_by_id", got.Targets[0].Dest)
+	assert.Equal(t, "hi", got.Targets[0].Doc["body"])
+	assert.Equal(t, "room", got.Targets[1].Alias)
+	assert.Equal(t, "not-found", got.Targets[1].Error)
+	assert.Nil(t, got.Targets[1].Doc)
+}
+
+func TestVerifier_Inspect_SourceGone(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	src := NewMockSourceStore(ctrl)
+	tgt := NewMockTargetStore(ctrl)
+	cass := NewMockCassStore(ctrl)
+	results := newResultsStore(10, 10, nil)
+	v := newVerifier(verifierMapping(), src, tgt, cass,
+		newTransformRegistry(msgbucket.New(72*time.Hour)), results,
+		verifierConfig{Poll: time.Second, Timeout: time.Minute, MaxChecks: 4, SamplePercent: 100})
+
+	src.EXPECT().FindByID(gomock.Any(), "rocketchat_message", "gone").Return(nil, errNotFound)
+	// _id-keyed target still inspectable via the documentKey fallback view
+	cass.EXPECT().SelectOne(gomock.Any(), "messages_by_id", map[string]any{"message_id": "gone"}, nil).
+		Return(map[string]any{"message_id": "gone"}, nil)
+	// room target keys on rid, unresolvable without the source doc
+
+	got, err := v.Inspect(context.Background(), "rocketchat_message", "gone")
+	require.NoError(t, err)
+	assert.Nil(t, got.Source)
+	assert.Equal(t, "not-found", got.SourceErr)
+	require.Len(t, got.Targets, 2)
+	assert.NotNil(t, got.Targets[0].Doc)
+	assert.Contains(t, got.Targets[1].Error, "key-unresolvable")
+}
+
+func TestVerifier_Inspect_UnmappedCollection(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	results := newResultsStore(10, 10, nil)
+	v := newVerifier(verifierMapping(), NewMockSourceStore(ctrl), NewMockTargetStore(ctrl), NewMockCassStore(ctrl),
+		newTransformRegistry(msgbucket.New(72*time.Hour)), results,
+		verifierConfig{Poll: time.Second, Timeout: time.Minute, MaxChecks: 4, SamplePercent: 100})
+	_, err := v.Inspect(context.Background(), "nope", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unmapped")
+}
