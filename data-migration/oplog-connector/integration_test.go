@@ -21,6 +21,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -144,7 +145,7 @@ func TestOplogConnector_ChangeStreamEndToEnd(t *testing.T) {
 
 	// Open the change stream BEFORE mutating so "from now" captures everything.
 	// No federation filter here — this test exercises the dumb-pump pass-through of all ops.
-	src, err := openMongoChangeSource(ctx, source, startPoint{Kind: startFromNow}, false)
+	src, err := openMongoChangeSource(ctx, source, startPoint{Kind: startFromNow}, false, false)
 	require.NoError(t, err)
 
 	pub := &fakePublisher{}
@@ -213,6 +214,58 @@ func TestOplogConnector_ChangeStreamEndToEnd(t *testing.T) {
 	assert.NotEmpty(t, saved.ids())
 }
 
+// TestOplogConnector_DRMode_UpdateLookupPostImage proves the DR lane is self-contained: with
+// updateLookup on and subject.DROplog injected, an update publishes to chat.dr.oplog.> and carries
+// the full post-image inline — exactly what the dr-oplog-worker applier needs (it never reads back
+// to the origin Mongo). Contrast the migration path, where an update carries only the delta.
+func TestOplogConnector_DRMode_UpdateLookupPostImage(t *testing.T) {
+	const coll = "rooms"
+	client, _ := startReplicaSet(t)
+	source := createSourceCollection(t, client.Database("chat"), coll)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// DR lane: updateLookup ON, no federation filter.
+	src, err := openMongoChangeSource(ctx, source, startPoint{Kind: startFromNow}, false, true)
+	require.NoError(t, err)
+
+	pub := &fakePublisher{}
+	store, _ := captureStore(t)
+	w := newWatcher("site1", coll, src, pub, store, 1, time.Hour)
+	w.subjectFor = subject.DROplog // DR lane
+	w.initialBackoff = time.Millisecond
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.run(runCtx) }()
+
+	_, err = source.InsertOne(ctx, bson.M{"_id": "r1", "name": "general", "crossSite": true})
+	require.NoError(t, err)
+	_, err = source.UpdateOne(ctx, bson.M{"_id": "r1"}, bson.M{"$set": bson.M{"name": "renamed"}})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return len(pub.snapshot()) >= 2 }, 30*time.Second, 50*time.Millisecond,
+		"expected insert+update envelopes")
+
+	runCancel()
+	require.NoError(t, <-runErr, "watcher exits cleanly on ctx cancel")
+
+	msgs := pub.snapshot()
+	require.GreaterOrEqual(t, len(msgs), 2)
+	assert.Equal(t, "chat.dr.oplog.site1.rooms.insert", msgs[0].Subject)
+	assert.Equal(t, "chat.dr.oplog.site1.rooms.update", msgs[1].Subject)
+
+	var updateEvt struct {
+		Op           string          `json:"op"`
+		FullDocument json.RawMessage `json:"fullDocument"`
+	}
+	require.NoError(t, json.Unmarshal(msgs[1].Data, &updateEvt))
+	assert.Equal(t, "update", updateEvt.Op)
+	require.NotEmpty(t, updateEvt.FullDocument, "DR update carries the looked-up post-image (self-contained)")
+	assert.Contains(t, string(updateEvt.FullDocument), "renamed", "post-image reflects the update")
+}
+
 func TestOplogConnector_FederationFilterDropsForeignInserts(t *testing.T) {
 	const coll = "rocketchat_message"
 	client, _ := startReplicaSet(t)
@@ -222,7 +275,7 @@ func TestOplogConnector_FederationFilterDropsForeignInserts(t *testing.T) {
 	defer cancel()
 
 	// Federation filter ON (this collection is the message collection in the test).
-	src, err := openMongoChangeSource(ctx, source, startPoint{Kind: startFromNow}, true)
+	src, err := openMongoChangeSource(ctx, source, startPoint{Kind: startFromNow}, true, false)
 	require.NoError(t, err)
 
 	pub := &fakePublisher{}

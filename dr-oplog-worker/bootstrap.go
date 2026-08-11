@@ -18,7 +18,7 @@ type streamManager interface {
 }
 
 // bootstrapStreams is a no-op in production (streams are ops/IaC-owned). When Enabled
-// (dev/integration) it creates only the DR_OPLOG_{siteID} schema (Name + Subjects); the
+// (dev/integration) it creates only the DR-OPLOG-{siteID} schema (Name + Subjects); the
 // cross-gateway routing that lands a remote origin site's publish here is an ops/IaC concern.
 func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
 	if !enabled {
@@ -29,7 +29,7 @@ func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enab
 		Name:     cfg.Name,
 		Subjects: cfg.Subjects,
 	}); err != nil {
-		return fmt.Errorf("create DR_OPLOG stream: %w", err)
+		return fmt.Errorf("create DR-OPLOG stream: %w", err)
 	}
 	return nil
 }

@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 func mustRaw(t *testing.T, m bson.M) bson.Raw {
@@ -50,7 +52,7 @@ func TestBuildEnvelope_OpsAndSubjects(t *testing.T) {
 				ev.UpdateDescription = mustRaw(t, bson.M{"updatedFields": bson.M{"msg": "edited"}})
 			}
 
-			subj, msgID, evt := buildEnvelope(&ev, site, nowMs)
+			subj, msgID, evt := buildEnvelope(&ev, site, nowMs, subject.MigrationOplog)
 
 			assert.Equal(t, tc.wantSubject, subj)
 			assert.Equal(t, ev.EventID, msgID, "msgID must equal eventID")
@@ -85,6 +87,24 @@ func TestBuildEnvelope_OpsAndSubjects(t *testing.T) {
 	}
 }
 
+// The DR lane injects subject.DROplog, so envelopes publish onto the chat.dr.oplog.> subjects the
+// dr-oplog-worker consumes — same envelope shape, different lane.
+func TestBuildEnvelope_DRSubjectLane(t *testing.T) {
+	ev := changeEvent{
+		EventID:      "EVT-dr",
+		Op:           "update",
+		DB:           "chat",
+		Collection:   "rooms",
+		DocumentKey:  mustRaw(t, bson.M{"_id": "r1"}),
+		FullDocument: mustRaw(t, bson.M{"_id": "r1", "name": "general"}),
+	}
+	subj, _, evt := buildEnvelope(&ev, "site1", 1, subject.DROplog)
+	assert.Equal(t, "chat.dr.oplog.site1.rooms.update", subj)
+	// updateLookup populates the post-image on updates in the DR lane.
+	require.NotNil(t, evt.FullDocument)
+	assert.True(t, json.Valid(evt.FullDocument))
+}
+
 func TestBuildEnvelope_DegradesOnFieldEncodeFailure(t *testing.T) {
 	// Lock the fixture: this raw declares length 5 but its terminator byte is
 	// 0x01 (not 0x00), so MarshalExtJSON rejects it.
@@ -101,7 +121,7 @@ func TestBuildEnvelope_DegradesOnFieldEncodeFailure(t *testing.T) {
 		FullDocument: bad, // forces the encode failure
 	}
 
-	_, msgID, evt := buildEnvelope(&ev, "site1", 1)
+	_, msgID, evt := buildEnvelope(&ev, "site1", 1, subject.MigrationOplog)
 
 	assert.True(t, evt.Degraded, "a field that fails to encode degrades the event")
 	assert.NotEmpty(t, evt.DegradedReason, "degraded events carry a reason")
@@ -126,7 +146,7 @@ func TestBuildEnvelope_OpaqueDocumentContents(t *testing.T) {
 		DocumentKey:  mustRaw(t, bson.M{"_id": "u1"}),
 		FullDocument: mustRaw(t, bson.M{"_id": "u1", "name": "alice", "active": true}),
 	}
-	_, _, evt := buildEnvelope(&ev, "site1", 1)
+	_, _, evt := buildEnvelope(&ev, "site1", 1, subject.MigrationOplog)
 
 	// The connector does not interpret the doc; it round-trips as JSON.
 	var decoded map[string]any

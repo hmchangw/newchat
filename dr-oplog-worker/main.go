@@ -171,7 +171,7 @@ func processOne(ctx context.Context, h *handler, m jetstream.Msg, mtr *metrics, 
 	}
 }
 
-// streamWaitTimeout bounds how long startup waits for the DR_OPLOG stream to exist.
+// streamWaitTimeout bounds how long startup waits for the DR-OPLOG stream to exist.
 const streamWaitTimeout = 60 * time.Second
 
 //nolint:gocritic // hugeParam: cfg passed by value to match jetstream.CreateOrUpdateConsumer's signature.
@@ -185,7 +185,7 @@ func createConsumerWithRetry(ctx context.Context, js o11ynats.JetStream, streamN
 		if !errors.Is(err, jetstream.ErrStreamNotFound) || time.Now().After(deadline) {
 			return nil, err
 		}
-		slog.Warn("waiting for DR_OPLOG stream to exist", "stream", streamName)
+		slog.Warn("waiting for DR-OPLOG stream to exist", "stream", streamName)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

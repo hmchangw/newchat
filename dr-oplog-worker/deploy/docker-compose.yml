@@ -2,7 +2,7 @@ name: dr-oplog-worker
 
 # Local dev only. Stands up a JetStream-enabled NATS, a backup (target) Mongo, and the DR applier.
 # The DR applier is self-contained: the producer-side connector uses updateLookup, so events carry
-# the full post-image and this service needs NO source Mongo. In prod the DR_OPLOG stream and the
+# the full post-image and this service needs NO source Mongo. In prod the DR-OPLOG stream and the
 # cross-gateway routing that lands a remote origin site's publish here are ops/IaC-owned; this
 # compose sets BOOTSTRAP_STREAMS=true only to stand up a fresh NATS locally.
 

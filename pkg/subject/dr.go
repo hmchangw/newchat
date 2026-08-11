@@ -10,7 +10,7 @@ func DROplog(siteID, collection, op string) string {
 	return fmt.Sprintf("chat.dr.oplog.%s.%s.%s", siteID, collection, op)
 }
 
-// DROplogWildcard matches every DR oplog event for an origin site — the DR_OPLOG_{siteID}
+// DROplogWildcard matches every DR oplog event for an origin site — the DR-OPLOG-{siteID}
 // stream's subjects, and the pattern the backup sources over the supercluster gateway.
 func DROplogWildcard(siteID string) string {
 	return fmt.Sprintf("chat.dr.oplog.%s.>", siteID)

@@ -42,5 +42,5 @@ func TestBootstrapStreams_Error_Wrapped(t *testing.T) {
 	fsm := &fakeStreamManager{err: errors.New("nats down")}
 	err := bootstrapStreams(context.Background(), fsm, "site1", true)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "DR_OPLOG")
+	assert.Contains(t, err.Error(), "DR-OPLOG")
 }

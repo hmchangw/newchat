@@ -32,6 +32,27 @@ func TestParseConfig_DefaultsAndSlices(t *testing.T) {
 	assert.Equal(t, ":9090", cfg.HealthAddr)
 	assert.Equal(t, "now", cfg.StartMode)
 	assert.False(t, cfg.Bootstrap.Enabled)
+	assert.Equal(t, "migration", cfg.Mode)
+	assert.False(t, cfg.isDR())
+}
+
+func TestParseConfig_DRMode(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("MODE", "dr")
+	t.Setenv("WATCH_COLLECTIONS", "rooms,subscriptions,room_members")
+	t.Setenv("SOURCE_DB", "chat")
+	cfg, err := parseConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "dr", cfg.Mode)
+	assert.True(t, cfg.isDR())
+}
+
+func TestParseConfig_RejectsInvalidMode(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("MODE", "banana")
+	_, err := parseConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MODE")
 }
 
 func TestParseConfig_RejectsDuplicateCollections(t *testing.T) {

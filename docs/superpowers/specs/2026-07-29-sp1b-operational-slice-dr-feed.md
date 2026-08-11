@@ -185,9 +185,20 @@ the replay, conflict policy, and cutover.
   (build-tagged `integration_test.go`, incl. a `CrossSite` round-trip) — they need
   Docker/testcontainers and run in CI, clearing the 80% floor there.
 
-**Next increment (same SP1b PR):** producer-side `updateLookup` — a DR-configured
-connector (or an opt-in `updateLookup` option on the existing change source,
-defaulted off to preserve migration behavior) so `update` events carry the inline
-post-image the applier's self-contained contract (§5) requires end-to-end.
+**Producer side (now built)** — the DR feed is live end-to-end. Rather than fork
+the connector's tested CDC engine (checkpointing, watchers, backoff), the
+existing `oplog-connector` gained a config-gated **`MODE=dr`** lane (default
+`migration`, byte-identical to before):
+- opens the change stream with `fullDocument: updateLookup`, so `update` events
+  carry the inline post-image the applier's self-contained contract (§5) needs;
+- injects `subject.DROplog` so envelopes publish onto `chat.dr.oplog.>`;
+- bootstraps / verifies `DR_OPLOG_{siteID}` instead of `MIGRATION_OPLOG`.
+- A DR-mode integration test asserts an `update` publishes to the DR lane
+  carrying the looked-up post-image.
+- DR deployment config: `MODE=dr`, `SOURCE_DB=chat`,
+  `WATCH_COLLECTIONS=rooms,subscriptions,room_members,thread_rooms,thread_subscriptions,users`.
+  This differs from the applier's new-service decision for a principled reason:
+  here extending is *simpler* and preserves migration behavior; there a new
+  service was simpler and the migration applier's source-lookup was wrong for DR.
 
 **Deferred to their own PRs:** SP1a (messages), multi-site fan-out, SP2/3/4/5/6.
