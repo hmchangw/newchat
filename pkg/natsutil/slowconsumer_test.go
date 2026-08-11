@@ -21,7 +21,10 @@ func TestSlowConsumerFields_RealSubscription(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	got := fieldMap(t, slowConsumerFields(sub))
+	dropped, ok := subDropped(sub)
+	require.True(t, ok, "a live subscription must report its drop count")
+
+	got := fieldMap(t, slowConsumerFields(sub, dropped, ok))
 
 	require.Equal(t, "slow.subject", got["subject"])
 	require.Equal(t, "slow-queue", got["queue"])
@@ -34,11 +37,16 @@ func TestSlowConsumerFields_RealSubscription(t *testing.T) {
 
 func TestSlowConsumerFields_NilSubscription(t *testing.T) {
 	require.NotPanics(t, func() {
-		got := fieldMap(t, slowConsumerFields(nil))
+		dropped, ok := subDropped(nil)
+		require.False(t, ok)
+		got := fieldMap(t, slowConsumerFields(nil, dropped, ok))
 		require.Equal(t, "unknown", got["subject"])
 	})
 }
 
+// A closed subscription must omit the counters it cannot read rather than
+// reporting a bogus zero — an ERROR line saying "messages dropped" with a
+// dropped:0 field would be worse than no field at all.
 func TestSlowConsumerFields_ClosedSubscription(t *testing.T) {
 	nc := newLocalConn(t)
 	sub, err := nc.Subscribe("closed.subject", func(*nats.Msg) {})
@@ -46,9 +54,49 @@ func TestSlowConsumerFields_ClosedSubscription(t *testing.T) {
 	require.NoError(t, sub.Unsubscribe())
 
 	require.NotPanics(t, func() {
-		got := fieldMap(t, slowConsumerFields(sub))
+		dropped, ok := subDropped(sub)
+		require.False(t, ok, "a closed subscription cannot report a drop count")
+
+		got := fieldMap(t, slowConsumerFields(sub, dropped, ok))
 		require.Equal(t, "closed.subject", got["subject"])
+		require.NotContains(t, got, "dropped")
+		require.NotContains(t, got, "pending_msgs")
+		require.NotContains(t, got, "limit_msgs")
 	})
+}
+
+// logSlowConsumer is the only function connect.go's ErrorHandler calls, so the
+// level rule and the field wiring must be verified on that path and not just on
+// the helpers beneath it.
+func TestLogSlowConsumer_LiveSubscriptionWarnsWithNoDrops(t *testing.T) {
+	nc := newLocalConn(t)
+	sub, err := nc.QueueSubscribe("live.subject", "live-queue", func(*nats.Msg) {})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	require.NotPanics(t, func() { logSlowConsumer(log, sub) })
+
+	var rec map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
+	require.Equal(t, "WARN", rec["level"], "a fresh subscription has dropped nothing yet")
+	require.Equal(t, "live.subject", rec["subject"])
+	require.Equal(t, "live-queue", rec["queue"])
+	require.Equal(t, float64(0), rec["dropped"])
+}
+
+func TestLogSlowConsumer_NilSubscriptionDoesNotPanic(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	require.NotPanics(t, func() { logSlowConsumer(log, nil) })
+
+	var rec map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
+	require.Equal(t, "WARN", rec["level"])
+	require.Equal(t, "unknown", rec["subject"])
 }
 
 func TestLogSlowConsumer_LevelSelection(t *testing.T) {
