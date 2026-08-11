@@ -153,12 +153,41 @@ the replay, conflict policy, and cutover.
   `CrossSite=true` room asserting the flag survives round-trip.
 - **Coverage** — ≥80% floor; ≥90% for the applier/handler business logic.
 
-## 10. Open sub-decisions (call out in the plan)
+## 10. Sub-decisions — resolved during implementation
 
-1. **Deploy shape** — MODE-configured reuse of the existing
-   `oplog-connector` / `oplog-direct-transfer` binaries (matching the repo's
-   unified-worker convention) vs thin new DR services. *Leaning: reuse.*
-2. **`DR_OPLOG_{siteID}` ownership** — new per-site stream bootstrapped via the
-   standard `BOOTSTRAP_STREAMS` convention; which service owns creation.
-3. **Backup namespacing** — separate Mongo *database* per `siteID` vs a
-   `siteID`-prefixed collection scheme (feeds the §7 origin hook).
+1. **Deploy shape** — a thin new **`dr-oplog-worker`** service (repo-root, flat
+   layout) that *reuses the patterns/packages* of `oplog-direct-transfer`
+   (envelope, disposition helpers in `pkg/migration`, verbatim `targetStore`)
+   rather than config-reusing the migration binary. Rationale: the migration
+   connector is coupled to legacy semantics (`rocketchat*` defaults, a `migration`
+   checkpoint DB, a `federation.origin` filter) and — decisively — opens its
+   change stream with *no* `updateLookup`, so config-reuse could not give a
+   self-contained feed (§5). The applier is meaningfully *simpler* than the
+   migration transfer: no source-Mongo connection, no lookups map.
+2. **`DR_OPLOG_{siteID}` ownership** — new per-site stream in `pkg/stream.DROplog`
+   / `pkg/subject.DROplog`, bootstrapped by `dr-oplog-worker` via the standard
+   `BOOTSTRAP_STREAMS` convention (no-op in prod; ops/IaC owns the real stream +
+   gateway routing).
+3. **Backup namespacing** — **separate Mongo database per origin site**
+   (`TARGET_DB_PREFIX` + `siteID`, default `chat_dr_{siteID}`). A whole DB per
+   site gives the cleanest isolation and the cleanest §7 failback boundary.
+
+## 11. Implementation status
+
+**Built and unit-tested** (this PR — the backup-side heart):
+- `pkg/subject.DROplog` / `DROplogWildcard`, `pkg/stream.DROplog` (+ tests).
+- `dr-oplog-worker` service: config, self-contained applier handler
+  (insert/replace/update via inline `fullDocument`; delete; explicit-`null`
+  post-image and missing post-image both poison; native `_id` types), verbatim
+  `mongoTargetStore`, `DR_OPLOG` bootstrap, metrics, consume/disposition wiring,
+  `deploy/` (Dockerfile, docker-compose, azure-pipelines). Business-logic units at
+  ~100%; `main`/`store_mongo`/`createConsumerWithRetry` are integration-covered
+  (build-tagged `integration_test.go`, incl. a `CrossSite` round-trip) — they need
+  Docker/testcontainers and run in CI, clearing the 80% floor there.
+
+**Next increment (same SP1b PR):** producer-side `updateLookup` — a DR-configured
+connector (or an opt-in `updateLookup` option on the existing change source,
+defaulted off to preserve migration behavior) so `update` events carry the inline
+post-image the applier's self-contained contract (§5) requires end-to-end.
+
+**Deferred to their own PRs:** SP1a (messages), multi-site fan-out, SP2/3/4/5/6.

@@ -81,6 +81,16 @@ func Outbox(siteID string) Config {
 	}
 }
 
+// DROplog returns DR-OPLOG-{siteID}: disaster-recovery CDC events shipped from an origin site's
+// operational Mongo to the shared backup. The backup sources this per origin site; ops/IaC owns
+// the cross-gateway routing that lands a remote publish here (not any service's bootstrap).
+func DROplog(siteID string) Config {
+	return Config{
+		Name:     fmt.Sprintf("DR-OPLOG-%s", siteID),
+		Subjects: []string{subject.DROplogWildcard(siteID)},
+	}
+}
+
 // MigrationOplog returns MIGRATION-OPLOG-{siteID}: raw CDC events from legacy source Mongo.
 func MigrationOplog(siteID string) Config {
 	return Config{
