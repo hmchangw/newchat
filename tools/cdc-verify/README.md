@@ -111,7 +111,9 @@ Two tabs, updated live over Server-Sent Events (`GET /api/events`):
 **Click any verification, feed, or failure row** to open a popup with the
 document's **live** source doc and every mapped destination doc/row —
 fetched from the stores at click time (`GET /api/inspect?collection=X&doc=Y`),
-independent of when the verification ran. The popup has a refresh button;
+independent of when the verification ran. Fields the mapping touches are
+highlighted in both panes: green for compared/mapped fields, amber for
+lookup-key fields. The popup has a refresh button;
 `?inspect=collection:docId` deep-links straight into it. After a source
 delete, `_id`-keyed destinations stay inspectable (the source pane shows
 `not-found`).

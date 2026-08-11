@@ -650,14 +650,20 @@ func TestVerifier_Inspect(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, doc, got.Source)
 	assert.Empty(t, got.SourceErr)
+	assert.Equal(t, []string{"_id", "msg", "rid"}, got.SourceFields)
 	require.Len(t, got.Targets, 2) // sorted: byId, room
 	assert.Equal(t, "byId", got.Targets[0].Alias)
 	assert.Equal(t, "cassandra", got.Targets[0].Kind)
 	assert.Equal(t, "messages_by_id", got.Targets[0].Dest)
 	assert.Equal(t, "hi", got.Targets[0].Doc["body"])
+	assert.Equal(t, []string{"message_id"}, got.Targets[0].KeyFields)
+	assert.Equal(t, []string{"body"}, got.Targets[0].CompareFields)
+	assert.False(t, got.Targets[0].Verbatim)
 	assert.Equal(t, "room", got.Targets[1].Alias)
 	assert.Equal(t, "not-found", got.Targets[1].Error)
 	assert.Nil(t, got.Targets[1].Doc)
+	assert.Equal(t, []string{"_id"}, got.Targets[1].KeyFields)
+	assert.Equal(t, []string{"_id"}, got.Targets[1].CompareFields)
 }
 
 func TestVerifier_Inspect_SourceGone(t *testing.T) {

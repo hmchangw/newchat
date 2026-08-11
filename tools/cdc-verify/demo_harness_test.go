@@ -63,15 +63,19 @@ func (demoInspector) Inspect(_ context.Context, collection, docID string) (Inspe
 			"_id": docID, "rid": "room-77", "msg": "deploy is green, shipping at 14:00",
 			"ts": "2026-08-11T06:02:11Z", "u": map[string]any{"_id": "u_331", "username": "rajeev"},
 		},
+		SourceFields: []string{"_id", "msg", "rid", "ts", "u._id"},
 		Targets: []InspectTarget{
 			{Alias: "msgById", Kind: "cassandra", Dest: "messages_by_id",
-				Key: map[string]any{"message_id": docID},
+				Key:           map[string]any{"message_id": docID},
+				KeyFields:     []string{"message_id"},
+				CompareFields: []string{"created_at", "msg", "sender.account"},
 				Doc: map[string]any{"message_id": docID, "room_id": "room-77",
 					"msg": "deploy is green, shipping at 14:00", "created_at": 1786428131000,
 					"sender": map[string]any{"account": "rajeev"}}},
 			{Alias: "msgByRoom", Kind: "cassandra", Dest: "messages_by_room",
-				Key:   map[string]any{"room_id": "room-77", "bucket": 1786320000000, "created_at": 1786428131000, "message_id": docID},
-				Error: "not-found"},
+				Key:       map[string]any{"room_id": "room-77", "bucket": 1786320000000, "created_at": 1786428131000, "message_id": docID},
+				KeyFields: []string{"bucket", "created_at", "message_id", "room_id"},
+				Error:     "not-found"},
 		},
 	}, nil
 }

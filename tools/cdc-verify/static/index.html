@@ -277,6 +277,10 @@
   }
   .inspect-err { color: var(--danger); font-size: 12px; }
   .inspect-note { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .hl-map { background: rgba(63,185,80,0.18); border-radius: 3px; }
+  .hl-key { background: rgba(210,153,34,0.18); border-radius: 3px; }
+  .hl-legend { color: var(--muted); font-size: 11px; margin-bottom: 8px; }
+  .hl-legend .hl-map, .hl-legend .hl-key { padding: 0 5px; }
 </style>
 </head>
 <body>
@@ -932,7 +936,46 @@
     try { return JSON.stringify(obj, null, 2); } catch (e) { return String(obj); }
   }
 
-  function inspectPane(title, arrowTitle, meta, doc, errText) {
+  // jsonPre renders obj as pretty JSON, one span per line, so lines whose
+  // dot-path appears in hl get a highlight class. Arrays inherit their
+  // parent's path (the mapping has no array indexing).
+  function jsonPre(obj, hl) {
+    var pre = document.createElement('pre');
+    function line(text, path) {
+      pre.appendChild(textEl('span', text + '\n', (hl && path && hl[path]) || undefined));
+    }
+    function walk(val, path, indent, prefix, suffix) {
+      var pad = new Array(indent + 1).join(' ');
+      if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+        line(pad + prefix + '{', path);
+        var keys = Object.keys(val).sort();
+        keys.forEach(function (k, i) {
+          walk(val[k], path ? path + '.' + k : k, indent + 2,
+            JSON.stringify(k) + ': ', i < keys.length - 1 ? ',' : '');
+        });
+        line(pad + '}' + suffix, null);
+      } else if (Array.isArray(val)) {
+        line(pad + prefix + '[', path);
+        val.forEach(function (v, i) {
+          walk(v, path, indent + 2, '', i < val.length - 1 ? ',' : '');
+        });
+        line(pad + ']' + suffix, null);
+      } else {
+        line(pad + prefix + JSON.stringify(val) + suffix, path);
+      }
+    }
+    walk(obj, '', 0, '', '');
+    return pre;
+  }
+
+  function hlOf(keyFields, mapFields) {
+    var hl = {};
+    (keyFields || []).forEach(function (f) { hl[f] = 'hl-key'; });
+    (mapFields || []).forEach(function (f) { hl[f] = 'hl-map'; }); // compared wins on overlap
+    return hl;
+  }
+
+  function inspectPane(title, arrowTitle, meta, doc, errText, hl) {
     var pane = document.createElement('div');
     pane.className = 'inspect-pane';
     var h4 = document.createElement('h4');
@@ -944,24 +987,35 @@
     pane.appendChild(h4);
     if (meta) pane.appendChild(textEl('div', meta, 'meta'));
     if (errText) pane.appendChild(textEl('div', errText, 'inspect-err'));
-    else pane.appendChild(textEl('pre', prettyJSON(doc)));
+    else pane.appendChild(jsonPre(doc, hl));
     return pane;
   }
 
   function renderInspect(data) {
     var body = document.getElementById('modal-body');
     body.replaceChildren();
+
+    var legend = document.createElement('div');
+    legend.className = 'hl-legend';
+    legend.appendChild(textEl('span', 'mapped / compared field', 'hl-map'));
+    legend.appendChild(textEl('span', '  '));
+    legend.appendChild(textEl('span', 'lookup key', 'hl-key'));
+    body.appendChild(legend);
+
     var grid = document.createElement('div');
     grid.className = 'inspect-grid';
 
     grid.appendChild(inspectPane(
       'Source: ' + data.collection, null, 'doc: ' + data.docId,
-      data.source, data.sourceError ? 'source ' + data.sourceError : null));
+      data.source, data.sourceError ? 'source ' + data.sourceError : null,
+      hlOf(null, data.sourceFields)));
 
     var right = document.createElement('div');
     (data.targets || []).forEach(function (t, i) {
       var meta = t.kind + (t.key ? ' · key ' + prettyJSON(t.key).replace(/\n\s*/g, ' ') : '');
-      var pane = inspectPane(t.alias, t.dest, meta, t.doc, t.error || null);
+      if (t.verbatim) meta += ' · verbatim: whole document compared';
+      var pane = inspectPane(t.alias, t.dest, meta, t.doc, t.error || null,
+        hlOf(t.keyFields, t.compareFields));
       if (i > 0) pane.style.marginTop = '12px';
       right.appendChild(pane);
     });

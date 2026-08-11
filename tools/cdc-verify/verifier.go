@@ -636,23 +636,29 @@ func (v *verifier) Shutdown(ctx context.Context) {
 }
 
 // InspectTarget is one destination's live view in an on-demand inspection.
+// KeyFields/CompareFields let the UI highlight what the mapping touches.
 type InspectTarget struct {
-	Alias string         `json:"alias"`
-	Kind  string         `json:"kind"`
-	Dest  string         `json:"dest"`
-	Key   map[string]any `json:"key,omitempty"`
-	Doc   map[string]any `json:"doc,omitempty"`
-	Error string         `json:"error,omitempty"`
+	Alias         string         `json:"alias"`
+	Kind          string         `json:"kind"`
+	Dest          string         `json:"dest"`
+	Key           map[string]any `json:"key,omitempty"`
+	Doc           map[string]any `json:"doc,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	KeyFields     []string       `json:"keyFields,omitempty"`
+	CompareFields []string       `json:"compareFields,omitempty"`
+	Verbatim      bool           `json:"verbatim,omitempty"`
 }
 
 // InspectResult is the live source + destination state for one document,
-// fetched at request time — independent of any past check.
+// fetched at request time — independent of any past check. SourceFields lists
+// every plain source path the mapping reads (fields, derived, keys, resolvers).
 type InspectResult struct {
-	Collection string          `json:"collection"`
-	DocID      string          `json:"docId"`
-	Source     map[string]any  `json:"source,omitempty"`
-	SourceErr  string          `json:"sourceError,omitempty"`
-	Targets    []InspectTarget `json:"targets"`
+	Collection   string          `json:"collection"`
+	DocID        string          `json:"docId"`
+	Source       map[string]any  `json:"source,omitempty"`
+	SourceErr    string          `json:"sourceError,omitempty"`
+	SourceFields []string        `json:"sourceFields,omitempty"`
+	Targets      []InspectTarget `json:"targets"`
 }
 
 // errUnmapped marks an inspect request for a collection the mapping doesn't cover.
@@ -666,7 +672,7 @@ func (v *verifier) Inspect(ctx context.Context, collection, docID string) (Inspe
 	if !ok {
 		return InspectResult{}, fmt.Errorf("%w: %q", errUnmapped, collection)
 	}
-	res := InspectResult{Collection: collection, DocID: docID}
+	res := InspectResult{Collection: collection, DocID: docID, SourceFields: mappedSourceFields(cs)}
 
 	srcDoc, err := v.source.FindByID(ctx, collection, docID)
 	switch {
@@ -689,7 +695,13 @@ func (v *verifier) Inspect(ctx context.Context, collection, docID string) (Inspe
 
 	for _, alias := range cs.aliases {
 		t := cs.src.Targets[alias]
-		it := InspectTarget{Alias: alias, Kind: t.Kind}
+		it := InspectTarget{
+			Alias:         alias,
+			Kind:          t.Kind,
+			KeyFields:     sortedMapKeys(t.Key),
+			CompareFields: comparedDestFields(cs.pairs[alias]),
+			Verbatim:      t.Mode == "verbatim",
+		}
 		if t.Kind == "cassandra" {
 			it.Dest = t.Table
 		} else {
@@ -727,4 +739,41 @@ func (v *verifier) Inspect(ctx context.Context, collection, docID string) (Inspe
 		res.Targets = append(res.Targets, it)
 	}
 	return res, nil
+}
+
+// mappedSourceFields lists every plain (non-resolver) source path the mapping
+// reads for this collection: compared fields, derived inputs, dest keys, and
+// resolver keys — what the UI highlights on the source document.
+func mappedSourceFields(cs *compiledSource) []string {
+	set := map[string]bool{}
+	add := func(paths []string) {
+		for _, p := range paths {
+			if !strings.HasPrefix(p, "@") {
+				set[p] = true
+			}
+		}
+	}
+	for _, alias := range cs.aliases {
+		for i := range cs.pairs[alias] {
+			add(cs.pairs[alias][i].SourcePaths)
+		}
+		for _, k := range cs.src.Targets[alias].Key {
+			add(k.From)
+		}
+	}
+	for _, r := range cs.src.Resolvers {
+		for _, k := range r.Key {
+			add(k.From)
+		}
+	}
+	return sortedMapKeys(set)
+}
+
+// comparedDestFields lists the dest field paths a target's pairs compare.
+func comparedDestFields(pairs []fieldPair) []string {
+	set := map[string]bool{}
+	for i := range pairs {
+		set[pairs[i].DestField] = true
+	}
+	return sortedMapKeys(set)
 }
