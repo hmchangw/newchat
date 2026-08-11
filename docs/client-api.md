@@ -6165,7 +6165,8 @@ See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code
 | `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
 | `unavailable` | — | Handler saturation — the concurrency cap is full; retry. |
 | `unavailable` | `upstream_unavailable` | The third-party translation backend returned a 5XX or was unreachable (transport failure). Clients should show a "translation service temporarily unavailable" message and allow a retry. |
-| `internal` | — | Other translation backend failure (e.g. malformed stream, 4XX, non-success returnCode). The raw cause is logged server-side, never returned. |
+| `too_many_requests` | `rate_limited` | The third-party translation backend rate-limited the request (HTTP 429). The service does **not** retry; clients should back off and retry later. |
+| `internal` | — | Other translation backend failure (e.g. malformed stream, other 4XX, non-success returnCode). The raw cause is logged server-side, never returned. |
 
 ```json
 {

@@ -6,4 +6,5 @@ const (
 	TranslateUnsupportedLang     Reason = "unsupported_lang"     // 400: targetLang not in the allowed set
 	TranslateEmptyText           Reason = "empty_text"           // 400: text is empty
 	TranslateUpstreamUnavailable Reason = "upstream_unavailable" // 503: third-party translation backend returned 5XX or was unreachable
+	TranslateRateLimited         Reason = "rate_limited"         // 429: third-party translation backend rate-limited the request (not retried)
 )
