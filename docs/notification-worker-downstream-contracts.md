@@ -87,15 +87,15 @@ directly — no gzip-aware decoder is needed.
 
 ### Payload size cap
 
-The wire payload is bounded by the broker's `max_payload`. The worker reads
-`NATS_MAX_PAYLOAD_BYTES` (default `262144` = 256 KiB) and **rejects any batch
-whose JSON wire size exceeds the cap before publishing** — the emitter surfaces a
-clear `exceeds NATS max_payload` error instead of letting the broker NACK with a
-less informative one. The `PUSH_RECIPIENT_BATCH_SIZE=100` default leaves a wide
-margin under 256 KiB for typical recipient/metadata sizes; the cap exists as a
-last-resort guard against pathological events (huge bodies, oversized metadata).
-
-Set `NATS_MAX_PAYLOAD_BYTES` to match your broker's configured `max_payload`.
+The wire payload is bounded by the broker's `max_payload`. The worker reads the
+cap from the broker's own INFO on connect (`nc.NatsConn().MaxPayload()`) and
+**rejects any batch whose JSON wire size exceeds it before publishing** — the
+emitter surfaces a clear `exceeds NATS max_payload` error instead of letting the
+broker NACK with a less informative one. The `PUSH_RECIPIENT_BATCH_SIZE=100`
+default leaves a wide margin under the broker's typical 256 KiB `max_payload`
+for typical recipient/metadata sizes; the cap exists as a last-resort guard
+against pathological events (huge bodies, oversized metadata). No env var
+configures this — it always tracks the connected broker.
 
 ### Routing predicate notes
 
@@ -298,7 +298,6 @@ Required before a production rollout:
    - `ROOMSUBCACHE_TTL` (default `5m`) — TTL for the Valkey room-member cache; no in-process L1 (per-pod memory bounded against very large rooms)
    - `LARGE_ROOM_THRESHOLD` (default `500` — same knob as message-gatekeeper)
    - `PUSH_RECIPIENT_BATCH_SIZE` (default `100` — recipients per push event; tune toward provider multicast caps)
-   - `NATS_MAX_PAYLOAD_BYTES` (default `262144` = 256 KiB — must match broker `max_payload`; see §1 Payload size cap)
    - `ROOM_META_CACHE_SIZE` (default `10000`), `ROOM_META_CACHE_TTL` (default `2m`) — fronts `rooms` collection lookups for title resolution
    - `PUSH_ASYNC_MAX_PENDING` (default `1024`)
 

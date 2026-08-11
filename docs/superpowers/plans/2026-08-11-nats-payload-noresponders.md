@@ -615,6 +615,12 @@ difference. Every other transport error still returns a raw wrap. Call it in
 place of `fmt.Errorf` on the error returned by `nc.Request`/`RequestMsg`.
 ```
 
+- [ ] **Step 3b: Correct a comment this PR made inaccurate**
+
+`message-gatekeeper/handler.go` has a doc comment on `quoteFetchErrIsTerminal` (around lines 497-503) stating that "non-errcode infra failures (NATS timeout, no-responders, unmarshal) are transient". After Task 2, NATS timeout and no-responders no longer arrive as non-errcode failures — they arrive as `errcode.CodeUnavailable` and are handled by that function's explicit `case errcode.CodeUnavailable`. The classification outcome is unchanged (still transient, still degrades to a placeholder); only the comment's description of *how* is now wrong.
+
+Read the current comment and correct just the inaccurate clause. Do not change any logic — `quoteFetchErrIsTerminal`'s behaviour is verified by `message-gatekeeper/handler_test.go:1435` and must stay as it is.
+
 - [ ] **Step 4: Full verification sweep**
 
 ```bash
