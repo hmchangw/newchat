@@ -116,8 +116,15 @@ independent of when the verification ran. The popup has a refresh button;
 delete, `_id`-keyed destinations stay inspectable (the source pane shows
 `not-found`).
 
+A **connections** button in the header opens a read-only side panel showing
+what the tool is wired to: site/stream/mapping file, NATS URL, source Mongo
+(URI, db, read preference), destination Mongo, and destination Cassandra
+(hosts, keyspace) with auth set/none tags. URIs are **redacted server-side**
+(`user:pass@` never leaves the process); `?panel=connections` deep-links
+with the panel open.
+
 Also `GET /healthz`; `GET /api/state` serves the initial snapshot including
-the mapping's pair list.
+the mapping's pair list and the redacted connection info.
 
 To preview the UI without any backing services, a seeded demo server ships
 behind a build tag:

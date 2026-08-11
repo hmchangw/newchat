@@ -170,6 +170,61 @@
 
   tr.clickable { cursor: pointer; }
 
+  .conn-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+  .conn-btn:hover, .conn-btn.active { color: var(--text); border-color: var(--success); }
+
+  .conn-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 340px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    z-index: 50;
+    overflow-y: auto;
+    padding: 14px 16px;
+    box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+  }
+  .conn-panel[hidden] { display: none; }
+  .conn-panel h2 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+  .conn-panel h2 button {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .conn-panel h2 button:hover { color: var(--text); }
+  .conn-ro { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+  .conn-group { margin-bottom: 16px; }
+  .conn-group h3 { font-size: 11px; color: var(--success); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .conn-group dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 11.5px; }
+  .conn-group dt { color: var(--muted); white-space: nowrap; }
+  .conn-group dd { word-break: break-all; }
+  .conn-tag { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10px; border: 1px solid var(--border); color: var(--muted); }
+  .conn-tag.on { color: var(--success); border-color: var(--success); }
+
   .modal { position: fixed; inset: 0; z-index: 100; }
   .modal[hidden] { display: none; }
   .modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.65); }
@@ -233,7 +288,14 @@
     <button id="tab-btn-verify" class="tab-btn" type="button">Verification</button>
   </nav>
   <span class="watcher"><span id="watcher-dot" class="dot"></span>watcher</span>
+  <button id="conn-btn" class="conn-btn" type="button">connections</button>
 </header>
+
+<aside id="conn-panel" class="conn-panel" hidden>
+  <h2>Connections <button id="conn-close" type="button" title="close">✕</button></h2>
+  <div class="conn-ro">read-only · secrets redacted server-side</div>
+  <div id="conn-body"></div>
+</aside>
 
 <div id="error-banner" class="error-banner" hidden></div>
 
@@ -754,6 +816,7 @@
 
     renderStats(data.stats || {});
     renderCounters();
+    renderConnInfo(data.connInfo);
     renderFeed();
     pairState.forEach(renderPair);
     renderFailures();
@@ -783,6 +846,80 @@
     tallyIfNew(r);
     renderCounters();
   }
+
+  // ── connections side panel (read-only; values arrive pre-redacted) ──
+  function connGroup(title, entries) {
+    var g = document.createElement('div');
+    g.className = 'conn-group';
+    g.appendChild(textEl('h3', title));
+    var dl = document.createElement('dl');
+    entries.forEach(function (e) {
+      if (e[1] === undefined || e[1] === null || e[1] === '') return;
+      dl.appendChild(textEl('dt', e[0]));
+      var dd = document.createElement('dd');
+      if (typeof e[1] === 'boolean') {
+        dd.appendChild(textEl('span', e[1] ? e[2] || 'yes' : e[3] || 'no', 'conn-tag' + (e[1] ? ' on' : '')));
+      } else {
+        dd.textContent = String(e[1]);
+      }
+      dl.appendChild(dd);
+    });
+    g.appendChild(dl);
+    return g;
+  }
+
+  function renderConnInfo(c) {
+    var body = document.getElementById('conn-body');
+    body.replaceChildren();
+    if (!c || !c.siteId) {
+      body.appendChild(textEl('div', 'No connection info in /api/state.', 'inspect-note'));
+      return;
+    }
+    body.appendChild(connGroup('Site', [
+      ['site', c.siteId],
+      ['stream', c.stream],
+      ['mapping', c.mappingFile]
+    ]));
+    var n = c.nats || {};
+    body.appendChild(connGroup('NATS', [
+      ['url', n.url],
+      ['creds file', !!n.credsFileSet, 'set', 'none']
+    ]));
+    var s = c.sourceMongo || {};
+    body.appendChild(connGroup('Source Mongo (legacy)', [
+      ['uri', s.uri],
+      ['db', s.db],
+      ['auth', !!s.authSet, 'set', 'none'],
+      ['read pref', s.readPreference]
+    ]));
+    var m = c.targetMongo || {};
+    body.appendChild(connGroup('Destination Mongo', [
+      ['uri', m.uri],
+      ['db', m.db],
+      ['auth', !!m.authSet, 'set', 'none']
+    ]));
+    var cs = c.cassandra || {};
+    if (cs.inUse) {
+      body.appendChild(connGroup('Destination Cassandra', [
+        ['hosts', cs.hosts],
+        ['keyspace', cs.keyspace],
+        ['auth', !!cs.authSet, 'set', 'none']
+      ]));
+    } else {
+      body.appendChild(connGroup('Destination Cassandra', [
+        ['in use', false, '', 'not referenced by mapping']
+      ]));
+    }
+  }
+
+  function toggleConnPanel(show) {
+    var panel = document.getElementById('conn-panel');
+    var next = show !== undefined ? show : panel.hidden;
+    panel.hidden = !next;
+    document.getElementById('conn-btn').classList.toggle('active', next);
+  }
+  document.getElementById('conn-btn').addEventListener('click', function () { toggleConnPanel(); });
+  document.getElementById('conn-close').addEventListener('click', function () { toggleConnPanel(false); });
 
   // ── inspect modal: live source + destination docs for one row ──
   var currentInspect = null; // {collection, doc}
@@ -874,6 +1011,10 @@
   });
 
   // ── boot ──
+  // ?panel=connections deep-links with the side panel open.
+  if (new URLSearchParams(window.location.search).get('panel') === 'connections') {
+    toggleConnPanel(true);
+  }
   // ?inspect=collection:docId deep-links straight into the popup.
   var inspectParam = new URLSearchParams(window.location.search).get('inspect');
   if (inspectParam && inspectParam.indexOf(':') > 0) {

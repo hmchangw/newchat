@@ -31,13 +31,14 @@ type handler struct {
 	recentCap int
 	pairs     []TargetPair
 	inspector docInspector
+	conn      ConnInfo
 }
 
 func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap int,
-	pairs []TargetPair, inspector docInspector,
+	pairs []TargetPair, inspector docInspector, conn *ConnInfo,
 ) *handler {
 	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap,
-		pairs: pairs, inspector: inspector}
+		pairs: pairs, inspector: inspector, conn: *conn}
 }
 
 // inspect serves the live source/destination view for one document. Reads go
@@ -74,6 +75,7 @@ func (h *handler) state(w http.ResponseWriter, _ *http.Request) {
 		"counters":  counters,
 		"recentCap": h.recentCap,
 		"pairs":     h.pairs,
+		"connInfo":  h.conn,
 	})
 }
 

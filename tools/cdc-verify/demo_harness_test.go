@@ -69,7 +69,7 @@ func (demoInspector) Inspect(_ context.Context, collection, docID string) (Inspe
 					"msg": "deploy is green, shipping at 14:00", "created_at": 1786428131000,
 					"sender": map[string]any{"account": "rajeev"}}},
 			{Alias: "msgByRoom", Kind: "cassandra", Dest: "messages_by_room",
-				Key: map[string]any{"room_id": "room-77", "bucket": 1786320000000, "created_at": 1786428131000, "message_id": docID},
+				Key:   map[string]any{"room_id": "room-77", "bucket": 1786320000000, "created_at": 1786428131000, "message_id": docID},
 				Error: "not-found"},
 		},
 	}, nil
@@ -111,7 +111,22 @@ func TestDemoHarness(t *testing.T) {
 	results.Upsert(row("c0", "rocketchat_room", "update", "room-81", StateMatched, 2, 2400, []TargetResult{
 		{Alias: "rooms", Matched: true}}, ""))
 
-	h := newHandler(hub, results, demoStats{}, 200, demoPairs(), demoInspector{})
+	conn := buildConnInfo(&config{
+		SiteID:              "site1",
+		NATSURL:             "nats://nats-a.site1.internal:4222",
+		CredsFile:           "/etc/nats/verify.creds",
+		SourceMongoURI:      "mongodb://admin:secret@rc-mongo-0.legacy:27017,rc-mongo-1.legacy:27017/?replicaSet=rs0",
+		SourceMongoUsername: "verify_ro",
+		SourceDB:            "rocketchat",
+		TargetMongoURI:      "mongodb://chat-mongo.site1.internal:27017",
+		TargetMongoUsername: "verify_ro",
+		TargetDB:            "chat",
+		CassandraHosts:      "cass-0.site1:9042,cass-1.site1:9042,cass-2.site1:9042",
+		CassandraKeyspace:   "chat",
+		CassandraUsername:   "verify_ro",
+		MappingFile:         "/etc/cdc-verify/mapping.json",
+	}, "MIGRATION-OPLOG-site1", true)
+	h := newHandler(hub, results, demoStats{}, 200, demoPairs(), demoInspector{}, &conn)
 	mux := http.NewServeMux()
 	h.registerRoutes(mux)
 	ln, err := net.Listen("tcp", ":8091")

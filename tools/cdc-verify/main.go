@@ -213,7 +213,8 @@ func main() {
 	go poller.Run(ctx)
 
 	// --- HTTP ---
-	h := newHandler(sseHub, results, poller, cfg.RecentCap, mapping.TargetPairs(), v)
+	conn := buildConnInfo(&cfg, streamName, mapping.NeedsCassandra())
+	h := newHandler(sseHub, results, poller, cfg.RecentCap, mapping.TargetPairs(), v, &conn)
 	mux := http.NewServeMux()
 	h.registerRoutes(mux)
 	srv := &http.Server{

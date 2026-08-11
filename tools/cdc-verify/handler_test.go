@@ -31,10 +31,23 @@ var testPairs = []TargetPair{
 	{Source: "rocketchat_message", Alias: "msgById", Kind: "cassandra", Dest: "messages_by_id"},
 }
 
+func ptrConnInfo() *ConnInfo {
+	c := testConnInfo()
+	return &c
+}
+
+func testConnInfo() ConnInfo {
+	return buildConnInfo(&config{
+		SiteID: "site1", NATSURL: "nats://n:4222",
+		SourceMongoURI: "mongodb://u:p@s:27017", SourceDB: "rocketchat",
+		TargetMongoURI: "mongodb://t:27017", TargetDB: "chat",
+	}, "MIGRATION-OPLOG-site1", false)
+}
+
 func testServer(t *testing.T) (*httptest.Server, *hub) {
 	t.Helper()
 	h := newHub()
-	handler := newHandler(h, fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{})
+	handler := newHandler(h, fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{}, ptrConnInfo())
 	mux := http.NewServeMux()
 	handler.registerRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -62,6 +75,7 @@ func TestAPIState(t *testing.T) {
 		Counters  Counters      `json:"counters"`
 		RecentCap int           `json:"recentCap"`
 		Pairs     []TargetPair  `json:"pairs"`
+		ConnInfo  ConnInfo      `json:"connInfo"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	assert.Equal(t, uint64(42), body.Stats.Msgs)
@@ -70,6 +84,8 @@ func TestAPIState(t *testing.T) {
 	assert.Equal(t, uint64(2), body.Counters.Checked)
 	assert.Equal(t, 200, body.RecentCap)
 	assert.Equal(t, testPairs, body.Pairs)
+	assert.Equal(t, "site1", body.ConnInfo.SiteID)
+	assert.Equal(t, "mongodb://***@s:27017", body.ConnInfo.SourceMongo.URI)
 }
 
 func TestFailuresDownload(t *testing.T) {
@@ -135,7 +151,7 @@ func (n *noFlushWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (n *noFlushWriter) WriteHeader(status int)      { n.status = status }
 
 func TestEventsHandler_StreamingUnsupported(t *testing.T) {
-	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{})
+	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{}, ptrConnInfo())
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	w := &noFlushWriter{}
 	h.events(w, req)
