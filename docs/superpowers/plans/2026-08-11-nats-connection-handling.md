@@ -816,19 +816,21 @@ Shape C sites are `defer`red inside a `run` function with no `shutdown.Wait` con
  				}
 ```
 
-- [ ] **Step 2: Convert `admin-service` and delete the stale comment**
+- [ ] **Step 2: Convert `admin-service` and correct the stale comment**
 
 ```go
 -				// srv.Shutdown has already waited out any in-flight toggle, so
 -				// Drain (which returns immediately and finishes in the background)
 -				// only closes the idle connection.
 -				if drainErr := nc.NatsConn().Drain(); drainErr != nil {
++				// srv.Shutdown has already waited out any in-flight toggle, so the
++				// drain only has the idle connection left to flush.
 +				if drainErr := natsutil.Drain(ctx, nc); drainErr != nil {
  					slog.Warn("drain nats", "error", drainErr)
  				}
 ```
 
-The comment described the exact trap this change removes. Leaving it would be actively misleading.
+Correct, not delete. The second clause described the exact trap this change removes and would be actively misleading if kept. The first clause — that `srv.Shutdown` has already waited out any in-flight toggle — is still true, because the ordering is unchanged, and it documents why draining here is cheap. Deleting the whole comment would take a true fact with the false one.
 
 - [ ] **Step 3: Convert `teams-room-creation`**
 
@@ -849,11 +851,16 @@ Ensure `"time"` is imported.
 
 - [ ] **Step 4: Convert `user-presence-service/sync`**
 
+Same `WithoutCancel` mechanic as Step 3, but **the reason differs and so does the comment.** This binary installs no signal handler — no `signal.Notify`, no `NotifyContext` anywhere in the package — and its `ctx` comes from `context.WithTimeout(context.Background(), cfg.RunTimeout)`. A bare SIGTERM would kill it outright without running any defer. What can leave `ctx` already `Done` here is `cfg.RunTimeout` elapsing during the run. Do not reuse Step 3's SIGTERM wording.
+
 ```go
  	defer func() {
 -		if err := nc.Drain(); err != nil {
-+		// ctx is already cancelled on SIGTERM by the time this defer runs, so
-+		// the drain deadline must not be derived from it.
++		// ctx carries the run deadline (context.WithTimeout at the top of run) and
++		// can already be Done when this defer executes, so the drain deadline must
++		// not derive from it. Unlike teams-room-creation this binary installs no
++		// signal handler — the expiry that matters here is RunTimeout elapsing
++		// during the run.
 +		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 +		defer cancel()
 +		if err := natsutil.Drain(dctx, nc); err != nil {

@@ -267,7 +267,13 @@ shuts down the HTTP server and disconnects Mongo/Valkey, and both swallow the
 drain error into `slog.Warn`. Convert to `natsutil.Drain(ctx, nc)` in place,
 keeping the existing swallow — the surrounding hook returns the *HTTP server's*
 error, and changing which error wins is a behavior change outside this spec's
-scope. Delete the now-false comment at `admin-service:93-95`.
+scope.
+
+At `admin-service:93-95`, delete only the now-false clause ("Drain … returns
+immediately and finishes in the background … only closes the idle connection").
+The first clause — that `srv.Shutdown` has already waited out any in-flight
+toggle — remains true, since the ordering is unchanged, and it documents why
+draining at that point is cheap. Keep it.
 
 **Shape C — `defer` in a run function (2 sites).** `teams-room-creation:71`,
 `user-presence-service/sync:106`. Same bug in a different wrapper: the deferred
