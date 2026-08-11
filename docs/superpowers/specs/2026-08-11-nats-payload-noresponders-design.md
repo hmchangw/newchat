@@ -11,7 +11,9 @@ order.
 
 ### A. A missing upstream is reported as a bug
 
-Fourteen call sites issue NATS request/reply and all share one shape:
+Fourteen call sites issue NATS request/reply. Eleven share one shape; the other
+three already handle this correctly and are covered under "Sites deliberately
+excluded" below. The common shape:
 
 ```go
 msg, err := c.nc.Request(ctx, subject.RoomsInfoBatch(siteID), req, roomRPCTimeout)
@@ -151,7 +153,7 @@ Distinct string values from the existing per-domain `upstream_unavailable`
 reasons in `codes_botplatform.go` and `codes_translation.go`, which describe an
 HTTP backend rather than a NATS peer.
 
-### A3. Call-site conversion (14 sites)
+### A3. Call-site conversion (11 sites)
 
 Each replaces its raw wrap with the helper, preserving the existing `op` text:
 
@@ -160,21 +162,42 @@ Each replaces its raw wrap with the helper, preserving the existing `op` text:
 +		return nil, natsutil.RequestFailure("rooms-info rpc", err)
 ```
 
-| File | Line |
-|---|---|
-| `room-service/reader_history.go` | 51 |
-| `message-gatekeeper/fetcher_history.go` | 75 |
-| `broadcast-worker/parent_fetcher.go` | 54 |
-| `search-service/room_client.go` | 32 |
-| `notification-worker/parent_fetcher.go` | 68 |
-| `notification-worker/presence.go` | 76 |
-| `user-service/roomclient/client.go` | 34, 57, 79, 99 |
-| `user-service/presenceclient/client.go` | 35 |
-| `user-service/historyclient/client.go` | 37, 63 |
-| `admin-service/room_onduty.go` | 87 |
+| File | Line | Existing `op` text |
+|---|---|---|
+| `message-gatekeeper/fetcher_history.go` | 77 | `history request` |
+| `broadcast-worker/parent_fetcher.go` | 56 | `history request for parent %s` |
+| `search-service/room_client.go` | 34 | `rooms-info rpc` |
+| `notification-worker/parent_fetcher.go` | 70 | `history request for parent %s` |
+| `user-service/roomclient/client.go` | 36, 59, 81, 101 | `rooms-info` / `thread-room-info` / `clear-all-thread-unread` / `create-dm rpc` |
+| `user-service/presenceclient/client.go` | 37 | `presence-query rpc` |
+| `user-service/historyclient/client.go` | 39, 65 | `thread-list rpc` / `rooms-get rpc` |
 
 Nothing else in those functions changes — the `errcode.Parse` relay below each
 call is already correct and stays.
+
+Two sites interpolate a message ID into the `op` string
+(`history request for parent %s`). A message ID is not a secret and already
+appears in these logs, so it stays; the helper takes the formatted string.
+
+### A4. Sites deliberately excluded (3)
+
+These were counted in the original survey but must **not** be converted. Two of
+them already do what this design proposes and are the model for it; converting
+them would lose behaviour.
+
+| Site | Why excluded |
+|---|---|
+| `room-service/reader_history.go:53` | Already returns `errcode.Unavailable` with the **domain** reason `RoomReadReceiptsUnavailable` and `WithCause`. `codes_room.go` documents that clients surface "receipts temporarily unavailable" and retry. Replacing that with the generic `no_responders` would make the client's error *less* specific — a regression. |
+| `admin-service/room_onduty.go:87` | Already maps `ErrNoResponders`, `ErrTimeout` and `DeadlineExceeded` to `errcode.Unavailable`, **and additionally** `context.Canceled`, which this helper does not handle. Converting would drop the `Canceled` case. Its comment also records a genuine reason the generic helper cannot know: room-service has no deadline of its own, so a timeout may still have applied the write, making 503-and-retry correct for that specific idempotent call. |
+| `notification-worker/presence.go:76` | Best-effort presence enrichment inside a fire-and-forget goroutine. It logs and returns; there is no error return path, so there is nothing to classify. |
+
+**`context.Canceled` is intentionally not handled by the helper.** Only
+`admin-service` maps it today, and its stated rationale — "a client hang-up is
+not an internal fault and must not log at ERROR" — is not actually achieved by
+`errcode.Unavailable`, because `Classify` logs `CodeUnavailable` at
+`slog.LevelError` (`classify.go:46`), the same level as `CodeInternal`. That
+contradiction is pre-existing, out of scope here, and recorded under Risks
+rather than silently propagated into eleven new call sites.
 
 ### B. Payload cap from the broker
 
@@ -254,10 +277,13 @@ config change is a removal (`NATS_MAX_PAYLOAD_BYTES`).
    environment setting it will find the variable ignored. Since the new source
    is the broker's own advertised value, the setting was only ever able to make
    things worse; the PR description must call the removal out explicitly.
-3. **`admin-service/room_onduty.go:87` uses `RequestMsg`, not `Request`.** The
-   helper classifies the returned error and is agnostic to which call produced
-   it, but the site should be verified individually rather than assumed
-   identical to the other thirteen.
+3. **`admin-service`'s `Canceled` mapping does not do what its comment says.**
+   The comment states a client hang-up "must not log at ERROR", but it maps to
+   `errcode.Unavailable`, which `Classify` logs at `slog.LevelError`
+   (`classify.go:46`). So a client disconnect logs at ERROR today. This is
+   pre-existing and untouched by this PR. Fixing it means either a new code with
+   an INFO log level or special-casing `Canceled` in `Classify` — a change to
+   shared error plumbing that deserves its own review. Flagged, not fixed.
 
 ## Verification
 
@@ -267,5 +293,6 @@ config change is a removal (`NATS_MAX_PAYLOAD_BYTES`).
 - `make sast` — note `govulncheck` and semgrep's registry rulesets are blocked
   by egress policy in the development sandbox; `gosec` and the in-repo
   `.semgrep/` rules run locally and CI must run the full gate
-- `grep` sweep confirming no `nc.Request`/`RequestMsg` site still wraps its
-  transport error with a bare `fmt.Errorf`
+- `grep` sweep over all `nc.Request`/`RequestMsg` sites confirming each one
+  either calls `RequestFailure` or is one of the three documented exclusions —
+  a bare `fmt.Errorf` on a transport error remaining anywhere else is a miss
