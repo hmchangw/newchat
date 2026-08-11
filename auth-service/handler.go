@@ -17,6 +17,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
+	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/principal"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -189,6 +190,8 @@ func (h *AuthHandler) handleSSO(ctx context.Context, c *gin.Context, req authReq
 		errhttp.Write(ctx, c, errcode.BadRequest("account must be a single NATS subject token (no '.', '*', '>' or whitespace)"))
 		return
 	}
+	ctx = obs.ContextWithIdentity(ctx, account, "", "")
+	c.Request = c.Request.WithContext(ctx)
 	ctx = errcode.WithLogValues(ctx, "account", account)
 
 	natsJWT, err := h.signNATSJWT(req.NATSPublicKey, account)
@@ -246,6 +249,8 @@ func (h *AuthHandler) handleSession(ctx context.Context, c *gin.Context, req aut
 		errhttp.Write(ctx, c, errcode.BadRequest("account contains invalid characters"))
 		return
 	}
+	ctx = obs.ContextWithIdentity(ctx, p.Account, "", "")
+	c.Request = c.Request.WithContext(ctx)
 	ctx = errcode.WithLogValues(ctx, "account", p.Account, "nats_account", natsAccount)
 
 	natsJWT, err := h.signNATSJWT(req.NATSPublicKey, natsAccount)
@@ -275,6 +280,8 @@ func (h *AuthHandler) handleDevAuth(ctx context.Context, c *gin.Context, req aut
 		errhttp.Write(ctx, c, errcode.BadRequest("account must be a single NATS subject token (no '.', '*', '>' or whitespace)"))
 		return
 	}
+	ctx = obs.ContextWithIdentity(ctx, req.Account, "", "")
+	c.Request = c.Request.WithContext(ctx)
 	ctx = errcode.WithLogValues(ctx, "account", req.Account)
 
 	natsJWT, err := h.signNATSJWT(req.NATSPublicKey, req.Account)

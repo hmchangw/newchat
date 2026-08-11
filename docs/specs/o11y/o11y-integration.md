@@ -2,7 +2,7 @@
 
 > **Status:** IN PROGRESS. This document is the design/rollout plan for adopting
 > [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y) (currently
-> pinned at **v0.9.1**) as the single observability entry point across the chat
+> pinned at **v0.10.0**) as the single observability entry point across the chat
 > platform.
 > Branch: `feat/integrate-o11y-sdk`. **Phase 0** (dependency baseline) and
 > **Phase 1** (`pkg/obs` wrapper) have landed; Phases 2–4 are pending.
@@ -154,11 +154,12 @@ integration test (§9).
 
 > **Outcome note (post-implementation):** "remove Marz32onE" means the chat repo
 > no longer imports `Marz32onE/instrumentation-go/otel-nats` **directly** — `grep`
-> over the tree is clean. As of o11y v0.9.1, `o11y/nats` wraps
-> `akira-core/instrumentation-go/otel-nats` v0.7.0 as an **indirect**
-> dependency. `pkg/natsutil.Connect` passes the SDK's resolved
-> `sdk.Toggles.Trace` through o11y's programmatic `WithTracingEnabled` option;
-> it no longer mutates process-global tracing env vars.
+> over the tree is clean. As of o11y v0.10.0, `o11y/nats` wraps
+> `akira-core/instrumentation-go/otel-nats` v0.8.0 as an **indirect**
+> dependency. `pkg/natsutil.Connect` passes `sdk.Toggles.Trace` as the
+> connection-local default; the effective state follows
+> `relay > OTEL_NATS_TRACING_ENABLED > option > module default`, with
+> `OTEL_INSTRUMENTATION_GO_TRACING_ENABLED` remaining the process-wide veto.
 
 **D3 — OTLP transport. → OTLP/HTTP (`:4318`).**
 `o11y` exports over HTTP; we currently use gRPC (`:4317`). Env/collector change,
@@ -413,6 +414,11 @@ New env vars (defaults chosen so local dev "just works"):
 | `DEPLOY_ENV` | `development` | resource attr; `production`/`staging`/… |
 | `SERVICE_NAMESPACE` | `chat` | resource attr |
 | `O11Y_TRACE_ENABLED` / `_METRICS_` / `_LOG_` / `_PROFILING_` | per SDK | SDK-owned runtime toggles |
+| `O11Y_USER_BAGGAGE_ENABLED` | `false` | PII opt-in; materializes trusted `user.name` baggage on spans/logs |
+| `OTEL_NATS_TRACING_ENABLED` | SDK trace toggle | otel-nats module override; relay still has higher precedence |
+| `OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT` | — | optional GO Feature Flag relay endpoint; configure before NATS wrappers are constructed |
+| `OTEL_INSTRUMENTATION_GO_FLAGS_API_KEY` | — | optional relay API key |
+| `OTEL_INSTRUMENTATION_GO_FLAGS_POLL_INTERVAL` | relay default | positive Go duration such as `60s` |
 
 Removed: the old gRPC OTLP endpoint env consumed by `otelutil`, and the retired
 data-migration `METRICS_ADDR` listener vars. `search-service` keeps
@@ -467,7 +473,8 @@ platform is pre-production for the duration of this work.
 
 - Custom domain metrics (messages/sec, fanout size, cross-site lag) using
   `obs.Meter(...)`.
-- Span enrichment with domain attributes (`room.id`, `site.id`) via
-  `obsctx`/attribute helpers.
+- Extend the current trusted-boundary identity enrichment beyond
+  `user.name`, `chat.room.id`, and `chat.site.id` only when a new bounded,
+  queryable use case justifies another baggage key.
 - Pyroscope profiling rollout beyond the trial service.
 - Dashboards/alerts (Grafana) — ops/IaC.

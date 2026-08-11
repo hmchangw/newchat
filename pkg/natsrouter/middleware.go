@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 )
 
 // Middleware is a handler that participates in the middleware chain.
@@ -77,6 +78,23 @@ func RequireRequestID() HandlerFunc {
 		c.Set(requestIDKey, id)
 		c.SetContext(ctx)
 		c.WithLogValues("request_id", id)
+		c.Next()
+	}
+}
+
+// TraceIdentity enriches the active NATS entry span and all downstream spans
+// and contextual logs with trusted route identity. Params were extracted from
+// the registered subject pattern before middleware runs; account has also been
+// decoded from its NATS-safe bot transport form by route.extractParams.
+func TraceIdentity() HandlerFunc {
+	return func(c *Context) {
+		ctx := obs.ContextWithIdentity(
+			c.ctx,
+			c.Params.Get("account"),
+			c.Params.Get("roomID"),
+			c.Params.Get("siteID"),
+		)
+		c.SetContext(ctx)
 		c.Next()
 	}
 }

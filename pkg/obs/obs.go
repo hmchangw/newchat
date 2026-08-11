@@ -16,11 +16,27 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/flywindy/o11y"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+)
+
+const (
+	// RoomIDKey and SiteIDKey are application semantic-convention keys. OTel
+	// does not define a generic chat-room or chat-site attribute, so the chat.*
+	// namespace prevents collisions with present and future standard keys.
+	RoomIDKey = "chat.room.id"
+	SiteIDKey = "chat.site.id"
+)
+
+var (
+	contextAttributesEnabled atomic.Bool
+	userBaggageEnabled       atomic.Bool
 )
 
 // Config is parsed from the environment. Variable names follow OpenTelemetry
@@ -38,6 +54,10 @@ type Config struct {
 	// O11Y_*_ENABLED pillar toggles then apply. When Enabled is false those
 	// per-pillar toggles are ignored (the master switch wins).
 	Enabled bool `env:"O11Y_ENABLED" envDefault:"false"`
+	// UserBaggageEnabled is a separate PII opt-in. It controls both creating
+	// user.name baggage at trusted request boundaries and materializing it onto
+	// spans/logs. Room/site identifiers remain enabled whenever O11Y_ENABLED is.
+	UserBaggageEnabled bool `env:"O11Y_USER_BAGGAGE_ENABLED" envDefault:"false"`
 
 	// ServiceName drives service.name on every span/metric/log. It defaults to a
 	// visible placeholder rather than being required so a missing env degrades to
@@ -101,6 +121,10 @@ func (c *Config) options() []o11y.Option {
 			o11y.WithProfilingEnabled(false),
 		)
 	}
+	opts = append(opts, o11y.WithBaggageAttributes(RoomIDKey, SiteIDKey))
+	if c.UserBaggageEnabled {
+		opts = append(opts, o11y.WithUserBaggage())
+	}
 	opts = append(opts, c.samplerOptions()...)
 	return opts
 }
@@ -147,6 +171,11 @@ func InitWithLoggerHandler(ctx context.Context, minLevel slog.Level, wrap func(s
 }
 
 func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) slog.Handler) (*o11y.SDK, func(context.Context) error, error) {
+	// Avoid retaining an earlier successful initialization's policy if a later
+	// initialization in the same process (notably a test) fails.
+	contextAttributesEnabled.Store(false)
+	userBaggageEnabled.Store(false)
+
 	cfg, err := parseConfig()
 	if err != nil {
 		return nil, nil, err
@@ -160,6 +189,8 @@ func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("init o11y sdk: %w", err)
 	}
+	contextAttributesEnabled.Store(cfg.Enabled)
+	userBaggageEnabled.Store(cfg.Enabled && cfg.UserBaggageEnabled)
 
 	otel.SetTracerProvider(sdk.TracerProvider())
 	otel.SetMeterProvider(sdk.MeterProvider())
@@ -171,4 +202,45 @@ func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) 
 	slog.SetDefault(logger)
 
 	return sdk, sdk.Shutdown, nil
+}
+
+// ContextWithIdentity attaches trusted request identity to ctx as W3C baggage
+// and to the current entry span. Baggage lets o11y's span processor enrich all
+// child driver spans and its slog handler enrich contextual logs; explicitly
+// setting the current span is necessary because it started before middleware
+// could authenticate or parse the identity.
+//
+// account is PII and is ignored unless O11Y_USER_BAGGAGE_ENABLED=true. Room
+// and site use application-scoped keys because OpenTelemetry defines no generic
+// semantic convention for a chat room/site. Empty values are ignored.
+func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) context.Context {
+	if !contextAttributesEnabled.Load() {
+		return ctx
+	}
+
+	if userBaggageEnabled.Load() && account != "" {
+		next, err := o11y.ContextWithUser(ctx, account)
+		if err != nil {
+			slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", o11y.UserNameKey, "error", err)
+		} else {
+			ctx = next
+			o11y.SetUser(ctx, account)
+		}
+	}
+	ctx = contextWithBaggageAttribute(ctx, RoomIDKey, roomID)
+	ctx = contextWithBaggageAttribute(ctx, SiteIDKey, siteID)
+	return ctx
+}
+
+func contextWithBaggageAttribute(ctx context.Context, key, value string) context.Context {
+	if value == "" {
+		return ctx
+	}
+	next, err := o11y.ContextWithBaggageValue(ctx, key, value)
+	if err != nil {
+		slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", key, "error", err)
+		return ctx
+	}
+	trace.SpanFromContext(next).SetAttributes(attribute.String(key, value))
+	return next
 }

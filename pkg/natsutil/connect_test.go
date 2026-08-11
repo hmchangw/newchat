@@ -26,6 +26,9 @@ func TestConnect_MissingCredsFileFailsFast(t *testing.T) {
 // retains propagation and spans.
 func TestConnect_TracingEnabledFollowsResolvedToggle(t *testing.T) {
 	native := startTestNATS(t)
+	unsetEnv(t, "OTEL_NATS_TRACING_ENABLED")
+	unsetEnv(t, "OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT")
+	t.Setenv("OTEL_INSTRUMENTATION_GO_TRACING_ENABLED", "true")
 
 	for _, tc := range []struct {
 		name    string
@@ -48,6 +51,56 @@ func TestConnect_TracingEnabledFollowsResolvedToggle(t *testing.T) {
 			require.Equal(t, tc.enabled, conn.TracingEnabled())
 		})
 	}
+}
+
+func TestConnect_TracingEnvironmentOverridesSDKDefault(t *testing.T) {
+	native := startTestNATS(t)
+	unsetEnv(t, "OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT")
+	t.Setenv("OTEL_INSTRUMENTATION_GO_TRACING_ENABLED", "true")
+
+	for _, tc := range []struct {
+		name          string
+		env           string
+		sdkDefault    bool
+		wantEffective bool
+	}{
+		{name: "environment enables when SDK default is off", env: "true", sdkDefault: false, wantEffective: true},
+		{name: "environment disables when SDK default is on", env: "false", sdkDefault: true, wantEffective: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OTEL_NATS_TRACING_ENABLED", tc.env)
+			conn, err := natsutil.Connect(context.Background(), native.ConnectedUrl(), "",
+				noop.NewTracerProvider(), propagation.TraceContext{}, tc.sdkDefault)
+			require.NoError(t, err)
+			t.Cleanup(conn.Close)
+			require.Equal(t, tc.wantEffective, conn.TracingEnabled())
+		})
+	}
+}
+
+func TestConnect_InvalidTracingEnvironmentFailsFast(t *testing.T) {
+	native := startTestNATS(t)
+	unsetEnv(t, "OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT")
+	t.Setenv("OTEL_INSTRUMENTATION_GO_TRACING_ENABLED", "true")
+	t.Setenv("OTEL_NATS_TRACING_ENABLED", "sometimes")
+
+	_, err := natsutil.Connect(context.Background(), native.ConnectedUrl(), "",
+		noop.NewTracerProvider(), propagation.TraceContext{}, true)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OTEL_NATS_TRACING_ENABLED")
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	value, existed := os.LookupEnv(key)
+	require.NoError(t, os.Unsetenv(key))
+	t.Cleanup(func() {
+		if existed {
+			require.NoError(t, os.Setenv(key, value))
+			return
+		}
+		require.NoError(t, os.Unsetenv(key))
+	})
 }
 
 func TestConnect_PresentCredsFilePassesPrecheck(t *testing.T) {

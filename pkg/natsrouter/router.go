@@ -84,14 +84,14 @@ func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 }
 
 // Default returns a Router pre-configured with the recommended middleware
-// stack: Recovery, RequestID, Logging — mirroring gin.Default()'s shape.
+// stack: Recovery, RequestID, TraceIdentity, Logging — mirroring gin.Default()'s shape.
 // Equivalent to:
 //
 //	r := New(nc, queue, opts...)
-//	r.Use(Recovery(), RequestID(), Logging())
+//	r.Use(Recovery(), RequestID(), TraceIdentity(), Logging())
 //
 // Recovery is registered first (outermost) so it catches panics from
-// RequestID and Logging themselves, not just from the handler. This
+// RequestID, TraceIdentity, and Logging themselves, not just from the handler. This
 // differs from gin.Default(), which places Logger() first; gin's order
 // is fine for HTTP because gin's Logger doesn't panic, but our
 // outermost-Recovery posture is strictly stricter.
@@ -103,7 +103,7 @@ func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 // HandlerTimeout sits relative to Logging in the chain.
 func Default(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	r := New(nc, queue, opts...)
-	r.Use(Recovery(), RequestID(), Logging())
+	r.Use(Recovery(), RequestID(), TraceIdentity(), Logging())
 	return r
 }
 

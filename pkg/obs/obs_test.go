@@ -7,11 +7,16 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/flywindy/o11y"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // clearEnv unsets every variable obs reads so each test starts from a known
@@ -23,7 +28,7 @@ func clearEnv(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
 		"OTEL_EXPORTER_PROMETHEUS_HOST", "OTEL_EXPORTER_PROMETHEUS_PORT",
 		"OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
-		"O11Y_ENABLED",
+		"O11Y_ENABLED", "O11Y_USER_BAGGAGE_ENABLED",
 		"O11Y_TRACE_ENABLED", "O11Y_METRICS_ENABLED", "O11Y_LOG_ENABLED", "O11Y_PROFILING_ENABLED",
 	} {
 		t.Setenv(k, "")
@@ -102,6 +107,16 @@ func TestParseConfig_Defaults(t *testing.T) {
 	assert.Empty(t, cfg.PrometheusHost)
 	assert.Empty(t, cfg.OTLPHeaders)
 	assert.False(t, cfg.Enabled, "O11Y_ENABLED must default to false (zero-impact master switch)")
+	assert.False(t, cfg.UserBaggageEnabled, "user.name baggage must remain an explicit PII opt-in")
+}
+
+func TestParseConfig_UserBaggageOptIn(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+
+	cfg, err := parseConfig()
+	require.NoError(t, err)
+	assert.True(t, cfg.UserBaggageEnabled)
 }
 
 // With the master switch off (default, no env), Init still succeeds and returns
@@ -127,9 +142,9 @@ func TestInit_MasterSwitchDisabledIsNoop(t *testing.T) {
 func TestOptions_MasterOffDisablesPillars(t *testing.T) {
 	off := Config{ServiceName: "svc", PrometheusPort: "2112", Enabled: false}
 	on := Config{ServiceName: "svc", PrometheusPort: "2112", Enabled: true}
-	// 6 base opts + 4 pillar-disable opts when off; on adds none (sampler empty).
+	// Master-off omits baggage materialization and appends four pillar disables.
 	assert.Len(t, off.options(), 10, "master-off must append the four WithXxxEnabled(false) opts")
-	assert.Len(t, on.options(), 6, "master-on with no sampler/headers adds no extra opts")
+	assert.Len(t, on.options(), 7, "master-on with no sampler/headers adds no extra opts")
 }
 
 func TestParseConfig_DefaultsServiceName(t *testing.T) {
@@ -207,9 +222,82 @@ func TestConfig_Options_HeadersOptional(t *testing.T) {
 
 	withHeaders := base
 	withHeaders.OTLPHeaders = map[string]string{"a": "b"}
+	withUser := base
+	withUser.UserBaggageEnabled = true
 
-	assert.Len(t, withoutHeaders, 6)
-	assert.Len(t, withHeaders.options(), 7, "WithOTLPHeaders should be appended only when headers are set")
+	assert.Len(t, withoutHeaders, 7, "room/site baggage materialization is always configured")
+	assert.Len(t, withHeaders.options(), 8, "WithOTLPHeaders should be appended only when headers are set")
+	assert.Len(t, withUser.options(), 8, "WithUserBaggage should be appended only after the PII opt-in")
+}
+
+func TestContextWithIdentity_RecordsBaggageAndCurrentSpanAttributes(t *testing.T) {
+	testEnv(t, "identity-svc")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+
+	_, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	ctx, span := tp.Tracer("test").Start(context.Background(), "entry")
+
+	ctx = ContextWithIdentity(ctx, "alice", "room-42", "site-a")
+	span.End()
+
+	bag := baggage.FromContext(ctx)
+	assert.Equal(t, "alice", bag.Member("user.name").Value())
+	assert.Equal(t, "room-42", bag.Member(RoomIDKey).Value())
+	assert.Equal(t, "site-a", bag.Member(SiteIDKey).Value())
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	attrs := make(map[string]string)
+	for _, attr := range ended[0].Attributes() {
+		attrs[string(attr.Key)] = attr.Value.AsString()
+	}
+	assert.Equal(t, "alice", attrs["user.name"])
+	assert.Equal(t, "room-42", attrs[RoomIDKey])
+	assert.Equal(t, "site-a", attrs[SiteIDKey])
+}
+
+func TestContextWithIdentity_UserBaggageDisabled(t *testing.T) {
+	testEnv(t, "identity-user-off-svc")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+
+	_, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	tp := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	ctx, span := tp.Tracer("test").Start(context.Background(), "entry")
+	defer span.End()
+
+	ctx = ContextWithIdentity(ctx, "alice", "room-42", "site-a")
+	bag := baggage.FromContext(ctx)
+	assert.Empty(t, bag.Member("user.name").Value())
+	assert.Equal(t, "room-42", bag.Member(RoomIDKey).Value())
+}
+
+func TestContextWithIdentity_RejectsOversizedValuesWithoutMutatingBaggage(t *testing.T) {
+	testEnv(t, "identity-bounds-svc")
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+
+	_, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	tooLong := strings.Repeat("x", o11y.MaxBaggageValueBytes+1)
+	ctx := ContextWithIdentity(context.Background(), tooLong, tooLong, "")
+	bag := baggage.FromContext(ctx)
+	assert.Empty(t, bag.Member("user.name").Value())
+	assert.Empty(t, bag.Member(RoomIDKey).Value())
 }
 
 // testEnv sets the minimum env for a successful Init with a random metrics port
@@ -281,6 +369,9 @@ func TestInit_InvalidEnvironment(t *testing.T) {
 
 func TestInit_ShutdownIdempotent(t *testing.T) {
 	testEnv(t, "shutdown-svc")
+	// This test verifies lifecycle idempotence, not exporter reachability.
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
 
 	_, shutdown, err := Init(context.Background())
 	require.NoError(t, err)

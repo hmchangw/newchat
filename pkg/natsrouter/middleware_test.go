@@ -10,9 +10,14 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 )
 
 // flowRecorder captures records for asserting on the on-demand FLOW lines.
@@ -268,4 +273,52 @@ func TestRequestID_NoDebugHeaderIsOff(t *testing.T) {
 	c.Next()
 
 	assert.Equal(t, natsutil.DebugOff, observed, "no X-Debug header → no rung on ctx")
+}
+
+func TestTraceIdentity_UsesDecodedRouteParams(t *testing.T) {
+	previousTracer := otel.GetTracerProvider()
+	previousMeter := otel.GetMeterProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	previousLogger := slog.Default()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousTracer)
+		otel.SetMeterProvider(previousMeter)
+		otel.SetTextMapPropagator(previousPropagator)
+		slog.SetDefault(previousLogger)
+	})
+
+	t.Setenv("O11Y_ENABLED", "true")
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+	t.Setenv("OTEL_SERVICE_NAME", "natsrouter-identity-test")
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", "0")
+
+	_, shutdown, err := obs.Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	ctx, span := tp.Tracer("test").Start(context.Background(), "nats entry")
+
+	c := &Context{
+		ctx:    ctx,
+		Params: NewParams(map[string]string{"account": "weather.bot", "roomID": "r1", "siteID": "s1"}),
+		chain:  &chainState{index: -1},
+	}
+	var got baggage.Baggage
+	c.chain.handlers = []HandlerFunc{
+		TraceIdentity(),
+		func(c *Context) { got = baggage.FromContext(c) },
+	}
+	c.Next()
+	span.End()
+
+	assert.Equal(t, "weather.bot", got.Member("user.name").Value())
+	assert.Equal(t, "r1", got.Member(obs.RoomIDKey).Value())
+	assert.Equal(t, "s1", got.Member(obs.SiteIDKey).Value())
+	require.Len(t, recorder.Ended(), 1)
 }
