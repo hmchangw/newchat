@@ -16,7 +16,7 @@ and `NoResponders` mapping) gets its own spec.
 | `natsutil.Drain` — make graceful shutdown actually wait | new, `pkg/natsutil/drain.go` |
 | `nats.DrainTimeout` default | `pkg/natsutil/connect.go` |
 | Slow consumer diagnostics + counter | `pkg/natsutil/connect.go`, new `pkg/natsutil/slowconsumer.go` |
-| Call-site conversion | 25 root services + 4 `data-migration` binaries |
+| Call-site conversion | 25 sites in root services + 5 in `data-migration` |
 
 ### Out of scope
 
@@ -273,9 +273,31 @@ the drain immediately.
   is in hand before the defer runs. Convert for consistency and to keep the
   pattern from being copied, not to fix a live bug.
 
-**`data-migration` (4 binaries).** `oplog-connector`, `oplog-transformer`,
-`oplog-direct-transfer`, `oplog-collections-transformer`. These move real data;
-converted with the rest.
+**Shape E — startup error path (14 sites, deliberately NOT converted).**
+Across the four `data-migration` binaries, most `_ = nc.Drain()` calls look like
+this:
+
+```go
+js, err := nc.JetStream()
+if err != nil {
+	slog.Error("jetstream init failed", "error", err)
+	_ = nc.Drain()
+	mongoutil.Disconnect(ctx, client)
+	os.Exit(1)
+}
+```
+
+This is best-effort cleanup on a startup failure, followed immediately by
+`os.Exit(1)`. Nothing has been published yet, so there is nothing buffered to
+flush, and blocking up to 15s before an error exit is strictly worse than the
+current behavior. Left as-is. Listed here so a reviewer does not read the
+omission as an oversight.
+
+**`data-migration` real shutdown sites (5).** `oplog-connector:97` and `:234`,
+`oplog-transformer:131`, `oplog-direct-transfer:149`,
+`oplog-collections-transformer:183` — the `shutdown.Wait` hooks plus
+`oplog-connector`'s own shutdown function, which already does a bounded
+`awaitWatchers` before draining. These move real data; converted with the rest.
 
 ## Testing
 
@@ -291,7 +313,7 @@ TDD, red first. `pkg/natsutil` already runs an embedded NATS server in
 | Ctx expiry | wedged handler + already-expired ctx → error wrapping `context.DeadlineExceeded` |
 | Already closed | `nc.Close()` then `Drain` → nil |
 | Idempotent | second `Drain` → nil (library already guards via `isDraining`; a concurrent second caller still waits for CLOSED) |
-| No listener leak | `RemoveStatusListener` runs on every exit path |
+| Nil conn | returns nil, no panic |
 | `DrainTimeout` applied | option present on the connection |
 
 `slowconsumer_test.go`:
@@ -302,6 +324,10 @@ TDD, red first. `pkg/natsutil` already runs an embedded NATS server in
 | `nil` subscription | no panic, degraded field set |
 | Closed subscription | no panic, errors from `Dropped`/`Pending` handled |
 | Level selection | ERROR when `dropped > 0`, WARN when 0 |
+
+Listener cleanup is structural — `defer nc.RemoveStatusListener(ch)` covers every
+exit path — so it is reviewed, not separately asserted. There is no public API
+to count registered listeners.
 
 Coverage: 80% floor repo-wide, 90% target for `pkg/`.
 
