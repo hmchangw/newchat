@@ -78,9 +78,16 @@ type config struct {
 	// JetStream consumer pending counts. Defaults to the docker-compose
 	// service name. Override (e.g. `http://127.0.0.1:8222/jsz` on the host,
 	// or a custom monitoring port) when running against non-default infra.
-	NatsMonitoringURL string           `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
-	Bottleneck        bottleneckConfig `envPrefix:"BOTTLENECK_"`
-	Soak              soakConfig       `envPrefix:"SOAK_"`
+	NatsMonitoringURL string `env:"NATS_MONITORING_URL"    envDefault:"http://nats:8222/jsz"`
+
+	// auth-service base URL for the `login` max-rps workload. Every other
+	// workload reaches NATS with a pre-provisioned creds file and never touches
+	// the HTTP auth leg, so this stays optional and the workload fail-fasts
+	// when it is empty.
+	AuthURL string `env:"AUTH_URL" envDefault:""`
+
+	Bottleneck bottleneckConfig `envPrefix:"BOTTLENECK_"`
+	Soak       soakConfig       `envPrefix:"SOAK_"`
 }
 
 func main() {
@@ -158,7 +165,7 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	parentsPerRoom := fs.Int("parents-per-room", 0, "thread workload: parent messages seeded per room (0 = default 8; must match the runtime default used by `loadgen max-rps`)")
 	_ = fs.Parse(args)
 	if *workload == "soak" {
-		return runSoakPhase(ctx, cfg, soakPhaseSeed, *seed)
+		return runSoakPhase(ctx, cfg, soakPhaseSeed, soakOptions{Seed: *seed, PageLimit: soakDefaultPageLimit})
 	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
@@ -311,7 +318,7 @@ func runTeardown(ctx context.Context, cfg *config, args []string) int {
 	seed := fs.Int64("seed", 42, "RNG seed (must match the seed used at seed time)")
 	_ = fs.Parse(args)
 	if *workload == "soak" {
-		return runSoakPhase(ctx, cfg, soakPhaseTeardown, soakDefaultSeed)
+		return runSoakPhase(ctx, cfg, soakPhaseTeardown, soakOptions{Seed: soakDefaultSeed, PageLimit: soakDefaultPageLimit})
 	}
 	if *preset == "" {
 		fmt.Fprintln(os.Stderr, "--preset required")
@@ -347,19 +354,19 @@ const (
 )
 
 func runSoak(ctx context.Context, cfg *config, args []string) int {
-	seed, err := parseSoakArgs(args)
+	opts, err := parseSoakArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	return runSoakPhase(ctx, cfg, soakPhaseRun, seed)
+	return runSoakPhase(ctx, cfg, soakPhaseRun, opts)
 }
 
 func runSoakPhase(
 	ctx context.Context,
 	cfg *config,
 	phase soakPhase,
-	seed int64,
+	opts soakOptions,
 ) int {
 	var validationErr error
 	if phase == soakPhaseTeardown {
@@ -383,9 +390,9 @@ func runSoakPhase(
 	}
 	logSoakAssumptions(&cfg.Soak)
 	if phase == soakPhaseSeed {
-		return runSoakSeed(ctx, cfg, seed)
+		return runSoakSeed(ctx, cfg, opts.Seed)
 	}
-	return runSoakWorkload(ctx, cfg, seed)
+	return runSoakWorkload(ctx, cfg, opts)
 }
 
 func runSoakTeardown(ctx context.Context, cfg *config) int {
@@ -742,6 +749,13 @@ func writeMembersCSV(path string, c *MemberCollector) error {
 	return WriteCSV(f, rows)
 }
 
+func membersCapacityDeliveryExitCode(missingReplies, missingEvents int) int {
+	if missingReplies > 0 || missingEvents > 0 {
+		return 1
+	}
+	return 0
+}
+
 func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("members-capacity", flag.ExitOnError)
 	preset := fs.String("preset", "", "members preset name")
@@ -883,7 +897,14 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 		slog.Error("generator error", "error", err)
 	}
 	time.Sleep(2 * time.Second)
-	collector.Finalize()
+	// The generator has stopped and drained, so anything still unmatched was
+	// never delivered. Report it: discarding the counts here made a run that
+	// dropped member events look identical to one that delivered them all.
+	missingReplies, missingEvents := collector.Finalize()
+	if missingReplies > 0 || missingEvents > 0 {
+		slog.Warn("undelivered after drain",
+			"missing_replies", missingReplies, "missing_events", missingEvents)
+	}
 
 	shutCtx, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = metricsSrv.Shutdown(shutCtx)
@@ -926,7 +947,7 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 			slog.Error("csv export", "error", err)
 		}
 	}
-	return 0
+	return membersCapacityDeliveryExitCode(missingReplies, missingEvents)
 }
 
 // computeSizeBuckets is intentionally simple in v1 — it returns one row per

@@ -85,7 +85,8 @@ func TestSoakCatalog_StateTransitions(t *testing.T) {
 	assert.True(t, catalog.MarkEdited("r-1", "m-1", "edited"))
 	assert.True(t, catalog.SetPinned("r-1", "m-1", true))
 	assert.True(t, catalog.SetReaction("r-1", "m-1", "party", "bob", true))
-	assert.True(t, catalog.IncrementThreadReplies("r-1", "m-1"))
+	assert.True(t, catalog.ReserveThreadReply("r-1", "m-1"))
+	assert.True(t, catalog.ConfirmThreadReply("r-1", "m-1"))
 
 	got, ok := catalog.Get("r-1", "m-1")
 	require.True(t, ok)
@@ -116,9 +117,9 @@ func TestSoakCatalog_ThreadReplyBudget(t *testing.T) {
 	}))
 	require.True(t, catalog.Accept("r-1", "m-1"))
 
-	assert.True(t, catalog.IncrementThreadReplies("r-1", "m-1"))
-	assert.True(t, catalog.IncrementThreadReplies("r-1", "m-1"))
-	assert.False(t, catalog.IncrementThreadReplies("r-1", "m-1"))
+	assert.True(t, catalog.ReserveThreadReply("r-1", "m-1"))
+	assert.True(t, catalog.ReserveThreadReply("r-1", "m-1"))
+	assert.False(t, catalog.ReserveThreadReply("r-1", "m-1"))
 	_, ok := catalog.PickEligible("r-1", "alice", soakCatalogThreadParent)
 	assert.False(t, ok)
 }
@@ -310,4 +311,77 @@ func (c *fakeSoakClock) Advance(duration time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(duration)
+}
+
+// A thread that has never been replied to has no thread room: message-worker
+// creates one when the first reply lands. Reading such a "thread" makes
+// history-service log `empty thread_room_id` and short-circuit before it ever
+// touches the Cassandra thread partition — so the sample is a fast no-op that
+// drags the GetThreadMessages percentiles down. The read side therefore needs
+// its own predicate, not the write side's.
+func TestSoakCatalog_ThreadReadRequiresAnExistingReply(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := newSoakCatalog(8, 100, 10*time.Second, clock)
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: "m-1", RoomID: "r-1", Author: "alice", CreatedAt: clock.Now(),
+		ThreadReplyLimit: 3,
+	}))
+	require.True(t, catalog.Accept("r-1", "m-1"))
+	clock.Advance(10 * time.Second)
+
+	// Writable: a zero-reply message is exactly where a new thread starts.
+	_, ok := catalog.PickEligible("r-1", "alice", soakCatalogThreadParent)
+	require.True(t, ok, "a zero-reply message must stay available as a new thread's parent")
+
+	// Not readable: there is no thread room to read yet.
+	_, ok = catalog.PickEligible("r-1", "alice", soakCatalogThreadRead)
+	require.False(t, ok, "a zero-reply message has no thread room to read")
+
+	require.True(t, catalog.ReserveThreadReply("r-1", "m-1"))
+	_, ok = catalog.PickEligible("r-1", "alice", soakCatalogThreadRead)
+	require.False(t, ok, "a pending reply reservation is not a persisted thread")
+
+	require.True(t, catalog.ConfirmThreadReply("r-1", "m-1"))
+	_, ok = catalog.PickEligible("r-1", "alice", soakCatalogThreadRead)
+	require.False(t, ok, "an accepted reply still needs persistence grace")
+
+	clock.Advance(10 * time.Second)
+	_, ok = catalog.PickEligible("r-1", "alice", soakCatalogThreadRead)
+	require.True(t, ok, "a confirmed reply is readable after persistence grace")
+}
+
+// A parent at its reply budget can take no more replies but still has a thread
+// to read — the two predicates must not collapse back into one.
+func TestSoakCatalog_ThreadReadStaysEligibleAtReplyLimit(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := newSoakCatalog(8, 100, 0, clock)
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: "m-1", RoomID: "r-1", Author: "alice", CreatedAt: clock.Now(),
+		ThreadReplyLimit: 1,
+	}))
+	require.True(t, catalog.Accept("r-1", "m-1"))
+	require.True(t, catalog.ReserveThreadReply("r-1", "m-1"))
+	require.True(t, catalog.ConfirmThreadReply("r-1", "m-1"))
+
+	_, ok := catalog.PickEligible("r-1", "alice", soakCatalogThreadParent)
+	require.False(t, ok, "budget spent: no more replies may be attached")
+
+	_, ok = catalog.PickEligible("r-1", "alice", soakCatalogThreadRead)
+	require.True(t, ok, "the thread still exists and must remain readable")
+}
+
+func TestSoakCatalog_ThreadReadSkipsDeleted(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := newSoakCatalog(8, 100, 0, clock)
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: "m-1", RoomID: "r-1", Author: "alice", CreatedAt: clock.Now(),
+		ThreadReplyLimit: 3,
+	}))
+	require.True(t, catalog.Accept("r-1", "m-1"))
+	require.True(t, catalog.ReserveThreadReply("r-1", "m-1"))
+	require.True(t, catalog.ConfirmThreadReply("r-1", "m-1"))
+	require.True(t, catalog.MarkDeleted("r-1", "m-1"))
+
+	_, ok := catalog.PickEligible("r-1", "alice", soakCatalogThreadRead)
+	require.False(t, ok)
 }

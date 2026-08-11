@@ -12,6 +12,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/errcode"
 )
 
 type soakRPCFakeReply struct {
@@ -343,4 +345,39 @@ func soakErrorEnvelope(payload string) error {
 		panic(err)
 	}
 	return parseSoakErrorEnvelope([]byte(payload))
+}
+
+// history-service replies with a compact oversize envelope when a page would
+// exceed the broker's max_payload (pkg/natsutil.oversizeEnvelope). It carries
+// code=internal, so without a dedicated class it is indistinguishable from a
+// server fault — and the operator cannot tell "lower --page-limit" from
+// "the service is broken".
+func TestClassifySoakRPCError_ResponseTooLargeIsItsOwnClass(t *testing.T) {
+	oversize := []byte(`{"code":"internal","reason":"response_too_large","error":"response payload exceeds maximum size"}`)
+	parsed, ok := errcode.Parse(oversize)
+	require.True(t, ok, "the oversize envelope must be a parseable errcode envelope")
+
+	assert.Equal(t, soakErrorResponseTooLarge, classifySoakRPCError(parsed))
+}
+
+// An ordinary internal error must keep its own class.
+func TestClassifySoakRPCError_PlainInternalStaysInternal(t *testing.T) {
+	plain, ok := errcode.Parse([]byte(`{"code":"internal","error":"boom"}`))
+	require.True(t, ok)
+	assert.Equal(t, soakErrorInternal, classifySoakRPCError(plain))
+}
+
+// The class has to be in the reported set or it is counted and never shown.
+func TestSoakAllErrorClasses_IncludesResponseTooLarge(t *testing.T) {
+	assert.Contains(t, soakAllErrorClasses[:], soakErrorResponseTooLarge)
+}
+
+// A class that aggregate reporting counts but validation rejects would be
+// dropped somewhere between the two. Assert the two sets agree rather than
+// spot-checking one entry.
+func TestValidSoakErrorClass_AgreesWithTheReportedSet(t *testing.T) {
+	for _, class := range soakAllErrorClasses {
+		assert.True(t, validSoakErrorClass(class),
+			"%q is reported but rejected by validation", class)
+	}
 }

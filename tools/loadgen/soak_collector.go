@@ -36,6 +36,7 @@ var soakAllErrorClasses = [...]soakErrorClass{
 	soakErrorAssertion,
 	soakErrorAmbiguous,
 	soakErrorMutationTargetMissing,
+	soakErrorResponseTooLarge,
 }
 
 type soakOperationOutcome string

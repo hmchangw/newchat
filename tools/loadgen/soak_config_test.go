@@ -277,3 +277,86 @@ func validSoakConfig(t *testing.T) soakConfig {
 	cfg.TeardownBatchDelay = 0
 	return cfg
 }
+
+// The page limit is a payload knob, so its safe value depends on how large the
+// soak's own messages are — SOAK_PAYLOAD_MAX_BYTES, not history-service's 20 KB
+// content cap, which the soak never reaches. Raising the payload size without
+// lowering the page size silently reintroduces oversize replies, so the two are
+// validated together.
+func TestValidateSoakPageBudget(t *testing.T) {
+	tests := []struct {
+		name             string
+		pageLimit        int
+		maxBytes         int
+		brokerMaxPayload int64
+		wantErr          bool
+	}{
+		{
+			name:             "defaults fit the broker budget",
+			pageLimit:        soakDefaultPageLimit,
+			maxBytes:         10240,
+			brokerMaxPayload: 262144,
+		},
+		{
+			name:             "raised payload size with the default page limit overflows",
+			pageLimit:        soakDefaultPageLimit,
+			maxBytes:         64 * 1024,
+			brokerMaxPayload: 262144,
+			wantErr:          true,
+		},
+		{
+			name:             "the old hardcoded 50 overflows even at the default payload size",
+			pageLimit:        50,
+			maxBytes:         10240,
+			brokerMaxPayload: 262144,
+			wantErr:          true,
+		},
+		{
+			name:             "a small page keeps a large payload legal",
+			pageLimit:        2,
+			maxBytes:         64 * 1024,
+			brokerMaxPayload: 262144,
+		},
+		{
+			name:             "a smaller connected broker rejects the defaults",
+			pageLimit:        soakDefaultPageLimit,
+			maxBytes:         10240,
+			brokerMaxPayload: 128 * 1024,
+			wantErr:          true,
+		},
+		{
+			name:             "a larger connected broker permits a larger page",
+			pageLimit:        20,
+			maxBytes:         10240,
+			brokerMaxPayload: 512 * 1024,
+		},
+		{
+			// pageLimit*payloadMaxBytes wraps negative at these values, so a
+			// product comparison silently passes the very pair the validator
+			// exists to reject.
+			name:             "an overflowing product must not read as within budget",
+			pageLimit:        int(^uint(0) >> 1),
+			maxBytes:         2,
+			brokerMaxPayload: 262144,
+			wantErr:          true,
+		},
+		{
+			name:             "overflow with the operands reversed",
+			pageLimit:        2,
+			maxBytes:         int(^uint(0) >> 1),
+			brokerMaxPayload: 262144,
+			wantErr:          true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSoakPageBudget(tt.pageLimit, tt.maxBytes, tt.brokerMaxPayload)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "page-limit")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

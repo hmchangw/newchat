@@ -539,12 +539,14 @@ func TestSoakReader_RecordsRPCFailuresByEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clock := newFakeSoakClock(time.Unix(100, 0))
-			catalog := acceptedSoakReadMessage(
+			// The parent carries a reply so the thread-read subtest has a
+			// thread to fetch; a zero-reply parent is skipped by design and
+			// would never reach the transport.
+			catalog := acceptedSoakReadThread(
 				t,
 				clock,
 				"room-1",
 				"AAAAAAAAAAAAAAAAAAAA",
-				"",
 			)
 			recorder := &soakReadRecorder{}
 			reader := newTestSoakReader(
@@ -708,7 +710,7 @@ func TestSoakCatalog_RejectsInvalidAndRepeatedTransitions(t *testing.T) {
 	assert.False(t, catalog.MarkDeleted("missing", "message-1"))
 	assert.False(t, catalog.SetPinned("missing", "message-1", true))
 	assert.False(t, catalog.SetReaction("missing", "message-1", "wave", "bob", true))
-	assert.False(t, catalog.IncrementThreadReplies("missing", "message-1"))
+	assert.False(t, catalog.ReserveThreadReply("missing", "message-1"))
 	assert.False(t, catalog.SetReaction("room-1", "message-1", "", "bob", true))
 	assert.False(t, catalog.SetReaction("room-1", "message-1", "wave", "", true))
 	assert.False(t, catalog.SetReaction("room-1", "message-1", "wave", "bob", false))
@@ -716,7 +718,7 @@ func TestSoakCatalog_RejectsInvalidAndRepeatedTransitions(t *testing.T) {
 	assert.False(t, catalog.MarkDeleted("room-1", "message-1"))
 	assert.False(t, catalog.MarkEdited("room-1", "message-1", "edited"))
 	assert.False(t, catalog.SetPinned("room-1", "message-1", true))
-	assert.False(t, catalog.IncrementThreadReplies("room-1", "message-1"))
+	assert.False(t, catalog.ReserveThreadReply("room-1", "message-1"))
 }
 
 func TestSoakTopology_RejectsInvalidLimitsAndIdentitySources(t *testing.T) {

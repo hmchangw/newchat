@@ -219,7 +219,7 @@ func (r *soakReader) GetThreadMessages(
 	parent, ok := r.catalog.PickEligible(
 		roomID,
 		account,
-		soakCatalogThreadParent,
+		soakCatalogThreadRead,
 	)
 	if !ok {
 		return r.skip(outcome), nil

@@ -35,17 +35,61 @@ type soakRuntimeStore interface {
 	LoadTopology(context.Context, string, string) (soakTopology, error)
 }
 
-func parseSoakArgs(args []string) (int64, error) {
+// soakDefaultPageLimit is how many messages a soak read asks for per page.
+//
+// The binding constraint is the broker's max_payload, not history-service's
+// maxPageSize (100). A read reply carries pageLimit messages, each up to
+// SOAK_PAYLOAD_MAX_BYTES — 10 KB by default, well under history-service's 20 KB
+// content cap, which this workload never reaches. At those defaults a page of
+// 15 is ~150 KB, inside the 256 KB budget; the old hardcoded 50 was ~500 KB and
+// came back as pkg/natsutil's oversize envelope instead of data.
+//
+// Because SOAK_PAYLOAD_MAX_BYTES is configurable, no constant is safe on its
+// own: validateSoakPageBudget checks the actual pair at startup.
+const soakDefaultPageLimit = 15
+
+// soakWalkRowBudget is how many clustered rows a paged walk must be able to
+// reach, independent of how the pages are sized.
+//
+// MaxPages used to be hardcoded at 100, which was a 5,000-row reach at the old
+// 50-row page. Lowering the page to fit the broker payload silently cut that to
+// 1,500: once a partition grew past it, older rows became unreachable to the
+// verifier and a mutation there would be missed or misreported as
+// target-missing. Page size is a transport constraint and walk depth is a
+// coverage requirement, so the two must not be the same number.
+const soakWalkRowBudget = 5000
+
+// soakMaxPages converts the row budget into a page count for the configured
+// page size, so a smaller page buys more pages rather than less history.
+func soakMaxPages(pageLimit int) int {
+	if pageLimit <= 0 {
+		return 1
+	}
+	return (soakWalkRowBudget + pageLimit - 1) / pageLimit
+}
+
+// soakOptions are the soak run's command-line knobs.
+type soakOptions struct {
+	Seed      int64
+	PageLimit int
+}
+
+func parseSoakArgs(args []string) (soakOptions, error) {
 	fs := flag.NewFlagSet("soak", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	seed := fs.Int64("seed", soakDefaultSeed, "RNG seed")
+	pageLimit := fs.Int("page-limit", soakDefaultPageLimit,
+		"messages requested per read page; keep it under broker max_payload / message size")
 	if err := fs.Parse(args); err != nil {
-		return 0, fmt.Errorf("parse soak arguments: %w", err)
+		return soakOptions{}, fmt.Errorf("parse soak arguments: %w", err)
 	}
 	if fs.NArg() != 0 {
-		return 0, fmt.Errorf("soak does not accept positional arguments")
+		return soakOptions{}, fmt.Errorf("soak does not accept positional arguments")
 	}
-	return *seed, nil
+	if *pageLimit <= 0 {
+		return soakOptions{}, fmt.Errorf("page-limit must be > 0, got %d", *pageLimit)
+	}
+	return soakOptions{Seed: *seed, PageLimit: *pageLimit}, nil
 }
 
 func waitForSoakWrappedDEK(
@@ -293,8 +337,9 @@ func runSoakSeed(
 func runSoakWorkload(
 	ctx context.Context,
 	cfg *config,
-	seed int64,
+	opts soakOptions,
 ) int {
+	seed := opts.Seed
 	client, err := mongoutil.Connect(
 		ctx,
 		cfg.MongoURI,
@@ -329,6 +374,17 @@ func runSoakWorkload(
 			slog.Error("drain Cassandra soak NATS connection", "error", err)
 		}
 	}()
+	// Fail before any load is generated: derive max_payload from the connected
+	// server's INFO so non-default brokers are neither overrun nor needlessly
+	// constrained by a local constant.
+	if err := validateSoakPageBudget(
+		opts.PageLimit,
+		cfg.Soak.PayloadMaxBytes,
+		nc.NatsConn().MaxPayload(),
+	); err != nil {
+		slog.Error("soak page budget rejected", "error", err)
+		return 2
+	}
 
 	metrics := NewMetrics()
 	metricsServer := startSoakMetricsServer(cfg.MetricsAddr, metrics)
@@ -434,7 +490,7 @@ func runSoakWorkload(
 	)
 	warmReader := newSoakReader(
 		soakReadConfig{
-			SiteID: cfg.SiteID, PageLimit: 50, MaxPages: 100,
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
 			RequestTimeout: soakRequestTimeout,
 		},
 		&topology,
@@ -454,7 +510,7 @@ func runSoakWorkload(
 		return 1
 	}
 	reader := newSoakReader(
-		soakMeasuredReadConfig(cfg.SiteID),
+		soakMeasuredReadConfig(cfg.SiteID, opts.PageLimit),
 		&topology,
 		catalog,
 		rpc,
@@ -482,7 +538,7 @@ func runSoakWorkload(
 	)
 	verifier := newSoakVerifier(
 		&soakVerifyConfig{
-			SiteID: cfg.SiteID, PageLimit: 50, MaxPages: 100,
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
 			RequestTimeout: soakRequestTimeout,
 		},
 		catalog,
@@ -586,11 +642,11 @@ func runSoakWorkload(
 	return 0
 }
 
-func soakMeasuredReadConfig(siteID string) soakReadConfig {
+func soakMeasuredReadConfig(siteID string, pageLimit int) soakReadConfig {
 	// Workload Model v1 defines the read rate in RPCs/second. Scheduled reads
 	// therefore fetch one page; the independent verifier owns bucket-walks.
 	return soakReadConfig{
-		SiteID: siteID, PageLimit: 50, MaxPages: 1,
+		SiteID: siteID, PageLimit: pageLimit, MaxPages: 1,
 		RequestTimeout: soakRequestTimeout,
 	}
 }
