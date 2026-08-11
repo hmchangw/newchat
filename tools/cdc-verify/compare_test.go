@@ -83,6 +83,29 @@ func TestValuesEqual(t *testing.T) {
 	}
 }
 
+func TestIsZeroValue(t *testing.T) {
+	tests := []struct {
+		name string
+		in   any
+		want bool
+	}{
+		{"nil", nil, true},
+		{"bool false", false, true},
+		{"bool true", true, false},
+		{"float64 zero", float64(0), true},
+		{"float64 nonzero", float64(1), false},
+		{"empty string", "", true},
+		{"non-empty string", "x", false},
+		{"unhandled type slice", []any{}, false},
+		{"unhandled type map", map[string]any{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isZeroValue(tt.in))
+		})
+	}
+}
+
 func TestDiffFields(t *testing.T) {
 	reg := newTransformRegistry(msgbucket.New(72 * time.Hour))
 	ts := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
