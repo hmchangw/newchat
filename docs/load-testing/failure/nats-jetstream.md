@@ -14,8 +14,10 @@ Loadgen can currently drive traffic through the following primary paths:
 
 However, the current implementation is **not sufficient to claim complete NATS / JetStream failover validation**:
 
-1. Loadgen has no federation / OUTBOX / remote INBOX, real bot pipeline, push delivery, search, HR, migration, or Teams pipeline scenarios.
-2. Loadgen has no per-operation outcome ledger. Some modes calculate latency from successful replies only, so timed-out or permanently missing outcomes may not be included in the failure rate.
+1. Loadgen has no federation / OUTBOX / remote INBOX, real bot pipeline, push delivery, HR, migration, or Teams pipeline scenarios. (A `max-rps search` workload landed in #200; search *correctness and index convergence* remain unverified.)
+2. Loadgen scores outcomes by the SLO spec's eligibility rules but still has no per-operation ledger. The two halves must not be confused, or work already done will be rebuilt:
+   - **Already implemented (#200).** `tools/loadgen/slooutcome.go` implements the `sli-slo.md` §0.1 eligibility table once for both transports (`classifyHTTPStatus` / `classifyErrcode` → good / failed / excluded), so a 4xx leaves the denominator instead of counting as success, and an unrecognized code burns budget instead of reading healthy. `max-rps messages` now carries `MissingReplies` / `MissingBroadcasts` from `ReplyStatsInWindow` / `BroadcastStatsInWindow`, so a dropped reply or broadcast is counted as missing rather than quietly excluded from a successful-sample percentile.
+   - **Still missing.** A per-operation ID ledger recording deadline, expected effects, and final read-back; a send-to-settle window so outcomes landing after fault removal are still attributed; and extension of that accounting to every mode rather than the message/login/search paths #200 touched. Window-based correlation answers *how many* went missing; recovery reconciliation needs *which operation IDs* went missing.
 3. The `daily` NATS connection pool uses the default reconnection behavior of raw `nats.Connect` and does not expose disconnect/reconnect/closed metrics. During a long outage, loadgen may lose its own connection first and produce incorrect fault attribution.
 4. Loadgen does not currently inject faults. Kubernetes, Chaos Mesh, network policies, traffic control, or NATS management tooling must inject faults while loadgen continues generating traffic and validating outcomes.
 5. The local `docker-local` environment runs a single NATS node. It can test a complete outage or restart, but it cannot validate JetStream RAFT leader failover, quorum loss, rolling node failover, or a cross-site gateway partition.
@@ -131,9 +133,9 @@ Coverage labels:
 | Mode | Traffic generated | Validation available | Failure-test limitation |
 |---|---|---|---|
 | `run` | Message front door or canonical injection | Gatekeeper reply, partial broadcast, message/broadcast pending samples | Canonical injection bypasses gatekeeper; other durables and missing outcomes are absent |
-| `max-rps messages` | Stepped message throughput | Successful latency, message/broadcast pending | Successful-sample bias; missing results may not be counted as failures |
+| `max-rps messages` | Stepped message throughput | §0.1-classified outcomes, missing replies/broadcasts in-window, message/broadcast pending | Window-level only: missing work is countable but not enumerable by operation ID, and there is no settle window past the send phase |
 | `max-rps thread` | Thread pressure | Partial thread results | Downstream/federation/search/push validation is incomplete |
-| `daily` | Mixed send/read/history/subscription-list/member-add/room-create/mute traffic, optionally presence | Aggregate operation errors and before/after pending deltas for all durables | A thread-reply helper exists but is not in the action mix; notification pending growth is exempted; no outcome ledger; insufficient connection-pool resilience |
+| `daily` | Mixed send/read/history/subscription-list/member-add/room-create/mute traffic, optionally presence | Aggregate operation errors and before/after pending deltas for all durables | A thread-reply helper exists but is not in the action mix; notification pending growth is exempted; no per-operation ledger (the #200 classifier does not yet cover this mode); insufficient connection-pool resilience |
 | `soak` | Continuous messages plus edit/delete/pin/unpin/reaction/thread operations | Data consistency through history/Cassandra read-back | Single-site only; no push/search/federation; some mutation retries alter the original failure distribution |
 | `members-*` | room-service front door or canonical ROOMS injection | room-worker backlog and member throughput | Not all side effects are verified; canonical mode bypasses room-service |
 | `history-*` / read modes | History/read-receipt/room-read/thread-read request/reply | RPC latency and error | Only selected endpoints; no side-effect ledger for reply loss |
@@ -230,10 +232,11 @@ Every campaign uses four phases: stable warmup for at least two maximum retry wi
    - Expose disconnect/reconnect/closed, buffer-full, last-connected-server, and reconnect-duration telemetry.
    - Automatically mark an interval inconclusive when the generator fails.
 
-2. **Per-operation outcome ledger / assertion mode**
-   - Persist operation ID, lane, deadline, expected event, and final read-back for each operation.
-   - Count eligible/good/bad/missing-after-deadline outcomes. Percentiles must not use successful samples only.
-   - Support send-to-settle execution so late recovery is not lost when the fault ends.
+2. **Per-operation outcome ledger / assertion mode** *(builds on #200, does not redo it)*
+   - Already in place: the shared §0.1 eligibility classifier (`slooutcome.go`) and window-based missing-reply/missing-broadcast accounting in `max-rps messages`. Reuse the classifier — do not add a second definition of good/failed/excluded.
+   - To add: persist operation ID, lane, deadline, expected event, and final read-back per operation, so missing work is enumerable by ID rather than only countable in aggregate.
+   - To add: send-to-settle execution so outcomes landing after fault removal are attributed to the run instead of lost at the send-window boundary.
+   - To add: extend this accounting to every mode that a campaign scores, not only the message/login/search paths #200 touched.
 
 3. **Complete durable sampler**
    - Include all enabled gatekeeper, message, broadcast, notification, push, room, inbox, outbox, search-sync, bot, HR, and migration durables.

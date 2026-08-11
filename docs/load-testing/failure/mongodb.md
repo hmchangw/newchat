@@ -178,7 +178,7 @@ Reconciliation must query by operation-owned identifiers and verify:
 
 ## 8. Observability Preconditions
 
-The authoritative metric inventory and dashboard design are in [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md).
+The authoritative metric inventory and dashboard design are in [Storage Dependency Metrics and Dashboard Contract](../../specs/o11y/storage-dependency-metrics.md).
 
 A MongoDB campaign is conclusive only when:
 

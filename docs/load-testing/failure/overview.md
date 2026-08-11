@@ -145,6 +145,35 @@ The detailed plans must verify both directions of every boundary:
 | Fault-time restart | Service starts while stream/consumer is unavailable | Service starts while no writable primary is available | Service starts while required consistency is unavailable |
 | Recovery surge | Redelivery and backlog drain | Queued callers and retry storm after primary recovery | Retried writes/reads, hints, repair, and backlog replay |
 
+### 6.1 Dependency Criticality and Failure-Mode Matrix
+
+The three campaign subsystems are not equally critical, and two further dependencies
+(Elasticsearch, Valkey) carry real failure modes without having their own campaign yet.
+The decisive axis is **whether the dependency sits on the message-send path**: an outage
+off the send path cannot fail a send, so it must surface as read/search/notification
+degradation rather than send failure. Any campaign result that contradicts this table is
+either a real design regression or a mis-attributed fault.
+
+| Dependency | Criticality | On send path? | **Dead** | **Degraded / half-dead** | **Slow** | App-layer backstop |
+|---|---|---|---|---|---|---|
+| **NATS / JetStream** | **Critical** | **Yes** (+ federation) | Platform stalls: send, broadcast, federation | Partial consumer lag; gateway interest-map pressure | E1/E2 latency rises, consumers back up | `MaxReconnects=-1`; consumer-lag alert; **no application fallback** |
+| **MongoDB** | **Critical** | **Yes** (both ends) | Send fails (gatekeeper subscription check); broadcast-worker writes fail | Primary stepdown: brief write failure and rollback risk | Send latency rises (`GetSubscription`, `FindUserByID`) | Tight context deadlines; room-metadata cache absorbs some reads |
+| **Cassandra** | Medium | **No** (history only) | History reads (J2 enter-channel) fail; **send unaffected** — message-worker persists asynchronously | LocalQuorum: reads hard-fail on quorum loss | Enter-channel/thread latency rises (SLO-4/5) | Send decoupled from Cassandra; gocql retry/speculative execution *(recommended, not yet wired)* |
+| **Elasticsearch** | Medium | No | Search unavailable (SLO-7/8); **no fallback** | Partial-shard results | Search latency rises (SLO-8) | Health probe; search isolated from core journeys |
+| **Valkey** | Low | No | Full fall-through: room metadata and restricted-room lookups go to Mongo/ES — **amplifies Mongo/ES load**, no correctness loss | Partial miss, partial amplification | Slight send/search latency rise | L1 to L2 to Mongo read-through; fail-open by design |
+
+Two consequences the campaigns must actually assert, not assume:
+
+- **A Cassandra or Valkey outage must not fail message-send.** If a campaign shows send
+  failures while only these are faulted, the decoupling or fail-open path has regressed.
+- **A Valkey outage should appear as elevated MongoDB/Elasticsearch load**, not as data
+  loss. That amplification factor is worth measuring, because treating the cache as a
+  free no-op understates the load the primaries must absorb during a cache outage.
+
+Elasticsearch and Valkey have no dedicated campaign in this round. They are exercised
+only as blast-radius observations inside the NATS/Mongo/Cassandra campaigns; a dedicated
+cache/search failure campaign is deferred and tracked as a coverage gap, not an omission.
+
 ## 7. Standard Campaign Lifecycle
 
 ```mermaid
@@ -192,7 +221,7 @@ All subsystem plans depend on the same loadgen foundations:
    - NATS / JetStream stream and consumer state, advisories, and reconnect behavior.
    - MongoDB topology, election, pool, command, replication-lag, and write/read outcomes.
    - Cassandra host state, consistency failures, timeouts, hints/repair state, and partition-level read-back.
-   - Shared metric names, gaps, labels, and dashboard rows are defined in the [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md).
+   - Shared metric names, gaps, labels, and dashboard rows are defined in the [Storage Dependency Metrics and Dashboard Contract](../../specs/o11y/storage-dependency-metrics.md).
 
 4. **Business reconciliation**
    - Mongo operational state.
@@ -210,6 +239,10 @@ Existing modes should be combined into a production-calibrated profile rather th
 - All connection pools, consumer loops, sessions, and service readiness states recover without manual data deletion or process intervention unless the documented design explicitly requires an operator action.
 - MongoDB, Cassandra, NATS-delivered state, search, push, and remote-site state converge where the tested user journey crosses those boundaries.
 - A loadgen connection failure, observer gap, clock error, or resource saturation makes the affected interval inconclusive rather than a system pass or failure.
+- **Latency-measurement integrity is itself a gate.** Faults that partition nodes or pause VMs are exactly the conditions that corrupt cross-process wall-clock latency, so a campaign must apply the SLO-2 sample rules from [`../system/sli-slo.md`](../system/sli-slo.md) §2 verbatim rather than inventing test-local ones:
+  - **Measurement-invalid** (`age < 0`, or a missing/zero JetStream metadata timestamp) is counted in `broadcast_channel_enqueue_age_invalid_total{reason}` and is **fail-closed** — kept in the denominator, never in the good numerator. A nonzero measurement-invalid rate makes the affected interval **INCONCLUSIVE**; it is never a pass.
+  - **A large positive age is a real failure, not an invalid sample.** Backlog or slow first-processing that pushes enqueue age to 30 s, 90 s, or minutes is a genuine SLO-2 miss and must stay in the denominator and out of the good numerator. Campaigns must not introduce an upper "sanity cap" that would discard exactly the outage the fault was injected to produce.
+  - **Stale redeliveries** are a duplicate-accounting problem for the outcome ledger, never reclassified as invalid latency.
 
 ## 10. Combined-Failure Campaigns
 
@@ -228,10 +261,10 @@ Each combined campaign must preserve single-fault attribution through exact time
 
 | Subsystem | Detailed plan | Status |
 |---|---|---|
-| NATS / JetStream | [NATS / JetStream Failure Testing and Loadgen Coverage Plan](nats-jetstream-failure-test-plan.md) | Initial inventory and campaign plan available |
-| MongoDB | [MongoDB Failure Testing and Loadgen Coverage Plan](mongodb-failure-test-plan.md) | Code-evidenced service/store inventory and campaign plan available |
-| Cassandra | [Cassandra Failure Testing and Loadgen Coverage Plan](cassandra-failure-test-plan.md) | Code-evidenced message/history/migration inventory and campaign plan available |
-| Storage observability | [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md) | Existing/missing metric inventory and shared production/failure-test dashboard contract available |
+| NATS / JetStream | [NATS / JetStream Failure Testing and Loadgen Coverage Plan](nats-jetstream.md) | Initial inventory and campaign plan available |
+| MongoDB | [MongoDB Failure Testing and Loadgen Coverage Plan](mongodb.md) | Code-evidenced service/store inventory and campaign plan available |
+| Cassandra | [Cassandra Failure Testing and Loadgen Coverage Plan](cassandra.md) | Code-evidenced message/history/migration inventory and campaign plan available |
+| Storage observability | [Storage Dependency Metrics and Dashboard Contract](../../specs/o11y/storage-dependency-metrics.md) | Existing/missing metric inventory and shared production/failure-test dashboard contract available |
 
 The subsystem documents own detailed fault injection, service-by-service behavior, observability queries, recovery objectives, and test cases. This overview owns shared terminology, lifecycle, loadgen requirements, cross-dependency boundaries, and combined campaigns.
 

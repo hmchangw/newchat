@@ -1,6 +1,6 @@
 # Cassandra Failure Testing and Loadgen Coverage Plan
 
-> Inventory date: 2026-08-11. This plan is based on the current Cassandra connection configuration, message/history repositories, JetStream consumers, loadgen soak implementation, CQL schema, and observability wiring. It complements the non-destructive [Cassandra Run A Soak Test](cassandra/soak-test-plan.md); it does not replace it.
+> Inventory date: 2026-08-11. This plan is based on the current Cassandra connection configuration, message/history repositories, JetStream consumers, loadgen soak implementation, CQL schema, and observability wiring. It complements the non-destructive [Cassandra Run A Soak Test](../cassandra/soak-test-plan.md); it does not replace it.
 
 ## 1. Executive Summary
 
@@ -163,7 +163,7 @@ Sampling is useful for soak performance, but a fault campaign needs 100% reconci
 
 ## 8. Observability Preconditions
 
-The authoritative metric inventory and dashboard design are in [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md).
+The authoritative metric inventory and dashboard design are in [Storage Dependency Metrics and Dashboard Contract](../../specs/o11y/storage-dependency-metrics.md).
 
 A Cassandra campaign is conclusive only when:
 
