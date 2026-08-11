@@ -272,9 +272,17 @@ type verifyRun struct {
 	// acceptance is only observable with a real subscription.
 	oracleNC *nats.Conn
 
-	mu        sync.Mutex
-	targets   []ReadbackTarget
-	oracleErr error
+	mu      sync.Mutex
+	targets []ReadbackTarget
+	// oracleErrs counts failed membership-oracle queries; oracleErrSample keeps
+	// the first for the operator-facing message. Counted, not latched, because
+	// the verdict tolerates a few (see maxToleratedOracleErrs) and the count is
+	// what distinguishes one blip from a service that was down all run.
+	oracleErrs      int
+	oracleErrSample error
+	// harnessErr is a fatal loadgen-side failure that aborted churn — a
+	// different class from an oracle query failure, and never tolerated.
+	harnessErr error
 }
 
 // executeVerify runs the full lifecycle: build pools, activate, preflight,
@@ -401,6 +409,7 @@ func executeVerify(
 	violations = append(violations, mm.Finalize()...)
 	violations = append(violations, readbackViolations...)
 
+	oracleErrs, oracleErrSample := run.takeOracleErrs()
 	in := VerifyInputs{
 		Violations:     violations,
 		Counts:         tracker.Counts(),
@@ -411,7 +420,9 @@ func executeVerify(
 		// non-delivery attributed to the system under test (spec §10).
 		DroppedRecipients: int(env.direct.DroppedRecipients()),
 		ReadbackErr:       readbackErr,
-		OracleErr:         run.takeOracleErr(),
+		OracleErrs:        oracleErrs,
+		OracleErrSample:   oracleErrSample,
+		HarnessErr:        run.takeHarnessErr(),
 		Cancelled:         ctx.Err() != nil,
 		GCPauseP99:        snapshotSelfMetrics().GCPauseP99Ms,
 		GCPauseMax:        verifyGCPauseMaxMs,
@@ -427,6 +438,7 @@ func executeVerify(
 		MultiplexDrops: in.MultiplexDrops,
 		Counts:         in.Counts,
 		Changes:        in.Changes,
+		OracleErrs:     in.OracleErrs,
 		Result:         evaluateVerify(in),
 	}, nil
 }
@@ -532,21 +544,45 @@ func (r *verifyRun) closeOracleConn() {
 	}
 }
 
-// recordOracleErr keeps the first error from a membership-supporting query.
-// Any such failure forces INCONCLUSIVE: an unreachable service says nothing
-// about whether the membership write happened (spec §10).
-func (r *verifyRun) recordOracleErr(err error) {
+// recordOracleErr counts one failed membership-supporting query and keeps the
+// first as the sample. Each failure is logged here rather than at the call site,
+// so failures 2..N are visible to an operator instead of being silently folded
+// into a latched first error (spec §10). IDs only — never message content.
+func (r *verifyRun) recordOracleErr(roomID, userID string, err error) {
 	r.mu.Lock()
-	if r.oracleErr == nil {
-		r.oracleErr = err
+	r.oracleErrs++
+	n := r.oracleErrs
+	if r.oracleErrSample == nil {
+		r.oracleErrSample = err
+	}
+	r.mu.Unlock()
+	slog.Warn("membership oracle query failed",
+		"room", roomID, "user", userID, "failures", n, "err", err)
+}
+
+// takeOracleErrs returns how many oracle queries failed and the first failure.
+func (r *verifyRun) takeOracleErrs() (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.oracleErrs, r.oracleErrSample
+}
+
+// recordHarnessErr keeps the first fatal loadgen-side failure. Unlike an oracle
+// query failure this is not a statement about the system under test at all: the
+// harness could not set up the membership it was about to check, so the run
+// carries no tolerance budget for it.
+func (r *verifyRun) recordHarnessErr(err error) {
+	r.mu.Lock()
+	if r.harnessErr == nil {
+		r.harnessErr = err
 	}
 	r.mu.Unlock()
 }
 
-func (r *verifyRun) takeOracleErr() error {
+func (r *verifyRun) takeHarnessErr() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.oracleErr
+	return r.harnessErr
 }
 
 // probeSendRate returns the sends/sec verify itself injects into probe rooms.
@@ -753,8 +789,9 @@ func (r *verifyRun) driveChurn(ctx context.Context, issueUntil time.Time) {
 			roomIdx++
 			if err != nil {
 				// The pool and the system have diverged; every later
-				// observation in this run is suspect.
-				r.recordOracleErr(err)
+				// observation in this run is suspect. This is a harness
+				// failure, not an oracle query failure — it gets no tolerance.
+				r.recordHarnessErr(err)
 				return
 			}
 			if ok {
@@ -915,7 +952,7 @@ func (r *verifyRun) harvest(ctx context.Context, pending []pendingChange, now ti
 func (r *verifyRun) observe(ctx context.Context, pc *pendingChange) {
 	has, err := r.oracleHasRoom(ctx, pc.account, pc.roomID)
 	if err != nil {
-		r.recordOracleErr(err)
+		r.recordOracleErr(pc.roomID, pc.userID, err)
 	} else {
 		var observed []string
 		if has {

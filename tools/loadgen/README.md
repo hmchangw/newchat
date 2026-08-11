@@ -1128,12 +1128,49 @@ VIOLATIONS (showing 4 of 4)
 VERDICT: FAIL
 ```
 
+The `membership:` line grows a fourth clause when some changes could not be
+observed at all:
+
+```
+membership:  22 changes (12 add, 10 remove) / 21 applied / 21 effective / 1 unobserved
+```
+
+`unobserved` counts changes whose backing `subscription.list` oracle query
+errored or timed out, so the change was never checked either way. Those
+changes are excluded from `applied` and `effective`, which is why those two
+read short of `changes` — without this clause the same line is
+indistinguishable from a real `membership_not_applied` that escaped its
+violation. The clause is omitted entirely when the count is zero. The same
+number is in the JSON report as `oracleErrs`.
+
 An INCONCLUSIVE run prints a `REASONS` block instead of (or in addition to)
 `VIOLATIONS`, naming which signal made the run untrustworthy (dropped
-recipient connection, readback/oracle error, probe floor not met, GC
-pressure, or cancellation — see `evaluateVerify` in
-`tools/loadgen/verify_verdict.go`). The console violation list is capped at
-10; pass `--json=<path>` for the full, uncapped report.
+recipient connection, readback error, membership-setup harness failure, too
+many oracle errors, probe floor not met, GC pressure, or cancellation — see
+`evaluateVerify` in `tools/loadgen/verify_verdict.go`). The console
+violation list is capped at 10; pass `--json=<path>` for the full, uncapped
+report.
+
+Two of those deserve a note:
+
+- **Membership oracle errors are tolerated up to `max(1, changes/10)`** —
+  one is always forgiven, then 10% of the changes issued. A failed oracle
+  query only blinds the one change it was checking, and that change is
+  already excluded from `applied`/`effective`; discarding a whole run's
+  clean delivery, leakage, exactly-once and persistence results over one
+  transient timeout confused "we could not check this change" with "we
+  cannot trust this run". Past the budget the reason names all three
+  numbers — `5 of 22 membership oracle queries failed (tolerance 2): …` —
+  so a single blip is distinguishable from a service that was down for the
+  whole run. Every individual failure is also logged (`membership oracle
+  query failed`, with room and user). The tolerance is a constant, not a
+  flag.
+- **A membership-setup harness failure has no tolerance.** If the
+  `SubscribeRoom` of a just-added churn target fails, churn aborts: loadgen's
+  model and the system have diverged, and every later observation is
+  suspect. This is a loadgen-side fault, so its reason reads
+  `harness failed during membership setup: …` rather than naming the oracle
+  — nothing was asked of `user-service` at all.
 
 The multiplex drop count on the `background:` line is **load context, not a
 trust signal** — it never makes a run INCONCLUSIVE. The multiplex pool's

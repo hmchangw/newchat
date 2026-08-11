@@ -35,10 +35,35 @@ type VerifyInputs struct {
 	MultiplexDrops    int64
 	DroppedRecipients int
 	ReadbackErr       error
-	OracleErr         error
-	Cancelled         bool
-	GCPauseP99        float64
-	GCPauseMax        float64
+	// OracleErrs counts failed membership-oracle queries and OracleErrSample
+	// carries the first; they are tolerated up to maxToleratedOracleErrs. A
+	// fatal harness-side churn abort is HarnessErr instead — a different class,
+	// with no tolerance. See evaluateVerify.
+	OracleErrs      int
+	OracleErrSample error
+	HarnessErr      error
+	Cancelled       bool
+	GCPauseP99      float64
+	GCPauseMax      float64
+}
+
+// oracleErrToleranceDivisor sets the share of issued membership changes whose
+// oracle query may fail before the run stops being trustworthy: 1/10th.
+// Deliberately a constant rather than a flag — an operator tuning it away is
+// tuning away the signal it guards.
+const oracleErrToleranceDivisor = 10
+
+// maxToleratedOracleErrs returns how many failed membership-oracle queries a run
+// may absorb: always at least one, then 10% of the changes issued.
+//
+// A change whose oracle query failed is already excluded from Applied and
+// Effective, so a tolerated failure costs detection sensitivity on that one
+// change — not the correctness of the verdict. The original all-or-nothing rule
+// conflated "we could not check this change" with "we cannot trust this run",
+// and threw away a whole run's clean delivery, leakage, exactly-once and
+// persistence results over a single transient subscription.list timeout.
+func maxToleratedOracleErrs(totalChanges int) int {
+	return max(1, totalChanges/oracleErrToleranceDivisor)
 }
 
 // VerifyResult is the evaluated outcome plus human-readable reasons.
@@ -53,8 +78,13 @@ type VerifyResult struct {
 // INCONCLUSIVE overrides both others: it means the signals cannot be trusted,
 // so reporting PASS or FAIL would be a lie either way. A violation only means
 // something if we can attribute it to the system under test — if the harness
-// itself dropped data or lost a connection, or a supporting query failed, the
-// run cannot prove the system did anything wrong (or right).
+// itself dropped data or lost a connection, or enough supporting queries failed,
+// the run cannot prove the system did anything wrong (or right).
+//
+// Membership-oracle failures are the one signal here with a budget rather than a
+// latch (maxToleratedOracleErrs): each failed query only blinds one change,
+// which is already excluded from Applied/Effective, so a few cost sensitivity
+// rather than trust. The count is reported either way (VerifyReport.OracleErrs).
 //
 // Membership churn (Changes) is deliberately NOT considered here: churn
 // legitimately changes the expected recipient set and is not, on its own,
@@ -72,7 +102,7 @@ type VerifyResult struct {
 // Gating on it made PASS unreachable in the default configuration — with
 // `daily-heavy` roughly 7000 users sit on multiplex, so drops are certain
 // within seconds. The count is still reported as load context (VerifyReport).
-func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugeParam: VerifyInputs is 192 bytes, but the by-value signature is fixed by this plan's brief and its pinned test call sites (e.g. evaluateVerify(passingInputs())), not by any interface conformance
+func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugeParam: VerifyInputs is well past the 80-byte threshold, but the by-value signature is fixed by this plan's brief and its pinned test call sites (e.g. evaluateVerify(passingInputs())), not by any interface conformance
 	var reasons []string
 
 	if in.DroppedRecipients > 0 {
@@ -83,8 +113,17 @@ func evaluateVerify(in VerifyInputs) VerifyResult { //nolint:gocritic // hugePar
 	if in.ReadbackErr != nil {
 		reasons = append(reasons, fmt.Sprintf("readback query failed: %v", in.ReadbackErr))
 	}
-	if in.OracleErr != nil {
-		reasons = append(reasons, fmt.Sprintf("membership oracle query failed: %v", in.OracleErr))
+	// A churn abort is a loadgen-side failure, not an oracle query failure:
+	// reporting it under an "oracle" prefix sends the operator after a service
+	// that was never asked anything. No tolerance — the harness could not set up
+	// the membership it was about to check.
+	if in.HarnessErr != nil {
+		reasons = append(reasons, fmt.Sprintf("harness failed during membership setup: %v", in.HarnessErr))
+	}
+	if tol := maxToleratedOracleErrs(in.Changes.Total); in.OracleErrs > tol {
+		reasons = append(reasons, fmt.Sprintf(
+			"%d of %d membership oracle queries failed (tolerance %d): %v",
+			in.OracleErrs, in.Changes.Total, tol, in.OracleErrSample))
 	}
 	if in.Counts.Tracked < in.MinProbes {
 		reasons = append(reasons, fmt.Sprintf(

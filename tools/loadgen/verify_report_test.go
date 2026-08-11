@@ -49,6 +49,47 @@ func TestRenderVerifyConsole_ShowsMultiplexDropsAsContext(t *testing.T) {
 	assert.NotContains(t, out, "REASONS")
 }
 
+// TestRenderVerifyConsole_ShowsUnobservedChanges pins that a tolerated oracle
+// failure stays visible even though it no longer gates the verdict: without it
+// on the membership line, "21 applied" out of 22 changes looks like a silent
+// membership_not_applied that simply escaped its violation.
+func TestRenderVerifyConsole_ShowsUnobservedChanges(t *testing.T) {
+	rep := reportForTest()
+	rep.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 21, Effective: 21}
+	rep.OracleErrs = 1
+
+	out := renderVerifyConsole(rep)
+	assert.Contains(t, out,
+		"membership:  22 changes (12 add, 10 remove) / 21 applied / 21 effective / 1 unobserved")
+}
+
+func TestRenderVerifyConsole_OmitsUnobservedWhenZero(t *testing.T) {
+	rep := reportForTest()
+	rep.OracleErrs = 0
+
+	out := renderVerifyConsole(rep)
+	assert.Contains(t, out,
+		"membership:  24 changes (14 add, 10 remove) / 24 applied / 24 effective\n")
+	assert.NotContains(t, out, "unobserved")
+}
+
+func TestRenderVerifyJSON_CarriesOracleErrs(t *testing.T) {
+	rep := reportForTest()
+	rep.OracleErrs = 3
+
+	raw, err := renderVerifyJSON(rep)
+	require.NoError(t, err)
+
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	assert.Contains(t, doc, "oracleErrs")
+	assert.NotContains(t, doc, "OracleErrs")
+
+	var back VerifyReport
+	require.NoError(t, json.Unmarshal(raw, &back))
+	assert.Equal(t, 3, back.OracleErrs)
+}
+
 func TestRenderVerifyConsole_ShowsViolationDetail(t *testing.T) {
 	out := renderVerifyConsole(reportForTest())
 	assert.Contains(t, out, "missing_recipient")
