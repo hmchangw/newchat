@@ -13,7 +13,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const defaultReconnectWait = 2 * time.Second
+const (
+	defaultReconnectWait = 2 * time.Second
+	// defaultDrainTimeout bounds the subscription-drain phase. Worst case is
+	// this plus drainConnection's internal FlushTimeout(5s) = 20s, which fits
+	// inside the 25s shutdown.Wait budget and the 30s Kubernetes grace period.
+	// The library default is 30s (nats.DefaultDrainTimeout), which is larger
+	// than our budget and so could never be the timeout that fires.
+	defaultDrainTimeout = 15 * time.Second
+)
 
 // Connect opens a NATS connection with sensible reconnect defaults.
 // The NATS client name is taken from the HOSTNAME env var (pod name in
@@ -44,6 +52,7 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 		nats.Name(name),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(defaultReconnectWait),
+		nats.DrainTimeout(defaultDrainTimeout),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			log.Warn("nats disconnected", "error", err)
 		}),
