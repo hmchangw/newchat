@@ -5,10 +5,12 @@ import './style.css'
 
 const UsersPage = lazy(() => import('@/components/UsersConsole'))
 const AuditView = lazy(() => import('@/components/AuditView'))
+const PermissionsView = lazy(() => import('@/components/PermissionsView'))
 
 const SECTIONS = [
   { key: 'users', label: 'Users' },
   { key: 'audit', label: 'Audit' },
+  { key: 'permissions', label: 'Permissions' },
 ]
 
 // Top-level authed layout: nav to switch Users/Audit, header with signed-in account + logout.
@@ -22,7 +24,8 @@ export default function AppShell() {
 
   const renderSection = () => {
     if (section === 'users') return <UsersPage />
-    return <AuditView />
+    if (section === 'audit') return <AuditView />
+    return <PermissionsView />
   }
 
   const content = (

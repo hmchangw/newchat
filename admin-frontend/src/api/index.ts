@@ -11,9 +11,11 @@ export { botLogin, changePassword } from './auth/botAuth'
 export type { Bundle } from './auth/botAuth'
 
 export {
+  createPermissions,
   createUser,
   getUser,
   listAudit,
+  listPermissions,
   listSessions,
   listUsers,
   revokeAllSessions,
@@ -26,8 +28,13 @@ export type {
   AdminUser,
   AuditEntry,
   AuditFilter,
+  CreatePermissionsRequest,
+  CreatePermissionsResponse,
   CreateUserInput,
+  ListPermissionsParams,
+  ListPermissionsResponse,
   ListUsersParams,
+  PermissionGrantView,
   SetPasswordInput,
   UpdateUserPatch,
 } from './admin'

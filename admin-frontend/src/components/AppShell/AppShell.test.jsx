@@ -4,12 +4,18 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 vi.mock('@/context/AuthContext', () => ({ useAuth: vi.fn() }))
 vi.mock('@/api', async (importOriginal) => {
   const actual = await importOriginal()
-  return { ...actual, listUsers: vi.fn(), listAudit: vi.fn() }
+  return {
+    ...actual,
+    listUsers: vi.fn(),
+    listAudit: vi.fn(),
+    createPermissions: vi.fn(),
+    listPermissions: vi.fn(),
+  }
 })
 
 import AppShell from './AppShell'
 import { useAuth } from '@/context/AuthContext'
-import { listUsers, listAudit } from '@/api'
+import { listUsers, listAudit, listPermissions } from '@/api'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -19,6 +25,7 @@ beforeEach(() => {
   })
   listUsers.mockResolvedValue({ users: [], total: 0 })
   listAudit.mockResolvedValue({ entries: [], total: 0 })
+  listPermissions.mockResolvedValue({ entries: [], total: 0 })
 })
 
 describe('AppShell', () => {
@@ -59,5 +66,17 @@ describe('AppShell', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^users$/i }))
     await waitFor(() => expect(listUsers).toHaveBeenCalledTimes(2))
+  })
+
+  it('switches from Users to Permissions via nav and mounts PermissionsView', async () => {
+    render(<AppShell />)
+    await waitFor(() => expect(listUsers).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: /^permissions$/i }))
+
+    await waitFor(() =>
+      expect(listPermissions).toHaveBeenCalledWith('tok', { page: 1, limit: 20 }),
+    )
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeInTheDocument()
   })
 })

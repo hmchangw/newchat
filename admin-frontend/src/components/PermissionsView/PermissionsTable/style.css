@@ -1,0 +1,32 @@
+.permissions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+
+.permissions-table th,
+.permissions-table td {
+  text-align: left;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.permissions-table th {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+}
+
+.permissions-table td {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  /* A 1000-rune reason can be one unbroken token (no spaces) — let it wrap
+     instead of blowing out the table width. */
+  overflow-wrap: anywhere;
+}
+
+.permissions-table-status {
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--text-muted);
+}

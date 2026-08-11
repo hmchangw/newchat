@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AsyncJobError } from '@/api'
 import {
+  createPermissions,
   createUser,
   getUser,
   listAudit,
+  listPermissions,
   listSessions,
   listUsers,
   revokeAllSessions,
@@ -294,5 +296,142 @@ describe('listAudit', () => {
 
     const [url] = fetchMock.mock.calls[0]
     expect(url).toBe('http://localhost:8082/v1/admin/audit')
+  })
+})
+
+const GRANT_VIEW = {
+  id: 'g-1',
+  permission: 'external.image.view',
+  subjectAccount: 'alice',
+  granted: true,
+  effectiveFrom: '2026-09-01',
+  expiresAt: '2026-12-31',
+  expiresAtUTC: '2026-12-31T16:00:00Z',
+  applicantAccount: 'carol',
+  approverAccount: 'dave',
+  reason: 'On-call staff must review production line photos from outside the fab.',
+  recordedBy: 'p_admin_wang',
+  recordedAt: '2026-08-11T03:00:00Z',
+}
+
+describe('createPermissions', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('POSTs /v1/admin/permissions with the request body and returns the created response', async () => {
+    const response = {
+      created: 2,
+      duplicatesIgnored: [],
+      grants: [
+        { id: 'g-1', subjectAccount: 'alice' },
+        { id: 'g-2', subjectAccount: 'bob' },
+      ],
+    }
+    const fetchMock = stubFetch(201, response)
+
+    const result = await createPermissions('tok', {
+      permission: 'external.image.view',
+      subjectAccounts: ['alice', 'bob'],
+      granted: true,
+      effectiveFrom: '2026-09-01',
+      expiresAt: '2026-12-31',
+      applicantAccount: 'carol',
+      approverAccount: 'dave',
+      reason: 'On-call staff must review production line photos from outside the fab.',
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8082/v1/admin/permissions')
+    expect(init.method).toBe('POST')
+    expect(init.headers.Authorization).toBe('Bearer tok')
+    expect(init.headers['Content-Type']).toBe('application/json')
+    expect(JSON.parse(init.body)).toEqual({
+      permission: 'external.image.view',
+      subjectAccounts: ['alice', 'bob'],
+      granted: true,
+      effectiveFrom: '2026-09-01',
+      expiresAt: '2026-12-31',
+      applicantAccount: 'carol',
+      approverAccount: 'dave',
+      reason: 'On-call staff must review production line photos from outside the fab.',
+    })
+    expect(result).toEqual(response)
+  })
+
+  it('throws AsyncJobError with reason preserved on a non-2xx response', async () => {
+    stubFetch(404, {
+      error: 'unknown accounts: zzz',
+      code: 'not_found',
+      reason: 'unknown_accounts',
+    })
+    const body = {
+      permission: 'external.image.view',
+      subjectAccounts: ['zzz'],
+      granted: true,
+      expiresAt: '2026-12-31',
+      applicantAccount: 'carol',
+      approverAccount: 'dave',
+      reason: 'test',
+    }
+
+    await expect(createPermissions('tok', body)).rejects.toBeInstanceOf(AsyncJobError)
+    await expect(createPermissions('tok', body)).rejects.toMatchObject({
+      reason: 'unknown_accounts',
+    })
+  })
+})
+
+describe('listPermissions', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('GETs /v1/admin/permissions with subjectAccount plus optional params when all are provided', async () => {
+    const fetchMock = stubFetch(200, { entries: [GRANT_VIEW], total: 1, currentlyGranted: true })
+
+    const result = await listPermissions('tok', {
+      subjectAccount: 'alice',
+      permission: 'external.image.view',
+      page: 2,
+      limit: 10,
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    const parsed = new URL(url)
+    expect(parsed.pathname).toBe('/v1/admin/permissions')
+    expect(parsed.searchParams.get('subjectAccount')).toBe('alice')
+    expect(parsed.searchParams.get('permission')).toBe('external.image.view')
+    expect(parsed.searchParams.get('page')).toBe('2')
+    expect(parsed.searchParams.get('limit')).toBe('10')
+    expect(init.method).toBe('GET')
+    expect(result).toEqual({ entries: [GRANT_VIEW], total: 1, currentlyGranted: true })
+  })
+
+  it('omits permission/page/limit from the query string when not provided', async () => {
+    const fetchMock = stubFetch(200, { entries: [], total: 0 })
+
+    await listPermissions('tok', { subjectAccount: 'alice' })
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8082/v1/admin/permissions?subjectAccount=alice')
+  })
+
+  it('omits subjectAccount from the query string when not provided (unfiltered list)', async () => {
+    const fetchMock = stubFetch(200, { entries: [], total: 0 })
+
+    await listPermissions('tok', {})
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8082/v1/admin/permissions')
+  })
+
+  it('GETs with permission only when subjectAccount is omitted', async () => {
+    const fetchMock = stubFetch(200, { entries: [], total: 0 })
+
+    await listPermissions('tok', { permission: 'external.image.view', page: 1, limit: 20 })
+
+    const [url] = fetchMock.mock.calls[0]
+    const parsed = new URL(url)
+    expect(parsed.searchParams.get('subjectAccount')).toBeNull()
+    expect(parsed.searchParams.get('permission')).toBe('external.image.view')
+    expect(parsed.searchParams.get('page')).toBe('1')
+    expect(parsed.searchParams.get('limit')).toBe('20')
   })
 })

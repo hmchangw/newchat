@@ -1,0 +1,76 @@
+.account-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.account-picker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.account-picker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-sm);
+  background: var(--bg-input);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.account-picker-chip button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--text-base);
+  line-height: 1;
+  padding: 0;
+}
+
+.account-picker-chip button:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.account-picker-chip button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.account-picker-input-wrap {
+  position: relative;
+}
+
+.account-picker-options {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + var(--space-2xs));
+  left: 0;
+  right: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--space-2xs) 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-dialog);
+  list-style: none;
+}
+
+.account-picker-options li {
+  padding: var(--space-xs) var(--space-md);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.account-picker-options li:hover {
+  background: var(--bg-hover);
+}
