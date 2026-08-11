@@ -301,6 +301,11 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
+	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
+		slog.WarnContext(ctx, "badge new mentions on edit failed",
+			"error", err, "room_id", room.ID, "request_id", natsutil.RequestIDFromContext(ctx))
+	}
+
 	edit := buildEditRoomEvent(room, evt)
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
@@ -308,6 +313,34 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		}
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
+}
+
+// badgeNewlyMentionedAccounts badges accounts an edit newly @-mentions (per
+// their subscription's current HasMention). Additive only: never clears a
+// badge for a removed mention, never re-badges an already-mentioned account.
+func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
+	parsed := mention.Parse(msg.Content)
+	if len(parsed.Accounts) == 0 {
+		return nil
+	}
+	subs, err := h.store.ListSubscriptions(ctx, roomID)
+	if err != nil {
+		return fmt.Errorf("list subscriptions %s: %w", roomID, err)
+	}
+	alreadyMentioned := make(map[string]bool, len(subs))
+	for i := range subs {
+		alreadyMentioned[subs[i].User.Account] = subs[i].HasMention
+	}
+	newAccounts := make([]string, 0, len(parsed.Accounts))
+	for _, account := range parsed.Accounts {
+		if !alreadyMentioned[account] {
+			newAccounts = append(newAccounts, account)
+		}
+	}
+	if len(newAccounts) == 0 {
+		return nil
+	}
+	return h.store.SetSubscriptionMentions(ctx, roomID, newAccounts, *msg.EditedAt)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {

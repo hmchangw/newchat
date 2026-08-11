@@ -947,6 +947,84 @@ func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {
 	assert.Equal(t, "secret edit", plaintext)
 }
 
+func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
+	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+
+	tests := []struct {
+		name            string
+		content         string
+		subs            []model.Subscription
+		wantSetMentions []string // nil = SetSubscriptionMentions must not be called
+	}{
+		{
+			name:    "edit adds a new mention",
+			content: "hey @bob check this",
+			subs: []model.Subscription{
+				{User: model.SubscriptionUser{Account: "bob"}, RoomID: "room-1"},
+			},
+			wantSetMentions: []string{"bob"},
+		},
+		{
+			name:    "re-editing an already-mentioned account does not re-badge",
+			content: "hey @bob check this again",
+			subs: []model.Subscription{
+				{User: model.SubscriptionUser{Account: "bob"}, RoomID: "room-1", HasMention: true},
+			},
+			wantSetMentions: nil,
+		},
+		{
+			name:    "removing a mention badges nobody",
+			content: "no mentions here anymore",
+			subs:    nil, // ListSubscriptions must not even be called
+		},
+		{
+			name:    "mixed: only the newly-added account is badged",
+			content: "hey @alice and @bob",
+			subs: []model.Subscription{
+				{User: model.SubscriptionUser{Account: "alice"}, RoomID: "room-1", HasMention: true},
+				{User: model.SubscriptionUser{Account: "bob"}, RoomID: "room-1"},
+			},
+			wantSetMentions: []string{"bob"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+
+			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+			if tc.subs != nil || tc.wantSetMentions != nil {
+				store.EXPECT().ListSubscriptions(gomock.Any(), "room-1").Return(tc.subs, nil)
+			}
+			if tc.wantSetMentions != nil {
+				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.InAnyOrder(tc.wantSetMentions), edited).Return(nil)
+			}
+
+			evt := model.MessageEvent{
+				Event:     model.EventUpdated,
+				SiteID:    "site-a",
+				Timestamp: edited.UnixMilli(),
+				Message: model.Message{
+					ID: "msg-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+					Content:   tc.content,
+					CreatedAt: edited.Add(-time.Hour),
+					EditedAt:  &edited, UpdatedAt: &edited,
+				},
+			}
+			data, err := json.Marshal(&evt)
+			require.NoError(t, err)
+
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+			require.Len(t, pub.records, 1, "edit must still fan out regardless of mention badging")
+		})
+	}
+}
+
 func TestHandleUpdated_MissingEditedAt_ReturnsError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
