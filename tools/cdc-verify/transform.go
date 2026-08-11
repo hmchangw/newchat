@@ -11,9 +11,8 @@ type transformFn func(args []any) (any, error)
 
 type transformRegistry map[string]transformFn
 
-// transformNames mirrors the registry keys so mapping validation can check
-// names without constructing a registry (which needs a bucket Sizer).
-// Keep in sync with newTransformRegistry.
+// transformNames mirrors the registry keys so validation can check names
+// without a bucket Sizer. Keep in sync with newTransformRegistry.
 var transformNames = map[string]bool{
 	"unixMilli": true,
 	"toString":  true,

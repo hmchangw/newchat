@@ -29,9 +29,8 @@ import (
 
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
-// testSiteID derives a per-test site id from t.Name() so every test (and
-// subtest) gets its own MIGRATION-OPLOG stream/consumer and never collides
-// with a sibling running concurrently.
+// testSiteID derives a per-test site id from t.Name() so each test gets its
+// own MIGRATION-OPLOG stream/consumer and never collides with siblings.
 func testSiteID(t *testing.T) string {
 	t.Helper()
 	h := fnv.New32a()
@@ -39,12 +38,8 @@ func testSiteID(t *testing.T) string {
 	return fmt.Sprintf("it-%x", h.Sum32())
 }
 
-// startPipeline wires a real verifier + watcher against the given stores and
-// a fresh, test-owned MIGRATION-OPLOG-{siteID} stream, then starts the
-// watcher consuming it. cass may be nil for mappings with no cassandra
-// target. cfgOverride, if non-nil, tweaks the default fast-poll config
-// before the verifier is built. Cleanup (consumer stop, NATS drain) is
-// registered via t.Cleanup.
+// startPipeline wires a real verifier + watcher against a fresh test-owned
+// stream; cass may be nil, cfgOverride tweaks the fast-poll defaults.
 func startPipeline(t *testing.T, mapping *Mapping, srcDB, tgtDB *mongo.Database, cass CassStore,
 	cfgOverride func(*verifierConfig),
 ) (results *resultsStore, siteID string, publish func(subject string, ev model.OplogEvent)) {
@@ -102,10 +97,8 @@ func startPipeline(t *testing.T, mapping *Mapping, srcDB, tgtDB *mongo.Database,
 	return results, siteID, publish
 }
 
-// oplogEvent builds a minimal, valid CDC envelope for docID: a documentKey
-// only, matching what the real oplog-connector sends for update/delete (and
-// enough for the verifier, which always re-reads current state rather than
-// trusting the event payload).
+// oplogEvent builds a minimal CDC envelope (documentKey only), matching what
+// oplog-connector sends for update/delete — the verifier re-reads state anyway.
 func oplogEvent(siteID, collection, op, docID string) model.OplogEvent {
 	nowMs := time.Now().UTC().UnixMilli()
 	return model.OplogEvent{
@@ -130,9 +123,7 @@ func findResult(results *resultsStore, docID string) (CheckResult, bool) {
 	return CheckResult{}, false
 }
 
-// awaitState polls results (via require.Eventually) until docID's row
-// reaches want, and returns that row. Fails the test if timeout elapses
-// first.
+// awaitState polls until docID's row reaches want, failing the test on timeout.
 func awaitState(t *testing.T, results *resultsStore, docID string, want CheckState, timeout time.Duration) CheckResult {
 	t.Helper()
 	var got CheckResult
@@ -186,9 +177,8 @@ func TestEndToEnd_Match(t *testing.T) {
 	assert.True(t, got.Targets[0].Matched)
 }
 
-// TestEndToEnd_DelayedConvergence inserts the target doc only after the
-// verifier has already polled a couple of times, asserting it still
-// converges to matched (with Attempts > 1) rather than failing early.
+// TestEndToEnd_DelayedConvergence inserts the target doc only after a couple
+// of polls, asserting convergence to matched (Attempts > 1), not early failure.
 func TestEndToEnd_DelayedConvergence(t *testing.T) {
 	srcDB := testutil.MongoDB(t, "cdcverify_src")
 	tgtDB := testutil.MongoDB(t, "cdcverify_tgt")
@@ -206,9 +196,8 @@ func TestEndToEnd_DelayedConvergence(t *testing.T) {
 	publish(subject.MigrationOplog(siteID, "rocketchat_room", "insert"),
 		oplogEvent(siteID, "rocketchat_room", "insert", "r2"))
 
-	// Give the verifier a couple of poll cycles to observe the target still
-	// missing before the doc lands, so the test genuinely exercises
-	// convergence rather than a same-attempt match.
+	// Let a couple of poll cycles observe the target missing before the doc
+	// lands, so the test exercises convergence, not a same-attempt match.
 	time.Sleep(2 * poll)
 	_, err = tgtDB.Collection("rooms").InsertOne(context.Background(), bson.M{"_id": "r2", "name": "general"})
 	require.NoError(t, err)

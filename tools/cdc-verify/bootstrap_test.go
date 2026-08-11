@@ -16,9 +16,8 @@ func TestBootstrapStreams_Disabled(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// fakeJetStream embeds a nil jetstream.JetStream so unimplemented methods
-// panic if ever called, and overrides only CreateOrUpdateStream — the one
-// method bootstrapStreams's enabled path uses.
+// fakeJetStream embeds a nil jetstream.JetStream (unimplemented methods panic)
+// and overrides only CreateOrUpdateStream — all the enabled path uses.
 type fakeJetStream struct {
 	jetstream.JetStream
 	created []jetstream.StreamConfig

@@ -21,9 +21,8 @@ type verifierConfig struct {
 	SamplePercent int
 }
 
-// compiledSource is the mapping pre-folded for the hot path: field fan-out
-// grouped per target, the dest column list each lookup projects, and which
-// resolvers each target depends on.
+// compiledSource is the mapping pre-folded for the hot path: per-target field
+// pairs, lookup projections, and resolver dependencies.
 type compiledSource struct {
 	src      *SourceMapping
 	aliases  []string               // target aliases, sorted — fixes sub-check order
@@ -32,9 +31,8 @@ type compiledSource struct {
 	deps     map[string][]string    // alias -> resolver aliases its key/fields reference
 }
 
-// checkHandle is the per-check control block held by the pending index. The
-// superseded flag distinguishes "a newer event took over this key" from
-// "the verifier is shutting down" when the check's context is cancelled.
+// checkHandle is the per-check control block in the pending index; superseded
+// distinguishes "newer event took over" from "shutting down" on cancellation.
 type checkHandle struct {
 	cancel     context.CancelFunc
 	superseded atomic.Bool
@@ -103,8 +101,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// compile folds Fields and Derived into per-target field pairs and precomputes
-// the projection each target lookup needs.
+// compile folds Fields and Derived into per-target field pairs and projections.
 func compile(s *SourceMapping) *compiledSource {
 	cs := &compiledSource{
 		src:      s,
@@ -159,8 +156,7 @@ func compile(s *SourceMapping) *compiledSource {
 	return cs
 }
 
-// targetDeps lists the resolver aliases a target's key columns and compared
-// fields reference through "@alias.path".
+// targetDeps lists the resolver aliases a target references through "@alias.path".
 func targetDeps(t *Target, pairs []fieldPair) []string {
 	seen := map[string]bool{}
 	add := func(path string) {
@@ -232,9 +228,8 @@ func sortedMapKeys[V any](m map[string]V) []string {
 	return out
 }
 
-// Submit classifies the event synchronously and spawns the check goroutine for
-// everything it does not skip. It never blocks on the check-concurrency
-// semaphore — the spawned goroutine acquires that itself.
+// Submit classifies the event synchronously and spawns a check goroutine for
+// anything not skipped; the goroutine acquires the concurrency semaphore itself.
 func (v *verifier) Submit(ev CDCEvent) {
 	nowMs := v.now().UTC().UnixMilli()
 	row := CheckResult{
@@ -295,12 +290,8 @@ func (v *verifier) skip(row *CheckResult, reason string, nowMs int64) {
 
 func pendingKey(collection, docID string) string { return collection + "\x00" + docID }
 
-// beginCheck installs h as the active check for key and enrols its goroutine in
-// the wait group, returning the displaced predecessor for the caller to
-// supersede. Registering here rather than inside the goroutine keeps supersede
-// ordering identical to Submit ordering; doing the wg.Add under the same lock
-// that Shutdown takes keeps it strictly ordered before wg.Wait. Reports false
-// once the verifier is shutting down.
+// beginCheck installs h as key's active check, returning the displaced predecessor; false once shutting down.
+// Held under the Shutdown mutex so wg.Add precedes wg.Wait and supersede order matches Submit order.
 func (v *verifier) beginCheck(key string, h *checkHandle) (*checkHandle, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -313,8 +304,7 @@ func (v *verifier) beginCheck(key string, h *checkHandle) (*checkHandle, bool) {
 	return prev, true
 }
 
-// unregisterPending drops h from the pending index unless a newer check has
-// already replaced it.
+// unregisterPending drops h unless a newer check has already replaced it.
 func (v *verifier) unregisterPending(key string, h *checkHandle) {
 	v.mu.Lock()
 	if v.pending[key] == h {
@@ -323,8 +313,7 @@ func (v *verifier) unregisterPending(key string, h *checkHandle) {
 	v.mu.Unlock()
 }
 
-// targetState is a sub-check's live state; only the owning check goroutine
-// touches it.
+// targetState is a sub-check's live state, touched only by the owning goroutine.
 type targetState struct {
 	alias   string
 	matched bool
@@ -332,8 +321,8 @@ type targetState struct {
 	diffs   []FieldDiff
 }
 
-// runCheck owns one check row from PENDING to a terminal state. The goroutine
-// running it is the row's sole writer and hands copies to the store.
+// runCheck owns one row from PENDING to a terminal state; its goroutine is the
+// row's sole writer and hands copies to the store.
 func (v *verifier) runCheck(ctx context.Context, h *checkHandle, key string, row *CheckResult,
 	cs *compiledSource, action OpAction,
 ) {
@@ -378,9 +367,8 @@ func (v *verifier) runCheck(ctx context.Context, h *checkHandle, key string, row
 	}
 }
 
-// attempt runs one full pass over the unfrozen sub-checks. It reports whether
-// the whole check must fail immediately (an ambiguous dest key can never
-// resolve itself by polling).
+// attempt runs one pass over the unfrozen sub-checks, reporting whether the
+// whole check must fail now (an ambiguous dest key never resolves by polling).
 func (v *verifier) attempt(ctx context.Context, cs *compiledSource, action OpAction,
 	docID string, states []targetState,
 ) bool {
@@ -421,20 +409,15 @@ func (v *verifier) attempt(ctx context.Context, cs *compiledSource, action OpAct
 	return false
 }
 
-// attemptDocs holds the two views of the source document an attempt works with.
-// raw is the document as stored; view additionally overlays resolved docs under
-// "@alias" keys so key building and fields-mode compares can reach them with a
-// single getPath walk. A verbatim compare must use raw: it ranges over every
-// source key, so each overlay key would surface as a diff the destination can
-// never satisfy. Verbatim targets provably never need resolver values —
-// validation forbids field refs onto them, and their keys are built from view.
+// attemptDocs: raw is the source doc as stored; view overlays resolved docs under "@alias" keys.
+// Verbatim compares must use raw — overlay keys would diff against a dest that can never contain them.
 type attemptDocs struct {
 	raw  map[string]any
 	view map[string]any
 }
 
-// applyLookup folds one dest lookup outcome into the sub-check state and
-// reports whether the whole check must fail now.
+// applyLookup folds one dest lookup into the sub-check state, reporting whether
+// the whole check must fail now.
 func (v *verifier) applyLookup(st *targetState, t *Target, pairs []fieldPair, action OpAction,
 	docs attemptDocs, rec map[string]any, err error,
 ) bool {
@@ -472,9 +455,8 @@ func (v *verifier) applyLookup(st *targetState, t *Target, pairs []fieldPair, ac
 	return false
 }
 
-// loadSource returns the source document to compare against, or a cause to
-// stamp on every unfrozen sub-check. verify-absent has no source document —
-// only the change-stream document key is known.
+// loadSource returns the source doc, or a cause to stamp on every unfrozen
+// sub-check. verify-absent knows only the change-stream document key.
 func (v *verifier) loadSource(ctx context.Context, cs *compiledSource, action OpAction, docID string) (map[string]any, string) {
 	if action == OpVerifyAbsent {
 		return map[string]any{"_id": docID}, ""
@@ -491,8 +473,7 @@ func (v *verifier) loadSource(ctx context.Context, cs *compiledSource, action Op
 	return doc, ""
 }
 
-// resolveAll performs the point lookups the still-unfrozen targets depend on,
-// once per attempt. Returns the resolved docs and a per-resolver failure cause.
+// resolveAll runs the point lookups the unfrozen targets need, once per attempt.
 func (v *verifier) resolveAll(ctx context.Context, cs *compiledSource, srcDoc map[string]any,
 	states []targetState,
 ) (map[string]map[string]any, map[string]string) {
@@ -544,9 +525,8 @@ func firstResolverCause(deps []string, causes map[string]string) string {
 	return ""
 }
 
-// sourceView overlays resolved documents onto the source document under their
-// "@alias" keys, so a single getPath walk serves both plain paths ("u._id")
-// and resolver paths ("@user.username" -> view["@user"]["username"]).
+// sourceView overlays resolved docs under their "@alias" keys so one getPath
+// walk serves plain paths ("u._id") and resolver paths ("@user.username") alike.
 func sourceView(srcDoc map[string]any, resolved map[string]map[string]any) map[string]any {
 	if len(resolved) == 0 {
 		return srcDoc
@@ -565,8 +545,8 @@ func buildKey(t *Target, view map[string]any, reg transformRegistry) (map[string
 	return buildKeyFrom(t.Key, view, reg)
 }
 
-// buildKeyFrom evaluates every key column against the source view; a missing
-// path or a failing transform makes the whole key unresolvable.
+// buildKeyFrom evaluates every key column; a missing path or failing transform
+// makes the whole key unresolvable.
 func buildKeyFrom(spec map[string]KeyFrom, view map[string]any, reg transformRegistry) (map[string]any, error) {
 	key := make(map[string]any, len(spec))
 	for _, col := range sortedMapKeys(spec) {
@@ -607,8 +587,8 @@ func allMatched(states []targetState) bool {
 	return true
 }
 
-// snapshotTargets renders sub-check state for the row. Diffs are attached only
-// on the terminal failure row — intermediate rows carry causes alone.
+// snapshotTargets renders sub-check state; diffs attach only to the terminal
+// failure row — intermediate rows carry causes alone.
 func snapshotTargets(states []targetState, withDiffs bool) []TargetResult {
 	out := make([]TargetResult, len(states))
 	for i := range states {
@@ -627,8 +607,8 @@ func (v *verifier) finish(row *CheckResult, state CheckState, states []targetSta
 	v.results.Upsert(*row)
 }
 
-// finishCancelled handles a cancelled check: a superseded one records that
-// outcome, a shutdown one leaves the row in its last observed state.
+// finishCancelled: a superseded check records that outcome; a shutdown one
+// keeps its last observed state.
 func (v *verifier) finishCancelled(h *checkHandle, row *CheckResult) {
 	if !h.superseded.Load() {
 		return
@@ -638,8 +618,7 @@ func (v *verifier) finishCancelled(h *checkHandle, row *CheckResult) {
 	v.results.Upsert(*row)
 }
 
-// Shutdown cancels every in-flight check and waits for the goroutines, bounded
-// by ctx.
+// Shutdown cancels every in-flight check and waits for them, bounded by ctx.
 func (v *verifier) Shutdown(ctx context.Context) {
 	v.mu.Lock()
 	v.closed = true

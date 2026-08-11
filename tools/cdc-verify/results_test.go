@@ -73,23 +73,16 @@ func TestResultsStore_OnUpdateFires(t *testing.T) {
 }
 
 func TestResultsStore_CountedMapPruningSymmetric(t *testing.T) {
-	// Test that counted map is pruned on both eviction sides.
-	// With recentCap=2, failedCap=2, upsert three distinct StateFailed rows.
-	// After the third, counted should have exactly 2 entries (the ones still in failures).
+	// counted must prune on both eviction sides: three failed rows at caps 2/2
+	// evict x from both windows, leaving exactly y and z tallied.
 	s := newResultsStore(2, 2, nil)
 	s.Upsert(mkResult("x", StateFailed))
 	s.Upsert(mkResult("y", StateFailed))
 	s.Upsert(mkResult("z", StateFailed))
 
-	// Lock to inspect internal state
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// At this point:
-	// - recent has the 2 newest: z, y
-	// - failures has the 2 newest: z, y
-	// - x was evicted from both
-	// - counted should have only y, z (not x)
 	assert.Len(t, s.counted, 2, "counted map should have exactly 2 entries after third failure evicts oldest")
 	assert.True(t, s.counted["y"], "y should be in counted")
 	assert.True(t, s.counted["z"], "z should be in counted")
@@ -97,8 +90,7 @@ func TestResultsStore_CountedMapPruningSymmetric(t *testing.T) {
 }
 
 func TestResultsStore_DeepCopyTargets(t *testing.T) {
-	// Test that Upsert deep-copies Targets and Diffs slices.
-	// Mutating the original should not affect stored values.
+	// Upsert must deep-copy Targets/Diffs: caller mutations must not reach the store.
 	s := newResultsStore(10, 10, nil)
 
 	original := CheckResult{
@@ -120,11 +112,9 @@ func TestResultsStore_DeepCopyTargets(t *testing.T) {
 
 	s.Upsert(original)
 
-	// Mutate the original's slices
 	original.Targets[0].Matched = true
 	original.Targets[0].Diffs[0].SourcePath = "changed"
 
-	// Verify Recent() still shows un-mutated values
 	recent := s.Recent()
 	require.Len(t, recent, 1)
 	assert.False(t, recent[0].Targets[0].Matched, "stored Matched should not be mutated")
@@ -132,22 +122,15 @@ func TestResultsStore_DeepCopyTargets(t *testing.T) {
 }
 
 func TestResultsStore_FailuresEvictionDoesNotPruneIfInRecent(t *testing.T) {
-	// Test that when a row is evicted from failures but still in recent,
-	// it remains in counted (not pruned unconditionally).
-	// With recentCap=10, failedCap=1: upsert "a" (StateFailed), then "b" (StateFailed).
-	// "a" is evicted from failures (stays in recent), but should remain in counted.
+	// A row evicted from failures but still in recent must stay in counted:
+	// at caps 10/1, "a" leaves failures yet remains in recent.
 	s := newResultsStore(10, 1, nil)
 	s.Upsert(mkResult("a", StateFailed))
 	s.Upsert(mkResult("b", StateFailed))
 
-	// Lock to inspect internal state
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// At this point:
-	// - recent has both: b, a (newest first)
-	// - failures has only newest: b (a was evicted)
-	// - counted should have both a and b (a is still in recent, so not pruned)
 	assert.Len(t, s.counted, 2, "counted map should have 2 entries (a still in recent, not pruned)")
 	assert.True(t, s.counted["a"], "a should still be in counted (in recent)")
 	assert.True(t, s.counted["b"], "b should be in counted")

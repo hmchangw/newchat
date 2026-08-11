@@ -111,8 +111,7 @@ func (p *statsPoller) pollOnce(ctx context.Context, now time.Time) {
 	}
 }
 
-// pushAndRate appends a sample and returns the sliding-window rate. A
-// sequence that went backwards (stream purge) resets the window.
+// pushAndRate appends a sample and returns the window rate; a backwards sequence (purge) resets it.
 func (p *statsPoller) pushAndRate(now time.Time, lastSeq uint64) float64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()

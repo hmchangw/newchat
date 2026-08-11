@@ -23,9 +23,8 @@ func getPath(doc map[string]any, path string) (any, bool) {
 	return cur, true
 }
 
-// normalize maps driver-specific scalar types onto canonical comparison forms.
-// Numeric magnitudes in this domain (unix ms, counts) are far below 2^53, so
-// float64 is a safe common numeric type.
+// normalize maps driver scalar types onto canonical comparison forms. Domain
+// magnitudes (unix ms, counts) sit far below 2^53, so float64 is safe for all numbers.
 func normalize(v any) any {
 	switch t := v.(type) {
 	case int:
@@ -75,9 +74,8 @@ func valuesEqual(a, b any) bool {
 	return reflect.DeepEqual(normalize(a), normalize(b))
 }
 
-// isZeroValue reports whether an already-normalized value is the zero value
-// of its comparison form: nil, false, 0, or "". Used to decide whether a dest
-// value counts as "absent" when its paired source field is absent (spec §5.3).
+// isZeroValue reports whether a normalized value is its comparison-form zero
+// (nil, false, 0, ""): a zero dest counts as absent when the source field is absent.
 func isZeroValue(v any) bool {
 	switch t := v.(type) {
 	case nil:
@@ -102,8 +100,7 @@ type FieldDiff struct {
 	Cause      string `json:"cause,omitempty"`
 }
 
-// fieldPair is the compiled per-target form of one mapping entry: source
-// path(s) -> one dest field, optionally through a transform.
+// fieldPair is one compiled mapping entry: source path(s) -> one dest field.
 type fieldPair struct {
 	SourcePaths []string
 	DestField   string
@@ -127,12 +124,8 @@ func diffFields(src, dst map[string]any, pairs []fieldPair, reg transformRegistr
 		got, gotOK := getPath(dst, p.DestField)
 
 		if !anyPresent {
-			// spec §5.3: an absent/null source field matches a dest value that is
-			// itself absent/nil or the zero value of its normalized form (false,
-			// 0, ""), unless the mapping marks the field required. A required
-			// field still needs a genuine dest value — a zero-value dest counts
-			// as absent for that check too, so it's diagnosed the same as a
-			// fully-absent dest rather than silently passing.
+			// spec §5.3: an absent source field matches an absent/nil/zero dest,
+			// unless required — then a zero dest diagnoses like a fully-absent one.
 			destZero := !gotOK || got == nil || isZeroValue(normalize(got))
 			switch {
 			case !destZero:
@@ -159,8 +152,7 @@ func diffFields(src, dst map[string]any, pairs []fieldPair, reg transformRegistr
 	return diffs
 }
 
-// diffVerbatim deep-compares whole documents both ways, skipping ignored
-// top-level keys. Dest-only keys are reported with an empty SourcePath want.
+// diffVerbatim deep-compares whole docs both ways minus ignored keys; dest-only keys diff too.
 func diffVerbatim(src, dst map[string]any, ignore []string) []FieldDiff {
 	skip := make(map[string]bool, len(ignore))
 	for _, k := range ignore {

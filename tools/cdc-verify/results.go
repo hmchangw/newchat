@@ -4,11 +4,8 @@ import (
 	"sync"
 )
 
-// deepCopyResult creates a deep copy of a CheckResult with fresh backing
-// arrays for Targets and Diffs slices. CheckResult is passed by value
-// throughout this package (Upsert, Snapshot) to match the JSON-serializable
-// value semantics of the type; switching to a pointer here alone would be
-// inconsistent.
+// deepCopyResult clones Targets and each Diffs slice so the store owns its
+// rows; CheckResult stays pass-by-value package-wide for its value semantics.
 //
 //nolint:gocritic // CheckResult is passed by value throughout this package
 func deepCopyResult(r CheckResult) CheckResult {
@@ -44,8 +41,7 @@ type TargetResult struct {
 	Diffs     []FieldDiff `json:"diffs,omitempty"`     // populated on final failure only
 }
 
-// CheckResult is one table row. A copy is what leaves the store — callers
-// never see the live pointer.
+// CheckResult is one table row; only copies ever leave the store.
 type CheckResult struct {
 	ID          string         `json:"id"` // idgen.GenerateID()
 	Collection  string         `json:"collection"`
@@ -90,7 +86,6 @@ func newResultsStore(recentCap, failedCap int, onUpdate func(CheckResult)) *resu
 
 //nolint:gocritic // value receiver matches the package-wide CheckResult convention
 func (s *resultsStore) Upsert(r CheckResult) {
-	// Deep-copy the incoming result to own its slices and protect from caller mutations
 	r = deepCopyResult(r)
 
 	s.mu.Lock()
@@ -132,8 +127,7 @@ func (s *resultsStore) Upsert(r CheckResult) {
 		case StateSuperseded:
 			s.counters.Superseded++
 		default:
-			// StatePending is not terminal and never reaches this switch
-			// (guarded by isTerminal above); no counter to bump.
+			// StatePending never reaches here (isTerminal guard); nothing to bump.
 		}
 	}
 	cb := s.onUpdate
@@ -147,13 +141,8 @@ func isTerminal(st CheckState) bool {
 	return st == StateMatched || st == StateFailed || st == StateSkipped || st == StateSuperseded
 }
 
-// evictedIDIfUncounted checks if the evicted ID is still present in the "other" list.
-// If found in the other list, returns "" (no delete); if not found, returns the ID for deletion.
-// Called at both eviction sites:
-// - recent-eviction: check if ID is still in failures (passed as others)
-// - failures-eviction: check if ID is still in recent (passed as others)
-// An ID evicted from both windows can never be upserted again (checks are single-writer),
-// so its dedup entry is dropped.
+// evictedIDIfUncounted returns r's ID for deletion from counted when it is gone
+// from the other retention window too — gone from both, it can never be upserted again.
 //
 //nolint:gocritic // value receiver matches the package-wide CheckResult convention
 func evictedIDIfUncounted(others []CheckResult, r CheckResult) string {

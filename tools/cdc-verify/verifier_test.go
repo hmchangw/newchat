@@ -176,12 +176,9 @@ func TestVerifier_VerifyAbsentDelete(t *testing.T) {
 	// delete: no source lookup; dest keys derive from documentKey only (_id)
 	cass.EXPECT().SelectOne(gomock.Any(), "messages_by_id", map[string]any{"message_id": "m1"}, gomock.Any()).
 		Return(nil, errNotFound)
-	_ = tgt // room target key needs rid from source doc -> unresolvable on delete -> counted matched-by-absence? No:
-	// see implementation note below — targets whose key cannot be built from
-	// documentKey alone on verify-absent are reported cause="key-unresolvable"
-	// and the check fails at deadline unless all resolvable targets are absent.
-	// For this fixture the room key (rid) is unresolvable; the test asserts the
-	// byId target matched and room carries key-unresolvable, final state failed.
+	// A verify-absent key not derivable from documentKey alone reports
+	// key-unresolvable: byId matches by absence, room (needs rid) fails at deadline.
+	_ = tgt
 	v.Submit(CDCEvent{Collection: "rocketchat_message", Op: "delete", DocID: "m1"})
 	r := waitState(t, results, "m1", StateFailed)
 	for _, tr := range r.Targets {
@@ -218,9 +215,8 @@ func TestVerifier_Supersede(t *testing.T) {
 	src.EXPECT().FindByID(gomock.Any(), gomock.Any(), "m1").Return(srcDoc(), nil).AnyTimes()
 	tgt.EXPECT().FindOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errNotFound).AnyTimes()
 	cass.EXPECT().SelectOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errNotFound).AnyTimes()
-	// Park each check between polls instead of advancing the fake clock, so the
-	// first check is still pending when the newer event arrives. (With the
-	// clock-advancing sleep it would burn its whole 60s deadline instantly.)
+	// Park checks between polls instead of advancing the fake clock — otherwise
+	// the first check burns its whole deadline before the newer event arrives.
 	v.sleep = func(ctx context.Context, _ time.Duration) bool {
 		<-ctx.Done()
 		return false
@@ -559,11 +555,8 @@ func TestVerifier_SubmitAfterShutdownIsDropped(t *testing.T) {
 	v.Shutdown(context.Background())
 }
 
-// A verbatim target deep-compares whole documents, so it must see the source
-// document as stored — never the resolver overlay. The overlay's "@alias" keys
-// are not part of the document and would each surface as a phantom diff the
-// destination can never satisfy. The overlay is shared across all targets in an
-// attempt, so a resolver pulled in by a *sibling* target is enough to trigger it.
+// Verbatim targets must diff the source doc as stored, never the resolver
+// overlay — a sibling target's resolver would inject phantom "@alias" diffs.
 func overlayVerbatimMapping() *Mapping {
 	return &Mapping{Sources: []SourceMapping{{
 		Collection: "rocketchat_room",

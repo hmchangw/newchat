@@ -16,10 +16,8 @@ type sseEvent struct {
 
 const clientBuffer = 64
 
-// hub is the single global broadcaster: there is no per-session state, so
-// every viewer sees the same pipeline of stats and result updates. Frames are
-// JSON-encoded once at broadcast time and fanned out as raw bytes, so N open
-// viewers cost one marshal, not N.
+// hub is the single global broadcaster — every viewer sees the same pipeline.
+// Frames are JSON-encoded once and fanned out as bytes: N viewers, one marshal.
 type hub struct {
 	mu      sync.RWMutex
 	clients map[string]chan []byte
@@ -50,9 +48,8 @@ func (h *hub) clientCount() int {
 	return len(h.clients)
 }
 
-// broadcastStats and broadcastResult take their payload by value: StreamStats
-// and CheckResult are passed by value package-wide, and the signature here is
-// also fixed by the SSE hub's public contract (see handler_test.go).
+// broadcastStats/broadcastResult take payloads by value: StreamStats and
+// CheckResult are value-passed package-wide.
 //
 //nolint:gocritic // see comment above
 func (h *hub) broadcastStats(s StreamStats) { h.broadcast(sseEvent{Kind: "stats", Data: s}) }

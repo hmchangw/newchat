@@ -37,8 +37,7 @@ type config struct {
 	TargetMongoPassword string `env:"TARGET_MONGO_PASSWORD" envDefault:""`
 	TargetDB            string `env:"TARGET_DB" envDefault:"chat"`
 
-	// Cassandra is required only when the mapping references a cassandra
-	// target — enforced in main after the mapping is loaded, not here.
+	// Cassandra is required only when the mapping references it — enforced after mapping load.
 	CassandraHosts    string `env:"CASSANDRA_HOSTS" envDefault:""`
 	CassandraKeyspace string `env:"CASSANDRA_KEYSPACE" envDefault:""`
 	CassandraUsername string `env:"CASSANDRA_USERNAME" envDefault:""`
@@ -115,11 +114,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ctx is needed by the connection calls below, but cancel is deliberately
-	// not deferred until after the last os.Exit-guarded block: os.Exit skips
-	// deferred calls entirely, so a defer ahead of a fail-fast exit is dead
-	// cleanup (gocritic: exitAfterDefer) — match the repo's other long-lived
-	// services (e.g. oplog-connector/main.go).
+	// cancel is deferred only after the last os.Exit-guarded block: os.Exit skips
+	// defers, so an earlier defer is dead cleanup (gocritic exitAfterDefer).
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// --- connections (fail fast, read-only use) ---

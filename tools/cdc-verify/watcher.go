@@ -26,8 +26,7 @@ func newWatcher(js jetstream.JetStream, streamName string, startAt time.Time, su
 	return &watcher{js: js, stream: streamName, startAt: startAt, sub: sub}
 }
 
-// orderedConfig maps the optional replay start onto the ordered-consumer
-// deliver policy: zero time = live tail (new messages only).
+// orderedConfig maps the optional replay start onto the deliver policy: zero time = live tail.
 func orderedConfig(startAt time.Time) jetstream.OrderedConsumerConfig {
 	if startAt.IsZero() {
 		return jetstream.OrderedConsumerConfig{DeliverPolicy: jetstream.DeliverNewPolicy}

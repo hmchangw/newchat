@@ -9,19 +9,14 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
-// bootstrapConfig gates dev/local stream creation; in production Enabled
-// stays false — MIGRATION-OPLOG-{siteID} is owned by oplog-connector/ops
-// (CLAUDE.md "Stream bootstrap is opt-in").
+// bootstrapConfig gates dev/local stream creation; production keeps Enabled
+// false — the stream is owned by oplog-connector/ops ("Stream bootstrap is opt-in").
 type bootstrapConfig struct {
 	Enabled bool `env:"STREAMS" envDefault:"false"`
 }
 
-// bootstrapStreams creates MIGRATION-OPLOG-{siteID} from schema
-// (Name+Subjects only) when enabled, for local/dev stacks that have no
-// oplog-connector standing the stream up already. A no-op when disabled —
-// the tool never creates or mutates the stream in production; a missing
-// stream then surfaces as the ordinary js.Stream fail-fast main() already
-// performs right after this call.
+// bootstrapStreams creates MIGRATION-OPLOG-{siteID} from schema (Name+Subjects) for
+// dev stacks without oplog-connector; disabled it no-ops and js.Stream fails fast.
 func bootstrapStreams(ctx context.Context, js jetstream.JetStream, siteID string, enabled bool) error {
 	if !enabled {
 		return nil

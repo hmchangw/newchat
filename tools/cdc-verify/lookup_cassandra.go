@@ -17,8 +17,7 @@ func newCassStore(session *gocql.Session) *cassStore { return &cassStore{session
 
 var cqlIdent = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
-// buildSelect assembles a point-select. Identifiers come from the validated
-// mapping file, but are re-checked here; values are always bound parameters.
+// buildSelect assembles a point-select; identifiers are re-checked here, values always bound.
 func buildSelect(table string, key map[string]any, cols []string) (string, []any, error) {
 	if !cqlIdent.MatchString(table) {
 		return "", nil, fmt.Errorf("invalid table identifier %q", table)

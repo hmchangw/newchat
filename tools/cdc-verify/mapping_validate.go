@@ -128,9 +128,8 @@ func checkKeyFrom(k KeyFrom, resolvers map[string]Resolver) error {
 	return nil
 }
 
-// checkSourcePath validates a source path; "@alias.field" must reference a
-// declared resolver. Passing nil resolvers rejects any @-reference (used to
-// forbid resolver chaining).
+// checkSourcePath validates a source path; "@alias.field" must name a declared
+// resolver. nil resolvers reject any @-reference — how chaining is forbidden.
 func checkSourcePath(path string, resolvers map[string]Resolver) error {
 	if !strings.HasPrefix(path, "@") {
 		return nil
@@ -173,8 +172,7 @@ func (m *Mapping) Source(collection string) (*SourceMapping, bool) {
 	return nil, false
 }
 
-// NeedsCassandra reports whether any target is a cassandra table — gates
-// whether main must connect to Cassandra at all.
+// NeedsCassandra reports whether any target is a cassandra table — gates the connect in main.
 func (m *Mapping) NeedsCassandra() bool {
 	for _, s := range m.Sources {
 		for _, t := range s.Targets {

@@ -7,9 +7,8 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// CDCEvent is the verifier's trigger: which document in which source
-// collection changed. Payload content beyond the key is ignored — the check
-// re-reads current state from the source (spec §6).
+// CDCEvent is the verifier's trigger: which doc in which source collection
+// changed. Payload beyond the key is ignored — checks re-read current state.
 type CDCEvent struct {
 	Collection string
 	Op         string
