@@ -6,7 +6,7 @@
 
 **Architecture:** One pure helper, `natsutil.RequestFailure(op string, err error) error`, classifies two transport errors into typed `errcode` values and leaves everything else as a raw wrap. Eleven request/reply call sites adopt it; three that already classify correctly are deliberately left alone. Separately, `notification-worker` sources its payload cap from the server-advertised `nc.NatsConn().MaxPayload()` instead of an environment variable.
 
-**Tech Stack:** Go 1.25, `github.com/nats-io/nats.go` v1.50.0, `pkg/errcode`, `stretchr/testify`, `testcontainers-go` via `pkg/testutil`.
+**Tech Stack:** Go 1.25, `github.com/nats-io/nats.go` v1.50.0, `pkg/errcode`, `stretchr/testify`, and `nats-server/v2` run in-process for tests that need a live broker (no Docker).
 
 **Spec:** `docs/superpowers/specs/2026-08-11-nats-payload-noresponders-design.md`
 
@@ -32,7 +32,7 @@
 **Created:**
 - `pkg/natsutil/request_failure.go` — the classifier. One exported function, no state.
 - `pkg/natsutil/request_failure_test.go` — unit tests (no network).
-- `pkg/natsutil/request_failure_integration_test.go` — one test against real NATS. **No `TestMain`.**
+(no integration-test file — the real-server test is a unit test using the package's existing embedded-server helper)
 
 **Modified:**
 - `pkg/errcode/codes_platform.go` — two new `Reason` constants.
@@ -46,8 +46,7 @@
 
 **Files:**
 - Create: `pkg/natsutil/request_failure.go`
-- Create: `pkg/natsutil/request_failure_test.go`
-- Create: `pkg/natsutil/request_failure_integration_test.go`
+- Create: `pkg/natsutil/request_failure_test.go` (unit tests **and** the embedded-server test — no separate integration file)
 - Modify: `pkg/errcode/codes_platform.go`
 
 **Interfaces:**
@@ -243,35 +242,23 @@ func RequestFailure(op string, err error) error {
 Run: `make test SERVICE=pkg/natsutil`
 Expected: PASS.
 
-- [ ] **Step 6: Write the integration test**
+- [ ] **Step 6: Write the real-server test — as a UNIT test, not an integration test**
 
-Create `pkg/natsutil/request_failure_integration_test.go`. **Do not add a `TestMain`** — `pkg/natsutil` already has one at `continuity_integration_test.go:21`, and a second is a compile error.
+This test needs a live NATS server, but it must **not** be an integration test. `pkg/natsutil` already runs an **embedded, in-process** server in its ordinary unit tests via the helper `startTestNATSWithMaxPayload(t, maxPayload int32) *nats.Conn` in `reply_test.go:39`. It calls `natsserver.NewServer(&natsserver.Options{Port: -1})`, starts it, waits for readiness and registers both server and connection cleanups. No Docker, no testcontainers, no build tag.
+
+Using it means this test runs under plain `make test` — locally, in CI, and in sandboxes with no Docker daemon — instead of being skipped everywhere the daemon is absent.
+
+Append to `pkg/natsutil/request_failure_test.go` (the existing unit-test file — do **not** create a new file, and do **not** add a `TestMain`; the package already has one at `continuity_integration_test.go:21`):
 
 ```go
-//go:build integration
-
-package natsutil
-
-import (
-	"errors"
-	"testing"
-	"time"
-
-	"github.com/nats-io/nats.go"
-	"github.com/stretchr/testify/require"
-
-	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/testutil"
-)
-
 // Proves the mapping fires on an error the real client produces, not just on a
 // hand-constructed sentinel. A request to a subject nobody subscribes to
-// returns ErrNoResponders when the connection has responder detection on,
-// which is the default.
+// returns ErrNoResponders, because responder detection is on by default.
+//
+// Uses the package's existing embedded-server helper, so this is a unit test:
+// no Docker, and it runs everywhere make test runs.
 func TestRequestFailure_RealNoResponders(t *testing.T) {
-	nc, err := nats.Connect(testutil.NATS(t))
-	require.NoError(t, err)
-	t.Cleanup(nc.Close)
+	nc := startTestNATSWithMaxPayload(t, 0) // 0 = leave the server default
 
 	_, reqErr := nc.Request("nobody.is.listening.here", []byte("{}"), 2*time.Second)
 	require.Error(t, reqErr)
@@ -285,12 +272,14 @@ func TestRequestFailure_RealNoResponders(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: Run the integration test**
+Add `"time"` to the file's imports.
 
-Run: `make test-integration SERVICE=pkg/natsutil`
-Expected: PASS. Requires Docker.
+- [ ] **Step 7: Run it**
 
-If it fails with `nats: timeout` rather than `no responders`, the connection was made without responder detection — check that the NATS container is reachable and that `nats.Connect` was used without `nats.NoResponders(false)`-style options. Report rather than working around it.
+Run: `make test SERVICE=pkg/natsutil`
+Expected: PASS, with no Docker required.
+
+If the request returns `nats: timeout` rather than `no responders`, responder detection was disabled on the connection — report it rather than relaxing the assertion to accept either error.
 
 - [ ] **Step 8: Verify coverage of the new function**
 
@@ -303,7 +292,7 @@ Expected: `RequestFailure` at 100.0% — it is a pure function with five branche
 
 ```bash
 make lint
-git add pkg/natsutil/request_failure.go pkg/natsutil/request_failure_test.go pkg/natsutil/request_failure_integration_test.go pkg/errcode/codes_platform.go
+git add pkg/natsutil/request_failure.go pkg/natsutil/request_failure_test.go pkg/errcode/codes_platform.go
 git commit -m "feat(natsutil): classify no-responders and request timeout as unavailable
 
 A raw wrapped transport error collapses to internal at the boundary, so a
