@@ -102,7 +102,17 @@ func TestClampPayloadCap(t *testing.T) {
 		{name: "typical broker value", in: 1048576, want: 1048576},
 		{name: "zero disables the guard", in: 0, want: 0},
 		{name: "negative clamps to zero", in: -1, want: 0},
-		{name: "above MaxInt clamps to MaxInt", in: math.MaxInt64, want: math.MaxInt},
+		{
+			// On a 64-bit build — what we ship — math.MaxInt == math.MaxInt64, so
+			// this passes straight through rather than exercising the clamp. The
+			// clamp branch guards a 32-bit int, where math.MaxInt is MaxInt32; it
+			// is unreachable here and cannot be covered by a test on this
+			// platform. It stays because it is correct on 32-bit and because it
+			// is what satisfies gosec G115 on the narrowing conversion.
+			name: "MaxInt64 passes through unchanged on 64-bit int",
+			in:   math.MaxInt64,
+			want: math.MaxInt,
+		},
 	}
 
 	for _, tt := range tests {
