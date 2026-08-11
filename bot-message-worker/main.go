@@ -174,7 +174,7 @@ func run() error {
 				return fmt.Errorf("worker drain: %w", dctx.Err())
 			}
 		},
-		func(_ context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(_ context.Context) error { cassSess.Close(); return nil },
 		func(_ context.Context) error {
 			if vaultWrapper != nil {

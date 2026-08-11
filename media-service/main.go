@@ -104,7 +104,7 @@ func run() error {
 
 	go shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(_ context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error {
 			slog.Info("shutting down media-service")
 			return srv.Shutdown(ctx)
