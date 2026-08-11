@@ -36,7 +36,7 @@
 
 **Modified:**
 - `pkg/errcode/codes_platform.go` — two new `Reason` constants.
-- Eight call-site files (Task 2).
+- Seven call-site files (Task 2) — 11 sites, since roomclient carries 4 and historyclient 2.
 - `notification-worker/main.go`, `notification-worker/emit.go`, and two `docker-compose.yml` files (Task 3).
 - `docs/client-api.md`, `docs/client-api/request-reply.md`, `docs/client-api/events.md`, `docs/error-handling.md` (Task 4).
 
@@ -400,7 +400,7 @@ Expected: 14 lines. Then confirm by reading each that exactly 11 are followed by
 git diff --name-only
 ```
 
-Expected: exactly 8 files. If `room-service/`, `admin-service/` or `notification-worker/presence.go` appear, an exclusion was converted — revert that file.
+Expected: exactly **7** files — 11 sites, since `roomclient` carries 4 and `historyclient` 2 (1+1+1+1+4+1+2 = 11). Do NOT convert anything extra to reach a higher count. If `room-service/`, `admin-service/` or `notification-worker/presence.go` appear, an exclusion was converted — revert that file.
 
 - [ ] **Step 6: Build every touched service**
 
