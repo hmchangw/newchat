@@ -420,7 +420,10 @@ func TestSlowConsumerFields_RealSubscription(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	got := fieldMap(t, slowConsumerFields(sub))
+	dropped, ok := subDropped(sub)
+	require.True(t, ok, "a live subscription must report its drop count")
+
+	got := fieldMap(t, slowConsumerFields(sub, dropped, ok))
 
 	require.Equal(t, "slow.subject", got["subject"])
 	require.Equal(t, "slow-queue", got["queue"])
@@ -433,11 +436,16 @@ func TestSlowConsumerFields_RealSubscription(t *testing.T) {
 
 func TestSlowConsumerFields_NilSubscription(t *testing.T) {
 	require.NotPanics(t, func() {
-		got := fieldMap(t, slowConsumerFields(nil))
+		dropped, ok := subDropped(nil)
+		require.False(t, ok)
+		got := fieldMap(t, slowConsumerFields(nil, dropped, ok))
 		require.Equal(t, "unknown", got["subject"])
 	})
 }
 
+// A closed subscription must omit the counters it cannot read rather than
+// reporting a bogus zero — an ERROR line saying "messages dropped" with a
+// dropped:0 field would be worse than no field at all.
 func TestSlowConsumerFields_ClosedSubscription(t *testing.T) {
 	nc := newLocalConn(t)
 	sub, err := nc.Subscribe("closed.subject", func(*nats.Msg) {})
@@ -445,9 +453,49 @@ func TestSlowConsumerFields_ClosedSubscription(t *testing.T) {
 	require.NoError(t, sub.Unsubscribe())
 
 	require.NotPanics(t, func() {
-		got := fieldMap(t, slowConsumerFields(sub))
+		dropped, ok := subDropped(sub)
+		require.False(t, ok, "a closed subscription cannot report a drop count")
+
+		got := fieldMap(t, slowConsumerFields(sub, dropped, ok))
 		require.Equal(t, "closed.subject", got["subject"])
+		require.NotContains(t, got, "dropped")
+		require.NotContains(t, got, "pending_msgs")
+		require.NotContains(t, got, "limit_msgs")
 	})
+}
+
+// logSlowConsumer is the only function connect.go's ErrorHandler calls, so the
+// level rule and the field wiring must be verified on that path and not just on
+// the helpers beneath it.
+func TestLogSlowConsumer_LiveSubscriptionWarnsWithNoDrops(t *testing.T) {
+	nc := newLocalConn(t)
+	sub, err := nc.QueueSubscribe("live.subject", "live-queue", func(*nats.Msg) {})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	require.NotPanics(t, func() { logSlowConsumer(log, sub) })
+
+	var rec map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
+	require.Equal(t, "WARN", rec["level"], "a fresh subscription has dropped nothing yet")
+	require.Equal(t, "live.subject", rec["subject"])
+	require.Equal(t, "live-queue", rec["queue"])
+	require.Equal(t, float64(0), rec["dropped"])
+}
+
+func TestLogSlowConsumer_NilSubscriptionDoesNotPanic(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	require.NotPanics(t, func() { logSlowConsumer(log, nil) })
+
+	var rec map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
+	require.Equal(t, "WARN", rec["level"])
+	require.Equal(t, "unknown", rec["subject"])
 }
 
 func TestLogSlowConsumer_LevelSelection(t *testing.T) {
@@ -530,35 +578,65 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 )
 
-// slowConsumerDropped counts messages dropped by a subscription that could not
-// keep up, tagged by subject and queue group.
-var slowConsumerDropped metric.Int64Counter
+// slowConsumerEvents counts slow-consumer episodes, tagged by subject and queue
+// group.
+//
+// One increment per episode — deliberately NOT the subscription's drop count.
+// Subscription.Dropped() is a cumulative total that is never reset except on
+// unsubscribe (nats.go:3770, 5574-5584), and the async error callback fires only
+// on the Active->SlowConsumer transition (nats.go:3771-3787), with sub.sc cleared
+// again on the next successful delivery (nats.go:3742). Adding Dropped() would
+// therefore re-add every earlier episode's drops on each new episode: 3 dropped
+// then 5 dropped reports 3 + 8 = 11. The callback is also dispatched through an
+// async queue (nats.go:3785), so Dropped() read inside it is not even the count
+// at episode time. Exact per-episode numbers live in the log fields.
+var slowConsumerEvents metric.Int64Counter
 
 func init() {
 	var err error
-	slowConsumerDropped, err = otel.Meter("nats").Int64Counter(
-		"nats_slow_consumer_dropped_total",
-		metric.WithDescription("Messages dropped by a NATS subscription that could not keep up, by subject and queue group"),
+	slowConsumerEvents, err = otel.Meter("nats").Int64Counter(
+		"nats_slow_consumer_events_total",
+		metric.WithDescription("Slow-consumer episodes on a NATS subscription, by subject and queue group"),
 	)
 	if err != nil {
 		// Fall back to a no-op counter so recording stays safe even if the
 		// global meter provider is not initialised at package init time.
-		slowConsumerDropped, _ = noop.NewMeterProvider().Meter("nats").
-			Int64Counter("nats_slow_consumer_dropped_total")
+		slowConsumerEvents, _ = noop.NewMeterProvider().Meter("nats").
+			Int64Counter("nats_slow_consumer_events_total")
 	}
 }
 
+// subDropped returns the subscription's cumulative drop count and whether it
+// could be read at all. sub is nil for connection-level async errors, and
+// Dropped() errors on an already-closed subscription, which happens routinely
+// during shutdown.
+func subDropped(sub *nats.Subscription) (int, bool) {
+	if sub == nil {
+		return 0, false
+	}
+	dropped, err := sub.Dropped()
+	if err != nil {
+		return 0, false
+	}
+	return dropped, true
+}
+
 // slowConsumerFields builds the slog fields describing a slow consumer.
-// Every accessor is best-effort: sub is nil for connection-level async errors,
-// and Dropped/Pending/PendingLimits all error on an already-closed
-// subscription, which happens routinely during shutdown. A diagnostic path
-// must never panic or mask the event it is reporting.
-func slowConsumerFields(sub *nats.Subscription) []any {
+//
+// dropped/ok come from a single Dropped() read made by the caller rather than a
+// second read here, so the level decision and the logged value cannot diverge:
+// if the subscription closes between two reads, the level could say ERROR
+// ("messages dropped") while the field set silently omits the dropped count.
+//
+// The remaining accessors stay best-effort — Pending/PendingLimits also error on
+// a closed subscription, and a diagnostic path must never panic or mask the
+// event it is reporting.
+func slowConsumerFields(sub *nats.Subscription, dropped int, ok bool) []any {
 	if sub == nil {
 		return []any{"subject", "unknown"}
 	}
 	fields := []any{"subject", sub.Subject, "queue", sub.Queue}
-	if dropped, err := sub.Dropped(); err == nil {
+	if ok {
 		fields = append(fields, "dropped", dropped)
 	}
 	// nbytes, not bytes — a local named bytes shadows the stdlib package and
@@ -572,29 +650,18 @@ func slowConsumerFields(sub *nats.Subscription) []any {
 	return fields
 }
 
-// subDropped returns the subscription's drop count, or 0 when it cannot be read.
-func subDropped(sub *nats.Subscription) int {
-	if sub == nil {
-		return 0
-	}
-	dropped, err := sub.Dropped()
-	if err != nil {
-		return 0
-	}
-	return dropped
-}
-
-// logSlowConsumer reports a slow consumer and records the drop count.
+// logSlowConsumer reports a slow-consumer episode and counts it.
 func logSlowConsumer(log *slog.Logger, sub *nats.Subscription) {
-	dropped := subDropped(sub)
-	logSlowConsumerAt(log, dropped, slowConsumerFields(sub))
-	if dropped > 0 && sub != nil {
-		slowConsumerDropped.Add(context.Background(), int64(dropped),
-			metric.WithAttributes(
-				attribute.String("subject", sub.Subject),
-				attribute.String("queue", sub.Queue),
-			))
+	dropped, ok := subDropped(sub)
+	logSlowConsumerAt(log, dropped, slowConsumerFields(sub, dropped, ok))
+	if sub == nil {
+		return
 	}
+	slowConsumerEvents.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("subject", sub.Subject),
+			attribute.String("queue", sub.Queue),
+		))
 }
 
 // logSlowConsumerAt picks the level: dropped messages on a core subscription are

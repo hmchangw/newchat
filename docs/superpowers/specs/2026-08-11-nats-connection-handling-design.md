@@ -207,20 +207,38 @@ nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
 
 New file `pkg/natsutil/slowconsumer.go`:
 
-- `slowConsumerFields(sub *nats.Subscription) []any` — returns `subject`,
-  `queue`, `dropped`, `pending_msgs`, `pending_bytes`, `limit_msgs`,
-  `limit_bytes`. Split out from the handler purely so it is testable against a
-  real subscription. It must tolerate `sub == nil` (connection-level async
-  errors pass nil) and the errors `Dropped()`/`Pending()`/`PendingLimits()`
-  return on an already-closed subscription — a diagnostic path must never panic
-  during shutdown.
+- `subDropped(sub *nats.Subscription) (int, bool)` — one read of `Dropped()`,
+  reporting whether it could be read at all. The caller threads the result into
+  both the level decision and the field list, so a subscription that closes
+  mid-report cannot produce an ERROR line saying "messages dropped" whose field
+  set silently omits the count.
+- `slowConsumerFields(sub *nats.Subscription, dropped int, ok bool) []any` —
+  returns `subject`, `queue`, `dropped`, `pending_msgs`, `pending_bytes`,
+  `limit_msgs`, `limit_bytes`. Split out from the handler purely so it is
+  testable against a real subscription. It must tolerate `sub == nil`
+  (connection-level async errors pass nil) and the errors `Pending()` /
+  `PendingLimits()` return on an already-closed subscription, omitting what it
+  cannot read rather than reporting a bogus zero — a diagnostic path must never
+  panic during shutdown.
 - `logSlowConsumer(log *slog.Logger, sub *nats.Subscription)` — logs at **ERROR**
-  when `Dropped() > 0`, **WARN** otherwise. Dropped messages on a core NATS
-  subscription are unrecoverable loss and should page; a slow consumer that has
-  not yet dropped anything is a warning.
-- An otel counter `nats_slow_consumer_dropped_total{subject,queue}`, following
-  the `pkg/cachemetrics` shape (`otel.Meter(...)`, no-op when no MeterProvider is
-  installed) so it records unconditionally without a wiring precondition.
+  when the drop count is above zero, **WARN** otherwise. Dropped messages on a
+  core NATS subscription are unrecoverable loss and should page; a slow consumer
+  that has not yet dropped anything is a warning.
+- An otel counter `nats_slow_consumer_events_total{subject,queue}`, following
+  the `pkg/roomkeymetrics` shape (package-level var, `init()` from
+  `otel.Meter(...)`, no-op fallback) so it records unconditionally without a
+  wiring precondition.
+
+  **It counts episodes, one per callback — not messages.** `Subscription.Dropped()`
+  is a cumulative total never reset except on unsubscribe (`nats.go:3770`,
+  `:5574-5584`), and the async error callback fires only on the
+  Active→SlowConsumer transition (`nats.go:3771-3787`), with `sub.sc` cleared
+  again on the next successful delivery (`:3742`). Adding `Dropped()` per episode
+  would re-add every earlier episode's drops — 3 dropped then 5 dropped would
+  report 3 + 8 = 11. The callback is also dispatched through an async queue
+  (`:3785`), so a `Dropped()` read inside it is not even the count at episode
+  time. Exact per-episode numbers belong in the log fields, where they are read
+  once and reported accurately.
 
 ### D. Call-site conversion
 
