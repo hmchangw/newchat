@@ -32,49 +32,55 @@ untouched — as in Spec 2, this changes only which accounts reach `survivors`.
 - **Per-room notification rules** beyond what the pipeline already applies. See
   "Room rules are absolute" below.
 
-## Mapping the issue onto our status vocabulary
+## Do-not-disturb and presenting are not ours to derive
 
 The issue names three presence conditions — `Do not disturb`, `presenting`, and
-`In a call`. Our vocabulary has two relevant values, and they do not line up
-one-for-one:
+`In a call`. Only the third exists in our vocabulary today. `busy` is a manual
+override and `Presenting` is currently folded into `in-call` by
+`user-presence-service/sync/reconcile.go`.
 
-| Issue term | Our value | Where it comes from |
-|---|---|---|
-| `Do not disturb` | `busy` | Manual override (`settings`/`presence.status`), `model.StatusBusy` |
-| `presenting` | `in-call` | Teams activity `Presenting`, folded into in-call by `user-presence-service/sync/reconcile.go` |
-| `In a call` | `in-call` | Teams activities `InACall` / `InAConferenceCall` |
+**Decision: do not infer either one. Stub both predicates.**
 
-**Decision: keep `Presenting` folded into `in-call`; split `busy` out on its own.**
+An earlier draft of this spec mapped `Do not disturb → busy` and
+`presenting → in-call`. That was wrong. Deriving DND from `busy` asserts a
+semantic equivalence this service has no authority to declare, and the same for
+presenting. Those statuses are owned by the presence side of the system, which
+will ship them; this worker's job is to gate on them, not to guess at them.
 
-Making `presenting` a literal third status would mean a new `model.PresenceStatus`
-value, a change to `reconcile.go`'s `callActivities` mapping, a new value in the
-`docs/client-api.md` presence enum, and every client that switches on presence
-needing an update — all to distinguish two states the issue then treats
-identically except for which checkbox governs them. `Presenting` is a call
-activity; it is in-call in every sense our system models.
+So `notification-worker` declares the two predicates it needs and leaves them
+inert:
 
-The consequence is stated plainly rather than buried: **a Teams user who is
-Presenting is treated as in-call, so `showNotificationsInCall` can let those
-pushes through.** Under a literal reading of the issue, Presenting would suppress
-unconditionally. If that distinction turns out to matter to users, it is a
-presence-service change, not a notification-worker one.
+```go
+var (
+	isDND        = func(model.Presence) bool { return false }
+	isPresenting = func(model.Presence) bool { return false }
+)
+```
 
-`busy`, by contrast, is already a distinct stored value and needs no new plumbing
-to separate.
+They are `var`s rather than plain funcs for one reason: a stub returning a
+constant makes its branch in `shouldPush` unreachable, so a plain func would ship
+the rule-2 wiring as untested dead code. As vars, tests supply the eventual
+behaviour and prove the gate ordering **now**, so when the real predicates land
+the only thing left to verify is the predicates themselves.
+
+**Consequence, stated rather than buried: rule 2 of the decision table is
+specified and wired but does not fire yet.** Until the presence side ships, a
+user in do-not-disturb is governed by whatever `isInCall` already covers.
+
+### `isInCall` is deliberately left alone
+
+`isInCall` keeps matching **both** `busy` and `in-call`, exactly as Spec 2 shipped
+it. Narrowing it to `in-call` now — the natural-looking tidy-up once `isDND`
+exists — would push notifications to every user in manual do-not-disturb for the
+entire gap before the presence side ships. Rule 2 arriving inert is acceptable;
+a regression in the meantime is not.
+
+When the real `isDND` lands, `busy` moves out of the `isInCall` bucket in that
+same change, and `showNotificationsInCall` narrows to in-call only.
 
 ## The gate
 
 ```go
-// isDND reports manual do-not-disturb. Separate from isInCall because
-// showNotificationsInCall governs only the latter.
-func isDND(p model.Presence) bool { return p.AggregatedStatus == string(model.StatusBusy) }
-
-// isInCall reports an active call. Teams "Presenting" arrives here too — see the
-// status-vocabulary mapping in the spec.
-func isInCall(p model.Presence) bool { return p.AggregatedStatus == string(model.StatusInCall) }
-
-// shouldPush applies the priority-contact pierce, then three independent
-// suppressors in the issue's stated priority order.
 func shouldPush(p model.Presence, ns notifSettings, isPrioritySender bool) bool {
 	if ns.allowPriority && isPrioritySender {
 		return true
@@ -82,7 +88,7 @@ func shouldPush(p model.Presence, ns notifSettings, isPrioritySender bool) bool 
 	if ns.muteAll {
 		return false
 	}
-	if isDND(p) {
+	if isDND(p) || isPresenting(p) {
 		return false
 	}
 	if isInCall(p) && !ns.showInCall {
@@ -92,8 +98,9 @@ func shouldPush(p model.Presence, ns notifSettings, isPrioritySender bool) bool 
 }
 ```
 
-Four decisions are encoded here, each of which could reasonably have gone the
-other way. Two of them reverse Spec 2.
+This is the issue's priority order literally: pierce, then mute, then rule 2,
+then the in-call bucket. Four decisions are encoded here, each of which could
+reasonably have gone the other way. One of them reverses Spec 2.
 
 ### The pierce is total, and it is one switch
 
@@ -119,20 +126,20 @@ trigger it". That reasoning was sound but is now overruled by the issue's explic
 "Priority contacts are still exempt". The setting is not unreachable — it governs
 every non-priority sender, which is the large majority of traffic.
 
-### `showNotificationsInCall` no longer governs DND
+### `showNotificationsInCall` will not govern DND — but not yet
 
-Spec 2 bucketed `busy` and `in-call` together under one predicate, arguing that
-splitting them "would leave `busy` with no user-facing control at all and no
-setting to add one".
+Rule 2 sits above the in-call check, so once `isDND` is real, a do-not-disturb
+user is suppressed whatever `showNotificationsInCall` says. That is the intent:
+do-not-disturb means do not disturb, and a checkbox named for calls should not
+quietly re-enable pushes during it.
 
-The issue answers that objection directly: DND *should* have no user-facing
-control beyond the priority-contact exemption. Do-not-disturb means do not
-disturb — a checkbox named for calls should not quietly re-enable pushes during
-it. `busy` is also the one status the user sets by hand, so an explicit intent
-already exists and does not need a second one layered on top.
+Today it changes nothing, because `isDND` is inert and `busy` is still inside the
+`isInCall` bucket. The ordering is what this spec locks in; the moment the
+predicate goes live the behaviour follows with no further change to `shouldPush`.
 
-**This reverses Spec 2**, which is left in place as the historical record with a
-superseded-by pointer at its head.
+Spec 2 argued the opposite — that splitting `busy` out "would leave `busy` with no
+user-facing control at all and no setting to add one". The issue answers that
+directly: DND *should* have no control beyond the priority-contact exemption.
 
 ### The pierce stays any-room
 
@@ -160,19 +167,26 @@ stays confined to `shouldPush`.
 
 ## Behaviour delta
 
-Exactly two populations move. Everyone else is bit-for-bit unchanged.
+**Exactly one population moves, and it moves toward more delivery, not less.**
 
 | Population | Before | After |
 |---|---|---|
-| `showNotificationsInCall=true`, presence `busy` | pushed | **suppressed** |
 | `alwaysAllowPriorityNotifications=true` + sender in `priorityContacts`, presence `busy` or `in-call` | suppressed | **pushed** |
 
+Nothing else changes. `isInCall` is byte-identical to what shipped, and the two
+new predicates are inert, so every recipient who is not a pierce case takes the
+same path as before. No user loses a notification on this deploy — which is what
+makes it safe to ship ahead of the presence side.
+
 Users with no stored settings are unaffected: the zero `notifSettings` has
-`showInCall=false` and `allowPriority=false`, so `busy` and `in-call` both
-suppressed before this change and both suppress after it. The same holds under
+`allowPriority=false`, so the pierce cannot fire for them. The same holds under
 `USER_SETTINGS_ENABLED=false`, whose `noopUserSettings` yields that zero value for
-every recipient — so the kill switch still restores pre-enforcement behaviour
-exactly.
+every recipient — the kill switch still restores pre-enforcement behaviour exactly.
+
+**When the presence side ships `isDND`/`isPresenting`,** a second population moves
+the other way: users in do-not-disturb who had `showNotificationsInCall` set stop
+being pushed. That is a reduction in delivery and belongs in *that* change's
+release notes, not this one's.
 
 ## Testing
 
@@ -181,73 +195,98 @@ is pure and I/O-free, so the unit table is the whole verification surface; no
 integration test is warranted because nothing here touches Mongo, NATS or Valkey.
 
 **`shouldPush` (table-driven, `presence_test.go`).** The matrix of `muteAll` ×
-`allowPriority` × `isPrioritySender` × `showInCall` × presence status over
-`{"", "online", "away", "offline", "busy", "in-call"}`. Named rows for:
+`allowPriority` × `isPrioritySender` × `showInCall` × `dnd` × `presenting` ×
+presence status over `{"", "online", "away", "offline", "busy", "in-call"}`. The
+`dnd`/`presenting` columns drive a `stubPresenceFlags` helper that swaps the two
+vars for the subtest and restores them in `t.Cleanup`, so no row leaks into a
+sibling. Named rows for:
 
-- the two moved populations above, one row each, named for the change;
-- the zero `notifSettings` reproducing pre-change behaviour on every status —
-  this is the row that pins "no stored settings, no change";
-- a priority sender *without* `allowPriority` still suppressed by DND and by
-  mute, pinning that the pierce needs its opt-in;
+- the moved population above;
+- the zero `notifSettings` with both stubs inert reproducing pre-change behaviour
+  on every status — the rows that pin "no stored settings, no change";
+- DND and presenting each suppressing while `showNotificationsInCall` is set,
+  pinning that the in-call opt-in does not rescue rule 2;
+- a priority sender *without* `allowPriority` still suppressed by DND, presenting
+  and mute, pinning that the pierce needs its opt-in;
 - `showNotificationsInCall=true` + `in-call` + non-priority sender pushing,
   pinning that the setting is still reachable.
 
-**`isDND` / `isInCall` (`presence_test.go`).** `TestIsInCall` splits into
-`TestIsDND` and `TestIsInCall`, each asserting the *other* status is false —
-that pair is what fails if anyone re-merges the bucket.
+**Stub contract (`presence_test.go`).** `TestDNDAndPresentingStubsAreInert`
+asserts both predicates return false for every status we currently receive —
+`busy` and `in-call` included. This is the test that fails if someone later
+"helpfully" wires DND to `busy`, which is exactly the inference this spec forbids.
+`TestIsInCall` is unchanged and still asserts the `busy`+`in-call` bucket.
 
-**Pierce end-to-end (`handler_test.go`).** A `busy` recipient with
-`alwaysAllowPriorityNotifications` and the sender in `priorityContacts` is emitted
-to. Complements the pure-function table by proving the settings and presence maps
-are actually combined per-recipient in the survivor loop.
+**Handler wiring (`handler_test.go`).** Two tests using invented statuses
+(`stub-dnd`, `stub-presenting`) via `stubPresenceFlagsByStatus`, so they assert
+the wiring without asserting a mapping the presence side has yet to define:
+one proving both predicates suppress despite `showNotificationsInCall`, one
+proving a priority sender pierces that suppression. These complement the
+pure-function table by proving the settings and presence maps are actually
+combined per-recipient in the survivor loop.
 
-Coverage floor 80%; `shouldPush` and its predicates are core logic and should
-reach 100% given how small they are.
+Coverage floor 80%; `shouldPush` and `isInCall` reach 100%.
 
 ## Documentation
 
-Three `docs/client-api.md` rows become factually wrong on merge and are corrected
-in the same PR:
+Two `docs/client-api.md` rows become factually wrong on merge and are corrected in
+the same PR:
 
 - `alwaysAllowPriorityNotifications` — drop "The pierce does not override
-  `showNotificationsInCall`"; state that the pierce covers mute, DND and in-call,
-  in any room type.
-- `showNotificationsInCall` — it governs `"in-call"` only, no longer `"busy"`; the
-  priority pierce *does* bypass it.
-- `muteAllNotifications` — unchanged in substance; verify the cross-reference
-  still reads correctly beside the two rewritten rows.
+  `showNotificationsInCall`"; state that the pierce covers mute and every presence
+  suppressor, in any room type.
+- `showNotificationsInCall` — still governs `"busy"` and `"in-call"`, but the
+  priority pierce now *does* bypass it.
 
-Plus the push-filter bullet in §4 ("Presence-busy / in-call recipients are not
-pushed; everyone else…"), which now needs the DND/in-call split and the priority
-exemption.
+Plus the push-filter bullet in §4, which gains the priority exemption.
 
-`2026-08-10-notification-settings-enforcement-design.md` gains a one-line
-superseded-by pointer at its head so it is not read as current.
+The docs describe only what the code does **today**. Rule 2 is deliberately
+undocumented on the client API surface: writing "do-not-disturb suppresses push"
+while `isDND` returns false would document a behaviour clients cannot observe.
+That sentence lands in the change that makes the predicate real.
+
+`2026-08-10-notification-settings-enforcement-design.md` gains a superseded-by
+pointer at its head so it is not read as current.
 
 ## Rollout
 
-Population 1 is the one that matters: users who explicitly enabled
-`showNotificationsInCall` and use manual DND stop receiving pushes while
-do-not-disturb is set. That is the intended outcome and it is a silent,
-user-visible reduction in delivery, so it belongs in the release notes rather than
-arriving as a report of missing notifications.
+Ordinary. No population loses notifications, so there is no silent
+reduction-in-delivery to pre-announce and no population to size beforehand.
 
-Release note: do-not-disturb now suppresses push regardless of the "show
-notifications in call" setting; priority contacts pierce do-not-disturb and
-in-call when "always allow priority contact notifications" is enabled;
+Release note: priority contacts now reach you while you are busy or in a call
+when "always allow priority contact notifications" is enabled;
 `USER_SETTINGS_ENABLED=false` reverts to prior behaviour without a rollback.
 
-Worth sizing population 1 against production `users` before deploying —
-`{"settings.showNotificationsInCall": true, "active": {"$ne": false}}` — so the
-change lands as a known number.
+**The follow-up is the one that needs care.** When the presence side ships DND and
+presenting, that change flips `isDND`/`isPresenting` to real implementations *and*
+narrows `isInCall` to `in-call` only. It should size
+`{"settings.showNotificationsInCall": true, "active": {"$ne": false}}` against
+production first, because those users stop receiving pushes while in
+do-not-disturb.
 
 ## Files
 
 | File | Change |
 |------|--------|
-| `notification-worker/presence.go` | Split `isInCall` into `isDND` + `isInCall`; rewrite `shouldPush`. |
-| `notification-worker/presence_test.go` | Extend the `shouldPush` table; split `TestIsInCall`. |
+| `notification-worker/presence.go` | Add inert `isDND`/`isPresenting` stub vars; rewrite `shouldPush`. `isInCall` unchanged. |
+| `notification-worker/presence_test.go` | Extend the `shouldPush` table with `dnd`/`presenting`; add the two stub helpers and the inert-contract test. `TestIsInCall` unchanged. |
 | `notification-worker/handler.go` | Correct the stale comment above the snapshot calls. |
-| `notification-worker/handler_test.go` | End-to-end priority pierce past a `busy` recipient. |
+| `notification-worker/handler_test.go` | Rule-2 suppression and priority pierce, end-to-end, via stubbed statuses. |
 | `docs/client-api.md` | Two settings rows; the §4 push-filter bullet. |
 | `docs/superpowers/specs/2026-08-10-notification-settings-enforcement-design.md` | Superseded-by pointer. |
+
+## What the presence side still owes this
+
+For whoever picks up the other half, the contract is exactly two functions in
+`notification-worker/presence.go`:
+
+```go
+func isDND(p model.Presence) bool        // true when the user is in do-not-disturb
+func isPresenting(p model.Presence) bool // true when the user is presenting
+```
+
+Converting the vars back to plain funcs is fine — `stubPresenceFlags` and
+`stubPresenceFlagsByStatus` in `presence_test.go` are the only things that need
+the var form, and both are test-only. That change must also drop `"busy"` from
+`isInCall`, delete `TestDNDAndPresentingStubsAreInert`, and add the DND sentence
+to the `showNotificationsInCall` row in `docs/client-api.md`.
