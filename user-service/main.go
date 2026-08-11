@@ -36,6 +36,7 @@ var (
 	_ service.SSOTokenRepository           = (*mongorepo.SSOTokenRepo)(nil)
 	_ service.TokenValidator               = (*pkgoidc.Validator)(nil)
 	_ service.TokenRefresher               = (*pkgoidc.Validator)(nil)
+	_ service.PermissionRepository         = (*mongorepo.PermissionRepo)(nil)
 )
 
 func main() {
@@ -92,6 +93,7 @@ func main() {
 	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	ssoTokenRepo := mongorepo.NewSSOTokenRepo(db)
+	permissionRepo := mongorepo.NewPermissionRepo(db)
 	if err := subRepo.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
@@ -112,6 +114,9 @@ func main() {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
 	}
+	// permissionRepo has no EnsureIndexes call: admin-service alone creates the
+	// permission_grants indexes (spec §3.6) — calling it from both services risks
+	// IndexKeySpecsConflict and a crash loop.
 
 	tokenValidator, tokenRefresher, err := oidcValidator(ctx, &cfg)
 	if err != nil {
@@ -119,7 +124,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
+	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), ssoTokenRepo, tokenValidator, tokenRefresher, permissionRepo, &cfg)
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.

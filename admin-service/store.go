@@ -72,6 +72,28 @@ type AdminStore interface {
 	AppendAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, siteID string, f AuditFilter, page, limit int) ([]AuditEntry, int64, error)
 
+	// InsertPermissionGrants appends the batch atomically (withTransaction + InsertMany).
+	InsertPermissionGrants(ctx context.Context, grants []*model.PermissionGrant) error
+
+	// ListPermissionGrants returns the ledger for the site newest-first
+	// (recordedAt desc, _id desc). subjectAccount == "" means all subjects;
+	// permission == "" means all permissions. The two filters are independent
+	// and any combination — including both empty — is valid.
+	ListPermissionGrants(ctx context.Context, siteID, subjectAccount string, permission model.PermissionKey, page, limit int) ([]model.PermissionGrant, int64, error)
+
+	// GetLatestPermissionGrant returns the newest grant row for the triple, or (nil, nil)
+	// when none exists. Full document (no projection trimming needed on admin side).
+	GetLatestPermissionGrant(ctx context.Context, siteID string, permission model.PermissionKey, subjectAccount string) (*model.PermissionGrant, error)
+
+	// FindAccountStates returns account -> IsActive() for the accounts that exist at the
+	// site; accounts not present in the map do not exist. One query, projection
+	// {account:1, active:1}.
+	FindAccountStates(ctx context.Context, siteID string, accounts []string) (map[string]bool, error)
+
+	// AppendAuditMany inserts all entries in one InsertMany. Best-effort contract same
+	// as AppendAudit (caller logs, never fails the request).
+	AppendAuditMany(ctx context.Context, entries []*AuditEntry) error
+
 	EnsureIndexes(ctx context.Context) error
 	Ping(ctx context.Context) error
 }

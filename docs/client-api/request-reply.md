@@ -251,6 +251,8 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `GET /v1/admin/audit` | synchronous HTTP | List the audit log (§9.9). |
 | `POST /v1/admin/rooms/:roomId/onduty` | synchronous HTTP | Toggle a channel's on-duty state: maps the boolean onto `restricted` + `externalAccess` via room-service's restrict RPC, with `ownerAccount` required when turning on. Emits a `room_restricted` room event; no system message, so nothing is displayed (§9.12). |
 | `POST /v1/password/change` | synchronous HTTP | Logged-in admin's self-service password change (§9.11). |
+| `POST /v1/admin/permissions` | synchronous HTTP | Grant or revoke a permission for one or more subject accounts; appends to the permission ledger with one slim audit entry per subject (§9.13). |
+| `GET /v1/admin/permissions?subjectAccount=<account>` | synchronous HTTP | List an account's permission ledger newest-first, plus the current computed decision (§9.14). |
 
 **Emits:** None directly — HTTP-only. `POST /v1/admin/rooms/:roomId/onduty` makes room-service publish [`room_restricted`](events.md#room_restricted-roomrestrictedroomevent) on `chat.room.{roomID}.event`.
 
@@ -1482,6 +1484,7 @@ no other endpoint emits a client-facing event.
 | `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
 | `chat.user.{account}.request.user.{siteID}.sso.set` | [sso.set](#ssoset) |
 | `chat.user.{account}.request.user.{siteID}.sso.refresh` | [sso.refresh](#ssorefresh) |
+| `chat.user.{account}.request.user.{siteID}.permission.get` | [permission.get](#permissionget) |
 
 ---
 
@@ -2088,6 +2091,33 @@ None — the request body is empty (`{}`).
 `sso_token_not_found` (`not_found`, no token pair stored), `sso_token_expired`
 (`unauthenticated`, refresh failed or refreshed token not owned by the caller — re-login),
 `upstream_unavailable` (`unavailable`, SSO not configured on this site), `internal` (local store failure).
+
+**Emits:** None.
+
+---
+
+### permission.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.permission.get`
+
+Returns whether the calling user currently holds a given permission. Self-service —
+the `{account}` subject token is the caller's NATS-JWT-authenticated identity; there
+is no way to query another account's permission. Computed latest-wins over the
+`permission_grants` ledger; never granted, expired, not-yet-effective, and revoked
+all read as `granted: false` on a normal `200`, not an error.
+
+#### Request body
+
+`{ "permission": string }`
+
+#### Success response
+
+`{ "permission": string, "granted": boolean }`
+
+#### Errors
+
+`unknown_permission` (`bad_request`, not a recognized permission key), `internal`
+(local store failure).
 
 **Emits:** None.
 

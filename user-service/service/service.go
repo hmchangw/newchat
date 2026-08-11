@@ -13,7 +13,7 @@ import (
 	"github.com/hmchangw/chat/user-service/models"
 )
 
-//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . SubscriptionRepository,UserRepository,AppRepository,RoomClient,HistoryClient,PresenceClient,EventPublisher,ThreadSubscriptionRepository,SSOTokenRepository,TokenValidator,TokenRefresher
+//go:generate mockgen -destination=mocks/mock_repository.go -package=mocks . SubscriptionRepository,UserRepository,AppRepository,RoomClient,HistoryClient,PresenceClient,EventPublisher,ThreadSubscriptionRepository,SSOTokenRepository,TokenValidator,TokenRefresher,PermissionRepository
 
 // SubscriptionRepository is the consumer-defined interface for subscription persistence (botDM app-subscription rows included).
 type SubscriptionRepository interface {
@@ -102,6 +102,12 @@ type TokenRefresher interface {
 	Refresh(ctx context.Context, refreshToken string) (oidc.TokenSet, error)
 }
 
+// PermissionRepository is the consumer-defined interface for whitelist
+// permission-grant reads (permission_grants; admin-service owns all writes).
+type PermissionRepository interface {
+	GetLatestGrant(ctx context.Context, siteID string, permission model.PermissionKey, subjectAccount string) (*model.PermissionGrant, error)
+}
+
 // UserService handles all user-related NATS request/reply endpoints.
 type UserService struct {
 	subs       SubscriptionRepository
@@ -118,6 +124,7 @@ type UserService struct {
 	ssoTokens        SSOTokenRepository
 	tokenValidator   TokenValidator
 	tokenRefresher   TokenRefresher
+	permissions      PermissionRepository
 	ssoRefreshWindow time.Duration
 	siteID           string
 	allSiteIDs       []string
@@ -129,7 +136,7 @@ type UserService struct {
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config) *UserService {
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, permissions PermissionRepository, cfg *config.Config) *UserService {
 	return &UserService{
 		subs:             subs,
 		users:            users,
@@ -143,6 +150,7 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		ssoTokens:        ssoTokens,
 		tokenValidator:   tokenValidator,
 		tokenRefresher:   tokenRefresher,
+		permissions:      permissions,
 		ssoRefreshWindow: cfg.SSORefreshWindow,
 		siteID:           cfg.SiteID,
 		allSiteIDs:       cfg.AllSiteIDs,
@@ -185,4 +193,5 @@ func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.UserAppsCategoriesPattern(s.siteID), s.ListAppCategories)
 	natsrouter.Register(r, subject.UserSSOSetPattern(s.siteID), s.SSOSet)
 	natsrouter.RegisterOptionalBody(r, subject.UserSSORefreshPattern(s.siteID), s.SSORefresh)
+	natsrouter.Register(r, subject.UserPermissionGetPattern(s.siteID), s.GetPermission)
 }

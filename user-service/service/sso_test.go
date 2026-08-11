@@ -31,7 +31,7 @@ func newSSOSvc(t *testing.T) (*UserService, *mocks.MockUserRepository, *mocks.Mo
 		mocks.NewMockThreadSubscriptionRepository(ctrl), mocks.NewMockRoomClient(ctrl),
 		mocks.NewMockHistoryClient(ctrl), mocks.NewMockPresenceClient(ctrl),
 		mocks.NewMockEventPublisher(ctrl), mocks.NewMockEventPublisher(ctrl),
-		ssoTokens, validator, refresher, cfg,
+		ssoTokens, validator, refresher, nil, cfg,
 	)
 	return svc, users, ssoTokens, validator, refresher
 }

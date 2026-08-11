@@ -19,6 +19,7 @@ var (
 	_ service.UserRepository         = (*UserRepo)(nil)
 	_ service.AppRepository          = (*AppRepo)(nil)
 	_ service.SSOTokenRepository     = (*SSOTokenRepo)(nil)
+	_ service.PermissionRepository   = (*PermissionRepo)(nil)
 )
 
 // newTestSubscriptionRepo builds a SubscriptionRepo with siteID "site-a"; seed cross-site rows with a different siteId to exercise the deleted-filter.
@@ -53,6 +54,16 @@ func newTestSSOTokenRepo(t *testing.T) (*SSOTokenRepo, *mongo.Database) {
 	r := NewSSOTokenRepo(db)
 	require.NoError(t, r.EnsureIndexes(context.Background()))
 	return r, db
+}
+
+// newTestPermissionRepo builds a PermissionRepo over an isolated test
+// database. No EnsureIndexes call: unlike every other repo in this file,
+// PermissionRepo has no such method — admin-service alone creates the
+// permission_grants indexes (spec §3.6).
+func newTestPermissionRepo(t *testing.T) (*PermissionRepo, *mongo.Database) {
+	t.Helper()
+	db := testutil.MongoDB(t, "user-service")
+	return NewPermissionRepo(db), db
 }
 
 // seed inserts raw docs into a collection on db.

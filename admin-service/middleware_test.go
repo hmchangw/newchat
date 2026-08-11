@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 	"github.com/hmchangw/chat/pkg/session"
 )
 
@@ -167,3 +171,38 @@ func TestRequireAdmin(t *testing.T) {
 
 // errNotFoundSentinel stands in for any session store miss (session.ErrNotFound).
 var errNotFoundSentinel = session.ErrNotFound
+
+func TestBodyLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		bodyBytes  int
+		wantStatus int
+	}{
+		{"body within the limit passes through to the handler", 10, http.StatusOK},
+		{"body over the limit fails JSON binding → 400", maxPermissionBodyBytes + 1024, http.StatusBadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := gin.New()
+			r.Use(bodyLimit(maxPermissionBodyBytes))
+			r.POST("/echo", func(c *gin.Context) {
+				var body map[string]any
+				if err := c.ShouldBindJSON(&body); err != nil {
+					errhttp.Write(c.Request.Context(), c, errcode.BadRequest("invalid request body",
+						errcode.WithReason(errcode.AuthMissingFields)))
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{"status": "ok"})
+			})
+
+			payload := []byte(`{"pad":"` + strings.Repeat("a", tc.bodyBytes) + `"}`)
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/echo", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, tc.wantStatus, w.Code)
+		})
+	}
+}

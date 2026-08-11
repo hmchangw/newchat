@@ -591,6 +591,377 @@ func TestIntegration_EnsureIndexes_Idempotent(t *testing.T) {
 }
 
 // -------------------------------------------------------------------------
+// Permission grants: InsertPermissionGrants (transactional) + ListPermissionGrants
+// + GetLatestPermissionGrant (latest-wins) + FindAccountStates + AppendAuditMany
+// -------------------------------------------------------------------------
+
+// timePtr returns a pointer to t, for constructing PermissionGrant.EffectiveFrom/ExpiresAt test fixtures.
+func timePtr(t time.Time) *time.Time { return &t }
+
+func TestIntegration_InsertPermissionGrants_AllOrNothing(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	require.NoError(t, st.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	preexisting := &model.PermissionGrant{
+		ID: "dup-id", SiteID: "site-a", Permission: model.PermissionExternalImageView,
+		SubjectAccount: "zoe", Granted: false, ApplicantAccount: "carol", ApproverAccount: "dave",
+		Reason: "pre-existing row", RecordedBy: "p_admin", RecordedAt: time.Now().UTC(),
+	}
+	require.NoError(t, st.InsertPermissionGrants(ctx, []*model.PermissionGrant{preexisting}))
+
+	now := time.Now().UTC()
+	batch := []*model.PermissionGrant{
+		{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "alice", Granted: true, EffectiveFrom: timePtr(now), ExpiresAt: timePtr(now.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "batch row 1", RecordedBy: "p_admin", RecordedAt: now},
+		{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "bob", Granted: true, EffectiveFrom: timePtr(now), ExpiresAt: timePtr(now.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "batch row 2", RecordedBy: "p_admin", RecordedAt: now},
+		{ID: "dup-id", SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "carl", Granted: true, EffectiveFrom: timePtr(now), ExpiresAt: timePtr(now.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "batch row 3 — collides with preexisting _id", RecordedBy: "p_admin", RecordedAt: now},
+	}
+
+	err := st.InsertPermissionGrants(ctx, batch)
+	require.Error(t, err, "a duplicate _id inside the batch must fail the whole transaction")
+
+	count, err := st.permGrants.CountDocuments(ctx, bson.M{"subjectAccount": bson.M{"$in": []string{"alice", "bob"}}})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count, "the transaction must roll back alice and bob too, not just the colliding row")
+
+	total, err := st.permGrants.CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total, "only the pre-existing row should remain")
+
+	t.Run("empty batch is a no-op, not an error", func(t *testing.T) {
+		require.NoError(t, st.InsertPermissionGrants(ctx, nil))
+	})
+}
+
+func TestIntegration_GetLatestPermissionGrant(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	require.NoError(t, st.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	t.Run("no rows returns (nil, nil)", func(t *testing.T) {
+		got, err := st.GetLatestPermissionGrant(ctx, "site-a", model.PermissionExternalImageView, "nobody")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("newest recordedAt wins", func(t *testing.T) {
+		older := time.Now().UTC().Add(-time.Hour)
+		newer := time.Now().UTC()
+		grants := []*model.PermissionGrant{
+			{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "dana", Granted: true, EffectiveFrom: timePtr(older), ExpiresAt: timePtr(older.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "first grant", RecordedBy: "p_admin", RecordedAt: older},
+			{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "dana", Granted: false, ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "revoked later", RecordedBy: "p_admin", RecordedAt: newer},
+		}
+		require.NoError(t, st.InsertPermissionGrants(ctx, grants))
+
+		latest, err := st.GetLatestPermissionGrant(ctx, "site-a", model.PermissionExternalImageView, "dana")
+		require.NoError(t, err)
+		require.NotNil(t, latest)
+		assert.False(t, latest.Granted, "the newer revoke row must win, not the older grant")
+	})
+
+	t.Run("same recordedAt ties break on _id desc", func(t *testing.T) {
+		shared := time.Now().UTC()
+		grants := []*model.PermissionGrant{
+			{ID: "grant-a", SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "erin", Granted: true, EffectiveFrom: timePtr(shared), ExpiresAt: timePtr(shared.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "batch row a", RecordedBy: "p_admin", RecordedAt: shared},
+			{ID: "grant-b", SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "erin", Granted: false, ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "batch row b", RecordedBy: "p_admin", RecordedAt: shared},
+		}
+		require.NoError(t, st.InsertPermissionGrants(ctx, grants))
+
+		latest, err := st.GetLatestPermissionGrant(ctx, "site-a", model.PermissionExternalImageView, "erin")
+		require.NoError(t, err)
+		require.NotNil(t, latest)
+		assert.Equal(t, "grant-b", latest.ID, "identical recordedAt must tie-break on the larger _id")
+	})
+}
+
+func TestIntegration_FindAccountStates(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	require.NoError(t, st.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	activeFlag := false
+	require.NoError(t, st.CreateUser(ctx, &model.User{ID: idgen.GenerateUUIDv7(), Account: "active-user", SiteID: "site-a"}))
+	require.NoError(t, st.CreateUser(ctx, &model.User{ID: idgen.GenerateUUIDv7(), Account: "inactive-user", SiteID: "site-a", Active: &activeFlag}))
+
+	states, err := st.FindAccountStates(ctx, "site-a", []string{"active-user", "inactive-user", "ghost-user"})
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]bool{"active-user": true, "inactive-user": false}, states, "ghost-user must be absent, not false")
+
+	_, exists := states["ghost-user"]
+	assert.False(t, exists, "an account that doesn't exist must not appear in the map at all")
+}
+
+func TestIntegration_ListPermissionGrants(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	require.NoError(t, st.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	otherPermission := model.PermissionKey("other.permission")
+	grants := []*model.PermissionGrant{
+		{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "faye", Granted: true, EffectiveFrom: timePtr(now.Add(-3 * time.Hour)), ExpiresAt: timePtr(now.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "r1", RecordedBy: "p_admin", RecordedAt: now.Add(-3 * time.Hour)},
+		{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "faye", Granted: false, ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "r2", RecordedBy: "p_admin", RecordedAt: now.Add(-2 * time.Hour)},
+		{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: otherPermission, SubjectAccount: "faye", Granted: true, EffectiveFrom: timePtr(now.Add(-1 * time.Hour)), ExpiresAt: timePtr(now.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "r3 — different permission", RecordedBy: "p_admin", RecordedAt: now.Add(-1 * time.Hour)},
+		{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "other-subject", Granted: true, EffectiveFrom: timePtr(now), ExpiresAt: timePtr(now.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "r4 — different subject", RecordedBy: "p_admin", RecordedAt: now},
+	}
+	require.NoError(t, st.InsertPermissionGrants(ctx, grants))
+
+	t.Run("filters by siteId+subjectAccount+permission, newest first", func(t *testing.T) {
+		results, total, err := st.ListPermissionGrants(ctx, "site-a", "faye", model.PermissionExternalImageView, 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), total)
+		require.Len(t, results, 2)
+		assert.Equal(t, "r2", results[0].Reason, "revoke row (recorded later) must come first")
+		assert.Equal(t, "r1", results[1].Reason)
+	})
+
+	t.Run("permission empty means all permissions for the subject", func(t *testing.T) {
+		results, total, err := st.ListPermissionGrants(ctx, "site-a", "faye", "", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total)
+		assert.Len(t, results, 3)
+	})
+
+	t.Run("pagination – page 1 limit 1", func(t *testing.T) {
+		results, total, err := st.ListPermissionGrants(ctx, "site-a", "faye", "", 1, 1)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total)
+		assert.Len(t, results, 1)
+	})
+
+	t.Run("pagination – page 2 limit 1 returns a disjoint row from page 1", func(t *testing.T) {
+		page1, total1, err := st.ListPermissionGrants(ctx, "site-a", "faye", "", 1, 1)
+		require.NoError(t, err)
+		require.Len(t, page1, 1)
+
+		page2, total2, err := st.ListPermissionGrants(ctx, "site-a", "faye", "", 2, 1)
+		require.NoError(t, err)
+		require.Len(t, page2, 1)
+
+		assert.Equal(t, int64(3), total1)
+		assert.Equal(t, int64(3), total2)
+		assert.NotEqual(t, page1[0].ID, page2[0].ID, "page 2 must return a different row than page 1 — skip must actually advance")
+	})
+
+	t.Run("no match returns empty with total 0", func(t *testing.T) {
+		results, total, err := st.ListPermissionGrants(ctx, "site-a", "no-such-subject", "", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, results)
+	})
+
+	t.Run("every field round-trips through the explicit projection", func(t *testing.T) {
+		results, _, err := st.ListPermissionGrants(ctx, "site-a", "other-subject", model.PermissionExternalImageView, 1, 10)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		g := results[0]
+		assert.NotEmpty(t, g.ID)
+		assert.Equal(t, "site-a", g.SiteID)
+		assert.Equal(t, model.PermissionExternalImageView, g.Permission)
+		assert.Equal(t, "other-subject", g.SubjectAccount)
+		assert.True(t, g.Granted)
+		require.NotNil(t, g.EffectiveFrom)
+		require.NotNil(t, g.ExpiresAt)
+		assert.Equal(t, "carol", g.ApplicantAccount)
+		assert.Equal(t, "dave", g.ApproverAccount)
+		assert.Equal(t, "r4 — different subject", g.Reason)
+		assert.Equal(t, "p_admin", g.RecordedBy)
+		assert.False(t, g.RecordedAt.IsZero())
+	})
+
+	t.Run("no filters (subjectAccount and permission both empty) returns every row for the site, newest first", func(t *testing.T) {
+		results, total, err := st.ListPermissionGrants(ctx, "site-a", "", "", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), total)
+		require.Len(t, results, 4)
+		// newest first across ALL subjects: r4 (other-subject, now), r3 (faye, now-1h),
+		// r2 (faye, now-2h), r1 (faye, now-3h).
+		assert.Equal(t, "r4 — different subject", results[0].Reason)
+		assert.Equal(t, "r3 — different permission", results[1].Reason)
+		assert.Equal(t, "r2", results[2].Reason)
+		assert.Equal(t, "r1", results[3].Reason)
+	})
+
+	t.Run("permission only (no subjectAccount) filters across every subject, newest first", func(t *testing.T) {
+		results, total, err := st.ListPermissionGrants(ctx, "site-a", "", model.PermissionExternalImageView, 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total)
+		require.Len(t, results, 3)
+		for _, g := range results {
+			assert.Equal(t, model.PermissionExternalImageView, g.Permission)
+		}
+		// newest first across faye + other-subject, otherPermission's row excluded:
+		// r4 (other-subject, now), r2 (faye revoke, now-2h), r1 (faye grant, now-3h).
+		assert.Equal(t, "r4 — different subject", results[0].Reason)
+		assert.Equal(t, "r2", results[1].Reason)
+		assert.Equal(t, "r1", results[2].Reason)
+	})
+}
+
+func TestIntegration_AppendAuditMany(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	require.NoError(t, st.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	entries := []*AuditEntry{
+		{ID: idgen.GenerateUUIDv7(), ActorUserID: "admin1", ActorAccount: "p_admin", Action: "permission.grant", TargetAccount: "alice", Details: map[string]string{"permission": "external.image.view"}, SiteID: "site-a", Timestamp: time.Now().UTC().UnixMilli()},
+		{ID: idgen.GenerateUUIDv7(), ActorUserID: "admin1", ActorAccount: "p_admin", Action: "permission.grant", TargetAccount: "bob", Details: map[string]string{"permission": "external.image.view"}, SiteID: "site-a", Timestamp: time.Now().UTC().UnixMilli()},
+	}
+	require.NoError(t, st.AppendAuditMany(ctx, entries))
+
+	results, total, err := st.ListAudit(ctx, "site-a", AuditFilter{Action: "permission.grant"}, 1, 10)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), total)
+	assert.Len(t, results, 2)
+
+	t.Run("empty batch is a no-op, not an error", func(t *testing.T) {
+		require.NoError(t, st.AppendAuditMany(ctx, nil))
+	})
+}
+
+// planStage captures one node of a MongoDB explain winningPlan tree. Decoded
+// via bson.Raw so nesting depth doesn't have to be known up front.
+type planStage struct {
+	Stage      string   `bson:"stage"`
+	IndexName  string   `bson:"indexName"`
+	InputStage bson.Raw `bson:"inputStage"`
+}
+
+// collectStages walks a winningPlan tree and returns every stage found,
+// outermost first, keeping each stage's indexName (empty for non-IXSCAN
+// stages) so callers can assert not just THAT an index was used but WHICH
+// one — two different indexes can produce an identical stage-name shape
+// (IXSCAN, no SORT) while serving the query very differently.
+func collectStages(t *testing.T, raw bson.Raw) []planStage {
+	t.Helper()
+	if len(raw) == 0 {
+		return nil
+	}
+	var s planStage
+	require.NoError(t, bson.Unmarshal(raw, &s))
+	return append([]planStage{s}, collectStages(t, s.InputStage)...)
+}
+
+// indexNameForKeys resolves the auto-generated name MongoDB assigned to the
+// index with exactly the given key spec, by listing the real indexes on the
+// collection rather than hand-predicting mongod's naming convention (field
+// order is significant for a compound index's identity, so this is an
+// ordered comparison, not a set comparison).
+func indexNameForKeys(ctx context.Context, t *testing.T, iv mongo.IndexView, want bson.D) string {
+	t.Helper()
+	specs, err := iv.ListSpecifications(ctx)
+	require.NoError(t, err)
+	for _, spec := range specs {
+		var got bson.D
+		require.NoError(t, bson.Unmarshal(spec.KeysDocument, &got))
+		if indexKeysEqual(got, want) {
+			return spec.Name
+		}
+	}
+	require.Fail(t, "no index found matching the expected key spec — did EnsureIndexes change?")
+	return ""
+}
+
+// indexKeysEqual compares two index key specs field-by-field, in order.
+func indexKeysEqual(got, want bson.D) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i].Key != want[i].Key || indexDirection(got[i].Value) != indexDirection(want[i].Value) {
+			return false
+		}
+	}
+	return true
+}
+
+// indexDirection normalizes a decoded BSON numeric (int32/int64/float64) index
+// direction to int64 so driver-decoded values compare cleanly against Go int literals.
+func indexDirection(v any) int64 {
+	switch n := v.(type) {
+	case int32:
+		return int64(n)
+	case int64:
+		return n
+	case float64:
+		return int64(n)
+	case int:
+		return int64(n)
+	}
+	return 0
+}
+
+func TestIntegration_ListPermissionGrants_UsesIndexNoInMemorySort(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	require.NoError(t, st.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	require.NoError(t, st.InsertPermissionGrants(ctx, []*model.PermissionGrant{
+		{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "gina", Granted: true, EffectiveFrom: timePtr(now), ExpiresAt: timePtr(now.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "r1", RecordedBy: "p_admin", RecordedAt: now},
+	}))
+
+	// Resolve the compound index's real auto-generated name at runtime
+	// (rather than hardcoding mongod's naming convention), so the assertion
+	// below can prove WHICH index served the query, not just that some index did.
+	wantIndexName := indexNameForKeys(ctx, t, st.permGrants.Indexes(), bson.D{
+		{Key: "siteId", Value: 1},
+		{Key: "permission", Value: 1},
+		{Key: "subjectAccount", Value: 1},
+		{Key: "recordedAt", Value: -1},
+		{Key: "_id", Value: -1},
+	})
+	t.Logf("compound index resolved to name %q", wantIndexName)
+
+	cmd := bson.D{
+		{Key: "explain", Value: bson.D{
+			{Key: "find", Value: "permission_grants"},
+			{Key: "filter", Value: bson.D{
+				{Key: "siteId", Value: "site-a"},
+				{Key: "permission", Value: string(model.PermissionExternalImageView)},
+				{Key: "subjectAccount", Value: "gina"},
+			}},
+			{Key: "sort", Value: bson.D{{Key: "recordedAt", Value: -1}, {Key: "_id", Value: -1}}},
+		}},
+		{Key: "verbosity", Value: "queryPlanner"},
+	}
+
+	var result struct {
+		QueryPlanner struct {
+			WinningPlan bson.Raw `bson:"winningPlan"`
+		} `bson:"queryPlanner"`
+	}
+	require.NoError(t, db.RunCommand(ctx, cmd).Decode(&result))
+
+	stages := collectStages(t, result.QueryPlanner.WinningPlan)
+
+	var ixscanNames []string
+	sawSort := false
+	for _, s := range stages {
+		switch s.Stage {
+		case "IXSCAN":
+			ixscanNames = append(ixscanNames, s.IndexName)
+		case "SORT":
+			sawSort = true
+		}
+	}
+
+	require.NotEmpty(t, ixscanNames, "the hot query must use an index, not a collection scan")
+	assert.Equal(t, []string{wantIndexName}, ixscanNames,
+		"the hot query must be served by the siteId+permission+subjectAccount+recordedAt+_id compound index; "+
+			"a narrower index (e.g. siteId+recordedAt alone) would still IXSCAN with no SORT stage — identical "+
+			"shape, wrong index — which is exactly what this assertion (as opposed to a stage-names-only check) catches")
+	assert.False(t, sawSort, "recordedAt desc,_id desc must come free from the index — no in-memory sort")
+}
+
+// -------------------------------------------------------------------------
 // TestLoginAndChangePasswordEndToEnd
 // -------------------------------------------------------------------------
 

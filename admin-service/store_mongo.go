@@ -17,12 +17,14 @@ import (
 type storeMongo struct {
 	users      *mongo.Collection
 	adminAudit *mongo.Collection
+	permGrants *mongo.Collection
 }
 
 func newStoreMongo(db *mongo.Database) *storeMongo {
 	return &storeMongo{
 		users:      db.Collection("users"),
 		adminAudit: db.Collection("admin_audit"),
+		permGrants: db.Collection("permission_grants"),
 	}
 }
 
@@ -51,6 +53,30 @@ func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("create admin_audit siteId_targetAccount_timestamp index: %w", err)
+	}
+
+	// Backs ListPermissionGrants/GetLatestPermissionGrant: equality prefix
+	// (siteId, permission, subjectAccount) + sort suffix (recordedAt, _id) so
+	// newest-first ordering comes free from the index (spec §3.6).
+	_, err = s.permGrants.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "siteId", Value: 1},
+			{Key: "permission", Value: 1},
+			{Key: "subjectAccount", Value: 1},
+			{Key: "recordedAt", Value: -1},
+			{Key: "_id", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create permission_grants siteId_permission_subjectAccount_recordedAt_id index: %w", err)
+	}
+
+	// Backs the audit/BI browse (no subjectAccount equality, so index 1 above doesn't apply).
+	_, err = s.permGrants.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "recordedAt", Value: -1}},
+	})
+	if err != nil {
+		return fmt.Errorf("create permission_grants siteId_recordedAt index: %w", err)
 	}
 
 	return nil
@@ -339,6 +365,152 @@ func (s *storeMongo) ListAudit(ctx context.Context, siteID string, f AuditFilter
 		entries = []AuditEntry{}
 	}
 	return entries, total, nil
+}
+
+// permissionGrantProjection returns every PermissionGrant field explicitly —
+// house rule "always project precisely" (CLAUDE.md Coding Rules); the admin
+// GET renders the full ledger row, so nothing is trimmed.
+var permissionGrantProjection = bson.M{
+	"_id":              1,
+	"siteId":           1,
+	"permission":       1,
+	"subjectAccount":   1,
+	"granted":          1,
+	"effectiveFrom":    1,
+	"expiresAt":        1,
+	"applicantAccount": 1,
+	"approverAccount":  1,
+	"reason":           1,
+	"recordedBy":       1,
+	"recordedAt":       1,
+}
+
+// InsertPermissionGrants appends the batch atomically (withTransaction +
+// InsertMany), so a resend after a partial failure cannot produce duplicate
+// rows (spec §4.4 note on step 11).
+func (s *storeMongo) InsertPermissionGrants(ctx context.Context, grants []*model.PermissionGrant) error {
+	if len(grants) == 0 {
+		return nil
+	}
+	docs := make([]any, len(grants))
+	for i, g := range grants {
+		docs[i] = g
+	}
+	return s.withTransaction(ctx, func(ctx context.Context) error {
+		if _, err := s.permGrants.InsertMany(ctx, docs); err != nil {
+			return fmt.Errorf("insert permission grants: %w", err)
+		}
+		return nil
+	})
+}
+
+// ListPermissionGrants returns the ledger for the site newest-first
+// (recordedAt desc, _id desc). subjectAccount == "" means all subjects;
+// permission == "" means all permissions — the two filters combine
+// independently (spec §4.6). Omitting either or both breaks the equality
+// prefix on index 1, so this path falls back to index 2 (siteId, recordedAt)
+// plus a residual filter, or — when both are omitted — index 2 alone with no
+// residual filter; accepted per spec.
+func (s *storeMongo) ListPermissionGrants(ctx context.Context, siteID, subjectAccount string, permission model.PermissionKey, page, limit int) ([]model.PermissionGrant, int64, error) {
+	filter := bson.M{"siteId": siteID}
+	if subjectAccount != "" {
+		filter["subjectAccount"] = subjectAccount
+	}
+	if permission != "" {
+		filter["permission"] = permission
+	}
+
+	skip := int64((page - 1) * limit)
+
+	total, err := s.permGrants.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count permission grants: %w", err)
+	}
+
+	cur, err := s.permGrants.Find(ctx, filter,
+		options.Find().
+			SetProjection(permissionGrantProjection).
+			SetSort(bson.D{{Key: "recordedAt", Value: -1}, {Key: "_id", Value: -1}}).
+			SetSkip(skip).
+			SetLimit(int64(limit)),
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("find permission grants: %w", err)
+	}
+
+	var grants []model.PermissionGrant
+	if err := cur.All(ctx, &grants); err != nil {
+		return nil, 0, fmt.Errorf("decode permission grants: %w", err)
+	}
+	if grants == nil {
+		grants = []model.PermissionGrant{}
+	}
+	return grants, total, nil
+}
+
+// GetLatestPermissionGrant returns the newest grant row for the triple, or
+// (nil, nil) when none exists — latest-wins evaluation reads this row
+// through model.EvaluateGrant (spec §3.5).
+func (s *storeMongo) GetLatestPermissionGrant(ctx context.Context, siteID string, permission model.PermissionKey, subjectAccount string) (*model.PermissionGrant, error) {
+	var g model.PermissionGrant
+	err := s.permGrants.FindOne(ctx,
+		bson.M{"siteId": siteID, "permission": permission, "subjectAccount": subjectAccount},
+		options.FindOne().
+			SetProjection(permissionGrantProjection).
+			SetSort(bson.D{{Key: "recordedAt", Value: -1}, {Key: "_id", Value: -1}}),
+	).Decode(&g)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get latest permission grant: %w", err)
+	}
+	return &g, nil
+}
+
+// accountStateProjection contains only the fields FindAccountStates needs to
+// derive IsActive() — never the rest of the user document.
+var accountStateProjection = bson.M{"account": 1, "active": 1}
+
+// FindAccountStates returns account -> IsActive() for the accounts that
+// exist at the site; accounts not present in the map do not exist. One
+// query for the whole batch (spec §4.4 step 10), rather than N lookups.
+func (s *storeMongo) FindAccountStates(ctx context.Context, siteID string, accounts []string) (map[string]bool, error) {
+	cur, err := s.users.Find(ctx,
+		bson.M{"siteId": siteID, "account": bson.M{"$in": accounts}},
+		options.Find().SetProjection(accountStateProjection),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find account states: %w", err)
+	}
+
+	var rows []model.User
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode account states: %w", err)
+	}
+
+	states := make(map[string]bool, len(rows))
+	for i := range rows {
+		states[rows[i].Account] = rows[i].IsActive()
+	}
+	return states, nil
+}
+
+// AppendAuditMany inserts all entries in one InsertMany — a 200-subject
+// batch would otherwise cost 200 round trips through AppendAudit. Same
+// best-effort contract: the caller logs a failure, never fails the request.
+func (s *storeMongo) AppendAuditMany(ctx context.Context, entries []*AuditEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	docs := make([]any, len(entries))
+	for i, e := range entries {
+		docs[i] = e
+	}
+	if _, err := s.adminAudit.InsertMany(ctx, docs); err != nil {
+		return fmt.Errorf("insert audit entries: %w", err)
+	}
+	return nil
 }
 
 func (s *storeMongo) Ping(ctx context.Context) error {

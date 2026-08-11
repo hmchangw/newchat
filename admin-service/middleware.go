@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"slices"
 	"strings"
 
@@ -83,4 +84,14 @@ func principalFrom(c *gin.Context) session.Session {
 	v, _ := c.Get(ctxPrincipal)
 	s, _ := v.(session.Session)
 	return s
+}
+
+// bodyLimit caps request bodies at max bytes; a caller that exceeds it gets a
+// truncated read, which fails ShouldBindJSON downstream and surfaces as an
+// ordinary 400 (spec §9 — no 413 in this service's closed Code set).
+func bodyLimit(max int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, max)
+		c.Next()
+	}
 }

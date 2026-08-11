@@ -70,6 +70,7 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
+	r.Use(bodyLimit(maxPermissionBodyBytes))
 	registerRoutes(r, h, sessStore, cfg.SiteID)
 
 	srv := &http.Server{

@@ -61,7 +61,7 @@ paths.
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
      - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset) · [`settings.priorityContacts.get`](#settingsprioritycontactsget) · [`settings.priorityContacts.add`](#settingsprioritycontactsadd) · [`settings.priorityContacts.remove`](#settingsprioritycontactsremove)
      - [Chatlist Sections](#chatlist-sections)
-     - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
+     - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh) · [`permission.get`](#permissionget)
    - [3.5 media-service](#35-media-service)
      - [`emoji.list`](#emojilist--list-a-sites-custom-emoji) · [`emoji.delete`](#emojidelete--delete-a-custom-emoji)
    - [3.6 translation-service](#36-translation-service)
@@ -4560,6 +4560,7 @@ See [Error envelope](#6-error-envelope-reference).
 | `chat.user.{account}.request.user.{siteID}.thread.read.all` | [Clear All Thread Unread](#clear-all-thread-unread) |
 | `chat.user.{account}.request.user.{siteID}.sso.set` | [`sso.set`](#ssoset) |
 | `chat.user.{account}.request.user.{siteID}.sso.refresh` | [`sso.refresh`](#ssorefresh) |
+| `chat.user.{account}.request.user.{siteID}.permission.get` | [`permission.get`](#permissionget) |
 
 #### me
 
@@ -5990,6 +5991,51 @@ None — the request body is empty.
 
 ---
 
+#### permission.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.permission.get`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Returns whether the **calling** user currently holds a given permission. Self-service — the `{account}` subject token is the caller's NATS-JWT-authenticated identity; there is no way to query another account's permission over this subject, and the request body carries no account field. The answer is computed from the newest matching row in the `permission_grants` ledger (latest-wins): never granted, expired, not yet effective, and revoked all read the same way — `granted: false` on an ordinary `200`, never an error. No dates are returned; this endpoint answers yes/no only.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `permission` | string | yes | Permission key to check. The only key defined today is `external.image.view`. |
+
+```json
+{ "permission": "external.image.view" }
+```
+
+##### Success response
+
+| Field | Type | Notes |
+|---|---|---|
+| `permission` | string | Echoes the requested key. |
+| `granted` | boolean | Whether the caller currently holds the permission. `false` covers "never granted", "expired", "not yet effective", and "revoked" alike — all are ordinary `200` responses, not errors. |
+
+```json
+{ "permission": "external.image.view", "granted": true }
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| `permission` missing or not a recognized key | `bad_request` | `unknown_permission` | Only `external.image.view` exists today. |
+| Internal failure | `internal` | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+##### Triggered events — success path
+
+`None — reply only.`
+
+##### Triggered events — error path
+
+`None — error returned only via the reply subject.`
+
+---
+
 ### 3.5 media-service
 
 | RPC subject | Method |
@@ -6714,6 +6760,14 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
 | `invalid_credentials` | unauthenticated | admin-service `POST /v1/login` (§9.10) (unknown account, wrong password, not admin, or deactivated — uniform response) |
 | `old_password_mismatch` | unauthenticated | admin-service `POST /v1/password/change` (§9.11) (`oldPassword` does not match) |
+| `unknown_permission` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13), `GET /v1/admin/permissions` (§9.14) (permission key not recognized); user-service `permission.get` (same) |
+| `invalid_subject_count` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`subjectAccounts` empty or over 200) |
+| `invalid_reason` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`reason` over 1000 runes) |
+| `missing_permission_fields` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`granted` omitted, or `applicantAccount`/`approverAccount` empty) |
+| `invalid_permission_window` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (grant only: malformed date, `effectiveFrom` after `expiresAt`, or `expiresAt` not in the future) |
+| `unexpected_permission_window` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (revoke only: `effectiveFrom`/`expiresAt` present) |
+| `inactive_subject` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (a subject account is deactivated) |
+| `unknown_accounts` | not_found | admin-service `POST /v1/admin/permissions` (§9.13) (a subject, applicant, or approver account does not exist at this site) |
 | `emoji_shortcode_reserved` | bad_request | media-service `PUT /api/v1/emoji/…` (shortcode collides with a built-in standard emoji) |
 | `emoji_delete_disabled` | forbidden | media-service `emoji.delete` (kill-switch `EMOJI_DELETE_ENABLED=false`, the default) |
 
@@ -7556,6 +7610,209 @@ For a room with members homed on other sites, room-service still fans the state 
 
 `None.`
 
+### 9.13 Create / revoke permission grants
+
+**Endpoint:** `POST /v1/admin/permissions`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Records a new row in the append-only `permission_grants` ledger for one or more subject accounts — either a grant (`granted: true`) or a revocation (`granted: false`) of the same permission key in one call. Unlike its siblings this is not a `/users/:account/...`-shaped endpoint, because `subjectAccounts` is a batch. The current state of a permission is never stored directly — it's always the newest row for `(permission, subjectAccount)`; revoking does not edit or delete any earlier row (see `currentlyGranted` in §9.14). One `admin_audit` entry (`action`: `permission.grant` or `permission.revoke`, `targetAccount`: the subject) is written per subject alongside the ledger rows.
+
+Dates are plain `YYYY-MM-DD` strings, interpreted under a fixed UTC+8 rule — never the caller's timezone, never the server's local timezone. There is no `timezone` field, and there never will be one for this endpoint.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `permission` | string | yes | Permission key. The only key defined today is `external.image.view`. |
+| `subjectAccounts` | string[] | yes | 1–200 accounts to grant or revoke for. Duplicates are silently deduplicated (first occurrence kept) and reported back in `duplicatesIgnored` — never rejected outright. |
+| `granted` | boolean | yes | `true` records a grant, `false` records a revocation. Required — a body that omits `granted`, or sends an explicit `granted: null`, is rejected with `400 missing_permission_fields`, not silently treated as `false`/revoke. |
+| `effectiveFrom` | string | no | Grant only — `YYYY-MM-DD`. Omitted means "effective immediately" (the write instant). Backdating is allowed. **Must be entirely absent — not `null` — when `granted` is `false`**; a revocation has no validity window. |
+| `expiresAt` | string | when `granted` is `true` | Grant only — `YYYY-MM-DD`, the last valid day (inclusive). Stored internally as the exclusive-end instant, UTC+8 midnight the *following* day. A value equal to today is valid (the grant expires tonight); any earlier date is rejected. **Must be entirely absent when `granted` is `false`** — there are no permanent grants and no dated revocations. |
+| `applicantAccount` | string | yes | Account of the person who requested the change (offline approval). Must exist at this site; may be inactive. |
+| `approverAccount` | string | yes | Account of the person who approved the change (offline approval). Must exist at this site; may be inactive. |
+| `reason` | string | no | Free text, ≤1000 runes (`utf8.RuneCountInString`) when present. Omitted or empty is accepted and stored as `""`. Retained permanently — this is an append-only ledger, not a mutable note. |
+
+Grant:
+
+```json
+{
+  "permission": "external.image.view",
+  "subjectAccounts": ["alice", "bob"],
+  "granted": true,
+  "effectiveFrom": "2026-09-01",
+  "expiresAt": "2026-12-31",
+  "applicantAccount": "carol",
+  "approverAccount": "dave",
+  "reason": "On-call staff must review production line photos from outside the fab."
+}
+```
+
+Revoke — `effectiveFrom`/`expiresAt` omitted entirely, not `null`:
+
+```json
+{
+  "permission": "external.image.view",
+  "subjectAccounts": ["alice"],
+  "granted": false,
+  "applicantAccount": "carol",
+  "approverAccount": "dave",
+  "reason": "Project ended."
+}
+```
+
+#### Success response
+
+`HTTP 201`
+
+| Field | Type | Notes |
+|---|---|---|
+| `created` | integer | Number of ledger rows written — the deduplicated subject count. |
+| `duplicatesIgnored` | string[] | Subject accounts dropped as duplicates of an earlier entry in the same request. `[]`, never `null`, when there were none. |
+| `grants` | [GrantCreated](#grantcreated)[] | One entry per row written, same order as the deduplicated subject list. |
+
+```json
+{
+  "created": 2,
+  "duplicatesIgnored": [],
+  "grants": [
+    { "id": "0199f2c3a4b5c6d70199f2c3a4b5c6d7", "subjectAccount": "alice" },
+    { "id": "0199f2c3a4b5c6d80199f2c3a4b5c6d8", "subjectAccount": "bob" }
+  ]
+}
+```
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | Body exceeds 1MB, or is not valid JSON. |
+| 400 | `bad_request` | `unknown_permission` | `permission` is not a recognized key. |
+| 400 | `bad_request` | `invalid_subject_count` | `subjectAccounts` is empty or exceeds 200 entries. |
+| 400 | `bad_request` | `invalid_reason` | `reason` exceeds 1000 runes. |
+| 400 | `bad_request` | `missing_permission_fields` | `granted` is omitted, or `applicantAccount`/`approverAccount` is empty. |
+| 400 | `bad_request` | `invalid_permission_window` | Grant only. `effectiveFrom`/`expiresAt` not `YYYY-MM-DD`, `effectiveFrom` after `expiresAt`, or `expiresAt`'s derived instant is not in the future (today is valid; yesterday or earlier is not). |
+| 400 | `bad_request` | `unexpected_permission_window` | Revoke only. `effectiveFrom` or `expiresAt` present. |
+| 404 | `not_found` | `unknown_accounts` | A subject, applicant, or approver account does not exist at this site. Message names the offending accounts; `metadata.accounts` carries the same comma-joined list for programmatic display. |
+| 400 | `bad_request` | `inactive_subject` | A subject account exists but is deactivated. `applicantAccount`/`approverAccount` are exempt — a departed staff member may still be recorded as applicant or approver. Message names the offending accounts; `metadata.accounts` carries the same comma-joined list. |
+| 401 | `unauthenticated` | `invalid_token` | Token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | The batch insert is transactional — on failure, no ledger row was written and no audit entry exists. |
+
+```bash
+# Grant
+curl -X POST https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permission": "external.image.view",
+    "subjectAccounts": ["alice", "bob"],
+    "granted": true,
+    "effectiveFrom": "2026-09-01",
+    "expiresAt": "2026-12-31",
+    "applicantAccount": "carol",
+    "approverAccount": "dave",
+    "reason": "On-call staff must review production line photos from outside the fab."
+  }'
+```
+
+```bash
+# Revoke
+curl -X POST https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permission": "external.image.view",
+    "subjectAccounts": ["alice"],
+    "granted": false,
+    "applicantAccount": "carol",
+    "approverAccount": "dave",
+    "reason": "Project ended."
+  }'
+```
+
+### 9.14 List permission grants
+
+**Endpoint:** `GET /v1/admin/permissions`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Returns the permission ledger, newest-first, plus the current computed decision when the filters narrow to a single subject and permission. Backs both the terminal workflow (confirm state before writing, confirm again after) and the console's lookup pane.
+
+#### Query parameters
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `subjectAccount` | string | Optional. Filter to one subject account. Omitted lists every subject at the site. |
+| `permission` | string | Optional. Filter to one permission key. Omitted lists every permission. An unrecognized key returns `400 unknown_permission`. |
+| `page` | integer | Page number, 1-based. Defaults to `1`. |
+| `limit` | integer | Page size. Defaults to `20`, max `100`. |
+
+`subjectAccount` and `permission` combine independently, four ways: neither given returns every row for the site; `subjectAccount` alone returns one subject's full ledger; `permission` alone returns one permission key across every subject; both given narrows to one subject's ledger for one permission. `currentlyGranted` (below) is included only in the both-given case.
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `currentlyGranted` | boolean | Present only when BOTH `subjectAccount` and `permission` were supplied — a latest-wins decision is meaningless without both. The current decision — latest-wins over the filtered ledger. Deliberately not named `granted`, which is a per-row field meaning "what this record did", not "current state". |
+| `entries` | [PermissionGrantView](#permissiongrantview)[] | The ledger, newest-first (`recordedAt` desc, `_id` desc tie-break). |
+| `total` | integer | Total matching rows across all pages. |
+
+```json
+{
+  "currentlyGranted": false,
+  "entries": [
+    {
+      "id": "0199f2c3a4b5c6d90199f2c3a4b5c6d9",
+      "permission": "external.image.view",
+      "subjectAccount": "alice",
+      "granted": false,
+      "applicantAccount": "carol",
+      "approverAccount": "dave",
+      "reason": "Project ended.",
+      "recordedBy": "p_admin_wang",
+      "recordedAt": "2026-10-15T02:03:04Z"
+    },
+    {
+      "id": "0199f2c3a4b5c6d70199f2c3a4b5c6d7",
+      "permission": "external.image.view",
+      "subjectAccount": "alice",
+      "granted": true,
+      "effectiveFrom": "2026-09-01",
+      "expiresAt": "2026-12-31",
+      "expiresAtUTC": "2026-12-31T16:00:00Z",
+      "applicantAccount": "carol",
+      "approverAccount": "dave",
+      "reason": "On-call staff must review production line photos from outside the fab.",
+      "recordedBy": "p_admin_wang",
+      "recordedAt": "2026-09-01T01:00:00Z"
+    }
+  ],
+  "total": 2
+}
+```
+
+Note what this example demonstrates: the revoke row (newest, listed first) omits
+`effectiveFrom`/`expiresAt`/`expiresAtUTC` entirely, and `currentlyGranted` correctly
+reads `false` because the revoke is the newest row for `(permission, subjectAccount)`.
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `unknown_permission` | `permission` is not a recognized key. |
+| 401 | `unauthenticated` | `invalid_token` | Token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+```bash
+# Lookup
+curl -G https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "subjectAccount=alice" \
+  --data-urlencode "permission=external.image.view"
+```
+
 ### UserView
 
 Projected user record returned by all admin user endpoints. The `services` / bcrypt field is never included.
@@ -7605,6 +7862,30 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `details` | map<string, string> | Non-secret context for the action (e.g. `{"account":"bob"}`). Omitted when empty. Never contains passwords, hashes, or tokens. |
 | `siteId` | string | Site the action was performed on. |
 | `timestamp` | integer | Epoch ms (UTC) when the action occurred. |
+
+### GrantCreated
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Ledger row ID written for this subject (32-char UUIDv7 hex). |
+| `subjectAccount` | string | The subject account this row was written for. |
+
+### PermissionGrantView
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Ledger row ID (32-char UUIDv7 hex). |
+| `permission` | string | Permission key this row applies to. |
+| `subjectAccount` | string | The account this row grants or revokes the permission for. |
+| `granted` | boolean | What this row did — `true` for a grant, `false` for a revocation. Historical rows are never rewritten; this is not "does the subject currently hold the permission" (see `currentlyGranted`, §9.14). |
+| `effectiveFrom` | string | `YYYY-MM-DD`, decoded back from the stored instant at UTC+8. Omitted on revoke rows (no validity window). |
+| `expiresAt` | string | `YYYY-MM-DD`, the inclusive last valid day (decoded from the stored exclusive-end instant at UTC+8, minus one day). Omitted on revoke rows. |
+| `expiresAtUTC` | string | RFC 3339. The exact stored instant — the exclusive end of the half-open window, one day past `expiresAt`. Omitted on revoke rows. |
+| `applicantAccount` | string | Who requested the change. |
+| `approverAccount` | string | Who approved the change. |
+| `reason` | string | Free-text justification, as submitted. |
+| `recordedBy` | string | The admin account that recorded this row (from the session token). |
+| `recordedAt` | string | RFC 3339. Server clock at write time — also the moment the change took effect. |
 
 ---
 
