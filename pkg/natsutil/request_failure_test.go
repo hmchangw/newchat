@@ -1,4 +1,4 @@
-package natsutil
+package natsutil_test
 
 import (
 	"context"
@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 func TestRequestFailure(t *testing.T) {
@@ -60,7 +62,7 @@ func TestRequestFailure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := RequestFailure("rooms-info rpc", tt.err)
+			got := natsutil.RequestFailure("rooms-info rpc", tt.err)
 			require.Error(t, got)
 			require.Contains(t, got.Error(), "rooms-info rpc")
 
@@ -80,14 +82,14 @@ func TestRequestFailure(t *testing.T) {
 }
 
 func TestRequestFailure_NilReturnsNil(t *testing.T) {
-	require.NoError(t, RequestFailure("rooms-info rpc", nil))
+	require.NoError(t, natsutil.RequestFailure("rooms-info rpc", nil))
 }
 
 // The cause is server-side only. If it ever reaches the wire envelope it would
 // leak internal detail to clients, which is the one thing errcode guarantees
 // against.
 func TestRequestFailure_CauseNeverSerialised(t *testing.T) {
-	err := RequestFailure("rooms-info rpc", fmt.Errorf("dial 10.1.2.3:4222: %w", nats.ErrNoResponders))
+	err := natsutil.RequestFailure("rooms-info rpc", fmt.Errorf("dial 10.1.2.3:4222: %w", nats.ErrNoResponders))
 
 	var typed *errcode.Error
 	require.True(t, errors.As(err, &typed))
@@ -96,4 +98,24 @@ func TestRequestFailure_CauseNeverSerialised(t *testing.T) {
 	require.NoError(t, mErr)
 	require.NotContains(t, string(data), "10.1.2.3")
 	require.NotContains(t, string(data), "no responders available")
+}
+
+// Proves the mapping fires on an error the real client produces, not just on a
+// hand-constructed sentinel. A request to a subject nobody subscribes to
+// returns ErrNoResponders, because responder detection is on by default.
+//
+// Uses the package's existing embedded-server helper, so this is a unit test:
+// no Docker, and it runs everywhere make test runs.
+func TestRequestFailure_RealNoResponders(t *testing.T) {
+	nc := startTestNATSWithMaxPayload(t, 0) // 0 = leave the server default
+
+	_, reqErr := nc.Request("nobody.is.listening.here", []byte("{}"), 2*time.Second)
+	require.Error(t, reqErr)
+
+	got := natsutil.RequestFailure("probe rpc", reqErr)
+
+	var typed *errcode.Error
+	require.True(t, errors.As(got, &typed), "expected a typed errcode, got %v", got)
+	require.Equal(t, errcode.CodeUnavailable, typed.Code)
+	require.Equal(t, errcode.NatsNoResponders, typed.Reason)
 }
