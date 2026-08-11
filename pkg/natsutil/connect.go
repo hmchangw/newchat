@@ -2,6 +2,7 @@ package natsutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -70,7 +71,11 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 		nats.ClosedHandler(func(_ *nats.Conn) {
 			log.Warn("nats connection closed")
 		}),
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			if errors.Is(err, nats.ErrSlowConsumer) {
+				logSlowConsumer(log, sub)
+				return
+			}
 			log.Error("nats async error", "error", err)
 		}),
 	}
