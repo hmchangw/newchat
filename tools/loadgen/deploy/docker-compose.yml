@@ -113,12 +113,13 @@ services:
   # worker is falling behind during a run. No container_name and no host port
   # binding, so this can coexist with tools/observability's exporter.
   #
-  # No healthcheck: the image ships the exporter binary without a shell or an
-  # HTTP client, so any `test:` command fails and the container never turns
-  # healthy — which stalled the whole dashboards profile behind Prometheus's
-  # `condition: service_healthy`. Prometheus does not need this target up at
-  # startup anyway; an unreachable target is simply marked down and retried on
-  # the next scrape, so the dependency below is `service_started`.
+  # No healthcheck: this minimal image ships no HTTP client (no wget, no curl),
+  # so the probe that used to live here could never pass and the container never
+  # turned healthy — which stalled the whole dashboards profile behind
+  # Prometheus's `condition: service_healthy`. Adding a client just to probe is
+  # not worth it: Prometheus does not need a target up at startup, it marks an
+  # unreachable one down and retries on the next scrape. Hence
+  # `service_started` on the dependency below.
   nats-exporter:
     image: natsio/prometheus-nats-exporter:0.16.0
     profiles: [dashboards]
