@@ -5556,6 +5556,8 @@ PUT-like idempotent endpoint to subscribe or unsubscribe the calling user from a
 | `appId` missing | `bad_request` | — | `"appId required"` |
 | App not found | `not_found` | `app_not_found` | `"app not found"` |
 | App has no assistant | `bad_request` | `app_disabled` | `"app has no assistant"` |
+| room-service unreachable | `unavailable` | `no_responders` | `"create-dm rpc: no service responding"` — subscribing with no existing DM room creates a botDM room via room-service. Retryable. |
+| room-service did not answer | `unavailable` | `upstream_timeout` | `"create-dm rpc: upstream did not respond in time"` — same path, request delivered but unanswered. Retryable. |
 | Internal failure | `internal` | — | — |
 
 ---
