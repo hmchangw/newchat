@@ -19,12 +19,17 @@ type VerifyReport struct {
 	MultiplexDrops int64        `json:"multiplexDrops"`
 	Counts         ProbeCounts  `json:"counts"`
 	Changes        ChangeCounts `json:"changes"`
-	Result         VerifyResult `json:"result"`
+	// OracleErrs is how many membership changes could not be observed because
+	// their oracle query failed. Reported even when under tolerance and so not
+	// affecting the verdict — otherwise a run's Applied count silently reads
+	// short of Total and looks like a membership bug that escaped its violation.
+	OracleErrs int          `json:"oracleErrs"`
+	Result     VerifyResult `json:"result"`
 }
 
 // renderVerifyConsole formats the operator-facing summary. Never includes
 // message content — IDs only.
-func renderVerifyConsole(rep VerifyReport) string { //nolint:gocritic // hugeParam: VerifyReport is 192 bytes, but the by-value signature is fixed by this plan's brief and its pinned test call sites (e.g. renderVerifyConsole(reportForTest())), not by any interface conformance
+func renderVerifyConsole(rep VerifyReport) string { //nolint:gocritic // hugeParam: VerifyReport is well past the 80-byte threshold, but the by-value signature is fixed by this plan's brief and its pinned test call sites (e.g. renderVerifyConsole(reportForTest())), not by any interface conformance
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "probe rooms: %d / %d members / direct pool %d (%d reserve)\n",
@@ -39,9 +44,16 @@ func renderVerifyConsole(rep VerifyReport) string { //nolint:gocritic // hugePar
 	fmt.Fprintf(&b, "delivery:    %d complete / %d partial / %d total-loss\n",
 		rep.Counts.Complete, rep.Counts.Partial, rep.Counts.TotalLoss)
 	fmt.Fprintf(&b, "leakage:     %d unexpected recipients (user lane)\n", rep.Counts.Leaked)
-	fmt.Fprintf(&b, "membership:  %d changes (%d add, %d remove) / %d applied / %d effective\n",
+	fmt.Fprintf(&b, "membership:  %d changes (%d add, %d remove) / %d applied / %d effective",
 		rep.Changes.Total, rep.Changes.Adds, rep.Changes.Removes,
 		rep.Changes.Applied, rep.Changes.Effective)
+	// Only rendered when non-zero: a tolerated oracle failure never reaches
+	// REASONS, so this clause is the only place the shortfall between Total and
+	// Applied is explained.
+	if rep.OracleErrs > 0 {
+		fmt.Fprintf(&b, " / %d unobserved", rep.OracleErrs)
+	}
+	b.WriteString("\n")
 
 	if len(rep.Result.Reasons) > 0 {
 		b.WriteString("\nREASONS\n")
@@ -78,7 +90,7 @@ func renderVerifyConsole(rep VerifyReport) string { //nolint:gocritic // hugePar
 // renderVerifyJSON emits the full report, uncapped. This is the artifact
 // diffed and grepped across runs, so it must carry every violation the
 // console cap trims — see TestRenderVerifyJSON_CarriesAllViolations.
-func renderVerifyJSON(rep VerifyReport) ([]byte, error) { //nolint:gocritic // hugeParam: VerifyReport is 192 bytes, but the by-value signature is fixed by this plan's brief and its pinned test call sites (e.g. renderVerifyJSON(reportForTest())), not by any interface conformance
+func renderVerifyJSON(rep VerifyReport) ([]byte, error) { //nolint:gocritic // hugeParam: VerifyReport is well past the 80-byte threshold, but the by-value signature is fixed by this plan's brief and its pinned test call sites (e.g. renderVerifyJSON(reportForTest())), not by any interface conformance
 	out, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal verify report: %w", err)
