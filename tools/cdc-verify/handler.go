@@ -25,20 +25,29 @@ type docInspector interface {
 }
 
 type handler struct {
-	hub       *hub
-	results   stateProvider
-	stats     statsProvider
-	recentCap int
-	pairs     []TargetPair
-	inspector docInspector
-	conn      ConnInfo
+	hub         *hub
+	results     stateProvider
+	stats       statsProvider
+	recentCap   int
+	pairs       []TargetPair
+	inspector   docInspector
+	conn        ConnInfo
+	mappingJSON []byte // the validated mapping file as loaded at startup
 }
 
 func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap int,
-	pairs []TargetPair, inspector docInspector, conn *ConnInfo,
+	pairs []TargetPair, inspector docInspector, conn *ConnInfo, mappingJSON []byte,
 ) *handler {
 	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap,
-		pairs: pairs, inspector: inspector, conn: *conn}
+		pairs: pairs, inspector: inspector, conn: *conn, mappingJSON: mappingJSON}
+}
+
+// mapping serves the startup-validated mapping file verbatim.
+func (h *handler) mapping(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write(h.mappingJSON); err != nil {
+		slog.Error("write mapping response", "error", err)
+	}
 }
 
 // inspect serves the live source/destination view for one document. Reads go

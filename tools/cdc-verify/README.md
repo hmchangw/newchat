@@ -117,11 +117,12 @@ delete, `_id`-keyed destinations stay inspectable (the source pane shows
 `not-found`).
 
 A **connections** button in the header opens a read-only side panel showing
-what the tool is wired to: site/stream/mapping file, NATS URL, source Mongo
-(URI, db, read preference), destination Mongo, and destination Cassandra
-(hosts, keyspace) with auth set/none tags. URIs are **redacted server-side**
-(`user:pass@` never leaves the process); `?panel=connections` deep-links
-with the panel open.
+what the tool is wired to: site/stream, NATS URL, source Mongo (URI, db,
+read preference), destination Mongo, and destination Cassandra (hosts,
+keyspace). No credential or auth information is exposed at all, and URIs are
+**redacted server-side** (`user:pass@` never leaves the process). A **view
+mapping** button in the panel pops up the startup-validated mapping file
+(`GET /api/mapping`); `?panel=connections` deep-links with the panel open.
 
 Also `GET /healthz`; `GET /api/state` serves the initial snapshot including
 the mapping's pair list and the redacted connection info.

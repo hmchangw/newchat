@@ -53,30 +53,30 @@ func TestBuildConnInfo_NeverCarriesSecrets(t *testing.T) {
 	assert.Equal(t, "site1", info.SiteID)
 	assert.Equal(t, "MIGRATION-OPLOG-site1", info.Stream)
 	assert.Equal(t, "nats://***@nats:4222", info.NATS.URL)
-	assert.True(t, info.NATS.CredsFileSet)
 	assert.Equal(t, "mongodb://***@src:27017", info.SourceMongo.URI)
 	assert.Equal(t, "rocketchat", info.SourceMongo.DB)
-	assert.True(t, info.SourceMongo.AuthSet)
 	assert.Equal(t, "primaryPreferred", info.SourceMongo.ReadPreference)
 	assert.Equal(t, "mongodb://tgt:27017", info.TargetMongo.URI)
 	assert.Equal(t, "chat", info.TargetMongo.DB)
-	assert.True(t, info.TargetMongo.AuthSet) // password set even without username
 	assert.True(t, info.Cassandra.InUse)
 	assert.Equal(t, "cass1:9042,cass2:9042", info.Cassandra.Hosts)
 	assert.Equal(t, "chat", info.Cassandra.Keyspace)
-	assert.True(t, info.Cassandra.AuthSet)
 
-	// No secret survives serialization — the JSON is what reaches the browser.
+	// No secret — and no credential/auth signal at all — survives
+	// serialization: the JSON is what reaches the browser.
 	b, err := json.Marshal(info)
 	require.NoError(t, err)
 	for _, secret := range []string{"sup3rs3cret", "srcpass", "tgtpass", "casspass", "tok3n", "srcuser", "cassuser"} {
 		assert.False(t, strings.Contains(string(b), secret), "connInfo JSON must not contain %q", secret)
+	}
+	for _, field := range []string{"auth", "creds", "username", "password"} {
+		assert.False(t, strings.Contains(strings.ToLower(string(b)), field),
+			"connInfo JSON must not carry auth-related field %q", field)
 	}
 }
 
 func TestBuildConnInfo_CassandraUnused(t *testing.T) {
 	info := buildConnInfo(&config{SiteID: "s"}, "MIGRATION-OPLOG-s", false)
 	assert.False(t, info.Cassandra.InUse)
-	assert.False(t, info.NATS.CredsFileSet)
-	assert.False(t, info.SourceMongo.AuthSet)
+	assert.Empty(t, info.Cassandra.Hosts)
 }

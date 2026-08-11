@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 )
@@ -126,7 +127,11 @@ func TestDemoHarness(t *testing.T) {
 		CassandraUsername:   "verify_ro",
 		MappingFile:         "/etc/cdc-verify/mapping.json",
 	}, "MIGRATION-OPLOG-site1", true)
-	h := newHandler(hub, results, demoStats{}, 200, demoPairs(), demoInspector{}, &conn)
+	rawMapping, err := os.ReadFile("mapping.example.json")
+	if err != nil {
+		t.Fatalf("read mapping.example.json: %v", err)
+	}
+	h := newHandler(hub, results, demoStats{}, 200, demoPairs(), demoInspector{}, &conn, rawMapping)
 	mux := http.NewServeMux()
 	h.registerRoutes(mux)
 	ln, err := net.Listen("tcp", ":8091")

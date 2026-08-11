@@ -877,39 +877,42 @@
     }
     body.appendChild(connGroup('Site', [
       ['site', c.siteId],
-      ['stream', c.stream],
-      ['mapping', c.mappingFile]
+      ['stream', c.stream]
     ]));
     var n = c.nats || {};
     body.appendChild(connGroup('NATS', [
-      ['url', n.url],
-      ['creds file', !!n.credsFileSet, 'set', 'none']
+      ['url', n.url]
     ]));
     var s = c.sourceMongo || {};
     body.appendChild(connGroup('Source Mongo (legacy)', [
       ['uri', s.uri],
       ['db', s.db],
-      ['auth', !!s.authSet, 'set', 'none'],
       ['read pref', s.readPreference]
     ]));
     var m = c.targetMongo || {};
     body.appendChild(connGroup('Destination Mongo', [
       ['uri', m.uri],
-      ['db', m.db],
-      ['auth', !!m.authSet, 'set', 'none']
+      ['db', m.db]
     ]));
     var cs = c.cassandra || {};
     if (cs.inUse) {
       body.appendChild(connGroup('Destination Cassandra', [
         ['hosts', cs.hosts],
-        ['keyspace', cs.keyspace],
-        ['auth', !!cs.authSet, 'set', 'none']
+        ['keyspace', cs.keyspace]
       ]));
     } else {
       body.appendChild(connGroup('Destination Cassandra', [
         ['in use', false, '', 'not referenced by mapping']
       ]));
     }
+
+    var mg = connGroup('Mapping', [['file', c.mappingFile]]);
+    var viewBtn = textEl('button', 'view mapping', 'conn-btn');
+    viewBtn.type = 'button';
+    viewBtn.style.marginTop = '6px';
+    viewBtn.addEventListener('click', openMappingModal);
+    mg.appendChild(viewBtn);
+    body.appendChild(mg);
   }
 
   function toggleConnPanel(show) {
@@ -923,6 +926,7 @@
 
   // ── inspect modal: live source + destination docs for one row ──
   var currentInspect = null; // {collection, doc}
+  var modalLoader = null;    // what the refresh button re-runs
 
   function prettyJSON(obj) {
     try { return JSON.stringify(obj, null, 2); } catch (e) { return String(obj); }
@@ -985,20 +989,53 @@
 
   function openInspect(collection, doc) {
     currentInspect = { collection: collection, doc: doc };
+    modalLoader = loadInspect;
     document.getElementById('modal-title').textContent = collection + ' / ' + doc;
     document.getElementById('modal-live').textContent = '';
     document.getElementById('modal').hidden = false;
     loadInspect();
   }
 
+  // openMappingModal shows the startup-validated mapping file in the same modal.
+  function openMappingModal() {
+    currentInspect = null;
+    modalLoader = loadMappingModal;
+    document.getElementById('modal-title').textContent = 'Mapping';
+    document.getElementById('modal-live').textContent = '';
+    document.getElementById('modal').hidden = false;
+    loadMappingModal();
+  }
+
+  function loadMappingModal() {
+    var body = document.getElementById('modal-body');
+    body.replaceChildren(textEl('div', 'Loading mapping…', 'inspect-note'));
+    fetch('/api/mapping')
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      })
+      .then(function (m) {
+        var pane = document.createElement('div');
+        pane.className = 'inspect-pane';
+        pane.appendChild(textEl('pre', prettyJSON(m)));
+        body.replaceChildren(pane);
+      })
+      .catch(function (err) {
+        body.replaceChildren(textEl('div', 'Mapping load failed: ' + err.message, 'inspect-err'));
+      });
+  }
+
   function closeInspect() {
     document.getElementById('modal').hidden = true;
     currentInspect = null;
+    modalLoader = null;
   }
 
   document.getElementById('modal-close').addEventListener('click', closeInspect);
   document.getElementById('modal-backdrop').addEventListener('click', closeInspect);
-  document.getElementById('modal-refresh').addEventListener('click', loadInspect);
+  document.getElementById('modal-refresh').addEventListener('click', function () {
+    if (modalLoader) modalLoader();
+  });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeInspect();
   });

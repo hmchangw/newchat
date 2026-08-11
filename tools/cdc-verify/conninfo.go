@@ -9,28 +9,24 @@ type ConnInfo struct {
 	Stream string `json:"stream"`
 
 	NATS struct {
-		URL          string `json:"url"`
-		CredsFileSet bool   `json:"credsFileSet"`
+		URL string `json:"url"`
 	} `json:"nats"`
 
 	SourceMongo struct {
 		URI            string `json:"uri"`
 		DB             string `json:"db"`
-		AuthSet        bool   `json:"authSet"`
 		ReadPreference string `json:"readPreference"`
 	} `json:"sourceMongo"`
 
 	TargetMongo struct {
-		URI     string `json:"uri"`
-		DB      string `json:"db"`
-		AuthSet bool   `json:"authSet"`
+		URI string `json:"uri"`
+		DB  string `json:"db"`
 	} `json:"targetMongo"`
 
 	Cassandra struct {
 		InUse    bool   `json:"inUse"`
 		Hosts    string `json:"hosts,omitempty"`
 		Keyspace string `json:"keyspace,omitempty"`
-		AuthSet  bool   `json:"authSet"`
 	} `json:"cassandra"`
 
 	MappingFile string `json:"mappingFile"`
@@ -72,22 +68,18 @@ func buildConnInfo(cfg *config, streamName string, cassandraInUse bool) ConnInfo
 	info.MappingFile = cfg.MappingFile
 
 	info.NATS.URL = redactURI(cfg.NATSURL)
-	info.NATS.CredsFileSet = cfg.CredsFile != ""
 
 	info.SourceMongo.URI = redactURI(cfg.SourceMongoURI)
 	info.SourceMongo.DB = cfg.SourceDB
-	info.SourceMongo.AuthSet = cfg.SourceMongoUsername != "" || cfg.SourceMongoPassword != ""
 	info.SourceMongo.ReadPreference = "primaryPreferred"
 
 	info.TargetMongo.URI = redactURI(cfg.TargetMongoURI)
 	info.TargetMongo.DB = cfg.TargetDB
-	info.TargetMongo.AuthSet = cfg.TargetMongoUsername != "" || cfg.TargetMongoPassword != ""
 
 	info.Cassandra.InUse = cassandraInUse
 	if cassandraInUse {
 		info.Cassandra.Hosts = cfg.CassandraHosts
 		info.Cassandra.Keyspace = cfg.CassandraKeyspace
 	}
-	info.Cassandra.AuthSet = cfg.CassandraUsername != "" || cfg.CassandraPassword != ""
 	return info
 }

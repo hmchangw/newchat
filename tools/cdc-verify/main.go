@@ -109,6 +109,11 @@ func main() {
 		slog.Error("load mapping", "error", err)
 		os.Exit(1)
 	}
+	rawMapping, err := os.ReadFile(cfg.MappingFile) // loadMapping just validated it
+	if err != nil {
+		slog.Error("re-read mapping file for the UI", "error", err)
+		os.Exit(1)
+	}
 	if mapping.NeedsCassandra() && (cfg.CassandraHosts == "" || cfg.CassandraKeyspace == "") {
 		slog.Error("mapping references cassandra targets but CASSANDRA_HOSTS/CASSANDRA_KEYSPACE are unset")
 		os.Exit(1)
@@ -214,7 +219,7 @@ func main() {
 
 	// --- HTTP ---
 	conn := buildConnInfo(&cfg, streamName, mapping.NeedsCassandra())
-	h := newHandler(sseHub, results, poller, cfg.RecentCap, mapping.TargetPairs(), v, &conn)
+	h := newHandler(sseHub, results, poller, cfg.RecentCap, mapping.TargetPairs(), v, &conn, rawMapping)
 	mux := http.NewServeMux()
 	h.registerRoutes(mux)
 	srv := &http.Server{

@@ -15,5 +15,6 @@ func (h *handler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/state", h.state)
 	mux.HandleFunc("GET /api/events", h.events)
 	mux.HandleFunc("GET /api/inspect", h.inspect)
+	mux.HandleFunc("GET /api/mapping", h.mapping)
 	mux.HandleFunc("GET /failures.json", h.failuresJSON)
 }

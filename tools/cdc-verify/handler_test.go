@@ -44,10 +44,14 @@ func testConnInfo() ConnInfo {
 	}, "MIGRATION-OPLOG-site1", false)
 }
 
+var testMappingJSON = []byte(`{"sources":[{"collection":"rocketchat_room",` +
+	`"ops":{"insert":"verify"},"targets":{"rooms":{"kind":"mongo","collection":"rooms",` +
+	`"key":{"_id":"_id"}}},"fields":{"name":["rooms.name"]}}]}`)
+
 func testServer(t *testing.T) (*httptest.Server, *hub) {
 	t.Helper()
 	h := newHub()
-	handler := newHandler(h, fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{}, ptrConnInfo())
+	handler := newHandler(h, fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{}, ptrConnInfo(), testMappingJSON)
 	mux := http.NewServeMux()
 	handler.registerRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -151,7 +155,7 @@ func (n *noFlushWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (n *noFlushWriter) WriteHeader(status int)      { n.status = status }
 
 func TestEventsHandler_StreamingUnsupported(t *testing.T) {
-	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{}, ptrConnInfo())
+	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{}, ptrConnInfo(), testMappingJSON)
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	w := &noFlushWriter{}
 	h.events(w, req)
@@ -229,4 +233,17 @@ func TestAPIInspect_UnmappedIs404(t *testing.T) {
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestAPIMapping(t *testing.T) {
+	srv, _ := testServer(t)
+	resp, err := http.Get(srv.URL + "/api/mapping")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+	var m Mapping
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&m))
+	require.Len(t, m.Sources, 1)
+	assert.Equal(t, "rocketchat_room", m.Sources[0].Collection)
 }
