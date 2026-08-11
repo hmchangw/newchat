@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 func main() {
@@ -40,8 +41,13 @@ func main() {
 		os.Exit(1)
 	}
 	// role distinguishes the two split deployments in logs and metrics (PR #482 review).
+	// The DR lane is a third role — it publishes to a different stream and never runs the
+	// federation-origin filter (its watched collections are new-stack operational ones).
 	role := "collections"
-	if cfg.watchesMessages() {
+	switch {
+	case cfg.isDR():
+		role = "dr"
+	case cfg.watchesMessages():
 		role = "messages"
 	}
 	m, err := newMetrics(role)
@@ -64,9 +70,13 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("oplog-connector started", "site", cfg.SiteID, "role", role, "collections", cfg.WatchCollections)
-	if cfg.watchesMessages() {
+	switch {
+	case cfg.isDR():
+		slog.Info("DR lane active — publishing to DR_OPLOG with updateLookup (self-contained events)",
+			"role", role, "collections", cfg.WatchCollections)
+	case cfg.watchesMessages():
 		slog.Info("federation-origin filter active", "role", role, "message_collection", cfg.MessageCollection)
-	} else {
+	default:
 		// Warn, not Info: legitimate for a collections-role pod, but conspicuous when a MESSAGE_COLLECTION
 		// typo leaves a message pod forwarding foreign-origin messages unfiltered (double-deliver).
 		slog.Warn("no message collection watched — federation-origin filter inactive",
@@ -136,7 +146,7 @@ func start(ctx context.Context, cfg *config, m *metrics, obsProv mongoutil.Obser
 		mongoutil.Disconnect(ctx, client)
 		return nil, fmt.Errorf("jetstream init: %w", err)
 	}
-	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
+	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled, cfg.isDR()); err != nil {
 		_ = nc.Drain()
 		mongoutil.Disconnect(ctx, client)
 		return nil, fmt.Errorf("bootstrap streams: %w", err)
@@ -175,7 +185,7 @@ func start(ctx context.Context, cfg *config, m *metrics, obsProv mongoutil.Obser
 		}
 		mongoColl := sourceDB.Collection(coll,
 			options.Collection().SetReadPreference(rp).SetReadConcern(readconcern.Majority()))
-		src, err := openMongoChangeSource(watchCtx, mongoColl, sp, coll == cfg.MessageCollection)
+		src, err := openMongoChangeSource(watchCtx, mongoColl, sp, coll == cfg.MessageCollection, cfg.isDR())
 		if err != nil {
 			c.Close()
 			return nil, fmt.Errorf("open change stream %q: %w", coll, err)
@@ -183,6 +193,9 @@ func start(ctx context.Context, cfg *config, m *metrics, obsProv mongoutil.Obser
 
 		w := newWatcher(cfg.SiteID, coll, src, js, store, cfg.CheckpointEvery, checkpointMaxAge)
 		w.metrics = m
+		if cfg.isDR() {
+			w.subjectFor = subject.DROplog // DR lane publishes to chat.dr.oplog.>
+		}
 		c.wg.Add(1)
 		go func(w *watcher) {
 			defer c.wg.Done()

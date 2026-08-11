@@ -7,7 +7,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // changeEvent is the connector-internal decoded form of one change-stream event; documents stay raw BSON until buildEnvelope makes them opaque JSON.
@@ -23,12 +22,17 @@ type changeEvent struct {
 	ClusterTimeMs     int64    // source op time, unix ms
 }
 
+// subjectFunc builds the publish subject for one event from its site, collection, and op. The
+// lane's builder is injected (subject.MigrationOplog or subject.DROplog) so buildEnvelope stays
+// lane-agnostic.
+type subjectFunc func(siteID, collection, op string) string
+
 // buildEnvelope maps a change event to its subject, dedup id, and opaque OplogEvent. nowMs is injected (no time.Now) so the function stays pure and testable.
 //
 // A field that won't encode never drops the event: the field is left nil and the
 // event is flagged Degraded (first failure wins) so the stream stays lossless.
-func buildEnvelope(ev *changeEvent, siteID string, nowMs int64) (subj, msgID string, evt model.OplogEvent) {
-	subj = subject.MigrationOplog(siteID, ev.Collection, ev.Op)
+func buildEnvelope(ev *changeEvent, siteID string, nowMs int64, subjectFor subjectFunc) (subj, msgID string, evt model.OplogEvent) {
+	subj = subjectFor(siteID, ev.Collection, ev.Op)
 	msgID = ev.EventID
 
 	evt = model.OplogEvent{
