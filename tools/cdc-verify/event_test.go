@@ -17,7 +17,7 @@ func TestDecodeCDCEvent(t *testing.T) {
 		{
 			name:    "insert with string id",
 			payload: `{"eventId":"e1","op":"insert","db":"rocketchat","coll":"rocketchat_message","documentKey":{"_id":"msg123"},"clusterTime":1700000000000}`,
-			want:    CDCEvent{Collection: "rocketchat_message", Op: "insert", DocID: "msg123", ClusterTime: 1700000000000},
+			want:    CDCEvent{Collection: "rocketchat_message", Op: "insert", DocID: "msg123"},
 		},
 		{
 			name:    "delete carries only documentKey",

@@ -90,18 +90,17 @@ func (p *statsPoller) pollOnce(ctx context.Context, now time.Time) {
 		stats.RatePerSec = p.pushAndRate(now, st.LastSeq)
 	}
 
-	for _, name := range p.trackConsumers {
-		lag := ConsumerLag{Name: name}
-		if p.ci == nil {
-			continue
+	if p.ci != nil {
+		for _, name := range p.trackConsumers {
+			lag := ConsumerLag{Name: name}
+			if cinfo, cerr := p.ci(ctx, name); cerr != nil {
+				lag.Error = cerr.Error()
+			} else {
+				lag.NumPending = cinfo.NumPending
+				lag.AckPending = cinfo.NumAckPending
+			}
+			stats.Consumers = append(stats.Consumers, lag)
 		}
-		if cinfo, cerr := p.ci(ctx, name); cerr != nil {
-			lag.Error = cerr.Error()
-		} else {
-			lag.NumPending = cinfo.NumPending
-			lag.AckPending = cinfo.NumAckPending
-		}
-		stats.Consumers = append(stats.Consumers, lag)
 	}
 
 	p.mu.Lock()

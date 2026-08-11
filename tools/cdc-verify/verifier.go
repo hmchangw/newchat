@@ -36,7 +36,6 @@ type compiledSource struct {
 // superseded flag distinguishes "a newer event took over this key" from
 // "the verifier is shutting down" when the check's context is cancelled.
 type checkHandle struct {
-	id         string
 	cancel     context.CancelFunc
 	superseded atomic.Bool
 }
@@ -268,7 +267,7 @@ func (v *verifier) Submit(ev CDCEvent) {
 	}
 
 	ctx, cancel := context.WithCancel(v.baseCtx)
-	h := &checkHandle{id: row.ID, cancel: cancel}
+	h := &checkHandle{cancel: cancel}
 	key := pendingKey(ev.Collection, ev.DocID)
 	prev, started := v.beginCheck(key, h)
 	if !started {
@@ -357,7 +356,7 @@ func (v *verifier) runCheck(ctx context.Context, h *checkHandle, key string, row
 
 	for {
 		row.Attempts++
-		failNow := v.attempt(ctx, cs, action, row.DocID, row.Collection, states)
+		failNow := v.attempt(ctx, cs, action, row.DocID, states)
 
 		switch {
 		case allMatched(states):
@@ -383,9 +382,9 @@ func (v *verifier) runCheck(ctx context.Context, h *checkHandle, key string, row
 // the whole check must fail immediately (an ambiguous dest key can never
 // resolve itself by polling).
 func (v *verifier) attempt(ctx context.Context, cs *compiledSource, action OpAction,
-	docID, collection string, states []targetState,
+	docID string, states []targetState,
 ) bool {
-	srcDoc, cause := v.loadSource(ctx, action, collection, docID)
+	srcDoc, cause := v.loadSource(ctx, cs, action, docID)
 	if cause != "" {
 		for i := range states {
 			if !states[i].matched {
@@ -476,11 +475,11 @@ func (v *verifier) applyLookup(st *targetState, t *Target, pairs []fieldPair, ac
 // loadSource returns the source document to compare against, or a cause to
 // stamp on every unfrozen sub-check. verify-absent has no source document —
 // only the change-stream document key is known.
-func (v *verifier) loadSource(ctx context.Context, action OpAction, collection, docID string) (map[string]any, string) {
+func (v *verifier) loadSource(ctx context.Context, cs *compiledSource, action OpAction, docID string) (map[string]any, string) {
 	if action == OpVerifyAbsent {
 		return map[string]any{"_id": docID}, ""
 	}
-	doc, err := v.source.FindByID(ctx, collection, docID)
+	doc, err := v.source.FindByID(ctx, cs.src.Collection, docID)
 	switch {
 	case errors.Is(err, errNotFound):
 		// Deleted between the event and the check; keep polling — the delete

@@ -11,10 +11,9 @@ import (
 // collection changed. Payload content beyond the key is ignored — the check
 // re-reads current state from the source (spec §6).
 type CDCEvent struct {
-	Collection  string
-	Op          string
-	DocID       string
-	ClusterTime int64
+	Collection string
+	Op         string
+	DocID      string
 }
 
 func decodeCDCEvent(data []byte) (CDCEvent, error) {
@@ -35,5 +34,5 @@ func decodeCDCEvent(data []byte) (CDCEvent, error) {
 	if !ok {
 		return CDCEvent{}, fmt.Errorf("documentKey._id is not a string: %T", key.ID)
 	}
-	return CDCEvent{Collection: ev.Collection, Op: ev.Op, DocID: id, ClusterTime: ev.ClusterTime}, nil
+	return CDCEvent{Collection: ev.Collection, Op: ev.Op, DocID: id}, nil
 }

@@ -30,7 +30,7 @@ func buildSelect(table string, key map[string]any, cols []string) (string, []any
 	}
 	var conds []string
 	var args []any
-	for _, k := range sortedKeys(key) {
+	for _, k := range sortedMapKeys(key) {
 		if !cqlIdent.MatchString(k) {
 			return "", nil, fmt.Errorf("invalid key column identifier %q", k)
 		}

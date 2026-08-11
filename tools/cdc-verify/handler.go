@@ -71,13 +71,8 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		case <-keepalive.C:
 			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
-		case ev := <-ch:
-			b, err := json.Marshal(ev)
-			if err != nil {
-				slog.Error("marshal sse event", "error", err)
-				continue
-			}
-			fmt.Fprintf(w, "data: %s\n\n", b)
+		case frame := <-ch:
+			fmt.Fprintf(w, "data: %s\n\n", frame)
 			flusher.Flush()
 		}
 	}

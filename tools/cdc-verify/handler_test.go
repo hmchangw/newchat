@@ -143,7 +143,9 @@ func TestHub_RegisterUnregisterAndDrop(t *testing.T) {
 	id, ch := h.register()
 	assert.Equal(t, 1, h.clientCount())
 	h.broadcastStats(StreamStats{Msgs: 1})
-	ev := <-ch
+	frame := <-ch
+	var ev sseEvent
+	require.NoError(t, json.Unmarshal(frame, &ev))
 	assert.Equal(t, "stats", ev.Kind)
 
 	// fill the buffer; further broadcasts must not block

@@ -324,6 +324,15 @@
     return tr;
   }
 
+  function buildRecentRow(r) {
+    var tr = buildRow(r, true);
+    tr.dataset.id = r.id;
+    tr.appendChild(textEl('td', r.attempts != null ? r.attempts : 0));
+    tr.appendChild(textEl('td', fmtDuration(r)));
+    if (!rowMatchesFilter(r)) tr.classList.add('hidden-row');
+    return tr;
+  }
+
   function renderRecent() {
     var tbody = document.querySelector('#recent tbody');
     tbody.replaceChildren();
@@ -339,12 +348,28 @@
     recentOrder.forEach(function (id) {
       var r = recentMap.get(id);
       if (!r) return;
-      var tr = buildRow(r, true);
-      tr.appendChild(textEl('td', r.attempts != null ? r.attempts : 0));
-      tr.appendChild(textEl('td', fmtDuration(r)));
-      if (!rowMatchesFilter(r)) tr.classList.add('hidden-row');
-      tbody.appendChild(tr);
+      tbody.appendChild(buildRecentRow(r));
     });
+  }
+
+  // patchRecentRow updates just the affected <tr> instead of rebuilding the
+  // whole table — a burst of SSE frames would otherwise rebuild up to
+  // recentCap rows per frame. Falls back to a full render on any structural
+  // transition it doesn't model (empty table, missing row).
+  function patchRecentRow(r, isNew, evictedId) {
+    var tbody = document.querySelector('#recent tbody');
+    if (tbody.querySelector('.empty-row')) { renderRecent(); return; }
+    if (isNew) {
+      tbody.prepend(buildRecentRow(r));
+      if (evictedId) {
+        var gone = tbody.querySelector('tr[data-id="' + evictedId + '"]');
+        if (gone) gone.remove();
+      }
+      return;
+    }
+    var tr = tbody.querySelector('tr[data-id="' + r.id + '"]');
+    if (!tr) { renderRecent(); return; }
+    tr.replaceWith(buildRecentRow(r));
   }
 
   // ── failures table ──
@@ -440,11 +465,12 @@
 
   function upsertResult(r) {
     var known = recentMap.has(r.id);
+    var evictedId = null;
     recentMap.set(r.id, r);
     if (!known) {
       recentOrder.unshift(r.id);
       if (recentOrder.length > recentCap) {
-        var evictedId = recentOrder.pop();
+        evictedId = recentOrder.pop();
         if (!failuresMap.has(evictedId)) recentMap.delete(evictedId);
       }
     }
@@ -459,7 +485,7 @@
 
     tallyIfNew(r);
     renderCounters();
-    renderRecent();
+    patchRecentRow(r, !known, evictedId);
     if (r.state === 'failed' || failuresMap.has(r.id)) renderFailures();
   }
 
