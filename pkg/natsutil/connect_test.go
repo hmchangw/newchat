@@ -70,6 +70,6 @@ func TestConnect_SetsDrainTimeout(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(conn.NatsConn().Close)
 
-	require.Equal(t, 15*time.Second, conn.NatsConn().Opts.DrainTimeout,
-		"DrainTimeout must be under the 25s shutdown budget, not the 30s library default")
+	require.Equal(t, 10*time.Second, conn.NatsConn().Opts.DrainTimeout,
+		"DrainTimeout must leave headroom in the shared 25s shutdown budget, not the 30s library default")
 }

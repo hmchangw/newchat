@@ -16,11 +16,19 @@ import (
 const (
 	defaultReconnectWait = 2 * time.Second
 	// defaultDrainTimeout bounds the subscription-drain phase. Worst case is
-	// this plus drainConnection's internal FlushTimeout(5s) = 20s, which fits
-	// inside the 25s shutdown.Wait budget and the 30s Kubernetes grace period.
-	// The library default is 30s (nats.DefaultDrainTimeout), which is larger
-	// than our budget and so could never be the timeout that fires.
-	defaultDrainTimeout = 15 * time.Second
+	// this plus drainConnection's internal FlushTimeout(5s) = 15s.
+	//
+	// shutdown.Wait creates ONE context for the whole shutdown and runs the
+	// hooks sequentially over it (pkg/shutdown/shutdown.go:21-32), so this
+	// budget is shared, not per-hook: a 15s worst-case drain leaves ~10s of
+	// the 25s for every remaining hook (DB disconnects, HTTP shutdown, o11y
+	// flush), which are sub-second in practice. A drain that actually needs
+	// longer than 10s means a wedged handler — a finding to surface, not a
+	// wait to extend.
+	//
+	// The library default is 30s (nats.DefaultDrainTimeout), larger than the
+	// entire shutdown budget, so it could never be the timeout that fires.
+	defaultDrainTimeout = 10 * time.Second
 )
 
 // Connect opens a NATS connection with sensible reconnect defaults.

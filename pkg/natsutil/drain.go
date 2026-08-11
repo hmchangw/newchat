@@ -56,6 +56,18 @@ func Drain(ctx context.Context, conn *o11ynats.Conn) error {
 	case <-ch:
 		return nil
 	case <-ctx.Done():
+		// select picks pseudo-randomly when both cases are ready at once, so a
+		// drain that finished in the same instant ctx expired can still land
+		// here. Re-check before reporting failure so a completed drain is
+		// never misreported as incomplete.
+		select {
+		case <-ch:
+			return nil
+		default:
+		}
+		if nc.IsClosed() {
+			return nil
+		}
 		return fmt.Errorf("nats drain incomplete: %w", ctx.Err())
 	}
 }
