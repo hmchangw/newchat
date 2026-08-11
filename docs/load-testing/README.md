@@ -68,7 +68,7 @@ NATS server.
 
 So a run executed in Kubernetes has **no consumer-backlog signal** unless the
 cluster is separately configured for it. That matters more than it sounds:
-`docs/specs/o11y/o11y-slo.md` §0.1 and §7 make consumer backlog the *primary*
+`docs/load-testing/system/sli-slo.md` §0.1 and §7 make consumer backlog the *primary*
 enforcement signal for every asynchronous SLO (1a/1b/2/6/9), because the event
 ratios behind those SLOs stay approximate until an exact outcome ledger exists.
 A Kubernetes run without it can report healthy latency while a worker falls

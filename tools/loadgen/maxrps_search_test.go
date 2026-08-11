@@ -65,9 +65,9 @@ func TestBuildSearchInputs(t *testing.T) {
 		c.Record(searchUsers, outcomeExcluded, 0)
 	}
 
-	in := buildSearchInputs(500, 10*time.Second, c)
+	in := buildSearchInputs(500, 10*time.Second, c, testSLO7(), testSLO8())
 
-	// Excluded attempts leave the denominator (o11y-slo.md §0.1).
+	// Excluded attempts leave the denominator (sli-slo.md §0.1).
 	assert.Equal(t, 97, in.AttemptedOps)
 	assert.Equal(t, 5, in.FailedOps)
 	// Search is synchronous request/reply — no JetStream consumer behind it.
@@ -81,12 +81,26 @@ func TestBuildSearchInputs(t *testing.T) {
 		assert.True(t, s.DiagnosticOnly)
 	}
 	assert.ElementsMatch(t, []string{"messages", "rooms", "users"}, names)
-	require.Len(t, in.EventRatios, 1)
-	assert.Equal(t, "SLO-8", in.EventRatios[0].Name)
-	assert.Equal(t, 92, in.EventRatios[0].Valid, "SLO-8 denominator is successful searches")
+	require.Len(t, in.EventRatios, 2)
+
+	// SLO-7 is availability over every eligible request; excluded outcomes
+	// have already left both sides.
+	assert.Equal(t, "SLO-7", in.EventRatios[0].Name)
+	assert.Equal(t, ratioSuccess, in.EventRatios[0].Kind)
+	assert.Equal(t, 97, in.EventRatios[0].Valid, "SLO-7 denominator is eligible requests")
 	assert.Len(t, in.EventRatios[0].SuccessfulLatencies, 92)
-	assert.Equal(t, 0.95, in.EventRatios[0].Target)
-	assert.Equal(t, latencyBoundP95, in.EventRatios[0].Bound)
+	assert.Equal(t, 0.995, in.EventRatios[0].Target)
+
+	assert.Equal(t, "SLO-8", in.EventRatios[1].Name)
+	assert.Equal(t, ratioLatency, in.EventRatios[1].Kind)
+	assert.Equal(t, 92, in.EventRatios[1].Valid, "SLO-8 denominator is successful searches")
+	assert.Len(t, in.EventRatios[1].SuccessfulLatencies, 92)
+	assert.Equal(t, 0.95, in.EventRatios[1].Target)
+	assert.Equal(t, time.Second, in.EventRatios[1].Bound)
+
+	// SLO-7 scores availability at its own objective, so the generic
+	// failed/attempted gate must not independently trip the step.
+	assert.True(t, in.ErrorRateDiagnosticOnly)
 }
 
 func TestBuildSearchInputs_UnderrunIsNotFailure(t *testing.T) {
@@ -95,7 +109,7 @@ func TestBuildSearchInputs_UnderrunIsNotFailure(t *testing.T) {
 	c.RecordUnderrun(9)
 	c.RecordSaturation()
 
-	in := buildSearchInputs(100, time.Second, c)
+	in := buildSearchInputs(100, time.Second, c, testSLO7(), testSLO8())
 
 	assert.Equal(t, 9, in.EmitUnderrun)
 	assert.Equal(t, 1, in.Saturation)

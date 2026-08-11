@@ -31,7 +31,7 @@ func TestBuildLoginInputs(t *testing.T) {
 		c.Record(outcomeExcluded, 0)
 	}
 
-	in := buildLoginInputs(200, 10*time.Second, c)
+	in := buildLoginInputs(200, 10*time.Second, c, testSLO3())
 
 	// Excluded events leave the denominator entirely: 90 good + 10 failed.
 	assert.Equal(t, 100, in.AttemptedOps)
@@ -44,7 +44,7 @@ func TestBuildLoginInputs(t *testing.T) {
 	require.Len(t, in.EventRatios, 1)
 	assert.Equal(t, eventRatioInput{
 		Name: "SLO-3", Valid: 100, SuccessfulLatencies: in.Latencies[0].Samples,
-		Target: 0.99, Bound: latencyBoundP99,
+		Target: 0.99, Kind: ratioLatency, Bound: time.Second,
 	}, in.EventRatios[0])
 	// Login is a synchronous HTTP call with no JetStream consumer behind it.
 	assert.Empty(t, in.Pending)
@@ -72,7 +72,7 @@ func TestBuildLoginInputs_SaturationIsNotFailure(t *testing.T) {
 	c.RecordSaturation()
 	c.RecordSaturation()
 
-	in := buildLoginInputs(100, time.Second, c)
+	in := buildLoginInputs(100, time.Second, c, testSLO3())
 
 	assert.Equal(t, 2, in.Saturation)
 	assert.Equal(t, 0, in.FailedOps)
@@ -86,7 +86,7 @@ func TestBuildLoginInputs_UnderrunIsNotFailure(t *testing.T) {
 	c.Record(outcomeGood, 10*time.Millisecond)
 	c.RecordUnderrun(17)
 
-	in := buildLoginInputs(100, time.Second, c)
+	in := buildLoginInputs(100, time.Second, c, testSLO3())
 
 	assert.Equal(t, 17, in.EmitUnderrun)
 	assert.Equal(t, 0, in.FailedOps)
@@ -102,7 +102,7 @@ func TestDefaultSteps_LoginRampsLowerThanMessages(t *testing.T) {
 func TestNewLoginWorkload_RequiresAuthURL(t *testing.T) {
 	p, ok := BuiltinPreset("small")
 	require.True(t, ok)
-	_, _, err := newLoginWorkload(&config{SiteID: "site-local"}, &p, 42, "", time.Second, 8)
+	_, _, err := newLoginWorkload(&config{SiteID: "site-local"}, &p, 42, "", time.Second, 8, testSLO3())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth-url")
 }

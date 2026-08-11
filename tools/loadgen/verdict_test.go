@@ -19,6 +19,12 @@ func nLatencies(n int, d time.Duration) []time.Duration {
 	return out
 }
 
+// testSLO3/7/8 mirror the spec defaults the max-rps flags carry, so a change to
+// those defaults surfaces here rather than in a hand-copied literal.
+func testSLO3() sloRatio { return sloRatio{Target: 0.99, Bound: time.Second} }
+func testSLO7() sloRatio { return sloRatio{Target: 0.995} }
+func testSLO8() sloRatio { return sloRatio{Target: 0.95, Bound: time.Second} }
+
 func defaultRPSThresholds() rpsThresholds {
 	return rpsThresholds{
 		P95:           ms(100),
@@ -178,7 +184,7 @@ func TestEvaluateRPSStep_JointRatioTripsWhenIndependentGatesWouldPass(t *testing
 		Latencies:               []seriesSamples{{Name: "login", Samples: successes, DiagnosticOnly: true}},
 		EventRatios: []eventRatioInput{{
 			Name: "SLO-3", Valid: 1000, SuccessfulLatencies: successes,
-			Target: 0.99, Bound: latencyBoundP99,
+			Target: 0.99, Kind: ratioLatency, Bound: ms(250),
 		}},
 	}
 
@@ -201,7 +207,7 @@ func TestEvaluateRPSStep_JointRatioPassesAtBoundary(t *testing.T) {
 		Latencies:               []seriesSamples{{Name: "login", Samples: successes, DiagnosticOnly: true}},
 		EventRatios: []eventRatioInput{{
 			Name: "SLO-3", Valid: 1000, SuccessfulLatencies: successes,
-			Target: 0.99, Bound: latencyBoundP99,
+			Target: 0.99, Kind: ratioLatency, Bound: ms(250),
 		}},
 	}
 
@@ -309,17 +315,17 @@ func TestEvaluateRPSStep_InvalidEventRatioIsInconclusive(t *testing.T) {
 		wantInclude string
 	}{
 		{
-			name: "unset bound selector",
+			name: "unset ratio kind",
 			ratio: eventRatioInput{
 				Name: "SLO-X", Valid: 10, SuccessfulLatencies: fast, Target: 0.99,
 			},
-			wantInclude: "invalid latency bound",
+			wantInclude: "invalid ratio kind",
 		},
 		{
 			name: "target above one",
 			ratio: eventRatioInput{
 				Name: "SLO-X", Valid: 10, SuccessfulLatencies: fast,
-				Target: 1.5, Bound: latencyBoundP99,
+				Target: 1.5, Kind: ratioLatency, Bound: 2 * time.Second,
 			},
 			wantInclude: "invalid target",
 		},
@@ -327,14 +333,14 @@ func TestEvaluateRPSStep_InvalidEventRatioIsInconclusive(t *testing.T) {
 			name: "target of zero",
 			ratio: eventRatioInput{
 				Name: "SLO-X", Valid: 10, SuccessfulLatencies: fast,
-				Target: 0, Bound: latencyBoundP99,
+				Target: 0, Kind: ratioLatency, Bound: 2 * time.Second,
 			},
 			wantInclude: "invalid target",
 		},
 		{
 			name: "no valid events",
 			ratio: eventRatioInput{
-				Name: "SLO-X", Valid: 0, Target: 0.99, Bound: latencyBoundP99,
+				Name: "SLO-X", Valid: 0, Target: 0.99, Kind: ratioLatency, Bound: 2 * time.Second,
 			},
 			wantInclude: "no valid events",
 		},
@@ -346,7 +352,7 @@ func TestEvaluateRPSStep_InvalidEventRatioIsInconclusive(t *testing.T) {
 				Name:                "SLO-X",
 				Valid:               1,
 				SuccessfulLatencies: []time.Duration{time.Millisecond, time.Millisecond},
-				Target:              0.99, Bound: latencyBoundP99,
+				Target:              0.99, Kind: ratioLatency, Bound: 2 * time.Second,
 			},
 			wantInclude: "but only",
 		},
@@ -381,7 +387,7 @@ func TestEvaluateRPSStep_InvalidRatioOutranksLatencyTrip(t *testing.T) {
 		TargetRPS: 100, Hold: time.Second,
 		AttemptedOps: 100, FailedOps: 100,
 		Latencies:   []seriesSamples{{Name: "E2", Samples: slow}},
-		EventRatios: []eventRatioInput{{Name: "SLO-X", Valid: 0, Target: 0.99, Bound: latencyBoundP99}},
+		EventRatios: []eventRatioInput{{Name: "SLO-X", Valid: 0, Target: 0.99, Kind: ratioLatency, Bound: 2 * time.Second}},
 	}
 	res := evaluateRPSStep(&in, rpsThresholds{P95: time.Millisecond, P99: time.Millisecond, ErrorRate: 0.001})
 
@@ -399,8 +405,8 @@ func TestEvaluateRPSStep_InvalidRatioDiscardsEarlierValidOnes(t *testing.T) {
 		TargetRPS: 100, Hold: time.Second,
 		AttemptedOps: 10, FailedOps: 0,
 		EventRatios: []eventRatioInput{
-			{Name: "SLO-OK", Valid: 10, SuccessfulLatencies: fast, Target: 0.99, Bound: latencyBoundP99},
-			{Name: "SLO-BAD", Valid: 0, Target: 0.99, Bound: latencyBoundP99},
+			{Name: "SLO-OK", Valid: 10, SuccessfulLatencies: fast, Target: 0.99, Kind: ratioLatency, Bound: 2 * time.Second},
+			{Name: "SLO-BAD", Valid: 0, Target: 0.99, Kind: ratioLatency, Bound: 2 * time.Second},
 		},
 	}
 	res := evaluateRPSStep(&in, rpsThresholds{P95: time.Second, P99: 2 * time.Second, ErrorRate: 0.5})
@@ -408,4 +414,88 @@ func TestEvaluateRPSStep_InvalidRatioDiscardsEarlierValidOnes(t *testing.T) {
 	assert.Equal(t, verdictInconclusive, res.Kind)
 	assert.Empty(t, res.EventRatios,
 		"a step whose SLI could not be computed must publish no ratio at all")
+}
+
+// SLO-7 has no latency component: a slow success is still a good event. The
+// ratio must therefore ignore the bound entirely rather than silently reusing
+// some other SLO's, which is what the shared p95/p99 selector used to do.
+func TestEvaluateRPSStep_SuccessRatioIgnoresLatency(t *testing.T) {
+	// 995 successes (all far slower than any latency gate) out of 1000
+	// eligible requests is exactly SLO-7's 99.5% objective.
+	successes := nLatencies(995, 30*time.Second)
+	in := rpsStepInputs{
+		TargetRPS: 1000, Hold: time.Second, AttemptedOps: 1000, FailedOps: 5,
+		ErrorRateDiagnosticOnly: true,
+		EventRatios: []eventRatioInput{{
+			Name: "SLO-7", Valid: 1000, SuccessfulLatencies: successes,
+			Target: 0.995, Kind: ratioSuccess,
+		}},
+	}
+
+	got := evaluateRPSStep(&in, rpsThresholds{P95: ms(1), P99: ms(1), ErrorRate: 0.001})
+
+	assert.Equal(t, verdictPass, got.Kind, "reasons=%v", got.Reasons)
+	require.Len(t, got.EventRatios, 1)
+	assert.Equal(t, 995, got.EventRatios[0].Good)
+	assert.InDelta(t, 0.995, got.EventRatios[0].Ratio, 0.000001)
+}
+
+// A success ratio still trips on its own target.
+func TestEvaluateRPSStep_SuccessRatioTripsBelowTarget(t *testing.T) {
+	successes := nLatencies(990, ms(5))
+	in := rpsStepInputs{
+		TargetRPS: 1000, Hold: time.Second, AttemptedOps: 1000, FailedOps: 10,
+		ErrorRateDiagnosticOnly: true,
+		EventRatios: []eventRatioInput{{
+			Name: "SLO-7", Valid: 1000, SuccessfulLatencies: successes,
+			Target: 0.995, Kind: ratioSuccess,
+		}},
+	}
+
+	got := evaluateRPSStep(&in, defaultRPSThresholds())
+
+	require.Equal(t, verdictTrip, got.Kind)
+	assert.Contains(t, got.Reasons[0], "SLO-7 good ratio")
+}
+
+// A latency ratio with no bound would count every success as good and silently
+// report a perfect score, so it is a measurement failure rather than a pass.
+func TestEvaluateRPSStep_LatencyRatioRequiresPositiveBound(t *testing.T) {
+	in := rpsStepInputs{
+		TargetRPS: 100, Hold: time.Second, AttemptedOps: 100,
+		EventRatios: []eventRatioInput{{
+			Name: "SLO-8", Valid: 10, SuccessfulLatencies: nLatencies(10, ms(5)),
+			Target: 0.95, Kind: ratioLatency,
+		}},
+	}
+
+	got := evaluateRPSStep(&in, defaultRPSThresholds())
+
+	assert.Equal(t, verdictInconclusive, got.Kind)
+	require.Len(t, got.Reasons, 1)
+	assert.Contains(t, got.Reasons[0], "non-positive latency bound")
+	assert.Empty(t, got.EventRatios)
+}
+
+// The SLO bound is the SLO's own, not whatever the report percentiles happen to
+// be set to — retuning --slo-p95/--slo-p99 must not move the objective.
+func TestEvaluateRPSStep_RatioBoundIsIndependentOfPercentileGates(t *testing.T) {
+	samples := nLatencies(100, ms(500))
+	in := rpsStepInputs{
+		TargetRPS: 100, Hold: time.Second, AttemptedOps: 100,
+		ErrorRateDiagnosticOnly: true,
+		EventRatios: []eventRatioInput{{
+			Name: "SLO-3", Valid: 100, SuccessfulLatencies: samples,
+			Target: 0.99, Kind: ratioLatency, Bound: time.Second,
+		}},
+	}
+
+	// Percentile gates far tighter than the ratio bound; the samples sit
+	// between the two. Only the diagnostic series would notice.
+	got := evaluateRPSStep(&in, rpsThresholds{P95: ms(10), P99: ms(20), ErrorRate: 0.5})
+
+	assert.Equal(t, verdictPass, got.Kind, "reasons=%v", got.Reasons)
+	require.Len(t, got.EventRatios, 1)
+	assert.Equal(t, time.Second, got.EventRatios[0].Bound)
+	assert.Equal(t, 100, got.EventRatios[0].Good)
 }

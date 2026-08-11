@@ -40,7 +40,7 @@ too slow":
 | 7 services (static) | `:9090` | hand-rolled counters, incl. `search_service_requests_total{type,status}` |
 | `cadvisor` | `:8080` | per-container CPU/memory |
 
-Consumer backlog matters most: per `docs/specs/o11y/o11y-slo.md` §0.1 and §7 it
+Consumer backlog matters most: per `docs/load-testing/system/sli-slo.md` §0.1 and §7 it
 is the *primary* enforcement signal for every async SLO, because the event
 ratios behind those SLOs are approximate until the outcome ledger lands. A run
 where latency looks fine but `num_pending` climbs monotonically is a run that
@@ -445,7 +445,9 @@ make -C tools/loadgen/deploy teardown-roomread PRESET=medium
 
 - Synchronous request/reply: gated on p95/p99 latency and error rate only
   (no consumer-pending signal). Defaults: `--slo-p95=100ms`, `--slo-p99=250ms`,
-  `--slo-error-rate=0.001`; override via the shared `max-rps` flags.
+  `--slo-error-rate=0.001`; override via the shared `max-rps` flags. The
+  per-SLO ratio flags (`--slo3-*`, `--slo7-*`, `--slo8-*`) are separate and
+  default to the spec's values.
 - Single-site only: all seeded users are local, so no cross-site inbox event is
   published on the read path.
 - Presets are the messages presets (`small`/`medium`/`large`/`realistic`); room
@@ -677,10 +679,11 @@ loadgen seed --workload=read-receipt --preset=history-medium --read-ratio=0.7
 loadgen max-rps --workload=read-receipt --preset=history-medium --steps=200,500,1k,2k
 
 # login: drive auth-service's HTTP leg (no seeding needed)
-loadgen max-rps --workload=login --preset=medium --slo-p99=1s
+# SLO-3 defaults to the spec's 1s / 99%; no flag needed to score it.
+loadgen max-rps --workload=login --preset=medium
 
 # search: drive search-service request/reply (reads the existing index)
-loadgen max-rps --workload=search --preset=medium --slo-p95=1s
+loadgen max-rps --workload=search --preset=medium
 ```
 
 Via the deploy Makefile:
@@ -704,9 +707,14 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium 
 | `--warmup` | `10s` | per-step warmup (samples discarded) |
 | `--hold` | `30s` | per-step measurement window |
 | `--cooldown` | `5s` | per-step settle gap before next step |
-| `--slo-p95` | `100ms` | ordinary p95 bound; also the SLO-8 joint-ratio bound for search |
-| `--slo-p99` | `250ms` | ordinary p99 bound; also the SLO-3 joint-ratio bound for login |
-| `--slo-error-rate` | `0.001` | `failed / attempted` (0.1%); diagnostic-only for login because SLO-3 already includes failures in its joint ratio |
+| `--slo-p95` | `100ms` | p95 latency gate (messages / thread / history / …) |
+| `--slo-p99` | `250ms` | p99 latency gate (messages / thread / history / …) |
+| `--slo-error-rate` | `0.001` | `failed / attempted` (0.1%); diagnostic-only for login and search, whose own SLO ratios already score failures |
+| `--slo3-latency` | `1s` | **login only**: SLO-3 latency bound |
+| `--slo3-target` | `0.99` | **login only**: SLO-3 good-ratio target |
+| `--slo7-target` | `0.995` | **search only**: SLO-7 availability target (no latency component) |
+| `--slo8-latency` | `1s` | **search only**: SLO-8 latency bound |
+| `--slo8-target` | `0.95` | **search only**: SLO-8 good-ratio target |
 | `--slo-pending-growth` | `1000` | **messages only**: per-durable end−start `NumPending` delta |
 | `--rate-tolerance` | `0.05` | achieved-vs-target shortfall band for the INCONCLUSIVE guard |
 | `--stop-on-trip` | `true` | stop the ramp at the first TRIP (does **not** stop on INCONCLUSIVE) |
@@ -740,7 +748,7 @@ at the same threshold as `err%` (`--slo-error-rate`), because from the
 sender's side a reply that never comes is no better than an error reply.
 
 They are counted and gated separately rather than summed, mirroring the way
-`docs/specs/o11y/o11y-slo.md` §2 scores persistence (SLO-1a) and publication
+`docs/load-testing/system/sli-slo.md` §2 scores persistence (SLO-1a) and publication
 (SLO-1b) as independent ratios: one send has two deliverables, so a fully
 dropped message would otherwise be counted twice against a denominator that
 counted it once. The CSV carries `missing_replies`, `missing_broadcasts`,
@@ -821,14 +829,14 @@ loadgen teardown --workload=history --preset=history-medium
 ### Login workload (`--workload=login`)
 
 Drives `POST /api/v1/auth` on auth-service so **SLO-3** — *successful login
-within 1 s / eligible login attempts* (`docs/specs/o11y/o11y-slo.md` §3) — can
+within 1 s / eligible login attempts* (`docs/load-testing/system/sli-slo.md` §3) — can
 be measured under load. Every other workload connects to NATS with a
 pre-provisioned creds file (`NATS_CREDS_FILE`) and never touches the HTTP auth
 leg, which is why auth was the one already-measurable SLO no workload could
 exercise.
 
 ```bash
-loadgen max-rps --workload=login --preset=medium --slo-p99=1s
+loadgen max-rps --workload=login --preset=medium
 ```
 
 No seeding step: accounts come from the chosen message preset's fixtures, and
@@ -841,7 +849,7 @@ exercises the real handler, nkey validation and JWT signing without standing up
 an OIDC provider or botplatform-service. auth-service must be running with dev
 mode enabled.
 
-**Outcome eligibility** follows the error-budget table in `o11y-slo.md` §0.1
+**Outcome eligibility** follows the error-budget table in `sli-slo.md` §0.1
 rather than the usual "2xx good, everything else bad":
 
 | Response | Counted as | Why |
@@ -852,7 +860,8 @@ rather than the usual "2xx good, everything else bad":
 
 So `attempted = good + failed`, with excluded attempts dropped from the
 denominator. The SLO-3 gate is the spec's single event predicate:
-`successful login within --slo-p99 / eligible attempts >= 99%`. The reported
+`successful login within --slo3-latency / eligible attempts >= --slo3-target`,
+defaulting to the spec's 1 s and 99%. The reported
 error rate and login p95/p99 remain diagnostic and do not independently gate
 the step. That matters in a lab: a preset whose accounts auth-service rejects
 yields a small sample and an honest INCONCLUSIVE, instead of a 100% error rate
@@ -861,11 +870,11 @@ that looks like a service failure.
 ### Search workload (`--workload=search`)
 
 Drives search-service's request/reply endpoints so **SLO-7** — *search returns
-ok / eligible search requests* (`docs/specs/o11y/o11y-slo.md` §5) — can be
+ok / eligible search requests* (`docs/load-testing/system/sli-slo.md` §5) — can be
 measured under load.
 
 ```bash
-loadgen max-rps --workload=search --preset=medium --slo-p95=1s
+loadgen max-rps --workload=search --preset=medium
 ```
 
 No seeding step: search reads whatever the index already holds, so run it
@@ -877,15 +886,18 @@ Accounts come from the chosen message preset. `--search-mix` sets the endpoint
 share (default `messages:60,rooms:30,users:10`). Per-endpoint p95/p99 values are
 diagnostic because an ES query over messages and a spotlight-index room lookup
 have different cost models. The SLO-8 gate is the aggregate event predicate
-`successful search within --slo-p95 / successful searches >= 95%`.
+`successful search within --slo8-latency / successful searches >= --slo8-target`,
+defaulting to the spec's 1 s and 95%.
 
-Outcome classification uses the shared `o11y-slo.md` §0.1 eligibility rule
+Outcome classification uses the shared `sli-slo.md` §0.1 eligibility rule
 (see the login workload above), applied to the reply's `errcode` envelope:
 `bad_request`/`unauthenticated`/`forbidden`/`not_found`/`conflict` leave the
 denominator, while `internal`/`unavailable`/`too_many_requests` and a request
 timeout burn budget. Only successful searches are timed, matching SLO-8's
-"successful search returns within 1 s / **successful** searches". SLO-7
-availability remains a separate `failed / attempted` gate; SLO-8 is evaluated
+"successful search returns within 1 s / **successful** searches". SLO-7 is
+scored as its own event ratio — `successes / eligible requests >=
+--slo7-target` (default 99.5%), with no latency component — so the generic
+`--slo-error-rate` gate is diagnostic-only for this workload. SLO-8 is evaluated
 from its joint good/valid counts rather than from a percentile threshold.
 
 **What this cannot tell you.** Two limits are worth stating before reading a
@@ -1158,7 +1170,7 @@ run:
   reads as "no service errors".
 
   Enabling it needs a uniform per-service error counter first. The intended
-  source is the natsrouter middleware in `docs/specs/o11y/o11y-slo.md` §8 P1
+  source is the natsrouter middleware in `docs/load-testing/system/sli-slo.md` §8 P1
   (`rpc_server_duration_seconds{subject_pattern, errcode_category}`); once it
   ships, point `serviceErrorCounterName` at it and fill `svcURLs` in
   `prodEnvFactory.Build`. A scrape that cannot find the family now fails with
@@ -1204,6 +1216,7 @@ make -C tools/loadgen/deploy run-max-room-size PRESET=botroom-medium RATE=200
 (default `100,500,1000,2000,5000`), `--rooms-per-size` (default 4), `--reads`
 (room-service read rate, default 0 = off), `--warmup`/`--hold`/`--cooldown`,
 `--stop-on-trip`, `--slo-p95`/`--slo-p99`/`--slo-error-rate`/`--slo-pending-growth`,
+`--slo3-latency`/`--slo3-target`/`--slo7-target`/`--slo8-latency`/`--slo8-target`,
 `--rate-tolerance`, `--seed`, `--csv`.
 
 ### Reading the output

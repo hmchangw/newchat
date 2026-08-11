@@ -16,14 +16,14 @@ import (
 
 // The login workload drives auth-service's POST /api/v1/auth so SLO-3
 // ("successful login within the bound / eligible login attempts",
-// docs/specs/o11y/o11y-slo.md §3) can be measured under load. Every other
+// docs/load-testing/system/sli-slo.md §3) can be measured under load. Every other
 // loadgen workload reaches NATS with a pre-provisioned creds file, which skips
 // the HTTP leg entirely — auth was the one already-measurable SLO that no
 // workload could exercise.
 
 // loginCollector accumulates one step's outcomes. Only successful logins have
 // a latency, while all eligible successes and failures stay in SLO-3's valid
-// denominator. The verdict counts successes within the p99 bound directly;
+// denominator. The verdict counts successes within SLO-3's own bound directly;
 // percentiles are diagnostic only.
 type loginCollector struct {
 	mu         sync.Mutex
@@ -92,9 +92,9 @@ func (c *loginCollector) count(read func() int) int {
 
 // buildLoginInputs assembles step inputs from a hold-window collector.
 // AttemptedOps is good+failed, not the raw request count: excluded attempts
-// leave the denominator per o11y-slo.md §0.1, so a run against bad fixtures
+// leave the denominator per sli-slo.md §0.1, so a run against bad fixtures
 // reports a small sample rather than a false failure rate.
-func buildLoginInputs(targetRPS int, hold time.Duration, c *loginCollector) rpsStepInputs {
+func buildLoginInputs(targetRPS int, hold time.Duration, c *loginCollector, slo3 sloRatio) rpsStepInputs {
 	good, failed := c.Good(), c.Failed()
 	samples := c.Samples()
 	return rpsStepInputs{
@@ -110,7 +110,7 @@ func buildLoginInputs(targetRPS int, hold time.Duration, c *loginCollector) rpsS
 		}},
 		EventRatios: []eventRatioInput{{
 			Name: "SLO-3", Valid: good + failed, SuccessfulLatencies: samples,
-			Target: 0.99, Bound: latencyBoundP99,
+			Target: slo3.Target, Kind: ratioLatency, Bound: slo3.Bound,
 		}},
 	}
 }
@@ -204,13 +204,14 @@ type loginWorkload struct {
 	requester *loginRequester
 	keys      *loginKeyPool
 	maxInFlt  int
+	slo3      sloRatio
 }
 
 func (w *loginWorkload) Label() string { return "login" }
 
 // newLoginWorkload builds the workload from the messages fixtures, so logins
 // use the same account set the rest of the load exercises.
-func newLoginWorkload(cfg *config, preset *Preset, seed int64, authURL string, timeout time.Duration, poolSize int) (*loginWorkload, func(), error) {
+func newLoginWorkload(cfg *config, preset *Preset, seed int64, authURL string, timeout time.Duration, poolSize int, slo3 sloRatio) (*loginWorkload, func(), error) {
 	if authURL == "" {
 		return nil, nil, fmt.Errorf("login workload requires --auth-url (or AUTH_URL)")
 	}
@@ -227,6 +228,7 @@ func newLoginWorkload(cfg *config, preset *Preset, seed int64, authURL string, t
 		requester: newLoginRequester(authURL, timeout),
 		keys:      keys,
 		maxInFlt:  max(1, cfg.MaxInFlight),
+		slo3:      slo3,
 	}
 	return w, func() { w.requester.client.CloseIdleConnections() }, nil
 }
@@ -244,7 +246,7 @@ func (w *loginWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hold
 	if err := w.drive(ctx, targetRPS, hold, c); err != nil {
 		return rpsStepInputs{}, err
 	}
-	return buildLoginInputs(targetRPS, hold, c), nil
+	return buildLoginInputs(targetRPS, hold, c, w.slo3), nil
 }
 
 // drive emits at targetRPS for d, recording every outcome into c.

@@ -17,7 +17,7 @@ import (
 )
 
 // The search workload drives search-service's request/reply endpoints so SLO-7
-// ("search returns ok / eligible search requests", docs/specs/o11y/o11y-slo.md
+// ("search returns ok / eligible search requests", docs/load-testing/system/sli-slo.md
 // §5) can be measured under load.
 //
 // SLO-7 is already computable server-side from
@@ -175,8 +175,8 @@ func (g *searchQueryGen) build(e searchEndpoint, i int) []byte {
 
 // searchCollector accumulates one step's outcomes per endpoint. Only successes
 // are timed because SLO-8's valid denominator is successful searches. The
-// verdict counts successful searches within the p95 bound directly; endpoint
-// percentiles remain diagnostic.
+// verdict counts successful searches within SLO-8's own bound directly;
+// endpoint percentiles remain diagnostic.
 type searchCollector struct {
 	mu         sync.Mutex
 	samples    map[searchEndpoint][]time.Duration
@@ -257,18 +257,25 @@ func (c *searchCollector) totals() (good, failed int) {
 }
 
 // buildSearchInputs assembles step inputs. Endpoint percentiles stay diagnostic
-// because the cost models differ; SLO-8 is the aggregate event ratio defined by
-// the spec: successful searches within the p95 bound / successful searches.
-func buildSearchInputs(targetRPS int, hold time.Duration, c *searchCollector) rpsStepInputs {
+// because the cost models differ; the spec's two aggregate ratios carry the
+// verdict — SLO-7 (successes / eligible requests) and SLO-8 (successful
+// searches within SLO-8's bound / successful searches).
+//
+// The failed/attempted gate is diagnostic for the same reason it is on the
+// login path: SLO-7 already scores availability, at its own 99.5% objective.
+// Leaving the generic gate live would let a step inside its SLO trip on the
+// tighter --slo-error-rate default.
+func buildSearchInputs(targetRPS int, hold time.Duration, c *searchCollector, slo7, slo8 sloRatio) rpsStepInputs {
 	good, failed := c.totals()
 	allSuccessful := make([]time.Duration, 0, good)
 	in := rpsStepInputs{
-		TargetRPS:    targetRPS,
-		Hold:         hold,
-		AttemptedOps: good + failed,
-		FailedOps:    failed,
-		Saturation:   c.Saturation(),
-		EmitUnderrun: c.Underrun(),
+		TargetRPS:               targetRPS,
+		Hold:                    hold,
+		AttemptedOps:            good + failed,
+		FailedOps:               failed,
+		Saturation:              c.Saturation(),
+		EmitUnderrun:            c.Underrun(),
+		ErrorRateDiagnosticOnly: true,
 	}
 	for _, e := range searchEndpoints {
 		samples := c.Samples(e)
@@ -277,10 +284,19 @@ func buildSearchInputs(targetRPS int, hold time.Duration, c *searchCollector) rp
 			Name: e.String(), Samples: samples, DiagnosticOnly: true,
 		})
 	}
-	in.EventRatios = []eventRatioInput{{
-		Name: "SLO-8", Valid: good, SuccessfulLatencies: allSuccessful,
-		Target: 0.95, Bound: latencyBoundP95,
-	}}
+	in.EventRatios = []eventRatioInput{
+		{
+			// SLO-7 is availability, not latency: every success is good,
+			// against every eligible request. Excluded outcomes have already
+			// left both sides in the collector.
+			Name: "SLO-7", Valid: good + failed, SuccessfulLatencies: allSuccessful,
+			Target: slo7.Target, Kind: ratioSuccess,
+		},
+		{
+			Name: "SLO-8", Valid: good, SuccessfulLatencies: allSuccessful,
+			Target: slo8.Target, Kind: ratioLatency, Bound: slo8.Bound,
+		},
+	}
 	return in
 }
 
@@ -293,6 +309,7 @@ type searchWorkload struct {
 	siteID         string
 	requestTimeout time.Duration
 	maxInFlt       int
+	slo7, slo8     sloRatio
 }
 
 func (w *searchWorkload) Label() string { return "search" }
@@ -300,7 +317,7 @@ func (w *searchWorkload) Label() string { return "search" }
 // newSearchWorkload dials NATS and builds the workload from the message
 // preset's fixtures, so searches run as the same accounts the rest of the load
 // exercises. No seeding step: search reads whatever the index already holds.
-func newSearchWorkload(cfg *config, preset *Preset, seed int64, mix SearchMix, timeout time.Duration) (*searchWorkload, func(), error) {
+func newSearchWorkload(cfg *config, preset *Preset, seed int64, mix SearchMix, timeout time.Duration, slo7, slo8 sloRatio) (*searchWorkload, func(), error) {
 	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
@@ -314,6 +331,7 @@ func newSearchWorkload(cfg *config, preset *Preset, seed int64, mix SearchMix, t
 		nc: nc.NatsConn(), fixtures: f, mix: mix,
 		queries: newSearchQueryGen(seed), siteID: cfg.SiteID,
 		requestTimeout: timeout, maxInFlt: max(1, cfg.MaxInFlight),
+		slo7: slo7, slo8: slo8,
 	}
 	return w, func() { _ = nc.Drain() }, nil
 }
@@ -330,7 +348,7 @@ func (w *searchWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	if err := w.drive(ctx, targetRPS, hold, c); err != nil {
 		return rpsStepInputs{}, err
 	}
-	return buildSearchInputs(targetRPS, hold, c), nil
+	return buildSearchInputs(targetRPS, hold, c, w.slo7, w.slo8), nil
 }
 
 // drive emits at targetRPS for d, recording every outcome into c.

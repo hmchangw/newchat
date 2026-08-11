@@ -21,22 +21,47 @@ type seriesSamples struct {
 	DiagnosticOnly bool
 }
 
-type latencyBound int
+// ratioKind selects how an event-based SLI counts a good event.
+type ratioKind int
 
 const (
-	latencyBoundP95 latencyBound = iota + 1
-	latencyBoundP99
+	// ratioLatency counts successful events whose latency is within Bound
+	// (SLO-3, SLO-8). Bound must be positive.
+	ratioLatency ratioKind = iota + 1
+	// ratioSuccess counts every successful event and ignores Bound (SLO-7,
+	// which is an availability ratio with no latency component).
+	ratioSuccess
 )
 
-// eventRatioInput describes an event-based latency SLI. SuccessfulLatencies
-// contains only successful events; Valid is the SLI denominator, which may
-// also include failed eligible events (SLO-3) or only successes (SLO-8).
+// sloRatio is one SLI's configured target and latency bound, parsed from that
+// SLO's own flags. Each SLO carries its own pair: reusing the report's
+// percentile knobs made one flag mean two unrelated things, so retuning a
+// percentile gate silently redefined the objective.
+type sloRatio struct {
+	Target float64
+	Bound  time.Duration
+}
+
+// eventRatioInput describes an event-based SLI. SuccessfulLatencies contains
+// only successful events; Valid is the SLI denominator, which may also include
+// failed eligible events (SLO-3, SLO-7) or only successes (SLO-8).
 type eventRatioInput struct {
 	Name                string
 	Valid               int
 	SuccessfulLatencies []time.Duration
 	Target              float64
-	Bound               latencyBound
+	Kind                ratioKind
+	// Bound applies to ratioLatency only. It is the SLO's own bound, not a
+	// report percentile.
+	Bound time.Duration
+}
+
+// good counts the numerator for this SLI. Callers must validate Kind first.
+func (r eventRatioInput) good() int {
+	if r.Kind == ratioSuccess {
+		return len(r.SuccessfulLatencies)
+	}
+	return countWithin(r.SuccessfulLatencies, r.Bound)
 }
 
 // consumerPendingDelta is one durable's NumPending at the hold boundaries.
@@ -60,7 +85,7 @@ type rpsStepInputs struct {
 	// by the drain deadline. BroadcastEligible is the accepted-publish
 	// denominator for MissingBroadcasts; missing replies continue to use
 	// AttemptedOps. Kept apart from FailedOps (and from each other)
-	// because one send has two independent deliverables — o11y-slo.md §2 scores
+	// because one send has two independent deliverables — sli-slo.md §2 scores
 	// persistence and publication as separate ratios for the same reason, and
 	// summing them into one counter would count a fully dropped message twice.
 	MissingReplies    int
@@ -192,10 +217,11 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 	// derived from a step whose SLI the evaluator has already rejected.
 	var ratios []eventRatioResult
 	for _, ratio := range in.EventRatios {
-		bound, ok := ratio.bound(th)
 		switch {
-		case !ok:
-			measurementIssue = fmt.Sprintf("%s has an invalid latency bound selector", ratio.Name)
+		case ratio.Kind != ratioLatency && ratio.Kind != ratioSuccess:
+			measurementIssue = fmt.Sprintf("%s has an invalid ratio kind", ratio.Name)
+		case ratio.Kind == ratioLatency && ratio.Bound <= 0:
+			measurementIssue = fmt.Sprintf("%s has non-positive latency bound %s", ratio.Name, ratio.Bound)
 		case ratio.Target <= 0 || ratio.Target > 1:
 			measurementIssue = fmt.Sprintf("%s has invalid target %.6f", ratio.Name, ratio.Target)
 		case ratio.Valid <= 0:
@@ -204,10 +230,10 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 			measurementIssue = fmt.Sprintf("%s has %d successful samples but only %d valid events",
 				ratio.Name, len(ratio.SuccessfulLatencies), ratio.Valid)
 		default:
-			good := countWithin(ratio.SuccessfulLatencies, bound)
+			good := ratio.good()
 			ratios = append(ratios, eventRatioResult{
 				Name: ratio.Name, Good: good, Valid: ratio.Valid,
-				Ratio: float64(good) / float64(ratio.Valid), Target: ratio.Target, Bound: bound,
+				Ratio: float64(good) / float64(ratio.Valid), Target: ratio.Target, Bound: ratio.Bound,
 			})
 		}
 		if measurementIssue != "" {
@@ -295,17 +321,6 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 	// (4) PASS.
 	res.Kind = verdictPass
 	return res
-}
-
-func (r eventRatioInput) bound(th rpsThresholds) (time.Duration, bool) {
-	switch r.Bound {
-	case latencyBoundP95:
-		return th.P95, true
-	case latencyBoundP99:
-		return th.P99, true
-	default:
-		return 0, false
-	}
 }
 
 func countWithin(samples []time.Duration, bound time.Duration) int {

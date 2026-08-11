@@ -116,7 +116,7 @@ func TestBuildMessagesInputs_CarriesMissingCounts(t *testing.T) {
 	assert.Equal(t, 45, in.MissingBroadcasts)
 	assert.Equal(t, 900, in.BroadcastEligible)
 	// Missing deliveries are tracked as their own signals, matching the way
-	// o11y-slo.md §2 keeps SLO-1b (publication) separate from SLO-1a: folding
+	// sli-slo.md §2 keeps SLO-1b (publication) separate from SLO-1a: folding
 	// both into FailedOps would count one dropped message twice.
 	assert.Equal(t, 0, in.FailedOps)
 }
