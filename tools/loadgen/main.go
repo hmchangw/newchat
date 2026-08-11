@@ -749,6 +749,13 @@ func writeMembersCSV(path string, c *MemberCollector) error {
 	return WriteCSV(f, rows)
 }
 
+func membersCapacityDeliveryExitCode(missingReplies, missingEvents int) int {
+	if missingReplies > 0 || missingEvents > 0 {
+		return 1
+	}
+	return 0
+}
+
 func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("members-capacity", flag.ExitOnError)
 	preset := fs.String("preset", "", "members preset name")
@@ -940,7 +947,7 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 			slog.Error("csv export", "error", err)
 		}
 	}
-	return 0
+	return membersCapacityDeliveryExitCode(missingReplies, missingEvents)
 }
 
 // computeSizeBuckets is intentionally simple in v1 — it returns one row per

@@ -143,6 +143,8 @@ func TestSoakSender_ThreadReplyUsesEligibleParentFromSameRoom(t *testing.T) {
 
 	assert.Equal(t, soakSendThreadReply, pending.Kind)
 	assert.Equal(t, parentID, pending.ThreadParentID)
+	_, readable := catalog.PickEligible("room-1", "bob", soakCatalogThreadRead)
+	assert.False(t, readable, "a pre-publish reservation must not create a readable thread")
 	_, payloads := publisher.snapshot()
 	var request model.SendMessageRequest
 	require.NoError(t, json.Unmarshal(payloads[0], &request))
@@ -156,6 +158,11 @@ func TestSoakSender_ThreadReplyUsesEligibleParentFromSameRoom(t *testing.T) {
 	require.NoError(t, err)
 	result := sender.HandleReply(subject.UserResponse("bob", soakTestRequestID), reply)
 	assert.Equal(t, soakSendReplyAccepted, result.Status)
+	_, readable = catalog.PickEligible("room-1", "bob", soakCatalogThreadRead)
+	assert.False(t, readable, "the accepted reply still needs persistence grace")
+	clock.Advance(10 * time.Second)
+	_, readable = catalog.PickEligible("room-1", "bob", soakCatalogThreadRead)
+	assert.True(t, readable)
 
 	child, ok := catalog.Get("room-1", soakTestMessageID)
 	require.True(t, ok)
@@ -397,7 +404,7 @@ func TestSoakSender_ThreadParentRequiresRoomGraceAndAvailableCap(t *testing.T) {
 			require.True(t, catalog.Accept(tt.parentRoom, parentID))
 			clock.Advance(tt.graceAdvance)
 			if tt.preconsume {
-				require.True(t, catalog.IncrementThreadReplies(tt.parentRoom, parentID))
+				require.True(t, catalog.ReserveThreadReply(tt.parentRoom, parentID))
 			}
 
 			sender := newTestSoakSender(

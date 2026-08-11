@@ -56,13 +56,19 @@ type soakCatalogMessage struct {
 
 type soakCatalogEntry struct {
 	soakCatalogCandidate
-	acceptedAt    time.Time
-	edited        bool
-	deleted       bool
-	pinned        bool
-	reactions     map[string]map[string]struct{}
-	threadReplies int
-	globalElement *list.Element
+	acceptedAt time.Time
+	edited     bool
+	deleted    bool
+	pinned     bool
+	reactions  map[string]map[string]struct{}
+	// threadReservations cap concurrent reply publishes before their
+	// gatekeeper responses arrive. threadReplies counts only accepted replies;
+	// keeping them separate prevents a reservation from making a non-existent
+	// thread eligible for reads.
+	threadReservations int
+	threadReplies      int
+	threadReadableAt   time.Time
+	globalElement      *list.Element
 }
 
 type soakCatalogRoom struct {
@@ -507,23 +513,43 @@ func (c *soakCatalog) SetReaction(
 	})
 }
 
-func (c *soakCatalog) IncrementThreadReplies(roomID, messageID string) bool {
+func (c *soakCatalog) ReserveThreadReply(roomID, messageID string) bool {
 	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
 		if entry.deleted || entry.ThreadParentID != "" ||
-			entry.threadReplies >= entry.ThreadReplyLimit {
+			entry.threadReplies+entry.threadReservations >= entry.ThreadReplyLimit {
 			return false
 		}
-		entry.threadReplies++
+		entry.threadReservations++
 		return true
 	})
 }
 
-func (c *soakCatalog) DecrementThreadReplies(roomID, messageID string) bool {
+func (c *soakCatalog) ReleaseThreadReplyReservation(roomID, messageID string) bool {
 	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
-		if entry.threadReplies <= 0 {
+		if entry.threadReservations <= 0 {
 			return false
 		}
-		entry.threadReplies--
+		entry.threadReservations--
+		return true
+	})
+}
+
+// ConfirmThreadReply converts one pending reservation into an accepted reply.
+// The first reply becomes readable only after persistGrace, giving the async
+// message-worker time to create the thread room and persist its first row.
+func (c *soakCatalog) ConfirmThreadReply(roomID, messageID string) bool {
+	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+		if entry.threadReservations <= 0 {
+			return false
+		}
+		entry.threadReservations--
+		if entry.deleted || entry.ThreadParentID != "" {
+			return false
+		}
+		if entry.threadReplies == 0 {
+			entry.threadReadableAt = c.clock.Now().Add(c.persistGrace)
+		}
+		entry.threadReplies++
 		return true
 	})
 }
@@ -566,7 +592,8 @@ func (c *soakCatalog) eligible(
 	case soakCatalogEdit, soakCatalogDelete:
 		return entry.Author == actor
 	case soakCatalogThreadParent:
-		return entry.ThreadParentID == "" && entry.threadReplies < entry.ThreadReplyLimit
+		return entry.ThreadParentID == "" &&
+			entry.threadReplies+entry.threadReservations < entry.ThreadReplyLimit
 	case soakCatalogThreadRead:
 		// A thread room is created by message-worker when the first reply
 		// lands, so a zero-reply message has none. Reading it makes
@@ -574,7 +601,8 @@ func (c *soakCatalog) eligible(
 		// touching the Cassandra thread partition — a fast no-op that would sit
 		// in the GetThreadMessages latency tape and pull the percentiles down.
 		// The reply budget is irrelevant here: a full thread is still readable.
-		return entry.ThreadParentID == "" && entry.threadReplies > 0
+		return entry.ThreadParentID == "" && entry.threadReplies > 0 &&
+			!now.Before(entry.threadReadableAt)
 	case soakCatalogPin, soakCatalogReaction:
 		return true
 	default:

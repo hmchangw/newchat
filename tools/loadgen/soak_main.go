@@ -340,13 +340,6 @@ func runSoakWorkload(
 	opts soakOptions,
 ) int {
 	seed := opts.Seed
-	// Fail before any load is generated: an oversize page would come back as
-	// rejections, and the run would record them as read failures rather than as
-	// a misconfiguration the operator can fix.
-	if err := validateSoakPageBudget(opts.PageLimit, cfg.Soak.PayloadMaxBytes); err != nil {
-		slog.Error("soak page budget rejected", "error", err)
-		return 2
-	}
 	client, err := mongoutil.Connect(
 		ctx,
 		cfg.MongoURI,
@@ -381,6 +374,17 @@ func runSoakWorkload(
 			slog.Error("drain Cassandra soak NATS connection", "error", err)
 		}
 	}()
+	// Fail before any load is generated: derive max_payload from the connected
+	// server's INFO so non-default brokers are neither overrun nor needlessly
+	// constrained by a local constant.
+	if err := validateSoakPageBudget(
+		opts.PageLimit,
+		cfg.Soak.PayloadMaxBytes,
+		nc.NatsConn().MaxPayload(),
+	); err != nil {
+		slog.Error("soak page budget rejected", "error", err)
+		return 2
+	}
 
 	metrics := NewMetrics()
 	metricsServer := startSoakMetricsServer(cfg.MetricsAddr, metrics)

@@ -279,16 +279,19 @@ func TestCollector_Reset_ClearsBroadcastEligible(t *testing.T) {
 // during the grace do not. Filtering by publish time keeps the slow tail
 // (dropping it would make percentiles optimistic) without importing samples
 // from outside the measured window.
-func TestCollector_LatencySamplesUpTo(t *testing.T) {
+func TestCollector_LatencySamplesInWindow(t *testing.T) {
 	c := NewCollector(NewMetrics(), "test")
+	holdStart := time.Unix(999, 0)
 	holdEnd := time.Unix(1000, 0)
 
+	c.RecordPublishBroadcastOnly("before-hold", holdStart.Add(-time.Millisecond))
+	c.RecordBroadcast("before-hold", holdStart.Add(time.Millisecond))
 	c.RecordPublishBroadcastOnly("in-hold", holdEnd.Add(-time.Second))
 	c.RecordBroadcast("in-hold", holdEnd.Add(300*time.Millisecond)) // arrived during grace
 	c.RecordPublishBroadcastOnly("during-grace", holdEnd.Add(500*time.Millisecond))
 	c.RecordBroadcast("during-grace", holdEnd.Add(600*time.Millisecond))
 
-	samples := c.LatencySamplesUpTo(holdEnd)
+	samples := c.LatencySamplesInWindow(holdStart, holdEnd)
 	assert.Len(t, samples, 1, "only publishes from inside the hold are timed")
 	assert.InDelta(t, 1300.0, samples[0], 1.0, "the late-arriving slow sample is kept")
 }

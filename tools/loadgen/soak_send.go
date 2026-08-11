@@ -151,7 +151,7 @@ func (s *soakSender) Publish(
 			target.Account,
 			soakCatalogThreadParent,
 		)
-		if !ok || !s.catalog.IncrementThreadReplies(target.RoomID, parent.ID) {
+		if !ok || !s.catalog.ReserveThreadReply(target.RoomID, parent.ID) {
 			kind = soakSendTopLevel
 		} else {
 			threadParentID = parent.ID
@@ -251,6 +251,12 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 		result.ErrorClass = soakErrorAssertion
 		return result
 	}
+	if pending.ThreadParentID != "" {
+		// Publishing reserved parent capacity before sending. Only the accepted
+		// response converts that reservation into a confirmed reply; reads then
+		// wait the catalog's persistence grace before using the thread.
+		s.catalog.ConfirmThreadReply(pending.Target.RoomID, pending.ThreadParentID)
+	}
 	result.Status = soakSendReplyAccepted
 	return result
 }
@@ -286,7 +292,7 @@ func (s *soakSender) releaseThreadReservation(
 	parentID string,
 ) {
 	if parentID != "" {
-		s.catalog.DecrementThreadReplies(roomID, parentID)
+		s.catalog.ReleaseThreadReplyReservation(roomID, parentID)
 	}
 }
 

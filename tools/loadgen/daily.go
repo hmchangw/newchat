@@ -406,7 +406,7 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 	in := stepInputs{
 		N: n, StartedAt: startedAt, HoldDuration: env.hold,
 		EffectiveN:           int(env.activatedCount.Load()),
-		LatencySamples:       env.collector.LatencySamplesUpTo(holdEndedAt),
+		LatencySamples:       env.collector.LatencySamplesInWindow(holdStartedAt, holdEndedAt),
 		ActionSamplesMs:      actionSamples,
 		AttemptedOps:         attemptedOps,
 		FailedOps:            failedOps,

@@ -330,21 +330,23 @@ func (c *Collector) BroadcastStatsInWindow(start, end time.Time) (eligible, miss
 	return eligible, missing
 }
 
-// LatencySamplesUpTo returns broadcast latencies in milliseconds for publishes
-// made at or before cutoff.
+// LatencySamplesInWindow returns broadcast latencies in milliseconds for
+// publishes made within [start, end].
 //
 // Reading samples only after a delivery grace would import publishes made
 // during the grace; reading them before it would drop the broadcasts that
 // arrived late — and those are the slowest, so excluding them makes the
 // percentiles optimistic in exactly the direction that hides a struggling
 // pipeline. Filtering by publish time keeps the slow tail without widening the
-// window.
-func (c *Collector) LatencySamplesUpTo(cutoff time.Time) []float64 {
+// window. The lower bound also excludes warm-up publishes that race with
+// Reset() and finish during the measured hold.
+func (c *Collector) LatencySamplesInWindow(start, end time.Time) []float64 {
 	var out []float64
 	for _, ms := range &c.msgShards {
 		ms.mu.Lock()
 		for i := range ms.e2 {
-			if !ms.e2[i].publishedAt.After(cutoff) {
+			publishedAt := ms.e2[i].publishedAt
+			if !publishedAt.Before(start) && !publishedAt.After(end) {
 				out = append(out, float64(ms.e2[i].latency.Microseconds())/1000.0)
 			}
 		}

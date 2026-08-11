@@ -710,7 +710,7 @@ func TestSoakCatalog_RejectsInvalidAndRepeatedTransitions(t *testing.T) {
 	assert.False(t, catalog.MarkDeleted("missing", "message-1"))
 	assert.False(t, catalog.SetPinned("missing", "message-1", true))
 	assert.False(t, catalog.SetReaction("missing", "message-1", "wave", "bob", true))
-	assert.False(t, catalog.IncrementThreadReplies("missing", "message-1"))
+	assert.False(t, catalog.ReserveThreadReply("missing", "message-1"))
 	assert.False(t, catalog.SetReaction("room-1", "message-1", "", "bob", true))
 	assert.False(t, catalog.SetReaction("room-1", "message-1", "wave", "", true))
 	assert.False(t, catalog.SetReaction("room-1", "message-1", "wave", "bob", false))
@@ -718,7 +718,7 @@ func TestSoakCatalog_RejectsInvalidAndRepeatedTransitions(t *testing.T) {
 	assert.False(t, catalog.MarkDeleted("room-1", "message-1"))
 	assert.False(t, catalog.MarkEdited("room-1", "message-1", "edited"))
 	assert.False(t, catalog.SetPinned("room-1", "message-1", true))
-	assert.False(t, catalog.IncrementThreadReplies("room-1", "message-1"))
+	assert.False(t, catalog.ReserveThreadReply("room-1", "message-1"))
 }
 
 func TestSoakTopology_RejectsInvalidLimitsAndIdentitySources(t *testing.T) {

@@ -59,11 +59,6 @@ type soakConfig struct {
 	TeardownBatchTimeout        time.Duration `env:"TEARDOWN_BATCH_TIMEOUT"            envDefault:"30s"`
 }
 
-// soakBrokerMaxPayloadBytes is the broker's max_payload this workload assumes.
-// It mirrors notification-worker's NATS_MAX_PAYLOAD_BYTES default, which that
-// service documents as having to match the broker.
-const soakBrokerMaxPayloadBytes = 262144
-
 // soakPayloadBudgetRatio is the share of max_payload a page of message bodies
 // may occupy. The rest is headroom for JSON structure, per-message metadata and
 // the response envelope, none of which is counted by the message-body estimate.
@@ -75,21 +70,19 @@ const soakPayloadBudgetRatio = 0.75
 // Neither value is safe alone: --page-limit and SOAK_PAYLOAD_MAX_BYTES multiply,
 // so raising the payload size silently reintroduces oversize replies that the
 // run would score as read failures rather than as a misconfiguration.
-func validateSoakPageBudget(pageLimit, payloadMaxBytes int) error {
-	if pageLimit <= 0 || payloadMaxBytes <= 0 {
+func validateSoakPageBudget(pageLimit, payloadMaxBytes int, brokerMaxPayload int64) error {
+	if pageLimit <= 0 || payloadMaxBytes <= 0 || brokerMaxPayload <= 0 {
 		return nil // caller validates these separately
 	}
-	budget := int(float64(soakBrokerMaxPayloadBytes) * soakPayloadBudgetRatio)
-	// Divide rather than multiply: pageLimit*payloadMaxBytes overflows for large
-	// inputs and wraps negative, which would read as comfortably under budget
-	// and pass the very pair this function exists to reject. The product is
-	// widened to int64 for the message only, never for the comparison.
-	if pageLimit > budget/payloadMaxBytes {
+	budget := int64(float64(brokerMaxPayload) * soakPayloadBudgetRatio)
+	// Divide rather than multiply: pageLimit*payloadMaxBytes can overflow for
+	// large inputs and read as comfortably under budget. The error path also
+	// avoids recomputing that unsafe product.
+	if int64(pageLimit) > budget/int64(payloadMaxBytes) {
 		return fmt.Errorf(
-			"page-limit %d x SOAK_PAYLOAD_MAX_BYTES %d = %d bytes exceeds the %d-byte page budget "+
+			"page-limit %d with SOAK_PAYLOAD_MAX_BYTES %d exceeds the %d-byte page budget "+
 				"(%d-byte broker max_payload); lower --page-limit or SOAK_PAYLOAD_MAX_BYTES",
-			pageLimit, payloadMaxBytes, int64(pageLimit)*int64(payloadMaxBytes),
-			budget, soakBrokerMaxPayloadBytes)
+			pageLimit, payloadMaxBytes, budget, brokerMaxPayload)
 	}
 	return nil
 }

@@ -407,7 +407,8 @@ func acceptedSoakReadThread(
 ) *soakCatalog {
 	t.Helper()
 	catalog := acceptedSoakReadMessage(t, clock, roomID, messageID, "")
-	require.True(t, catalog.IncrementThreadReplies(roomID, messageID))
+	require.True(t, catalog.ReserveThreadReply(roomID, messageID))
+	require.True(t, catalog.ConfirmThreadReply(roomID, messageID))
 	return catalog
 }
 
