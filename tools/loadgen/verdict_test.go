@@ -387,3 +387,25 @@ func TestEvaluateRPSStep_InvalidRatioOutranksLatencyTrip(t *testing.T) {
 
 	assert.Equal(t, verdictInconclusive, res.Kind)
 }
+
+// evaluateRPSStep appends each ratio result as it goes, so an invalid ratio
+// after a valid one used to leave the valid one published alongside an
+// INCONCLUSIVE verdict. The report would then show a computed number for a step
+// whose SLI the evaluator had already rejected. Not reachable today (no
+// workload declares two ratios) but it goes live the moment SLO-7 becomes one.
+func TestEvaluateRPSStep_InvalidRatioDiscardsEarlierValidOnes(t *testing.T) {
+	fast := []time.Duration{10 * time.Millisecond}
+	in := rpsStepInputs{
+		TargetRPS: 100, Hold: time.Second,
+		AttemptedOps: 10, FailedOps: 0,
+		EventRatios: []eventRatioInput{
+			{Name: "SLO-OK", Valid: 10, SuccessfulLatencies: fast, Target: 0.99, Bound: latencyBoundP99},
+			{Name: "SLO-BAD", Valid: 0, Target: 0.99, Bound: latencyBoundP99},
+		},
+	}
+	res := evaluateRPSStep(&in, rpsThresholds{P95: time.Second, P99: 2 * time.Second, ErrorRate: 0.5})
+
+	assert.Equal(t, verdictInconclusive, res.Kind)
+	assert.Empty(t, res.EventRatios,
+		"a step whose SLI could not be computed must publish no ratio at all")
+}

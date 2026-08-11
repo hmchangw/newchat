@@ -186,6 +186,11 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 		})
 	}
 	measurementIssue := ""
+	// Ratios are staged here and only published once every one of them has been
+	// validated. Appending directly to res would leave an earlier valid ratio's
+	// computed number in the report next to an INCONCLUSIVE verdict — a figure
+	// derived from a step whose SLI the evaluator has already rejected.
+	var ratios []eventRatioResult
 	for _, ratio := range in.EventRatios {
 		bound, ok := ratio.bound(th)
 		switch {
@@ -200,7 +205,7 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 				ratio.Name, len(ratio.SuccessfulLatencies), ratio.Valid)
 		default:
 			good := countWithin(ratio.SuccessfulLatencies, bound)
-			res.EventRatios = append(res.EventRatios, eventRatioResult{
+			ratios = append(ratios, eventRatioResult{
 				Name: ratio.Name, Good: good, Valid: ratio.Valid,
 				Ratio: float64(good) / float64(ratio.Valid), Target: ratio.Target, Bound: bound,
 			})
@@ -208,6 +213,9 @@ func evaluateRPSStep(in *rpsStepInputs, th rpsThresholds) rpsStepResult {
 		if measurementIssue != "" {
 			break
 		}
+	}
+	if measurementIssue == "" {
+		res.EventRatios = ratios
 	}
 	// Worst pending delta (always, for the report column).
 	for _, p := range in.Pending {

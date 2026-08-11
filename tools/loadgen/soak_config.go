@@ -80,11 +80,16 @@ func validateSoakPageBudget(pageLimit, payloadMaxBytes int) error {
 		return nil // caller validates these separately
 	}
 	budget := int(float64(soakBrokerMaxPayloadBytes) * soakPayloadBudgetRatio)
-	if worst := pageLimit * payloadMaxBytes; worst > budget {
+	// Divide rather than multiply: pageLimit*payloadMaxBytes overflows for large
+	// inputs and wraps negative, which would read as comfortably under budget
+	// and pass the very pair this function exists to reject. The product is
+	// widened to int64 for the message only, never for the comparison.
+	if pageLimit > budget/payloadMaxBytes {
 		return fmt.Errorf(
 			"page-limit %d x SOAK_PAYLOAD_MAX_BYTES %d = %d bytes exceeds the %d-byte page budget "+
 				"(%d-byte broker max_payload); lower --page-limit or SOAK_PAYLOAD_MAX_BYTES",
-			pageLimit, payloadMaxBytes, worst, budget, soakBrokerMaxPayloadBytes)
+			pageLimit, payloadMaxBytes, int64(pageLimit)*int64(payloadMaxBytes),
+			budget, soakBrokerMaxPayloadBytes)
 	}
 	return nil
 }

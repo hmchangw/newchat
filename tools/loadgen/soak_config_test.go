@@ -312,6 +312,21 @@ func TestValidateSoakPageBudget(t *testing.T) {
 			pageLimit: 2,
 			maxBytes:  64 * 1024,
 		},
+		{
+			// pageLimit*payloadMaxBytes wraps negative at these values, so a
+			// product comparison silently passes the very pair the validator
+			// exists to reject.
+			name:      "an overflowing product must not read as within budget",
+			pageLimit: int(^uint(0) >> 1),
+			maxBytes:  2,
+			wantErr:   true,
+		},
+		{
+			name:      "overflow with the operands reversed",
+			pageLimit: 2,
+			maxBytes:  int(^uint(0) >> 1),
+			wantErr:   true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
