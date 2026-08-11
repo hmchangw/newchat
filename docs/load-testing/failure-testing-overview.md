@@ -192,6 +192,7 @@ All subsystem plans depend on the same loadgen foundations:
    - NATS / JetStream stream and consumer state, advisories, and reconnect behavior.
    - MongoDB topology, election, pool, command, replication-lag, and write/read outcomes.
    - Cassandra host state, consistency failures, timeouts, hints/repair state, and partition-level read-back.
+   - Shared metric names, gaps, labels, and dashboard rows are defined in the [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md).
 
 4. **Business reconciliation**
    - Mongo operational state.
@@ -228,8 +229,9 @@ Each combined campaign must preserve single-fault attribution through exact time
 | Subsystem | Detailed plan | Status |
 |---|---|---|
 | NATS / JetStream | [NATS / JetStream Failure Testing and Loadgen Coverage Plan](nats-jetstream-failure-test-plan.md) | Initial inventory and campaign plan available |
-| MongoDB | `docs/load-testing/mongodb-failure-test-plan.md` | Planned; requires dedicated service/store and loadgen coverage audit |
-| Cassandra | `docs/load-testing/cassandra-failure-test-plan.md` | Planned; requires dedicated message/history and recovery audit |
+| MongoDB | [MongoDB Failure Testing and Loadgen Coverage Plan](mongodb-failure-test-plan.md) | Code-evidenced service/store inventory and campaign plan available |
+| Cassandra | [Cassandra Failure Testing and Loadgen Coverage Plan](cassandra-failure-test-plan.md) | Code-evidenced message/history/migration inventory and campaign plan available |
+| Storage observability | [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md) | Existing/missing metric inventory and shared production/failure-test dashboard contract available |
 
 The subsystem documents own detailed fault injection, service-by-service behavior, observability queries, recovery objectives, and test cases. This overview owns shared terminology, lifecycle, loadgen requirements, cross-dependency boundaries, and combined campaigns.
 
