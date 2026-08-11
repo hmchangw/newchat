@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func passingInputs() VerifyInputs {
@@ -121,11 +122,127 @@ func TestEvaluateVerify_ReadbackError_IsInconclusive(t *testing.T) {
 	assert.Contains(t, r.Reasons[0], "readback")
 }
 
-func TestEvaluateVerify_OracleError_IsInconclusive(t *testing.T) {
+// TestEvaluateVerify_OracleErrsBelowTolerance_IsPass pins the tolerance rule: a
+// change whose oracle query failed is already excluded from Applied/Effective,
+// so a handful of failures costs detection sensitivity on those changes, not
+// trust in the whole run. The old all-or-nothing rule threw away every clean
+// delivery, leakage, exactly-once and persistence result over one blip.
+func TestEvaluateVerify_OracleErrsBelowTolerance_IsPass(t *testing.T) {
 	in := passingInputs()
-	in.OracleErr = errors.New("subscription.list timeout")
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 21, Effective: 21}
+	in.OracleErrs = 1
+	in.OracleErrSample = errors.New("subscription.list timeout")
 
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictPass, r.Verdict)
+	assert.Empty(t, r.Reasons, "a tolerated oracle failure must not add a reason either")
+}
+
+func TestEvaluateVerify_OracleErrsAboveTolerance_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10, Applied: 17, Effective: 17}
+	in.OracleErrs = 5
+	in.OracleErrSample = errors.New("subscription.list timeout")
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	require.Len(t, r.Reasons, 1)
+	assert.Contains(t, r.Reasons[0], "5 of 22",
+		"the reason must distinguish one blip from a service that was down all run")
+	assert.Contains(t, r.Reasons[0], "tolerance 2")
+	assert.Contains(t, r.Reasons[0], "subscription.list timeout")
+}
+
+// TestEvaluateVerify_OracleErrsAtTolerance_IsPass pins the boundary from both
+// sides: exactly maxToleratedOracleErrs passes, one more does not.
+func TestEvaluateVerify_OracleErrsAtTolerance_IsPass(t *testing.T) {
+	in := passingInputs()
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10}
+	in.OracleErrSample = errors.New("subscription.list timeout")
+
+	in.OracleErrs = 2
+	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict,
+		"22/10 = 2 tolerated failures, so 2 is still inside the budget")
+
+	in.OracleErrs = 3
+	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict,
+		"one past the budget must trip")
+}
+
+// TestEvaluateVerify_OneOracleErrIsAlwaysForgiven pins the max(1, …) floor: with
+// few changes the 10% share rounds to zero, and a single blip would otherwise
+// discard the run.
+func TestEvaluateVerify_OneOracleErrIsAlwaysForgiven(t *testing.T) {
+	in := passingInputs()
+	in.Changes = ChangeCounts{Total: 3, Adds: 2, Removes: 1}
+	in.OracleErrs = 1
+	in.OracleErrSample = errors.New("subscription.list timeout")
+
+	assert.Equal(t, VerdictPass, evaluateVerify(in).Verdict)
+
+	in.OracleErrs = 2
 	assert.Equal(t, VerdictInconclusive, evaluateVerify(in).Verdict)
+}
+
+func TestEvaluateVerify_NoChurnNoOracleErrs_IsPass(t *testing.T) {
+	in := passingInputs()
+	in.Changes = ChangeCounts{}
+	in.OracleErrs = 0
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictPass, r.Verdict, "a run without churn must be unaffected by the tolerance rule")
+	assert.Empty(t, r.Reasons)
+}
+
+// TestEvaluateVerify_HarnessErr_IsInconclusive pins the split between a real
+// oracle query failure (transient, tolerable) and a fatal churn abort (a
+// loadgen-side failure that is never tolerable, and must not be reported under
+// an "oracle" prefix that points the operator at the wrong service).
+func TestEvaluateVerify_HarnessErr_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10}
+	in.HarnessErr = errors.New("membership churn aborted, added user is unobservable: subscribe u-1 to r-1")
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict)
+	require.Len(t, r.Reasons, 1)
+	assert.Contains(t, r.Reasons[0], "harness")
+	assert.NotContains(t, r.Reasons[0], "oracle",
+		"a churn abort is a harness failure, not an oracle query failure")
+	assert.Contains(t, r.Reasons[0], "unobservable")
+}
+
+func TestEvaluateVerify_HarnessErrWithToleratedOracleErrs_IsInconclusive(t *testing.T) {
+	in := passingInputs()
+	in.Changes = ChangeCounts{Total: 22, Adds: 12, Removes: 10}
+	in.OracleErrs = 1
+	in.OracleErrSample = errors.New("subscription.list timeout")
+	in.HarnessErr = errors.New("subscribe u-1 to r-1: no such user")
+
+	r := evaluateVerify(in)
+	assert.Equal(t, VerdictInconclusive, r.Verdict,
+		"a harness error has no tolerance budget regardless of the oracle count")
+	require.Len(t, r.Reasons, 1)
+}
+
+func TestMaxToleratedOracleErrs(t *testing.T) {
+	tests := []struct {
+		name    string
+		changes int
+		want    int
+	}{
+		{name: "no changes still forgives one", changes: 0, want: 1},
+		{name: "below ten forgives one", changes: 9, want: 1},
+		{name: "ten forgives one", changes: 10, want: 1},
+		{name: "twenty-two forgives two", changes: 22, want: 2},
+		{name: "hundred forgives ten", changes: 100, want: 10},
+		{name: "negative is clamped", changes: -5, want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, maxToleratedOracleErrs(tt.changes))
+		})
+	}
 }
 
 func TestEvaluateVerify_RecipientDropped_IsInconclusive(t *testing.T) {

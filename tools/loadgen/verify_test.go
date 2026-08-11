@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -523,7 +525,86 @@ func TestVerifyRun_Harvest(t *testing.T) {
 	assert.Equal(t, "r-4", keep[1].roomID,
 		"surviving changes must keep their relative order through the in-place filter")
 	assert.Len(t, *observed, 2, "exactly the two settled changes are observed")
-	assert.NoError(t, r.takeOracleErr())
+	n, sample := r.takeOracleErrs()
+	assert.Zero(t, n)
+	assert.NoError(t, sample)
+}
+
+// TestVerifyRun_Observe_FailedOracleQueryIsCounted pins that a failed oracle
+// query is counted rather than recorded as an observation: a change nobody could
+// check must not land in Applied, and it must not silently vanish either.
+func TestVerifyRun_Observe_FailedOracleQueryIsCounted(t *testing.T) {
+	r := &verifyRun{
+		vc: &verifyConfig{Settle: time.Second},
+		mm: NewMembershipModel(ProbeRoomSet{byRoom: map[string][]string{}}),
+		env: &stepEnv{
+			request: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, error) {
+				return nil, errors.New("subscription.list timeout")
+			},
+		},
+	}
+	pc := pendingChange{roomID: "r-1", userID: "u-1", account: "user-1", due: at(10)}
+
+	r.observe(t.Context(), &pc)
+
+	n, sample := r.takeOracleErrs()
+	assert.Equal(t, 1, n)
+	require.Error(t, sample)
+	assert.Contains(t, sample.Error(), "subscription.list timeout")
+	assert.NoError(t, r.takeHarnessErr(), "a query failure is not a harness failure")
+}
+
+func TestVerifyRun_RecordOracleErr_CountsAndKeepsFirst(t *testing.T) {
+	r := &verifyRun{}
+
+	r.recordOracleErr("r-1", "u-1", errors.New("first"))
+	r.recordOracleErr("r-2", "u-2", errors.New("second"))
+	r.recordOracleErr("r-3", "u-3", errors.New("third"))
+
+	n, sample := r.takeOracleErrs()
+	assert.Equal(t, 3, n, "every failure counts, so one blip is distinguishable from a dead service")
+	require.Error(t, sample)
+	assert.Equal(t, "first", sample.Error())
+}
+
+func TestVerifyRun_RecordOracleErr_NoneRecorded(t *testing.T) {
+	r := &verifyRun{}
+
+	n, sample := r.takeOracleErrs()
+	assert.Zero(t, n)
+	assert.NoError(t, sample)
+}
+
+func TestVerifyRun_RecordHarnessErr_FirstWins(t *testing.T) {
+	r := &verifyRun{}
+
+	r.recordHarnessErr(errors.New("subscribe failed"))
+	r.recordHarnessErr(errors.New("later"))
+
+	require.Error(t, r.takeHarnessErr())
+	assert.Equal(t, "subscribe failed", r.takeHarnessErr().Error())
+	n, _ := r.takeOracleErrs()
+	assert.Zero(t, n, "a harness abort must not inflate the oracle failure count")
+}
+
+func TestVerifyRun_RecordErrs_Concurrent(t *testing.T) {
+	r := &verifyRun{}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.recordOracleErr("r-1", "u-1", errors.New("boom"))
+			r.recordHarnessErr(errors.New("abort"))
+		}()
+	}
+	wg.Wait()
+
+	n, sample := r.takeOracleErrs()
+	assert.Equal(t, 50, n)
+	assert.Error(t, sample)
+	assert.Error(t, r.takeHarnessErr())
 }
 
 func TestVerifyRun_Harvest_NothingDue(t *testing.T) {
