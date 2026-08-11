@@ -80,23 +80,36 @@ Open http://localhost:8091 (or the port set by `PORT`).
 
 ## The UI
 
-Three panels, updated live over Server-Sent Events (`GET /api/events`):
+Two tabs, updated live over Server-Sent Events (`GET /api/events`):
 
-1. **Stream stats header** — stream totals, msgs/s (sliding window), bytes,
-   per-`collection.op` count chips, and per-tracked-consumer lag badges for
-   the durables named in `TRACK_CONSUMERS`. Also shows watcher liveness — a
-   stalled feed is visible, never silent.
-2. **Recent verifications** — a capped tailing table (newest first): time,
-   collection, op, key, state badge, duration-to-match, attempts, and one
-   chip per sub-check target (e.g. `msgById ✓ msgByRoom …`) so partial
-   convergence across a fan-out mapping is visible. Rows update in place
-   until they reach a terminal state (frozen).
-3. **Failures** — a separate accumulated table: everything from the recent
-   row plus an expandable per-target field-level diff, counters for total
-   failed/evicted, and a **Download JSON** button (`GET /failures.json`).
+**NATS tab** — what is flowing through the stream:
 
-Also `GET /healthz` and a summary counters strip (checked / matched / failed
-/ skipped / superseded since start), served by `GET /api/state`.
+- Stream summary cards: total messages, msgs/s (sliding window), bytes, and
+  the first–last sequence range, plus watcher liveness (a stalled feed is
+  visible, never silent).
+- **Subjects** table: one row per observed subject with its collection, op,
+  and message count, sorted by volume.
+- **Consumers** table: per-tracked-consumer pending/ack-pending and a
+  caught-up / behind / lagging status, for the durables named in
+  `TRACK_CONSUMERS`.
+- **Event feed**: a capped live ticker of decoded CDC events (time,
+  collection, op, doc id, disposition — including skipped/unmapped events).
+
+**Verification tab** — what the checks concluded:
+
+- A counters strip (checked / matched / failed / skipped / superseded).
+- **Mongo → Mongo** and **Mongo → Cassandra** sections, each with a
+  **separate capped tailing table per collection pair** from the mapping
+  (e.g. `rocketchat_subscription → subscriptions`, `rocketchat_message →
+  messages_by_id`). Each row shows that pair's own sub-check status
+  (matched / cause / diff count) alongside the overall check state,
+  attempts, and duration-to-match. Rows update in place until they reach a
+  terminal state (frozen).
+- **Failures** — an accumulated table with an expandable per-target
+  field-level diff and a **Download JSON** button (`GET /failures.json`).
+
+Also `GET /healthz`; `GET /api/state` serves the initial snapshot including
+the mapping's pair list.
 
 ## Verification Semantics
 

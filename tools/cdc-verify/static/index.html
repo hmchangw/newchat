@@ -31,47 +31,35 @@
   header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    padding: 12px 18px;
+    padding: 10px 18px;
     position: sticky;
     top: 0;
     z-index: 10;
-  }
-
-  .stat-row {
     display: flex;
     align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
+    gap: 20px;
   }
-  .stream-name { font-size: 15px; font-weight: 700; color: var(--text); }
-  .stat-item { color: var(--muted); font-size: 12px; }
-  .stat-item b { color: var(--text); }
-
-  .watcher { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+  .app-title { font-size: 15px; font-weight: 700; }
+  .tabs { display: flex; gap: 4px; }
+  .tab-btn {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 5px 14px;
+    cursor: pointer;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--text); background: var(--surface2); border-color: var(--border); }
+  .watcher { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); margin-left: auto; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
   .dot.on { background: var(--success); box-shadow: 0 0 6px var(--success); }
 
-  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .chip {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 11px;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    color: var(--text);
-  }
-  .chip.ok   { color: var(--success); border-color: var(--success); }
-  .chip.wait { color: var(--warning); border-color: var(--warning); }
-  .counter-chip { color: var(--muted); }
-
-  .lag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--border); }
-  .lag.green { color: var(--success); border-color: var(--success); }
-  .lag.amber { color: var(--warning); border-color: var(--warning); }
-  .lag.red   { color: var(--danger);  border-color: var(--danger); background: rgba(248,81,73,0.1); }
-
   .error-banner {
-    margin-top: 8px;
+    margin: 10px 18px 0;
     padding: 6px 10px;
     background: rgba(248,81,73,0.12);
     border: 1px solid var(--danger);
@@ -81,7 +69,8 @@
   }
   .error-banner[hidden] { display: none; }
 
-  section { padding: 18px; }
+  main[hidden] { display: none; }
+  section { padding: 14px 18px; }
   section h2 {
     font-size: 13px;
     font-weight: 600;
@@ -106,27 +95,38 @@
   }
   section h2 a:hover { border-color: var(--success); }
 
-  #filter {
+  .cards { display: flex; flex-wrap: wrap; gap: 12px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    min-width: 130px;
+  }
+  .card .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+
+  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
     background: var(--surface2);
     border: 1px solid var(--border);
-    border-radius: 6px;
     color: var(--text);
-    font-family: inherit;
-    font-size: 12px;
-    padding: 4px 8px;
-    outline: none;
-    width: 220px;
   }
-  #filter:focus { border-color: var(--success); }
+  .chip.ok   { color: var(--success); border-color: var(--success); }
+  .chip.wait { color: var(--warning); border-color: var(--warning); }
+  .counter-chip { color: var(--muted); }
 
   table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
   th, td { text-align: left; padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { background: var(--surface2); color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
   tbody tr:last-child td { border-bottom: none; }
   tbody tr:hover { background: var(--surface2); }
-  tbody tr.hidden-row { display: none; }
-
-  .targets-cell { display: flex; flex-wrap: wrap; gap: 4px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
 
   .badge {
     display: inline-block;
@@ -143,6 +143,23 @@
   .badge.superseded { color: var(--grey);    background: rgba(110,118,129,0.12); text-decoration: line-through; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 
+  .lag-ok  { color: var(--success); }
+  .lag-warn { color: var(--warning); }
+  .lag-bad { color: var(--danger); }
+
+  .pair-block { margin-bottom: 18px; }
+  .pair-block h3 {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .pair-block h3 .arrow { color: var(--muted); padding: 0 6px; }
+  .pair-block h3 .pair-count { color: var(--muted); font-weight: 400; margin-left: 8px; }
+
+  .cause { color: var(--warning); font-size: 11px; }
+  .cause.bad { color: var(--danger); }
+
   details.diff-details summary { cursor: pointer; color: var(--muted); font-size: 11px; }
   details.diff-details summary:hover { color: var(--text); }
   .diff-table { margin-top: 6px; width: 100%; border: 1px solid var(--border); background: var(--bg); }
@@ -154,49 +171,94 @@
 </head>
 <body>
 
-<header id="stats">
-  <div class="stat-row">
-    <span id="stream-name" class="stream-name">—</span>
-    <span class="stat-item">msgs: <b id="stat-msgs">0</b></span>
-    <span class="stat-item">rate: <b id="stat-rate">0.0</b>/s</span>
-    <span class="watcher"><span id="watcher-dot" class="dot"></span>watcher</span>
-  </div>
-  <div id="counters-row" class="chip-row"></div>
-  <div id="subject-chips" class="chip-row"></div>
-  <div id="lag-badges" class="chip-row"></div>
-  <div id="error-banner" class="error-banner" hidden></div>
+<header>
+  <span class="app-title">CDC Verify</span>
+  <nav class="tabs">
+    <button id="tab-btn-nats" class="tab-btn active" type="button">NATS</button>
+    <button id="tab-btn-verify" class="tab-btn" type="button">Verification</button>
+  </nav>
+  <span class="watcher"><span id="watcher-dot" class="dot"></span>watcher</span>
 </header>
 
-<section>
-  <h2>Recent verifications <input id="filter" placeholder="filter collection/doc"></h2>
-  <table id="recent">
-    <thead><tr>
-      <th>Time</th><th>Collection</th><th>Op</th><th>Doc</th><th>State</th><th>Targets</th><th>Attempts</th><th>Duration</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-</section>
+<div id="error-banner" class="error-banner" hidden></div>
 
-<section>
-  <h2>Failures <a href="/failures.json" download>Download JSON</a></h2>
-  <table id="failures">
-    <thead><tr>
-      <th>Time</th><th>Collection</th><th>Op</th><th>Doc</th><th>Targets</th><th>Diff</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-</section>
+<main id="tab-nats">
+  <section>
+    <h2>Stream</h2>
+    <div class="cards">
+      <div class="card"><div class="label">Stream</div><div class="value" id="stat-stream">—</div></div>
+      <div class="card"><div class="label">Messages</div><div class="value" id="stat-msgs">0</div></div>
+      <div class="card"><div class="label">Rate</div><div class="value"><span id="stat-rate">0.0</span>/s</div></div>
+      <div class="card"><div class="label">Bytes</div><div class="value" id="stat-bytes">0</div></div>
+      <div class="card"><div class="label">Seq range</div><div class="value" id="stat-seq">—</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Subjects</h2>
+    <table id="subjects">
+      <thead><tr><th>Subject</th><th>Collection</th><th>Op</th><th class="num">Messages</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Consumers</h2>
+    <table id="consumers">
+      <thead><tr><th>Consumer</th><th class="num">Pending</th><th class="num">Ack pending</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Event feed</h2>
+    <table id="feed">
+      <thead><tr><th>Time</th><th>Collection</th><th>Op</th><th>Doc</th><th>Disposition</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<main id="tab-verify" hidden>
+  <section>
+    <h2>Totals</h2>
+    <div id="counters-row" class="chip-row"></div>
+  </section>
+
+  <section>
+    <h2>Mongo &rarr; Mongo</h2>
+    <div id="pairs-mongo"></div>
+  </section>
+
+  <section>
+    <h2>Mongo &rarr; Cassandra</h2>
+    <div id="pairs-cassandra"></div>
+  </section>
+
+  <section>
+    <h2>Failures <a href="/failures.json" download>Download JSON</a></h2>
+    <table id="failures">
+      <thead><tr>
+        <th>Time</th><th>Collection</th><th>Op</th><th>Doc</th><th>Targets</th><th>Diff</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
 
 <script>
 (function () {
   'use strict';
 
   var TERMINAL = { matched: true, failed: true, skipped: true, superseded: true };
+  var FEED_CAP = 100;
+  var PAIR_CAP = 50;
 
-  var recentMap = new Map();   // id -> CheckResult
-  var recentOrder = [];        // ids, newest first
-  var DEFAULT_RECENT_CAP = 200; // fallback if the server omits recentCap
-  var recentCap = DEFAULT_RECENT_CAP;
+  // pairKey(source, alias) -> {pair, rows: Map<id, r>, order: [ids newest first]}
+  var pairState = new Map();
+
+  var feedMap = new Map();   // id -> CheckResult
+  var feedOrder = [];
 
   var failuresMap = new Map();
   var failuresOrder = [];
@@ -204,7 +266,7 @@
   var localCounters = { checked: 0, matched: 0, failed: 0, skipped: 0, superseded: 0, evicted: 0 };
   var countedIds = new Set();
 
-  var filterText = '';
+  function pairKey(source, alias) { return source + ' ' + alias; }
 
   // ── DOM helpers (textContent only — never innerHTML with server data) ──
   function textEl(tag, text, className) {
@@ -224,24 +286,32 @@
     return '…';
   }
 
+  function fmtBytes(n) {
+    if (!n) return '0';
+    var units = ['B', 'KB', 'MB', 'GB'];
+    var i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+  }
+
   function stateBadge(state) {
     return textEl('span', state, 'badge ' + state);
   }
 
-  function targetChip(t) {
-    var span = document.createElement('span');
-    span.className = 'chip ' + (t.matched ? 'ok' : 'wait');
-    span.textContent = t.alias + (t.matched ? ' ✓' : ' …');
-    if (!t.matched && t.lastCause) span.title = t.lastCause;
-    return span;
+  // ── tabs ──
+  function showTab(name) {
+    document.getElementById('tab-nats').hidden = name !== 'nats';
+    document.getElementById('tab-verify').hidden = name !== 'verify';
+    document.getElementById('tab-btn-nats').classList.toggle('active', name === 'nats');
+    document.getElementById('tab-btn-verify').classList.toggle('active', name === 'verify');
+    if (window.location.hash !== '#' + name) window.location.hash = name;
   }
-
-  function targetsCell(r) {
-    var td = document.createElement('td');
-    td.className = 'targets-cell';
-    (r.targets || []).forEach(function (t) { td.appendChild(targetChip(t)); });
-    return td;
-  }
+  document.getElementById('tab-btn-nats').addEventListener('click', function () { showTab('nats'); });
+  document.getElementById('tab-btn-verify').addEventListener('click', function () { showTab('verify'); });
+  window.addEventListener('hashchange', function () {
+    showTab(window.location.hash === '#verify' ? 'verify' : 'nats');
+  });
+  if (window.location.hash === '#verify') showTab('verify');
 
   // ── counters (server pushes StreamStats/CheckResult only, never Counters,
   // so we tally terminal transitions client-side to keep the strip live) ──
@@ -264,31 +334,55 @@
     });
   }
 
-  // ── header / stats ──
-  function renderHeader(stats) {
-    document.getElementById('stream-name').textContent = stats.stream || '—';
+  // ── NATS tab ──
+  function renderStats(stats) {
+    document.getElementById('stat-stream').textContent = stats.stream || '—';
     document.getElementById('stat-msgs').textContent = stats.msgs != null ? stats.msgs : 0;
     document.getElementById('stat-rate').textContent = (stats.ratePerSec != null ? stats.ratePerSec : 0).toFixed(1);
+    document.getElementById('stat-bytes').textContent = fmtBytes(stats.bytes);
+    document.getElementById('stat-seq').textContent =
+      (stats.firstSeq != null && stats.lastSeq != null) ? stats.firstSeq + ' – ' + stats.lastSeq : '—';
 
     var dot = document.getElementById('watcher-dot');
     dot.className = 'dot' + (stats.watcherLive ? ' on' : '');
 
-    var subjEl = document.getElementById('subject-chips');
-    subjEl.replaceChildren();
+    var subjBody = document.querySelector('#subjects tbody');
+    subjBody.replaceChildren();
     var perSubject = stats.perSubject || {};
-    Object.keys(perSubject).sort().forEach(function (subj) {
-      subjEl.appendChild(textEl('span', subj + ' ' + perSubject[subj], 'chip'));
+    var subjects = Object.keys(perSubject).sort(function (a, b) { return perSubject[b] - perSubject[a]; });
+    if (subjects.length === 0) {
+      emptyRow(subjBody, 4, 'No subjects yet.');
+    }
+    subjects.forEach(function (subj) {
+      // chat.migration.oplog.{site}.{collection}.{op}
+      var parts = subj.split('.');
+      var op = parts[parts.length - 1] || '';
+      var coll = parts[parts.length - 2] || '';
+      var tr = document.createElement('tr');
+      tr.appendChild(textEl('td', subj));
+      tr.appendChild(textEl('td', coll));
+      tr.appendChild(textEl('td', op));
+      tr.appendChild(textEl('td', perSubject[subj], 'num'));
+      subjBody.appendChild(tr);
     });
 
-    var lagEl = document.getElementById('lag-badges');
-    lagEl.replaceChildren();
-    (stats.consumers || []).forEach(function (c) {
-      var cls = 'red';
-      if (c.numPending === 0) cls = 'green';
-      else if (c.numPending < 1000) cls = 'amber';
-      var badge = textEl('span', c.name + ': ' + c.numPending, 'lag ' + cls);
-      if (c.error) badge.title = c.error;
-      lagEl.appendChild(badge);
+    var consBody = document.querySelector('#consumers tbody');
+    consBody.replaceChildren();
+    var consumers = stats.consumers || [];
+    if (consumers.length === 0) {
+      emptyRow(consBody, 4, 'No tracked consumers (set TRACK_CONSUMERS).');
+    }
+    consumers.forEach(function (c) {
+      var tr = document.createElement('tr');
+      tr.appendChild(textEl('td', c.name));
+      tr.appendChild(textEl('td', c.numPending, 'num'));
+      tr.appendChild(textEl('td', c.ackPending, 'num'));
+      var status = 'caught up', cls = 'lag-ok';
+      if (c.error) { status = c.error; cls = 'lag-bad'; }
+      else if (c.numPending >= 1000) { status = 'lagging'; cls = 'lag-bad'; }
+      else if (c.numPending > 0) { status = 'behind'; cls = 'lag-warn'; }
+      tr.appendChild(textEl('td', status, cls));
+      consBody.appendChild(tr);
     });
 
     var errBanner = document.getElementById('error-banner');
@@ -301,78 +395,185 @@
     }
   }
 
-  // ── recent table ──
-  function rowMatchesFilter(r) {
-    if (!filterText) return true;
-    var hay = ((r.collection || '') + ' ' + (r.docId || '')).toLowerCase();
-    return hay.indexOf(filterText) !== -1;
+  function feedDisposition(r) {
+    if (r.state === 'skipped') return textEl('span', 'skipped: ' + (r.skipReason || ''), 'badge skipped');
+    return stateBadge(r.state);
   }
 
-  function buildRow(r, includeState) {
+  function buildFeedRow(r) {
     var tr = document.createElement('tr');
     tr.dataset.id = r.id;
     tr.appendChild(textEl('td', fmtTime(r.startedAtMs)));
     tr.appendChild(textEl('td', r.collection || ''));
     tr.appendChild(textEl('td', r.op || ''));
     tr.appendChild(textEl('td', r.docId || ''));
-    if (includeState) {
-      var stateTd = document.createElement('td');
-      stateTd.appendChild(stateBadge(r.state));
-      tr.appendChild(stateTd);
-    }
-    tr.appendChild(targetsCell(r));
+    var td = document.createElement('td');
+    td.appendChild(feedDisposition(r));
+    tr.appendChild(td);
     return tr;
   }
 
-  function buildRecentRow(r) {
-    var tr = buildRow(r, true);
-    tr.dataset.id = r.id;
-    tr.appendChild(textEl('td', r.attempts != null ? r.attempts : 0));
-    tr.appendChild(textEl('td', fmtDuration(r)));
-    if (!rowMatchesFilter(r)) tr.classList.add('hidden-row');
-    return tr;
-  }
-
-  function renderRecent() {
-    var tbody = document.querySelector('#recent tbody');
+  function renderFeed() {
+    var tbody = document.querySelector('#feed tbody');
     tbody.replaceChildren();
-    if (recentOrder.length === 0) {
-      var empty = document.createElement('tr');
-      empty.className = 'empty-row';
-      var td = textEl('td', 'No verifications yet.');
-      td.colSpan = 8;
-      empty.appendChild(td);
-      tbody.appendChild(empty);
+    if (feedOrder.length === 0) {
+      emptyRow(tbody, 5, 'No events observed yet.');
       return;
     }
-    recentOrder.forEach(function (id) {
-      var r = recentMap.get(id);
-      if (!r) return;
-      tbody.appendChild(buildRecentRow(r));
+    feedOrder.forEach(function (id) {
+      var r = feedMap.get(id);
+      if (r) tbody.appendChild(buildFeedRow(r));
     });
   }
 
-  // patchRecentRow updates just the affected <tr> instead of rebuilding the
-  // whole table — a burst of SSE frames would otherwise rebuild up to
-  // recentCap rows per frame. Falls back to a full render on any structural
-  // transition it doesn't model (empty table, missing row).
-  function patchRecentRow(r, isNew, evictedId) {
-    var tbody = document.querySelector('#recent tbody');
-    if (tbody.querySelector('.empty-row')) { renderRecent(); return; }
-    if (isNew) {
-      tbody.prepend(buildRecentRow(r));
-      if (evictedId) {
-        var gone = tbody.querySelector('tr[data-id="' + evictedId + '"]');
+  function upsertFeed(r) {
+    var tbody = document.querySelector('#feed tbody');
+    var known = feedMap.has(r.id);
+    feedMap.set(r.id, r);
+    if (!known) {
+      feedOrder.unshift(r.id);
+      var evicted = null;
+      if (feedOrder.length > FEED_CAP) {
+        evicted = feedOrder.pop();
+        feedMap.delete(evicted);
+      }
+      if (tbody.querySelector('.empty-row')) { renderFeed(); return; }
+      tbody.prepend(buildFeedRow(r));
+      if (evicted) {
+        var gone = tbody.querySelector('tr[data-id="' + evicted + '"]');
         if (gone) gone.remove();
       }
       return;
     }
     var tr = tbody.querySelector('tr[data-id="' + r.id + '"]');
-    if (!tr) { renderRecent(); return; }
-    tr.replaceWith(buildRecentRow(r));
+    if (tr) tr.replaceWith(buildFeedRow(r)); else renderFeed();
+  }
+
+  function emptyRow(tbody, colSpan, msg) {
+    var empty = document.createElement('tr');
+    empty.className = 'empty-row';
+    var td = textEl('td', msg);
+    td.colSpan = colSpan;
+    empty.appendChild(td);
+    tbody.appendChild(empty);
+  }
+
+  // ── Verification tab: one table per collection pair ──
+  function initPairs(pairs) {
+    pairState = new Map();
+    var mongoRoot = document.getElementById('pairs-mongo');
+    var cassRoot = document.getElementById('pairs-cassandra');
+    mongoRoot.replaceChildren();
+    cassRoot.replaceChildren();
+
+    var byKind = { mongo: 0, cassandra: 0 };
+    (pairs || []).forEach(function (p) {
+      byKind[p.kind] = (byKind[p.kind] || 0) + 1;
+      var block = document.createElement('div');
+      block.className = 'pair-block';
+      block.dataset.pair = pairKey(p.source, p.alias);
+
+      var h3 = document.createElement('h3');
+      h3.appendChild(textEl('span', p.source));
+      h3.appendChild(textEl('span', '→', 'arrow'));
+      h3.appendChild(textEl('span', p.dest));
+      h3.appendChild(textEl('span', '', 'pair-count'));
+      block.appendChild(h3);
+
+      var table = document.createElement('table');
+      var thead = document.createElement('thead');
+      var htr = document.createElement('tr');
+      ['Time', 'Op', 'Doc', 'Pair status', 'Check', 'Attempts', 'Duration'].forEach(function (h) {
+        htr.appendChild(textEl('th', h));
+      });
+      thead.appendChild(htr);
+      table.appendChild(thead);
+      var tbody = document.createElement('tbody');
+      emptyRow(tbody, 7, 'No events for this pair yet.');
+      table.appendChild(tbody);
+      block.appendChild(table);
+
+      (p.kind === 'cassandra' ? cassRoot : mongoRoot).appendChild(block);
+      pairState.set(pairKey(p.source, p.alias), { pair: p, rows: new Map(), order: [], tbody: tbody, countEl: h3.querySelector('.pair-count') });
+    });
+
+    if (!byKind.mongo) mongoRoot.appendChild(textEl('div', 'No mongo targets in the mapping.', 'chip counter-chip'));
+    if (!byKind.cassandra) cassRoot.appendChild(textEl('div', 'No cassandra targets in the mapping.', 'chip counter-chip'));
+  }
+
+  function pairStatusCell(target, rowState) {
+    var td = document.createElement('td');
+    if (target.matched) {
+      td.appendChild(textEl('span', '✓ matched', 'lag-ok'));
+      return td;
+    }
+    var cls = rowState === 'failed' ? 'cause bad' : 'cause';
+    td.appendChild(textEl('span', target.lastCause || '…', cls));
+    var diffCount = (target.diffs || []).length;
+    if (diffCount > 0) td.appendChild(textEl('span', ' (' + diffCount + ' diff' + (diffCount === 1 ? '' : 's') + ')', 'cause bad'));
+    return td;
+  }
+
+  function buildPairRow(r, target) {
+    var tr = document.createElement('tr');
+    tr.dataset.id = r.id;
+    tr.appendChild(textEl('td', fmtTime(r.startedAtMs)));
+    tr.appendChild(textEl('td', r.op || ''));
+    tr.appendChild(textEl('td', r.docId || ''));
+    tr.appendChild(pairStatusCell(target, r.state));
+    var td = document.createElement('td');
+    td.appendChild(stateBadge(r.state));
+    tr.appendChild(td);
+    tr.appendChild(textEl('td', r.attempts != null ? r.attempts : 0));
+    tr.appendChild(textEl('td', fmtDuration(r)));
+    return tr;
+  }
+
+  function renderPair(ps) {
+    ps.tbody.replaceChildren();
+    if (ps.order.length === 0) {
+      emptyRow(ps.tbody, 7, 'No events for this pair yet.');
+    } else {
+      ps.order.forEach(function (id) {
+        var entry = ps.rows.get(id);
+        if (entry) ps.tbody.appendChild(buildPairRow(entry.r, entry.target));
+      });
+    }
+    ps.countEl.textContent = ps.order.length ? '(' + ps.order.length + ' shown)' : '';
+  }
+
+  function upsertPair(ps, r, target) {
+    var known = ps.rows.has(r.id);
+    ps.rows.set(r.id, { r: r, target: target });
+    if (!known) {
+      ps.order.unshift(r.id);
+      var evicted = null;
+      if (ps.order.length > PAIR_CAP) {
+        evicted = ps.order.pop();
+        ps.rows.delete(evicted);
+      }
+      if (ps.tbody.querySelector('.empty-row')) { renderPair(ps); return; }
+      ps.tbody.prepend(buildPairRow(r, target));
+      if (evicted) {
+        var gone = ps.tbody.querySelector('tr[data-id="' + evicted + '"]');
+        if (gone) gone.remove();
+      }
+      ps.countEl.textContent = '(' + ps.order.length + ' shown)';
+      return;
+    }
+    var tr = ps.tbody.querySelector('tr[data-id="' + r.id + '"]');
+    if (tr) tr.replaceWith(buildPairRow(r, target)); else renderPair(ps);
   }
 
   // ── failures table ──
+  function targetChip(t) {
+    var span = document.createElement('span');
+    span.className = 'chip ' + (t.matched ? 'ok' : 'wait');
+    span.textContent = t.alias + (t.matched ? ' ✓' : ' …');
+    if (!t.matched && t.lastCause) span.title = t.lastCause;
+    return span;
+  }
+
   function diffTable(targets) {
     var table = document.createElement('table');
     table.className = 'diff-table';
@@ -407,7 +608,16 @@
   }
 
   function buildFailureRow(r) {
-    var tr = buildRow(r, false);
+    var tr = document.createElement('tr');
+    tr.dataset.id = r.id;
+    tr.appendChild(textEl('td', fmtTime(r.startedAtMs)));
+    tr.appendChild(textEl('td', r.collection || ''));
+    tr.appendChild(textEl('td', r.op || ''));
+    tr.appendChild(textEl('td', r.docId || ''));
+    var targetsTd = document.createElement('td');
+    targetsTd.className = 'targets-cell';
+    (r.targets || []).forEach(function (t) { targetsTd.appendChild(targetChip(t)); });
+    tr.appendChild(targetsTd);
 
     var diffTd = document.createElement('td');
     var details = document.createElement('details');
@@ -425,12 +635,7 @@
     var tbody = document.querySelector('#failures tbody');
     tbody.replaceChildren();
     if (failuresOrder.length === 0) {
-      var empty = document.createElement('tr');
-      empty.className = 'empty-row';
-      var td = textEl('td', 'No failures.');
-      td.colSpan = 6;
-      empty.appendChild(td);
-      tbody.appendChild(empty);
+      emptyRow(tbody, 6, 'No failures.');
       return;
     }
     failuresOrder.forEach(function (id) {
@@ -442,12 +647,20 @@
 
   // ── state application ──
   function applyInitialState(data) {
+    initPairs(data.pairs || []);
+
     var recent = data.recent || [];
     var failures = data.failures || [];
 
-    recentCap = data.recentCap > 0 ? data.recentCap : DEFAULT_RECENT_CAP;
-    recentOrder = recent.map(function (r) { return r.id; });
-    recentMap = new Map(recent.map(function (r) { return [r.id, r]; }));
+    feedMap = new Map();
+    feedOrder = [];
+    // recent arrives newest-first; unshift in reverse so the feed keeps that order
+    recent.slice().reverse().forEach(function (r) {
+      feedMap.set(r.id, r);
+      feedOrder.unshift(r.id);
+      routeToPairs(r);
+    });
+    feedOrder = feedOrder.slice(0, FEED_CAP);
 
     failuresOrder = failures.map(function (r) { return r.id; });
     failuresMap = new Map(failures.map(function (r) { return [r.id, r]; }));
@@ -457,62 +670,55 @@
     seedCounted(recent);
     seedCounted(failures);
 
-    renderHeader(data.stats || {});
+    renderStats(data.stats || {});
     renderCounters();
-    renderRecent();
+    renderFeed();
+    pairState.forEach(renderPair);
     renderFailures();
   }
 
+  function routeToPairs(r) {
+    (r.targets || []).forEach(function (t) {
+      var ps = pairState.get(pairKey(r.collection, t.alias));
+      if (ps) upsertPair(ps, r, t);
+    });
+  }
+
   function upsertResult(r) {
-    var known = recentMap.has(r.id);
-    var evictedId = null;
-    recentMap.set(r.id, r);
-    if (!known) {
-      recentOrder.unshift(r.id);
-      if (recentOrder.length > recentCap) {
-        evictedId = recentOrder.pop();
-        if (!failuresMap.has(evictedId)) recentMap.delete(evictedId);
-      }
-    }
+    upsertFeed(r);
+    routeToPairs(r);
 
     if (r.state === 'failed') {
       var knownF = failuresMap.has(r.id);
       failuresMap.set(r.id, r);
       if (!knownF) failuresOrder.unshift(r.id);
+      renderFailures();
     } else if (failuresMap.has(r.id)) {
       failuresMap.set(r.id, r);
+      renderFailures();
     }
 
     tallyIfNew(r);
     renderCounters();
-    patchRecentRow(r, !known, evictedId);
-    if (r.state === 'failed' || failuresMap.has(r.id)) renderFailures();
   }
 
-  // ── filter ──
-  document.getElementById('filter').addEventListener('input', function (e) {
-    filterText = e.target.value.trim().toLowerCase();
-    renderRecent();
-  });
-
-  // ── initial fill ──
+  // ── boot ──
   fetch('/api/state')
-    .then(function (res) { return res.json(); })
+    .then(function (resp) { return resp.json(); })
     .then(applyInitialState)
-    .catch(function (err) { console.error('failed to load initial state', err); });
+    .catch(function (err) {
+      var errBanner = document.getElementById('error-banner');
+      errBanner.hidden = false;
+      errBanner.textContent = 'Failed to load state: ' + err;
+    });
 
-  // ── live updates ──
   var es = new EventSource('/api/events');
-  es.onmessage = function (e) {
+  es.onmessage = function (msg) {
     var ev;
-    try { ev = JSON.parse(e.data); } catch (err) { return; }
-    if (ev.kind === 'stats') {
-      renderHeader(ev.data);
-    } else if (ev.kind === 'result') {
-      upsertResult(ev.data);
-    }
+    try { ev = JSON.parse(msg.data); } catch (e) { return; }
+    if (ev.kind === 'stats') renderStats(ev.data || {});
+    else if (ev.kind === 'result') upsertResult(ev.data || {});
   };
-  es.onerror = function () {};
 })();
 </script>
 </body>

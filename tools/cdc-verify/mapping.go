@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -122,6 +123,37 @@ type Derived struct {
 	From      []string `json:"from"`
 	Transform string   `json:"transform"`
 	Dest      []string `json:"dest"`
+}
+
+// TargetPair names one source-collection → destination pair the mapping
+// verifies — the UI groups its per-pair tables from this.
+type TargetPair struct {
+	Source string `json:"source"`
+	Alias  string `json:"alias"`
+	Kind   string `json:"kind"`
+	Dest   string `json:"dest"`
+}
+
+// TargetPairs lists every pair, sorted by source then alias.
+func (m *Mapping) TargetPairs() []TargetPair {
+	var pairs []TargetPair
+	for i := range m.Sources {
+		src := &m.Sources[i]
+		for alias, t := range src.Targets {
+			dest := t.Collection
+			if t.Kind == "cassandra" {
+				dest = t.Table
+			}
+			pairs = append(pairs, TargetPair{Source: src.Collection, Alias: alias, Kind: t.Kind, Dest: dest})
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].Source != pairs[j].Source {
+			return pairs[i].Source < pairs[j].Source
+		}
+		return pairs[i].Alias < pairs[j].Alias
+	})
+	return pairs
 }
 
 func loadMapping(path string) (*Mapping, error) {

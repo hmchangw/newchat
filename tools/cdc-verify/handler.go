@@ -21,10 +21,11 @@ type handler struct {
 	results   stateProvider
 	stats     statsProvider
 	recentCap int
+	pairs     []TargetPair
 }
 
-func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap int) *handler {
-	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap}
+func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap int, pairs []TargetPair) *handler {
+	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap, pairs: pairs}
 }
 
 func (h *handler) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -39,6 +40,7 @@ func (h *handler) state(w http.ResponseWriter, _ *http.Request) {
 		"failures":  failures,
 		"counters":  counters,
 		"recentCap": h.recentCap,
+		"pairs":     h.pairs,
 	})
 }
 

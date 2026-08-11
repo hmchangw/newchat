@@ -136,3 +136,30 @@ func TestLoadMapping_ValidatesContent(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validate mapping")
 }
+
+func TestMapping_TargetPairs(t *testing.T) {
+	m := &Mapping{Sources: []SourceMapping{
+		{
+			Collection: "rocketchat_subscription",
+			Targets: map[string]Target{
+				"subs":    {Kind: "mongo", Collection: "subscriptions"},
+				"members": {Kind: "mongo", Collection: "room_members"},
+			},
+		},
+		{
+			Collection: "rocketchat_message",
+			Targets: map[string]Target{
+				"msgById":   {Kind: "cassandra", Table: "messages_by_id"},
+				"msgByRoom": {Kind: "cassandra", Table: "messages_by_room"},
+			},
+		},
+	}}
+	got := m.TargetPairs()
+	want := []TargetPair{
+		{Source: "rocketchat_message", Alias: "msgById", Kind: "cassandra", Dest: "messages_by_id"},
+		{Source: "rocketchat_message", Alias: "msgByRoom", Kind: "cassandra", Dest: "messages_by_room"},
+		{Source: "rocketchat_subscription", Alias: "members", Kind: "mongo", Dest: "room_members"},
+		{Source: "rocketchat_subscription", Alias: "subs", Kind: "mongo", Dest: "subscriptions"},
+	}
+	assert.Equal(t, want, got) // sorted by source, then alias
+}
