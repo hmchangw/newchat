@@ -163,13 +163,22 @@ as every other hook and cannot outlive it.
 Add to `baseOpts` in `Connect`:
 
 ```go
-nats.DrainTimeout(defaultDrainTimeout), // 15 * time.Second
+nats.DrainTimeout(defaultDrainTimeout), // 10 * time.Second
 ```
 
-Worst case: 15s subscription drain + `drainConnection`'s internal
-`FlushTimeout(5s)` = 20s, inside the 25s hook budget, inside the 30s Kubernetes
-grace period. A package const rather than an env var — no service should want a
-different answer, and `Connect` already appends caller `opts` after `baseOpts`
+Worst case: 10s subscription drain + `drainConnection`'s internal
+`FlushTimeout(5s)` = 15s, inside the 25s shutdown budget, inside the 30s
+Kubernetes grace period.
+
+The 25s is **shared, not per-hook**: `shutdown.Wait` creates one context for the
+whole shutdown and runs the hooks sequentially over it
+(`pkg/shutdown/shutdown.go:21-32`). A 15s worst-case drain therefore leaves ~10s
+for every remaining hook — DB disconnects, HTTP shutdown, o11y flush — which are
+sub-second in practice. A drain that genuinely needs more than 10s means a
+wedged handler, which is a finding to surface rather than a wait to extend.
+
+A package const rather than an env var — no service should want a different
+answer, and `Connect` already appends caller `opts` after `baseOpts`
 (`connect.go:60`), so a caller that genuinely needs to override still can.
 
 ### C. Slow consumer diagnostics
@@ -249,7 +258,7 @@ scope. Delete the now-false comment at `admin-service:93-95`.
 
 ```go
 defer func() {
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
 	if err := natsutil.Drain(dctx, nc); err != nil {
 		slog.Error("nats drain", "error", err)
@@ -335,10 +344,10 @@ Coverage: 80% floor repo-wide, 90% target for `pkg/`.
 
 No wire, schema, or config change. No `docs/client-api.md` impact — nothing here
 is client-facing. Behavior change is confined to shutdown, where services will
-now take up to ~20s to exit instead of exiting instantly, and slow consumer
+now take up to ~15s to exit instead of exiting instantly, and slow consumer
 events become visible.
 
 The one risk worth watching: a service with a wedged subscription handler that
-previously exited instantly will now sit until the 15s drain timeout. That is
+previously exited instantly will now sit until the 10s drain timeout. That is
 the correct behavior — it is the signal that the handler is wedged — but it will
 look like a regression in pod restart time on first deploy. Expected, not a bug.

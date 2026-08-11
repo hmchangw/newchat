@@ -294,11 +294,19 @@ In `pkg/natsutil/connect.go`, extend the const block at line 16:
 const (
 	defaultReconnectWait = 2 * time.Second
 	// defaultDrainTimeout bounds the subscription-drain phase. Worst case is
-	// this plus drainConnection's internal FlushTimeout(5s) = 20s, which fits
-	// inside the 25s shutdown.Wait budget and the 30s Kubernetes grace period.
-	// The library default is 30s (nats.DefaultDrainTimeout), which is larger
-	// than our budget and so could never be the timeout that fires.
-	defaultDrainTimeout = 15 * time.Second
+	// this plus drainConnection's internal FlushTimeout(5s) = 15s.
+	//
+	// shutdown.Wait creates ONE context for the whole shutdown and runs the
+	// hooks sequentially over it (pkg/shutdown/shutdown.go:21-32), so this
+	// budget is shared, not per-hook: a 15s worst-case drain leaves ~10s of
+	// the 25s for every remaining hook (DB disconnects, HTTP shutdown, o11y
+	// flush), which are sub-second in practice. A drain that actually needs
+	// longer than 10s means a wedged handler — a finding to surface, not a
+	// wait to extend.
+	//
+	// The library default is 30s (nats.DefaultDrainTimeout), larger than the
+	// entire shutdown budget, so it could never be the timeout that fires.
+	defaultDrainTimeout = 10 * time.Second
 )
 ```
 
@@ -321,8 +329,8 @@ func TestConnect_SetsDrainTimeout(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(conn.NatsConn().Close)
 
-	require.Equal(t, 15*time.Second, conn.NatsConn().Opts.DrainTimeout,
-		"DrainTimeout must be under the 25s shutdown budget, not the 30s library default")
+	require.Equal(t, 10*time.Second, conn.NatsConn().Opts.DrainTimeout,
+		"DrainTimeout must leave headroom in the shared 25s shutdown budget, not the 30s library default")
 }
 ```
 
@@ -762,7 +770,7 @@ The comment described the exact trap this change removes. Leaving it would be ac
 -		if err := nc.Drain(); err != nil {
 +		// ctx is already cancelled on SIGTERM by the time this defer runs, so
 +		// the drain deadline must not be derived from it.
-+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
++		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 +		defer cancel()
 +		if err := natsutil.Drain(dctx, nc); err != nil {
  			slog.Error("nats drain", "error", err)
@@ -779,7 +787,7 @@ Ensure `"time"` is imported.
 -		if err := nc.Drain(); err != nil {
 +		// ctx is already cancelled on SIGTERM by the time this defer runs, so
 +		// the drain deadline must not be derived from it.
-+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
++		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 +		defer cancel()
 +		if err := natsutil.Drain(dctx, nc); err != nil {
  			slog.Warn("nats drain", "error", err)
@@ -858,7 +866,7 @@ directly would expire the drain immediately and silently do nothing."
 +	defer func() {
 +		// ctx is already cancelled on SIGTERM by the time this defer runs, so
 +		// the drain deadline must not be derived from it.
-+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
++		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 +		defer cancel()
 +		if err := natsutil.Drain(dctx, nc); err != nil {
 +			slog.Error("nats drain", "error", err)
@@ -958,7 +966,7 @@ At `oplog-connector/main.go:234`, inside the function that already does a bounde
  		slog.Warn("watcher drain incomplete", "error", err)
  	}
 -	_ = c.nc.Drain()
-+	dctx, dcancel := context.WithTimeout(context.Background(), 15*time.Second)
++	dctx, dcancel := context.WithTimeout(context.Background(), 20*time.Second)
 +	defer dcancel()
 +	if err := natsutil.Drain(dctx, c.nc); err != nil {
 +		slog.Warn("nats drain incomplete", "error", err)
@@ -1050,7 +1058,9 @@ Do not open a PR unless explicitly asked.
 
 **No wire, schema, or config change.** Nothing here is client-facing, so `docs/client-api.md` and its derived views are untouched.
 
-**Expected behavior change:** services will now take up to ~20s to exit instead of exiting instantly. That is the point — but it will look like a pod-restart regression on first deploy. A service that sits at the full 15s drain timeout has a wedged subscription handler, which is a real finding, not a bug in this change.
+**Expected behavior change:** services will now take up to ~15s to exit instead of exiting instantly. That is the point — but it will look like a pod-restart regression on first deploy. A service that sits at the full 10s drain timeout has a wedged subscription handler, which is a real finding, not a bug in this change.
+
+**On the shutdown budget:** `shutdown.Wait` creates one context for the whole shutdown and runs hooks sequentially over it (`pkg/shutdown/shutdown.go:21-32`), so the 25s is shared, not per-hook. That is why `defaultDrainTimeout` is 10s rather than 15s: worst case 10s + `drainConnection`'s internal `FlushTimeout(5s)` = 15s, leaving ~10s for the remaining hooks. The standalone deferred sites in Tasks 4-6 have no shared budget, so they wrap the drain in their own 20s context — comfortably above the 15s worst case, so the wrapper is never the binding constraint.
 
 **Deliberately out of scope**, so the omissions are not read as oversights:
 - `SetPendingLimits` tuning for `broadcast-worker` — diagnose with the new counter first, tune with real numbers second.
