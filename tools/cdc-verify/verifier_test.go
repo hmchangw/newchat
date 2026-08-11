@@ -701,3 +701,159 @@ func TestVerifier_Inspect_UnmappedCollection(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unmapped")
 }
+
+func TestResolverAlias(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		wantAlias string
+		wantOK    bool
+	}{
+		{"plain source path", "u._id", "", false},
+		{"alias with field", "@user.username", "user", true},
+		{"alias nested field", "@room.owner.id", "room", true},
+		{"bare at only", "@", "", false},
+		{"at with empty alias", "@.field", "", false},
+		{"alias without dot", "@user", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			alias, ok := resolverAlias(tt.path)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantAlias, alias)
+		})
+	}
+}
+
+// resolveAllVerifier builds a bare verifier exercising only resolveAll's deps:
+// source/target stores + registry, no pending machinery.
+func resolveAllVerifier(src SourceStore, tgt TargetStore) *verifier {
+	return &verifier{source: src, target: tgt, reg: newTransformRegistry(msgbucket.New(72 * time.Hour))}
+}
+
+func resolveAllSource(db string) *compiledSource {
+	return &compiledSource{
+		src: &SourceMapping{Resolvers: map[string]Resolver{
+			"user": {DB: db, Collection: "users",
+				Key:    map[string]KeyFrom{"_id": {From: []string{"u._id"}}},
+				Fields: []string{"username"}},
+		}},
+		deps: map[string][]string{"subs": {"user"}},
+	}
+}
+
+func TestResolveAll_NoneNeededWhenAllMatched(t *testing.T) {
+	v := resolveAllVerifier(nil, nil)
+	cs := resolveAllSource("source")
+	docs, causes := v.resolveAll(context.Background(), cs,
+		map[string]any{"u": map[string]any{"_id": "u1"}},
+		[]targetState{{alias: "subs", matched: true}})
+	assert.Nil(t, docs)
+	assert.Nil(t, causes)
+}
+
+func TestResolveAll_KeyUnresolvableIsResolverMiss(t *testing.T) {
+	v := resolveAllVerifier(nil, nil)
+	cs := resolveAllSource("source")
+	// srcDoc lacks u._id → buildKeyFrom fails → resolver-miss, no store call.
+	docs, causes := v.resolveAll(context.Background(), cs,
+		map[string]any{}, []targetState{{alias: "subs"}})
+	assert.Empty(t, docs)
+	assert.Equal(t, "resolver-miss: user", causes["user"])
+}
+
+func TestResolveAll_NotFoundIsResolverMiss(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	src := NewMockSourceStore(ctrl)
+	src.EXPECT().FindOne(gomock.Any(), "users", map[string]any{"_id": "u1"}, []string{"username"}).
+		Return(nil, errNotFound)
+
+	v := resolveAllVerifier(src, nil)
+	cs := resolveAllSource("source")
+	docs, causes := v.resolveAll(context.Background(), cs,
+		map[string]any{"u": map[string]any{"_id": "u1"}}, []targetState{{alias: "subs"}})
+	assert.Empty(t, docs)
+	assert.Equal(t, "resolver-miss: user", causes["user"])
+}
+
+func TestResolveAll_StoreErrorIsResolverError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	src := NewMockSourceStore(ctrl)
+	src.EXPECT().FindOne(gomock.Any(), "users", gomock.Any(), gomock.Any()).
+		Return(nil, errors.New("boom"))
+
+	v := resolveAllVerifier(src, nil)
+	cs := resolveAllSource("source")
+	_, causes := v.resolveAll(context.Background(), cs,
+		map[string]any{"u": map[string]any{"_id": "u1"}}, []targetState{{alias: "subs"}})
+	assert.Contains(t, causes["user"], "resolver-error: user:")
+}
+
+func TestResolveAll_SourceDBSuccess(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	src := NewMockSourceStore(ctrl)
+	src.EXPECT().FindOne(gomock.Any(), "users", map[string]any{"_id": "u1"}, []string{"username"}).
+		Return(map[string]any{"username": "alice"}, nil)
+
+	v := resolveAllVerifier(src, nil)
+	cs := resolveAllSource("source")
+	docs, causes := v.resolveAll(context.Background(), cs,
+		map[string]any{"u": map[string]any{"_id": "u1"}}, []targetState{{alias: "subs"}})
+	assert.Empty(t, causes)
+	assert.Equal(t, map[string]any{"username": "alice"}, docs["user"])
+}
+
+func TestResolveAll_TargetDBSuccess(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	tgt := NewMockTargetStore(ctrl)
+	tgt.EXPECT().FindOne(gomock.Any(), "users", map[string]any{"_id": "u1"}, []string{"username"}).
+		Return(map[string]any{"username": "bob"}, nil)
+
+	v := resolveAllVerifier(nil, tgt)
+	cs := resolveAllSource("target")
+	docs, causes := v.resolveAll(context.Background(), cs,
+		map[string]any{"u": map[string]any{"_id": "u1"}}, []targetState{{alias: "subs"}})
+	assert.Empty(t, causes)
+	assert.Equal(t, map[string]any{"username": "bob"}, docs["user"])
+}
+
+// TestCompile_DefensiveSkipAndSort drives compile's defensive branches: a
+// fields/derived ref to an unknown target alias is skipped, and a target with
+// two pairs exercises the pair-sort comparator.
+func TestCompile_DefensiveSkipAndSort(t *testing.T) {
+	s := &SourceMapping{
+		Collection: "c",
+		Targets: map[string]Target{
+			"m": {Kind: "mongo", Collection: "coll",
+				Key: map[string]KeyFrom{"_id": {From: []string{"_id"}}}},
+			"v": {Kind: "mongo", Collection: "vcoll", Mode: "verbatim",
+				Key: map[string]KeyFrom{"_id": {From: []string{"_id"}}}},
+		},
+		Fields: map[string][]DestRef{
+			"f1":     {{Dest: "m.b"}},
+			"f2":     {{Dest: "m.a"}},     // two pairs on "m" → sort comparator runs
+			"f3":     {{Dest: "ghost.x"}}, // unknown alias → skipped
+			"vfield": {{Dest: "v.body"}},  // verbatim target → skipped
+		},
+		Derived: []Derived{
+			{From: []string{"x"}, Dest: []string{"ghost.y"}}, // unknown alias → skipped
+			{From: []string{"x"}, Dest: []string{"v.z"}},     // verbatim target → skipped
+		},
+	}
+	cs := compile(s)
+
+	assert.Len(t, cs.pairs["m"], 2)
+	assert.Equal(t, "a", cs.pairs["m"][0].DestField) // sorted ascending
+	assert.Equal(t, "b", cs.pairs["m"][1].DestField)
+	assert.NotContains(t, cs.pairs, "ghost")
+	assert.Empty(t, cs.pairs["v"]) // verbatim target carries no pairs
+}
+
+func TestNewVerifier_DefaultSampleFn(t *testing.T) {
+	v := newVerifier(verifierMapping(), nil, nil, nil,
+		newTransformRegistry(msgbucket.New(72*time.Hour)), newResultsStore(1, 1, nil),
+		verifierConfig{Poll: time.Second, Timeout: time.Second, MaxChecks: 1, SamplePercent: 100})
+	n := v.sampleFn()
+	assert.GreaterOrEqual(t, n, 0)
+	assert.Less(t, n, 100)
+}
