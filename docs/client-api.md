@@ -6710,6 +6710,8 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `priority_contact_limit` | forbidden | user-service `settings.priorityContacts.add` (list already at the 30-entry cap and the contact is not already on it) |
 | `priority_contact_not_found` | not_found | user-service `settings.priorityContacts.add` (contact account does not resolve — inactive/unknown user, or app not found for a `.bot` account) |
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
+| `no_responders` | unavailable | any request/reply RPC whose upstream subject had no subscriber (`natsutil.RequestFailure`) — the upstream service is down, not yet started, or not routed to this site. Retry. |
+| `upstream_timeout` | unavailable | any request/reply RPC delivered to the upstream but not answered within the caller's timeout (`natsutil.RequestFailure`). Retry. |
 | `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
 | `invalid_credentials` | unauthenticated | admin-service `POST /v1/login` (§9.10) (unknown account, wrong password, not admin, or deactivated — uniform response) |
