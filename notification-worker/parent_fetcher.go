@@ -10,6 +10,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -67,7 +68,7 @@ func (f *historyParentFetcher) FetchParent(ctx context.Context, account, roomID,
 	}
 	msg, err := f.nc.Request(ctx, subject.MsgGet(account, roomID, siteID), reqBytes, parentFetchTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("history request for parent %s: %w", messageID, err)
+		return nil, natsutil.RequestFailure(fmt.Sprintf("history request for parent %s", messageID), err)
 	}
 	// The errcode envelope has a top-level "error"; a real Message never does, so this
 	// can't false-positive. Propagate the typed remote error for accurate classification.

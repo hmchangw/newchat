@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -34,7 +35,7 @@ func (c *Client) QueryPresence(ctx context.Context, siteID string, accounts []st
 	}
 	msg, err := c.nc.Request(ctx, subject.PresenceQueryBatchPeer(siteID), body, presenceRPCTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("presence-query rpc: %w", err)
+		return nil, natsutil.RequestFailure("presence-query rpc", err)
 	}
 	if e, ok := errcode.Parse(msg.Data); ok {
 		return nil, e
