@@ -112,16 +112,17 @@ services:
   # detail (num_pending, num_ack_pending, num_redelivered) that shows whether a
   # worker is falling behind during a run. No container_name and no host port
   # binding, so this can coexist with tools/observability's exporter.
+  #
+  # No healthcheck: the image ships the exporter binary without a shell or an
+  # HTTP client, so any `test:` command fails and the container never turns
+  # healthy — which stalled the whole dashboards profile behind Prometheus's
+  # `condition: service_healthy`. Prometheus does not need this target up at
+  # startup anyway; an unreachable target is simply marked down and retried on
+  # the next scrape, so the dependency below is `service_started`.
   nats-exporter:
     image: natsio/prometheus-nats-exporter:0.16.0
     profiles: [dashboards]
     command: ["-port=7777", "-jsz=all", "http://chat-local-nats:8222"]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7777/metrics"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
     networks:
       - chat-local
 
@@ -136,7 +137,7 @@ services:
       cadvisor:
         condition: service_healthy
       nats-exporter:
-        condition: service_healthy
+        condition: service_started
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro # Docker SD for :2112 targets

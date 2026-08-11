@@ -199,11 +199,13 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	cancel()
 	wg.Wait()
 	holdEnd := time.Now()
-	endCounts := w.snapshotCounters()
+	// Pending at the hold boundary, counters after the drain — see the
+	// snapshot-ordering note in messagesWorkload.RunStep.
 	endPending, perr2 := w.snapshotPending(ctx)
 	if err := waitOrCancel(ctx, w.drain); err != nil {
 		return rpsStepInputs{}, err
 	}
+	endCounts := w.snapshotCounters()
 	w.collector.DiscardBefore(holdStart)
 
 	if holdErr != nil {
@@ -213,7 +215,7 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 	// Windowed rather than Finalize() — see the note in messagesWorkload.RunStep:
 	// a warm-up publish whose map write lands after Reset keeps its pre-holdStart
 	// timestamp and would otherwise be charged to this step.
-	missingReplies, _ := w.collector.MissingInWindow(holdStart, holdEnd)
+	replyEligible, missingReplies := w.collector.ReplyStatsInWindow(holdStart, holdEnd)
 	broadcastEligible, missingBroadcasts := w.collector.BroadcastStatsInWindow(holdStart, holdEnd)
 
 	delta := diffCounters(startCounts, endCounts)
@@ -226,6 +228,6 @@ func (w *threadWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hol
 		startPending, endPending, w.durables, pendingOK,
 		missCounts{
 			Replies: missingReplies, Broadcasts: missingBroadcasts,
-			BroadcastEligible: broadcastEligible,
+			ReplyEligible: replyEligible, BroadcastEligible: broadcastEligible,
 		}), nil
 }

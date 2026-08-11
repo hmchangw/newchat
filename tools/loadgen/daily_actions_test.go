@@ -221,3 +221,68 @@ func TestThreadReply_PublishFailureIsNotBroadcastEligible(t *testing.T) {
 	assert.Zero(t, eligible)
 	assert.Zero(t, missing)
 }
+
+// The broker can flush the publish and the room event can come back before the
+// publishing goroutine registers its correlation. Registering after the publish
+// dropped that broadcast as unmatched and then reported the send as a loss, so
+// the correlation must exist before the publish is issued.
+func TestSendMessage_BroadcastDuringPublishIsMatched(t *testing.T) {
+	col := NewCollector(nil, "test")
+	u := &userState{ID: "u-1", Account: "user-1", Rooms: []string{"room-a"}}
+	start := time.Now().Add(-time.Second)
+
+	// Publish delivers the room event synchronously, i.e. before Publish
+	// returns — the worst-case interleaving of the real race.
+	publish := func(_ context.Context, _ string, data []byte) error {
+		var req model.SendMessageRequest
+		if err := json.Unmarshal(data, &req); err != nil {
+			return err
+		}
+		col.RecordBroadcast(req.ID, time.Now())
+		return nil
+	}
+	ctx := actionCtx{Ctx: context.Background(), Publish: publish, SiteID: "site-test", Collector: col}
+
+	require.NoError(t, sendMessage(ctx, u, "hello"))
+
+	eligible, missing := col.BroadcastStatsInWindow(start, time.Now().Add(time.Second))
+	assert.Equal(t, 1, eligible)
+	assert.Zero(t, missing, "a broadcast delivered during the publish is not a loss")
+}
+
+func TestThreadReply_BroadcastDuringPublishIsMatched(t *testing.T) {
+	col := NewCollector(nil, "test")
+	u := &userState{ID: "u-1", Account: "user-1", Rooms: []string{"room-a"}}
+	start := time.Now().Add(-time.Second)
+
+	publish := func(_ context.Context, _ string, data []byte) error {
+		var req model.SendMessageRequest
+		if err := json.Unmarshal(data, &req); err != nil {
+			return err
+		}
+		col.RecordBroadcast(req.ID, time.Now())
+		return nil
+	}
+	ctx := actionCtx{Ctx: context.Background(), Publish: publish, SiteID: "site-test", Collector: col}
+
+	require.NoError(t, threadReply(ctx, u, "parent-msg-1", "reply"))
+
+	eligible, missing := col.BroadcastStatsInWindow(start, time.Now().Add(time.Second))
+	assert.Equal(t, 1, eligible)
+	assert.Zero(t, missing)
+}
+
+// The provisional registration must not survive a failed publish.
+func TestSendMessage_PublishFailureLeavesNoCorrelation(t *testing.T) {
+	col := NewCollector(nil, "test")
+	u := &userState{ID: "u-1", Account: "user-1", Rooms: []string{"room-a"}}
+	failing := func(context.Context, string, []byte) error { return errors.New("boom") }
+	ctx := actionCtx{Ctx: context.Background(), Publish: failing, SiteID: "site-test", Collector: col}
+	start := time.Now().Add(-time.Second)
+
+	require.Error(t, sendMessage(ctx, u, "hello"))
+
+	eligible, missing := col.BroadcastStatsInWindow(start, time.Now().Add(time.Second))
+	assert.Zero(t, eligible)
+	assert.Zero(t, missing, "a failed publish must not read as a dropped broadcast")
+}

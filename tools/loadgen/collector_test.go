@@ -242,10 +242,10 @@ func TestCollector_BroadcastStatsInWindowUsesAcceptedPublishBoundary(t *testing.
 	start := time.Unix(1000, 0)
 	end := start.Add(10 * time.Second)
 
-	c.RecordAcceptedBroadcastPublish("before", start.Add(-time.Second))
-	c.RecordAcceptedBroadcastPublish("delivered", start.Add(time.Second))
-	c.RecordAcceptedBroadcastPublish("missing", start.Add(2*time.Second))
-	c.RecordAcceptedBroadcastPublish("after", end.Add(time.Second))
+	c.recordAcceptedBroadcastPublish("before", start.Add(-time.Second))
+	c.recordAcceptedBroadcastPublish("delivered", start.Add(time.Second))
+	c.recordAcceptedBroadcastPublish("missing", start.Add(2*time.Second))
+	c.recordAcceptedBroadcastPublish("after", end.Add(time.Second))
 	c.RecordBroadcast("delivered", start.Add(3*time.Second))
 
 	eligible, missing := c.BroadcastStatsInWindow(start, end)
@@ -313,4 +313,75 @@ func TestCollector_Reset(t *testing.T) {
 	c.RecordPublish("req-2", "msg-2", now)
 	c.RecordReply("req-2", now.Add(5*time.Millisecond))
 	assert.Equal(t, 1, c.E1Count())
+}
+
+// recordAcceptedBroadcastPublish is the accepted-publish pair as the production
+// callers apply it: register the correlation, then count the denominator. Tests
+// that only care about the settled state use this instead of restating both
+// calls; the ordering itself is covered in daily_actions_test.go.
+func (c *Collector) recordAcceptedBroadcastPublish(messageID string, at time.Time) {
+	c.RecordPublishBroadcastOnly(messageID, at)
+	c.RecordBroadcastEligible()
+}
+
+// A broadcast that arrives before its correlation is registered used to be
+// dropped as unmatched, and the late registration then read as a loss. With
+// pre-publish registration the delivery matches.
+func TestCollector_BroadcastArrivingBeforeEligibleCount(t *testing.T) {
+	c := NewCollector(nil, "test")
+	start := time.Now()
+
+	c.RecordPublishBroadcastOnly("m-1", start)
+	c.RecordBroadcast("m-1", start.Add(5*time.Millisecond)) // beats the accept
+	c.RecordBroadcastEligible()
+
+	eligible, missing := c.BroadcastStatsInWindow(start.Add(-time.Second), start.Add(time.Second))
+	assert.Equal(t, 1, eligible)
+	assert.Zero(t, missing, "a delivered broadcast must not be counted as dropped")
+}
+
+// A publish that fails after provisional registration leaves nothing behind.
+func TestCollector_DiscardBroadcastPublish(t *testing.T) {
+	c := NewCollector(nil, "test")
+	start := time.Now()
+
+	c.RecordPublishBroadcastOnly("m-1", start)
+	c.DiscardBroadcastPublish("m-1")
+
+	eligible, missing := c.BroadcastStatsInWindow(start.Add(-time.Second), start.Add(time.Second))
+	assert.Zero(t, eligible)
+	assert.Zero(t, missing, "a failed publish enters neither side of the ratio")
+}
+
+// The reply denominator is derived from the same accepted set as the numerator:
+// unmatched correlations plus recorded replies, both filtered to the window.
+func TestCollector_ReplyStatsInWindow(t *testing.T) {
+	c := NewCollector(nil, "test")
+	start := time.Now()
+	end := start.Add(10 * time.Second)
+
+	c.RecordPublish("before", "m-before", start.Add(-time.Second))
+	c.RecordPublish("answered", "m-1", start.Add(time.Second))
+	c.RecordPublish("dropped", "m-2", start.Add(2*time.Second))
+	c.RecordPublish("after", "m-after", end.Add(time.Second))
+	c.RecordReply("answered", start.Add(2*time.Second))
+
+	eligible, missing := c.ReplyStatsInWindow(start, end)
+
+	assert.Equal(t, 2, eligible, "one answered plus one dropped, both in window")
+	assert.Equal(t, 1, missing)
+}
+
+// A publish that failed was removed from the correlation map, so it enters
+// neither side — the property that stops it diluting the rate.
+func TestCollector_ReplyStatsExcludesFailedPublishes(t *testing.T) {
+	c := NewCollector(nil, "test")
+	start := time.Now()
+
+	c.RecordPublish("failed", "m-1", start)
+	c.RecordPublishFailed("failed", "m-1")
+
+	eligible, missing := c.ReplyStatsInWindow(start.Add(-time.Second), start.Add(time.Second))
+	assert.Zero(t, eligible)
+	assert.Zero(t, missing)
 }

@@ -234,3 +234,70 @@ func TestLoginRequester_UnreachableHostIsFailure(t *testing.T) {
 	outcome, _ := r.login(t.Context(), "alice", "UABC")
 	assert.Equal(t, outcomeFailed, outcome)
 }
+
+// http.Client.Do returns at the response headers, so stopping the clock there
+// measured time-to-first-byte and called a stalled body a fast success.
+func TestLoginRequester_MeasuresThroughResponseBody(t *testing.T) {
+	const bodyDelay = 60 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		// Simulated server-side body latency — the quantity under test, not
+		// goroutine synchronisation.
+		time.Sleep(bodyDelay)
+		_, _ = w.Write([]byte(`{"token":"t"}`))
+	}))
+	defer srv.Close()
+
+	req := newLoginRequester(srv.URL, 5*time.Second)
+	out, elapsed := req.login(context.Background(), "user-1", "UKEY")
+
+	assert.Equal(t, outcomeGood, out)
+	assert.GreaterOrEqual(t, elapsed, bodyDelay,
+		"latency must cover the body, not just the headers")
+}
+
+// A 2xx whose body is cut off mid-flight is not a successful login: the client
+// never received a usable response.
+func TestLoginRequester_TruncatedBodyIsFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "128")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":`))
+		w.(http.Flusher).Flush()
+		// Returning now closes the connection with the declared body unsent.
+	}))
+	defer srv.Close()
+
+	req := newLoginRequester(srv.URL, 5*time.Second)
+	out, _ := req.login(context.Background(), "user-1", "UKEY")
+
+	assert.Equal(t, outcomeFailed, out)
+}
+
+// The window-edge rule still applies while the body is being read: a step
+// deadline landing mid-read is the harness stopping, not the service failing.
+func TestLoginRequester_CancelledBodyReadIsExcluded(t *testing.T) {
+	flushed := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "128")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":`))
+		w.(http.Flusher).Flush()
+		close(flushed)
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := newLoginRequester(srv.URL, 5*time.Second)
+	go func() {
+		<-flushed // the client is now blocked reading the partial body
+		cancel()
+	}()
+	out, _ := req.login(ctx, "user-1", "UKEY")
+
+	assert.Equal(t, outcomeExcluded, out)
+}

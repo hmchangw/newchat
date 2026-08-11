@@ -124,7 +124,8 @@ func TestBuildMessagesInputs_CarriesMissingCounts(t *testing.T) {
 func TestEvaluateRPSStep_TripsOnMissingReplies(t *testing.T) {
 	in := rpsStepInputs{
 		TargetRPS: 1000, Hold: 10 * time.Second,
-		AttemptedOps: 10000, FailedOps: 0, MissingReplies: 500,
+		AttemptedOps: 10000, FailedOps: 0,
+		ReplyEligible: 10000, MissingReplies: 500,
 	}
 	res := evaluateRPSStep(&in, buildThresholds(ms(100), ms(250), 0.01, 1000, 0.1))
 
@@ -132,6 +133,37 @@ func TestEvaluateRPSStep_TripsOnMissingReplies(t *testing.T) {
 	assert.Equal(t, 0.05, res.MissingReplyRate)
 	require.Len(t, res.Reasons, 1)
 	assert.Contains(t, res.Reasons[0], "missing reply")
+}
+
+// Publish failures never register a correlation, so including them in the
+// denominator could only dilute the rate. The reviewer's arithmetic: 9 publish
+// errors and 10 missing replies in 10,000 attempts lands on exactly 0.1% over
+// AttemptedOps and slips past the strict `>` gate, while 10 of the 9,991
+// requests actually accepted is over it.
+func TestEvaluateRPSStep_MissingReplyRateNotDilutedByPublishFailures(t *testing.T) {
+	in := rpsStepInputs{
+		TargetRPS: 1000, Hold: 10 * time.Second,
+		AttemptedOps: 10000, FailedOps: 9,
+		ReplyEligible: 9991, MissingReplies: 10,
+	}
+	res := evaluateRPSStep(&in, buildThresholds(ms(100), ms(250), 0.001, 1000, 0.1))
+
+	assert.Greater(t, res.MissingReplyRate, 0.001,
+		"the rate must be over the gate once the denominator is the accepted set")
+	require.Equal(t, verdictTrip, res.Kind, "reasons=%v", res.Reasons)
+	assert.Contains(t, res.Reasons[0], "missing reply")
+}
+
+// With no accepted publishes there is no rate to compute, and a zero
+// denominator must not read as a breach.
+func TestEvaluateRPSStep_NoReplyEligibleLeavesRateZero(t *testing.T) {
+	in := rpsStepInputs{
+		TargetRPS: 1000, Hold: 10 * time.Second,
+		AttemptedOps: 100, FailedOps: 100, ReplyEligible: 0, MissingReplies: 0,
+	}
+	res := evaluateRPSStep(&in, buildThresholds(ms(100), ms(250), 0.5, 1000, 0.9))
+
+	assert.Zero(t, res.MissingReplyRate)
 }
 
 func TestEvaluateRPSStep_TripsOnMissingBroadcasts(t *testing.T) {

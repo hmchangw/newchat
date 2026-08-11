@@ -177,8 +177,8 @@ func (r *loginRequester) login(ctx context.Context, account, natsPublicKey strin
 
 	start := time.Now()
 	resp, err := r.client.Do(req)
-	elapsed := time.Since(start)
 	if err != nil {
+		elapsed := time.Since(start)
 		// The step deadline cancels the context handed to every in-flight
 		// request, so a window-edge request fails through no fault of the
 		// service. Those are excluded rather than counted: at MaxInFlight=200
@@ -194,7 +194,22 @@ func (r *loginRequester) login(ctx context.Context, account, natsPublicKey strin
 	defer func() { _ = resp.Body.Close() }()
 	// Drain so the connection returns to the keep-alive pool; a fresh TCP+TLS
 	// handshake per request would measure the load box, not auth-service.
-	_, _ = io.Copy(io.Discard, resp.Body)
+	//
+	// The drain is inside the measured span, and its error is checked. Do
+	// returns as soon as the response *headers* arrive, so stopping the clock
+	// there timed only the time-to-first-byte: a 2xx whose body then stalled,
+	// truncated or timed out was recorded as a fast successful login. A login
+	// the client cannot read is not a login.
+	_, readErr := io.Copy(io.Discard, resp.Body)
+	elapsed := time.Since(start)
+	if readErr != nil {
+		// Same window-edge rule as above: the step deadline cancelling an
+		// in-flight body read is the harness ending the measurement.
+		if ctx.Err() != nil {
+			return outcomeExcluded, elapsed
+		}
+		return outcomeFailed, elapsed
+	}
 	return classifyHTTPStatus(resp.StatusCode, false), elapsed
 }
 

@@ -55,6 +55,7 @@ func diffCounters(start, end msgCounters) msgCounters {
 type missCounts struct {
 	Replies           int
 	Broadcasts        int
+	ReplyEligible     int
 	BroadcastEligible int
 }
 
@@ -83,6 +84,7 @@ func buildMessagesInputs(
 		Saturation:        int(delta.err["saturated"]),
 		EmitUnderrun:      int(delta.err["underrun"]),
 		MissingReplies:    miss.Replies,
+		ReplyEligible:     miss.ReplyEligible,
 		MissingBroadcasts: miss.Broadcasts,
 		BroadcastEligible: miss.BroadcastEligible,
 		Latencies: []seriesSamples{
@@ -278,21 +280,26 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 	// cancel is absent from the denominator yet still registered in the
 	// correlation map, so Finalize counts it as missing and the miss rate can
 	// exceed 100%.
-	//
-	// Counters are still read before the drain, so a gatekeeper or bad_reply
-	// error whose reply lands during the drain is not attributed to this step.
-	// The drain then lets trailing E1/E2 samples settle before percentiles and
-	// the unanswered-publish counts are taken.
 	cancel()
 	wg.Wait()
 	// No publish can land after wg.Wait, so [holdStart, holdEnd] bounds every
 	// publish this step made.
 	holdEnd := time.Now()
-	endCounts := w.snapshotCounters()
+	// Pending is a point-in-time backlog reading and belongs at the hold
+	// boundary: taken after the drain it would show a queue the consumers had
+	// been given extra time to work off.
 	endPending, perr2 := w.snapshotPending(ctx)
 	if err := waitOrCancel(ctx, w.drain); err != nil {
 		return rpsStepInputs{}, err
 	}
+	// Counters are cumulative outcome tallies, so they are read after the drain
+	// — the generator has stopped, so every increment during the drain is an
+	// outcome for a hold-window request. Reading them before the drain lost
+	// those outcomes entirely: a malformed reply arriving during the drain
+	// incremented bad_reply outside this step's delta while DiscardReply
+	// consumed its correlation, so it was neither a failure nor a missing
+	// reply, and the increment silently moved into the next step's baseline.
+	endCounts := w.snapshotCounters()
 	w.collector.DiscardBefore(holdStart)
 
 	if holdErr != nil {
@@ -308,7 +315,7 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 	// pre-holdStart timestamp. DiscardBefore only filters the completed sample
 	// slices, not the correlation maps, so Finalize would score that warm-up
 	// leftover against this step.
-	missingReplies, _ := w.collector.MissingInWindow(holdStart, holdEnd)
+	replyEligible, missingReplies := w.collector.ReplyStatsInWindow(holdStart, holdEnd)
 	broadcastEligible, missingBroadcasts := w.collector.BroadcastStatsInWindow(holdStart, holdEnd)
 
 	delta := diffCounters(startCounts, endCounts)
@@ -321,6 +328,6 @@ func (w *messagesWorkload) RunStep(ctx context.Context, targetRPS int, warmup, h
 		startPending, endPending, w.durables, pendingOK,
 		missCounts{
 			Replies: missingReplies, Broadcasts: missingBroadcasts,
-			BroadcastEligible: broadcastEligible,
+			ReplyEligible: replyEligible, BroadcastEligible: broadcastEligible,
 		}), nil
 }

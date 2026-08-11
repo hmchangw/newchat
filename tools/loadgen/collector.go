@@ -142,13 +142,17 @@ func (c *Collector) RecordPublishBroadcastOnly(messageID string, t time.Time) {
 	ms.mu.Unlock()
 }
 
-// RecordAcceptedBroadcastPublish records one successfully accepted publish at
-// the acceptance boundary and includes it in the broadcast SLI denominator.
-// Failed publishes never call this method, so numerator and denominator come
-// from the same accepted set.
-func (c *Collector) RecordAcceptedBroadcastPublish(messageID string, acceptedAt time.Time) {
-	c.RecordPublishBroadcastOnly(messageID, acceptedAt)
-	c.broadcastEligible.Add(1)
+// DiscardBroadcastPublish removes a correlation registered before a publish
+// that then failed, so the orphan is not reported as a dropped broadcast.
+// Counterpart to registering with RecordPublishBroadcastOnly ahead of the
+// publish; the denominator is only incremented (RecordBroadcastEligible) once
+// the publish succeeds, so numerator and denominator still come from the same
+// accepted set.
+func (c *Collector) DiscardBroadcastPublish(messageID string) {
+	ms := c.msgShards[shardIdx(messageID)]
+	ms.mu.Lock()
+	delete(ms.byMsgID, messageID)
+	ms.mu.Unlock()
 }
 
 // RecordPublishFailed removes entries previously stored by RecordPublish.
@@ -270,6 +274,36 @@ func (c *Collector) MissingInWindow(start, end time.Time) (replies, broadcasts i
 		ms.mu.Unlock()
 	}
 	return replies, broadcasts
+}
+
+// ReplyStatsInWindow returns the reply-eligible publishes and the
+// still-unmatched subset within [start, end], the reply-side counterpart to
+// BroadcastStatsInWindow.
+//
+// Missing replies used to be divided by AttemptedOps, which counts marshal and
+// publish failures too. Those never register a correlation, so they could only
+// dilute the rate: 9 publish errors and 10 missing replies in 10,000 attempts
+// reports exactly 0.1% and slips past a strict `>` gate, although 10 of the
+// 9,991 requests that were actually accepted is over it. Deriving both sides
+// from the same accepted set removes that.
+func (c *Collector) ReplyStatsInWindow(start, end time.Time) (eligible, missing int) {
+	inWindow := func(t time.Time) bool { return !t.Before(start) && !t.After(end) }
+	for _, rs := range &c.reqShards {
+		rs.mu.Lock()
+		for _, e := range rs.byReqID {
+			if inWindow(e.publishedAt) {
+				eligible++
+				missing++
+			}
+		}
+		for _, s := range rs.e1 {
+			if inWindow(s.publishedAt) {
+				eligible++
+			}
+		}
+		rs.mu.Unlock()
+	}
+	return eligible, missing
 }
 
 // BroadcastStatsInWindow returns the accepted broadcast-eligible publishes and

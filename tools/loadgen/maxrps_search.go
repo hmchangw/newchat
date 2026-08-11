@@ -100,17 +100,46 @@ func ParseSearchMix(s string) (SearchMix, error) {
 }
 
 // classifySearchReply maps one request/reply round onto an eligibility class.
-// A transport error (which for nats.Request means the reply never arrived
-// within the timeout) is a failure, not an absent sample — the same rule the
-// messages workload applies to dropped broadcasts.
-func classifySearchReply(body []byte, reqErr error) sloOutcome {
+// A transport error (which for a request means the reply never arrived within
+// the timeout) is a failure, not an absent sample — the same rule the messages
+// workload applies to dropped broadcasts.
+//
+// A reply that is neither an errcode envelope nor a decodable success payload
+// is a failure too. Treating "not an error envelope" as success let an empty,
+// truncated or contract-incompatible body improve both SLO-7 and SLO-8, which
+// is the same bias as the rest of this file: a response the client could not
+// consume must not read as a served request.
+func classifySearchReply(e searchEndpoint, body []byte, reqErr error) sloOutcome {
 	if reqErr != nil {
 		return outcomeFailed
 	}
-	if e, ok := errcode.Parse(body); ok {
-		return classifyErrcode(e.Code)
+	if ec, ok := errcode.Parse(body); ok {
+		return classifyErrcode(ec.Code)
+	}
+	if !decodesAsSearchResponse(e, body) {
+		return outcomeFailed
 	}
 	return outcomeGood
+}
+
+// decodesAsSearchResponse reports whether body is the success payload this
+// endpoint is contracted to return. The check is the presence of the top-level
+// collection, not its length: a zero-hit search legitimately replies with an
+// empty array, while `{}` or `{"unexpected":1}` leaves it nil and is a contract
+// violation rather than an empty result.
+func decodesAsSearchResponse(e searchEndpoint, body []byte) bool {
+	switch e {
+	case searchMessages:
+		var resp model.SearchMessagesResponse
+		return json.Unmarshal(body, &resp) == nil && resp.Messages != nil
+	case searchRooms:
+		var resp model.SearchRoomsResponse
+		return json.Unmarshal(body, &resp) == nil && resp.Rooms != nil
+	default:
+		// search.users replies with a bare JSON array, not an object.
+		var users []model.SearchUser
+		return json.Unmarshal(body, &users) == nil && users != nil
+	}
 }
 
 // searchQueryGen builds request payloads. Query terms vary per request: a
@@ -126,9 +155,17 @@ func newSearchQueryGen(seed int64) *searchQueryGen {
 	return &searchQueryGen{rng: rand.New(rand.NewSource(seed)), size: 20} // #nosec G404 -- deterministic fixture generation, not security
 }
 
-// searchTerms are short tokens drawn from the seeded message content so that
-// hits are plausible rather than uniformly empty. An always-empty result set
-// would exercise neither scoring nor the enrichment path.
+// searchTerms are ordinary vocabulary tokens, used verbatim. They used to be
+// suffixed with the iteration number for variety, which turned "hello" into
+// "hello0" — a distinct term under standard or keyword analysis, so no indexed
+// document could match and the workload only ever exercised the zero-hit path,
+// skipping retrieval and enrichment entirely. Variety now comes from the term
+// and filter combinations below, which keeps every query a real term.
+//
+// These do NOT match loadgen's own seeded corpus: the message generator fills
+// bodies with a run of 'x'. As the README states, the search workload reads
+// whatever the index already holds, so a meaningful run needs an index carrying
+// representative data — a prerequisite of the workload, not of these terms.
 var searchTerms = []string{
 	"hello", "meeting", "report", "update", "review", "deploy",
 	"status", "issue", "release", "ticket", "design", "budget",
@@ -136,8 +173,8 @@ var searchTerms = []string{
 
 var searchRoomTypes = []string{"", "all", "channel", "dm"}
 
-// build returns the JSON body for one request. i seeds the deterministic part
-// so a run is reproducible for a given --seed.
+// build returns the JSON body for one request. i selects the second term so a
+// run is reproducible for a given --seed.
 func (g *searchQueryGen) build(e searchEndpoint, i int) []byte {
 	g.mu.Lock()
 	term := searchTerms[g.rng.Intn(len(searchTerms))]
@@ -145,8 +182,12 @@ func (g *searchQueryGen) build(e searchEndpoint, i int) []byte {
 	size := g.size
 	g.mu.Unlock()
 
-	// Vary the term further by iteration so consecutive requests rarely repeat.
-	query := fmt.Sprintf("%s%d", term, i%97)
+	// Consecutive queries differ by pairing a second real term with the first,
+	// rather than by mutating either into a token no document can contain.
+	query := term
+	if second := searchTerms[i%len(searchTerms)]; second != term {
+		query = term + " " + second
+	}
 
 	// Typed request structs from pkg/model, not map[string]any: CLAUDE.md
 	// requires NATS payloads to use them, and it makes a field rename in the
@@ -284,18 +325,25 @@ func buildSearchInputs(targetRPS int, hold time.Duration, c *searchCollector, sl
 			Name: e.String(), Samples: samples, DiagnosticOnly: true,
 		})
 	}
-	in.EventRatios = []eventRatioInput{
-		{
-			// SLO-7 is availability, not latency: every success is good,
-			// against every eligible request. Excluded outcomes have already
-			// left both sides in the collector.
-			Name: "SLO-7", Valid: good + failed, SuccessfulLatencies: allSuccessful,
-			Target: slo7.Target, Kind: ratioSuccess,
-		},
-		{
+	in.EventRatios = []eventRatioInput{{
+		// SLO-7 is availability, not latency: every success is good, against
+		// every eligible request. Excluded outcomes have already left both
+		// sides in the collector.
+		Name: "SLO-7", Valid: good + failed, SuccessfulLatencies: allSuccessful,
+		Target: slo7.Target, Kind: ratioSuccess,
+	}}
+	// SLO-8 is only declared when the step actually produced successes. Its
+	// denominator is successful searches, so a total outage would build it with
+	// Valid=0 — an invalid SLI, and invalid SLIs outrank a TRIP. That let the
+	// one verdict a dead search service must produce (SLO-7 at 0%) be masked by
+	// an undefined latency ratio, exactly inverting the intended precedence.
+	// With no successes there is no latency statement to make; the availability
+	// ratio carries the step on its own.
+	if good > 0 {
+		in.EventRatios = append(in.EventRatios, eventRatioInput{
 			Name: "SLO-8", Valid: good, SuccessfulLatencies: allSuccessful,
 			Target: slo8.Target, Kind: ratioLatency, Bound: slo8.Bound,
-		},
+		})
 	}
 	return in
 }
@@ -371,9 +419,18 @@ func (w *searchWorkload) drive(ctx context.Context, targetRPS int, d time.Durati
 			sub := w.fixtures.Subscriptions[i%len(w.fixtures.Subscriptions)]
 			subj := searchSubjectFor(endpoint, sub.User.Account, w.siteID)
 
+			// RequestWithContext, not Request: the plain form observes only
+			// requestTimeout and ignores reqCtx entirely, so at the step
+			// boundary up to MaxInFlight requests kept running for the full
+			// timeout — delaying shutdown, holding inboxes, and letting a late
+			// reply be recorded into a hold window that had already closed.
+			// The child deadline keeps a genuine per-request timeout a failure
+			// while step cancellation propagates immediately.
+			callCtx, callCancel := context.WithTimeout(reqCtx, w.requestTimeout)
 			start := time.Now()
-			msg, err := w.nc.Request(subj, w.queries.build(endpoint, i), w.requestTimeout)
+			msg, err := w.nc.RequestWithContext(callCtx, subj, w.queries.build(endpoint, i))
 			elapsed := time.Since(start)
+			callCancel()
 			// A request cut short because the step window closed is the harness
 			// ending the measurement, not the service failing. Excluded for the
 			// same reason as the login path; a genuine reply timeout leaves
@@ -386,7 +443,7 @@ func (w *searchWorkload) drive(ctx context.Context, targetRPS int, d time.Durati
 			if msg != nil {
 				data = msg.Data
 			}
-			c.Record(endpoint, classifySearchReply(data, err), elapsed)
+			c.Record(endpoint, classifySearchReply(endpoint, data, err), elapsed)
 		})
 
 	// The parent being cancelled is a real abort; this step's own deadline

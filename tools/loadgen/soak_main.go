@@ -48,6 +48,26 @@ type soakRuntimeStore interface {
 // own: validateSoakPageBudget checks the actual pair at startup.
 const soakDefaultPageLimit = 15
 
+// soakWalkRowBudget is how many clustered rows a paged walk must be able to
+// reach, independent of how the pages are sized.
+//
+// MaxPages used to be hardcoded at 100, which was a 5,000-row reach at the old
+// 50-row page. Lowering the page to fit the broker payload silently cut that to
+// 1,500: once a partition grew past it, older rows became unreachable to the
+// verifier and a mutation there would be missed or misreported as
+// target-missing. Page size is a transport constraint and walk depth is a
+// coverage requirement, so the two must not be the same number.
+const soakWalkRowBudget = 5000
+
+// soakMaxPages converts the row budget into a page count for the configured
+// page size, so a smaller page buys more pages rather than less history.
+func soakMaxPages(pageLimit int) int {
+	if pageLimit <= 0 {
+		return 1
+	}
+	return (soakWalkRowBudget + pageLimit - 1) / pageLimit
+}
+
 // soakOptions are the soak run's command-line knobs.
 type soakOptions struct {
 	Seed      int64
@@ -466,7 +486,7 @@ func runSoakWorkload(
 	)
 	warmReader := newSoakReader(
 		soakReadConfig{
-			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: 100,
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
 			RequestTimeout: soakRequestTimeout,
 		},
 		&topology,
@@ -514,7 +534,7 @@ func runSoakWorkload(
 	)
 	verifier := newSoakVerifier(
 		&soakVerifyConfig{
-			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: 100,
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
 			RequestTimeout: soakRequestTimeout,
 		},
 		catalog,

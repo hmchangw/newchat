@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 // Compile-time check: searchWorkload satisfies rpsWorkload.
@@ -128,13 +130,13 @@ func TestSearchCollector_OnlyTimesSuccesses(t *testing.T) {
 func TestClassifySearchReply_OK(t *testing.T) {
 	body, err := json.Marshal(map[string]any{"messages": []any{}, "total": 0})
 	require.NoError(t, err)
-	assert.Equal(t, outcomeGood, classifySearchReply(body, nil))
+	assert.Equal(t, outcomeGood, classifySearchReply(searchMessages, body, nil))
 }
 
 // A no-reply (request timeout) is a failure, never an absent sample — the same
 // rule the messages workload now applies to dropped broadcasts.
 func TestClassifySearchReply_TimeoutIsFailure(t *testing.T) {
-	assert.Equal(t, outcomeFailed, classifySearchReply(nil, assert.AnError))
+	assert.Equal(t, outcomeFailed, classifySearchReply(searchMessages, nil, assert.AnError))
 }
 
 func TestClassifySearchReply_ErrorEnvelope(t *testing.T) {
@@ -155,7 +157,7 @@ func TestClassifySearchReply_ErrorEnvelope(t *testing.T) {
 				"error": "boom",
 			})
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, classifySearchReply(body, nil))
+			assert.Equal(t, tc.want, classifySearchReply(searchMessages, body, nil))
 		})
 	}
 }
@@ -222,4 +224,120 @@ func TestSearchSubjectFor(t *testing.T) {
 		searchSubjectFor(searchRooms, "alice", "site-local"))
 	assert.Equal(t, "chat.user.alice.request.search.site-local.users",
 		searchSubjectFor(searchUsers, "alice", "site-local"))
+}
+
+// A reply the client could not consume must not read as a served request.
+// Treating "not an errcode envelope" as success let an empty or truncated body
+// improve both SLO-7 and SLO-8.
+func TestClassifySearchReply_MalformedBodyIsFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{"nil body", nil},
+		{"empty body", []byte{}},
+		{"not json", []byte("not json")},
+		{"truncated json", []byte(`{"messages":[`)},
+		{"json null", []byte("null")},
+		{"object without the contracted collection", []byte(`{"unexpected":1}`)},
+		{"empty object", []byte(`{}`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, outcomeFailed, classifySearchReply(searchMessages, tt.body, nil))
+		})
+	}
+}
+
+// A zero-hit search is a served request: the collection is present and empty,
+// which must stay distinct from a body that omits it entirely.
+func TestClassifySearchReply_ZeroHitsIsSuccess(t *testing.T) {
+	tests := []struct {
+		endpoint searchEndpoint
+		body     string
+	}{
+		{searchMessages, `{"messages":[],"total":0}`},
+		{searchRooms, `{"rooms":[]}`},
+		{searchUsers, `[]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.endpoint.String(), func(t *testing.T) {
+			assert.Equal(t, outcomeGood, classifySearchReply(tt.endpoint, []byte(tt.body), nil))
+		})
+	}
+}
+
+// Each endpoint validates against its own contract: search.users replies with a
+// bare array, so an object body is a contract violation there.
+func TestClassifySearchReply_ValidatesPerEndpointShape(t *testing.T) {
+	assert.Equal(t, outcomeFailed, classifySearchReply(searchUsers, []byte(`{"messages":[]}`), nil))
+	assert.Equal(t, outcomeFailed, classifySearchReply(searchRooms, []byte(`[]`), nil))
+	assert.Equal(t, outcomeGood, classifySearchReply(searchUsers, []byte(`[{"account":"u-1"}]`), nil))
+}
+
+// A total search outage must TRIP on availability. SLO-8's denominator is
+// successful searches, so declaring it with Valid=0 made an invalid SLI
+// outrank the one verdict a dead service has to produce.
+func TestBuildSearchInputs_AllFailedTripsAvailability(t *testing.T) {
+	c := newSearchCollector()
+	for range 100 {
+		c.Record(searchMessages, outcomeFailed, 0)
+	}
+
+	in := buildSearchInputs(100, time.Second, c, testSLO7(), testSLO8())
+
+	require.Len(t, in.EventRatios, 1, "SLO-8 is undefined with no successful searches")
+	assert.Equal(t, "SLO-7", in.EventRatios[0].Name)
+
+	res := evaluateRPSStep(&in, defaultRPSThresholds())
+	require.Equal(t, verdictTrip, res.Kind, "reasons=%v", res.Reasons)
+	assert.Contains(t, res.Reasons[0], "SLO-7 good ratio")
+}
+
+// One success is enough to make a latency statement, so SLO-8 comes back.
+func TestBuildSearchInputs_DeclaresSLO8OnceThereIsASuccess(t *testing.T) {
+	c := newSearchCollector()
+	c.Record(searchMessages, outcomeGood, 10*time.Millisecond)
+	for range 99 {
+		c.Record(searchMessages, outcomeFailed, 0)
+	}
+
+	in := buildSearchInputs(100, time.Second, c, testSLO7(), testSLO8())
+
+	require.Len(t, in.EventRatios, 2)
+	assert.Equal(t, "SLO-8", in.EventRatios[1].Name)
+	assert.Equal(t, 1, in.EventRatios[1].Valid)
+}
+
+// Terms must stay real tokens: suffixing the iteration number turned every
+// query into a term no indexed document could contain.
+func TestSearchQueryGen_UsesUnmutatedTerms(t *testing.T) {
+	g := newSearchQueryGen(42)
+	vocabulary := map[string]bool{}
+	for _, term := range searchTerms {
+		vocabulary[term] = true
+	}
+
+	for i := range 200 {
+		var req model.SearchMessagesRequest
+		require.NoError(t, json.Unmarshal(g.build(searchMessages, i), &req))
+		require.NotEmpty(t, req.Query)
+		for _, word := range strings.Fields(req.Query) {
+			assert.True(t, vocabulary[word],
+				"query %q contains %q, which is not a corpus term", req.Query, word)
+		}
+	}
+}
+
+// Variety still has to come from somewhere, or every request would be served
+// from Elasticsearch's query cache after the first hit.
+func TestSearchQueryGen_ProducesVariedQueries(t *testing.T) {
+	g := newSearchQueryGen(42)
+	seen := map[string]bool{}
+	for i := range 200 {
+		var req model.SearchMessagesRequest
+		require.NoError(t, json.Unmarshal(g.build(searchMessages, i), &req))
+		seen[req.Query] = true
+	}
+	assert.Greater(t, len(seen), 20, "queries must not collapse onto a handful of terms")
 }
