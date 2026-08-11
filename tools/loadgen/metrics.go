@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -36,6 +37,17 @@ type Metrics struct {
 	SoakVerifications         *prometheus.CounterVec
 	SoakMutationTargetMissing prometheus.Counter
 	SoakSaturation            *prometheus.CounterVec
+
+	FailureOperations    *prometheus.CounterVec
+	FailureObservations  *prometheus.CounterVec
+	FailureInflight      *prometheus.GaugeVec
+	FailureRecovered     prometheus.Counter
+	FailureInvalidations *prometheus.CounterVec
+	FailureJournalBytes  prometheus.Gauge
+
+	NATSConnected        *prometheus.GaugeVec
+	NATSConnectionEvents *prometheus.CounterVec
+	NATSOutageDuration   *prometheus.HistogramVec
 }
 
 // NewMetrics constructs a dedicated Prometheus registry with all loadgen
@@ -162,6 +174,68 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"lane"},
 	)
+	m.FailureOperations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_operations_total",
+			Help: "Completed fault-observation operations by bounded scenario, lane, and result.",
+		},
+		[]string{"scenario", "lane", "result"},
+	)
+	m.FailureObservations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_observations_total",
+			Help: "Fault-observation results by bounded scenario, lane, observer, and result.",
+		},
+		[]string{"scenario", "lane", "observer", "result"},
+	)
+	m.FailureInflight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "loadgen_failure_inflight",
+			Help: "Operations awaiting one or more fault-observation results.",
+		},
+		[]string{"scenario", "lane"},
+	)
+	m.FailureRecovered = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_recovered_operations_total",
+			Help: "Unresolved operations recovered from the persistent failure ledger.",
+		},
+	)
+	m.FailureInvalidations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_invalidations_total",
+			Help: "Conditions that invalidate fault-test evidence, by bounded reason.",
+		},
+		[]string{"reason"},
+	)
+	m.FailureJournalBytes = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "loadgen_failure_journal_bytes",
+			Help: "Current persistent failure-ledger WAL size in bytes.",
+		},
+	)
+	m.NATSConnected = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "loadgen_nats_connected",
+			Help: "Whether an instrumented loadgen NATS pool is currently connected.",
+		},
+		[]string{"pool"},
+	)
+	m.NATSConnectionEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_nats_connection_events_total",
+			Help: "Loadgen NATS connection lifecycle events.",
+		},
+		[]string{"pool", "event"},
+	)
+	m.NATSOutageDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_nats_outage_duration_seconds",
+			Help:    "Observed duration of loadgen NATS disconnections.",
+			Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300},
+		},
+		[]string{"pool"},
+	)
 	r.MustRegister(
 		m.Published, m.PublishErrors,
 		m.E1Latency, m.E2Latency,
@@ -173,6 +247,11 @@ func NewMetrics() *Metrics {
 		m.SoakOperations, m.SoakRetries, m.SoakErrors,
 		m.SoakRPCLatency, m.SoakVerifications,
 		m.SoakMutationTargetMissing, m.SoakSaturation,
+		m.FailureOperations, m.FailureObservations, m.FailureInflight,
+		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
+		m.NATSConnected, m.NATSConnectionEvents, m.NATSOutageDuration,
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return m
 }

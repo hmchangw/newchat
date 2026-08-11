@@ -86,6 +86,18 @@ type soakSendReplyResult struct {
 	ErrorClass soakErrorClass
 }
 
+type soakSendLifecycle interface {
+	Start(*soakPendingSend) error
+}
+
+type soakSenderOption func(*soakSender)
+
+func withSoakSendLifecycle(lifecycle soakSendLifecycle) soakSenderOption {
+	return func(sender *soakSender) {
+		sender.lifecycle = lifecycle
+	}
+}
+
 type soakSender struct {
 	cfg       soakSendConfig
 	catalog   *soakCatalog
@@ -93,6 +105,7 @@ type soakSender struct {
 	clock     soakClock
 	rng       *rand.Rand
 	ids       *soakSendIDs
+	lifecycle soakSendLifecycle
 
 	rngMu     sync.Mutex
 	pendingMu sync.Mutex
@@ -106,6 +119,7 @@ func newSoakSender(
 	clock soakClock,
 	rng *rand.Rand,
 	ids *soakSendIDs,
+	options ...soakSenderOption,
 ) *soakSender {
 	if clock == nil {
 		clock = soakRealClock{}
@@ -119,10 +133,14 @@ func newSoakSender(
 	if cfg.ReplyTimeout <= 0 {
 		cfg.ReplyTimeout = 10 * time.Second
 	}
-	return &soakSender{
+	sender := &soakSender{
 		cfg: cfg, catalog: catalog, publisher: publisher, clock: clock,
 		rng: rng, ids: ids, pending: make(map[string]*soakPendingSend),
 	}
+	for _, option := range options {
+		option(sender)
+	}
+	return sender
 }
 
 func (s *soakSender) Publish(
@@ -190,6 +208,13 @@ func (s *soakSender) Publish(
 	if err := s.addPending(pending); err != nil {
 		s.rejectPending(pending)
 		return nil, err
+	}
+	if s.lifecycle != nil {
+		if err := s.lifecycle.Start(cloneSoakPendingSend(pending)); err != nil {
+			s.removePending(pending.RequestID)
+			s.rejectPending(pending)
+			return nil, fmt.Errorf("persist soak send intent: %w", err)
+		}
 	}
 
 	if err := s.publisher.Publish(ctx, pending.Subject, pending.Payload); err != nil {
@@ -262,6 +287,10 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 }
 
 func (s *soakSender) Expire() int {
+	return len(s.ExpireResults())
+}
+
+func (s *soakSender) ExpireResults() []soakSendReplyResult {
 	now := s.clock.Now()
 	expired := make([]*soakPendingSend, 0)
 	s.pendingMu.Lock()
@@ -276,7 +305,15 @@ func (s *soakSender) Expire() int {
 	for _, pending := range expired {
 		s.rejectPending(pending)
 	}
-	return len(expired)
+	results := make([]soakSendReplyResult, 0, len(expired))
+	for _, pending := range expired {
+		results = append(results, soakSendReplyResult{
+			Status: soakSendReplyRejected, Kind: pending.Kind,
+			RequestID: pending.RequestID, MessageID: pending.MessageID,
+			Latency: now.Sub(pending.PublishedAt), ErrorClass: soakErrorTimeout,
+		})
+	}
+	return results
 }
 
 func (s *soakSender) rejectPending(pending *soakPendingSend) {
@@ -331,6 +368,12 @@ func (s *soakSender) takePending(
 	}
 	delete(s.pending, requestID)
 	return pending
+}
+
+func (s *soakSender) removePending(requestID string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	delete(s.pending, requestID)
 }
 
 func matchingSoakSendReply(

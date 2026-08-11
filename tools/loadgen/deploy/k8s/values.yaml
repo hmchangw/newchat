@@ -30,6 +30,17 @@ metrics:
     prometheus.io/path: /metrics
     prometheus.io/port: "9099"
 
+ledger:
+  enabled: true
+  existingClaim: ""
+  storageClassName: ""
+  accessMode: ReadWriteOnce
+  size: 20Gi
+  mountPath: /var/lib/loadgen/ledger
+  capacity: "200000"
+  reconcileDeadline: 10m
+  reconcileRetryInterval: 1s
+
 seed:
   randomSeed: 42
   activeDeadlineSeconds: 7200

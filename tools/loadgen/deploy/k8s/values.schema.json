@@ -11,6 +11,7 @@
     "mongo",
     "cassandra",
     "metrics",
+    "ledger",
     "seed",
     "soak",
     "teardown"
@@ -84,6 +85,35 @@
           "type": "object",
           "additionalProperties": {"type": "string"}
         }
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "existingClaim",
+        "storageClassName",
+        "accessMode",
+        "size",
+        "mountPath",
+        "capacity",
+        "reconcileDeadline",
+        "reconcileRetryInterval"
+      ],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "existingClaim": {"type": "string"},
+        "storageClassName": {"type": "string"},
+        "accessMode": {
+          "type": "string",
+          "enum": ["ReadWriteOnce", "ReadWriteOncePod"]
+        },
+        "size": {"type": "string", "minLength": 1},
+        "mountPath": {"type": "string", "pattern": "^/"},
+        "capacity": {"type": "string", "minLength": 1},
+        "reconcileDeadline": {"type": "string", "minLength": 1},
+        "reconcileRetryInterval": {"type": "string", "minLength": 1}
       }
     },
     "seed": {

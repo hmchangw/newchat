@@ -70,10 +70,15 @@ services:
       - SOAK_RETRY_MAX_BACKOFF=${SOAK_RETRY_MAX_BACKOFF:-5s}
       - SOAK_RECENT_PER_ROOM=${SOAK_RECENT_PER_ROOM:-128}
       - SOAK_RECENT_TOTAL=${SOAK_RECENT_TOTAL:-200000}
+      - SOAK_LEDGER_DIR=/var/lib/loadgen/ledger
+      - SOAK_LEDGER_CAPACITY=${SOAK_LEDGER_CAPACITY:-200000}
+      - SOAK_RECONCILE_DEADLINE=${SOAK_RECONCILE_DEADLINE:-10m}
+      - SOAK_RECONCILE_RETRY_INTERVAL=${SOAK_RECONCILE_RETRY_INTERVAL:-1s}
       - SOAK_CASSANDRA_CLEANUP=${SOAK_CASSANDRA_CLEANUP:-none}
       - SOAK_CONFIRM_KEYSPACE=${SOAK_CONFIRM_KEYSPACE:-}
     volumes:
       - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - loadgen-ledger:/var/lib/loadgen/ledger
     ports:
       - "9099:9099"
     entrypoint: ["sleep", "infinity"]
@@ -165,3 +170,6 @@ services:
 networks:
   chat-local:
     external: true
+
+volumes:
+  loadgen-ledger:

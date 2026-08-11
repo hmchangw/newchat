@@ -48,6 +48,52 @@
       "title": "Publish errors/sec",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
       "targets": [{"expr": "rate(loadgen_publish_errors_total[10s])", "legendFormat": "{{reason}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cassandra soak operation rate",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [{"expr": "sum by (action, outcome) (rate(loadgen_soak_operations_total[1m]))", "legendFormat": "{{action}} / {{outcome}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Failure ledger terminal outcomes",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [{"expr": "sum by (lane, result) (rate(loadgen_failure_operations_total[1m]))", "legendFormat": "{{lane}} / {{result}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "NATS connection and lifecycle events",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "loadgen_nats_connected{pool=\"soak\"}", "legendFormat": "{{pool}} connected", "refId": "A"},
+        {"expr": "sum by (pool, event) (rate(loadgen_nats_connection_events_total[1m]))", "legendFormat": "{{pool}} / {{event}}/s", "refId": "B"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconciliation inflight and invalidations",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {"expr": "sum by (lane) (loadgen_failure_inflight)", "legendFormat": "{{lane}} inflight", "refId": "A"},
+        {"expr": "sum by (reason) (increase(loadgen_failure_invalidations_total[5m]))", "legendFormat": "{{reason}} invalidations/5m", "refId": "B"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Failure ledger WAL and loadgen memory",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "targets": [
+        {"expr": "loadgen_failure_journal_bytes", "legendFormat": "WAL bytes", "refId": "A"},
+        {"expr": "process_resident_memory_bytes", "legendFormat": "RSS bytes", "refId": "B"},
+        {"expr": "go_memstats_heap_alloc_bytes", "legendFormat": "Go heap bytes", "refId": "C"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconciliation observations",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "targets": [{"expr": "sum by (observer, result) (rate(loadgen_failure_observations_total[1m]))", "legendFormat": "{{observer}} / {{result}}", "refId": "A"}]
     }
   ]
 }

@@ -364,7 +364,8 @@ func runSoakWorkload(
 		return 1
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
 	if err != nil {
 		slog.Error("connect NATS for Cassandra soak", "error", err)
 		return 1
@@ -386,7 +387,6 @@ func runSoakWorkload(
 		return 2
 	}
 
-	metrics := NewMetrics()
 	metricsServer := startSoakMetricsServer(cfg.MetricsAddr, metrics)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -408,6 +408,22 @@ func runSoakWorkload(
 		collectorDuration,
 	)
 	recorders := newSoakCollectorRecorders(collector, now)
+	ledger, err := openSoakFailureLedger(&cfg.Soak, metrics, now)
+	if err != nil {
+		slog.Error("open Cassandra soak failure ledger", "error", err)
+		return 1
+	}
+	defer func() {
+		if err := ledger.Close(); err != nil {
+			slog.Error("close Cassandra soak failure ledger", "error", err)
+		}
+	}()
+	failureTracker := newSoakFailureTracker(
+		ledger,
+		cfg.Soak.PersistGrace,
+		cfg.Soak.ReconcileDeadline,
+		now,
+	)
 	catalog := newSoakCatalog(
 		cfg.Soak.RecentPerRoom,
 		cfg.Soak.RecentTotal,
@@ -430,6 +446,7 @@ func runSoakWorkload(
 		nil,
 		rand.New(rand.NewSource(seed+4)),
 		nil,
+		withSoakSendLifecycle(failureTracker),
 	)
 	sendReplies := make(chan soakSendObservation, cfg.MaxInFlight+1)
 	responseSub, err := startSoakSendResponsesWithObserver(
@@ -453,6 +470,9 @@ func runSoakWorkload(
 				Action: action, Outcome: outcome, At: now(),
 				Latency: result.Latency, ErrorClass: errorClass,
 			})
+			if err := failureTracker.ObserveReply(&result); err != nil {
+				slog.Error("record Cassandra soak send observation", "error", err)
+			}
 			select {
 			case sendReplies <- soakSendObservation{result: result}:
 			default:
@@ -487,6 +507,19 @@ func runSoakWorkload(
 		},
 		nil,
 		nil,
+	)
+	failureVerifier := newSoakFailureRPCVerifier(
+		cfg.SiteID,
+		rpc,
+		catalog,
+		recorders.verify,
+		now,
+	)
+	failureReconciler := newSoakFailureReconciler(
+		ledger,
+		failureVerifier,
+		cfg.Soak.ReconcileRetryInterval,
+		now,
 	)
 	warmReader := newSoakReader(
 		soakReadConfig{
@@ -550,11 +583,17 @@ func runSoakWorkload(
 	var verificationSequence atomic.Uint64
 	actions := soakWorkloadActions{
 		Send: func(actionCtx context.Context, _ bool) error {
-			for range sender.Expire() {
+			for _, result := range sender.ExpireResults() {
 				_ = collector.Record(&soakOperationSample{
 					Action: soakRPCSend, Outcome: soakOutcomeFailed, At: now(),
 					ErrorClass: soakErrorTimeout,
 				})
+				if err := failureTracker.ObserveReply(&result); err != nil {
+					slog.Error("record expired Cassandra soak send", "error", err)
+				}
+			}
+			if _, err := ledger.Expire(now()); err != nil {
+				slog.Error("expire Cassandra soak failure operations", "error", err)
 			}
 			target, content := selector.nextSend()
 			pending, publishErr := sender.Publish(actionCtx, target, content)
@@ -569,9 +608,26 @@ func runSoakWorkload(
 				Action: action, Outcome: soakOutcomeFailed, At: now(),
 				ErrorClass: classifySoakRPCError(publishErr),
 			})
+			if pending != nil {
+				if err := failureTracker.ObserveReply(&soakSendReplyResult{
+					Status: soakSendReplyRejected, Kind: pending.Kind,
+					RequestID: pending.RequestID, MessageID: pending.MessageID,
+					ErrorClass: classifySoakRPCError(publishErr),
+				}); err != nil {
+					slog.Error("record failed Cassandra soak publish", "error", err)
+				}
+			}
 			return nil
 		},
 		Read: func(actionCtx context.Context, _ bool) error {
+			reconciled, err := failureReconciler.Try(actionCtx)
+			if err != nil {
+				slog.Error("reconcile Cassandra soak operation", "error", err)
+				return nil
+			}
+			if reconciled {
+				return nil
+			}
 			_, _ = reader.ReadMixed(actionCtx, selector.nextRoom())
 			return nil
 		},

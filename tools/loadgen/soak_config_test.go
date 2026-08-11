@@ -278,6 +278,40 @@ func validSoakConfig(t *testing.T) soakConfig {
 	return cfg
 }
 
+func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*soakConfig)
+		want   string
+	}{
+		{
+			name:   "zero capacity",
+			mutate: func(cfg *soakConfig) { cfg.LedgerCapacity = 0 },
+			want:   "SOAK_LEDGER_CAPACITY",
+		},
+		{
+			name:   "deadline does not exceed persistence grace",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileDeadline = cfg.PersistGrace },
+			want:   "SOAK_RECONCILE_DEADLINE",
+		},
+		{
+			name:   "zero retry interval",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileRetryInterval = 0 },
+			want:   "SOAK_RECONCILE_RETRY_INTERVAL",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			tt.mutate(&cfg)
+
+			err := validateSoakConfig(&cfg, "chat")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 // The page limit is a payload knob, so its safe value depends on how large the
 // soak's own messages are — SOAK_PAYLOAD_MAX_BYTES, not history-service's 20 KB
 // content cap, which the soak never reaches. Raising the payload size without

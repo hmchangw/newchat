@@ -94,7 +94,14 @@ These metrics do not replace database telemetry; they connect dependency behavio
 | `loadgen_soak_verifications_total{action,class}` | loadgen soak | Sampled Cassandra read-back correctness | Existing |
 | `loadgen_soak_mutation_target_missing_total` | loadgen soak | Persisted target still absent after the dedicated wait/retry policy | Existing |
 | `loadgen_soak_saturation_total{lane}` | loadgen soak | Invalid-run detector: loadgen dropped work because its own in-flight budget filled | Existing |
-| `loadgen_published_total`, `loadgen_publish_errors_total`, E1/E2 histograms | loadgen message modes | Admission and visible-delivery impact on Mongo/Cassandra-backed paths | Existing but no terminal outcome ledger |
+| `loadgen_failure_operations_total{scenario,lane,result}` | loadgen soak | Terminal good/bad/missing-after-deadline results for durable operation lanes | Existing for Cassandra user-message sends |
+| `loadgen_failure_observations_total{scenario,lane,observer,result}` | loadgen soak | Separates admission failures from Cassandra history loss or mismatch | Existing for admission and Cassandra history |
+| `loadgen_failure_inflight{scenario,lane}` | loadgen soak | Unresolved-operation backlog and deadline pressure | Existing for Cassandra user-message sends |
+| `loadgen_failure_recovered_operations_total` | loadgen soak | Operations restored from the PVC-backed WAL after loadgen restart | Existing |
+| `loadgen_failure_invalidations_total{reason}` | loadgen soak | Ledger capacity or WAL failures that invalidate evidence | Existing |
+| `loadgen_failure_journal_bytes` | loadgen soak | Persistent evidence footprint and compaction health | Existing |
+| `loadgen_nats_connected{pool}`, `loadgen_nats_connection_events_total{pool,event}`, `loadgen_nats_outage_duration_seconds_*{pool}` | loadgen soak | Separates generator connection loss from service/storage impact | Existing for soak; other loadgen pools remain a gap |
+| `loadgen_published_total`, `loadgen_publish_errors_total`, E1/E2 histograms | loadgen message modes | Admission and visible-delivery impact on Mongo/Cassandra-backed paths | Existing; terminal ledger is currently limited to soak message sends |
 | `loadgen_member_*` | loadgen member modes | Mongo-backed room/member operation impact | Existing but no final state ledger |
 | `loadgen_botroom_*` | loadgen botroom mode | Bot path traffic and latency | Existing, but it does not exercise the real bot-message-worker persistence lane |
 | `oplog_events_published_total`, `oplog_publish_errors_total`, `oplog_events_skipped_total`, `oplog_events_degraded_total`, `oplog_replication_lag_ms` | oplog-connector | Mongo change-stream progress and downstream publish health | Existing |
@@ -102,7 +109,7 @@ These metrics do not replace database telemetry; they connect dependency behavio
 | `cache_hits_total`, `cache_misses_total`, `cache_errors_total` | service caches | Explains whether Mongo load/impact was hidden or amplified by cache behavior | Existing in selected services |
 | `go_*`, `process_*`, container CPU/memory/network | SDK/runtime, cAdvisor | Detects client or loadgen exhaustion and recovery surge | Existing where targets are scraped |
 
-Existing loadgen metrics are aggregate counters/histograms. They do not prove that every accepted operation reached a terminal state, and most lack a test run identifier. A failure test remains inconclusive if aggregate success looks healthy but individual operations can disappear.
+The Cassandra soak message-send lane now proves a terminal admission and history result for every generated operation and retains unresolved evidence on a dedicated PVC. Other loadgen lanes remain aggregate or sampled. A campaign that relies on one of those lanes remains inconclusive if aggregate success looks healthy but individual operations can disappear.
 
 ## 6. Missing Metrics and Telemetry
 
@@ -116,7 +123,7 @@ Existing loadgen metrics are aggregate counters/histograms. They do not prove th
 | Mongo instrumentation gaps | Instrument every direct service/process listed in Section 3.1 | Otherwise the service-by-service dashboard is incomplete |
 | Cassandra batch telemetry | Route production batches through the o11y batch seam or add equivalent batch duration/error metrics | The highest-risk denormalized writes are currently absent from Cassandra operation metrics |
 | Retry/exhaustion metrics | Count application retry, driver attempt, JetStream redelivery, terminal failure, and permanent drop separately | Logs alone cannot prove retry safety or enumerate exhausted work |
-| Operation outcome ledger | Add bounded `eligible/good/bad/missing` counters backed by an operation-ID ledger/reconciler | Required to detect silent loss and ambiguous success |
+| Operation outcome ledger expansion | Extend the implemented Cassandra message-send ledger to MongoDB state, mutations, real bot messages, federation, and the remaining JetStream lanes | Required to detect silent loss and ambiguous success outside the first vertical slice |
 | Fault timeline | Emit Grafana annotations or a bounded `fault_event` series with run/scenario/phase | Required to align election, error, backlog, and recovery windows |
 
 ### 6.2 MongoDB server signals to normalize

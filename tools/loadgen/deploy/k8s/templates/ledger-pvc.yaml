@@ -1,0 +1,21 @@
+{{- if and (eq .Values.phase "soak") .Values.ledger.enabled (not .Values.ledger.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-ledger" (include "cassandra-soak.fullname" .) }}
+  labels:
+    {{- include "cassandra-soak.labels" . | nindent 4 }}
+    loadgen.newchat/phase: soak
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes:
+    - {{ .Values.ledger.accessMode | quote }}
+  {{- if .Values.ledger.storageClassName }}
+  storageClassName: {{ .Values.ledger.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.ledger.size | quote }}
+{{- end }}

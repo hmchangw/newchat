@@ -6,6 +6,15 @@ component-specific and system-wide test plans.
 
 ## Current Plans
 
+- [`failure-testing-overview.md`](failure-testing-overview.md) defines the
+  shared NATS, MongoDB, and Cassandra failure-test program.
+- [`loadgen-failure-observation.md`](loadgen-failure-observation.md) documents
+  the deployable persistent operation ledger and Cassandra message vertical
+  slice implemented by the continuous soak workload.
+- [`nats-jetstream-failure-test-plan.md`](nats-jetstream-failure-test-plan.md),
+  [`mongodb-failure-test-plan.md`](mongodb-failure-test-plan.md), and
+  [`cassandra-failure-test-plan.md`](cassandra-failure-test-plan.md) own the
+  dependency-specific inventories and remaining coverage gaps.
 - [`system/sli-slo.md`](system/sli-slo.md) is the platform's user-facing
   SLI/SLO specification — the acceptance criteria all system-level load tests
   assert against.

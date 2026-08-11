@@ -225,6 +225,13 @@ Every campaign uses four phases: stable warmup for at least two maximum retry wi
 
 ### P0: Required Before Formal Failure Campaigns
 
+Implementation status on 2026-08-12: Cassandra soak now exposes its NATS
+connected state, lifecycle events, and outage duration, and its user-message
+lane has a PVC-backed admission-to-history operation ledger. These are shared
+building blocks, but the daily connection pool, other loadgen modes, complete
+durable sampler, terminal advisories, and federation observers below remain
+open. See [Loadgen Failure Observation Runtime](loadgen-failure-observation.md).
+
 1. **Shared resilient connection and self-monitoring**
    - Give every loadgen pool a consistent, explicit reconnect policy.
    - Expose disconnect/reconnect/closed, buffer-full, last-connected-server, and reconnect-duration telemetry.
@@ -233,7 +240,8 @@ Every campaign uses four phases: stable warmup for at least two maximum retry wi
 2. **Per-operation outcome ledger / assertion mode**
    - Persist operation ID, lane, deadline, expected event, and final read-back for each operation.
    - Count eligible/good/bad/missing-after-deadline outcomes. Percentiles must not use successful samples only.
-   - Support send-to-settle execution so late recovery is not lost when the fault ends.
+   - Keep deadline-based reconciliation running continuously so late recovery
+     is not lost when an externally injected fault ends.
 
 3. **Complete durable sampler**
    - Include all enabled gatekeeper, message, broadcast, notification, push, room, inbox, outbox, search-sync, bot, HR, and migration durables.

@@ -185,8 +185,11 @@ All subsystem plans depend on the same loadgen foundations:
 
 2. **Per-operation outcome ledger**
    - Operation ID, lane, start time, deadline, expected effects, and final read-back.
-   - Mutually exclusive eligible/good/bad/missing-after-deadline outcomes.
-   - Send, fault, recovery, and settle windows that remain separately queryable.
+   - Eligibility is separate from the mutually exclusive terminal results
+     `good`, `bad`, and `missing_after_deadline`.
+   - Operation timestamps remain queryable against externally recorded fault
+     and recovery annotations; loadgen does not switch traffic behavior when a
+     fault begins.
 
 3. **Dependency-specific observers**
    - NATS / JetStream stream and consumer state, advisories, and reconnect behavior.
@@ -200,6 +203,11 @@ All subsystem plans depend on the same loadgen foundations:
    - NATS recipient events, federation state, push outcomes, and search convergence.
 
 Existing modes should be combined into a production-calibrated profile rather than relying on built-in default ratios. Until coverage gaps are closed, every report must state which product lanes were not exercised.
+
+The first implementation of this foundation is documented in
+[Loadgen Failure Observation Runtime](loadgen-failure-observation.md). It
+covers the Cassandra soak user-message admission-to-history lane and does not
+imply that the remaining subsystem lanes are complete.
 
 ## 9. Shared Acceptance Gates
 

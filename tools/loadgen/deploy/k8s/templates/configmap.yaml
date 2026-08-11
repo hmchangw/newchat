@@ -48,6 +48,10 @@ data:
   SOAK_RETRY_MAX_BACKOFF: {{ .Values.soak.retryMaxBackoff | quote }}
   SOAK_RECENT_PER_ROOM: {{ .Values.soak.recentPerRoom | quote }}
   SOAK_RECENT_TOTAL: {{ .Values.soak.recentTotal | quote }}
+  SOAK_LEDGER_DIR: {{ ternary .Values.ledger.mountPath "" .Values.ledger.enabled | quote }}
+  SOAK_LEDGER_CAPACITY: {{ .Values.ledger.capacity | quote }}
+  SOAK_RECONCILE_DEADLINE: {{ .Values.ledger.reconcileDeadline | quote }}
+  SOAK_RECONCILE_RETRY_INTERVAL: {{ .Values.ledger.reconcileRetryInterval | quote }}
   SOAK_CASSANDRA_CLEANUP: {{ .Values.cassandra.cleanup | quote }}
   SOAK_CONFIRM_KEYSPACE: {{ .Values.cassandra.confirmKeyspace | quote }}
   SOAK_TEARDOWN_BATCH_ROOMS: {{ .Values.teardown.batchRooms | quote }}

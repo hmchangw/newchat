@@ -4,7 +4,7 @@
 
 ## 1. Executive Summary
 
-Cassandra stores denormalized message history in four tables and is directly used by message-worker, bot-message-worker, history-service, and es-index-migrator. Current loadgen soak mode provides useful normal-path traffic and sampled read-back for user messages, threads, edits, deletes, reactions, pins, and history reads. It does not yet prove degraded-mode correctness.
+Cassandra stores denormalized message history in four tables and is directly used by message-worker, bot-message-worker, history-service, and es-index-migrator. Current loadgen soak mode provides useful normal-path traffic, durable per-operation admission-to-history reconciliation for user message sends, and sampled read-back for threads, edits, deletes, reactions, pins, and other history reads. It does not yet prove every degraded-mode mirror invariant.
 
 The main gaps are:
 
@@ -145,8 +145,15 @@ Sampling is useful for soak performance, but a fault campaign needs 100% reconci
 
 ### P0 — before a conclusive campaign
 
-1. Add an operation ledger with operation ID, expected table set, deadline, and eligible/good/bad/missing final state.
-2. Add full post-settle mirror reconciliation for all run-owned operations.
+Implementation status on 2026-08-12: the deployable soak harness now persists
+message-send intents to a PVC-backed WAL, records admission and
+`GetMessageByID` observations, retries reconciliation inside the existing read
+budget, restores unresolved operations after restart, and emits bounded
+terminal-outcome and loadgen self-health metrics. See
+[Loadgen Failure Observation Runtime](loadgen-failure-observation.md).
+
+1. Extend the implemented user-message operation ledger to carry the expected table set for mutations, thread counters, pins, and reactions.
+2. Extend the implemented per-message history reconciliation to full post-settle mirror reconciliation for all run-owned operation types.
 3. Separate loadgen retry, NATS request retry, JetStream redelivery, Cassandra query attempt/page, and terminal exhaustion counters.
 4. Add a real bot canonical-to-bot-message-worker scenario.
 5. Add max-delivery advisory/terminal-message evidence for message-worker and bot-message-worker.
