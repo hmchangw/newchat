@@ -43,7 +43,6 @@ services:
       # Must match the broker's max_payload. Emitter rejects batches larger
       # than this before publish so the failure surfaces with a clear error
       # instead of a NATS NACK.
-      - NATS_MAX_PAYLOAD_BYTES=${NATS_MAX_PAYLOAD_BYTES:-262144}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
     volumes:
       - ../../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro

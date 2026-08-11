@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 
@@ -90,4 +91,23 @@ func TestMobileEmitter_RejectsOversizedBatch(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds NATS max_payload")
 	assert.Empty(t, pub.records, "oversized batch must not reach the publisher")
+}
+
+func TestClampPayloadCap(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int64
+		want int
+	}{
+		{name: "typical broker value", in: 1048576, want: 1048576},
+		{name: "zero disables the guard", in: 0, want: 0},
+		{name: "negative clamps to zero", in: -1, want: 0},
+		{name: "above MaxInt clamps to MaxInt", in: math.MaxInt64, want: math.MaxInt},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, clampPayloadCap(tt.in))
+		})
+	}
 }

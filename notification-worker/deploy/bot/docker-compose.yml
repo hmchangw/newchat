@@ -36,7 +36,6 @@ services:
       # Must match the broker's max_payload. Emitter rejects batches larger
       # than this before publish so the failure surfaces with a clear error
       # instead of a NATS NACK.
-      - NATS_MAX_PAYLOAD_BYTES=${NATS_MAX_PAYLOAD_BYTES:-262144}
       # BOT-MESSAGES-CANONICAL owned by bot-message-handler; BOT-PUSH-NOTIFICATION is ops/IaC-owned.
       # true like the user variants — false means verify-and-exit, and the bot
       # streams' creator (bot-message-handler) is not in compose.services.yaml.
