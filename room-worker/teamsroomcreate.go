@@ -261,16 +261,9 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 	if err != nil {
 		return fmt.Errorf("marshal membership event: %w", err)
 	}
-	// The internal lane carries the InboxEvent envelope like every other
-	// InboxInternal publisher — search-sync-worker decodes evt.Payload. The
-	// federated branch below stays unwrapped: outbox.Publish builds its own.
-	//
-	// Timestamp is acceptedAt, NOT time.Now(): search-sync-worker uses it as the
-	// ES external document version (spotlight.go, user_room.go), and this is a
-	// batch replay, so it must be the batch's logical time. Wall-clock here would
-	// give a redelivered older event a higher version than the newer event that
-	// superseded it — resurrecting a removed member. The federated lane passes
-	// acceptedAt for the same reason.
+	// Envelope for the internal lane only — outbox.Publish builds its own below.
+	// Timestamp is acceptedAt, not time.Now(): it becomes the ES external doc
+	// version, and wall-clock would let a redelivered older event outrank a newer one.
 	internalData, err := json.Marshal(model.InboxEvent{
 		Type:       eventType,
 		SiteID:     h.siteID,
