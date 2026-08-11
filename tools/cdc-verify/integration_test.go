@@ -375,3 +375,60 @@ func TestEndToEnd_ResolverHop(t *testing.T) {
 		assert.Equal(t, "resolver-miss: user", got.Targets[0].LastCause)
 	})
 }
+
+// setupCassandraWithReactions mirrors the real messages_by_id shape: it carries
+// a `reactions map<frozen<udt>, ...>` column whose struct key gocql's MapScan
+// cannot represent. The whole-row inspect view must skip it, not crash.
+func setupCassandraWithReactions(t *testing.T) *cassTargetHandle {
+	t.Helper()
+	keyspace, admin, host := testutil.CassandraKeyspace(t, "cdcinspect")
+	require.NoError(t, admin.Query(
+		`CREATE TYPE IF NOT EXISTS `+keyspace+`.reaction_key (emoji text)`).Exec())
+	require.NoError(t, admin.Query(
+		`CREATE TABLE IF NOT EXISTS `+keyspace+`.messages_by_id (
+			message_id text PRIMARY KEY, body text, created_at bigint,
+			reactions map<frozen<reaction_key>, text>)`).Exec())
+
+	session, err := cassutil.Connect(cassutil.Config{Hosts: host, Keyspace: keyspace})
+	require.NoError(t, err)
+	t.Cleanup(func() { cassutil.Close(session) })
+	return &cassTargetHandle{store: newCassStore(session), raw: session}
+}
+
+// TestInspect_CassandraStructKeyedMap reproduces the inspect-popup crash: a
+// whole-row SELECT * over a table with a struct-keyed map column panicked in
+// gocql's MapScan. The unrepresentable column must be skipped, the rest returned.
+func TestInspect_CassandraStructKeyedMap(t *testing.T) {
+	cass := setupCassandraWithReactions(t)
+	require.NoError(t, cass.raw.Query(
+		`INSERT INTO messages_by_id (message_id, body, created_at) VALUES (?, ?, ?)`,
+		"m9", "hi", int64(1700000000000)).Exec())
+
+	srcDB := testutil.MongoDB(t, "cdcinspect_src")
+	tgtDB := testutil.MongoDB(t, "cdcinspect_tgt")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := srcDB.Collection("rocketchat_message").InsertOne(ctx, bson.M{"_id": "m9", "msg": "hi"})
+	require.NoError(t, err)
+
+	mapping := &Mapping{Sources: []SourceMapping{{
+		Collection: "rocketchat_message",
+		Ops:        map[string]OpAction{"insert": OpVerify},
+		Targets: map[string]Target{
+			"byId": {Kind: "cassandra", Table: "messages_by_id",
+				Key: map[string]KeyFrom{"message_id": {From: []string{"_id"}}}},
+		},
+		Fields: map[string][]DestRef{"msg": {{Dest: "byId.body"}}},
+	}}}
+	v := newVerifier(mapping, newMongoStore(srcDB), newMongoStore(tgtDB), cass.store,
+		newTransformRegistry(msgbucket.New(72*time.Hour)), newResultsStore(10, 10, nil),
+		verifierConfig{Poll: time.Second, Timeout: time.Minute, MaxChecks: 4, SamplePercent: 100})
+
+	got, err := v.Inspect(ctx, "rocketchat_message", "m9")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"_id": "m9", "msg": "hi"}, got.Source)
+	require.Len(t, got.Targets, 1)
+	assert.Empty(t, got.Targets[0].Error, "struct-keyed map column must be skipped, not error")
+	assert.Equal(t, "hi", got.Targets[0].Doc["body"])
+	assert.NotContains(t, got.Targets[0].Doc, "reactions", "unrepresentable column is omitted")
+}

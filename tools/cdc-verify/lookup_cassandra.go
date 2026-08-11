@@ -46,11 +46,27 @@ func buildSelect(table string, key map[string]any, cols []string) (string, []any
 	return q, args, nil
 }
 
-func (s *cassStore) SelectOne(ctx context.Context, table string, key map[string]any, cols []string) (map[string]any, error) {
+func (s *cassStore) SelectOne(ctx context.Context, table string, key map[string]any, cols []string) (result map[string]any, err error) {
+	// A whole-row read (no explicit projection) must not select columns gocql
+	// can't scan — a struct-keyed map (e.g. reactions map<frozen<udt>,...>)
+	// panics MapScan. Resolve the scannable subset from column metadata first.
+	if len(cols) == 0 {
+		cols, err = s.scannableColumns(ctx, table, key)
+		if err != nil {
+			return nil, err
+		}
+	}
 	q, args, err := buildSelect(table, key, cols)
 	if err != nil {
 		return nil, fmt.Errorf("build select: %w", err)
 	}
+	// Belt-and-suspenders: any residual gocql type panic degrades to an error
+	// rather than tearing down the request.
+	defer func() {
+		if r := recover(); r != nil {
+			result, err = nil, fmt.Errorf("scan %s: %v", table, r)
+		}
+	}()
 	// #nosec G201 -- identifiers validated against ^[a-zA-Z0-9_]+$ in buildSelect; values are bound parameters
 	iter := s.session.Query(q, args...).WithContext(ctx).Iter()
 	var rows []map[string]any
@@ -74,6 +90,60 @@ func (s *cassStore) SelectOne(ctx context.Context, table string, key map[string]
 		return rows[0], nil
 	default:
 		return nil, errAmbiguous
+	}
+}
+
+// scannableColumns lists a row's column names minus any gocql can't MapScan
+// into a Go value. It reads only column metadata (never materialising a row),
+// so it can't hit the MapScan panic it exists to avoid.
+func (s *cassStore) scannableColumns(ctx context.Context, table string, key map[string]any) ([]string, error) {
+	q, args, err := buildSelect(table, key, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build select: %w", err)
+	}
+	// #nosec G201 -- identifiers validated against ^[a-zA-Z0-9_]+$ in buildSelect; values are bound parameters
+	iter := s.session.Query(q, args...).WithContext(ctx).Iter()
+	var out []string
+	for _, c := range iter.Columns() {
+		if cqlScannable(c.TypeInfo) {
+			out = append(out, c.Name)
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return nil, fmt.Errorf("inspect columns of %s: %w", table, err)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no scannable columns in %s", table)
+	}
+	return out, nil
+}
+
+// cqlScannable reports whether gocql can MapScan a column of this type. A map
+// whose key is a frozen UDT or nested collection can't be built as a Go map
+// (reflect.MapOf rejects a non-comparable key type), so such columns are not.
+func cqlScannable(t gocql.TypeInfo) bool {
+	ct, ok := t.(gocql.CollectionType)
+	if !ok {
+		return true
+	}
+	switch ct.Type() {
+	case gocql.TypeMap:
+		return cqlComparableKey(ct.Key) && cqlScannable(ct.Elem)
+	case gocql.TypeList, gocql.TypeSet:
+		return cqlScannable(ct.Elem)
+	default:
+		return true
+	}
+}
+
+// cqlComparableKey reports whether a CQL type maps to a comparable Go type
+// usable as a map key. UDTs and collections do not.
+func cqlComparableKey(t gocql.TypeInfo) bool {
+	switch t.Type() {
+	case gocql.TypeUDT, gocql.TypeMap, gocql.TypeList, gocql.TypeSet, gocql.TypeTuple:
+		return false
+	default:
+		return true
 	}
 }
 
