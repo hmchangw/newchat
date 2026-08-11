@@ -2,6 +2,7 @@ package natsrouter
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"testing"
@@ -12,8 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/baggage"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -275,7 +274,7 @@ func TestRequestID_NoDebugHeaderIsOff(t *testing.T) {
 	assert.Equal(t, natsutil.DebugOff, observed, "no X-Debug header → no rung on ctx")
 }
 
-func TestTraceIdentity_UsesDecodedRouteParams(t *testing.T) {
+func TestRouter_AutomaticallyEnrichesIdentityWithoutOptInMiddleware(t *testing.T) {
 	previousTracer := otel.GetTracerProvider()
 	previousMeter := otel.GetMeterProvider()
 	previousPropagator := otel.GetTextMapPropagator()
@@ -292,33 +291,29 @@ func TestTraceIdentity_UsesDecodedRouteParams(t *testing.T) {
 	t.Setenv("O11Y_METRICS_ENABLED", "false")
 	t.Setenv("O11Y_LOG_ENABLED", "false")
 	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
-	t.Setenv("OTEL_SERVICE_NAME", "natsrouter-identity-test")
+	t.Setenv("OTEL_SERVICE_NAME", "natsrouter-automatic-identity-test")
 	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", "0")
 
 	_, shutdown, err := obs.Init(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = shutdown(context.Background()) })
 
-	recorder := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
-	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
-	ctx, span := tp.Tracer("test").Start(context.Background(), "nats entry")
+	nc := startTestNATS(t)
+	r := New(nc, "identity-test")
+	got := make(chan baggage.Baggage, 1)
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity",
+		func(c *Context, _ testReq) (*testResp, error) {
+			got <- baggage.FromContext(c)
+			return &testResp{Greeting: "ok"}, nil
+		})
 
-	c := &Context{
-		ctx:    ctx,
-		Params: NewParams(map[string]string{"account": "weather.bot", "roomID": "r1", "siteID": "s1"}),
-		chain:  &chainState{index: -1},
-	}
-	var got baggage.Baggage
-	c.chain.handlers = []HandlerFunc{
-		TraceIdentity(),
-		func(c *Context) { got = baggage.FromContext(c) },
-	}
-	c.Next()
-	span.End()
+	data, err := json.Marshal(testReq{})
+	require.NoError(t, err)
+	_, err = nc.Request(context.Background(),
+		"chat.user.weather_bot.request.room.room-42.site-1.identity", data, 2*time.Second)
+	require.NoError(t, err)
 
-	assert.Equal(t, "weather.bot", got.Member("user.name").Value())
-	assert.Equal(t, "r1", got.Member(obs.RoomIDKey).Value())
-	assert.Equal(t, "s1", got.Member(obs.SiteIDKey).Value())
-	require.Len(t, recorder.Ended(), 1)
+	bag := <-got
+	assert.Equal(t, "weather.bot", bag.Member("user.name").Value())
+	assert.Equal(t, "room-42", bag.Member(obs.RoomIDKey).Value())
 }

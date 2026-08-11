@@ -12,6 +12,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 )
@@ -80,6 +84,48 @@ func TestStreamTranslator_SendsAuthorizationHeader(t *testing.T) {
 	_, err := tr.Translate(context.Background(), "hi", "en")
 	require.NoError(t, err)
 	assert.Equal(t, "J2-test", gotAuth) // raw J2 token, no Bearer prefix
+}
+
+func TestStreamTranslator_StripsBaggageBeforeThirdPartyEgress(t *testing.T) {
+	previous := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{},
+	))
+	t.Cleanup(func() { otel.SetTextMapPropagator(previous) })
+
+	var tokenBaggage, tokenTraceparent, translateBaggage, translateTraceparent string
+	atSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenBaggage = r.Header.Get("baggage")
+		tokenTraceparent = r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"token":"J2-test","expiresAt":"`+rfc3339In(time.Hour)+`"}`)
+	}))
+	t.Cleanup(atSrv.Close)
+	translateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translateBaggage = r.Header.Get("baggage")
+		translateTraceparent = r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"returnCode":96200,"returnMessage":"success","returnData":{"translation":"ok"}}`+"\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n")
+	}))
+	t.Cleanup(translateSrv.Close)
+
+	member, err := baggage.NewMember("user.name", "alice")
+	require.NoError(t, err)
+	bag, err := baggage.New(member)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), bag)
+	ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceFlags: trace.FlagsSampled,
+	}))
+
+	tr := newStreamTranslator(translateSrv.URL, atSrv.URL, staticJ1("J1-test"), 5*time.Second, time.Minute)
+	_, err = tr.Translate(ctx, "hello", "en")
+	require.NoError(t, err)
+	assert.Empty(t, tokenBaggage)
+	assert.Empty(t, translateBaggage)
+	assert.NotEmpty(t, tokenTraceparent, "trace correlation must survive baggage stripping")
+	assert.NotEmpty(t, translateTraceparent, "trace correlation must survive baggage stripping")
 }
 
 func TestStreamTranslator_NonSuccessCodeErrors(t *testing.T) {

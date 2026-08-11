@@ -85,10 +85,12 @@ func TestConnect_WithObservability_CassandraMetricsIncludeTable(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	tp := trace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	session, err := Connect(
 		Config{Hosts: host, Keyspace: keyspace},
-		WithObservability(recorderObs{tp: trace.NewTracerProvider(), mp: mp}),
+		WithObservability(recorderObs{tp: tp, mp: mp}),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { Close(session) })

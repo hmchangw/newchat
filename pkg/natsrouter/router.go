@@ -84,14 +84,14 @@ func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 }
 
 // Default returns a Router pre-configured with the recommended middleware
-// stack: Recovery, RequestID, TraceIdentity, Logging — mirroring gin.Default()'s shape.
+// stack: Recovery, RequestID, Logging — mirroring gin.Default()'s shape.
 // Equivalent to:
 //
 //	r := New(nc, queue, opts...)
-//	r.Use(Recovery(), RequestID(), TraceIdentity(), Logging())
+//	r.Use(Recovery(), RequestID(), Logging())
 //
 // Recovery is registered first (outermost) so it catches panics from
-// RequestID, TraceIdentity, and Logging themselves, not just from the handler. This
+// RequestID and Logging themselves, not just from the handler. This
 // differs from gin.Default(), which places Logger() first; gin's order
 // is fine for HTTP because gin's Logger doesn't panic, but our
 // outermost-Recovery posture is strictly stricter.
@@ -103,7 +103,7 @@ func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 // HandlerTimeout sits relative to Logging in the chain.
 func Default(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	r := New(nc, queue, opts...)
-	r.Use(Recovery(), RequestID(), TraceIdentity(), Logging())
+	r.Use(Recovery(), RequestID(), Logging())
 	return r
 }
 
@@ -165,8 +165,12 @@ func (r *Router) Use(mw ...HandlerFunc) {
 
 func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 	rt := parsePattern(pattern)
-	all := make([]HandlerFunc, 0, len(r.middleware)+len(handlers))
+	all := make([]HandlerFunc, 0, len(r.middleware)+1+len(handlers))
 	all = append(all, r.middleware...)
+	// Identity enrichment is router plumbing, not an opt-in middleware. Keep it
+	// immediately before the typed handler so every New/Default call path is
+	// covered while Recovery, RequestID, Logging, and HandlerTimeout can wrap it.
+	all = append(all, traceIdentity())
 	all = append(all, handlers...)
 
 	natsHandler := func(msgCtx context.Context, m *nats.Msg) {

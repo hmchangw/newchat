@@ -87,7 +87,7 @@ func (p *presenceClient) accessToken(ctx context.Context) (string, error) {
 	form.Set("username", p.creds.Username)
 	form.Set("password", p.creds.Password)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.tokenURL, strings.NewReader(form.Encode()))
+	req, err := newExternalRequestWithContext(ctx, http.MethodPost, p.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("build ropc token request: %w", err)
 	}
@@ -152,7 +152,7 @@ func (p *presenceClient) fetch(ctx context.Context, token string, ids []string) 
 		return nil, fmt.Errorf("marshal presence ids: %w", err)
 	}
 	endpoint := p.baseURL + "/communications/getPresencesByUserId"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	req, err := newExternalRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("build presence request: %w", err)
 	}

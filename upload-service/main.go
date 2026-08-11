@@ -139,7 +139,7 @@ func run() error {
 	r.Use(corsMiddleware(cfg.CORSAllowedOrigins))
 	// o11y server-span middleware wraps real requests so downstream slog/handlers
 	// are trace-correlated.
-	r.Use(o11ygin.Middleware("upload-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
+	r.Use(o11ygin.Middleware("upload-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())

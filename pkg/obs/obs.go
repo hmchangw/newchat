@@ -22,14 +22,16 @@ import (
 	"github.com/flywindy/o11y"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const (
-	// RoomIDKey and SiteIDKey are application semantic-convention keys. OTel
-	// does not define a generic chat-room or chat-site attribute, so the chat.*
-	// namespace prevents collisions with present and future standard keys.
+	// RoomIDKey and SiteIDKey are application-defined OTel attribute keys. OTel
+	// does not define generic chat-room or chat-site semantic conventions, so
+	// the chat.* namespace prevents collisions with standard keys.
 	RoomIDKey = "chat.room.id"
 	SiteIDKey = "chat.site.id"
 )
@@ -170,6 +172,16 @@ func InitWithLoggerHandler(ctx context.Context, minLevel slog.Level, wrap func(s
 	return initSDK(ctx, &minLevel, wrap)
 }
 
+// PublicIngressPropagator accepts distributed trace context at an Internet-
+// facing HTTP boundary without accepting caller-controlled W3C baggage. The
+// handler can rebuild trusted identity after authentication. Using this as the
+// server middleware's extractor is important: clearing baggage in a later Gin
+// middleware would be too late to prevent the entry span's OnStart processor
+// from materializing forged values.
+func PublicIngressPropagator() propagation.TextMapPropagator {
+	return propagation.TraceContext{}
+}
+
 func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) slog.Handler) (*o11y.SDK, func(context.Context) error, error) {
 	// Avoid retaining an earlier successful initialization's policy if a later
 	// initialization in the same process (notably a test) fails.
@@ -210,21 +222,26 @@ func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) 
 // setting the current span is necessary because it started before middleware
 // could authenticate or parse the identity.
 //
-// account is PII and is ignored unless O11Y_USER_BAGGAGE_ENABLED=true. Room
-// and site use application-scoped keys because OpenTelemetry defines no generic
-// semantic convention for a chat room/site. Empty values are ignored.
+// account is PII and is added only when O11Y_USER_BAGGAGE_ENABLED=true; an
+// authoritative non-empty account still removes a superseded inbound value
+// when the opt-in is off. Room and site use application-scoped keys because
+// OpenTelemetry defines no generic semantic convention for them. Empty values
+// preserve trusted baggage received from an internal hop.
 func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) context.Context {
 	if !contextAttributesEnabled.Load() {
 		return ctx
 	}
 
-	if userBaggageEnabled.Load() && account != "" {
-		next, err := o11y.ContextWithUser(ctx, account)
-		if err != nil {
-			slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", o11y.UserNameKey, "error", err)
-		} else {
-			ctx = next
-			o11y.SetUser(ctx, account)
+	if account != "" {
+		ctx = withoutBaggageAttribute(ctx, o11y.UserNameKey)
+		if userBaggageEnabled.Load() {
+			next, err := o11y.ContextWithUser(ctx, account)
+			if err != nil {
+				slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", o11y.UserNameKey, "error", err)
+			} else {
+				ctx = next
+				o11y.SetUser(ctx, account)
+			}
 		}
 	}
 	ctx = contextWithBaggageAttribute(ctx, RoomIDKey, roomID)
@@ -236,6 +253,7 @@ func contextWithBaggageAttribute(ctx context.Context, key, value string) context
 	if value == "" {
 		return ctx
 	}
+	ctx = withoutBaggageAttribute(ctx, key)
 	next, err := o11y.ContextWithBaggageValue(ctx, key, value)
 	if err != nil {
 		slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", key, "error", err)
@@ -243,4 +261,18 @@ func contextWithBaggageAttribute(ctx context.Context, key, value string) context
 	}
 	trace.SpanFromContext(next).SetAttributes(attribute.String(key, value))
 	return next
+}
+
+// withoutBaggageAttribute removes a superseded inbound value before setting a
+// trusted one. If the replacement is rejected (for example, over the SDK size
+// limit), the old value must not survive in propagation or on the current entry
+// span. Empty span attributes are used only when OnStart already materialized a
+// value that OpenTelemetry cannot otherwise delete.
+func withoutBaggageAttribute(ctx context.Context, key string) context.Context {
+	if baggage.FromContext(ctx).Member(key).Key() == "" {
+		return ctx
+	}
+	ctx = o11y.ContextWithoutBaggageValues(ctx, key)
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String(key, ""))
+	return ctx
 }

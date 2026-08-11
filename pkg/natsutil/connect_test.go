@@ -90,6 +90,19 @@ func TestConnect_InvalidTracingEnvironmentFailsFast(t *testing.T) {
 	require.Contains(t, err.Error(), "OTEL_NATS_TRACING_ENABLED")
 }
 
+func TestConnect_InvalidRelayEndpointFailsFast(t *testing.T) {
+	native := startTestNATS(t)
+	unsetEnv(t, "OTEL_NATS_TRACING_ENABLED")
+	unsetEnv(t, "OTEL_INSTRUMENTATION_GO_FLAGS_POLL_INTERVAL")
+	t.Setenv("OTEL_INSTRUMENTATION_GO_TRACING_ENABLED", "true")
+	t.Setenv("OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT", "relay:1031")
+
+	_, err := natsutil.Connect(context.Background(), native.ConnectedUrl(), "",
+		noop.NewTracerProvider(), propagation.TraceContext{}, true)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT")
+}
+
 func unsetEnv(t *testing.T, key string) {
 	t.Helper()
 	value, existed := os.LookupEnv(key)

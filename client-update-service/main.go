@@ -56,7 +56,7 @@ func run() error {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(o11ygin.Middleware("client-update-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
+	r.Use(o11ygin.Middleware("client-update-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())

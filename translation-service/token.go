@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"go.opentelemetry.io/otel/baggage"
 
 	"github.com/hmchangw/chat/pkg/restyutil"
 )
@@ -98,6 +99,9 @@ func (p *tokenProvider) Refresh(ctx context.Context, stale string) (string, erro
 // fetchLocked calls the accessToken API, sending the J1 token in the JSON body
 // ({"key": <J1>}), and caches the J2 result. Caller must hold p.mu.
 func (p *tokenProvider) fetchLocked(ctx context.Context) (string, error) {
+	// The access-token API is a third party. Preserve trace correlation while
+	// preventing internal user/room baggage from crossing the trust boundary.
+	ctx = baggage.ContextWithoutBaggage(ctx)
 	key, err := p.readJ1()
 	if err != nil {
 		return "", fmt.Errorf("read j1 token: %w", err)

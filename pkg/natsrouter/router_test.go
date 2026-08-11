@@ -638,7 +638,7 @@ func TestRouter_replyBusy_NoReplySubject(t *testing.T) {
 
 func TestDefault_PreInstallsMiddleware(t *testing.T) {
 	r := Default(nil, "test")
-	assert.Len(t, r.middleware, 4, "Default should pre-install Recovery, RequestID, TraceIdentity, Logging")
+	assert.Len(t, r.middleware, 3, "Default should pre-install Recovery, RequestID, Logging")
 }
 
 func TestDefault_ForwardsOptions(t *testing.T) {

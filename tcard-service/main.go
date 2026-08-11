@@ -91,7 +91,7 @@ func run() error {
 	// CORS handles preflight before tracing so OPTIONS noise does not pollute Tempo.
 	r.Use(ginutil.CORS())
 	// o11y server-span middleware wraps real requests so slog/handlers are trace-correlated.
-	r.Use(o11ygin.Middleware("tcard-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
+	r.Use(o11ygin.Middleware("tcard-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())

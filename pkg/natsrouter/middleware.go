@@ -82,11 +82,12 @@ func RequireRequestID() HandlerFunc {
 	}
 }
 
-// TraceIdentity enriches the active NATS entry span and all downstream spans
-// and contextual logs with trusted route identity. Params were extracted from
-// the registered subject pattern before middleware runs; account has also been
+// traceIdentity enriches the active NATS entry span and all downstream spans
+// and contextual logs with trusted route identity. Router.addRoute installs it
+// for every router, including callers that use New with a hand-built middleware
+// stack. Params were extracted before middleware runs; account has also been
 // decoded from its NATS-safe bot transport form by route.extractParams.
-func TraceIdentity() HandlerFunc {
+func traceIdentity() HandlerFunc {
 	return func(c *Context) {
 		ctx := obs.ContextWithIdentity(
 			c.ctx,

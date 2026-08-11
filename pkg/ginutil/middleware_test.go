@@ -155,5 +155,5 @@ func TestCORS_PreflightOptions_AllowsTracePropagationHeaders(t *testing.T) {
 	allowed := w.Header().Get("Access-Control-Allow-Headers")
 	assert.Contains(t, allowed, "traceparent")
 	assert.Contains(t, allowed, "tracestate")
-	assert.Contains(t, allowed, "baggage")
+	assert.NotContains(t, allowed, "baggage", "public browser callers must not supply untrusted telemetry identity")
 }

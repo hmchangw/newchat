@@ -15,8 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // clearEnv unsets every variable obs reads so each test starts from a known
@@ -273,7 +275,9 @@ func TestContextWithIdentity_UserBaggageDisabled(t *testing.T) {
 
 	tp := sdktrace.NewTracerProvider()
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
-	ctx, span := tp.Tracer("test").Start(context.Background(), "entry")
+	ctx, err := o11y.ContextWithUser(context.Background(), "forged-user")
+	require.NoError(t, err)
+	ctx, span := tp.Tracer("test").Start(ctx, "entry")
 	defer span.End()
 
 	ctx = ContextWithIdentity(ctx, "alice", "room-42", "site-a")
@@ -282,7 +286,7 @@ func TestContextWithIdentity_UserBaggageDisabled(t *testing.T) {
 	assert.Equal(t, "room-42", bag.Member(RoomIDKey).Value())
 }
 
-func TestContextWithIdentity_RejectsOversizedValuesWithoutMutatingBaggage(t *testing.T) {
+func TestContextWithIdentity_RejectsOversizedValuesAndClearsSupersededBaggage(t *testing.T) {
 	testEnv(t, "identity-bounds-svc")
 	t.Setenv("O11Y_TRACE_ENABLED", "false")
 	t.Setenv("O11Y_METRICS_ENABLED", "false")
@@ -293,11 +297,28 @@ func TestContextWithIdentity_RejectsOversizedValuesWithoutMutatingBaggage(t *tes
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = shutdown(context.Background()) })
 
+	ctx, err := o11y.ContextWithUser(context.Background(), "forged-user")
+	require.NoError(t, err)
+	ctx, err = o11y.ContextWithBaggageValue(ctx, RoomIDKey, "forged-room")
+	require.NoError(t, err)
 	tooLong := strings.Repeat("x", o11y.MaxBaggageValueBytes+1)
-	ctx := ContextWithIdentity(context.Background(), tooLong, tooLong, "")
+	ctx = ContextWithIdentity(ctx, tooLong, tooLong, "")
 	bag := baggage.FromContext(ctx)
 	assert.Empty(t, bag.Member("user.name").Value())
 	assert.Empty(t, bag.Member(RoomIDKey).Value())
+}
+
+func TestPublicIngressPropagator_IgnoresUntrustedBaggage(t *testing.T) {
+	carrier := propagation.MapCarrier{
+		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"tracestate":  "vendor=value",
+		"baggage":     "user.name=forged-user,chat.room.id=forged-room",
+	}
+
+	ctx := PublicIngressPropagator().Extract(context.Background(), carrier)
+	assert.True(t, oteltrace.SpanContextFromContext(ctx).IsValid(), "trusted trace context must still propagate")
+	assert.Empty(t, baggage.FromContext(ctx).Members(), "public ingress must not accept caller-controlled baggage")
+	assert.ElementsMatch(t, []string{"traceparent", "tracestate"}, PublicIngressPropagator().Fields())
 }
 
 // testEnv sets the minimum env for a successful Init with a random metrics port

@@ -160,6 +160,13 @@ integration test (§9).
 > connection-local default; the effective state follows
 > `relay > OTEL_NATS_TRACING_ENABLED > option > module default`, with
 > `OTEL_INSTRUMENTATION_GO_TRACING_ENABLED` remaining the process-wide veto.
+> The zero-code relay path is enabled by setting
+> `OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT` before constructing the NATS
+> connection. It evaluates `otel-nats-tracing` for the module and
+> `otel-instrumentation-go-tracing` for the process-wide veto on every
+> operation, so a flag change does not require a pod restart. Invalid endpoint,
+> poll-interval, or boolean values fail connection construction rather than
+> silently selecting a fallback.
 
 **D3 — OTLP transport. → OTLP/HTTP (`:4318`).**
 `o11y` exports over HTTP; we currently use gRPC (`:4317`). Env/collector change,
@@ -193,8 +200,9 @@ type Config struct {
     OTLPHeaders    map[string]string `env:"OTEL_EXPORTER_OTLP_HEADERS"`
     PrometheusHost string            `env:"OTEL_EXPORTER_PROMETHEUS_HOST" envDefault:""`
     PrometheusPort string            `env:"OTEL_EXPORTER_PROMETHEUS_PORT" envDefault:"2112"`
-    // Head sampling is read directly by the SDK from the standard
-    // OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG — not duplicated here.
+    // Head sampling is mapped by pkg/obs from the standard
+    // OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG variables because o11y
+    // does not parse them directly.
     // Pillar toggles fall through to the SDK's O11Y_*_ENABLED env vars.
 }
 
@@ -211,6 +219,11 @@ Notes:
 - Request-ID correlation is preserved: `pkg/logctx`/`pkg/natsrouter` already add
   `request_id` as a slog attribute; `o11y`'s handler adds `traceId`/`spanId`.
   Verify both appear together in one log line in Phase 1 (package acceptance).
+- Public HTTP entry spans use a TraceContext-only propagator. Caller-controlled
+  baggage is rejected before span start; authenticated identity is rebuilt in
+  the handler. Internal NATS hops retain the SDK's composite TraceContext +
+  Baggage propagator. Third-party HTTP clients must remove baggage while
+  retaining the span context before egress.
 - **Metrics endpoint reconciliation:** `pkg/health` only serves `/healthz` +
   `/readyz` (never `/metrics`), so there is no collision with it. The SDK owns
   `/metrics` on `OTEL_EXPORTER_PROMETHEUS_HOST:PORT` (default `:2112`).
@@ -409,7 +422,7 @@ New env vars (defaults chosen so local dev "just works"):
 | `OTEL_EXPORTER_OTLP_HEADERS` | — | OTel standard; optional auth/routing |
 | `OTEL_EXPORTER_PROMETHEUS_HOST` | `""` (all interfaces) | OTel standard; SDK `/metrics` bind host |
 | `OTEL_EXPORTER_PROMETHEUS_PORT` | `2112` | OTel standard; SDK `/metrics` port |
-| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | per SDK | OTel standard; head sampling, read by the SDK directly |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | per SDK | OTel standard; head sampling, mapped to SDK options by `pkg/obs` |
 | `SERVICE_VERSION` | `dev` | resource attr (no OTel single-field std); from CI build tag |
 | `DEPLOY_ENV` | `development` | resource attr; `production`/`staging`/… |
 | `SERVICE_NAMESPACE` | `chat` | resource attr |
