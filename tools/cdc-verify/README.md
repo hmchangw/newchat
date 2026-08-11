@@ -119,6 +119,11 @@ delete, `_id`-keyed destinations stay inspectable (the source pane shows
 Also `GET /healthz`; `GET /api/state` serves the initial snapshot including
 the mapping's pair list.
 
+To preview the UI without any backing services, a seeded demo server ships
+behind a build tag:
+`go test -tags demoharness -count=1 -run TestDemoHarness ./tools/cdc-verify/`
+then open http://localhost:8091.
+
 ## Verification Semantics
 
 ### Convergence model
