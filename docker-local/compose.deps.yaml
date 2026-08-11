@@ -32,6 +32,13 @@ services:
     # tracks the same image testcontainers uses.
     image: mongo:8.2.9
     container_name: chat-local-mongodb
+    # Single-node replica set — transactions (admin-service password-change,
+    # deactivate, and the new permission-grant batch insert) require one; a
+    # standalone mongod rejects them outright. The member host below is the
+    # in-network service name "mongodb", so container-side clients need no
+    # config change; host-side tools (make seed, tools/jaeger/README.md) add
+    # ?directConnection=true instead of trying to resolve that name.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "27017:27017"
     volumes:
@@ -39,11 +46,14 @@ services:
       # chat.hr_employee went stale. `make seed` owns that collection now.
       - mongo-data:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "echo 'db.runCommand({ping:1}).ok' | mongosh --quiet | grep -q 1"]
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --eval
+          'try { rs.status().ok } catch (e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"mongodb:27017"}]}) }'
       interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
+      timeout: 10s
+      retries: 15
     networks:
       - chat-local
 
