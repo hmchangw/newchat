@@ -4619,6 +4619,22 @@ func TestUserStatusUpdated_RoundTrip(t *testing.T) {
 	roundTrip(t, &src, &dst)
 }
 
+func TestUserSettingsPriorityContactsRoundTrip(t *testing.T) {
+	src := model.UserSettings{PriorityContacts: []string{"alice", "helper.bot"}}
+	dst := model.UserSettings{}
+	roundTrip(t, &src, &dst)
+}
+
+// priorityContacts must NOT satisfy settings.set: it is written only by the
+// dedicated add/remove RPCs, so a settings.set carrying just this field has to
+// fall through to bad_request "no settings provided".
+func TestUserSettingsIsEmptyIgnoresPriorityContacts(t *testing.T) {
+	s := model.UserSettings{PriorityContacts: []string{"alice"}}
+	if !s.IsEmpty() {
+		t.Error("IsEmpty() = false, want true")
+	}
+}
+
 func TestUserSettingsUpdated_RoundTrip(t *testing.T) {
 	mute, width := true, false
 	lang := "ja"

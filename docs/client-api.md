@@ -59,7 +59,7 @@ paths.
      - [`search.messages`](#searchmessages--full-text-message-search) · [Search Rooms](#search-rooms) · [Search Apps](#search-apps) · [Search Users](#search-users) · [Search Orgs](#search-orgs)
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
-     - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
+     - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset) · [`settings.priorityContacts.get`](#settingsprioritycontactsget) · [`settings.priorityContacts.add`](#settingsprioritycontactsadd) · [`settings.priorityContacts.remove`](#settingsprioritycontactsremove)
      - [Chatlist Sections](#chatlist-sections)
      - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
@@ -1073,6 +1073,42 @@ and Rename Room.
   "timestamp": 1746518400456
 }
 ```
+
+#### PriorityContactItem
+
+One row of a [priorityContacts.get](#settingsprioritycontactsget) /
+[priorityContacts.add](#settingsprioritycontactsadd) /
+[priorityContacts.remove](#settingsprioritycontactsremove) response. `type`
+selects which nested field is present — `user` for `"user"`, `app` for
+`"bot"` — so `user` and `app` are mutually exclusive with each other. Both are
+omitted when the account no longer resolves (no surviving user document, or a
+deleted app) — the row still carries `account` and `type`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | The contact's account. |
+| `type` | string | `"user"` or `"bot"`. |
+| `user` | [PriorityContactUser](#prioritycontactuser) | Optional. Present only when `type == "user"` and a user document still exists for the account — a deactivated user whose document survives still renders full enrichment; only an account with no document at all degrades to `account` + `type`. |
+| `app` | [PriorityContactApp](#prioritycontactapp) | Optional. Present only when `type == "bot"` and the account still resolves to an app. |
+
+#### PriorityContactUser
+
+HR-directory display fields for a `"user"`-type [PriorityContactItem](#prioritycontactitem).
+
+| Field | Type | Notes |
+|---|---|---|
+| `engName` | string | English display name. |
+| `chineseName` | string | Chinese display name. |
+| `employeeId` | string | Employee ID. |
+| `sectName` | string | Section/department name. |
+
+#### PriorityContactApp
+
+App display fields for a `"bot"`-type [PriorityContactItem](#prioritycontactitem).
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | App display name. |
 
 ### 3.1 room-service
 
@@ -2158,6 +2194,8 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 Synchronous RPC. `room-service` flips `Subscription.favorite` for the requester in a single atomic Mongo `FindOneAndUpdate`, replies with the resulting value, and fans out a `subscription.update` event to the user's other client sessions. Used by the client to render the per-user "favorited" sidebar section; backend treats the flag as a render hint only — no downstream behaviour (notifications, routing, retention) is gated on it.
 
+Favorites membership is also manually orderable via [Move Chat to Section](#move-chat-to-section) (`sectionId: "favorites"`) — the two RPCs stay in sync: toggling favorite **off** also clears `sectionId`/`sectionOrder` when they were `"favorites"` (toggling **on** leaves any existing `sectionId` alone); moving a chat **into** `"favorites"` sets `favorite: true`, moving it to any other section (or removing it) sets `favorite: false`. Clients keep reading membership from `favorite`, unchanged.
+
 Idempotency: this is a toggle, not a set — every successful call flips the bit. Clients must debounce the user-visible action; redelivery of the same RPC will flip back.
 
 ##### Request body
@@ -2214,7 +2252,7 @@ Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual
 
 | Field | Type | Notes |
 |---|---|---|
-| `sectionId` | string \| null | The custom section to move the chat into. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in) — the two are indistinguishable at the wire layer and handled identically. A **built-in** id (`favorites`/`apps`/`teams`/`chats`) is rejected — built-in membership is derived, not user-set. |
+| `sectionId` | string \| null | The custom section to move the chat into, or `"favorites"`. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in, and clears `favorite` if it was set) — the two are indistinguishable at the wire layer and handled identically. The other built-in ids (`apps`/`teams`/`chats`) are rejected — their membership is derived, not user-set. `favorites` is the one built-in target: moving in sets `Subscription.favorite = true` (mirroring [Toggle Favorite](#toggle-favorite)); moving to any other section sets it `false`. |
 | `afterRoomId` | string | Optional. Place the chat just after this room within the section. Omit to append at the end. Mutually exclusive with `beforeRoomId`. |
 | `beforeRoomId` | string | Optional. Place the chat just before this room within the section (top-insertion when it is the section head). Mutually exclusive with `afterRoomId`. |
 
@@ -2234,7 +2272,7 @@ Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual
 
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
-- reason `chatlist_builtin_target` — `sectionId` is a built-in section.
+- reason `chatlist_builtin_target` — `sectionId` is a built-in section other than `favorites`.
 - reason `chatlist_section_not_found` — `sectionId` is empty.
 - `"only room members can list members"` — the user has no subscription in the room.
 
@@ -4490,7 +4528,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 `user-service` exposes 19 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
 
-> **Events:** [`settings.set`](#settingsset) emits [`settings.update`](#settingsupdate-event) to the caller's other devices. No other endpoint emits a client-facing event. (`status.set` and `settings.set` also trigger a server-side cross-site federation update, which is not delivered to clients.)
+> **Events:** [`settings.set`](#settingsset), [`settings.priorityContacts.add`](#settingsprioritycontactsadd), and [`settings.priorityContacts.remove`](#settingsprioritycontactsremove) each emit [`settings.update`](#settingsupdate-event) to the caller's other devices; [`settings.priorityContacts.get`](#settingsprioritycontactsget) is a pure read and emits nothing. No other endpoint emits a client-facing event. (`status.set` and the three settings-mutating endpoints above also trigger a server-side cross-site federation update, which is not delivered to clients.)
 
 | RPC subject | Method |
 |---|---|
@@ -4500,6 +4538,9 @@ See [Error envelope](#6-error-envelope-reference).
 | `chat.user.{account}.request.user.{siteID}.status.set` | [`status.set`](#statusset) |
 | `chat.user.{account}.request.user.{siteID}.settings.get` | [`settings.get`](#settingsget) |
 | `chat.user.{account}.request.user.{siteID}.settings.set` | [`settings.set`](#settingsset) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get` | [`settings.priorityContacts.get`](#settingsprioritycontactsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add` | [`settings.priorityContacts.add`](#settingsprioritycontactsadd) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove` | [`settings.priorityContacts.remove`](#settingsprioritycontactsremove) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.get` | [`chatlist.get`](#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.section.create` | [`chatlist.section.create`](#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.section.rename` | [`chatlist.section.rename`](#chatlist-sections) |
@@ -4709,7 +4750,7 @@ None (empty payload).
 
 ##### Success response
 
-The stored settings object. All nine fields are optional and appear only when the user has explicitly set them:
+The stored settings object. All ten fields are optional and appear only when the user has explicitly set them:
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -4717,18 +4758,20 @@ The stored settings object. All nine fields are optional and appear only when th
 | `themePreference` | string | Theme: `"system"` \| `"light"` \| `"dark"`. |
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
 | `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
-| `muteAllNotifications` | boolean | Mute all notifications. |
-| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. |
+| `muteAllNotifications` | boolean | Mute all notifications. Enforced server-side by `notification-worker`: push delivery is suppressed for this user unless pierced — see `alwaysAllowPriorityNotifications`. |
+| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) pierces `muteAllNotifications` in **any** room type — DM and channel alike — and for `.bot` senders as well as users. The pierce does not override `showNotificationsInCall`. |
 | `showPreviewsInNotifications` | boolean | Show previews in notifications. |
-| `showNotificationsInCall` | boolean | Show notifications in call. |
+| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce of `muteAllNotifications` does not bypass this — set both to receive priority pushes while in a call. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
 | `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
+| `priorityContacts` | string[] | Read-only here — raw contact accounts (not enriched), stored order. Written only by [`settings.priorityContacts.add`](#settingsprioritycontactsadd) / [`settings.priorityContacts.remove`](#settingsprioritycontactsremove), never by `settings.set`. |
 
 ```json
 {
   "fullWidth": true,
   "themePreference": "dark",
   "translateMessageInto": "en-US",
-  "messagePreviewEnabled": true
+  "messagePreviewEnabled": true,
+  "priorityContacts": ["alice", "helper.bot"]
 }
 ```
 
@@ -4805,7 +4848,7 @@ The payload carries the **full post-update settings** (replace, don't merge):
 | Field | Type | Notes |
 |-------|------|-------|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | The full post-update settings — same nine optional fields as [`settings.get`](#settingsget). |
+| `settings` | UserSettings | The full post-update settings — same ten optional fields as [`settings.get`](#settingsget). |
 
 ```json
 {
@@ -4813,6 +4856,189 @@ The payload carries the **full post-update settings** (replace, don't merge):
   "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
 }
 ```
+
+---
+
+#### settings.priorityContacts.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Returns the calling user's priority-contact list, enriched for display, in
+stored order. Capped at 30 stored entries (enforced by the mutating RPCs, not
+this one).
+
+##### Request body
+
+None (empty payload).
+
+##### Success response
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `contacts` | [PriorityContactItem](#prioritycontactitem)[] | The full enriched list, stored order. |
+
+```json
+{
+  "contacts": [
+    {
+      "account": "alice",
+      "type": "user",
+      "user": {
+        "engName": "Alice",
+        "chineseName": "愛麗絲",
+        "employeeId": "E12345",
+        "sectName": "Engineering"
+      }
+    },
+    {
+      "account": "helper.bot",
+      "type": "bot",
+      "app": { "name": "Helper Bot" }
+    }
+  ]
+}
+```
+
+A contact whose account no longer resolves (deactivated user, deleted app)
+still appears with only `account` and `type` — `user`/`app` are omitted.
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+---
+
+#### settings.priorityContacts.add
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Adds one contact to the calling user's priority-contact list and returns the
+full enriched list. **Idempotent**: re-adding a contact already on the list
+succeeds and returns the unchanged list, even when the list is already at the
+cap of 30.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `contactAccount` | string | yes | The account to add. Must be non-empty and must not equal the caller's own account. |
+
+```json
+{ "contactAccount": "helper.bot" }
+```
+
+##### Success response
+
+Same shape as [`settings.priorityContacts.get`](#settingsprioritycontactsget):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `contacts` | [PriorityContactItem](#prioritycontactitem)[] | The full enriched list, stored order, after this mutation. |
+
+```json
+{
+  "contacts": [
+    {
+      "account": "alice",
+      "type": "user",
+      "user": {
+        "engName": "Alice",
+        "chineseName": "愛麗絲",
+        "employeeId": "E12345",
+        "sectName": "Engineering"
+      }
+    },
+    {
+      "account": "helper.bot",
+      "type": "bot",
+      "app": { "name": "Helper Bot" }
+    }
+  ]
+}
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| `contactAccount` missing or empty | `bad_request` | — | `{ "code": "bad_request", "error": "contactAccount is required" }` |
+| `contactAccount` equals the caller's own account | `bad_request` | — | `{ "code": "bad_request", "error": "cannot add yourself as a priority contact" }` |
+| `contactAccount` does not resolve | `not_found` | `priority_contact_not_found` | `{ "code": "not_found", "reason": "priority_contact_not_found", "error": "priority contact not found" }` — a user account must be ACTIVE; a `.bot` account only needs its app to exist (it need not be enabled). |
+| List already at the 30-entry cap and `contactAccount` is not already on it | `forbidden` | `priority_contact_limit` | `{ "code": "forbidden", "reason": "priority_contact_limit", "error": "priority contact limit reached" }` |
+| Write missed (cap or missing caller) but a concurrent `settings.priorityContacts.remove` changed the list before the disambiguating re-read | `conflict` | — | `{ "code": "conflict", "error": "priority contacts changed concurrently, retry" }` — retry the request. |
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+**Emits:** [`settings.update`](#settingsupdate-event) to the caller's other devices, carrying the full post-update settings — including a duplicate add under the cap (the stored list is unchanged, but `settingsUpdatedAt` still bumps and both fanouts still fire). Only a duplicate add already at the 30-entry cap skips the publish. A server-side cross-site federation update also fires whenever this event does, not delivered to clients.
+
+---
+
+#### settings.priorityContacts.remove
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Removes one contact from the calling user's priority-contact list and returns
+the full enriched list. **Idempotent**: removing a contact not on the list
+succeeds and returns the unchanged list. Unlike `add`, removing yourself is
+allowed (no self-account check), and there is no existence check on
+`contactAccount` — removing a since-deleted account is exactly the cleanup
+case this permits.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `contactAccount` | string | yes | The account to remove. Must be non-empty. |
+
+```json
+{ "contactAccount": "helper.bot" }
+```
+
+##### Success response
+
+Same shape as [`settings.priorityContacts.get`](#settingsprioritycontactsget):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `contacts` | [PriorityContactItem](#prioritycontactitem)[] | The full enriched list, stored order, after this mutation. |
+
+```json
+{
+  "contacts": [
+    {
+      "account": "alice",
+      "type": "user",
+      "user": {
+        "engName": "Alice",
+        "chineseName": "愛麗絲",
+        "employeeId": "E12345",
+        "sectName": "Engineering"
+      }
+    },
+    {
+      "account": "helper.bot",
+      "type": "bot",
+      "app": { "name": "Helper Bot" }
+    }
+  ]
+}
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| `contactAccount` missing or empty | `bad_request` | — | `{ "code": "bad_request", "error": "contactAccount is required" }` |
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+**Emits:** [`settings.update`](#settingsupdate-event) to the caller's other devices, carrying the full post-update settings. A server-side cross-site federation update also fires, not delivered to clients.
 
 ---
 
@@ -5939,7 +6165,8 @@ See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code
 | `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
 | `unavailable` | — | Handler saturation — the concurrency cap is full; retry. |
 | `unavailable` | `upstream_unavailable` | The third-party translation backend returned a 5XX or was unreachable (transport failure). Clients should show a "translation service temporarily unavailable" message and allow a retry. |
-| `internal` | — | Other translation backend failure (e.g. malformed stream, 4XX, non-success returnCode). The raw cause is logged server-side, never returned. |
+| `too_many_requests` | `rate_limited` | The third-party translation backend rate-limited the request (HTTP 429). The service does **not** retry; clients should back off and retry later. |
+| `internal` | — | Other translation backend failure (e.g. malformed stream, other 4XX, non-success returnCode). The raw cause is logged server-side, never returned. |
 
 ```json
 {
@@ -6480,6 +6707,8 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `app_disabled` | bad_request | user-service `subscription.setAppSubscription` (app exists but has no assistant) |
 | `subscription_not_found` | not_found | user-service `subscription.getDM` (no DM subscription exists for the account pair) |
 | `sso_token_not_found` | not_found | user-service `sso.refresh` (no token pair stored for the caller) |
+| `priority_contact_limit` | forbidden | user-service `settings.priorityContacts.add` (list already at the 30-entry cap and the contact is not already on it) |
+| `priority_contact_not_found` | not_found | user-service `settings.priorityContacts.add` (contact account does not resolve — inactive/unknown user, or app not found for a `.bot` account) |
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
 | `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |

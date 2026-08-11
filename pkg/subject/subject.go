@@ -1364,6 +1364,44 @@ func UserSettingsSetPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.set", siteID)
 }
 
+// Priority-contacts subjects. Nested under settings. because the list lives at
+// settings.priorityContacts and rides the settings fanouts, but it gets its own
+// RPCs because settings.set never writes it. The concrete forms panic on a
+// wildcard account, same guard as the settings helpers.
+
+func UserPriorityContactsGet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.priorityContacts.get", account, siteID)
+}
+
+func UserPriorityContactsGetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.priorityContacts.get", siteID)
+}
+
+func UserPriorityContactsAdd(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.priorityContacts.add", account, siteID)
+}
+
+func UserPriorityContactsAddPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.priorityContacts.add", siteID)
+}
+
+func UserPriorityContactsRemove(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.priorityContacts.remove", account, siteID)
+}
+
+func UserPriorityContactsRemovePattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.priorityContacts.remove", siteID)
+}
+
 // Chatlist section-definition registry subjects — get + five mutations. The
 // concrete forms panic on a wildcard account (same guard as the settings
 // helpers). Membership/order is NOT here — that rides the room-service moveChat

@@ -26,11 +26,20 @@ services:
       # multicast cap and APNs HTTP/2 connection-frame ceiling.
       - PUSH_RECIPIENT_BATCH_SIZE=${PUSH_RECIPIENT_BATCH_SIZE:-100}
       # Title is resolved here from the rooms collection; sender display name is
-      # pre-composed by message-gatekeeper and propagated on the canonical message,
-      # so no users-collection lookup runs in this service.
+      # pre-composed by message-gatekeeper and propagated on the canonical message.
+      # The users collection IS read, but only for notification settings: an
+      # indexed $in per 512-account chunk over the already-narrowed candidate
+      # set — one query for almost every room — never a per-recipient lookup and
+      # never on the sender-name path.
       - ROOM_META_CACHE_SIZE=${ROOM_META_CACHE_SIZE:-10000}
       - ROOM_META_CACHE_TTL=${ROOM_META_CACHE_TTL:-2m}
       - PRESENCE_RPC_ENABLED=${PRESENCE_RPC_ENABLED:-false}
+      # Enforces muteAllNotifications / alwaysAllowPriorityNotifications /
+      # showNotificationsInCall. Kill switch: false reverts to pre-enforcement
+      # delivery without rolling back the binary.
+      - USER_SETTINGS_ENABLED=${USER_SETTINGS_ENABLED:-true}
+      - USER_SETTINGS_BATCH_SIZE=${USER_SETTINGS_BATCH_SIZE:-512}
+      - USER_SETTINGS_TIMEOUT=${USER_SETTINGS_TIMEOUT:-2s}
       # Must match the broker's max_payload. Emitter rejects batches larger
       # than this before publish so the failure surfaces with a clear error
       # instead of a NATS NACK.

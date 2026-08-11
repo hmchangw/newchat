@@ -209,9 +209,17 @@ Open Room (`opened`), Mark Messages Read (`read`) — see [request-reply.md](req
 
 **Subject:** `chat.user.{account}.event.settings.update`
 
-Published by user-service after every successful [settings.set](request-reply.md#settingsset)
+Published by user-service after every successful
+[settings.set](request-reply.md#settingsset),
+[settings.priorityContacts.add](request-reply.md#settingsprioritycontactsadd),
+or [settings.priorityContacts.remove](request-reply.md#settingsprioritycontactsremove)
 — ephemeral core-NATS fan-out to the caller's own connected devices, so other
-logged-in clients sync live. Best-effort: a fan-out failure does not fail the set.
+logged-in clients sync live. Best-effort: a fan-out failure does not fail the
+triggering call. `settings.priorityContacts.get` is a pure read and never
+publishes this event. Exception: a `settings.priorityContacts.add` for a
+contact already present AND the list already at the 30-entry cap skips the
+publish too (the write misses, the re-read finds the contact already there,
+and the call returns early); a duplicate add under the cap still publishes.
 
 The payload carries the **full post-update settings** — receivers replace their
 local copy, they never merge deltas. A field absent from `settings` was never
@@ -223,7 +231,7 @@ server never injects defaults).
 | Field | Type | Notes |
 |---|---|---|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | Full post-update settings; all nine fields optional. |
+| `settings` | UserSettings | Full post-update settings; all ten fields optional. |
 
 UserSettings — every field optional, present only when explicitly set:
 
@@ -238,6 +246,15 @@ UserSettings — every field optional, present only when explicitly set:
 | `showPreviewsInNotifications` | boolean |
 | `showNotificationsInCall` | boolean |
 | `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
+| `priorityContacts` | string[] |
+
+`priorityContacts` here is the **raw list of contact accounts** (`[]string`),
+not the enriched `PriorityContactItem[]` shape returned by
+[settings.priorityContacts.get](request-reply.md#settingsprioritycontactsget).
+This is deliberate: the fanout mirrors what's stored, not a display-ready
+projection. A device that needs display names (engName/chineseName/app name)
+re-issues `settings.priorityContacts.get` rather than reading them off this
+event.
 
 ```json
 {

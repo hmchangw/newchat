@@ -1,4 +1,6 @@
+import { CHATLIST_MOCK } from '@/lib/runtimeConfig'
 import { subscriptionUpdate } from '../_transport/subjects'
+import { onSectionMovedMock } from '../_transport/chatlistMock'
 import type { Nats, NatsSubscription, SubscriptionUpdateEvent } from '../types'
 
 /** Callback fired for every `subscription.update` event addressed to
@@ -19,5 +21,16 @@ export function subscribeToSubscriptionUpdates(
   // narrower for this op — cast once at the boundary so consumers
   // (useRoomSubscriptions) get the typed event without each call site
   // re-narrowing.
-  return subscribe(subscriptionUpdate(user.account), callback as (event: unknown) => void)
+  const real = subscribe(subscriptionUpdate(user.account), callback as (event: unknown) => void)
+  if (!CHATLIST_MOCK) return real
+  // Dev-only: the chatlist mock fans section_moved through the same callback
+  // (no live backend for it yet). Additive to the real stream so real room
+  // events still flow; the whole branch is dead once the flag is off.
+  const unsubMock = onSectionMovedMock(callback)
+  return {
+    unsubscribe: () => {
+      real.unsubscribe()
+      unsubMock()
+    },
+  }
 }

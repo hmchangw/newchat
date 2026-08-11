@@ -5,6 +5,7 @@ package mongorepo
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,7 +70,7 @@ func TestUpdateUserSettings_PartialSet_Integration(t *testing.T) {
 	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{
 		FullWidth:            ptrBool(false),
 		TranslateMessageInto: ptrStr("ja"),
-	})
+	}, time.Now().UTC())
 	require.NoError(t, err)
 	require.NotNil(t, u)
 	require.NotNil(t, u.Settings)
@@ -84,7 +85,7 @@ func TestUpdateUserSettings_FirstSetCreatesSubDocument_Integration(t *testing.T)
 	ctx := context.Background()
 	seed(t, db, "users", bson.M{"_id": "u-alice", "account": "alice", "active": true})
 
-	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{InitialChatScrollPosition: ptrStr(model.InitialChatScrollNewest)})
+	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{InitialChatScrollPosition: ptrStr(model.InitialChatScrollNewest)}, time.Now().UTC())
 	require.NoError(t, err)
 	require.NotNil(t, u)
 	require.NotNil(t, u.Settings)
@@ -97,7 +98,7 @@ func TestUpdateUserSettings_NoActiveUser_Integration(t *testing.T) {
 	ctx := context.Background()
 	seed(t, db, "users", bson.M{"_id": "u-ghost", "account": "ghost", "active": false})
 
-	u, err := r.UpdateUserSettings(ctx, "ghost", &model.UserSettings{FullWidth: ptrBool(true)})
+	u, err := r.UpdateUserSettings(ctx, "ghost", &model.UserSettings{FullWidth: ptrBool(true)}, time.Now().UTC())
 	require.NoError(t, err)
 	assert.Nil(t, u)
 }

@@ -26,20 +26,64 @@ func TestNoopPresence_EmptySnapshot(t *testing.T) {
 
 func TestShouldPush(t *testing.T) {
 	tests := []struct {
+		name             string
+		status           string
+		ns               notifSettings
+		isPrioritySender bool
+		want             bool
+	}{
+		// Zero notifSettings must reproduce the pre-enforcement truth table exactly.
+		{"zero settings online", "online", notifSettings{}, false, true},
+		{"zero settings offline", "offline", notifSettings{}, false, true},
+		{"zero settings away", "away", notifSettings{}, false, true},
+		{"zero settings busy", "busy", notifSettings{}, false, false},
+		{"zero settings in-call", "in-call", notifSettings{}, false, false},
+		{"zero settings missing status", "", notifSettings{}, false, true},
+		{"zero settings unknown status", "unknown", notifSettings{}, false, true},
+
+		// muteAll suppresses unless a priority sender pierces it.
+		{"muted, no pierce", "online", notifSettings{muteAll: true}, false, false},
+		{"muted, priority sender but pierce disabled", "online", notifSettings{muteAll: true}, true, false},
+		{"muted, pierce enabled but sender not priority", "online", notifSettings{muteAll: true, allowPriority: true}, false, false},
+		{"muted, pierce enabled and sender is priority", "online", notifSettings{muteAll: true, allowPriority: true}, true, true},
+		{"unmuted, pierce enabled, non-priority sender", "online", notifSettings{allowPriority: true}, false, true},
+
+		// showNotificationsInCall governs both suppressed statuses.
+		{"in-call, opted in", "in-call", notifSettings{showInCall: true}, false, true},
+		{"busy, opted in", "busy", notifSettings{showInCall: true}, false, true},
+		{"in-call, not opted in", "in-call", notifSettings{}, false, false},
+
+		// The pierce does not cross the in-call gate.
+		{"muted+pierced but in-call without opt-in", "in-call", notifSettings{muteAll: true, allowPriority: true}, true, false},
+		{"muted+pierced and in-call with opt-in", "in-call", notifSettings{muteAll: true, allowPriority: true, showInCall: true}, true, true},
+
+		// Both suppressors clear.
+		{"muted+pierced, online", "online", notifSettings{muteAll: true, allowPriority: true, showInCall: true}, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldPush(model.Presence{AggregatedStatus: tt.status}, tt.ns, tt.isPrioritySender)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestIsInCall(t *testing.T) {
+	tests := []struct {
 		status string
 		want   bool
 	}{
-		{"online", true},
-		{"offline", true},
-		{"away", true},
-		{"busy", false},
-		{"in-call", false},
-		{"", true},        // missing → fail-open
-		{"unknown", true}, // unknown → fail-open
+		{"busy", true},
+		{"in-call", true},
+		{"online", false},
+		{"offline", false},
+		{"away", false},
+		{"", false},
+		{"unknown", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.status, func(t *testing.T) {
-			assert.Equal(t, tt.want, shouldPush(model.Presence{AggregatedStatus: tt.status}))
+			assert.Equal(t, tt.want, isInCall(model.Presence{AggregatedStatus: tt.status}))
 		})
 	}
 }
