@@ -118,6 +118,7 @@ type fakeCassandra struct {
 	maxInFlight int
 	barrierAt   int           // once this many fetches are concurrently in-flight, release the gate
 	gate        chan struct{} // closed when barrierAt reached; nil disables the barrier
+	gateOnce    sync.Once     // concurrent fetches must release the shared gate exactly once
 }
 
 func (f *fakeCassandra) fetch(ctx context.Context, bucket int64, first bool, pageState []byte, limit int) (bucketPage[int], error) {
@@ -138,11 +139,7 @@ func (f *fakeCassandra) fetch(ctx context.Context, bucket int64, first bool, pag
 	if participate {
 		if reachedBarrier {
 			// Release everyone waiting once enough goroutines are concurrently here.
-			select {
-			case <-gate:
-			default:
-				close(gate)
-			}
+			f.gateOnce.Do(func() { close(gate) })
 		}
 		select {
 		case <-gate:
