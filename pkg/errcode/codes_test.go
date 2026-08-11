@@ -21,6 +21,9 @@ var allReasons = []Reason{
 	RequestIDRequired,
 	EmojiShortcodeReserved,
 	EmojiDeleteDisabled,
+	PermissionUnknownKey, PermissionInvalidSubjects, PermissionInvalidReason,
+	PermissionMissingFields, PermissionInvalidWindow, PermissionUnexpectedWindow,
+	PermissionInactiveSubject, PermissionUnknownAccounts,
 }
 
 func TestReasons_SnakeCase(t *testing.T) {

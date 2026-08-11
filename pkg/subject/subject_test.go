@@ -625,6 +625,7 @@ func TestUserServiceBuilders(t *testing.T) {
 		{"me", subject.UserMe("alice", "s1"), "chat.user.alice.request.user.s1.me"},
 		{"settings.get", subject.UserSettingsGet("alice", "s1"), "chat.user.alice.request.user.s1.settings.get"},
 		{"settings.set", subject.UserSettingsSet("alice", "s1"), "chat.user.alice.request.user.s1.settings.set"},
+		{"permission.get", subject.UserPermissionGet("alice", "s1"), "chat.user.alice.request.user.s1.permission.get"},
 		{"priorityContacts.get", subject.UserPriorityContactsGet("alice", "s1"), "chat.user.alice.request.user.s1.settings.priorityContacts.get"},
 		{"priorityContacts.add", subject.UserPriorityContactsAdd("alice", "s1"), "chat.user.alice.request.user.s1.settings.priorityContacts.add"},
 		{"priorityContacts.remove", subject.UserPriorityContactsRemove("alice", "s1"), "chat.user.alice.request.user.s1.settings.priorityContacts.remove"},
@@ -652,6 +653,13 @@ func TestParseUserSubject(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, "apps", area)
 		assert.Equal(t, "list", action)
+	})
+
+	t.Run("permission.get roundtrips", func(t *testing.T) {
+		_, _, area, action, ok := subject.ParseUserSubject(subject.UserPermissionGet("alice", "s1"))
+		assert.True(t, ok)
+		assert.Equal(t, "permission", area)
+		assert.Equal(t, "get", action)
 	})
 
 	t.Run("rejects malformed", func(t *testing.T) {
@@ -800,6 +808,7 @@ func TestUserServiceBuildersRejectWildcardAccounts(t *testing.T) {
 		{"UserMe", func() { subject.UserMe("*", "s1") }},
 		{"UserSettingsGet", func() { subject.UserSettingsGet("*", "s1") }},
 		{"UserSettingsSet", func() { subject.UserSettingsSet(">", "s1") }},
+		{"UserPermissionGet", func() { subject.UserPermissionGet("*", "s1") }},
 		{"UserPriorityContactsGet", func() { subject.UserPriorityContactsGet("*", "s1") }},
 		{"UserPriorityContactsAdd", func() { subject.UserPriorityContactsAdd("*", "s1") }},
 		{"UserPriorityContactsRemove", func() { subject.UserPriorityContactsRemove("*", "s1") }},
@@ -945,6 +954,7 @@ func TestUserServicePatternBuilders(t *testing.T) {
 		{"me", subject.UserMePattern("s1"), "chat.user.{account}.request.user.s1.me"},
 		{"settings.get", subject.UserSettingsGetPattern("s1"), "chat.user.{account}.request.user.s1.settings.get"},
 		{"settings.set", subject.UserSettingsSetPattern("s1"), "chat.user.{account}.request.user.s1.settings.set"},
+		{"permission.get", subject.UserPermissionGetPattern("s1"), "chat.user.{account}.request.user.s1.permission.get"},
 		{"priorityContacts.get", subject.UserPriorityContactsGetPattern("s1"), "chat.user.{account}.request.user.s1.settings.priorityContacts.get"},
 		{"priorityContacts.add", subject.UserPriorityContactsAddPattern("s1"), "chat.user.{account}.request.user.s1.settings.priorityContacts.add"},
 		{"priorityContacts.remove", subject.UserPriorityContactsRemovePattern("s1"), "chat.user.{account}.request.user.s1.settings.priorityContacts.remove"},

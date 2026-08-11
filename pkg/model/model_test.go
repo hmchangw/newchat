@@ -29,6 +29,44 @@ func TestUserJSON(t *testing.T) {
 	roundTrip(t, &u, &model.User{})
 }
 
+func TestPermissionGrantJSON(t *testing.T) {
+	from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := model.PermissionGrant{
+		ID:               "0199f2c3a4b5701e8f2a4c6e9b1d3f00",
+		SiteID:           "site-a",
+		Permission:       model.PermissionExternalImageView,
+		SubjectAccount:   "alice",
+		Granted:          true,
+		EffectiveFrom:    &from,
+		ExpiresAt:        &until,
+		ApplicantAccount: "carol",
+		ApproverAccount:  "dave",
+		Reason:           "On-call staff must review production line photos from outside the fab.",
+		RecordedBy:       "p_admin_wang",
+		RecordedAt:       time.Date(2026, 8, 11, 3, 0, 0, 0, time.UTC),
+	}
+	roundTrip(t, &g, &model.PermissionGrant{})
+}
+
+func TestPermissionGrantRevokeJSON(t *testing.T) {
+	g := model.PermissionGrant{
+		ID:               "0199f2c3a4b6802f9a3b5d7fac2e4011",
+		SiteID:           "site-a",
+		Permission:       model.PermissionExternalImageView,
+		SubjectAccount:   "alice",
+		Granted:          false,
+		EffectiveFrom:    nil,
+		ExpiresAt:        nil,
+		ApplicantAccount: "carol",
+		ApproverAccount:  "dave",
+		Reason:           "Project ended.",
+		RecordedBy:       "p_admin_wang",
+		RecordedAt:       time.Date(2026, 8, 11, 3, 5, 0, 0, time.UTC),
+	}
+	roundTrip(t, &g, &model.PermissionGrant{})
+}
+
 func TestUserJSON_WithSectAndDept(t *testing.T) {
 	u := model.User{
 		ID: "u1", Account: "alice", SiteID: "site-a",

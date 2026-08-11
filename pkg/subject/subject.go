@@ -1364,6 +1364,18 @@ func UserSettingsSetPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.set", siteID)
 }
 
+// UserPermissionGet is the concrete subject for the self permission query.
+func UserPermissionGet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.permission.get", account, siteID)
+}
+
+func UserPermissionGetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.permission.get", siteID)
+}
+
 // Priority-contacts subjects. Nested under settings. because the list lives at
 // settings.priorityContacts and rides the settings fanouts, but it gets its own
 // RPCs because settings.set never writes it. The concrete forms panic on a
@@ -1551,7 +1563,7 @@ func UserSubscriptionGetByRoomIDPattern(siteID string) string {
 //
 //	chat.user.{account}.request.user.{siteID}.{area}.{action}
 //
-// where area is one of "status", "subscription", "profile", "apps", "settings".
+// where area is one of "status", "subscription", "profile", "apps", "settings", "permission".
 // Does NOT match the room-scoped form — use ParseRoomSubject for those.
 func ParseUserSubject(subj string) (account, siteID, area, action string, ok bool) {
 	parts := strings.Split(subj, ".")
@@ -1565,7 +1577,7 @@ func ParseUserSubject(subj string) (account, siteID, area, action string, ok boo
 		return "", "", "", "", false
 	}
 	switch parts[6] {
-	case "status", "subscription", "profile", "apps", "settings":
+	case "status", "subscription", "profile", "apps", "settings", "permission":
 	default:
 		return "", "", "", "", false
 	}
