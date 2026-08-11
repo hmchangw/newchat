@@ -92,10 +92,7 @@ func run() error {
 			func(ctx context.Context) error {
 				slog.Info("shutting down admin-service")
 				err := srv.Shutdown(ctx)
-				// srv.Shutdown has already waited out any in-flight toggle, so
-				// Drain (which returns immediately and finishes in the background)
-				// only closes the idle connection.
-				if drainErr := nc.NatsConn().Drain(); drainErr != nil {
+				if drainErr := natsutil.Drain(ctx, nc); drainErr != nil {
 					slog.Warn("drain nats", "error", drainErr)
 				}
 				mongoutil.Disconnect(ctx, mongoClient)
