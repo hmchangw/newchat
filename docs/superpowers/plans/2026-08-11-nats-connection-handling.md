@@ -866,7 +866,9 @@ Ensure `"time"` is imported.
 
 - [ ] **Step 5: Build, test, lint**
 
-Run: `make build SERVICE=botplatform-service && make build SERVICE=admin-service && make build SERVICE=teams-room-creation && make build SERVICE=user-presence-service`
+Run: `make build SERVICE=botplatform-service && make build SERVICE=admin-service && make build SERVICE=teams-room-creation && make build SERVICE=user-presence-service && make build SERVICE=user-presence-service/sync`
+
+The last one is not redundant: `user-presence-service` and `user-presence-service/sync` are two separate `main.go` packages under one service directory, and `make build SERVICE=user-presence-service` builds only the root. The `sync/` package is the one this task edits. (Full-repo `make test` compiles it too, but the build list should not imply coverage it does not have.)
 
 Run: `make test`
 
