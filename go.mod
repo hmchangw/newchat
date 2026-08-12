@@ -9,7 +9,7 @@ require (
 	github.com/docker/docker v27.1.1+incompatible
 	github.com/elastic/elastic-transport-go/v8 v8.8.0
 	github.com/elastic/go-elasticsearch/v8 v8.19.3
-	github.com/flywindy/o11y v0.10.0
+	github.com/flywindy/o11y v0.11.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/gocql/gocql v1.7.0
@@ -54,7 +54,7 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/akira-core/instrumentation-go/otel-flags v0.2.0 // indirect
-	github.com/akira-core/instrumentation-go/otel-nats v0.8.0 // indirect
+	github.com/akira-core/instrumentation-go/otel-nats v0.9.1 // indirect
 	github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect

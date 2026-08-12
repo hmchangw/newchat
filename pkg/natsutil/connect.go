@@ -29,7 +29,7 @@ const defaultReconnectWait = 2 * time.Second
 // tp, prop, and tracingEnabled are wired into the underlying o11y/nats layer.
 // Production callers should pass sdk.TracerProvider(), sdk.Propagator, and
 // sdk.Toggles.Trace from the same obs.Init result. This value is the
-// connection-local default; otel-nats v0.8 resolves relay > environment >
+// connection-local default; otel-nats v0.9 resolves relay > environment >
 // option > module default, so OTEL_NATS_TRACING_ENABLED or a configured relay
 // can override it in either direction. With no higher-precedence source, false
 // selects the direct path without tracing or propagation overhead.

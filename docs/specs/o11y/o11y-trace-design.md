@@ -52,19 +52,19 @@ messaging semantic conventions.
 
 What `otelnats` does at each hop:
 
-- **Producer** (`Publish` / `PublishMsg` / `Request`): starts a `send <subject>`
-  span (`PRODUCER`) **as a child of the active span** (so within the producing
-  service it stays in the same trace), then injects W3C `traceparent` into the
-  message headers.
+- **Producer** (`Publish` / `PublishMsg` / `Request`): starts a
+  `publish <subject>` (or `request <subject>`) span (`PRODUCER`) **as a child of
+  the active span** (so within the producing service it stays in the same
+  trace), then injects W3C `traceparent` into the message headers.
 - **Consumer** (`Subscribe` / `QueueSubscribe` / JetStream `Consume` / `Fetch`):
   extracts the producer's span context, then starts one **detached**
   `process <subject>` span (`CONSUMER`; new root, empty parent) carrying a
   **LINK** to the producer span. Handler work and DB spans hang off `process`.
 - **Go request/reply response** (`Conn.Request` + responder `Conn.Respond`):
   the responder reply is sent through the traced publish path, and the requester
-  creates a short `receive <subject>` consumer span with a link to that reply.
+  creates a short bare `receive` client span with a link to that reply.
   If the requester calls `Conn.Request(context.Background(), ...)` without an
-  active caller span, the send and reply-receive spans are still discoverable
+  active caller span, the publish and reply-receive spans are still discoverable
   by links but may not land in the same trace.
 
 Net effect: **one logical flow = a constellation of per-service traces**, each
@@ -102,8 +102,29 @@ actual **frontend** span names follow `nats <operation> <subject>` —
 Tempo trace list is legible at a glance
 instead of a wall of `nats.request`. The subject is *also* carried on the
 `messaging.destination.name` attribute (with `chat.request_id` on requests), so
-you can filter by span name **or** by attribute. Backend consumer spans are
-named `process <subject>` by `otelnats` from the subject directly.
+you can filter by span name **or** by attribute.
+
+Backend span names are owned entirely by `otelnats` and follow the semconv
+v1.39.0 messaging shape `{operation} {destination}` (otel-nats v0.9.1, shipped
+with o11y v0.11.0):
+
+| Path | Span name |
+|---|---|
+| `Publish` / `PublishMsg`, core and JetStream | `publish <subject>` |
+| `Request` / `RequestMsg` | `request <subject>` |
+| Subscribe / QueueSubscribe handler | `process <registered subject>` (the wildcard, not the delivered subject) |
+| JetStream `Consume` callback | `process <filter subject>` (falls back to the delivered subject when the filter is absent or multi-valued) |
+| JetStream pull-receive (`Next` / `Messages` / `Fetch`) | `receive <filter subject>` |
+| Any span whose destination is a reply inbox (reply-receive, a reply published to `msg.Reply`, a handler subscribed on an inbox) | `publish` / `process` / `receive` — **no destination** |
+
+An inbox is auto-generated and single-use, so semconv omits it from the name
+rather than turning span names into an unbounded dimension; it stays queryable
+on `messaging.destination.name`, `messaging.message.conversation_id`, and the
+`messaging.destination.temporary` / `.anonymous` booleans — **correlate replies
+by attribute, not by span name**. Dashboards, TraceQL queries, alerts, and
+`spanmetrics` rules keyed on the pre-v0.11.0 names (`send <subject>`,
+`<subject> request`, `receive <inbox>`) have no compatibility shim and must be
+updated.
 
 ---
 
@@ -124,8 +145,8 @@ flowchart TB
       GKp["process chat.user.{a}.room.{r}.{s}.msg.send (CONSUMER)"]
       GKsub["mongo subscriptions.find (membership)\n(valkey GET room-meta on L2 hit)"]
       GKroom["mongo rooms.find (room meta) — on cache miss"]
-      GKsend["send chat.msg.canonical.{s}.created (PRODUCER)"]
-      GKreply["send {reply} → client ack (PRODUCER)"]
+      GKsend["publish chat.msg.canonical.{s}.created (PRODUCER)"]
+      GKreply["publish (reply inbox) → client ack (PRODUCER)"]
       GKp --> GKsub --> GKroom --> GKsend
       GKp --> GKreply
     end
@@ -141,14 +162,14 @@ flowchart TB
       BWp["process canonical.created (CONSUMER)"]
       BWmeta["mongo rooms/subscriptions.find + valkey GET (room meta/members)"]
       BWkey["mongo roomkeys.find (E2E, if enabled)"]
-      BWout["send chat.room.{r}.event.* → room members (PRODUCER ×N)"]
+      BWout["publish chat.room.{r}.event.* → room members (PRODUCER ×N)"]
       BWp --> BWmeta --> BWkey --> BWout
     end
 
     subgraph TNW["〔Trace: notification-worker〕"]
       NWp["process canonical.created (CONSUMER)"]
       NWdb["mongo subscriptions/rooms.find + valkey GET (roomsub cache)"]
-      NWpush["send chat.server.notification.push.{s}.send (PRODUCER)"]
+      NWpush["publish chat.server.notification.push.{s}.send (PRODUCER)"]
       NWp --> NWdb --> NWpush
     end
 
@@ -166,14 +187,14 @@ flowchart TB
 ### Per-service span tree (what to assert)
 
 - **gatekeeper** (1 trace, root): `process …msg.send` → `mongo subscriptions.find`
-  (+ `valkey GET` / `mongo rooms.find` on cache miss) → `send …canonical.created`
-  + `send {reply}`.
+  (+ `valkey GET` / `mongo rooms.find` on cache miss) → `publish …canonical.created`
+  + `publish` (bare — reply inbox).
 - **message-worker** (1 trace, linked): `process …canonical.created` →
   `cassandra … INSERT` (+ `mongo thread_subscriptions` for thread replies).
 - **broadcast-worker** (1 trace, linked): `process` → `mongo`/`valkey` room
-  meta+members (+ `mongo roomkeys` if E2E) → N× `send chat.room.{r}.event.*`.
+  meta+members (+ `mongo roomkeys` if E2E) → N× `publish chat.room.{r}.event.*`.
 - **notification-worker** (1 trace, linked): `process` → `mongo`/`valkey` →
-  `send push.{s}.send` → links into the push service's trace.
+  `publish push.{s}.send` → links into the push service's trace.
 - **search-sync-worker** (linked): JetStream `Fetch` consumer span → `search-sync bulk flush` (links to every source message in the batch) → Elasticsearch bulk spans.
 
 **Total for one message ≈ 6 traces** — the **browser** publish span is its own
@@ -181,7 +202,7 @@ trace (linked, not parent, into the gatekeeper), plus gatekeeper +
 message-worker + broadcast-worker + notification-worker + search-sync; the push
 service adds a 7th linked off notification. They are
 stitched by links, not a shared trace ID: browser → gatekeeper (link), and
-gatekeeper's `send …canonical.created` → each of the 4 canonical consumers
+gatekeeper's `publish …canonical.created` → each of the 4 canonical consumers
 (link).
 
 ---
@@ -201,14 +222,14 @@ flowchart TB
       HSp["process chat.user.{a}.request.room.{r}.{s}.msg.get (CONSUMER)"]
       HSacc["mongo subscriptions/rooms.find (access + accessSince)"]
       HScass["cassandra messages_by_room SELECT (bucket walk)"]
-      HSreply["send {reply} → client (PRODUCER, reply carries trace context)"]
+      HSreply["publish (reply inbox) → client (PRODUCER, reply carries trace context)"]
       HSp --> HSacc --> HScass --> HSreply
     end
 
     subgraph TRR["〔Trace: read-receipt write〕 (root)"]
       RRp["process …request.…read / subscription update (CONSUMER)"]
       RRmongo["mongo subscriptions.update (lastSeenAt)"]
-      RRpub["send subscription.update event (PRODUCER) — optional"]
+      RRpub["publish subscription.update event (PRODUCER) — optional"]
       RRp --> RRmongo --> RRpub
     end
 
@@ -221,7 +242,7 @@ flowchart TB
 - **history get** (1 trace): `process …msg.get` → `mongo` access checks →
   `cassandra SELECT` (one span per bucket query) → reply.
 - **read-receipt** (1 trace): `process …read` → `mongo subscriptions.update`
-  → optional `send subscription.update` (links to a broadcast-worker trace that
+  → optional `publish subscription.update` (links to a broadcast-worker trace that
   delivers the read badge).
 - Client-perceived RTT **is** captured — on the browser's `nats request`
   CLIENT span (it wraps `await nc.request`). Go service-to-service
@@ -235,7 +256,7 @@ flowchart TB
 ## 3. Scenario C — User receives a new group message
 
 "Receiving" is the **tail of Scenario A**: `broadcast-worker` delivers to room
-members via core NATS `send chat.room.{r}.event.*`. The recipient browser
+members via core NATS `publish chat.room.{r}.event.*`. The recipient browser
 receives it over `nats.ws`; the web subscription wrapper extracts `traceparent`
 from the message headers and starts a detached `nats receive <subject>`
 `CONSUMER` span linked to the broadcast-worker producer span.
@@ -245,7 +266,7 @@ flowchart LR
     subgraph TBW["〔Trace: broadcast-worker〕 (= Trace BW from §1)"]
       BWp["process canonical.created (CONSUMER)"]
       BWmeta["mongo/valkey room meta + members"]
-      BWout["send chat.room.{r}.event.* (PRODUCER ×N members)"]
+      BWout["publish chat.room.{r}.event.* (PRODUCER ×N members)"]
       BWp --> BWmeta --> BWout
     end
     BWout -. "span link via traceparent" .-> RX["〔Trace: recipient browser〕\nnats receive chat.room.{r}.event.*"]
@@ -270,12 +291,12 @@ span **link**, so the destination trace is separate.
 flowchart LR
     subgraph TOrigin["〔Trace: origin worker (broadcast/room/message)〕"]
       Op["process … (CONSUMER)"]
-      Osend["send chat.outbox.{origin}.{dest}.{eventType} (PRODUCER)"]
+      Osend["publish chat.outbox.{origin}.{dest}.{eventType} (PRODUCER)"]
       Op --> Osend
     end
     subgraph TRelay["〔Trace: outbox-worker @ origin site〕"]
       Rp["process outbox (CONSUMER)"]
-      Rsend["send chat.inbox.{dest}.external.{event} (PRODUCER)"]
+      Rsend["publish chat.inbox.{dest}.external.{event} (PRODUCER)"]
       Rp --> Rsend
     end
     subgraph TDest["〔Trace: inbox-worker @ dest site〕"]
@@ -303,7 +324,7 @@ The DM-specific piece is **first-time room provisioning**: `user-service`'s
 
 - `〔Trace: user-service〕` `process …request…dm` → `mongo` → `send
   …room.{site}.create.dm` (PRODUCER) + reply to client.
-- `〔Trace: room-worker〕` (linked to the `send …create.dm`) `process` →
+- `〔Trace: room-worker〕` (linked to the `publish …create.dm`) `process` →
   `mongo rooms/subscriptions insert` → atrest DEK provision (`vault` +
   `mongo dek`) → `roomkeysender` publish → reply.
 
@@ -332,8 +353,8 @@ flowchart TB
     subgraph TRS["〔Trace: room-service〕 (linked to browser)"]
       RSp["process chat.user.{a}.request.room.{r}.{s}.member.add (CONSUMER)"]
       RSmongo["mongo rooms/subscriptions write + cap checks"]
-      RSinvite["send member add → ROOMS stream (PRODUCER)"]
-      RSack["send sync-ack reply (PRODUCER)"]
+      RSinvite["publish member add → ROOMS stream (PRODUCER)"]
+      RSack["publish sync-ack reply (PRODUCER)"]
       RSp --> RSmongo --> RSinvite
       RSp --> RSack
     end
@@ -342,8 +363,8 @@ flowchart TB
       RWp["process member-add (CONSUMER)"]
       RWmongo["mongo subscription create"]
       RWkey["roomkeysender: distribute room key (PRODUCER)"]
-      RWcanon["send canonical member events (PRODUCER)"]
-      RWresp["send chat.user.{a}.response.{requestID} — async result (PRODUCER)"]
+      RWcanon["publish canonical member events (PRODUCER)"]
+      RWresp["publish chat.user.{a}.response.{requestID} — async result (PRODUCER)"]
       RWp --> RWmongo --> RWkey
       RWp --> RWcanon
       RWp --> RWresp
@@ -378,7 +399,7 @@ Client → `history-service` (`…request.room.{r}.{s}.msg.edit` / `…msg.delet
   `mongo` access checks → `cassandra … UPDATE` (or soft-delete) → `send
   …canonical.edited` (PRODUCER, link target) + reply.
 - `〔Trace: broadcast-worker〕` `process …canonical.edited` (linked) →
-  `mongo`/`valkey` → `send chat.room.{r}.event.*` (edit).
+  `mongo`/`valkey` → `publish chat.room.{r}.event.*` (edit).
 - `search-sync-worker` reindex: JetStream `Fetch` consume is linked to the
   canonical producer; `search-sync bulk flush` links to the source message spans
   and parents the Elasticsearch bulk spans.
@@ -389,7 +410,7 @@ Client → `history-service` (`…request.room.{r}.{s}.msg.edit` / `…msg.delet
 
 1. **Bare-context Go request/reply callers can still look split.** `Conn.Request`
    creates the requester-side reply receive span as a child of the caller ctx.
-   If that ctx has no active span, the send and reply-receive spans may be two
+   If that ctx has no active span, the publish and reply-receive spans may be two
    root traces connected only by links. Start an ambient caller span around
    background-worker `Conn.Request(context.Background(), ...)` calls when the
    full round trip must read as one trace.
