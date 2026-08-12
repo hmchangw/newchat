@@ -51,8 +51,8 @@ func TestPushMappings_PushesOnlyCollectionsWithMappings(t *testing.T) {
 	}
 
 	require.NoError(t, pushMappings(context.Background(), eng, collections))
-	assert.Equal(t, []string{"messages-x-*"}, eng.mappingPatterns,
-		"pattern is version-stripped so pre-bump indices are covered too")
+	assert.Equal(t, []string{"messages-x-*", "spotlight-x"}, eng.mappingPatterns,
+		"message pattern is version-stripped; spotlight is a single index updated directly (both backfill new fields onto existing indices); spotlight-org + user-room are no-ops")
 }
 
 // A non-nil but zero-length body is still "no update" — it must never
