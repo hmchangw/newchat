@@ -2,7 +2,7 @@
 
 > **Status:** IN PROGRESS. This document is the design/rollout plan for adopting
 > [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y) (currently
-> pinned at **v0.10.0**) as the single observability entry point across the chat
+> pinned at **v0.11.0**) as the single observability entry point across the chat
 > platform.
 > Branch: `feat/integrate-o11y-sdk`. **Phase 0** (dependency baseline) and
 > **Phase 1** (`pkg/obs` wrapper) have landed; Phases 2–4 are pending.
@@ -154,8 +154,8 @@ integration test (§9).
 
 > **Outcome note (post-implementation):** "remove Marz32onE" means the chat repo
 > no longer imports `Marz32onE/instrumentation-go/otel-nats` **directly** — `grep`
-> over the tree is clean. As of o11y v0.10.0, `o11y/nats` wraps
-> `akira-core/instrumentation-go/otel-nats` v0.8.0 as an **indirect**
+> over the tree is clean. As of o11y v0.11.0, `o11y/nats` wraps
+> `akira-core/instrumentation-go/otel-nats` v0.9.1 as an **indirect**
 > dependency. `pkg/natsutil.Connect` passes `sdk.Toggles.Trace` as the
 > connection-local default; the effective state follows
 > `relay > OTEL_NATS_TRACING_ENABLED > option > module default`, with
