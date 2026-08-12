@@ -151,6 +151,10 @@ DEV_MODE=true
 # Stack-wide settings.
 #SITE_ID=site-local            # also drives ES index names, buckets, site URLs
 #ALL_SITE_IDS=site-local
+# Same-site room .event lanes: global|dual|local. Compose defaults to dual
+# (both lanes); local mirrors the production end state. global breaks live
+# delivery for crossSite:false rooms — the client subscribes chat.local.room.>.
+#ROOM_SUBJECT_MODE=dual
 #MONGO_URI=mongodb://mongodb:27017
 #MONGO_DB=chat
 #CASSANDRA_HOSTS=cassandra
