@@ -947,6 +947,67 @@ func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {
 	assert.Equal(t, "secret edit", plaintext)
 }
 
+func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
+	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+
+	// The worker forwards every parsed mention to SetSubscriptionMentions; the
+	// additive / no-re-badge / skip-non-subscriber properties are enforced by the
+	// store filter (read-guard) and covered by TestSetSubscriptionMentions_ReadGuard_Integration.
+	tests := []struct {
+		name            string
+		content         string
+		wantSetMentions []string // nil = SetSubscriptionMentions must not be called
+	}{
+		{
+			name:            "edit adds a mention",
+			content:         "hey @bob check this",
+			wantSetMentions: []string{"bob"},
+		},
+		{
+			name:    "no mentions badges nobody",
+			content: "no mentions here anymore",
+		},
+		{
+			name:            "every parsed mention is forwarded to the store",
+			content:         "hey @alice and @bob",
+			wantSetMentions: []string{"alice", "bob"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+
+			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+			if tc.wantSetMentions != nil {
+				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.InAnyOrder(tc.wantSetMentions), edited).Return(nil)
+			}
+
+			evt := model.MessageEvent{
+				Event:     model.EventUpdated,
+				SiteID:    "site-a",
+				Timestamp: edited.UnixMilli(),
+				Message: model.Message{
+					ID: "msg-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+					Content:   tc.content,
+					CreatedAt: edited.Add(-time.Hour),
+					EditedAt:  &edited, UpdatedAt: &edited,
+				},
+			}
+			data, err := json.Marshal(&evt)
+			require.NoError(t, err)
+
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+			require.Len(t, pub.records, 1, "edit must still fan out regardless of mention badging")
+		})
+	}
+}
+
 func TestHandleUpdated_MissingEditedAt_ReturnsError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)

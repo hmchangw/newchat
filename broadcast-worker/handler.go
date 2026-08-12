@@ -301,6 +301,10 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
+	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
+		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
+	}
+
 	edit := buildEditRoomEvent(room, evt)
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
@@ -308,6 +312,18 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		}
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
+}
+
+// badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
+// handleCreated. Additive only: SetSubscriptionMentions' filter skips
+// non-subscribers and accounts that have already read past the edit, so a
+// removed mention is never cleared and an already-read one is never re-flagged.
+func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
+	parsed := mention.Parse(msg.Content)
+	if len(parsed.Accounts) == 0 {
+		return nil
+	}
+	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
