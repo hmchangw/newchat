@@ -174,19 +174,41 @@ func (l *l2Store) FindUsersByAccounts(ctx context.Context, accounts []string) ([
 	if len(accounts) == 0 {
 		return nil, nil
 	}
-	seen := make(map[string]struct{}, len(accounts))
-	hits := make([]model.User, 0, len(accounts))
-	missing := make([]string, 0, len(accounts))
+	// One MGet rather than a Get per account: the caller's mention count is
+	// attacker-influenced (a message body can name hundreds), and per-key gets
+	// would serialize a round-trip each. Keys are collected before the fetch so
+	// duplicates cost nothing.
+	keys := make([]string, 0, len(accounts))
+	keyed := make(map[string]string, len(accounts))
 	for _, a := range accounts {
-		if _, dup := seen[a]; dup {
+		if _, dup := keyed[a]; dup {
 			continue
 		}
-		seen[a] = struct{}{}
+		k := accountKey(a)
+		keyed[a] = k
+		keys = append(keys, k)
+	}
+
+	cached, err := l.client.MGet(ctx, keys)
+	if err != nil {
+		// A broken cache must not fail a lookup the store can serve.
+		slog.WarnContext(ctx, "user L2 bulk read failed, falling back to the source of truth",
+			"keys", len(keys), "error", err)
+	}
+
+	hits := make([]model.User, 0, len(keys))
+	missing := make([]string, 0, len(keys))
+	for _, a := range accounts {
+		k, ok := keyed[a]
+		if !ok {
+			continue // duplicate, already accounted for
+		}
+		delete(keyed, a)
 		// Served without refresh-on-read: this is the bulk mention path, and one
-		// re-validation per stale account would put the outage latency back that
-		// the tier exists to remove. The TTL still bounds staleness.
-		if entry, found := l.readL2(ctx, accountKey(a)); found {
-			hits = append(hits, entry.User)
+		// re-validation per stale account would put back the outage latency the
+		// tier exists to remove. The TTL still bounds staleness.
+		if u, found := l.decodeEntry(ctx, cached[k]); found {
+			hits = append(hits, u)
 			continue
 		}
 		missing = append(missing, a)
@@ -194,14 +216,36 @@ func (l *l2Store) FindUsersByAccounts(ctx context.Context, accounts []string) ([
 	if len(missing) == 0 {
 		return hits, nil
 	}
-	fresh, err := l.inner.FindUsersByAccounts(ctx, missing)
+	fresh, ferr := l.inner.FindUsersByAccounts(ctx, missing)
 	for i := range fresh {
 		l.write(ctx, &fresh[i])
 	}
-	if err != nil {
-		return append(hits, fresh...), fmt.Errorf("l2 find users by accounts: %w", err)
+	if ferr != nil {
+		return append(hits, fresh...), fmt.Errorf("l2 find users by accounts: %w", ferr)
 	}
 	return append(hits, fresh...), nil
+}
+
+// decodeEntry turns one MGet result into a usable user, recording the same
+// hit/miss/error outcomes the single-key path records through ReadCachedJSON.
+// An empty raw means the key was absent.
+func (l *l2Store) decodeEntry(ctx context.Context, raw string) (model.User, bool) {
+	if raw == "" {
+		l.metrics.Miss(ctx)
+		return model.User{}, false
+	}
+	var entry cachedUser
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		l.metrics.Error(ctx)
+		slog.WarnContext(ctx, "user L2 entry failed to decode, treating as miss", "error", err)
+		return model.User{}, false
+	}
+	if entry.User.ID == "" {
+		l.metrics.Miss(ctx)
+		return model.User{}, false
+	}
+	l.metrics.Hit(ctx)
+	return entry.User, true
 }
 
 func (l *l2Store) readL2(ctx context.Context, key string) (cachedUser, bool) {

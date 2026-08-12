@@ -132,3 +132,16 @@ func TestValkeyCache_GetJSONNullYieldsEmptyMap(t *testing.T) {
 func TestRestrictedKey_Format(t *testing.T) {
 	assert.Equal(t, "searchservice:restrictedrooms:alice", restrictedKey("alice"))
 }
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (s *stubValkey) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := s.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}

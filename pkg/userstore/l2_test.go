@@ -18,12 +18,14 @@ import (
 // tracked but not enforced by a clock — tests drive staleness through the
 // L2Store's injected now().
 type fakeValkey struct {
-	data    map[string]string
-	ttls    map[string]time.Duration
-	getErr  error
-	setErr  error
-	gets    int
-	expires int
+	data     map[string]string
+	ttls     map[string]time.Duration
+	getErr   error
+	setErr   error
+	gets     int
+	mgets    int
+	mgetKeys int
+	expires  int
 }
 
 func newFakeValkey() *fakeValkey {
@@ -314,4 +316,116 @@ func TestL2Store_SuccessfulRefreshRewritesAndResetsTheWindow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Alice Renamed", got.EngName)
 	assert.Equal(t, 2, inner.calls, "a just-refreshed entry must not re-validate again")
+}
+
+// MGet reads the map directly rather than looping Get, so the gets counter
+// keeps measuring only genuine single-key reads and a test can tell the two
+// paths apart.
+func (f *fakeValkey) MGet(_ context.Context, keys []string) (map[string]string, error) {
+	f.mgets++
+	f.mgetKeys += len(keys)
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		if v, ok := f.data[k]; ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+func TestL2Store_FindUsersByAccounts_UsesOneBatchRead(t *testing.T) {
+	vk := newFakeValkey()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+	ctx := context.Background()
+
+	accounts := make([]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		accounts = append(accounts, fmt.Sprintf("user-%d", i))
+	}
+	_, err := s.FindUsersByAccounts(ctx, accounts)
+	require.NoError(t, err)
+
+	// Mention count is driven by message content, so a per-key read would put a
+	// serialized round-trip on the persist path for every account named.
+	assert.Equal(t, 1, vk.mgets, "the whole account set must be fetched in one batch")
+	assert.Equal(t, 0, vk.gets, "no per-account Get may remain on this path")
+	assert.Equal(t, 50, vk.mgetKeys)
+}
+
+func TestL2Store_FindUsersByAccounts_DedupesKeysBeforeFetching(t *testing.T) {
+	vk := newFakeValkey()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	_, err := s.FindUsersByAccounts(context.Background(), []string{"a", "b", "a", "b", "a"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, vk.mgetKeys, "a repeated mention must not be fetched twice")
+}
+
+func TestL2Store_FindUsersByAccounts_BatchReadFailureFallsThroughToStore(t *testing.T) {
+	vk := newFakeValkey()
+	vk.getErr = errors.New("valkey down")
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	got, err := s.FindUsersByAccounts(context.Background(), []string{"alice"})
+	require.NoError(t, err, "a broken cache must not fail a lookup the store can serve")
+	require.Len(t, got, 1)
+	assert.Equal(t, "alice", got[0].Account)
+}
+
+func TestL2Store_FindUsersByAccounts_MixedHitsPreserveOrderAndCompleteness(t *testing.T) {
+	vk := newFakeValkey()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+	ctx := context.Background()
+
+	_, err := s.FindUserByAccount(ctx, "alice")
+	require.NoError(t, err)
+
+	bob := model.User{ID: "u-bob", Account: "bob"}
+	inner.user = &bob
+	got, err := s.FindUsersByAccounts(ctx, []string{"alice", "bob"})
+	require.NoError(t, err)
+
+	accounts := make([]string, 0, len(got))
+	for _, u := range got {
+		accounts = append(accounts, u.Account)
+	}
+	assert.ElementsMatch(t, []string{"alice", "bob"}, accounts,
+		"a cached account and a fetched one must both come back")
+	assert.Equal(t, []string{"bob"}, inner.lastAccounts, "only the miss goes to the store")
+}
+
+func TestL2Store_FindUsersByAccounts_RejectsUnusableEntries(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "malformed json", raw: "{not json"},
+		{name: "json null", raw: "null"},
+		{name: "envelope with no user", raw: `{"cachedAt":123}`},
+		{name: "user with empty id", raw: `{"user":{"account":"alice"},"cachedAt":123}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			vk := newFakeValkey()
+			vk.data[accountKey("alice")] = tc.raw
+			inner := &countingStore{user: &alice}
+			s := NewL2Store(inner, vk, time.Minute)
+
+			got, err := s.FindUsersByAccounts(context.Background(), []string{"alice"})
+			require.NoError(t, err)
+
+			// An unusable entry must degrade to a miss and be re-fetched, never be
+			// served as a half-populated user.
+			require.Len(t, got, 1)
+			assert.Equal(t, "u-alice", got[0].ID)
+			assert.Equal(t, []string{"alice"}, inner.lastAccounts, "the bad entry must fall through to the store")
+		})
+	}
 }

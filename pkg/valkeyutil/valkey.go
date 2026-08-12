@@ -17,6 +17,13 @@ import (
 // Client is the interface exposed by ConnectCluster. Tests can substitute their own implementation without depending on go-redis directly.
 type Client interface {
 	Get(ctx context.Context, key string) (string, error)
+	// MGet fetches many keys at once, returning only the ones that were present
+	// — an absent key is simply missing from the map, since a cache miss is not
+	// an error. Prefer it over a Get loop for any lookup whose key count is
+	// driven by input (a mention list, a member list): in cluster mode the keys
+	// span slots, so a loop costs one serialized round-trip each, while this
+	// costs roughly one per node regardless of key count.
+	MGet(ctx context.Context, keys []string) (map[string]string, error)
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
 	// SetNX atomically sets key to value with ttl iff key is absent: (true,nil) acquired,
 	// (false,nil) refused, (false,err) transport failure. ttl must be > 0 — a zero ttl stores without expiry.
@@ -102,6 +109,36 @@ func (r *clusterClient) Get(ctx context.Context, key string) (string, error) {
 		return "", fmt.Errorf("valkey get: %w", err)
 	}
 	return val, nil
+}
+
+// MGet issues one GET per key through a pipeline. go-redis groups the pipelined
+// commands by node and runs the groups concurrently, so cross-slot keys — which
+// a plain MGET would reject — cost about one round-trip per node.
+func (r *clusterClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	cmds := make([]*redis.StringCmd, len(keys))
+	_, err := r.c.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for i, k := range keys {
+			cmds[i] = p.Get(ctx, k)
+		}
+		return nil
+	})
+	// Pipelined surfaces the first command error, and redis.Nil is the expected
+	// answer for any absent key — only a genuine transport failure is an error.
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("valkey mget: %w", err)
+	}
+	out := make(map[string]string, len(keys))
+	for i, cmd := range cmds {
+		val, cmdErr := cmd.Result()
+		if cmdErr != nil {
+			continue // absent, or unreadable — both are a miss to the caller
+		}
+		out[keys[i]] = val
+	}
+	return out, nil
 }
 
 func (r *clusterClient) Set(ctx context.Context, key, value string, ttl time.Duration) error {

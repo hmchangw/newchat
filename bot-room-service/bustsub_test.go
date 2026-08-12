@@ -91,3 +91,16 @@ func TestHandleRemove_NoBustOnDuplicateRemove(t *testing.T) {
 
 	assert.Empty(t, fake.dels, "a no-op remove must not bust the cache")
 }
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (f *fakeBustClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := f.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}

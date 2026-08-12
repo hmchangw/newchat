@@ -207,3 +207,16 @@ func TestBustMeta_FailOpen(t *testing.T) {
 	assert.NotPanics(t, func() { BustMeta(context.Background(), fake, "r1") })
 	assert.Equal(t, []string{MetaKey("r1")}, fake.dels)
 }
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (f *fakeValkey) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := f.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}

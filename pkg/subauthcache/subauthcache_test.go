@@ -582,3 +582,16 @@ func TestTier_RefreshFindingUnsubscribedEvictsTheEntry(t *testing.T) {
 	_, present := fv.store[SubKey("room1", "alice")]
 	assert.False(t, present, "the stale entry must be evicted, not left to expire")
 }
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (f *fakeValkey) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := f.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}

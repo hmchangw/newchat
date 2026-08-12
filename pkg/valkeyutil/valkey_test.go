@@ -305,3 +305,16 @@ func TestReadCachedJSON_NilPredicateAcceptsZeroValue(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, 1, rec.hit)
 }
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (f *fakeClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := f.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}

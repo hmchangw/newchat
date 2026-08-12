@@ -208,3 +208,16 @@ func TestRegisterBotRoutes_AuthRequired(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (w *wireCaptureClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := w.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}

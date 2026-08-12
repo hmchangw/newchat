@@ -7753,3 +7753,16 @@ func TestFederateOne_NoopWhenLocalOrEmpty(t *testing.T) {
 	require.NoError(t, h.federateOne(context.Background(), "r1", "site-a", model.InboxSubscriptionRead, []byte(`{}`), "seed", 1))
 	assert.False(t, called, "empty or local destination must not publish")
 }
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (f *fakeBustClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := f.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}
