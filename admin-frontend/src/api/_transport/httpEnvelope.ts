@@ -24,6 +24,7 @@ const REASON_COPY: Record<string, string> = {
   invalid_token: 'That link has expired or is invalid — request a new one.',
   account_exists: 'An account with that email already exists.',
   unknown_permission: "That permission isn't recognized.",
+  // "200" mirrors pkg/model.MaxSubjects; "1000" mirrors pkg/model.MaxReasonRunes.
   invalid_subject_count: 'Enter between 1 and 200 accounts.',
   invalid_reason: 'Enter a reason, up to 1000 characters.',
   missing_permission_fields: 'Applicant and approver are both required.',

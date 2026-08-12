@@ -6,8 +6,8 @@ import AccountPicker from '../AccountPicker'
 import { PERMISSION_KEY } from '../permissionKey'
 import './style.css'
 
-const MAX_SUBJECTS = 200
-const MAX_REASON_RUNES = 1000
+const MAX_SUBJECTS = 200 // mirrors pkg/model.MaxSubjects
+const MAX_REASON_RUNES = 1000 // mirrors pkg/model.MaxReasonRunes
 
 // Grant/revoke form, opened as a dialog from PermissionsPage's "Create" button. On a successful
 // submit it reports up via `onCreated` immediately (PermissionsPage refreshes the list right
@@ -67,7 +67,7 @@ export default function CreatePermissionsDialog({ authToken, onClose, onCreated 
     setFormErrorMetadata(null)
     try {
       const response = await createPermissions(authToken, buildPayload())
-      setResult({ ...response, requestMode: mode })
+      setResult(response)
       onCreated()
     } catch (err) {
       const message = handleAdminError(err)
@@ -88,7 +88,7 @@ export default function CreatePermissionsDialog({ authToken, onClose, onCreated 
         <div>
           <div className="permissions-result dialog-success">
             <p>
-              {result.requestMode === 'grant'
+              {mode === 'grant'
                 ? `Created ${result.created} grant${result.created === 1 ? '' : 's'}.`
                 : `Recorded ${result.created} revocation${result.created === 1 ? '' : 's'}.`}
             </p>
