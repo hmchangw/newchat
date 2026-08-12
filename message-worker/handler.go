@@ -79,32 +79,66 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 
 	resolved, err := mention.Resolve(ctx, evt.Message.Content, h.userStore.FindUsersByAccounts)
 	if err != nil {
-		return fmt.Errorf("resolve mentions: %w", err)
+		// Fail-open: mention resolution is enrichment, not durability. The content
+		// (including the literal @tokens) persists intact; only the resolved
+		// participant list is lost, so a mentioned user may miss a notification
+		// during the outage. Blocking the write would be strictly worse.
+		slog.WarnContext(ctx, "mention resolution failed, persisting without mentions",
+			"error", err, "message_id", evt.Message.ID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+	} else {
+		evt.Message.Mentions = resolved.Participants
 	}
-	evt.Message.Mentions = resolved.Participants
 	// debug: mention resolution is the first decision step — count only, no content.
 	slog.DebugContext(ctx, "message-worker mentions resolved",
-		"request_id", natsutil.RequestIDFromContext(ctx), "mentions", len(resolved.Participants))
+		"request_id", natsutil.RequestIDFromContext(ctx), "mentions", len(evt.Message.Mentions))
 
 	var sender *cassParticipant
 	user, err := h.userStore.FindUserByAccount(ctx, evt.Message.UserAccount)
-	if err != nil {
-		if model.IsSystemMessageType(evt.Message.Type) {
-			// System messages may have no real user; proceed with nil sender.
-			// A client type (e.g. important) has a real sender, so a lookup failure
-			// there falls through to the error branch like a normal message.
-			slog.WarnContext(ctx, "user not found for system message, using nil sender",
-				"account", evt.Message.UserAccount, "type", evt.Message.Type,
-				"request_id", natsutil.RequestIDFromContext(ctx))
-		} else {
-			return fmt.Errorf("lookup user %s: %w", evt.Message.UserAccount, err)
-		}
-	} else {
+	switch {
+	// user != nil is defensive, not a live fix: every current UserStore reports a
+	// miss as ErrUserNotFound rather than (nil, nil). It costs one comparison and
+	// keeps a future implementation that returns the looser (nil, nil) from
+	// panicking on the sole message-persistence path.
+	case err == nil && user != nil:
 		sender = &cassParticipant{
 			ID:          user.ID,
 			EngName:     user.EngName,
 			CompanyName: user.ChineseName,
 			Account:     evt.Message.UserAccount,
+		}
+	case model.IsSystemMessageType(evt.Message.Type):
+		// System messages may have no real user; proceed with nil sender.
+		// A client type (e.g. important) has a real sender, so a lookup failure
+		// there falls through to the fail-open branch like a normal message.
+		slog.WarnContext(ctx, "user not found for system message, using nil sender",
+			"account", evt.Message.UserAccount, "type", evt.Message.Type,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+	default:
+		// Fail-open: project the sender from the canonical event, which already
+		// carries the identity the gatekeeper resolved at send time. Only the
+		// EngName/ChineseName split is lost (UserDisplayName is already the
+		// composed render-ready name), so the write proceeds rather than
+		// NAK-buffering until Mongo returns.
+		slog.WarnContext(ctx, "sender lookup failed, projecting sender from event",
+			"error", err, "account", evt.Message.UserAccount,
+			"message_id", evt.Message.ID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+		sender = &cassParticipant{
+			ID:      evt.Message.UserID,
+			EngName: evt.Message.UserDisplayName,
+			Account: evt.Message.UserAccount,
+		}
+		// SiteID is deliberately left zero. It reaches
+		// publishThreadSubInboxIfRemote as ownerSiteID — the subscription
+		// owner's HOME site, not the room's site (evt.SiteID) — and we do not
+		// know it without the user doc. Guessing it either misroutes the
+		// federated event or silently short-circuits it; an empty value takes
+		// the documented skip-and-warn branch instead.
+		user = &model.User{
+			ID:      evt.Message.UserID,
+			Account: evt.Message.UserAccount,
+			EngName: evt.Message.UserDisplayName,
 		}
 	}
 	// debug: which sender the message resolved to (system messages have none).
@@ -256,8 +290,10 @@ func debugFlowPersisted(ctx context.Context, messageID string, thread bool) {
 // replies it upserts both subscriptions and bumps the room's last-message pointer.
 // It returns the threadRoomID so the caller can pass it to SaveThreadMessage.
 //
-// `replier` may be nil for system messages with no real user (rare in thread
-// paths); subscriptions for the replier are skipped in that case.
+// `replier` is nil only for system messages with no real user. A real user
+// whose Mongo sender lookup failed (fail-open) is projected from the
+// canonical event, so their subscription still lands even during a Mongo
+// outage.
 func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, isMigration bool) (string, error) {
 	now := msg.CreatedAt
 

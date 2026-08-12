@@ -14,6 +14,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/logctx"
@@ -26,6 +27,7 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -52,6 +54,11 @@ type config struct {
 	HealthAddr         string                  `env:"HEALTH_ADDR"          envDefault:":8081"`
 	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string                  `env:"METRICS_ADDR"         envDefault:":9090"`
+	ValkeyAddrs        []string                `env:"VALKEY_ADDRS"    envSeparator:","`
+	ValkeyPassword     string                  `env:"VALKEY_PASSWORD" envDefault:""`
+	DEKL2TTL           time.Duration           `env:"ATREST_DEK_L2_TTL"           envDefault:"90m"`
+	DEKBreakerFails    int                     `env:"ATREST_DEK_BREAKER_FAILS"    envDefault:"5"`
+	DEKBreakerCooldown time.Duration           `env:"ATREST_DEK_BREAKER_COOLDOWN" envDefault:"10s"`
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Atrest             atrest.Config
@@ -128,6 +135,28 @@ func main() {
 	}
 	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
 
+	// Valkey fronting the at-rest DEK L2. Empty VALKEY_ADDRS disables the tier
+	// (the DEK store falls straight through to Mongo, as before).
+	//
+	// A connect failure must NOT be fatal. This worker is the sole persister of
+	// message history to Cassandra; exiting here would crash-loop the pod over a
+	// fail-open cache tier and stop every write — strictly worse than the outage
+	// the L2 exists to survive. A nil client is the documented "L2 off" contract
+	// (NewL2DEKStore and valkeyutil.Disconnect both accept it).
+	var dekValkey valkeyutil.Client
+	if len(cfg.ValkeyAddrs) > 0 {
+		client, connErr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
+		if connErr != nil {
+			slog.Error("valkey connect (dek L2) failed; DEK L2 disabled", "error", connErr)
+		} else {
+			dekValkey = client
+		}
+		slog.Info("at-rest DEK L2 configured", "enabled", dekValkey != nil && cfg.DEKL2TTL > 0, "ttl", cfg.DEKL2TTL)
+	}
+
 	var (
 		cipher       atrest.Cipher
 		vaultWrapper atrest.KeyWrapperCloser
@@ -140,7 +169,13 @@ func main() {
 		}
 		vaultWrapper = w
 		dekColl := db.Collection(atrest.CollectionName)
-		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+		// message-worker is the sole persister, so its DEK breaker opening is the
+		// difference between messages being written and being parked. Publish it.
+		dekBreaker := circuitbreaker.New(cfg.DEKBreakerFails, cfg.DEKBreakerCooldown,
+			circuitbreaker.Tracked(ctx, "atrestdek"))
+		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), dekValkey,
+			cfg.DEKL2TTL, dekBreaker, atrest.DefaultL2Recorder())
+		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
 	}
 
 	store := NewCassandraStore(cassSession, bucketSizer, cipher)
@@ -277,6 +312,7 @@ func main() {
 			}
 			return nil
 		},
+		func(_ context.Context) error { valkeyutil.Disconnect(dekValkey); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
