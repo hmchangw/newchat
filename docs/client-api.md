@@ -270,6 +270,8 @@ Site discovery — called once per login, **before** §2.2. Looks the account up
 
 **Discovery only — no token is validated here.** The endpoint serves non-secret directory data keyed by `account`. The client supplies the account directly: derived from the SSO token's `preferred_username` claim in production, or the dev login form in dev mode. The authoritative check is auth-service (§2.2), which validates the SSO token before minting a JWT — an account that resolves here still cannot obtain a NATS JWT or connect without a valid token at that step.
 
+> **Failover routing.** During a home-site outage, `baseUrl` and `natsUrl` may point at the shared backup site while `siteId` stays the account's home site (data on the backup is namespaced by the origin `siteId`). Clients need no special handling: the existing reconnect-on-connection-failure path re-queries this endpoint and receives the current coordinates, in both the failover and failback directions.
+
 #### Request
 
 | Field | Source | Type | Required | Notes |
