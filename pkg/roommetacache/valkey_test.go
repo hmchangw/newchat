@@ -64,7 +64,6 @@ func (f *fakeValkey) Del(_ context.Context, keys ...string) error {
 	}
 	return nil
 }
-
 func (f *fakeValkey) Expire(context.Context, string, time.Duration) (bool, error) {
 	return true, nil
 }
@@ -116,6 +115,76 @@ func TestReadThrough_L2Hit_DoesNotPopulate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 	assert.Empty(t, fake.sets, "Set must not be called on a cache hit")
+}
+
+// The guard exists to fence the Mongo fetch, not the cache in front of it. If
+// it fenced the whole read-through, a circuit breaker that opened during a
+// Mongo outage would also refuse L2 hits — disabling the cache at the exact
+// moment it is the only thing that can answer.
+func TestReadThrough_FetchGuard_NotAppliedToL2Hit(t *testing.T) {
+	fake := newFakeValkey()
+	want := Meta{ID: "r1", Type: model.RoomTypeChannel, Name: "general", SiteID: "site-a", UserCount: 7}
+	raw, err := json.Marshal(want)
+	require.NoError(t, err)
+	fake.data[MetaKey("r1")] = string(raw)
+
+	guardCalls := 0
+	got, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{},
+		WithFetchGuard(func(func() error) error {
+			guardCalls++
+			return errors.New("guard refused")
+		}))
+
+	require.NoError(t, err, "an L2 hit must be served even while the guard is refusing")
+	assert.Equal(t, want, got)
+	assert.Zero(t, guardCalls, "the guard must not wrap the L2 read")
+}
+
+// On a miss the fetch runs inside the guard, so a refusing guard short-circuits
+// before Mongo is touched (nil collection proves it was never dereferenced).
+func TestReadThrough_FetchGuard_WrapsMongoFetch(t *testing.T) {
+	fake := newFakeValkey()
+	errRefused := errors.New("guard refused")
+
+	guardCalls := 0
+	_, err := ReadThrough(context.Background(), fake, nil, "missing", time.Minute, &fakeRecorder{},
+		WithFetchGuard(func(func() error) error {
+			guardCalls++
+			return errRefused
+		}))
+
+	require.ErrorIs(t, err, errRefused)
+	assert.Equal(t, 1, guardCalls, "the fetch must run inside the guard")
+	assert.Empty(t, fake.sets, "nothing may be cached when the fetch never ran")
+}
+
+// A decoded-but-zero entry must be treated as a miss, not served. Any
+// well-formed JSON that is not a Meta unmarshals to the zero value, and a Meta
+// with an empty SiteID/Type feeds routing decisions downstream — so a stray
+// "null" under this key would misroute a room's events for a whole TTL.
+// FetchFromMongo always populates ID, so ID=="" cannot be a legitimate entry.
+func TestReadThrough_ZeroValueL2Entry_TreatedAsMiss(t *testing.T) {
+	for _, tt := range []struct{ name, stored string }{
+		{"json null", "null"},
+		{"empty object", "{}"},
+		{"foreign value", `{"unrelated":"field"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeValkey()
+			fake.data[MetaKey("r1")] = tt.stored
+			rec := &fakeRecorder{}
+
+			guardCalls := 0
+			_, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute, rec,
+				WithFetchGuard(func(func() error) error {
+					guardCalls++
+					return errors.New("fell through to the source of truth")
+				}))
+
+			require.Error(t, err, "a zero entry must not be served as a hit")
+			assert.Equal(t, 1, guardCalls, "a zero entry must fall through to Mongo")
+		})
+	}
 }
 
 func TestBustMeta_CallsDel(t *testing.T) {

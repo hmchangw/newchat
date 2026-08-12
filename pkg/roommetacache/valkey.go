@@ -2,7 +2,6 @@ package roommetacache
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -27,25 +26,31 @@ func MetaKey(roomID string) string {
 	return "room:{" + roomID + "}:meta"
 }
 
-// readL2 attempts the L2 (Valkey) read for roomID, records the outcome on rec,
-// and returns the cached Meta with found=true only on a hit. A clean miss
-// records Miss; any other L2 error records Error and logs at warn. Both return
-// found=false so the caller falls through to Mongo.
+// readL2 attempts the L2 (Valkey) read. An entry with no room ID is not usable:
+// FetchFromMongo always populates it, so a zero Meta means the key holds
+// something that is not a Meta — and serving it would hand out an empty SiteID
+// and type, which downstream routing reads.
 func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Recorder) (Meta, bool) {
-	var cached Meta
-	err := valkeyutil.GetJSON(ctx, client, MetaKey(roomID), &cached)
-	if err == nil {
-		rec.Hit(ctx)
-		return cached, true
-	}
-	if errors.Is(err, valkeyutil.ErrCacheMiss) {
-		rec.Miss(ctx)
-		return Meta{}, false
-	}
-	rec.Error(ctx)
-	slog.WarnContext(ctx, "room meta L2 read failed, falling back to mongo",
-		"room_id", roomID, "error", err)
-	return Meta{}, false
+	return valkeyutil.ReadCachedJSON(ctx, client, MetaKey(roomID), "room meta", rec,
+		func(m *Meta) bool { return m.ID != "" }, "room_id", roomID)
+}
+
+// ReadThroughOption configures a ReadThrough call.
+type ReadThroughOption func(*readThroughOpts)
+
+type readThroughOpts struct {
+	guard func(func() error) error
+}
+
+// WithFetchGuard runs the Mongo fetch inside guard — typically a circuit
+// breaker's Do — so a cold miss fast-fails during an outage instead of stalling
+// on Mongo's own timeout.
+//
+// The guard deliberately wraps only the fetch, never the L2 read. Fencing the
+// whole read-through would make an open breaker refuse cached rooms too,
+// disabling the L2 at precisely the moment it is the only tier that can answer.
+func WithFetchGuard(guard func(fn func() error) error) ReadThroughOption {
+	return func(o *readThroughOpts) { o.guard = guard }
 }
 
 // ReadThrough resolves a room Meta through the L2 (Valkey) tier: GET on the
@@ -57,22 +62,45 @@ func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Re
 // rec records L2 hit/miss/error outcomes; callers pass a shared
 // cachemetrics.For("roommeta", "l2") so every service emits the same series.
 // A nil client (L2 disabled) records nothing — there is no L2 to hit or miss.
-func ReadThrough(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder) (Meta, error) {
+func ReadThrough(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder, opts ...ReadThroughOption) (Meta, error) {
+	var o readThroughOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	if client == nil {
-		return FetchFromMongo(ctx, rooms, roomID)
+		return fetchGuarded(ctx, o.guard, rooms, roomID)
 	}
 
 	if meta, found := readL2(ctx, client, roomID, rec); found {
 		return meta, nil
 	}
 
-	meta, err := FetchFromMongo(ctx, rooms, roomID)
+	meta, err := fetchGuarded(ctx, o.guard, rooms, roomID)
 	if err != nil {
 		return Meta{}, fmt.Errorf("l2 read-through: %w", err)
 	}
 	if err := valkeyutil.SetJSONWithTTL(ctx, client, MetaKey(roomID), meta, ttl); err != nil {
 		slog.WarnContext(ctx, "room meta L2 populate failed (TTL will reconcile)",
 			"room_id", roomID, "error", err)
+	}
+	return meta, nil
+}
+
+// fetchGuarded runs FetchFromMongo, inside guard when one was supplied. A nil
+// guard (the common case) calls straight through.
+func fetchGuarded(ctx context.Context, guard func(func() error) error, rooms *mongo.Collection, roomID string) (Meta, error) {
+	if guard == nil {
+		return FetchFromMongo(ctx, rooms, roomID)
+	}
+	var meta Meta
+	err := guard(func() error {
+		var e error
+		meta, e = FetchFromMongo(ctx, rooms, roomID)
+		return e
+	})
+	if err != nil {
+		return Meta{}, err
 	}
 	return meta, nil
 }
