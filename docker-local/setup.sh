@@ -136,7 +136,7 @@ NATS_CREDS_FILE=/etc/nats/backend.creds
 DEV_MODE=true
 
 # Every setting in the service compose files is overridable from here — grep a
-# compose file for ${ to see a service's own knobs. The common ones:
+# compose file for \${ to see a service's own knobs. The common ones:
 #
 # Published host ports (change one to dodge a conflict; the URLs follow).
 #GATEWAY_HOST_PORT=7777        # baseUrl; portal/media URLs derive from it
