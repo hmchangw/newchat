@@ -53,6 +53,9 @@ func (s *stubValkey) Del(_ context.Context, keys ...string) error {
 	}
 	return nil
 }
+func (s *stubValkey) Expire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
 
 func (s *stubValkey) Close() error { return nil }
 

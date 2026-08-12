@@ -63,6 +63,9 @@ func (f *fakeClient) Del(_ context.Context, keys ...string) error {
 	}
 	return nil
 }
+func (f *fakeClient) Expire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
 
 func (f *fakeClient) Close() error { return nil }
 

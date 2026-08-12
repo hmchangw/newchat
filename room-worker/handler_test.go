@@ -6857,6 +6857,10 @@ func (f *fakeBustClient) Del(_ context.Context, keys ...string) error {
 	f.dels = append(f.dels, keys...)
 	return f.delErr
 }
+func (f *fakeBustClient) Expire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
 func (f *fakeBustClient) Close() error { return nil }
 
 // SetNX / IncrEx satisfy valkeyutil.Client but are unused here; panic on any call.

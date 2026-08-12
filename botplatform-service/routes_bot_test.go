@@ -42,6 +42,10 @@ func (w *wireCaptureClient) Del(context.Context, ...string) error {
 	atomic.AddInt32(&w.del, 1)
 	return nil
 }
+func (w *wireCaptureClient) Expire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
 func (w *wireCaptureClient) Close() error { return nil }
 
 var _ valkeyutil.Client = (*wireCaptureClient)(nil)

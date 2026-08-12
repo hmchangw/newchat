@@ -65,6 +65,10 @@ func (f *fakeValkey) Del(_ context.Context, keys ...string) error {
 	return nil
 }
 
+func (f *fakeValkey) Expire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
 func (f *fakeValkey) Close() error { return nil }
 
 // SetNX / IncrEx satisfy valkeyutil.Client but are unused here; panic on any call.

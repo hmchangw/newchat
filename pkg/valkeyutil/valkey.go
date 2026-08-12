@@ -25,6 +25,11 @@ type Client interface {
 	// on the 0->1 transition (standard fixed-window rate-limit recipe), via INCR + conditional EXPIRE.
 	IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error)
 	Del(ctx context.Context, keys ...string) error
+	// Expire re-arms an existing key's TTL without touching its value, reporting
+	// whether the key existed. Prefer it over a re-Set when only the deadline
+	// should move: a re-Set would resurrect a key deleted since it was read, and
+	// would clobber a value another writer updated in the meantime.
+	Expire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 	Close() error
 }
 
@@ -142,6 +147,14 @@ func (r *clusterClient) Del(ctx context.Context, keys ...string) error {
 	return nil
 }
 
+func (r *clusterClient) Expire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	existed, err := r.c.Expire(ctx, key, ttl).Result()
+	if err != nil {
+		return false, fmt.Errorf("valkey expire: %w", err)
+	}
+	return existed, nil
+}
+
 func (r *clusterClient) Close() error {
 	return r.c.Close()
 }
@@ -169,4 +182,59 @@ func SetJSONWithTTL(ctx context.Context, client Client, key string, value any, t
 		return fmt.Errorf("valkey set json: %w", err)
 	}
 	return nil
+}
+
+// CacheRecorder records the outcome of an L2 cache lookup. Every cache package's
+// own Recorder satisfies it structurally, so callers pass theirs unchanged.
+type CacheRecorder interface {
+	Hit(ctx context.Context)
+	Miss(ctx context.Context)
+	Error(ctx context.Context)
+}
+
+// ReadCachedJSON GETs key, unmarshals the stored JSON into T, and records the
+// outcome. It is the shared read half of every read-through cache tier in this
+// repo, which otherwise reimplement the same five branches and drift apart.
+//
+// ok is true only for a usable hit. There are three ways to not have one, and
+// they are deliberately not the same thing to the metrics:
+//
+//   - A clean miss records Miss.
+//   - A decoded value that fails valid records Miss and warns. Any well-formed
+//     JSON that is not a T unmarshals to the zero value, so without this an
+//     entry of "null" — or a foreign value written under the same key — is
+//     served as a real one for the rest of its TTL. What "usable" means is the
+//     caller's to decide, hence the predicate; a nil valid accepts anything
+//     that decodes.
+//   - A transport or decode failure records Error and warns.
+//
+// All three return ok=false, so the caller falls through to its source of
+// truth: this half is fail-open by construction and never returns an error.
+//
+// label names the cache in log messages; logAttrs are appended to them so each
+// caller keeps its own structured fields.
+func ReadCachedJSON[T any](ctx context.Context, client Client, key, label string,
+	rec CacheRecorder, valid func(*T) bool, logAttrs ...any,
+) (T, bool) {
+	var zero, cached T
+	err := GetJSON(ctx, client, key, &cached)
+	switch {
+	case err == nil && (valid == nil || valid(&cached)):
+		rec.Hit(ctx)
+		return cached, true
+	case err == nil:
+		rec.Miss(ctx)
+		slog.WarnContext(ctx, label+" L2 entry failed validation, treating as miss", logAttrs...)
+		return zero, false
+	case errors.Is(err, ErrCacheMiss):
+		rec.Miss(ctx)
+		return zero, false
+	default:
+		rec.Error(ctx)
+		attrs := make([]any, 0, len(logAttrs)+2)
+		attrs = append(attrs, logAttrs...)
+		attrs = append(attrs, "error", err)
+		slog.WarnContext(ctx, label+" L2 read failed, falling back to the source of truth", attrs...)
+		return zero, false
+	}
 }
