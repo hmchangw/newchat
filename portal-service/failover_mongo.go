@@ -50,7 +50,7 @@ func (s *mongoFailoverStore) List(ctx context.Context) ([]FailoverState, error) 
 // (a concurrent insert -> duplicate key -> conflict). Otherwise it CAS-updates
 // the document whose stored version == next.Version-1; a non-match means a
 // racing writer moved first -> conflict.
-func (s *mongoFailoverStore) Transition(ctx context.Context, next FailoverState) error {
+func (s *mongoFailoverStore) Transition(ctx context.Context, next *FailoverState) error {
 	if next.Version < 1 {
 		return fmt.Errorf("transition: next version must be >= 1, got %d", next.Version)
 	}

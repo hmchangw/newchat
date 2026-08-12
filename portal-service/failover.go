@@ -53,7 +53,7 @@ type FailoverState struct {
 
 // ServingTarget derives where this site is served from. Any status other than
 // failed_over/failing_back (including an unknown value) is home — the fail-safe.
-func (s FailoverState) ServingTarget() ServingTarget {
+func (s *FailoverState) ServingTarget() ServingTarget {
 	switch s.Status {
 	case StatusFailedOver, StatusFailingBack:
 		return ServingBackup
@@ -92,7 +92,7 @@ func nextStatus(cur FailoverStatus, action FailoverAction) (FailoverStatus, erro
 // applyAction computes the next FailoverState for an operator action. It bumps
 // version by 1 and stamps operator/reason/since/timestamp. It does not persist —
 // the caller CAS-writes the result via FailoverStore.Transition.
-func applyAction(cur FailoverState, action FailoverAction, operator, reason string, nowMs int64) (FailoverState, error) {
+func applyAction(cur *FailoverState, action FailoverAction, operator, reason string, nowMs int64) (FailoverState, error) {
 	ns, err := nextStatus(cur.Status, action)
 	if err != nil {
 		return FailoverState{}, err

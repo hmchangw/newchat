@@ -32,7 +32,7 @@ func TestMongoFailoverStore_TransitionInsertThenUpdate(t *testing.T) {
 
 	// First transition inserts version 1.
 	v1 := FailoverState{SiteID: "site-a", Status: StatusFailedOver, Operator: "jane", Reason: "down", Since: 100, Version: 1, Timestamp: 100}
-	require.NoError(t, store.Transition(ctx, v1))
+	require.NoError(t, store.Transition(ctx, &v1))
 
 	got, err := store.Get(ctx, "site-a")
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestMongoFailoverStore_TransitionInsertThenUpdate(t *testing.T) {
 
 	// Second transition CAS-updates to version 2.
 	v2 := FailoverState{SiteID: "site-a", Status: StatusFailingBack, Operator: "jane", Reason: "draining", Since: 200, Version: 2, Timestamp: 200}
-	require.NoError(t, store.Transition(ctx, v2))
+	require.NoError(t, store.Transition(ctx, &v2))
 	got, err = store.Get(ctx, "site-a")
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailingBack, got.Status)
@@ -53,13 +53,13 @@ func TestMongoFailoverStore_TransitionStaleVersionConflicts(t *testing.T) {
 	store := newMongoFailoverStore(db)
 	ctx := context.Background()
 
-	require.NoError(t, store.Transition(ctx, FailoverState{SiteID: "site-b", Status: StatusFailedOver, Version: 1, Since: 1, Timestamp: 1}))
+	require.NoError(t, store.Transition(ctx, &FailoverState{SiteID: "site-b", Status: StatusFailedOver, Version: 1, Since: 1, Timestamp: 1}))
 	// Now at version 1. A second "version 1" insert (stale) must conflict.
-	err := store.Transition(ctx, FailoverState{SiteID: "site-b", Status: StatusFailedOver, Version: 1, Since: 2, Timestamp: 2})
+	err := store.Transition(ctx, &FailoverState{SiteID: "site-b", Status: StatusFailedOver, Version: 1, Since: 2, Timestamp: 2})
 	assert.ErrorIs(t, err, errFailoverVersionConflict)
 
 	// A version-3 update (skipping 2) finds no version-2 doc -> conflict.
-	err = store.Transition(ctx, FailoverState{SiteID: "site-b", Status: StatusHealthy, Version: 3, Since: 3, Timestamp: 3})
+	err = store.Transition(ctx, &FailoverState{SiteID: "site-b", Status: StatusHealthy, Version: 3, Since: 3, Timestamp: 3})
 	assert.ErrorIs(t, err, errFailoverVersionConflict)
 }
 
@@ -69,7 +69,7 @@ func TestMongoFailoverStore_ConcurrentCASOneWinner(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed version 1.
-	require.NoError(t, store.Transition(ctx, FailoverState{SiteID: "site-c", Status: StatusFailedOver, Version: 1, Since: 1, Timestamp: 1}))
+	require.NoError(t, store.Transition(ctx, &FailoverState{SiteID: "site-c", Status: StatusFailedOver, Version: 1, Since: 1, Timestamp: 1}))
 
 	// Two goroutines both try to move version 1 -> 2. Exactly one wins.
 	var wg sync.WaitGroup
@@ -78,7 +78,7 @@ func TestMongoFailoverStore_ConcurrentCASOneWinner(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = store.Transition(ctx, FailoverState{SiteID: "site-c", Status: StatusHealthy, Version: 2, Since: 2, Timestamp: 2})
+			errs[idx] = store.Transition(ctx, &FailoverState{SiteID: "site-c", Status: StatusHealthy, Version: 2, Since: 2, Timestamp: 2})
 		}(i)
 	}
 	wg.Wait()
@@ -102,8 +102,8 @@ func TestMongoFailoverStore_List(t *testing.T) {
 	store := newMongoFailoverStore(db)
 	ctx := context.Background()
 
-	require.NoError(t, store.Transition(ctx, FailoverState{SiteID: "site-x", Status: StatusFailedOver, Version: 1, Since: 1, Timestamp: 1}))
-	require.NoError(t, store.Transition(ctx, FailoverState{SiteID: "site-y", Status: StatusHealthy, Version: 1, Since: 1, Timestamp: 1}))
+	require.NoError(t, store.Transition(ctx, &FailoverState{SiteID: "site-x", Status: StatusFailedOver, Version: 1, Since: 1, Timestamp: 1}))
+	require.NoError(t, store.Transition(ctx, &FailoverState{SiteID: "site-y", Status: StatusHealthy, Version: 1, Since: 1, Timestamp: 1}))
 
 	all, err := store.List(ctx)
 	require.NoError(t, err)

@@ -45,7 +45,7 @@ type failoverStateResponse struct {
 	Timestamp     int64          `json:"timestamp"`
 }
 
-func toResponse(s FailoverState) failoverStateResponse {
+func toResponse(s *FailoverState) failoverStateResponse {
 	return failoverStateResponse{
 		SiteID:        s.SiteID,
 		Status:        s.Status,
@@ -67,8 +67,8 @@ func (h *FailoverHandler) List(c *gin.Context) {
 		return
 	}
 	out := make([]failoverStateResponse, 0, len(states))
-	for _, s := range states {
-		out = append(out, toResponse(s))
+	for i := range states {
+		out = append(out, toResponse(&states[i]))
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -82,7 +82,7 @@ func (h *FailoverHandler) Get(c *gin.Context) {
 		errhttp.Write(ctx, c, fmt.Errorf("get failover state: %w", err))
 		return
 	}
-	c.JSON(http.StatusOK, toResponse(st))
+	c.JSON(http.StatusOK, toResponse(&st))
 }
 
 // Post applies an operator transition to a site's failover state.
@@ -113,7 +113,7 @@ func (h *FailoverHandler) Post(c *gin.Context) {
 	}
 
 	nowMs := h.now().UTC().UnixMilli()
-	next, err := applyAction(cur, req.Action, req.Operator, req.Reason, nowMs)
+	next, err := applyAction(&cur, req.Action, req.Operator, req.Reason, nowMs)
 	if err != nil {
 		errhttp.Write(ctx, c, errcode.Conflict(
 			fmt.Sprintf("action %q not allowed from status %q", req.Action, cur.Status),
@@ -121,7 +121,7 @@ func (h *FailoverHandler) Post(c *gin.Context) {
 		return
 	}
 
-	if err := h.store.Transition(ctx, next); err != nil {
+	if err := h.store.Transition(ctx, &next); err != nil {
 		if errors.Is(err, errFailoverVersionConflict) {
 			errhttp.Write(ctx, c, errcode.Conflict("failover state changed concurrently, retry",
 				errcode.WithReason(errcode.PortalFailoverVersionConflict)))
@@ -134,7 +134,7 @@ func (h *FailoverHandler) Post(c *gin.Context) {
 	slog.InfoContext(ctx, "failover transition",
 		"siteId", siteID, "from", cur.Status, "to", next.Status,
 		"operator", req.Operator, "reason", req.Reason, "version", next.Version)
-	c.JSON(http.StatusOK, toResponse(next))
+	c.JSON(http.StatusOK, toResponse(&next))
 }
 
 // registerFailoverRoutes mounts the control surface behind the ops-token gate.

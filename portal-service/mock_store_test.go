@@ -126,7 +126,7 @@ func (mr *MockFailoverStoreMockRecorder) List(ctx any) *gomock.Call {
 }
 
 // Transition mocks base method.
-func (m *MockFailoverStore) Transition(ctx context.Context, next FailoverState) error {
+func (m *MockFailoverStore) Transition(ctx context.Context, next *FailoverState) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Transition", ctx, next)
 	ret0, _ := ret[0].(error)

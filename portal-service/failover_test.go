@@ -41,7 +41,7 @@ func TestApplyAction_LegalTransitions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cur := FailoverState{SiteID: "site-a", Status: tc.from, Version: 3}
-			next, err := applyAction(cur, tc.action, "jane", "because", 1700)
+			next, err := applyAction(&cur, tc.action, "jane", "because", 1700)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, next.Status)
 			assert.Equal(t, "site-a", next.SiteID)
@@ -68,7 +68,7 @@ func TestApplyAction_IllegalTransitions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cur := FailoverState{SiteID: "site-a", Status: tc.from, Version: 1}
-			_, err := applyAction(cur, tc.action, "jane", "because", 1700)
+			_, err := applyAction(&cur, tc.action, "jane", "because", 1700)
 			assert.ErrorIs(t, err, errIllegalTransition)
 		})
 	}

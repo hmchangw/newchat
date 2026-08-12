@@ -53,5 +53,5 @@ type DirectoryStore interface {
 type FailoverStore interface {
 	Get(ctx context.Context, siteID string) (FailoverState, error)
 	List(ctx context.Context) ([]FailoverState, error)
-	Transition(ctx context.Context, next FailoverState) error
+	Transition(ctx context.Context, next *FailoverState) error
 }
