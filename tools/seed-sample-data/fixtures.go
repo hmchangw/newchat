@@ -451,10 +451,13 @@ func BuildSubscriptions() []model.Subscription {
 				Name:         name,
 				RoomType:     r.Type,
 				IsSubscribed: true,
-				JoinedAt:     seedBaseTime,
-				HasMention:   false,
-				Alert:        true,
-				Muted:        false,
+				// Not omitempty in bson: leaving it unset writes `open: false`,
+				// which subscription.list treats as explicitly closed.
+				Open:       true,
+				JoinedAt:   seedBaseTime,
+				HasMention: false,
+				Alert:      true,
+				Muted:      false,
 			})
 		}
 	}
