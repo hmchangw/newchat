@@ -33,11 +33,12 @@ type config struct {
 	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
 	// LEGACY_ROOM_ORIGINS is a JSON array of {siteID, origin} objects mapping
 	// each room-origin site to the legacy URL substituted into ${roomOrigin}.
-	LegacyRoomOrigins legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
-	MongoURI          string            `env:"MONGO_URI,required"`
-	MongoDB           string            `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername     string            `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
+	LegacyRoomOrigins  legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
+	MongoURI           string            `env:"MONGO_URI,required"`
+	MongoDB            string            `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername      string            `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword      string            `env:"MONGO_PASSWORD"            envDefault:""`
+	MongoSelectTimeout time.Duration     `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	// MongoReadPreference routes the store's display/list reads to secondaries; the
 	// client stays on primary for authz/dedup/read-after-write.
 	MongoReadPreference      string          `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
@@ -171,7 +172,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		// A stopped Mongo must error rather than block: the driver default (30s)
+		// outlasts any useful budget on this path. Elections are covered by the
+		// caller's retry, not by waiting here.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)

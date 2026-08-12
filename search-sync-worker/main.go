@@ -31,22 +31,23 @@ type bootstrapConfig struct {
 }
 
 type config struct {
-	NatsURL             string `env:"NATS_URL,required"`
-	NatsCredsFile       string `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID              string `env:"SITE_ID,required"`
-	MongoURI            string `env:"MONGO_URI,required"`
-	MongoDB             string `env:"MONGO_DB"      envDefault:"chat"`
-	MongoUsername       string `env:"MONGO_USERNAME" envDefault:""`
-	MongoPassword       string `env:"MONGO_PASSWORD" envDefault:""`
-	SearchURL           string `env:"SEARCH_URL,required"`
-	SearchBackend       string `env:"SEARCH_BACKEND"         envDefault:"elasticsearch"`
-	SearchUsername      string `env:"SEARCH_USERNAME"        envDefault:""`
-	SearchPassword      string `env:"SEARCH_PASSWORD"        envDefault:""`
-	SearchTLSSkipVerify bool   `env:"SEARCH_TLS_SKIP_VERIFY" envDefault:"false"`
-	MsgIndexPrefix      string `env:"MSG_INDEX_PREFIX,required"`
-	SpotlightIndex      string `env:"SPOTLIGHT_INDEX,required"`
-	SpotlightOrgIndex   string `env:"SPOTLIGHT_ORG_INDEX,required"`
-	HRCentralSiteID     string `env:"HR_CENTRAL_SITE_ID,required"`
+	NatsURL             string        `env:"NATS_URL,required"`
+	NatsCredsFile       string        `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID              string        `env:"SITE_ID,required"`
+	MongoURI            string        `env:"MONGO_URI,required"`
+	MongoDB             string        `env:"MONGO_DB"      envDefault:"chat"`
+	MongoUsername       string        `env:"MONGO_USERNAME" envDefault:""`
+	MongoPassword       string        `env:"MONGO_PASSWORD" envDefault:""`
+	MongoSelectTimeout  time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	SearchURL           string        `env:"SEARCH_URL,required"`
+	SearchBackend       string        `env:"SEARCH_BACKEND"         envDefault:"elasticsearch"`
+	SearchUsername      string        `env:"SEARCH_USERNAME"        envDefault:""`
+	SearchPassword      string        `env:"SEARCH_PASSWORD"        envDefault:""`
+	SearchTLSSkipVerify bool          `env:"SEARCH_TLS_SKIP_VERIFY" envDefault:"false"`
+	MsgIndexPrefix      string        `env:"MSG_INDEX_PREFIX,required"`
+	SpotlightIndex      string        `env:"SPOTLIGHT_INDEX,required"`
+	SpotlightOrgIndex   string        `env:"SPOTLIGHT_ORG_INDEX,required"`
+	HRCentralSiteID     string        `env:"HR_CENTRAL_SITE_ID,required"`
 	// HRJetStreamDomain, when set, is the remote NATS domain owning OrgSyncStream (hr-syncer's HR
 	// stream), letting a worker at one site consume it in another's domain; empty means local domain.
 	HRJetStreamDomain string `env:"HR_JETSTREAM_DOMAIN" envDefault:""`
@@ -152,7 +153,12 @@ func main() {
 	}
 
 	// Mongo backs the migrated-Teams-history author lookup (teams_user → account → user _id).
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		// A stopped Mongo must error rather than block: the driver default (30s)
+		// outlasts any useful budget on this path. Elections are covered by the
+		// caller's retry, not by waiting here.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongodb connect failed", "error", err)
 		os.Exit(1)

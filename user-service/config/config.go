@@ -18,6 +18,10 @@ type MongoConfig struct {
 	// ReadPreference routes staleness-tolerant reads to secondaries per read site;
 	// the client stays on primary for dedup/read-after-write.
 	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// ServerSelectionTimeout bounds how long a read waits for a reachable
+	// server. Deliberately far below the driver default (30s), which outlasts
+	// any useful request budget on this path.
+	ServerSelectionTimeout time.Duration `env:"SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 }
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).

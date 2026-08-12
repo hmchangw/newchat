@@ -26,6 +26,7 @@ type config struct {
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
 
+	MongoSelectTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	// MaxConcurrency caps in-flight req/reply handlers across all routes.
 	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"200"`
 
@@ -65,7 +66,12 @@ func run() error {
 		return fmt.Errorf("bootstrap streams: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		// A stopped Mongo must error rather than block: the driver default (30s)
+		// outlasts any useful budget on this path. Elections are covered by the
+		// caller's retry, not by waiting here.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}

@@ -70,7 +70,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithObservability(sdk),
+		// A stopped Mongo must error rather than block: the driver default (30s)
+		// outlasts any useful budget on this path. Elections are covered by the
+		// caller's retry, not by waiting here.
+		mongoutil.WithServerSelectionTimeout(cfg.Mongo.ServerSelectionTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)

@@ -29,18 +29,19 @@ import (
 )
 
 type config struct {
-	NatsURL       string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID        string                  `env:"SITE_ID"         envDefault:"default"`
-	MongoURI      string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB       string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword string                  `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers    int                     `env:"MAX_WORKERS"     envDefault:"100"`
-	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	NatsURL            string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile      string                  `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID             string                  `env:"SITE_ID"         envDefault:"default"`
+	MongoURI           string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB            string                  `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername      string                  `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword      string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	MongoSelectTimeout time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	MaxWorkers         int                     `env:"MAX_WORKERS"     envDefault:"100"`
+	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr         string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 
@@ -676,7 +677,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		// A stopped Mongo must error rather than block: the driver default (30s)
+		// outlasts any useful budget on this path. Elections are covered by the
+		// caller's retry, not by waiting here.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
