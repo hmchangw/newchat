@@ -107,6 +107,7 @@ func newSpotlightSearchIndex(account string, evt *model.InboxMemberEvent) search
 		RoomType:    string(evt.RoomType),
 		SiteID:      evt.SiteID,
 		JoinedAt:    convertJoinedAt(evt.JoinedAt),
+		Origin:      evt.Origin,
 	})
 }
 

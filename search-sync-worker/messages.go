@@ -266,6 +266,7 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 			UserAccount: id.Account,
 			Content:     teamsmigrate.BodyToContent(tm.Body),
 			CreatedAt:   tm.CreatedDateTime,
+			Origin:      model.OriginTeams,
 		}
 		body, _ := json.Marshal(doc)
 		actions = append(actions, searchengine.BulkAction{

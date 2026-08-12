@@ -256,6 +256,7 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		SiteID:    h.siteID,
 		Accounts:  accounts,
 		Timestamp: acceptedAt.UnixMilli(),
+		Origin:    model.OriginTeams,
 	}
 	payload, err := json.Marshal(evt)
 	if err != nil {

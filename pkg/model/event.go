@@ -132,6 +132,10 @@ type InboxMemberEvent struct {
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty"`
 	JoinedAt           int64    `json:"joinedAt,omitempty"`
 	Timestamp          int64    `json:"timestamp" bson:"timestamp"`
+	// Origin marks provenance (e.g. OriginTeams for Teams-migrated room
+	// membership); empty for natively-created rooms. Propagated into the
+	// spotlight search doc.
+	Origin string `json:"origin,omitempty"`
 }
 
 // NotificationEvent is the per-user reaction notification on chat.user.{account}.notification;

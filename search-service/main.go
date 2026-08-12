@@ -100,6 +100,10 @@ type Config struct {
 	// door (ErrUnavailable) instead of piling unbounded work onto Elasticsearch/
 	// MongoDB. 0 disables the cap (unbounded spawn).
 	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+	// ShowTeamsRoom controls whether Teams-migrated rooms/messages (origin
+	// "teams") appear in search results; false hides them (reversible read-time
+	// filter — see pkg/model.OriginTeams).
+	ShowTeamsRoom bool `env:"SHOW_TEAMS_ROOM" envDefault:"false"`
 }
 
 func main() {
@@ -208,6 +212,7 @@ func main() {
 		UserRoomIndex:           cfg.UserRoomIndex,
 		SpotlightReadPattern:    spotlightReadPattern,
 		SpotlightOrgReadPattern: spotlightOrgReadPattern,
+		ShowTeamsRoom:           cfg.ShowTeamsRoom,
 	})
 	handler.room = newRoomClient(nc)
 

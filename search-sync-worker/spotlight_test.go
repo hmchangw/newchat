@@ -56,6 +56,18 @@ func TestNewSpotlightSearchIndex_ZeroJoinedAtStaysZeroTime(t *testing.T) {
 	assert.True(t, doc.JoinedAt.IsZero())
 }
 
+func TestNewSpotlightSearchIndex_OriginPropagated(t *testing.T) {
+	evt := &model.InboxMemberEvent{RoomID: "r-eng", Origin: model.OriginTeams}
+	doc := newSpotlightSearchIndex("alice", evt)
+	assert.Equal(t, model.OriginTeams, doc.Origin)
+}
+
+func TestNewSpotlightSearchIndex_NormalRoomOriginEmpty(t *testing.T) {
+	evt := &model.InboxMemberEvent{RoomID: "r-eng"}
+	doc := newSpotlightSearchIndex("alice", evt)
+	assert.Equal(t, "", doc.Origin)
+}
+
 func TestSpotlightCollection_Metadata(t *testing.T) {
 	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 

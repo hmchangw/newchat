@@ -33,6 +33,9 @@ type SubscriptionRepo struct {
 	subscriptionsSecondary *mongoutil.Collection[model.Subscription]
 	enrichedSecondary      *mongoutil.Collection[model.EnrichedSubscription]
 	siteID                 string // this instance's site — distinguishes local vs cross-site rows in the deleted-filter
+	// showTeamsRoom mirrors SHOW_TEAMS_ROOM: false (default) excludes
+	// Teams-migrated rooms (origin "teams") from list/count results.
+	showTeamsRoom bool
 }
 
 // NewSubscriptionRepo builds a SubscriptionRepo over db; the deleted-filter keeps cross-site rows, drops local rows with missing/soft-deleted rooms.
@@ -47,6 +50,7 @@ func NewSubscriptionRepo(db *mongo.Database, siteID string, opts ...Option) *Sub
 		subscriptionsSecondary: subscriptions.WithReadPreference(s.readPref),
 		enrichedSecondary:      enriched.WithReadPreference(s.readPref),
 		siteID:                 siteID,
+		showTeamsRoom:          s.showTeamsRoom,
 	}
 }
 
@@ -93,6 +97,7 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 					"encKey.priv":       1,
 					"encKey.ver":        1,
 					"crossSite":         1,
+					"origin":            1,
 				}},
 			},
 			"as": "room",
@@ -113,6 +118,7 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 			"appCount":          "$room.appCount",
 			"roomName":          "$room.name",
 			"crossSite":         "$room.crossSite",
+			"origin":            "$room.origin",
 			// Sort key: room activity (lastMsgAt), falling back to room.createdAt for
 			// rooms with no messages. Null for cross-site/missing rooms (they sort last).
 			"__sortKey": bson.M{"$ifNull": bson.A{"$room.lastMsgAt", "$room.createdAt"}},
@@ -263,6 +269,7 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// rooms have no local room doc and are kept (their deletion isn't visible here).
 	pipeline := bson.A{bson.M{"$match": match}}
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	pipeline = append(pipeline, r.originFilterStage()...)
 	// Activity window keys on the room's lastMsgAt (surfaced by the enrich stage),
 	// not the subscription's _updatedAt. rooms-type only; cross-site / no-message
 	// rooms (null lastMsgAt) fall outside the window.
@@ -277,6 +284,16 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// denormalizing room activity onto the subscription — a write-side change tracked separately.
 	// Primary: the subscription list must reflect a just-changed subscription immediately.
 	return r.enriched.AggregatePagedHasMore(ctx, pipeline, page)
+}
+
+// originFilterStage excludes Teams-migrated rooms (origin "teams") when
+// showTeamsRoom is false; empty (no-op) otherwise. Must run after
+// roomsEnrichStages, which surfaces the joined room's origin field.
+func (r *SubscriptionRepo) originFilterStage() bson.A {
+	if r.showTeamsRoom {
+		return bson.A{}
+	}
+	return bson.A{bson.M{"$match": bson.M{"origin": bson.M{"$ne": model.OriginTeams}}}}
 }
 
 // sortStages orders rows by room activity (lastMsgAt) desc then name asc. In the
@@ -420,6 +437,7 @@ func activeSubscriptionFilter(account string) bson.M {
 func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account string) (int, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	pipeline = append(pipeline, r.originFilterStage()...)
 	pipeline = append(pipeline, bson.M{"$count": "n"})
 	cur, err := r.subscriptionsSecondary.Raw().Aggregate(ctx, pipeline)
 	if err != nil {

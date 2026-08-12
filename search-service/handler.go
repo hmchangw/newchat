@@ -32,6 +32,7 @@ type handlerConfig struct {
 	UserRoomIndex           string
 	SpotlightReadPattern    string
 	SpotlightOrgReadPattern string
+	ShowTeamsRoom           bool
 }
 
 type handler struct {
@@ -105,7 +106,7 @@ func (h *handler) searchMessages(c *natsrouter.Context, req model.SearchMessages
 	// When req.RoomIDs is set, buildMessageQuery -> scopedAccessClauses
 	// iterates req.RoomIDs and classifies each ID against this map directly,
 	// so no handler-level pre-classification is needed.
-	body, err := buildMessageQuery(req, account, restricted, h.cfg.RecentWindow, h.cfg.UserRoomIndex)
+	body, err := buildMessageQuery(req, account, restricted, h.cfg.RecentWindow, h.cfg.UserRoomIndex, h.cfg.ShowTeamsRoom)
 	if err != nil {
 		return nil, fmt.Errorf("building search query: %w", err)
 	}
@@ -148,7 +149,7 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 	ctx, cancel := h.withRequestTimeout(c)
 	defer cancel()
 
-	body, err := buildRoomQuery(req, account)
+	body, err := buildRoomQuery(req, account, h.cfg.ShowTeamsRoom)
 	if err != nil {
 		// A typed errcode error (invalid roomType) passes through;
 		// anything else (marshal failure — unreachable) gets sanitized.
