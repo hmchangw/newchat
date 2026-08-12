@@ -173,8 +173,15 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
+	// Fail-open: this is read-model bookkeeping, not delivery. lastMsgAt is
+	// derivable from the message itself and already rides on this event, so a
+	// write failure costs a stale room-list ordering hint — while treating it as
+	// fatal costs the message, because the handler NAKs before any fan-out runs
+	// and the recipient sees nothing at all. Delivery outranks bookkeeping.
 	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
-		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
+		slog.WarnContext(ctx, "update room last message failed, delivering anyway",
+			"error", err, "room_id", msg.RoomID, "message_id", msg.ID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
 	}
 	// Sending implies the sender has read up to their own message: advance the
 	// sender's lastSeenAt so the room read-floor (minUserLastSeenAt) doesn't count
@@ -190,8 +197,12 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	if len(resolved.Accounts) > 0 {
+		// Same trade: a missed mention badge is recoverable and self-corrects on
+		// the next read; a dropped message is not.
 		if err := h.store.SetSubscriptionMentions(ctx, meta.ID, resolved.Accounts, msg.CreatedAt); err != nil {
-			return fmt.Errorf("set subscription mentions: %w", err)
+			slog.WarnContext(ctx, "set subscription mentions failed, delivering anyway",
+				"error", err, "room_id", meta.ID, "message_id", msg.ID,
+				"request_id", natsutil.RequestIDFromContext(ctx))
 		}
 	}
 

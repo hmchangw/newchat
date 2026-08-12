@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -35,10 +36,11 @@ type mongoStore struct {
 	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
 	metaTTL       time.Duration
 	metaRec       roommetacache.Recorder
+	metaOpts      []roommetacache.ReadThroughOption
 }
 
-func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration) *mongoStore {
-	return &mongoStore{
+func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration, metaBreaker *circuitbreaker.Breaker) *mongoStore {
+	s := &mongoStore{
 		roomCol:       roomCol,
 		subCol:        subCol,
 		threadRoomCol: threadRoomCol,
@@ -46,6 +48,16 @@ func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valk
 		metaTTL:       metaTTL,
 		metaRec:       cachemetrics.For("roommeta", "l2"),
 	}
+	if metaBreaker != nil {
+		s.metaOpts = []roommetacache.ReadThroughOption{roommetacache.WithFetchGuard(metaBreaker.Do)}
+	}
+	return s
+}
+
+// MetaBreakerFailure is the failure predicate the room-meta breaker must be
+// built with: a missing room is a healthy answer, not a sign Mongo is unwell.
+func MetaBreakerFailure(err error) bool {
+	return err != nil && !errors.Is(err, mongo.ErrNoDocuments)
 }
 
 func (m *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, error) {
@@ -71,8 +83,12 @@ func (m *mongoStore) ListSubscriptions(ctx context.Context, roomID string) ([]mo
 	return subs, nil
 }
 
+// GetRoomMeta fences only the Mongo fetch, never the L2 read in front of it: an
+// open breaker must still serve cached rooms, since during the outage that
+// opened it the L2 is the only tier that can answer — and this read gates
+// delivery for every message in the room.
 func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec)
+	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec, m.metaOpts...)
 }
 
 func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {

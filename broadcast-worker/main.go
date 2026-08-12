@@ -16,6 +16,7 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -56,6 +57,9 @@ type config struct {
 	RoomKeyGracePeriod   time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	RoomKeyCacheTTL      time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
 	RoomKeyCacheSize     int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	MongoBreakerFails    int             `env:"BROADCAST_MONGO_BREAKER_FAILS"    envDefault:"5"`
+	MongoBreakerCooldown time.Duration   `env:"BROADCAST_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
+	MongoSelectTimeout   time.Duration   `env:"MONGO_SERVER_SELECTION_TIMEOUT"   envDefault:"2s"`
 	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
 	ValkeyAddrs          []string        `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
@@ -112,7 +116,10 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		// A stopped Mongo must error rather than block: every read here gates
+		// delivery, and the driver default (30s) outlasts any useful budget.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -131,7 +138,11 @@ func main() {
 		}
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL)
+	metaBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+		circuitbreaker.Tracked(ctx, "roommeta"),
+		circuitbreaker.WithFailurePredicate(MetaBreakerFailure))
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"),
+		metaValkey, cfg.RoomMetaL2TTL, metaBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)

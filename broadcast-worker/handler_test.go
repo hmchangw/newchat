@@ -428,8 +428,14 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		us := NewMockUserStore(ctrl)
 		pub := &mockPublisher{}
 
-		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // combined lookup runs before UpdateRoomLastMessage
+		// A genuinely absent room is still refused — but the guard is GetRoomMeta,
+		// not the bookkeeping write, which is now fail-open (see
+		// TestHandler_HandleMessage_DeliversWhenBookkeepingWritesFail).
+		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
 		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(errors.New("not found"))
+		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
+		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").
+			Return(roommetacache.Meta{}, fmt.Errorf("get room meta: %w", mongo.ErrNoDocuments))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
@@ -438,23 +444,26 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		assert.Empty(t, pub.records)
 	})
 
-	t.Run("update room fails", func(t *testing.T) {
+	t.Run("update room fails but delivery proceeds", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockStore(ctrl)
 		us := NewMockUserStore(ctrl)
 		pub := &mockPublisher{}
 
-		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // combined lookup runs before UpdateRoomLastMessage
+		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
 		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(errors.New("db error"))
+		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
+		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
+		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
 		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime))
-		require.Error(t, err)
-		assert.Empty(t, pub.records)
+		require.NoError(t, err, "a bookkeeping write failure must not drop the message")
+		assert.Len(t, pub.records, 1)
 	})
 
-	t.Run("set subscription mentions fails", func(t *testing.T) {
+	t.Run("set subscription mentions fails but delivery proceeds", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockStore(ctrl)
 		us := NewMockUserStore(ctrl)
@@ -467,11 +476,11 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.Any(), gomock.Any()).Return(errors.New("db error"))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
+		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
 		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
 		err := h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hey @alice", msgTime))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "set subscription mentions")
-		assert.Empty(t, pub.records)
+		require.NoError(t, err, "a missed mention badge must not drop the message")
+		assert.Len(t, pub.records, 1)
 	})
 
 	t.Run("unknown room type", func(t *testing.T) {
@@ -772,6 +781,11 @@ func TestHandler_FetchAndUpdateRoom_Missing(t *testing.T) {
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // single combined lookup
 	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "ghost-room", "msg-1", msgTime, false).
 		Return(fmt.Errorf("update room last message ghost-room: %w", mongo.ErrNoDocuments))
+	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "ghost-room", "sender", msgTime).Return(nil)
+	// The refusal now comes from GetRoomMeta: a room with no document cannot be
+	// fanned out to, and that read is still fatal.
+	store.EXPECT().GetRoomMeta(gomock.Any(), "ghost-room").
+		Return(roommetacache.Meta{}, fmt.Errorf("get room meta ghost-room: %w", mongo.ErrNoDocuments))
 
 	keyStore := NewMockRoomKeyProvider(ctrl)
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
@@ -3340,4 +3354,48 @@ func TestHandleCreated_AdvanceSenderLastSeen_FailureSwallowed(t *testing.T) {
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime)))
+}
+
+// Delivery must survive a MongoDB outage. UpdateRoomLastMessage and
+// SetSubscriptionMentions are read-model bookkeeping — lastMsgAt is recomputable
+// and already rides on the event — so failing them must not stop the fan-out.
+// Before this, a stopped Mongo failed the first write and the message was NAKed
+// without ever being published, so recipients saw nothing at all.
+func TestHandler_HandleMessage_DeliversWhenBookkeepingWritesFail(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	pub := &mockPublisher{}
+	msgTime := time.Now().UTC().Truncate(time.Millisecond)
+
+	evt := model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Content: "hello @alice", CreatedAt: msgTime,
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	mongoDown := errors.New("server selection error: context deadline exceeded")
+	key := testRoomKey(t)
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(mongoDown)
+	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(mongoDown)
+	// Room meta still resolves — it is L2-backed, which is the whole point.
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.Any(), msgTime).Return(mongoDown).AnyTimes()
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, mongoDown)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	err = h.HandleMessage(context.Background(), data)
+
+	require.NoError(t, err, "bookkeeping write failures must not fail the message")
+	require.Len(t, pub.records, 1, "the message must still be delivered")
+	gotEvt := model.RoomEvent{}
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &gotEvt))
+	assert.Equal(t, model.RoomEventNewMessage, gotEvt.Type)
 }
