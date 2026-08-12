@@ -224,6 +224,19 @@ Notes:
   the handler. Internal NATS hops retain the SDK's composite TraceContext +
   Baggage propagator. Third-party HTTP clients must remove baggage while
   retaining the span context before egress.
+- **Client-facing NATS subjects get the same policy, one hop later.** A NATS
+  propagator is per-connection, so `chat.user.>` ingress cannot refuse baggage
+  at extraction the way HTTP does. Instead `pkg/natsrouter`'s identity
+  middleware calls `obs.ContextWithPublicIdentity`, which drops every key in
+  `obs.ManagedBaggageKeys()` — including ones the subject carries no trusted
+  replacement for — and zeroes the entry span attributes the SDK's OnStart
+  processor already materialized from them. A route whose subject pins the site
+  to a static token is labeled from `natsrouter.WithSiteID` (the service's own
+  config), never from the caller. Internal subjects keep the upstream hop's
+  values so a federated event stays attributed to its originating site.
+  Residual risk: a head sampler must not key on a managed attribute — the entry
+  span starts before the middleware runs, so a forged value is visible to the
+  sampling decision even though it never reaches the exported span.
 - **Metrics endpoint reconciliation:** `pkg/health` only serves `/healthz` +
   `/readyz` (never `/metrics`), so there is no collision with it. The SDK owns
   `/metrics` on `OTEL_EXPORTER_PROMETHEUS_HOST:PORT` (default `:2112`).

@@ -202,7 +202,7 @@ func main() {
 
 	// Bound in-flight handlers so a burst is shed at the door instead of piling
 	// unbounded concurrent work onto the (now explicitly capped) Mongo pool.
-	var routerOpts []natsrouter.Option
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}

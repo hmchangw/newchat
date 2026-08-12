@@ -100,6 +100,10 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 
 	account, roomID, siteID, ok := subject.ParseUserRoomSiteSubject(msg.Subject())
 	if !ok {
+		// MESSAGES is client-facing: with no identity to derive from the subject
+		// there is nothing to overwrite the sender's baggage with, so drop it
+		// rather than let a forged value ride the reply and this span.
+		ctx = obs.ContextWithPublicIdentity(ctx, "", "", "")
 		slog.Warn("invalid subject", "subject", msg.Subject())
 		debugFlowRejected(ctx, req.RequestID, "invalid_subject")
 		// Best-effort error reply so the client doesn't hang; sendReply no-ops

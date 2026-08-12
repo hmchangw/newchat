@@ -74,7 +74,7 @@ func run() error {
 	pub := JetStreamPublisher{JS: js}
 	h := newHandler(store, pub, cfg.SiteID)
 
-	router := natsrouter.New(nc, "bot-message-handler", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	router := natsrouter.New(nc, "bot-message-handler", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency), natsrouter.WithSiteID(cfg.SiteID))
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	h.Register(router)
 

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -306,6 +307,70 @@ func TestContextWithIdentity_RejectsOversizedValuesAndClearsSupersededBaggage(t 
 	bag := baggage.FromContext(ctx)
 	assert.Empty(t, bag.Member("user.name").Value())
 	assert.Empty(t, bag.Member(RoomIDKey).Value())
+}
+
+// TestContextWithPublicIdentity_DropsForgedManagedKeys covers the ingress a
+// client reaches directly: every managed key the caller supplied must go, even
+// the ones this boundary has no trusted replacement for, and the entry span's
+// already-materialized attributes must be zeroed with them.
+func TestContextWithPublicIdentity_DropsForgedManagedKeys(t *testing.T) {
+	testEnv(t, "public-identity-svc")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+
+	_, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	ctx, err := o11y.ContextWithUser(context.Background(), "forged-user")
+	require.NoError(t, err)
+	ctx, err = o11y.ContextWithBaggageValue(ctx, RoomIDKey, "forged-room")
+	require.NoError(t, err)
+	ctx, err = o11y.ContextWithBaggageValue(ctx, SiteIDKey, "forged-site")
+	require.NoError(t, err)
+
+	// The entry span starts with the forged baggage already in context, the way
+	// the SDK's OnStart processor sees it on a real NATS consumer span.
+	ctx, span := tp.Tracer("test").Start(ctx, "entry")
+	for _, key := range ManagedBaggageKeys() {
+		span.SetAttributes(attribute.String(key, "forged"))
+	}
+
+	// The route supplies account and room but not site — the case a static
+	// subject token creates, where the old behavior left the forged value.
+	ctx = ContextWithPublicIdentity(ctx, "alice", "room-42", "")
+	span.End()
+
+	bag := baggage.FromContext(ctx)
+	assert.Equal(t, "alice", bag.Member("user.name").Value())
+	assert.Equal(t, "room-42", bag.Member(RoomIDKey).Value())
+	assert.Empty(t, bag.Member(SiteIDKey).Value(), "an unsupplied key must be dropped, not inherited from the caller")
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	attrs := make(map[string]string)
+	for _, attr := range ended[0].Attributes() {
+		attrs[string(attr.Key)] = attr.Value.AsString()
+	}
+	assert.Equal(t, "alice", attrs["user.name"])
+	assert.Equal(t, "room-42", attrs[RoomIDKey])
+	assert.Empty(t, attrs[SiteIDKey], "the forged value must not survive on the entry span either")
+}
+
+// TestManagedBaggageKeys_MatchesMaterializedKeys guards the single source of
+// truth: a key registered for materialization but missing from the clear list
+// would be forgeable at public ingress.
+func TestManagedBaggageKeys_MatchesMaterializedKeys(t *testing.T) {
+	assert.ElementsMatch(t, []string{o11y.UserNameKey, RoomIDKey, SiteIDKey}, ManagedBaggageKeys())
+	assert.NotSame(t, &managedBaggageKeys, &[]string{}, "callers must not be able to mutate the package list")
+
+	got := ManagedBaggageKeys()
+	got[0] = "mutated"
+	assert.NotEqual(t, "mutated", ManagedBaggageKeys()[0], "ManagedBaggageKeys must return a copy")
 }
 
 func TestPublicIngressPropagator_IgnoresUntrustedBaggage(t *testing.T) {

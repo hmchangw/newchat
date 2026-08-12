@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -35,6 +36,18 @@ const (
 	RoomIDKey = "chat.room.id"
 	SiteIDKey = "chat.site.id"
 )
+
+// managedBaggageKeys is the single source of truth for the keys this package
+// materializes onto spans and logs. options() registers them, and public
+// ingress clears exactly this set — a key registered in one place but missing
+// from the other would be forgeable by a caller.
+var managedBaggageKeys = []string{o11y.UserNameKey, RoomIDKey, SiteIDKey}
+
+// ManagedBaggageKeys returns a copy of the baggage keys this package treats as
+// trusted identity.
+func ManagedBaggageKeys() []string {
+	return slices.Clone(managedBaggageKeys)
+}
 
 var (
 	contextAttributesEnabled atomic.Bool
@@ -123,7 +136,10 @@ func (c *Config) options() []o11y.Option {
 			o11y.WithProfilingEnabled(false),
 		)
 	}
-	opts = append(opts, o11y.WithBaggageAttributes(RoomIDKey, SiteIDKey))
+	// Derived from managedBaggageKeys so registration and the public-ingress
+	// clear list cannot drift; user.name has its own PII opt-in option below.
+	opts = append(opts, o11y.WithBaggageAttributes(slices.DeleteFunc(
+		ManagedBaggageKeys(), func(k string) bool { return k == o11y.UserNameKey })...))
 	if c.UserBaggageEnabled {
 		opts = append(opts, o11y.WithUserBaggage())
 	}
@@ -247,6 +263,28 @@ func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) co
 	ctx = contextWithBaggageAttribute(ctx, RoomIDKey, roomID)
 	ctx = contextWithBaggageAttribute(ctx, SiteIDKey, siteID)
 	return ctx
+}
+
+// ContextWithPublicIdentity is ContextWithIdentity for a boundary a client can
+// reach directly, where inbound baggage is caller-controlled rather than a
+// trusted upstream hop's. Every managed key is dropped first — including those
+// this boundary has no trusted value for, which ContextWithIdentity would
+// otherwise leave in place — so an identifier the subject does not carry (a
+// static site token, say) cannot be supplied by the caller instead.
+//
+// This is the NATS counterpart of PublicIngressPropagator: HTTP can refuse
+// baggage at extraction, but a NATS propagator is per-connection, so the drop
+// happens on the first hop of the handler chain. Dropping also zeroes the
+// entry span's attributes, which the SDK's OnStart processor materialized from
+// the forged values before any handler ran.
+func ContextWithPublicIdentity(ctx context.Context, account, roomID, siteID string) context.Context {
+	if !contextAttributesEnabled.Load() {
+		return ctx
+	}
+	for _, key := range managedBaggageKeys {
+		ctx = withoutBaggageAttribute(ctx, key)
+	}
+	return ContextWithIdentity(ctx, account, roomID, siteID)
 }
 
 func contextWithBaggageAttribute(ctx context.Context, key, value string) context.Context {

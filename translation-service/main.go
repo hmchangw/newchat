@@ -107,7 +107,7 @@ func main() {
 	// and outbound connections without ceiling; on saturation the router replies
 	// errcode.Unavailable("service busy") so the caller can retry immediately.
 	// MAX_CONCURRENCY=0 disables the cap (unbounded spawn).
-	var routerOpts []natsrouter.Option
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}

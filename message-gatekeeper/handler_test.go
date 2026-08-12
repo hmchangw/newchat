@@ -2379,3 +2379,51 @@ func TestHandleJetStreamMsg_AttachesIdentityToContext(t *testing.T) {
 		assertIdentity(t, replyCtx, "error reply context")
 	})
 }
+
+// TestHandleJetStreamMsg_InvalidSubject_DropsForgedIdentity covers the one
+// client-reachable path that returns before the subject yields an identity: the
+// forged baggage a client attached must not survive onto the entry span or the
+// error reply just because there was nothing trusted to overwrite it with.
+func TestHandleJetStreamMsg_InvalidSubject_DropsForgedIdentity(t *testing.T) {
+	enableIdentityTelemetry(t)
+
+	var replyCtx context.Context
+	reply := func(ctx context.Context, _ *nats.Msg) error {
+		replyCtx = ctx
+		return nil
+	}
+	h := NewHandler(nil, nil, nil, reply, "site-A", nil, 500, 1, 8192, "")
+
+	forged, err := baggage.New(
+		mustMember(t, "user.name", "forged-user"),
+		mustMember(t, obs.RoomIDKey, "forged-room"),
+		mustMember(t, obs.SiteIDKey, "forged-site"),
+	)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), forged)
+
+	req := model.SendMessageRequest{
+		ID:        idgen.GenerateMessageID(),
+		Content:   "hi",
+		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+	}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+	msg := &fakeJSMsg{subject: "chat.user.alice.garbage", data: data}
+
+	h.HandleJetStreamMsg(ctx, msg)
+
+	require.True(t, msg.acked, "invalid subject must Ack — not retryable")
+	require.NotNil(t, replyCtx, "best-effort error reply must run")
+	bag := baggage.FromContext(replyCtx)
+	assert.Empty(t, bag.Member("user.name").Value())
+	assert.Empty(t, bag.Member(obs.RoomIDKey).Value())
+	assert.Empty(t, bag.Member(obs.SiteIDKey).Value())
+}
+
+func mustMember(t *testing.T, key, value string) baggage.Member {
+	t.Helper()
+	member, err := baggage.NewMember(key, value)
+	require.NoError(t, err)
+	return member
+}

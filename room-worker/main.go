@@ -240,7 +240,7 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.New(nc, "room-worker")
+	router := natsrouter.New(nc, "room-worker", natsrouter.WithSiteID(cfg.SiteID))
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
