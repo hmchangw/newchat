@@ -231,6 +231,14 @@ func TestBuildSubscriptions_FieldsPopulated(t *testing.T) {
 	}
 }
 
+// Open has no bson omitempty, so an unset field persists as `open: false` —
+// which subscription.list reads as "explicitly closed" and filters out.
+func TestBuildSubscriptions_Open(t *testing.T) {
+	for _, s := range BuildSubscriptions() {
+		assert.True(t, s.Open, "subscription %s must be open or the sidebar drops it", s.ID)
+	}
+}
+
 func TestBuildSubscriptions_DMSubscriptionsHaveCounterpartName(t *testing.T) {
 	dmAB := idgen.BuildDMRoomID("u-alice", "u-bob")
 	gotForAB := 0
