@@ -43,3 +43,15 @@ type DirectoryStore interface {
 	// (_, false, nil) when the account does not exist.
 	GetByAccount(ctx context.Context, account string) (employee, bool, error)
 }
+
+// FailoverStore is the sole-writer, CAS-guarded persistence for per-site
+// FailoverState (portal is the split-brain fence). Get synthesizes a healthy,
+// version-0 state for a site with no document, so callers treat "no doc" as
+// healthy. Transition inserts the first state (version 1) or CAS-updates a
+// later one, returning errFailoverVersionConflict when the stored version does
+// not match next.Version-1.
+type FailoverStore interface {
+	Get(ctx context.Context, siteID string) (FailoverState, error)
+	List(ctx context.Context) ([]FailoverState, error)
+	Transition(ctx context.Context, next FailoverState) error
+}
