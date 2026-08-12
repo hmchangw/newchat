@@ -369,8 +369,9 @@ The live fan-out for a newly created non-thread message (plain send, quoted send
 system message). Triggered by [Send Message](request-reply.md#send-message). Thread
 replies publish [`new_thread_message`](#new_thread_message-roomevent) instead.
 
-**botDM rooms receive no `new_message` fan-out** — `broadcast-worker` skips `botDM`
-room types; bots consume messages through a separate backend path.
+**botDM rooms fan out to the human member, not the bot** — `broadcast-worker` publishes the
+`RoomEvent` to each non-bot member and skips the bot account (`isBot`); the bot side consumes
+messages through a separate backend path.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -488,8 +489,8 @@ create event gets the distinct type.
 `chat.room.{roomID}.event`; it fans out **per-subscriber** on `chat.user.{account}.event.room` to the
 reply sender, the parent-message author, thread followers (anyone who has replied in the thread), and
 history-gated @-mentioned accounts. DM/botDM thread replies fan out **per member** on the same
-`chat.user.{account}.event.room` subject — **including `botDM`** (unlike an ordinary `new_message`, whose
-`botDM` fan-out is suppressed).
+`chat.user.{account}.event.room` subject — the bot account is skipped (`isBot`), same as an ordinary
+`new_message` in a botDM.
 
 | Field | Type | Notes |
 |---|---|---|
