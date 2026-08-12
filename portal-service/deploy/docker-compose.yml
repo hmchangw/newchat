@@ -28,7 +28,10 @@ services:
       # in handler.go — both required, nothing else read). baseUrl is the unified
       # backend origin (`{baseUrl}/api/v1/...` via the Traefik gateway on :7777);
       # natsUrl is the site's NATS WS URL.
-      - 'PORTAL_SITE_URLS={"site-local":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"}}'
+      - 'PORTAL_SITE_URLS={"site-local":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"},"_backup":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"}}'
+      # Reserved backup entry served for a failed-over site (SP3). Points at the
+      # same local stack in dev — there is no separate backup site locally.
+      - PORTAL_BACKUP_SITE_ID=_backup
       # Single cluster-internal botplatform endpoint /api/v1/login forwards to.
       - BOTPLATFORM_URL=http://botplatform-service:8080
       # Served to the frontend via GET /api/settings. Both required (notEmpty) —
