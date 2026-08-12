@@ -194,10 +194,17 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       if (prev?.hasLoadedHistory) return
       if (inflightHistory.current.has(roomId)) return inflightHistory.current.get(roomId)
 
+      // Route to the room's home site: a cross-site room's history lives on
+      // another site, so use the summary's siteId (mirrors loadOlderHistory /
+      // markRoomRead / loadSurrounding); fall back to the user's home site when
+      // no summary is loaded yet.
+      const summary = stateRef.current.summaries.find((r) => r.id === roomId)
+      const siteId = summary?.siteId ?? user.siteId
+
       const gen = currentGeneration()
       const promise = (async () => {
         try {
-          const resp = await fetchMessageHistory(nats, { roomId, siteId: user.siteId, limit: HISTORY_PAGE_SIZE })
+          const resp = await fetchMessageHistory(nats, { roomId, siteId, limit: HISTORY_PAGE_SIZE })
           // history-service ships newest-first; the UI reads chronological.
           // Normalisation to the broadcast `Message` shape now happens inside
           // the api op.
