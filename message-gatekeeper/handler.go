@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -99,6 +100,10 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 
 	account, roomID, siteID, ok := subject.ParseUserRoomSiteSubject(msg.Subject())
 	if !ok {
+		// MESSAGES is client-facing: with no identity to derive from the subject
+		// there is nothing to overwrite the sender's baggage with, so drop it
+		// rather than let a forged value ride the reply and this span.
+		ctx = obs.ContextWithPublicIdentity(ctx, "", "", "")
 		slog.Warn("invalid subject", "subject", msg.Subject())
 		debugFlowRejected(ctx, req.RequestID, "invalid_subject")
 		// Best-effort error reply so the client doesn't hang; sendReply no-ops
@@ -110,6 +115,8 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
+	requester := subject.DecodeAccount(account)
+	ctx = obs.ContextWithPublicIdentity(ctx, requester, roomID, siteID)
 	ctx = errcode.WithLogValues(ctx, "room_id", roomID)
 
 	if parseErr != nil {
@@ -131,7 +138,6 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	// encoded token. processMessage needs the requester's real account for
 	// data-key lookups (subscription, history), keyed on the original dotted
 	// account — so decode here. No-op for every non-bot account.
-	requester := subject.DecodeAccount(account)
 	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req)
 	if err != nil {
 		// Typed *errcode.Error → client-facing validation/permanence: reply + Ack.

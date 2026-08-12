@@ -129,7 +129,7 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operati
 		if err := g.waitThrottle(ctx); err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return nil, fmt.Errorf("build chats request: %w", err)
 		}

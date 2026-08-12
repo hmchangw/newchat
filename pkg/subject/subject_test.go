@@ -1282,3 +1282,27 @@ func TestTranslateSubjects(t *testing.T) {
 	assert.Equal(t, "chat.user.{account}.request.translate.site-a.text",
 		subject.TranslateRequestPattern("site-a"))
 }
+
+func TestIsClientFacing(t *testing.T) {
+	tests := []struct {
+		name string
+		subj string
+		want bool
+	}{
+		{"user request", "chat.user.alice.request.room.r1.site-a.msg.get", true},
+		{"user message send", "chat.user.alice.room.r1.site-a.msg.send", true},
+		{"bot encoded account", "chat.user.weather_bot.room.r1.site-a.msg.send", true},
+		{"server request", "chat.server.request.room.site-a.create.dm", false},
+		{"room event", "chat.room.r1.event.message", false},
+		{"inbox", "chat.inbox.site-b.external.member_added", false},
+		{"outbox", "chat.outbox.site-a.site-b.member_added", false},
+		{"canonical", "chat.msg.canonical.site-a.created", false},
+		{"empty", "", false},
+		{"prefix without trailing dot is not the namespace", "chat.users.alice.request", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, subject.IsClientFacing(tc.subj))
+		})
+	}
+}

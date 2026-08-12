@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"go.opentelemetry.io/otel/baggage"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/restyutil"
@@ -84,6 +85,9 @@ func (t *streamTranslator) Translate(ctx context.Context, text, targetLang strin
 // nil error) when the response is a "failed to verify jwt" auth rejection, so the
 // caller can refresh and retry.
 func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, token string) (result string, jwtFailed bool, err error) {
+	// Translation is a third-party egress. Keep the parent span but never send
+	// internal identity or room baggage to the provider.
+	ctx = baggage.ContextWithoutBaggage(ctx)
 	resp, err := t.client.R().
 		SetContext(ctx).
 		SetHeader("Accept", "text/event-stream").

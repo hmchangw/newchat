@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -90,6 +91,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		// so the caller Acks (drops) it instead of retrying until MaxDeliver.
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
+	ctx = obs.ContextWithIdentity(ctx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
 
 	switch evt.Event {
 	case model.EventCreated:
@@ -124,6 +126,7 @@ func (h *Handler) HandleServerBroadcast(ctx context.Context, data []byte) {
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		return
 	}
+	ctx = obs.ContextWithIdentity(ctx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
 	switch evt.Event {
 	case model.EventThreadReplyAdded:
 		if err := h.handleThreadTCountUpdated(ctx, &evt); err != nil {

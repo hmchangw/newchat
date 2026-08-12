@@ -39,6 +39,14 @@ x-local-o11y: &local-o11y
     # Individual service deployment Compose files intentionally omit this so
     # production stays zero-impact unless its deployment sets the master switch.
     O11Y_ENABLED: ${O11Y_ENABLED:-true}
+    # user.name is PII and therefore remains a separate explicit opt-in.
+    O11Y_USER_BAGGAGE_ENABLED: ${O11Y_USER_BAGGAGE_ENABLED:-false}
+    # otel-nats v0.9 resolves relay > env > SDK default. Leaving the module env
+    # unset preserves sdk.Toggles.Trace as the local default; setting the relay
+    # endpoint makes live flag changes available without an application change.
+    OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT: ${OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT:-}
+    OTEL_INSTRUMENTATION_GO_FLAGS_API_KEY: ${OTEL_INSTRUMENTATION_GO_FLAGS_API_KEY:-}
+    OTEL_INSTRUMENTATION_GO_FLAGS_POLL_INTERVAL: ${OTEL_INSTRUMENTATION_GO_FLAGS_POLL_INTERVAL:-60s}
 
 services:
   admin-service: *local-o11y

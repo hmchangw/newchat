@@ -28,9 +28,11 @@ const defaultReconnectWait = 2 * time.Second
 //
 // tp, prop, and tracingEnabled are wired into the underlying o11y/nats layer.
 // Production callers should pass sdk.TracerProvider(), sdk.Propagator, and
-// sdk.Toggles.Trace from the same obs.Init result. Using the resolved SDK toggle
-// selects o11y/nats' direct path when tracing is disabled, avoiding wrapper and
-// propagation overhead without re-parsing environment variables here.
+// sdk.Toggles.Trace from the same obs.Init result. This value is the
+// connection-local default; otel-nats v0.9 resolves relay > environment >
+// option > module default, so OTEL_NATS_TRACING_ENABLED or a configured relay
+// can override it in either direction. With no higher-precedence source, false
+// selects the direct path without tracing or propagation overhead.
 func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, opts ...nats.Option) (*o11ynats.Conn, error) {
 	if credsFile != "" {
 		if _, err := os.Stat(credsFile); err != nil {

@@ -53,7 +53,7 @@ func (g *graphClient) GetGroup(ctx context.Context, groupID string) (*GroupProfi
 	q.Set("$select", "id,displayName,description")
 	endpoint := g.baseURL + "/groups/" + url.PathEscape(groupID) + "?" + q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build get-group request: %w", err)
 	}
@@ -139,7 +139,7 @@ func (g *graphClient) ListGroupMembers(ctx context.Context, groupID string, page
 }
 
 func (g *graphClient) fetchMembersPage(ctx context.Context, token, endpoint string) (*membersPage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build list-members request: %w", err)
 	}

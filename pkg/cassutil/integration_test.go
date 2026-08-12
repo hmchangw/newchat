@@ -10,8 +10,11 @@ import (
 	"github.com/gocql/gocql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -25,10 +28,16 @@ func TestMain(m *testing.M) { testutil.RunTests(m) }
 // test can assert that instrumentation actually emits query spans.
 type recorderObs struct {
 	tp *trace.TracerProvider
+	mp metric.MeterProvider
 }
 
 func (r recorderObs) TracerProvider() oteltrace.TracerProvider { return r.tp }
-func (r recorderObs) MeterProvider() metric.MeterProvider      { return metricnoop.NewMeterProvider() }
+func (r recorderObs) MeterProvider() metric.MeterProvider {
+	if r.mp != nil {
+		return r.mp
+	}
+	return metricnoop.NewMeterProvider()
+}
 
 func TestConnect_WithObservability_RecordsQuerySpan(t *testing.T) {
 	keyspace, admin, host := testutil.CassandraKeyspace(t, "cassutil_obs")
@@ -65,6 +74,63 @@ func TestConnect_WithObservability_RecordsQuerySpan(t *testing.T) {
 		}
 	}
 	assert.True(t, sawSelect, "expected a SELECT query span, got %v", spanNames(spans))
+}
+
+func TestConnect_WithObservability_CassandraMetricsIncludeTable(t *testing.T) {
+	keyspace, admin, host := testutil.CassandraKeyspace(t, "cassutil_metric_table")
+	require.NoError(t, admin.Query(
+		`CREATE TABLE IF NOT EXISTS `+keyspace+`.items (id text PRIMARY KEY, name text)`,
+	).Exec())
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	tp := trace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	session, err := Connect(
+		Config{Hosts: host, Keyspace: keyspace},
+		WithObservability(recorderObs{tp: tp, mp: mp}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { Close(session) })
+
+	var name string
+	err = session.Query(`SELECT name FROM items WHERE id = ?`, "missing").
+		WithContext(context.Background()).Scan(&name)
+	require.ErrorIs(t, err, gocql.ErrNotFound)
+
+	var metrics metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &metrics))
+	assert.True(t, metricHasStringAttribute(metrics, "db.client.operation.duration", "db.collection.name", "items"),
+		"Cassandra operation metric must carry the addressed table")
+	assert.True(t, metricHasStringAttribute(metrics, "cassandra.query.attempts", "db.collection.name", "items"),
+		"Cassandra attempt metric must carry the addressed table")
+}
+
+func metricHasStringAttribute(metrics metricdata.ResourceMetrics, metricName, key, want string) bool {
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != metricName {
+				continue
+			}
+			switch data := m.Data.(type) {
+			case metricdata.Histogram[float64]:
+				for _, point := range data.DataPoints {
+					if value, ok := point.Attributes.Value(attribute.Key(key)); ok && value.AsString() == want {
+						return true
+					}
+				}
+			case metricdata.Sum[int64]:
+				for _, point := range data.DataPoints {
+					if value, ok := point.Attributes.Value(attribute.Key(key)); ok && value.AsString() == want {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 func spanNames(spans tracetest.SpanStubs) []string {

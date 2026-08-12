@@ -10,6 +10,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestInsecureTLSTransport(t *testing.T) {
@@ -150,6 +154,38 @@ func TestRefresh_Success(t *testing.T) {
 	assert.Equal(t, "rotated-refresh", ts.RefreshToken)
 	assert.Equal(t, "alice", ts.Account, "Account carries the verified token's preferred_username")
 	assert.WithinDuration(t, exp, ts.Expiry, time.Second)
+}
+
+func TestRefresh_StripsBaggageBeforeIssuerEgress(t *testing.T) {
+	previous := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{},
+	))
+	t.Cleanup(func() { otel.SetTextMapPropagator(previous) })
+
+	f := newFakeIssuer(t)
+	v := newTestValidator(t, f, Config{ClientID: "nats-chat"})
+	var traceparent string
+	f.TokenHandler = func(w http.ResponseWriter, r *http.Request) {
+		assert.Empty(t, r.Header.Get("baggage"), "identity baggage must not cross the OIDC trust boundary")
+		traceparent = r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}
+
+	member, err := baggage.NewMember("user.name", "alice")
+	require.NoError(t, err)
+	bag, err := baggage.New(member)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), bag)
+	ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceFlags: trace.FlagsSampled,
+	}))
+
+	_, err = v.Refresh(ctx, "old-refresh")
+	assert.ErrorIs(t, err, ErrRefreshRejected)
+	assert.NotEmpty(t, traceparent, "trace correlation must survive baggage stripping")
 }
 
 func TestRefresh_InvalidGrantIsRejected(t *testing.T) {

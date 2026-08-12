@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 )
@@ -79,6 +80,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		// Malformed payload — it will never parse on redelivery. Mark permanent so the caller Acks (drops) it instead of retrying until MaxDeliver.
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
+	ctx = obs.ContextWithIdentity(ctx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
 	// Non-created events are filtered at the broker; defensive backstop only.
 	if evt.Event != model.EventCreated && evt.Event != "" {
 		return nil

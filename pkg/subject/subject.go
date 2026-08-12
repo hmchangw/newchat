@@ -69,6 +69,19 @@ func IsValidAccountToken(s string) bool {
 	return true
 }
 
+// UserPrefix is the namespace a client publishes on. Every other namespace
+// (chat.server.*, chat.room.*, chat.inbox.*, chat.outbox.*) is reachable only
+// from inside the platform.
+const UserPrefix = "chat.user."
+
+// IsClientFacing reports whether subj lives in the user-scoped namespace — the
+// subjects a browser or bot client publishes to directly. Callers use it to
+// decide whether message-supplied metadata (headers, W3C baggage) is
+// caller-controlled rather than a trusted upstream hop's.
+func IsClientFacing(subj string) bool {
+	return strings.HasPrefix(subj, UserPrefix)
+}
+
 // ParseUserRoomSubject extracts the user account and roomID from subjects
 // matching the pattern "chat.user.{account}.*.room.{roomID}.…".
 // Returns the user account, roomID, and ok=true on success. The account is

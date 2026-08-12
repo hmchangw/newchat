@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/baggage"
 )
 
 var (
@@ -37,6 +39,10 @@ func (v *Validator) Refresh(ctx context.Context, refreshToken string) (TokenSet,
 	if v.clientID == "" {
 		return TokenSet{}, errors.New("oidc: refresh requires Config.ClientID")
 	}
+	// The issuer is outside the chat service trust boundary. Preserve trace
+	// context for the HTTP client span, but never forward internal identity or
+	// room baggage to it.
+	ctx = baggage.ContextWithoutBaggage(ctx)
 
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
