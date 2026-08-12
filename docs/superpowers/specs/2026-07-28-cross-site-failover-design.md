@@ -137,11 +137,21 @@ event-derived slice.
   connection failure; the reroute reuses that path.
 
 ### 4.3 Identity
-- The backup must mint NATS JWTs for **any** site's accounts, so it needs the
+> **Resolved (2026-08-12) — the trade-off below does not apply.** This section
+> assumed **per-site NATS accounts** (so the backup would concentrate every
+> site's signing keys — "World 2"). Production actually runs **one shared
+> org-level NATS account** for all clients ("World 1"): the chat `account` is a
+> *tag* on a scoped user JWT, and one signing key is trusted at every site. The
+> backup therefore mints in the *same* account every site uses — **not**
+> impersonation, no per-site keys — so it needs no special key custody and
+> reuses `auth-service` unchanged. See `specs/2026-08-11-sp2-backup-identity-jwt-minting.md`.
+> The only surviving identity task is the shared-template `chat.local.room.>`
+> grant (§7). The original per-site framing is retained below for history.
+- ~~The backup must mint NATS JWTs for **any** site's accounts, so it needs the
   account signing NKeys. This is the design's largest security trade-off (one
-  deployment can impersonate every site's users).
-- **Recommended:** a shared org-level signing scheme or KMS-fronted keys, rather
-  than copying raw per-site NKeys onto the backup.
+  deployment can impersonate every site's users).~~
+- ~~**Recommended:** a shared org-level signing scheme or KMS-fronted keys, rather
+  than copying raw per-site NKeys onto the backup.~~
 
 ## 5. Data flow
 
@@ -346,7 +356,7 @@ first time (a single 1× copy to the backup) — new inter-site traffic, but che
 | **Correlated multi-site outage** | Backup is sized for **one site down at a time**; concurrent multi-site failure degrades further (documented ceiling, alerting). |
 | **Split brain (A + backup both serving A)** | Prevented by portal-service as sole routing authority; failback flips only after reconciliation drains. |
 | **Last in-flight messages at outage instant** | Async RPO ⇒ seconds of potential loss accepted for lifeboat scope. |
-| **Identity key compromise on backup** | Mitigated by shared/KMS-fronted signing rather than raw NKey copies; backup hardened accordingly. |
+| **Identity key compromise on backup** | World 1: the backup holds no per-site keys — it uses the one shared account signing key already present on every site's `auth-service`, so it is no more key-exposed than any site. Reducing that shared key's exposure (fleet-wide remote signer) is a separate security project, not a failover concern (§4.3). |
 | **Replay duplicates on failback** | Idempotent: message-ID / `Nats-Msg-Id` dedup + append-only bucketed writes. |
 | **Silent RPO decay** (backup can't keep up with N-aggregate ingest) | Per-site replication-lag monitoring + alert (§8); the lag *is* the live RPO. |
 | **Outage longer than history window** | Restore uses the canonical **stream** log (`MaxAge` ≥ max outage), not the 72h Cassandra read window (§6.5); anti-entropy backstop re-derives the rest. |
@@ -371,8 +381,11 @@ first time (a single 1× copy to the backup) — new inter-site traffic, but che
    the (longer) canonical restore-log `MaxAge` (§6.5).
 3. **Health-detection mechanism** and the manual-override control surface
    (likely portal-service-owned).
-4. **Identity key custody** — concrete shared-signing / KMS scheme for the
-   backup minting cross-site JWTs, incl. the `chat.local.room.>` grant (§7).
+4. ~~**Identity key custody** — concrete shared-signing / KMS scheme for the
+   backup minting cross-site JWTs.~~ **Moot (World 1, 2026-08-12):** one shared
+   NATS account ⇒ no per-site keys, no custody problem; the backup reuses
+   `auth-service` unchanged. Only the `chat.local.room.>` grant (§7) remains —
+   see `specs/2026-08-11-sp2-backup-identity-jwt-minting.md`.
 5. **Backup capacity sizing** — separate ingest (N-aggregate) vs serving
    (largest single site) targets, and documented multi-site-outage degradation.
 6. **Failback cutover protocol** — precise drain/flip sequencing, tail-sweep
