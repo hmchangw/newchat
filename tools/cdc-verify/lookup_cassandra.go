@@ -47,9 +47,8 @@ func buildSelect(table string, key map[string]any, cols []string) (string, []any
 }
 
 func (s *cassStore) SelectOne(ctx context.Context, table string, key map[string]any, cols []string) (result map[string]any, err error) {
-	// A whole-row read (no explicit projection) must not select columns gocql
-	// can't scan — a struct-keyed map (e.g. reactions map<frozen<udt>,...>)
-	// panics MapScan. Resolve the scannable subset from column metadata first.
+	// A whole-row read must skip columns gocql can't scan — a struct-keyed map
+	// (e.g. reactions map<frozen<udt>,...>) panics MapScan; resolve them out first.
 	if len(cols) == 0 {
 		cols, err = s.scannableColumns(ctx, table, key)
 		if err != nil {
@@ -60,15 +59,20 @@ func (s *cassStore) SelectOne(ctx context.Context, table string, key map[string]
 	if err != nil {
 		return nil, fmt.Errorf("build select: %w", err)
 	}
-	// Belt-and-suspenders: any residual gocql type panic degrades to an error
-	// rather than tearing down the request.
-	defer func() {
-		if r := recover(); r != nil {
-			result, err = nil, fmt.Errorf("scan %s: %v", table, r)
-		}
-	}()
 	// #nosec G201 -- identifiers validated against ^[a-zA-Z0-9_]+$ in buildSelect; values are bound parameters
 	iter := s.session.Query(q, args...).WithContext(ctx).Iter()
+	// Close always runs (even on panic unwind); a residual gocql type panic
+	// degrades to an error rather than tearing down the request.
+	defer func() {
+		cerr := iter.Close()
+		if r := recover(); r != nil {
+			result, err = nil, fmt.Errorf("scan %s: %v", table, r)
+			return
+		}
+		if cerr != nil {
+			result, err = nil, fmt.Errorf("select from %s: %w", table, cerr)
+		}
+	}()
 	var rows []map[string]any
 	for {
 		row := map[string]any{}
@@ -80,9 +84,6 @@ func (s *cassStore) SelectOne(ctx context.Context, table string, key map[string]
 			break
 		}
 	}
-	if err := iter.Close(); err != nil {
-		return nil, fmt.Errorf("select from %s: %w", table, err)
-	}
 	switch len(rows) {
 	case 0:
 		return nil, errNotFound
@@ -93,9 +94,8 @@ func (s *cassStore) SelectOne(ctx context.Context, table string, key map[string]
 	}
 }
 
-// scannableColumns lists a row's column names minus any gocql can't MapScan
-// into a Go value. It reads only column metadata (never materialising a row),
-// so it can't hit the MapScan panic it exists to avoid.
+// scannableColumns lists a row's columns minus any gocql can't MapScan. It reads
+// only column metadata, never a row, so it can't hit the panic it guards against.
 func (s *cassStore) scannableColumns(ctx context.Context, table string, key map[string]any) ([]string, error) {
 	q, args, err := buildSelect(table, key, nil)
 	if err != nil {
@@ -118,9 +118,8 @@ func (s *cassStore) scannableColumns(ctx context.Context, table string, key map[
 	return out, nil
 }
 
-// cqlScannable reports whether gocql can MapScan a column of this type. A map
-// whose key is a frozen UDT or nested collection can't be built as a Go map
-// (reflect.MapOf rejects a non-comparable key type), so such columns are not.
+// cqlScannable reports whether gocql can MapScan a column of this type: a map
+// with a non-comparable key (frozen UDT/collection) can't be built (reflect.MapOf).
 func cqlScannable(t gocql.TypeInfo) bool {
 	ct, ok := t.(gocql.CollectionType)
 	if !ok {

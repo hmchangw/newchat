@@ -242,19 +242,24 @@ type cassTargetHandle struct {
 	raw   *gocql.Session
 }
 
-// setupCassandraTarget creates an isolated keyspace + messages_by_id table
-// and returns a keyspace-scoped session (mirroring how main.go connects).
+// connectCassHandle opens a keyspace-scoped session and returns a store handle,
+// closing the session on cleanup.
+func connectCassHandle(t *testing.T, keyspace, host string) *cassTargetHandle {
+	t.Helper()
+	session, err := cassutil.Connect(cassutil.Config{Hosts: host, Keyspace: keyspace})
+	require.NoError(t, err)
+	t.Cleanup(func() { cassutil.Close(session) })
+	return &cassTargetHandle{store: newCassStore(session), raw: session}
+}
+
+// setupCassandraTarget creates an isolated keyspace + messages_by_id table.
 func setupCassandraTarget(t *testing.T) *cassTargetHandle {
 	t.Helper()
 	keyspace, admin, host := testutil.CassandraKeyspace(t, "cdcverify")
 	require.NoError(t, admin.Query(
 		`CREATE TABLE IF NOT EXISTS `+keyspace+`.messages_by_id (message_id text PRIMARY KEY, body text, created_at bigint)`,
 	).Exec())
-
-	session, err := cassutil.Connect(cassutil.Config{Hosts: host, Keyspace: keyspace})
-	require.NoError(t, err)
-	t.Cleanup(func() { cassutil.Close(session) })
-	return &cassTargetHandle{store: newCassStore(session), raw: session}
+	return connectCassHandle(t, keyspace, host)
 }
 
 // TestEndToEnd_CassandraTarget covers the cassandra lookup path end to end.
@@ -376,9 +381,8 @@ func TestEndToEnd_ResolverHop(t *testing.T) {
 	})
 }
 
-// setupCassandraWithReactions mirrors the real messages_by_id shape: it carries
-// a `reactions map<frozen<udt>, ...>` column whose struct key gocql's MapScan
-// cannot represent. The whole-row inspect view must skip it, not crash.
+// setupCassandraWithReactions builds messages_by_id with a struct-keyed
+// `reactions map<frozen<udt>,...>` column that gocql's MapScan can't represent.
 func setupCassandraWithReactions(t *testing.T) *cassTargetHandle {
 	t.Helper()
 	keyspace, admin, host := testutil.CassandraKeyspace(t, "cdcinspect")
@@ -388,16 +392,11 @@ func setupCassandraWithReactions(t *testing.T) *cassTargetHandle {
 		`CREATE TABLE IF NOT EXISTS `+keyspace+`.messages_by_id (
 			message_id text PRIMARY KEY, body text, created_at bigint,
 			reactions map<frozen<reaction_key>, text>)`).Exec())
-
-	session, err := cassutil.Connect(cassutil.Config{Hosts: host, Keyspace: keyspace})
-	require.NoError(t, err)
-	t.Cleanup(func() { cassutil.Close(session) })
-	return &cassTargetHandle{store: newCassStore(session), raw: session}
+	return connectCassHandle(t, keyspace, host)
 }
 
-// TestInspect_CassandraStructKeyedMap reproduces the inspect-popup crash: a
-// whole-row SELECT * over a table with a struct-keyed map column panicked in
-// gocql's MapScan. The unrepresentable column must be skipped, the rest returned.
+// TestInspect_CassandraStructKeyedMap reproduces the inspect crash: a whole-row
+// read of a struct-keyed map column panicked MapScan; it must skip, not crash.
 func TestInspect_CassandraStructKeyedMap(t *testing.T) {
 	cass := setupCassandraWithReactions(t)
 	require.NoError(t, cass.raw.Query(

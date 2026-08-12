@@ -817,9 +817,8 @@ func TestResolveAll_TargetDBSuccess(t *testing.T) {
 	assert.Equal(t, map[string]any{"username": "bob"}, docs["user"])
 }
 
-// TestCompile_DefensiveSkipAndSort drives compile's defensive branches: a
-// fields/derived ref to an unknown target alias is skipped, and a target with
-// two pairs exercises the pair-sort comparator.
+// TestCompile_DefensiveSkipAndSort checks compile skips fields/derived refs to
+// unknown or verbatim aliases, and sorts a target's field pairs.
 func TestCompile_DefensiveSkipAndSort(t *testing.T) {
 	s := &SourceMapping{
 		Collection: "c",
