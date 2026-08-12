@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"testing"
 	"time"
 
@@ -307,6 +308,11 @@ func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 		{
 			name:   "read share claims the whole read lane",
 			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = 1.5 },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+		{
+			name:   "read share is not a number",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = math.NaN() },
 			want:   "SOAK_RECONCILE_READ_SHARE",
 		},
 	}

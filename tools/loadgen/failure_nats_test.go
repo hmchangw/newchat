@@ -51,3 +51,37 @@ func TestLoadgenNATSHealth_ClosedInvalidatesConnectionState(t *testing.T) {
 		metrics.NATSConnectionEvents.WithLabelValues("soak", "closed"),
 	))
 }
+
+func TestLoadgenNATSHealth_InitialConnectedDoesNotOverwriteCallbackState(t *testing.T) {
+	tests := []struct {
+		name       string
+		transition func(*loadgenNATSHealth)
+	}{
+		{
+			name: "disconnected",
+			transition: func(health *loadgenNATSHealth) {
+				health.disconnected(errors.New("connection reset"))
+			},
+		},
+		{
+			name:       "closed",
+			transition: func(health *loadgenNATSHealth) { health.closed() },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metrics := NewMetrics()
+			health := newLoadgenNATSHealth(metrics, time.Now)
+
+			tt.transition(health)
+			health.connected()
+
+			assert.Equal(t, float64(0), testutil.ToFloat64(
+				metrics.NATSConnected.WithLabelValues("soak"),
+			))
+			assert.Equal(t, float64(0), testutil.ToFloat64(
+				metrics.NATSConnectionEvents.WithLabelValues("soak", "connected"),
+			))
+		})
+	}
+}

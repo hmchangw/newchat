@@ -61,6 +61,57 @@ func TestFailureLedgerPromRecorder_RecordsBoundedOutcomes(t *testing.T) {
 	))
 }
 
+func TestFailureLedgerPromRecorder_RecordsLifecycleAndGuardsNil(t *testing.T) {
+	metrics := NewMetrics()
+	recorder := newFailureLedgerPromRecorder(metrics)
+	operation := testFailureOperation("message-1", time.Now().UTC())
+
+	recorder.Recovered(3)
+	recorder.Invalidated("capacity")
+	recorder.JournalSize(512)
+	recorder.ObservationRecorded(
+		operation, failureObserverAdmission, failureObservationBad,
+	)
+	recorder.OperationStarted(operation)
+	recorder.OperationFinalized(operation, failureResultUnverified)
+
+	assert.Equal(t, float64(3), testutil.ToFloat64(metrics.FailureRecovered))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureInvalidations.WithLabelValues("capacity"),
+	))
+	assert.Equal(t, float64(512), testutil.ToFloat64(metrics.FailureJournalBytes))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureObservations.WithLabelValues(
+			"cassandra_soak", "message_send", "admission", "bad",
+		),
+	))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureOperations.WithLabelValues(
+			"cassandra_soak", "message_send", "unverified",
+		),
+	))
+
+	recorder.OperationStarted(nil)
+	recorder.ObservationRecorded(nil, failureObserverAdmission, failureObservationGood)
+	recorder.OperationFinalized(nil, failureResultGood)
+	recorder.Recovered(0)
+	var nilRecorder *failureLedgerPromRecorder
+	nilRecorder.OperationStarted(operation)
+	nilRecorder.ObservationRecorded(
+		operation, failureObserverAdmission, failureObservationGood,
+	)
+	nilRecorder.OperationFinalized(operation, failureResultGood)
+	nilRecorder.Recovered(1)
+	nilRecorder.Invalidated("wal")
+	nilRecorder.JournalSize(1)
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureOperations.WithLabelValues(
+			"cassandra_soak", "message_send", "unverified",
+		),
+	))
+}
+
 func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 	metrics := NewMetrics()
 	metrics.FailureInvalidations.WithLabelValues("wal").Inc()

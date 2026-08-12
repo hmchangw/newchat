@@ -218,7 +218,7 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 
 func (l *failureLedger) Start(operation *failureOperation) error {
 	if err := validateFailureOperation(operation); err != nil {
-		return err
+		return fmt.Errorf("start failure operation: %w", err)
 	}
 	tracked := cloneFailureOperation(operation)
 	tracked.Observations = make(map[failureObserver]failureObservation)
@@ -333,6 +333,7 @@ func (l *failureLedger) Observe(
 	}
 	operation.Observations[observer] = observation
 	if observer == failureObserverHistory {
+		operation.claimed = false
 		l.dequeueLocked(operation)
 	}
 	if l.recorder != nil {
@@ -721,10 +722,20 @@ func validFailureResult(result failureResult) bool {
 // answer", which outranks success.
 func failureOperationResult(operation *failureOperation) failureResult {
 	result := failureResultGood
-	for _, observation := range operation.Observations {
+	for observer, observation := range operation.Observations {
 		switch observation {
 		case failureObservationGood:
 		case failureObservationMissingAfterDeadline:
+			// A missing admission reply is an availability ambiguity, not proof
+			// that a successfully persisted message was lost. Only a healthy
+			// history read that confirms absence can make the current vertical
+			// slice's data-loss claim.
+			if observer == failureObserverAdmission {
+				if result == failureResultGood {
+					result = failureResultUnverified
+				}
+				continue
+			}
 			return failureResultMissingAfterDeadline
 		case failureObservationBad:
 			result = failureResultBad

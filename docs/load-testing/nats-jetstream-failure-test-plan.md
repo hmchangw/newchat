@@ -15,7 +15,7 @@ Loadgen can currently drive traffic through the following primary paths:
 However, the current implementation is **not sufficient to claim complete NATS / JetStream failover validation**:
 
 1. Loadgen has no federation / OUTBOX / remote INBOX, real bot pipeline, push delivery, search, HR, migration, or Teams pipeline scenarios.
-2. Loadgen has no per-operation outcome ledger. Some modes calculate latency from successful replies only, so timed-out or permanently missing outcomes may not be included in the failure rate.
+2. Only the Cassandra soak user-message lane has a durable per-operation outcome ledger. Other modes calculate latency from successful replies only, so timed-out or permanently missing outcomes may not be included in the failure rate.
 3. The `daily` NATS connection pool uses the default reconnection behavior of raw `nats.Connect` and does not expose disconnect/reconnect/closed metrics. During a long outage, loadgen may lose its own connection first and produce incorrect fault attribution.
 4. Loadgen does not currently inject faults. Kubernetes, Chaos Mesh, network policies, traffic control, or NATS management tooling must inject faults while loadgen continues generating traffic and validating outcomes.
 5. The local `docker-local` environment runs a single NATS node. It can test a complete outage or restart, but it cannot validate JetStream RAFT leader failover, quorum loss, rolling node failover, or a cross-site gateway partition.
@@ -183,7 +183,10 @@ Services:
 Loadgen:
 
 - A unique operation ID, start time, deadline, and Ack/reply/event/read-back outcome for every operation.
-- Four mutually exclusive outcomes: `eligible`, `good`, `bad`, and `missing_after_deadline`, plus run-window deltas.
+- `eligible` as the non-terminal ledger-admitted state, followed by exactly one
+  terminal result: `good`, `bad`, `unverified`, `not_sent`, or
+  `missing_after_deadline`, plus separate untracked/recovery-dropped counts and
+  run-window deltas.
 - Loadgen's own NATS connection state, reconnect count, buffer errors, CPU, memory, and socket errors.
 - Separate statistics for warmup, measurement, fault, and recovery/settle phases.
 
@@ -238,8 +241,13 @@ open. See [Loadgen Failure Observation Runtime](loadgen-failure-observation.md).
    - Automatically mark an interval inconclusive when the generator fails.
 
 2. **Per-operation outcome ledger / assertion mode**
-   - Persist operation ID, lane, deadline, expected event, and final read-back for each operation.
-   - Count eligible/good/bad/missing-after-deadline outcomes. Percentiles must not use successful samples only.
+   - Expand the implemented Cassandra soak user-message ledger to the remaining
+     operations, persisting operation ID, lane, deadline, expected event, and
+     final read-back.
+   - Count `eligible` separately from the terminal `good`, `bad`, `unverified`,
+     `not_sent`, and `missing_after_deadline` results. Report untracked and
+     recovery-dropped operations as invalid evidence. Percentiles must not use
+     successful samples only.
    - Keep deadline-based reconciliation running continuously so late recovery
      is not lost when an externally injected fault ends.
 
@@ -288,7 +296,9 @@ The following are common hard gates for every campaign. Exact latency and error-
 
 ## 10. Recommended Execution Order
 
-1. Implement P0 loadgen connection telemetry, the outcome ledger, and the complete durable sampler.
+1. Extend the implemented soak connection telemetry and partial outcome ledger
+   to all required loadgen pools and operations, then implement the complete
+   durable sampler.
 2. Run an outage/restart smoke test in the local single-node environment and confirm that reports and missing outcomes fail correctly.
 3. Run F01-F07 and F10-F13 in a single-site, three-node staging environment.
 4. After implementing federation observers, run F08-F09 in two-site and three-site environments.
@@ -299,7 +309,9 @@ The following are common hard gates for every campaign. Exact latency and error-
 
 - Git SHA, image/tag, NATS version and topology, stream replicas, site IDs, and loadgen seed/profile.
 - Baseline/fault/recovery timeline and injection target.
-- Per-lane eligible/good/bad/missing, p50/p95/p99, and maximum recovery latency.
+- Per-lane eligible, good, bad, unverified, not-sent, missing-after-deadline,
+  untracked, and recovery-dropped counts, plus p50/p95/p99 and maximum recovery
+  latency.
 - Per-consumer pending/ack-pending/redelivery/oldest-age/ack-floor charts.
 - Disconnect/reconnect/closed, publish retry/exhausted, and MaxDeliver advisories.
 - Duplicate-event and data-reconciliation results with all missing/duplicate operation IDs.

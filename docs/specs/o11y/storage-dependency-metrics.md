@@ -111,7 +111,14 @@ These metrics do not replace database telemetry; they connect dependency behavio
 | `cache_hits_total`, `cache_misses_total`, `cache_errors_total` | service caches | Explains whether Mongo load/impact was hidden or amplified by cache behavior | Existing in selected services |
 | `go_*`, `process_*`, container CPU/memory/network | SDK/runtime, cAdvisor | Detects client or loadgen exhaustion and recovery surge | Existing where targets are scraped |
 
-The Cassandra soak message-send lane now proves a terminal admission and history result for every generated operation and retains unresolved evidence on a dedicated PVC. Other loadgen lanes remain aggregate or sampled. A campaign that relies on one of those lanes remains inconclusive if aggregate success looks healthy but individual operations can disappear.
+The Cassandra soak message-send lane now proves a terminal admission and
+history result for every operation successfully admitted to its ledger and
+retains unresolved evidence on a dedicated PVC. Sends that cannot be admitted
+or observed are counted as untracked, and over-capacity WAL replay is counted
+as dropped; either condition invalidates the affected observation interval.
+Other loadgen lanes remain aggregate or sampled. A campaign that relies on one
+of those lanes remains inconclusive if aggregate success looks healthy but
+individual operations can disappear.
 
 ## 6. Missing Metrics and Telemetry
 
@@ -194,7 +201,9 @@ The failure-test view reuses all base rows and adds:
 - `run_id`, `scenario`, and traffic-profile variables sourced from loadgen/run metadata.
 - An annotation track for baseline, injection, failover, recovery, backlog-drain, and settle timestamps.
 - Loadgen offered/completed/retried/failed/saturated rates.
-- Eligible/good/bad/missing-after-deadline outcomes after the P0 ledger is implemented.
+- `eligible` as the separate non-terminal ledger state, the exact terminal
+  results `good`, `bad`, `unverified`, `not_sent`, and
+  `missing_after_deadline`, and separate untracked/recovery-dropped counts.
 - Before/during/after deltas for latency, error rate, replication lag, pending work, and resource saturation.
 - A verdict panel that reports `PASS`, `FAIL`, or `INCONCLUSIVE`; missing required telemetry is never a pass.
 
@@ -268,7 +277,9 @@ Current repository provisioning is insufficient for a complete storage dashboard
 1. Deploy/scrape MongoDB and Cassandra server exporters in staging and production, then add stable recording rules.
 2. Close direct-client instrumentation gaps and Cassandra batch telemetry.
 3. Add storage readiness or explicitly document a deliberate readiness policy.
-4. Add retry/exhaustion/terminal-outcome metrics and the loadgen operation ledger.
+4. Add the remaining retry/exhaustion metrics and expand the implemented
+   terminal-outcome metrics and Cassandra user-message ledger to MongoDB state,
+   mutations, federation, and the remaining loadgen lanes.
 5. Build the shared production base dashboard.
 6. Add the failure-test overlay and fault annotations.
 7. Execute single-dependency campaigns only after every required panel has non-stale data.

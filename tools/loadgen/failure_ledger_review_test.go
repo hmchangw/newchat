@@ -90,6 +90,31 @@ func TestFailureLedger_ExpireFinalizesReleasedClaim(t *testing.T) {
 	assert.Equal(t, 1, finalized)
 }
 
+func TestFailureLedger_HistoryObservationReleasesClaimForAdmissionExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(reviewFailureOperation("reply-missing", now)))
+
+	_, claimed := ledger.ClaimDue(now)
+	require.True(t, claimed)
+	finalized, err := ledger.Observe(
+		"reply-missing", failureObserverHistory, failureObservationGood, now,
+	)
+	require.NoError(t, err)
+	assert.False(t, finalized)
+
+	expired, err := ledger.Expire(now.Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, expired)
+	snapshot := ledger.Snapshot()
+	assert.Zero(t, snapshot.Active)
+	assert.Equal(t, uint64(1), snapshot.Results[failureResultUnverified])
+	assert.Zero(t, snapshot.Results[failureResultMissingAfterDeadline])
+}
+
 func TestFailureLedger_ClaimDueReturnsEarliestDueOperation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{
@@ -206,6 +231,14 @@ func TestFailureOperationResult_Precedence(t *testing.T) {
 			observations: map[failureObserver]failureObservation{
 				failureObserverAdmission: failureObservationGood,
 				failureObserverHistory:   failureObservationUnverified,
+			},
+			want: failureResultUnverified,
+		},
+		{
+			name: "missing admission reply with persisted history is unverified",
+			observations: map[failureObserver]failureObservation{
+				failureObserverAdmission: failureObservationMissingAfterDeadline,
+				failureObserverHistory:   failureObservationGood,
 			},
 			want: failureResultUnverified,
 		},

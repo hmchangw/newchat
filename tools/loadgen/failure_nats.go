@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -31,7 +32,7 @@ func dialNATSWithMetrics(
 			health.disconnected(err)
 		}),
 		nats.ReconnectHandler(func(connection *nats.Conn) {
-			health.reconnected(connection.ConnectedUrl())
+			health.reconnected(connection.ConnectedUrlRedacted())
 		}),
 		nats.ClosedHandler(func(_ *nats.Conn) {
 			health.closed()
@@ -41,7 +42,7 @@ func dialNATSWithMetrics(
 		}),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("connect NATS for loadgen: %w", err)
 	}
 	health.connected()
 	return connection, nil
@@ -54,6 +55,8 @@ type loadgenNATSHealth struct {
 	pool           string
 	now            func() time.Time
 	disconnectedAt time.Time
+	callbackSeen   bool
+	closedState    bool
 }
 
 func newLoadgenNATSHealth(
@@ -67,6 +70,11 @@ func newLoadgenNATSHealth(
 }
 
 func (h *loadgenNATSHealth) connected() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.callbackSeen {
+		return
+	}
 	if h.metrics != nil {
 		h.metrics.NATSConnected.WithLabelValues(h.pool).Set(1)
 		h.metrics.NATSConnectionEvents.WithLabelValues(h.pool, "connected").Inc()
@@ -75,23 +83,32 @@ func (h *loadgenNATSHealth) connected() {
 
 func (h *loadgenNATSHealth) disconnected(err error) {
 	h.mu.Lock()
+	if h.closedState {
+		h.mu.Unlock()
+		return
+	}
+	h.callbackSeen = true
 	if h.disconnectedAt.IsZero() {
 		h.disconnectedAt = h.now().UTC()
 	}
-	h.mu.Unlock()
 	if h.metrics != nil {
 		h.metrics.NATSConnected.WithLabelValues(h.pool).Set(0)
 		h.metrics.NATSConnectionEvents.WithLabelValues(h.pool, "disconnected").Inc()
 	}
+	h.mu.Unlock()
 	slog.Warn("nats disconnected", "error", err)
 }
 
 func (h *loadgenNATSHealth) reconnected(url string) {
 	now := h.now().UTC()
 	h.mu.Lock()
+	if h.closedState {
+		h.mu.Unlock()
+		return
+	}
+	h.callbackSeen = true
 	disconnectedAt := h.disconnectedAt
 	h.disconnectedAt = time.Time{}
-	h.mu.Unlock()
 	if h.metrics != nil {
 		h.metrics.NATSConnected.WithLabelValues(h.pool).Set(1)
 		h.metrics.NATSConnectionEvents.WithLabelValues(h.pool, "reconnected").Inc()
@@ -101,14 +118,23 @@ func (h *loadgenNATSHealth) reconnected(url string) {
 			)
 		}
 	}
+	h.mu.Unlock()
 	slog.Info("nats reconnected", "url", url)
 }
 
 func (h *loadgenNATSHealth) closed() {
+	h.mu.Lock()
+	if h.closedState {
+		h.mu.Unlock()
+		return
+	}
+	h.callbackSeen = true
+	h.closedState = true
 	if h.metrics != nil {
 		h.metrics.NATSConnected.WithLabelValues(h.pool).Set(0)
 		h.metrics.NATSConnectionEvents.WithLabelValues(h.pool, "closed").Inc()
 	}
+	h.mu.Unlock()
 	slog.Warn("nats connection closed")
 }
 

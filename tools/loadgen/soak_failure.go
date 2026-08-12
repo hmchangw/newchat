@@ -155,6 +155,9 @@ func (t *soakFailureTracker) ObserveReply(result *soakSendReplyResult) error {
 	if t == nil || t.ledger == nil {
 		return fmt.Errorf("soak failure ledger is required")
 	}
+	if result == nil {
+		return fmt.Errorf("soak send result is required")
+	}
 	// A reply with no matching pending send belongs to no ledger operation —
 	// typically a late response whose send already expired.
 	if result.Status == soakSendReplyUnmatched {

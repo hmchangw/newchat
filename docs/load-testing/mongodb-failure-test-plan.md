@@ -158,7 +158,10 @@ Reconciliation must query by operation-owned identifiers and verify:
 
 ### P0 — before a conclusive core-chat campaign
 
-1. Add the shared operation outcome ledger with eligible/good/bad/missing-after-deadline results.
+1. Expand the shared operation outcome ledger to MongoDB operations. Treat
+   `eligible` as the non-terminal admitted state; report the terminal results
+   `good`, `bad`, `unverified`, `not_sent`, and `missing_after_deadline`, while
+   untracked or recovery-dropped operations invalidate the affected interval.
 2. Add a Mongo reconciliation observer for rooms, subscriptions, thread rooms/subscriptions, users, and run-owned operation records.
 3. Add run/scenario/phase metadata and fault annotations without placing run ID on every application metric.
 4. Add loadgen connection/pool metrics and invalidate a run when loadgen itself cannot reach MongoDB or saturates.

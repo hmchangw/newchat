@@ -48,7 +48,8 @@ read-back are independent observations, so a reply timeout followed by a
 successful read-back remains an availability failure without being
 misreported as data loss.
 
-Every generated message operation is eligible. Its terminal result is one of:
+Only a generated message operation successfully admitted to the ledger is
+`eligible` for terminal accounting. Its terminal result is one of:
 
 - `good`: admission and persisted history both match;
 - `bad`: an observation explicitly failed or the persisted record mismatched;
@@ -70,8 +71,16 @@ Where observations disagree, the strongest evidence wins:
 The invariant for a completed interval is:
 
 ```text
-eligible = good + bad + unverified + not_sent + missing_after_deadline
+ledger_admitted = good + bad + unverified + not_sent + missing_after_deadline
 ```
+
+`eligible` is the non-terminal state of a ledger-admitted operation, not a
+sixth result. Sends that continue after ledger admission or observation fails
+are counted separately in `loadgen_failure_untracked_total`. Operations dropped
+while replaying a WAL that exceeds the configured capacity are counted in
+`loadgen_failure_dropped_total`. Neither count belongs on the right-hand side
+of the invariant; either count invalidates the affected observation interval
+and prevents a conclusive PASS.
 
 ## Reconciliation Traffic
 

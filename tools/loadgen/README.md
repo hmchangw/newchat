@@ -116,11 +116,14 @@ loadgen -> message-gatekeeper -> message-worker -> Cassandra
 loadgen -> history-service -> Cassandra
 ```
 
-The continuous workload also maintains a durable per-message operation
-ledger. It records an intent before publish, observes the gatekeeper result,
-and consumes existing read-lane slots to reconcile every generated message
-through `GetMessageByID`. Fault injection remains external and does not change
-the configured traffic profile. See
+The continuous workload also maintains a per-message operation ledger. When
+`SOAK_LEDGER_DIR` is configured, it persists the ledger there and recovers
+unresolved operations after restart; the default empty value used by direct
+invocation is in-memory only and is not restart-durable. The ledger records an
+intent before publish, observes the gatekeeper result, and consumes existing
+read-lane slots to reconcile every ledger-admitted message through
+`GetMessageByID`. Fault injection remains external and does not change the
+configured traffic profile. See
 [`docs/load-testing/loadgen-failure-observation.md`](../../docs/load-testing/loadgen-failure-observation.md).
 
 It is not a full-newchat capacity test and it does not establish product SLOs.

@@ -185,8 +185,12 @@ All subsystem plans depend on the same loadgen foundations:
 
 2. **Per-operation outcome ledger**
    - Operation ID, lane, start time, deadline, expected effects, and final read-back.
-   - Eligibility is separate from the mutually exclusive terminal results
-     `good`, `bad`, and `missing_after_deadline`.
+   - `eligible` means the operation was admitted to the ledger and is awaiting
+     a terminal result; it is not itself a terminal result. The mutually
+     exclusive terminal results are `good`, `bad`, `unverified`, `not_sent`,
+     and `missing_after_deadline`.
+   - Untracked sends and operations dropped during WAL recovery are reported
+     separately and invalidate the affected observation interval.
    - Operation timestamps remain queryable against externally recorded fault
      and recovery annotations; loadgen does not switch traffic behavior when a
      fault begins.
@@ -211,7 +215,7 @@ imply that the remaining subsystem lanes are complete.
 
 ## 9. Shared Acceptance Gates
 
-- Every accepted operation has a successful, explicitly failed, or queryable terminal outcome. Missing-after-deadline is zero unless an approved error budget explicitly allows otherwise.
+- Every ledger-admitted operation has a successful, explicitly failed, or queryable terminal outcome. Any untracked send or recovery-dropped operation makes the affected interval inconclusive. Missing-after-deadline is zero unless an approved error budget explicitly allows otherwise.
 - No silent drop exists only in logs. Retry exhaustion and terminal drops are enumerable by operation/event ID.
 - At-least-once replay may produce duplicate delivery attempts, but final business state is idempotent and contains no duplicate membership, message mutation, notification, or other side effect.
 - Dependency and application backlogs return to pre-fault steady state within the approved recovery-time objective.
@@ -247,7 +251,7 @@ The subsystem documents own detailed fault injection, service-by-service behavio
 
 - Git SHA, image tags, dependency versions, topology, replica/consistency settings, site IDs, loadgen seed, and traffic profile.
 - Baseline, fault, failover, recovery, backlog-drain, and reconciliation timestamps.
-- Per-lane eligible/good/bad/missing outcomes and p50/p95/p99 latency, including maximum recovery latency.
+- Per-lane eligible, good, bad, unverified, not-sent, and missing-after-deadline outcomes, plus untracked and recovery-dropped counts and p50/p95/p99 latency, including maximum recovery latency.
 - Dependency topology and state changes during the run.
 - Retry, timeout, exhaustion, duplicate, and terminal-outcome evidence.
 - Reconciliation results with all missing or duplicate operation IDs.

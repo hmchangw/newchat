@@ -82,6 +82,7 @@ func TestSoakFailureTracker_RejectsInvalidInputs(t *testing.T) {
 	require.NoError(t, err)
 	tracker = newSoakFailureTracker(ledger, 0, time.Minute, time.Now)
 	require.Error(t, tracker.Start(nil))
+	require.EqualError(t, tracker.ObserveReply(nil), "soak send result is required")
 	require.Error(t, tracker.ObserveReply(&soakSendReplyResult{}))
 }
 

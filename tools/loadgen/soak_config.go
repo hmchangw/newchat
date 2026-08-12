@@ -180,7 +180,8 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if cfg.ReconcileRetryInterval <= 0 {
 		return fmt.Errorf("SOAK_RECONCILE_RETRY_INTERVAL must be greater than zero")
 	}
-	if cfg.ReconcileReadShare <= 0 || cfg.ReconcileReadShare > 1 {
+	if !isFinite(cfg.ReconcileReadShare) ||
+		cfg.ReconcileReadShare <= 0 || cfg.ReconcileReadShare > 1 {
 		return fmt.Errorf("SOAK_RECONCILE_READ_SHARE must be greater than zero and at most 1")
 	}
 

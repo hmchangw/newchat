@@ -595,10 +595,12 @@ func runSoakWorkload(
 	actions := soakWorkloadActions{
 		Send: func(actionCtx context.Context, _ bool) error {
 			for _, result := range sender.ExpireResults() {
-				_ = collector.Record(&soakOperationSample{
+				if err := collector.Record(&soakOperationSample{
 					Action: soakRPCSend, Outcome: soakOutcomeFailed, At: now(),
 					ErrorClass: soakErrorTimeout,
-				})
+				}); err != nil {
+					slog.Error("record expired Cassandra soak send timeout", "error", err)
+				}
 				if err := failureTracker.ObserveReply(&result); err != nil {
 					slog.Error("record expired Cassandra soak send", "error", err)
 				}
