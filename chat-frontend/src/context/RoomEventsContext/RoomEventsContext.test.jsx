@@ -129,6 +129,45 @@ describe('RoomEventsProvider', () => {
     )
   })
 
+  it('loadHistory routes to the room home site for a cross-site room, not the user home site', async () => {
+    // User is logged in on site-B; the room lives on site-A. History must be
+    // fetched from the room's home site (site-A), or history-service on site-B
+    // replies "room not found".
+    const rooms = [{ id: 'a', name: 'x', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null }]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.includes('.msg.history')) return Promise.resolve({ messages: [] })
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request, user: { account: 'alice', siteId: 'site-B' } })
+
+    function Trigger() {
+      const { loadHistory } = useRoomEvents('a')
+      const { summaries } = useRoomSummaries()
+      return (
+        <div>
+          <button onClick={() => loadHistory()}>load</button>
+          <div data-testid="count">{summaries.length}</div>
+        </div>
+      )
+    }
+
+    render(wrap(<Trigger />, nats))
+    // Wait for the bootstrap summary to land so loadHistory sees the room's siteId.
+    await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+    await act(async () => {
+      screen.getByText('load').click()
+    })
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith('chat.user.alice.request.room.a.site-A.msg.history', { limit: 50 }),
+    )
+    // Never routed to the user's own home site.
+    const historyCalls = request.mock.calls.filter(([subject]) => subject.includes('.msg.history'))
+    expect(historyCalls.every(([subject]) => !subject.includes('.site-B.'))).toBe(true)
+  })
+
   it('loadHistory surfaces historyError on failure', async () => {
     const request = vi.fn().mockImplementation((subject) => {
       if (subject.includes('.msg.history')) return Promise.reject(new Error('boom'))

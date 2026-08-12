@@ -1313,6 +1313,10 @@ Full-text message search. Auto-scoped to rooms the user is a member of. May incl
 messages from remote sites. One query matches message text, attachment text (file
 names + descriptions, pooled into one searched field), and tcard data.
 
+System messages (`room_created`, `members_added`, `member_removed`, `member_left`,
+`room_renamed`, `room_restricted`, `teams_meet_started`) are never returned — they are
+excluded from the index. A client-set `type: "important"` message stays searchable.
+
 > **Breaking change (v2):** Response changed from `{total, results}` to `{messages, total}`.
 > The `results` field no longer exists.
 

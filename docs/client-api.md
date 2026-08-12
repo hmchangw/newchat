@@ -1204,7 +1204,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously on val
 - `"channel name is required"` / `"channel name must be at most 100 characters"`
 - `"bots cannot be added to a channel"` / `"bot not available"` (botDM target whose assistant is disabled)
 - `user "<account>": user not found` / `org "<orgId>": invalid org` (each wrapped with the offending account/org ID)
-- `"user is missing required name fields"`
+- `"user is missing required name fields"` — rejected only when BOTH `engName` and `chineseName` are empty (either one alone is sufficient)
 - `"exceeds maximum capacity (N): would create M members"`
 
 ```json
@@ -4068,6 +4068,8 @@ See [Error envelope](#6-error-envelope-reference).
 
 **Searched fields:** one query matches message text (`content`), attachment text (`attachmentText` — every attachment's file name and description pooled into one field), and tcard data (`cardData`, the card's data document indexed verbatim as text). All terms of the query must match within a single one of these fields (`multi_match` with `AND`) — a query mixing a word from the message text with a word from a filename matches neither field and returns no hit; a query mixing a filename word with a description word DOES match, since both live in `attachmentText`.
 
+**System messages are never returned.** Server-generated room chrome (`type` of `room_created`, `members_added`, `member_removed`, `member_left`, `room_renamed`, `room_restricted`, `teams_meet_started` — see [`Message.type`](#message-schema)) is excluded from the search index, so it can never appear in `messages`. A client-set `type: "important"` message is normal user content and remains searchable.
+
 ##### Request body
 
 ```json
@@ -4761,9 +4763,9 @@ The stored settings object. All ten fields are optional and appear only when the
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
 | `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
 | `muteAllNotifications` | boolean | Mute all notifications. Enforced server-side by `notification-worker`: push delivery is suppressed for this user unless pierced — see `alwaysAllowPriorityNotifications`. |
-| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) pierces `muteAllNotifications` in **any** room type — DM and channel alike — and for `.bot` senders as well as users. The pierce does not override `showNotificationsInCall`. |
+| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) is pushed regardless of `muteAllNotifications` and regardless of a suppressing presence (`"busy"` / `"in-call"`) — in **any** room type, DM and channel alike, and for `.bot` senders as well as users. This setting is the only opt-in for that pierce; listing a priority contact without enabling it changes nothing. Per-room mute is not pierced. |
 | `showPreviewsInNotifications` | boolean | Show previews in notifications. |
-| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce of `muteAllNotifications` does not bypass this — set both to receive priority pushes while in a call. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
+| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce bypasses this — see `alwaysAllowPriorityNotifications`. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
 | `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
 | `priorityContacts` | string[] | Read-only here — raw contact accounts (not enriched), stored order. Written only by [`settings.priorityContacts.add`](#settingsprioritycontactsadd) / [`settings.priorityContacts.remove`](#settingsprioritycontactsremove), never by `settings.set`. |
 
@@ -6315,7 +6317,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 
 #### Triggered events — success path
 
-After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. **`botDM` rooms receive no `new_message` fan-out at all:** `broadcast-worker` only handles `channel` and `dm` room types, so a `botDM` falls through to the default branch and is skipped — the human participant in a `botDM` does **not** receive a `new_message` room event from this pipeline. (Bot integrations consume `botDM` messages through a separate backend path.)
+After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
 
 **1. For channel rooms — `chat.room.{roomID}.event`** (`publishChannelEvent`)
 
@@ -6323,7 +6325,7 @@ A `RoomEvent`. Recipients: every client subscribed to the room (which includes t
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | string | Always `"new_message"`. |
+| `type` | string | `"new_message"` for this room-wide channel path. A thread reply carries `"new_thread_message"` instead and is delivered per-subscriber (see [new_thread_message](client-api/events.md#new_thread_message-roomevent)). |
 | `roomId` | string | |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 | `eventTimestamp` | number | Milliseconds since Unix epoch (UTC). When message-worker published the canonical event. Omitted for legacy events. |
@@ -6451,8 +6453,12 @@ The worker filters recipients per message:
 - In rooms with more than `LARGE_ROOM_THRESHOLD` members (default 500),
   pushes only to mentioned recipients (`@user`, `@all`, `@here`).
 - Bots never receive a mobile push.
-- Presence-busy / in-call recipients are not pushed; everyone else
-  (online, offline, away, missing) receives one.
+- Presence-busy / in-call recipients are not pushed unless they set
+  `showNotificationsInCall`; everyone else (online, offline, away, missing)
+  receives one.
+- A sender in the recipient's `priorityContacts` bypasses `muteAllNotifications`
+  and presence suppression alike, but only when the recipient enabled
+  `alwaysAllowPriorityNotifications`. Per-room mute is never bypassed.
 
 ---
 
@@ -6500,7 +6506,7 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 
 #### When it fires
 
-- **Reply added (`action: "reply_added"`):** fired when a new thread reply is successfully persisted (triggered by a `Send Message` RPC with `threadParentId` set). Published in addition to the per-subscriber `new_message` `RoomEvent` that carries the reply content.
+- **Reply added (`action: "reply_added"`):** fired when a new thread reply is successfully persisted (triggered by a `Send Message` RPC with `threadParentId` set). Published in addition to the per-subscriber `new_thread_message` `RoomEvent` that carries the reply content.
 - **Reply deleted (`action: "reply_deleted"`):** fired when a thread reply is soft-deleted (triggered by a `Delete Message` RPC). Published in addition to the `DeleteRoomEvent` that carries the delete notification.
 
 #### Client handling

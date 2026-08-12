@@ -947,6 +947,67 @@ func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {
 	assert.Equal(t, "secret edit", plaintext)
 }
 
+func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
+	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+
+	// The worker forwards every parsed mention to SetSubscriptionMentions; the
+	// additive / no-re-badge / skip-non-subscriber properties are enforced by the
+	// store filter (read-guard) and covered by TestSetSubscriptionMentions_ReadGuard_Integration.
+	tests := []struct {
+		name            string
+		content         string
+		wantSetMentions []string // nil = SetSubscriptionMentions must not be called
+	}{
+		{
+			name:            "edit adds a mention",
+			content:         "hey @bob check this",
+			wantSetMentions: []string{"bob"},
+		},
+		{
+			name:    "no mentions badges nobody",
+			content: "no mentions here anymore",
+		},
+		{
+			name:            "every parsed mention is forwarded to the store",
+			content:         "hey @alice and @bob",
+			wantSetMentions: []string{"alice", "bob"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+
+			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+			if tc.wantSetMentions != nil {
+				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.InAnyOrder(tc.wantSetMentions), edited).Return(nil)
+			}
+
+			evt := model.MessageEvent{
+				Event:     model.EventUpdated,
+				SiteID:    "site-a",
+				Timestamp: edited.UnixMilli(),
+				Message: model.Message{
+					ID: "msg-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+					Content:   tc.content,
+					CreatedAt: edited.Add(-time.Hour),
+					EditedAt:  &edited, UpdatedAt: &edited,
+				},
+			}
+			data, err := json.Marshal(&evt)
+			require.NoError(t, err)
+
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+			require.Len(t, pub.records, 1, "edit must still fan out regardless of mention badging")
+		})
+	}
+}
+
 func TestHandleUpdated_MissingEditedAt_ReturnsError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -2357,7 +2418,7 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 		subjects[r.subject] = true
 		var roomEvt model.RoomEvent
 		require.NoError(t, json.Unmarshal(r.data, &roomEvt))
-		assert.Equal(t, model.RoomEventNewMessage, roomEvt.Type)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "thread reply must publish new_thread_message, not new_message")
 		assert.Positive(t, roomEvt.Timestamp, "Timestamp must be the broadcast-worker publish time")
 		assert.Equal(t, msgTime.UnixMilli(), roomEvt.EventTimestamp)
 	}
@@ -2490,9 +2551,50 @@ func TestHandleThreadCreated_DMRoom_FansOutToAllMembers(t *testing.T) {
 	subjects := map[string]bool{}
 	for _, r := range pub.records {
 		subjects[r.subject] = true
+		roomEvt := decodeRoomEvent(t, r.data)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "DM thread reply must publish new_thread_message, not new_message")
 	}
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+}
+
+func TestHandleThreadCreated_BotDMRoom_EmitsNewThreadMessage(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 11, 0, 0, 0, time.UTC)
+
+	// botDM thread replies fan out per member — the human member gets the event,
+	// the bot account is skipped (same as an ordinary botDM new_message). The
+	// production branch handles RoomTypeBotDM too.
+	botDMRoom := &model.Room{ID: "dm-1", Type: model.RoomTypeBotDM, SiteID: "site-a", UserCount: 2}
+	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(botDMRoom), nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    "site-a",
+		Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "thread reply in botDM", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-dm", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.NotEmpty(t, pub.records, "botDM thread reply fans out per member")
+	for _, r := range pub.records {
+		roomEvt := decodeRoomEvent(t, r.data)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "botDM thread reply must publish new_thread_message")
+	}
 }
 
 func TestHandleThreadCreated_DMRoom_WithMention_NoSubscriptionWrite(t *testing.T) {

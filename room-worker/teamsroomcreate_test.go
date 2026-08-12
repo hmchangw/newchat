@@ -44,16 +44,21 @@ func membershipEvents(t *testing.T, published []publishedMsg, subjMatch string) 
 		if !strings.Contains(p.subj, subjMatch) {
 			continue
 		}
-		raw := p.data
-		if strings.Contains(p.subj, "outbox") { // outbox double-wraps: OutboxEvent.Envelope = InboxEvent, .Payload = the member event
+		// Both lanes wrap the member event in an InboxEvent envelope; outbox adds
+		// one more layer (OutboxEvent.Envelope = InboxEvent). Decoding through the
+		// envelope asserts the consumer's contract, not whatever shape we publish.
+		envelope := p.data
+		if strings.Contains(p.subj, "outbox") {
 			var ob model.OutboxEvent
 			require.NoError(t, json.Unmarshal(p.data, &ob))
-			var ie model.InboxEvent
-			require.NoError(t, json.Unmarshal(ob.Envelope, &ie))
-			raw = ie.Payload
+			envelope = ob.Envelope
 		}
+		var ie model.InboxEvent
+		require.NoError(t, json.Unmarshal(envelope, &ie))
+		require.NotEmpty(t, ie.Payload, "subject %s: member event must ride in InboxEvent.Payload", p.subj)
+
 		var e model.InboxMemberEvent
-		require.NoError(t, json.Unmarshal(raw, &e))
+		require.NoError(t, json.Unmarshal(ie.Payload, &e))
 		out = append(out, e)
 	}
 	return out
@@ -435,6 +440,78 @@ func TestFederateTeamsMembership_MigrationHeaderStamped(t *testing.T) {
 		map[string]string{"alice": "site-a"}, time.Now())
 	require.NoError(t, err)
 	assert.True(t, gotHeader)
+}
+
+// Pins the internal-lane contract: search-sync-worker decodes InboxEvent.Payload,
+// so a bare InboxMemberEvent is dropped. `timestamp` exists on both structs, so
+// this asserts Type and Payload explicitly, not just the timestamp.
+func TestFederateTeamsMembership_InternalLaneCarriesInboxEventEnvelope(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, published := newTeamsTestHandler(t, store)
+
+	acceptedAt := time.UnixMilli(1735689600000).UTC()
+	room := &model.Room{ID: "chat1", Name: "engineering", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	require.NoError(t, h.federateTeamsMembership(context.Background(), room,
+		[]string{"alice", "bob"}, model.InboxMemberAdded,
+		map[string]string{"alice": "site-a", "bob": "site-a"}, acceptedAt))
+
+	wantSubj := subject.InboxInternal("site-a", model.InboxMemberAdded)
+	var internal [][]byte
+	for _, p := range *published {
+		if p.subj == wantSubj {
+			internal = append(internal, p.data)
+		}
+	}
+	require.Len(t, internal, 1, "exactly one internal-lane publish")
+
+	var evt model.InboxEvent
+	require.NoError(t, json.Unmarshal(internal[0], &evt))
+	assert.Equal(t, model.InboxMemberAdded, evt.Type, "envelope carries the event type")
+	assert.Equal(t, "site-a", evt.SiteID)
+	assert.Equal(t, "site-a", evt.DestSiteID, "local-origin event: origin site is also the destination")
+	assert.Equal(t, acceptedAt.UnixMilli(), evt.Timestamp)
+	require.NotEmpty(t, evt.Payload, "inner event must ride in Payload, not replace the envelope")
+
+	var inner model.InboxMemberEvent
+	require.NoError(t, json.Unmarshal(evt.Payload, &inner))
+	assert.Equal(t, "chat1", inner.RoomID)
+	assert.Equal(t, "engineering", inner.RoomName)
+	assert.Equal(t, model.RoomTypeChannel, inner.RoomType)
+	assert.ElementsMatch(t, []string{"alice", "bob"}, inner.Accounts)
+}
+
+// Guards the other direction: h.federate -> outbox.Publish builds the envelope
+// itself, so the cross-site branch must keep passing the INNER event — wrapping
+// both lanes the same way would double-wrap and break federation.
+func TestFederateTeamsMembership_FederatedLaneStaysSingleWrapped(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, published := newTeamsTestHandler(t, store)
+
+	room := &model.Room{ID: "chat1", Name: "engineering", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	require.NoError(t, h.federateTeamsMembership(context.Background(), room,
+		[]string{"dave"}, model.InboxMemberAdded,
+		map[string]string{"dave": "site-b"}, time.UnixMilli(1735689600000).UTC()))
+
+	var outboxData []byte
+	for _, p := range *published {
+		if strings.Contains(p.subj, "outbox") {
+			outboxData = p.data
+		}
+	}
+	require.NotNil(t, outboxData, "remote member produces an outbox publish")
+
+	var ob model.OutboxEvent
+	require.NoError(t, json.Unmarshal(outboxData, &ob))
+	var ie model.InboxEvent
+	require.NoError(t, json.Unmarshal(ob.Envelope, &ie))
+	require.NotEmpty(t, ie.Payload)
+
+	var inner model.InboxMemberEvent
+	require.NoError(t, json.Unmarshal(ie.Payload, &inner),
+		"OutboxEvent.Envelope.Payload must be the inner event, not another envelope")
+	assert.Equal(t, []string{"dave"}, inner.Accounts)
 }
 
 // TestProcessTeamsRoomCreate_StampsMigrationHeader exercises the stamp at the

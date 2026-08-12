@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -165,11 +166,30 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 		return nil, fmt.Errorf("subscription search backend: %w", err)
 	}
 
-	rooms, err := parseRooms(raw)
+	rooms, shards, err := parseRooms(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parsing spotlight rooms: %w", err)
 	}
+	if len(rooms) == 0 {
+		logEmptyResult(ctx, "rooms", h.cfg.SpotlightReadPattern, account, req.Query, shards)
+	}
 	return &model.SearchRoomsResponse{Rooms: rooms}, nil
+}
+
+// logEmptyResult names the searched pattern on a zero-result query, since
+// allow_no_indices=true makes a misconfigured index look like a normal miss.
+// WARN only for zero shards (always broken) and without the user-typed query;
+// routine misses log at flow level, which is X-Debug-gated and keeps it.
+func logEmptyResult(ctx context.Context, kind, pattern, account, query string, shards int) {
+	requestID := natsutil.RequestIDFromContext(ctx)
+	if shards == 0 {
+		slog.WarnContext(ctx, "empty search result: read pattern matched no index",
+			"kind", kind, "pattern", pattern, "account", account, "request_id", requestID,
+			"hint", "the index this service reads is not the one search-sync-worker writes")
+		return
+	}
+	slog.Log(ctx, logctx.LevelFlow, "empty search result: index present, no document matched",
+		"kind", kind, "pattern", pattern, "account", account, "request_id", requestID, "query", query)
 }
 
 // searchOrgs runs a prefix search over the company-wide spotlight-org ES
@@ -211,9 +231,12 @@ func (h *handler) searchOrgs(c *natsrouter.Context, req model.SearchOrgsRequest)
 		return nil, fmt.Errorf("org search backend: %w", err)
 	}
 
-	orgs, err := parseOrgs(raw)
+	orgs, shards, err := parseOrgs(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parsing spotlight orgs: %w", err)
+	}
+	if len(orgs) == 0 {
+		logEmptyResult(ctx, "orgs", h.cfg.SpotlightOrgReadPattern, account, req.Query, shards)
 	}
 	return &model.SearchOrgsResponse{Orgs: orgs}, nil
 }

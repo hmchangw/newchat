@@ -202,7 +202,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	case model.RoomTypeChannel:
 		return h.publishChannelEvent(ctx, &meta, clientMsg, evt.Timestamp, resolved.MentionAll, resolved.Participants)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
-		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts)
+		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts, model.RoomEventNewMessage)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping fan-out",
 			"type", meta.Type,
@@ -262,6 +262,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		// in the main channel, so a room-level mention badge would appear with no
 		// visible message to explain it.
 		roomEvt := buildRoomEvent(&meta, clientMsg, evt.Timestamp)
+		roomEvt.Type = model.RoomEventNewThreadMessage
 		roomEvt.MentionAll = resolved.MentionAll
 		if len(resolved.Participants) > 0 {
 			roomEvt.Mentions = resolved.Participants
@@ -276,7 +277,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		// owned by message-worker (markThreadMentions), so broadcast-worker doesn't
 		// touch subscriptions here. lastMsgAt is intentionally NOT updated (would
 		// wrongly mark hasUnread for non-participants).
-		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts)
+		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts, model.RoomEventNewThreadMessage)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping thread fan-out",
 			"type", meta.Type,
@@ -301,6 +302,10 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
+	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
+		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
+	}
+
 	edit := buildEditRoomEvent(room, evt)
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
@@ -308,6 +313,18 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		}
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
+}
+
+// badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
+// handleCreated. Additive only: SetSubscriptionMentions' filter skips
+// non-subscribers and accounts that have already read past the edit, so a
+// removed mention is never cleared and an already-read one is never re-flagged.
+func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
+	parsed := mention.Parse(msg.Content)
+	if len(parsed.Accounts) == 0 {
+		return nil
+	}
+	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
@@ -848,7 +865,7 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 		"request_id", natsutil.RequestIDFromContext(ctx), "account", account, "room_id", roomID)
 }
 
-func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string) error {
+func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string, roomEventType model.RoomEventType) error {
 	subs, err := h.store.ListSubscriptions(ctx, meta.ID)
 	if err != nil {
 		return fmt.Errorf("list subscriptions for DM room %s: %w", meta.ID, err)
@@ -871,6 +888,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 		_, hasMention := mentionSet[account]
 
 		evt := buildRoomEvent(meta, clientMsg, timestamp)
+		evt.Type = roomEventType
 		evt.HasMention = hasMention
 
 		payload, err := sonic.Marshal(evt)

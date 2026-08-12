@@ -65,6 +65,44 @@ func TestRunMessages_FlushesEvenWhenAWorkerFails(t *testing.T) {
 	assert.Equal(t, 0, f.FailedCount(), "the room-ok action that did reach ES succeeded and must not count as failed")
 }
 
+// TestRunMessages_SkipsSystemMessages: the live path drops sys-messages in
+// messageCollection.BuildAction, so a backfill that indexed them would silently
+// re-introduce every one. Skipping is not a failure — FailedCount must stay 0.
+func TestRunMessages_SkipsSystemMessages(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := NewMockSubscriptionSource(ctrl)
+	messages := NewMockMessageSource(ctrl)
+	store := NewMockESStore(ctrl)
+	cfg := testConfig()
+	cfg.WorkerConcurrency = 1
+
+	now := time.Now()
+	subs.EXPECT().RoomIDs(gomock.Any(), cfg.SiteID).Return([]string{"room1"}, nil)
+	messages.EXPECT().StreamMessages(gomock.Any(), cfg.SiteID, "room1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _, _ string, _, _ time.Time, fn func(cassandra.Message) error) error {
+			for _, m := range []cassandra.Message{
+				{MessageID: "m1", RoomID: "room1", CreatedAt: now},
+				{MessageID: "sys1", RoomID: "room1", CreatedAt: now, Type: model.MessageTypeMembersAdded},
+				{MessageID: "sys2", RoomID: "room1", CreatedAt: now, Type: model.MessageTypeRoomRenamed},
+				{MessageID: "m2", RoomID: "room1", CreatedAt: now, Type: model.MessageTypeImportant},
+			} {
+				if err := fn(m); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	// Only m1 and m2 (important is client-set, not system) reach ES.
+	store.EXPECT().Bulk(gomock.Any(), gomock.Len(2)).Return(
+		[]searchengine.BulkResult{{Status: 200}, {Status: 200}}, nil)
+
+	f := newFlusher(store, 500)
+	require.NoError(t, runMessages(context.Background(), subs, messages, f, cfg))
+	// RecordSkipped feeds failedCount, so filtering must bypass it entirely —
+	// otherwise a clean backfill reports thousands of "failures".
+	assert.Equal(t, 0, f.FailedCount(), "a system message is filtered, not a build failure")
+}
+
 func TestRunSpotlight_OneActionPerSubscription(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	subs := NewMockSubscriptionSource(ctrl)

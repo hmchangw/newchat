@@ -2,9 +2,98 @@ package model
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// Parses the whole package (constants aren't enumerable at runtime) and asserts
+// every MessageType* constant is in systemMessageTypes or exempted in nonSystem
+// with a reason — an unregistered one silently changes behaviour in four services.
+func TestSystemMessageTypesCoverEveryConstant(t *testing.T) {
+	nonSystem := map[string]string{
+		"MessageTypeImportant": "client-settable (重要訊息): previews and notifies like a normal message",
+	}
+
+	// Whole-directory walk so a MessageType* constant moved or added in any
+	// other pkg/model file stays guarded; a single-file parse would silently
+	// un-guard it while found>0 keeps the test green.
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+
+	var found int
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", name, perr)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, cname := range vs.Names {
+					if !strings.HasPrefix(cname.Name, "MessageType") {
+						continue
+					}
+					// Fail closed on forms this walk cannot evaluate — a valueless
+					// constant (inheriting the previous expression) or a non-literal
+					// would otherwise slip through the registry check unnoticed,
+					// which is the exact failure this guard exists to prevent.
+					if i >= len(vs.Values) {
+						t.Errorf("%s: MessageType constants must declare an explicit value", cname.Name)
+						continue
+					}
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						t.Errorf("%s: MessageType constants must be string literals so this guard can read them", cname.Name)
+						continue
+					}
+					value, uerr := strconv.Unquote(lit.Value)
+					if uerr != nil {
+						t.Errorf("%s: cannot unquote value %s: %v", cname.Name, lit.Value, uerr)
+						continue
+					}
+					found++
+
+					if reason, exempt := nonSystem[cname.Name]; exempt {
+						if IsSystemMessageType(value) {
+							t.Errorf("%s (%q) is in systemMessageTypes but marked non-system: %s",
+								cname.Name, value, reason)
+						}
+						continue
+					}
+					if !IsSystemMessageType(value) {
+						t.Errorf("%s (%q) is missing from systemMessageTypes.\n"+
+							"Add it there, or add %s to this test's nonSystem map with a reason.\n"+
+							"Left unregistered it will be indexed as searchable content, trigger push "+
+							"notifications, and show up in room history.", cname.Name, value, cname.Name)
+					}
+				}
+			}
+		}
+	}
+
+	if found == 0 {
+		t.Fatal("no MessageType* constants found — the parser stopped matching, so this test guards nothing")
+	}
+}
 
 func TestIsSystemMessageType(t *testing.T) {
 	cases := []struct {

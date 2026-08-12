@@ -67,6 +67,15 @@ func parseMemberEvent(data []byte) (*model.InboxEvent, *model.InboxMemberEvent, 
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return nil, nil, fmt.Errorf("unmarshal inbox event: %w", err)
 	}
+	// Envelope-only fields first: a bare InboxMemberEvent shares `timestamp` and
+	// `siteId` with InboxEvent, so checking timestamp first would mask an
+	// unwrapped publish behind a less diagnostic error.
+	if len(evt.Payload) == 0 {
+		return nil, nil, fmt.Errorf("parse member event: missing payload envelope (unwrapped publish?)")
+	}
+	if evt.Type == "" {
+		return nil, nil, fmt.Errorf("parse member event: missing event type")
+	}
 	if evt.Timestamp <= 0 {
 		return nil, nil, fmt.Errorf("parse member event: missing timestamp")
 	}

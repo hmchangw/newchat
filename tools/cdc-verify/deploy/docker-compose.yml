@@ -1,0 +1,105 @@
+# CDC Migration Verification Tool — local demo stack
+#
+# Starts NATS+JetStream, a source Mongo, a target Mongo, a Cassandra node, and
+# the tool itself, wired together for a local dry run of the mapping file.
+#
+# Usage:
+#   cp tools/cdc-verify/mapping.example.json tools/cdc-verify/deploy/mapping.local.json
+#   docker compose -f tools/cdc-verify/deploy/docker-compose.yml up
+#   Open http://localhost:8091
+#
+# mapping.local.json is operator-provided next to this file (gitignored) — a
+# copy of ../mapping.example.json works out of the box. It is bind-mounted
+# read-only into the container so it can be edited without a rebuild.
+#
+# BOOTSTRAP_STREAMS=true below is dev-only: it makes the tool create
+# MIGRATION-OPLOG-{siteID} itself since this stack has no oplog-connector to
+# do it. In production the stream already exists (owned by
+# oplog-connector/ops) and this gate stays off. With nothing publishing to
+# the stream yet, the stack starts idle — an empty dashboard — until you seed
+# matching documents in source/target and publish oplog events (or run
+# oplog-connector against the same NATS/Mongo).
+#
+# Cassandra is slow to boot (~a minute) and ships with no keyspace, so
+# cassandra-init (idiom borrowed from docker-local/compose.deps.yaml) waits
+# for its healthcheck, then applies the repo's real schema — the same
+# docker-local/cassandra/init/*.cql that creates keyspace `chat` and the
+# messages_by_id / messages_by_room tables mapping.example.json references —
+# so cdc-verify's cassutil.Connect has something to connect to on first boot.
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--http_port", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+  source-mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+  target-mongo:
+    image: mongo:7
+    ports: ["27018:27017"]
+  cassandra:
+    image: cassandra:4.1
+    ports: ["9042:9042"]
+    environment:
+      - HEAP_NEWSIZE=128M
+      - MAX_HEAP_SIZE=512M
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "DESCRIBE KEYSPACES"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+  # Schema bootstrap. One-shot: applies every *.cql under docker-local's real
+  # Cassandra init directory (keyspace `chat` + messages_by_id/messages_by_room
+  # + their UDTs) in sorted order, then exits 0.
+  cassandra-init:
+    image: cassandra:4.1
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ../../../docker-local/cassandra/init:/init:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        shopt -s nullglob
+        for f in /init/*.cql; do
+          echo "==> applying $$f"
+          cqlsh cassandra -f "$$f"
+        done
+        echo "Schema initialized successfully"
+  cdc-verify:
+    build:
+      context: ../../..
+      dockerfile: tools/cdc-verify/deploy/Dockerfile
+    depends_on:
+      nats:
+        condition: service_healthy
+      source-mongo:
+        condition: service_started
+      target-mongo:
+        condition: service_started
+      cassandra-init:
+        condition: service_completed_successfully
+    restart: on-failure
+    ports: ["8091:8091"]
+    volumes:
+      - ./mapping.local.json:/etc/cdc-verify/mapping.json:ro
+    environment:
+      SITE_ID: site1
+      NATS_URL: nats://nats:4222
+      SOURCE_MONGO_URI: mongodb://source-mongo:27017
+      TARGET_MONGO_URI: mongodb://target-mongo:27017
+      CASSANDRA_HOSTS: cassandra:9042
+      CASSANDRA_KEYSPACE: chat
+      MAPPING_FILE: /etc/cdc-verify/mapping.json
+      BOOTSTRAP_STREAMS: "true"

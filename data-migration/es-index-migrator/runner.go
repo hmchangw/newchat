@@ -57,6 +57,12 @@ func runMessages(ctx context.Context, subs SubscriptionSource, messages MessageS
 	var mu sync.Mutex
 	runErr := runWithWorkerPool(ctx, cfg.WorkerConcurrency, roomIDs, func(ctx context.Context, roomID string) error {
 		err := messages.StreamMessages(ctx, cfg.SiteID, roomID, cfg.MigrationStartAt, cfg.MigrationEndAt, func(msg cassandra.Message) error {
+			// Sys-messages are dropped on the live path (messageCollection.BuildAction);
+			// the backfill must match or it re-introduces them. Not RecordSkipped —
+			// nothing failed, that counter is for genuine build failures.
+			if model.IsSystemMessageType(msg.Type) {
+				return nil
+			}
 			action, err := buildMessageAction(msg, cfg.MsgIndexPrefix)
 			mu.Lock()
 			defer mu.Unlock()
