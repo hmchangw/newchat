@@ -116,7 +116,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	requester := subject.DecodeAccount(account)
-	ctx = obs.ContextWithIdentity(ctx, requester, roomID, siteID)
+	ctx = obs.ContextWithPublicIdentity(ctx, requester, roomID, siteID)
 	ctx = errcode.WithLogValues(ctx, "room_id", roomID)
 
 	if parseErr != nil {

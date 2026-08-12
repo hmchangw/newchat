@@ -2299,7 +2299,7 @@ func enableIdentityTelemetry(t *testing.T) {
 
 	_, shutdown, err := obs.Init(context.Background())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	t.Cleanup(func() { assert.NoError(t, shutdown(context.Background())) })
 }
 
 // TestHandleJetStreamMsg_AttachesIdentityToContext proves the identity the
@@ -2419,6 +2419,80 @@ func TestHandleJetStreamMsg_InvalidSubject_DropsForgedIdentity(t *testing.T) {
 	assert.Empty(t, bag.Member("user.name").Value())
 	assert.Empty(t, bag.Member(obs.RoomIDKey).Value())
 	assert.Empty(t, bag.Member(obs.SiteIDKey).Value())
+}
+
+// A public NATS boundary must sanitize caller-controlled identity even when
+// o11y emission is disabled but the NATS wrapper independently propagated
+// baggage because an env or relay override enabled tracing.
+func TestHandleJetStreamMsg_ValidSubject_MasterOffDropsForgedIdentity(t *testing.T) {
+	previousTracer := otel.GetTracerProvider()
+	previousMeter := otel.GetMeterProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	previousLogger := slog.Default()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousTracer)
+		otel.SetMeterProvider(previousMeter)
+		otel.SetTextMapPropagator(previousPropagator)
+		slog.SetDefault(previousLogger)
+	})
+
+	t.Setenv("O11Y_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "false")
+	t.Setenv("OTEL_SERVICE_NAME", "message-gatekeeper-master-off-test")
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", "0")
+
+	_, shutdown, err := obs.Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, shutdown(context.Background())) })
+
+	store := NewMockStore(gomock.NewController(t))
+	store.EXPECT().
+		GetSubscription(gomock.Any(), "weather.bot", "room-1").
+		Return(&model.Subscription{
+			User:  model.SubscriptionUser{ID: "u-bot", Account: "weather.bot"},
+			Roles: []model.Role{model.RoleMember},
+		}, nil)
+
+	var publishCtx, replyCtx context.Context
+	publish := func(ctx context.Context, _ *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+		publishCtx = ctx
+		return &jetstream.PubAck{}, nil
+	}
+	reply := func(ctx context.Context, _ *nats.Msg) error {
+		replyCtx = ctx
+		return nil
+	}
+	h := NewHandler(store, nil, publish, reply, "site-A", nil, 500, 1, 8192, "")
+
+	forged, err := baggage.New(
+		mustMember(t, "user.name", "forged-user"),
+		mustMember(t, obs.RoomIDKey, "forged-room"),
+		mustMember(t, obs.SiteIDKey, "forged-site"),
+		mustMember(t, "tenant.id", "trusted-upstream-value"),
+	)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), forged)
+	req := model.SendMessageRequest{
+		ID:        idgen.GenerateMessageID(),
+		Content:   "hi",
+		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+	}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+	msg := &fakeJSMsg{subject: "chat.user.weather_bot.room.room-1.site-A.msg.send", data: data}
+
+	h.HandleJetStreamMsg(ctx, msg)
+
+	require.NotNil(t, publishCtx, "canonical publish must run")
+	require.NotNil(t, replyCtx, "client reply must run")
+	for name, callbackCtx := range map[string]context.Context{"publish": publishCtx, "reply": replyCtx} {
+		bag := baggage.FromContext(callbackCtx)
+		assert.Empty(t, bag.Member("user.name").Value(), name+" must not carry forged user identity")
+		assert.Empty(t, bag.Member(obs.RoomIDKey).Value(), name+" must not carry forged room identity")
+		assert.Empty(t, bag.Member(obs.SiteIDKey).Value(), name+" must not carry forged site identity")
+		assert.Equal(t, "trusted-upstream-value", bag.Member("tenant.id").Value(),
+			name+" must preserve unrelated baggage")
+	}
 }
 
 func mustMember(t *testing.T, key, value string) baggage.Member {

@@ -361,6 +361,42 @@ func TestContextWithPublicIdentity_DropsForgedManagedKeys(t *testing.T) {
 	assert.Empty(t, attrs[SiteIDKey], "the forged value must not survive on the entry span either")
 }
 
+// Public ingress sanitization is a trust-boundary guarantee, not a telemetry
+// emission feature. It must still run when the o11y master switch is off but
+// NATS propagation has been enabled independently by env or relay.
+func TestContextWithPublicIdentity_MasterOffStillDropsManagedKeys(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OTEL_SERVICE_NAME", "public-identity-master-off-svc")
+
+	_, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, shutdown(context.Background())) })
+
+	forged, err := baggage.New(
+		mustBaggageMember(t, o11y.UserNameKey, "forged-user"),
+		mustBaggageMember(t, RoomIDKey, "forged-room"),
+		mustBaggageMember(t, SiteIDKey, "forged-site"),
+		mustBaggageMember(t, "tenant.id", "trusted-upstream-value"),
+	)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), forged)
+
+	ctx = ContextWithPublicIdentity(ctx, "alice", "room-42", "site-a")
+	bag := baggage.FromContext(ctx)
+	assert.Empty(t, bag.Member(o11y.UserNameKey).Value())
+	assert.Empty(t, bag.Member(RoomIDKey).Value())
+	assert.Empty(t, bag.Member(SiteIDKey).Value())
+	assert.Equal(t, "trusted-upstream-value", bag.Member("tenant.id").Value(),
+		"sanitization must remove only application-managed identity keys")
+}
+
+func mustBaggageMember(t *testing.T, key, value string) baggage.Member {
+	t.Helper()
+	member, err := baggage.NewMember(key, value)
+	require.NoError(t, err)
+	return member
+}
+
 // TestManagedBaggageKeys_MatchesMaterializedKeys guards the single source of
 // truth: a key registered for materialization but missing from the clear list
 // would be forgeable at public ingress.

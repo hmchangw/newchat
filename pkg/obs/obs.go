@@ -278,11 +278,11 @@ func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) co
 // entry span's attributes, which the SDK's OnStart processor materialized from
 // the forged values before any handler ran.
 func ContextWithPublicIdentity(ctx context.Context, account, roomID, siteID string) context.Context {
-	if !contextAttributesEnabled.Load() {
-		return ctx
-	}
 	for _, key := range managedBaggageKeys {
 		ctx = withoutBaggageAttribute(ctx, key)
+	}
+	if !contextAttributesEnabled.Load() {
+		return ctx
 	}
 	return ContextWithIdentity(ctx, account, roomID, siteID)
 }
