@@ -950,41 +950,27 @@ func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {
 func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
 	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
 
+	// The worker forwards every parsed mention to SetSubscriptionMentions; the
+	// additive / no-re-badge / skip-non-subscriber properties are enforced by the
+	// store filter (read-guard) and covered by TestSetSubscriptionMentions_ReadGuard_Integration.
 	tests := []struct {
 		name            string
 		content         string
-		subs            []model.Subscription
 		wantSetMentions []string // nil = SetSubscriptionMentions must not be called
 	}{
 		{
-			name:    "edit adds a new mention",
-			content: "hey @bob check this",
-			subs: []model.Subscription{
-				{User: model.SubscriptionUser{Account: "bob"}, RoomID: "room-1"},
-			},
+			name:            "edit adds a mention",
+			content:         "hey @bob check this",
 			wantSetMentions: []string{"bob"},
 		},
 		{
-			name:    "re-editing an already-mentioned account does not re-badge",
-			content: "hey @bob check this again",
-			subs: []model.Subscription{
-				{User: model.SubscriptionUser{Account: "bob"}, RoomID: "room-1", HasMention: true},
-			},
-			wantSetMentions: nil,
-		},
-		{
-			name:    "removing a mention badges nobody",
+			name:    "no mentions badges nobody",
 			content: "no mentions here anymore",
-			subs:    nil, // ListSubscriptions must not even be called
 		},
 		{
-			name:    "mixed: only the newly-added account is badged",
-			content: "hey @alice and @bob",
-			subs: []model.Subscription{
-				{User: model.SubscriptionUser{Account: "alice"}, RoomID: "room-1", HasMention: true},
-				{User: model.SubscriptionUser{Account: "bob"}, RoomID: "room-1"},
-			},
-			wantSetMentions: []string{"bob"},
+			name:            "every parsed mention is forwarded to the store",
+			content:         "hey @alice and @bob",
+			wantSetMentions: []string{"alice", "bob"},
 		},
 	}
 
@@ -997,9 +983,6 @@ func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
 			keyStore := NewMockRoomKeyProvider(ctrl)
 
 			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
-			if tc.subs != nil || tc.wantSetMentions != nil {
-				store.EXPECT().ListSubscriptions(gomock.Any(), "room-1").Return(tc.subs, nil)
-			}
 			if tc.wantSetMentions != nil {
 				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.InAnyOrder(tc.wantSetMentions), edited).Return(nil)
 			}

@@ -302,8 +302,7 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
-		slog.WarnContext(ctx, "badge new mentions on edit failed",
-			"error", err, "room_id", room.ID, "request_id", natsutil.RequestIDFromContext(ctx))
+		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
 	}
 
 	edit := buildEditRoomEvent(room, evt)
@@ -315,32 +314,16 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
 }
 
-// badgeNewlyMentionedAccounts badges accounts an edit newly @-mentions (per
-// their subscription's current HasMention). Additive only: never clears a
-// badge for a removed mention, never re-badges an already-mentioned account.
+// badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
+// handleCreated. Additive only: SetSubscriptionMentions' filter skips
+// non-subscribers and accounts that have already read past the edit, so a
+// removed mention is never cleared and an already-read one is never re-flagged.
 func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
 	parsed := mention.Parse(msg.Content)
 	if len(parsed.Accounts) == 0 {
 		return nil
 	}
-	subs, err := h.store.ListSubscriptions(ctx, roomID)
-	if err != nil {
-		return fmt.Errorf("list subscriptions %s: %w", roomID, err)
-	}
-	alreadyMentioned := make(map[string]bool, len(subs))
-	for i := range subs {
-		alreadyMentioned[subs[i].User.Account] = subs[i].HasMention
-	}
-	newAccounts := make([]string, 0, len(parsed.Accounts))
-	for _, account := range parsed.Accounts {
-		if !alreadyMentioned[account] {
-			newAccounts = append(newAccounts, account)
-		}
-	}
-	if len(newAccounts) == 0 {
-		return nil
-	}
-	return h.store.SetSubscriptionMentions(ctx, roomID, newAccounts, *msg.EditedAt)
+	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
