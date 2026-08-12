@@ -2364,3 +2364,122 @@ describe('roomEventsReducer: MESSAGE_RECEIVED historical-mode duplicate guard ap
     expect(next).toBe(seeded)
   })
 })
+
+describe('roomEventsReducer: BUCKETS_LOADED merge mode', () => {
+  // A degraded `subscription.list` bootstrap must never delete rooms: the
+  // caller can't tell "no rooms" from "the fetch failed", so a partial
+  // result upserts instead of replacing, and omits the buckets it couldn't
+  // reach rather than sending them as empty.
+  function sub(roomId, overrides = {}) {
+    return { roomId, siteId: 'site-A', name: `sub-${roomId}`, roomType: 'channel', hasMention: false, ...overrides }
+  }
+
+  const seeded = roomEventsReducer(initialState, {
+    type: 'BUCKETS_LOADED',
+    rooms: [room('a'), room('b')],
+    subscriptions: { a: sub('a'), b: sub('b') },
+    favoriteIds: ['a'],
+    appIds: ['b'],
+    channelDmIds: ['a', 'b'],
+  })
+
+  it('keeps subscriptions the merge payload omits', () => {
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      merge: true,
+      rooms: [room('a')],
+      subscriptions: { a: sub('a', { name: 'renamed' }) },
+      channelDmIds: ['a'],
+    })
+    expect(Object.keys(next.subscriptions).sort()).toEqual(['a', 'b'])
+    expect(next.subscriptions.a.name).toBe('renamed')
+  })
+
+  it('keeps summaries the merge payload omits', () => {
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      merge: true,
+      rooms: [room('a', { name: 'room-a-renamed' })],
+      subscriptions: { a: sub('a') },
+      channelDmIds: ['a'],
+    })
+    expect(next.summaries.map((r) => r.id).sort()).toEqual(['a', 'b'])
+    expect(next.summaries.find((r) => r.id === 'a').name).toBe('room-a-renamed')
+  })
+
+  it('keeps the bucket Sets the merge payload omits and replaces the ones it carries', () => {
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      merge: true,
+      rooms: [room('a')],
+      subscriptions: { a: sub('a') },
+      channelDmIds: ['a'],
+    })
+    expect([...next.favoriteIds]).toEqual(['a'])
+    expect([...next.appIds]).toEqual(['b'])
+    expect([...next.channelDmIds]).toEqual(['a'])
+  })
+
+  it('adds rooms the merge payload introduces', () => {
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      merge: true,
+      rooms: [room('c')],
+      subscriptions: { c: sub('c') },
+      channelDmIds: ['a', 'b', 'c'],
+    })
+    expect(next.summaries.map((r) => r.id).sort()).toEqual(['a', 'b', 'c'])
+    expect(next.subscriptions.c).toBeDefined()
+  })
+
+  it('preserves per-summary live state that the merge payload has no opinion on', () => {
+    const withUnread = {
+      ...seeded,
+      summaries: seeded.summaries.map((s) => (s.id === 'a' ? { ...s, unreadCount: 7 } : s)),
+    }
+    const next = roomEventsReducer(withUnread, {
+      type: 'BUCKETS_LOADED',
+      merge: true,
+      rooms: [room('a')],
+      subscriptions: { a: sub('a') },
+      channelDmIds: ['a'],
+    })
+    expect(next.summaries.find((r) => r.id === 'a').unreadCount).toBe(7)
+  })
+
+  it('seeds previews for the subscriptions a merge payload does carry', () => {
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      merge: true,
+      rooms: [room('a')],
+      subscriptions: {
+        a: sub('a', {
+          room: {
+            previewMessage: {
+              messageId: 'm9',
+              content: 'hello there',
+              sender: { account: 'bob', engName: 'Bob' },
+              createdAt: '2026-08-14T10:00:00Z',
+            },
+          },
+        }),
+      },
+      channelDmIds: ['a'],
+    })
+    expect(next.previews.a).toMatchObject({ messageId: 'm9', text: 'hello there' })
+  })
+
+  it('replace mode still drops rooms the payload omits', () => {
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      rooms: [room('a')],
+      subscriptions: { a: sub('a') },
+      favoriteIds: ['a'],
+      appIds: [],
+      channelDmIds: ['a'],
+    })
+    expect(next.summaries.map((r) => r.id)).toEqual(['a'])
+    expect(Object.keys(next.subscriptions)).toEqual(['a'])
+    expect(next.appIds.size).toBe(0)
+  })
+})

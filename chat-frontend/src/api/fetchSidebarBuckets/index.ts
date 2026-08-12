@@ -33,10 +33,19 @@ interface SidebarBucketReply {
   hasMore: boolean
 }
 
+/** Which of the three `subscription.list` buckets a result came from. */
+export type SidebarBucket = 'favorites' | 'apps' | 'rooms'
+
 export interface SidebarBuckets {
   favoriteIds: string[]
   appIds: string[]
   channelDmIds: string[]
+  /** Buckets that did NOT drain cleanly — an RPC rejected, a later page
+   *  failed, or the server never cleared `hasMore`. Their contents are
+   *  whatever we managed to fetch, so the caller must treat them as
+   *  incomplete and refuse to delete rooms on their behalf. Empty means
+   *  the whole bootstrap is authoritative. */
+  failures: SidebarBucket[]
   /** Per-roomId map of the full subscription record (DM variant typing
    *  covers both kinds — see SidebarBucketReply above). The reducer
    *  stores this directly under `state.subscriptions` so components
@@ -82,12 +91,15 @@ export async function fetchSidebarBuckets({ user, request }: Nats): Promise<Side
     fetchAllPages(request, subject, { type: 'apps' }),
     fetchAllPages(request, subject, { type: 'rooms' }),
   ])
+  const failures: SidebarBucket[] = []
   const unwrap = (
-    result: PromiseSettledResult<DMSubscription[]>,
+    result: PromiseSettledResult<BucketPages>,
+    bucket: SidebarBucket,
     label: string,
   ): DMSubscription[] => {
     if (result.status === 'fulfilled') {
-      return result.value
+      if (result.value.degraded) failures.push(bucket)
+      return result.value.subs
     }
     const err = result.reason
     console.warn(
@@ -96,11 +108,12 @@ export async function fetchSidebarBuckets({ user, request }: Nats): Promise<Side
       'FAILED:',
       err?.message ?? err,
     )
+    failures.push(bucket)
     return []
   }
-  const favSubs = unwrap(results[0], `${subject} {type:current,favorite:true}`)
-  const appSubs = unwrap(results[1], `${subject} {type:apps}`)
-  const roomSubs = unwrap(results[2], `${subject} {type:rooms}`)
+  const favSubs = unwrap(results[0], 'favorites', `${subject} {type:current,favorite:true}`)
+  const appSubs = unwrap(results[1], 'apps', `${subject} {type:apps}`)
+  const roomSubs = unwrap(results[2], 'rooms', `${subject} {type:rooms}`)
 
   const subscriptions: Record<string, DMSubscription> = {}
   const rooms: Room[] = []
@@ -128,9 +141,17 @@ export async function fetchSidebarBuckets({ user, request }: Nats): Promise<Side
     favoriteIds: favSubs.map((s) => s.roomId),
     appIds: appSubs.map((s) => s.roomId),
     channelDmIds: roomSubs.map((s) => s.roomId),
+    failures,
     subscriptions,
     rooms,
   }
+}
+
+/** One bucket's drained pages plus whether the drain completed. `degraded`
+ *  means `subs` is a partial view of that bucket. */
+interface BucketPages {
+  subs: DMSubscription[]
+  degraded: boolean
 }
 
 /** Drain one subscription bucket to completion. Requests successive pages
@@ -150,7 +171,7 @@ async function fetchAllPages(
   request: Nats['request'],
   subject: string,
   filter: Record<string, unknown>,
-): Promise<DMSubscription[]> {
+): Promise<BucketPages> {
   const all: DMSubscription[] = []
   for (let page = 0; page < MAX_PAGES; page++) {
     let reply: SidebarBucketReply
@@ -167,17 +188,17 @@ async function fetchAllPages(
         'FAILED:',
         (err as Error)?.message ?? err,
       )
-      return all
+      return { subs: all, degraded: true }
     }
     if (reply?.subscriptions?.length) all.push(...reply.subscriptions)
-    if (!reply?.hasMore) return all
+    if (!reply?.hasMore) return { subs: all, degraded: false }
   }
   console.warn(
     '[sidebar-bootstrap]',
     `${subject} ${JSON.stringify(filter)}`,
     `stopped after MAX_PAGES=${MAX_PAGES}; server kept signalling hasMore — bucket may be truncated`,
   )
-  return all
+  return { subs: all, degraded: true }
 }
 
 /** Derive a `Room` from a subscription record — the ONE wire→Room mapper
