@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -240,6 +241,38 @@ func TestProcessTeamsRoomCreate_HardRemoveOnly(t *testing.T) {
 	require.Len(t, local, 1)
 	assert.Equal(t, []string{"bob"}, local[0].Accounts)
 	assert.Empty(t, membershipEvents(t, *published, "member_added"), "remove-only batch emits no adds")
+}
+
+// TestReconcileTeamsRoom_HardRemove_BustsSubL2 covers the security-critical gap:
+// a Teams-reconciliation removal deletes the subscription the same way the live
+// remove path does, but previously left the departed member's subauthcache L2
+// entry cached — a stale positive decision would let them keep sending/reading
+// for up to the 90m TTL. The bust must fire for every removed account.
+func TestReconcileTeamsRoom_HardRemove_BustsSubL2(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, _ := newTeamsTestHandler(t, store)
+	fake := &fakeBustClient{}
+	h.valkey = fake
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return([]model.Subscription{
+		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a"},
+		{User: model.SubscriptionUser{Account: "bob"}, RoomID: "chat1", SiteID: "site-a"},
+	}, nil)
+	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), gomock.Any(), []string{"bob"}).Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
+
+	chat := model.TeamsRoomCreateChat{
+		ID:      "chat1",
+		Name:    "Project Sync",
+		Members: []model.TeamsRoomCreateMember{{ID: "aad1", Account: "alice"}}, // bob departed
+	}
+	err := h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat))
+	require.NoError(t, err)
+
+	assert.Contains(t, fake.dels, subauthcache.SubKey(idgen.DeterministicID([]byte("chat1")), "bob"),
+		"the departed member's subauthcache L2 entry must be busted")
 }
 
 // TestProcessTeamsRoomCreate_IdempotentNoOp: re-running the same batch against an

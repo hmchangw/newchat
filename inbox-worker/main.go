@@ -25,6 +25,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -42,6 +43,14 @@ type config struct {
 	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+
+	// Valkey backs best-effort subauthcache L2 invalidation on this site after
+	// a federated role_updated/member_removed write. Optional: when
+	// VALKEY_ADDRS is empty the bust is a no-op (the L2 TTL reconciles); a
+	// connect failure logs and continues rather than exiting — this is an
+	// optional cache-invalidation tier, not a hard dependency.
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
 }
 
 // mongoInboxStore implements InboxStore using MongoDB.
@@ -540,6 +549,34 @@ func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, room
 	return nil
 }
 
+// ListSubscriptionAccountsByRoom returns the accounts subscribed to roomID on
+// this site's local replica. Callers only read the subscriber account, so
+// project just that field — mirrors room-service's ListSubscriptionsByRoom.
+func (s *mongoInboxStore) ListSubscriptionAccountsByRoom(ctx context.Context, roomID string) ([]string, error) {
+	cursor, err := s.subCol.Find(ctx,
+		bson.M{"roomId": roomID},
+		options.Find().SetProjection(bson.M{"_id": 0, "u.account": 1}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list subscription accounts for room %q: find: %w", roomID, err)
+	}
+	var docs []struct {
+		User struct {
+			Account string `bson:"account"`
+		} `bson:"u"`
+	}
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("list subscription accounts for room %q: decode: %w", roomID, err)
+	}
+	accounts := make([]string, 0, len(docs))
+	for _, d := range docs {
+		if d.User.Account != "" {
+			accounts = append(accounts, d.User.Account)
+		}
+	}
+	return accounts, nil
+}
+
 func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error {
 	// Guarded thread-sub update first; same gate then protects the Subscription overwrite.
 	tsFilter := bson.M{
@@ -682,7 +719,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Best-effort subauthcache L2 (Valkey) invalidation. A connect failure logs
+	// and continues (nil client, bust becomes a no-op reconciled by the L2
+	// TTL) rather than exiting — this is an optional cache tier, not a hard
+	// startup dependency.
+	var subValkey valkeyutil.Client
+	if len(cfg.ValkeyAddrs) > 0 {
+		subValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
+		if err != nil {
+			slog.Error("valkey connect (subauth L2 invalidation) failed, continuing without it", "error", err)
+			subValkey = nil
+		} else {
+			slog.Info("subauth L2 invalidation enabled")
+		}
+	}
+
 	handler := NewHandler(store)
+	handler.valkey = subValkey
 
 	// Two-lane pull pattern over the single INBOX external consumer:
 	//
@@ -801,6 +857,7 @@ func main() {
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)

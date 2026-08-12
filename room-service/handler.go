@@ -29,7 +29,9 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type Handler struct {
@@ -72,6 +74,11 @@ type Handler struct {
 	roomMembersCallLimit int
 	// routeMode gates the namespace(s) same-site room .event uses (ROOM_SUBJECT_MODE); cross-site is always global.
 	routeMode subject.RoomRouteMode
+	// valkey is the L2 (Valkey) client used only to invalidate subauthcache
+	// entries after authoritative subscription writes (role change, visibility
+	// change). nil disables invalidation (best-effort). Set post-construction,
+	// mirroring dekProvisioner/graphClient.
+	valkey valkeyutil.Client
 }
 
 func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, legacyRoomOrigins map[string]string, maxResponseBytes int64, routeMode subject.RoomRouteMode) *Handler {
@@ -791,6 +798,9 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		}
 		return nil, fmt.Errorf("set owner role: %w", err)
 	}
+	// Bust AFTER the write: the cached Roles drove canBypassLargeRoomCap in the
+	// gatekeeper and must not keep serving the pre-change decision.
+	subauthcache.BustSub(ctx, h.valkey, roomID, req.Account)
 
 	// Role updates are channel-only (guarded above); the channel name is already in hand.
 	subEvtData, err := h.publishSubscriptionUpdate(ctx, req.Account, "role_updated", sub, room.Name, now)
@@ -2034,6 +2044,12 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 	for i := range subs {
 		accounts = append(accounts, subs[i].User.Account)
 	}
+	// Bust every subscriber's subauthcache L2 entry in one batched round trip:
+	// ApplySubscriptionRestriction may have bulk-rewritten Roles (owner set,
+	// everyone else demoted to member) alongside the restricted/externalAccess
+	// flags, so a stale cached decision for any subscriber — not just
+	// OwnerAccount — would be wrong.
+	subauthcache.BustSubs(ctx, h.valkey, req.RoomID, accounts)
 	users, err := h.store.FindUsersByAccounts(ctx, accounts)
 	if err != nil {
 		return nil, fmt.Errorf("find users for inbox fan-out: %w", err)

@@ -12,6 +12,8 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // InboxStore abstracts the data store operations needed by the inbox worker.
@@ -71,6 +73,12 @@ type InboxStore interface {
 	// ownerAccount is non-empty, a $cond pipeline demotes all accounts except
 	// ownerAccount to RoleMember.
 	ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error
+	// ListSubscriptionAccountsByRoom returns the accounts subscribed to roomID
+	// on this site's local replica. Used to drive the room_restricted bust
+	// loop: ApplySubscriptionRestriction can bulk-rewrite Roles for every
+	// local subscriber, not just OwnerAccount, so every one of them needs an
+	// L2 bust. Mirrors room-service's ListSubscriptionsByRoom.
+	ListSubscriptionAccountsByRoom(ctx context.Context, roomID string) ([]string, error)
 	// UpdateUserStatus replicates a cross-site status change onto the local users doc keyed by
 	// account, guarded by statusUpdatedAt (the event publish time): an older/equal high-water
 	// mark is a no-op so out-of-order multi-site delivery can't regress the status. statusIsShow
@@ -99,6 +107,12 @@ type InboxStore interface {
 // Handler processes cross-site InboxEvent messages; replicates only subscription/room metadata, never room keys.
 type Handler struct {
 	store InboxStore
+	// valkey is the L2 (Valkey) client used only to invalidate this site's
+	// local subauthcache entries after a federated write that replicates a
+	// role change or member removal onto this site's own subscription copy.
+	// nil disables invalidation (best-effort). Set post-construction,
+	// mirroring room-worker/room-service's valkey field.
+	valkey valkeyutil.Client
 }
 
 // NewHandler creates a Handler with the given store.
@@ -250,6 +264,10 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	if err := h.store.DeleteSubscriptionsByAccounts(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete subscriptions for room %s: %w", memberEvt.RoomID, err)
 	}
+	// Bust AFTER the write, in one batched round trip: this site's local
+	// replica of each removed member's subscription is gone, so their cached
+	// positive decision must die immediately, not linger for the L2 TTL.
+	subauthcache.BustSubs(ctx, h.valkey, memberEvt.RoomID, memberEvt.Accounts)
 	// Scrub the removed accounts' thread read-state on this site too (#308).
 	if err := h.store.DeleteThreadSubscriptions(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete thread subscriptions for room %s: %w", memberEvt.RoomID, err)
@@ -291,6 +309,9 @@ func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.InboxEvent) 
 	if err := h.store.UpdateSubscriptionRoles(ctx, account, roomID, roles, time.UnixMilli(subEvt.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription roles: %w", err)
 	}
+	// Bust AFTER the write: this site's local replica's cached Roles must not
+	// keep serving the pre-change decision.
+	subauthcache.BustSub(ctx, h.valkey, roomID, account)
 	return nil
 }
 
@@ -405,6 +426,20 @@ func (h *Handler) handleRoomVisibilityChanged(ctx context.Context, evt *model.In
 	if err := h.store.ApplySubscriptionRestriction(ctx, p.RoomID, p.Restricted, p.ExternalAccess, p.OwnerAccount, time.UnixMilli(p.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("apply subscription visibility for room %s: %w", p.RoomID, err)
 	}
+	// Bust every local subscriber's subauthcache L2 entry in one batched round
+	// trip: ApplySubscriptionRestriction is the same store method
+	// room-service's roomRestricted calls, and it can bulk-rewrite Roles for
+	// every subscriber (owner set, everyone else demoted) alongside the
+	// restricted/externalAccess flags — not just OwnerAccount. A listing
+	// failure is logged, not fatal: the write already committed, and the L2
+	// TTL reconciles a missed bust.
+	accounts, err := h.store.ListSubscriptionAccountsByRoom(ctx, p.RoomID)
+	if err != nil {
+		slog.WarnContext(ctx, "list local subscribers for subauthcache bust failed (TTL will reconcile)",
+			"room_id", p.RoomID, "error", err)
+		return nil
+	}
+	subauthcache.BustSubs(ctx, h.valkey, p.RoomID, accounts)
 	return nil
 }
 

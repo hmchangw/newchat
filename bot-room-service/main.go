@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -34,6 +35,11 @@ type config struct {
 
 	// RoomKeyGracePeriod governs how long a rotated-out room key stays readable (roomkeystore.NewMongoStore); matches room-service/room-worker.
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
+
+	// Valkey backs best-effort subauthcache L2 invalidation on member removal.
+	// Optional: when VALKEY_ADDRS is empty the bust is a no-op (the L2 TTL reconciles).
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
 
 	MaxConcurrency int    `env:"MAX_CONCURRENCY" envDefault:"200"`
 	HealthAddr     string `env:"HEALTH_ADDR"     envDefault:":8081"`
@@ -87,8 +93,27 @@ func run() error {
 		return nc.NatsConn().PublishMsg(msg)
 	}
 
+	// Best-effort subauthcache L2 (Valkey) invalidation. A connect failure logs
+	// and continues (nil client, bust becomes a no-op reconciled by the L2
+	// TTL) rather than exiting — this is an optional cache tier, not a hard
+	// startup dependency.
+	var subValkey valkeyutil.Client
+	if len(cfg.ValkeyAddrs) > 0 {
+		subValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
+		if err != nil {
+			slog.Error("valkey connect (subauth L2 invalidation) failed, continuing without it", "error", err)
+			subValkey = nil
+		} else {
+			slog.Info("subauth L2 invalidation enabled")
+		}
+	}
+
 	peers := parsePeers(cfg.AllSiteIDs, cfg.SiteID)
 	h := newHandler(store, cfg.SiteID, peers, pubCallback, keyStore, keySender)
+	h.valkey = subValkey
 	// LOCAL sysmsg emission on create/add/remove; never federated cross-site.
 	h.sysmsgPub = jsPublishAdapter{js: js}
 
@@ -108,6 +133,7 @@ func run() error {
 		func(dctx context.Context) error { return router.Shutdown(dctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(dctx context.Context) error { mongoutil.Disconnect(dctx, mc); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(dctx context.Context) error { return healthStop(dctx) },
 		func(dctx context.Context) error { return obsShutdown(dctx) },
 	)

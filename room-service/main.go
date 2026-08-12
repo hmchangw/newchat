@@ -24,6 +24,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -85,6 +86,13 @@ type config struct {
 	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
 	// disables the cap (unbounded spawn).
 	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+
+	// Valkey backs best-effort subauthcache L2 invalidation after role/visibility
+	// writes. Optional: when VALKEY_ADDRS is empty the bust is a no-op (the L2
+	// TTL reconciles); a connect failure logs and continues rather than exiting
+	// — this is an optional cache-invalidation tier, not a hard dependency.
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -250,6 +258,24 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
+	// Best-effort subauthcache L2 (Valkey) invalidation. A connect failure logs
+	// and continues (nil client, bust becomes a no-op reconciled by the L2
+	// TTL) rather than exiting — this is an optional cache tier, not a hard
+	// startup dependency.
+	var subValkey valkeyutil.Client
+	if len(cfg.ValkeyAddrs) > 0 {
+		subValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
+		if err != nil {
+			slog.Error("valkey connect (subauth L2 invalidation) failed, continuing without it", "error", err)
+			subValkey = nil
+		} else {
+			slog.Info("subauth L2 invalidation enabled")
+		}
+	}
+
 	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout)
 	handler := NewHandler(store, keyStore, memberListClient, msgReader, cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
 		func(ctx context.Context, subj string, data []byte, msgID string) error {
@@ -274,6 +300,7 @@ func main() {
 		roomRouteMode,
 	)
 	handler.dekProvisioner = dekProvisioner
+	handler.valkey = subValkey
 	handler.graphClient = graphClient
 	handler.directoryClient = directoryClient
 	handler.teamsMeetingStore = store
@@ -311,6 +338,7 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(context.Context) error {
 			if vaultWrapper != nil {
 				return vaultWrapper.Close()
