@@ -267,14 +267,26 @@ do-not-disturb.
 
 **And it must be sequenced consumer-first.** `shouldPush` fails open on
 unrecognized presence, and `isInCall` matches the literal strings `busy` and
-`in-call`. So if the presence service begins emitting a new representation for
-do-not-disturb while any `notification-worker` is still on the old binary, that
-worker sees an unknown status, fails open, and pushes to precisely the users the
-change exists to protect — a rolling deploy would produce exactly the bug being
-fixed, intermittently. Deploy recognition to every `notification-worker` **before**
-any producer emits the new representation, and keep emitting the old suppressing
-representation (or dual-encode) until the last old worker and every rollback target
-is gone.
+`in-call`. Two hazards follow from that, and they are not the same hazard:
+
+- **Regression — must be prevented.** If the presence service *replaces* `busy`
+  with a new do-not-disturb representation while any `notification-worker` still
+  runs the old binary, that worker sees an unknown status and fails open. A user
+  who leaves `showNotificationsInCall` unset goes from suppressed today to pushed
+  — a live regression, produced intermittently across a rolling deploy. Prevent it
+  by deploying recognition to every worker **before** any producer emits the new
+  representation, and by continuing to emit `busy` alongside it until the last old
+  worker and every rollback target is gone.
+- **Delayed benefit — accept it.** An old worker *cannot* suppress do-not-disturb
+  for a user who set `showNotificationsInCall: true`: under that binary the opt-in
+  outranks the whole `busy`/`in-call` bucket, and no choice of encoding changes it.
+  Those users keep today's behaviour until the rollout finishes. That is the new
+  benefit arriving late, not a regression, and it resolves itself once every worker
+  is new.
+
+The distinction matters because it is tempting to "fix" the second bullet by
+dropping `busy` from the dual encoding. That trades a self-resolving delay for the
+live regression in the first bullet.
 
 ## Files
 
