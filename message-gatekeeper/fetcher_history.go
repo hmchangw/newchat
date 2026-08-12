@@ -57,38 +57,55 @@ type quotedParentProjection struct {
 	TShow                 bool                    `json:"tshow"`
 }
 
-// FetchQuotedParent issues a NATS request to history-service's GetMessageByID
-// handler at subject.MsgGet(account, roomID, siteID). On a successful reply,
-// projects the returned cassandra.Message into a cassandra.QuotedParentMessage
-// snapshot. Any error (NATS timeout, no responder, natsrouter error envelope,
-// unmarshal failure) is wrapped and returned — the caller treats every error
-// as a soft-fail signal.
-func (f *historyParentFetcher) FetchQuotedParent(
+// requestMessageByID issues history-service's GetMessageByID RPC for one
+// message and decodes the reply into dst. Shared by the quote and forward
+// fetches: both hit subject.MsgGet with the same payload and differ only in
+// the projection they decode and in how their caller treats failure (quotes
+// soft-fail, forwards hard-fail). label names the operation inside wrapped
+// errors so the two call sites stay distinguishable in logs.
+//
+// A typed remote *errcode.Error is returned unwrapped so callers can preserve
+// the upstream classification (a transient infra failure stays unavailable,
+// not collapsed to not_found).
+func (f *historyParentFetcher) requestMessageByID(
 	ctx context.Context,
-	account, roomID, siteID, messageID string,
-) (*cassandra.QuotedParentMessage, error) {
+	label, account, roomID, siteID, messageID string,
+	dst any,
+) error {
 	reqBytes, err := sonic.Marshal(getMessageByIDRequest{MessageID: messageID})
 	if err != nil {
-		return nil, fmt.Errorf("marshal GetMessageByID request: %w", err)
+		return fmt.Errorf("marshal %s request: %w", label, err)
 	}
 
 	subj := subject.MsgGet(account, roomID, siteID)
 	msg, err := f.nc.Request(ctx, subj, reqBytes, historyRequestTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("history request: %w", err)
+		return fmt.Errorf("%s request: %w", label, err)
 	}
 
 	// Detect the errcode error envelope first; a real Message has no top-level
-	// "error" field so this cannot false-positive. Propagate the typed remote
-	// errcode so the caller can preserve the upstream classification (a
-	// transient infra failure stays unavailable, not collapsed to not_found).
+	// "error" field so this cannot false-positive.
 	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		return nil, ee
+		return ee
 	}
 
+	if err := sonic.Unmarshal(msg.Data, dst); err != nil {
+		return fmt.Errorf("unmarshal %s: %w", label, err)
+	}
+	return nil
+}
+
+// FetchQuotedParent issues the msg.get RPC against the quoted parent's room and
+// projects the reply into a cassandra.QuotedParentMessage snapshot. Any error
+// (NATS timeout, no responder, natsrouter error envelope, unmarshal failure) is
+// returned — the caller treats every error as a soft-fail signal.
+func (f *historyParentFetcher) FetchQuotedParent(
+	ctx context.Context,
+	account, roomID, siteID, messageID string,
+) (*cassandra.QuotedParentMessage, error) {
 	var parent quotedParentProjection
-	if err := sonic.Unmarshal(msg.Data, &parent); err != nil {
-		return nil, fmt.Errorf("unmarshal parent message: %w", err)
+	if err := f.requestMessageByID(ctx, "quoted parent", account, roomID, siteID, messageID, &parent); err != nil {
+		return nil, err
 	}
 
 	return &cassandra.QuotedParentMessage{
@@ -130,32 +147,16 @@ type forwardSourceProjection struct {
 	ForwardedMessage      json.RawMessage         `json:"forwardedMessage"` // presence-only (chain detection)
 }
 
-// FetchForwardedSource issues a NATS request to history-service's
-// GetMessageByID handler on the SOURCE room's subject and projects the reply.
-// Every error (timeout, no responder, errcode envelope, unmarshal) is
-// returned — the caller hard-fails the send on any of them.
+// FetchForwardedSource issues the msg.get RPC against the SOURCE room and
+// projects the reply. Every error (timeout, no responder, errcode envelope,
+// unmarshal) is returned — the caller hard-fails the send on any of them.
 func (f *historyParentFetcher) FetchForwardedSource(
 	ctx context.Context,
 	account, srcRoomID, siteID, messageID string,
 ) (*forwardSourceProjection, error) {
-	reqBytes, err := sonic.Marshal(getMessageByIDRequest{MessageID: messageID})
-	if err != nil {
-		return nil, fmt.Errorf("marshal GetMessageByID request: %w", err)
-	}
-
-	subj := subject.MsgGet(account, srcRoomID, siteID)
-	msg, err := f.nc.Request(ctx, subj, reqBytes, historyRequestTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("forward source request: %w", err)
-	}
-
-	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		return nil, ee
-	}
-
 	var src forwardSourceProjection
-	if err := sonic.Unmarshal(msg.Data, &src); err != nil {
-		return nil, fmt.Errorf("unmarshal forward source: %w", err)
+	if err := f.requestMessageByID(ctx, "forward source", account, srcRoomID, siteID, messageID, &src); err != nil {
+		return nil, err
 	}
 	return &src, nil
 }

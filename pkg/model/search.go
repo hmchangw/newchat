@@ -2,8 +2,6 @@ package model
 
 import (
 	"time"
-
-	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
 // SearchMessagesRequest is the NATS payload for `chat.user.{account}.request.search.{siteID}.messages`.
@@ -55,10 +53,18 @@ type SearchMessage struct {
 	Sender *MessageSender `json:"sender,omitempty"`
 }
 
-// MessageRoom, MessageHRInfo, MessageAppInfo live in pkg/model/cassandra so
-// the ForwardedMessage snapshot can embed MessageRoom without an import
-// cycle; aliased here to keep the enrichment API in pkg/model.
-type MessageRoom = cassandra.MessageRoom
+// MessageRoom is the enriched room object attached to a SearchMessage, built
+// per-read by search-service. Type is the room type. HRInfo is set only for dm
+// rooms; AppInfo only for botDM rooms. Name is the app name (botDM), the
+// counterpart's display name (dm), or the canonical room name
+// (channel/discussion).
+type MessageRoom struct {
+	ID      string          `json:"id"`
+	Name    string          `json:"name,omitempty"`
+	Type    RoomType        `json:"type,omitempty"`
+	HRInfo  *MessageHRInfo  `json:"hrInfo,omitempty"`
+	AppInfo *MessageAppInfo `json:"appInfo,omitempty"`
+}
 
 // MessageSender is the enriched author object attached to a SearchMessage.
 // HR is set for human senders, AppInfo for bot senders; both are omitted
@@ -69,9 +75,22 @@ type MessageSender struct {
 	AppInfo *MessageAppInfo `json:"appInfo,omitempty"`
 }
 
-type MessageHRInfo = cassandra.MessageHRInfo
+// MessageHRInfo is the compact HR record on search sender/room objects.
+type MessageHRInfo struct {
+	Account     string `json:"account"`
+	ChineseName string `json:"chineseName,omitempty"`
+	EngName     string `json:"engName,omitempty"`
+}
 
-type MessageAppInfo = cassandra.MessageAppInfo
+// MessageAppInfo is the compact app record on search sender/room objects.
+// IsSubscribed is set only on room.appInfo (botDM) — explicit true/false from
+// the caller's subscription row — and stays nil (absent) on sender.appInfo.
+type MessageAppInfo struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	AssistantName string `json:"assistantName"`
+	IsSubscribed  *bool  `json:"isSubscribed,omitempty"`
+}
 
 // SearchRoomsRequest is the NATS payload for
 // `chat.user.{account}.request.search.{siteID}.rooms`.

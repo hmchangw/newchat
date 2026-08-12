@@ -110,36 +110,9 @@ func (r *Repository) buildEditPayload(ctx context.Context, msg *models.Message, 
 		plain:         newMsg,
 		payload:       payload,
 		meta:          &cassmodel.EncMeta{Nonce: meta.Nonce},
-		quotedMeta:    blankQuotedBody(quoted),
-		forwardedMeta: blankForwardedBody(forwarded),
+		quotedMeta:    quoted,
+		forwardedMeta: forwarded,
 	}, nil
-}
-
-// blankQuotedBody returns a copy of the quoted-parent UDT with only its body
-// sub-fields cleared, mirroring atrest.StripEncryptedFields — the body moves
-// into enc_payload while message_id/sender/timestamps stay in the plaintext
-// column. nil in → nil out (no quote, column stays null).
-func blankQuotedBody(quoted *cassmodel.QuotedParentMessage) *cassmodel.QuotedParentMessage {
-	if quoted == nil {
-		return nil
-	}
-	stripped := *quoted
-	stripped.Msg = ""
-	stripped.Attachments = nil
-	return &stripped
-}
-
-// blankForwardedBody returns a copy of the forwarded-snapshot UDT with its
-// body cleared, mirroring atrest.StripEncryptedFields — the body moves into
-// enc_payload while the metadata stays in the plaintext column. nil in → nil
-// out (not a forward, column stays null).
-func blankForwardedBody(forwarded *cassmodel.ForwardedMessage) *cassmodel.ForwardedMessage {
-	if forwarded == nil {
-		return nil
-	}
-	stripped := *forwarded
-	stripped.Msg = ""
-	return &stripped
 }
 
 // readEncryptedFields fetches the existing row body from messages_by_id
@@ -152,6 +125,11 @@ func blankForwardedBody(forwarded *cassmodel.ForwardedMessage) *cassmodel.Forwar
 // attachments / card because ApplyDecryptedFields unconditionally
 // overwrites those fields with the (empty) bundle. sys_msg_data is not
 // encrypted, so it is neither read here nor carried in the bundle.
+//
+// Both returned UDTs come back body-blanked and ready to re-bind to the
+// plaintext columns: which sub-fields move into enc_payload is pkg/atrest's
+// rule, so the promotion and the blanking both go through it rather than
+// being restated here.
 func (r *Repository) readEncryptedFields(ctx context.Context, msg *models.Message) (atrest.EncryptedFields, *cassmodel.QuotedParentMessage, *cassmodel.ForwardedMessage, error) {
 	var (
 		encPayload  []byte
@@ -177,6 +155,14 @@ func (r *Repository) readEncryptedFields(ctx context.Context, msg *models.Messag
 	// quoted-parent and forwarded-snapshot metadata live in the plaintext
 	// columns on both the already-encrypted and legacy paths; the caller
 	// re-binds them body-blanked.
+	row := cassmodel.Message{
+		Msg:                 msgText,
+		Attachments:         attachments,
+		Card:                card,
+		CardAction:          cardAction,
+		QuotedParentMessage: quoted,
+		ForwardedMessage:    forwarded,
+	}
 	if len(encPayload) > 0 {
 		meta := atrest.EncMeta{}
 		if encMeta != nil {
@@ -186,29 +172,20 @@ func (r *Repository) readEncryptedFields(ctx context.Context, msg *models.Messag
 		if err != nil {
 			return atrest.EncryptedFields{}, nil, nil, fmt.Errorf("decrypt existing enc_payload for message %s in room %s: %w", msg.MessageID, msg.RoomID, err)
 		}
-		return fields, quoted, forwarded, nil
+		// Already-encrypted rows store the UDT bodies blank; strip anyway so
+		// both paths return the same shape regardless of what the row held.
+		atrest.StripEncryptedFields(&row)
+		return fields, row.QuotedParentMessage, row.ForwardedMessage, nil
 	}
 	// Legacy plaintext row — promote the plaintext body columns into the
 	// bundle so the subsequent encrypt carries them forward. The legacy
 	// columns become stale after the UPDATE but are harmless: the read
 	// path branches on enc_payload != nil and ApplyDecryptedFields will
 	// overwrite the structScan'd plaintext fields with the bundle's.
-	fields := atrest.EncryptedFields{
-		Msg:         msgText,
-		Attachments: attachments,
-		Card:        card,
-		CardAction:  cardAction,
-	}
-	if quoted != nil && (quoted.Msg != "" || len(quoted.Attachments) > 0) {
-		fields.QuotedParentContent = &atrest.QuotedParentEncrypted{
-			Msg:         quoted.Msg,
-			Attachments: quoted.Attachments,
-		}
-	}
-	if forwarded != nil && forwarded.Msg != "" {
-		fields.ForwardedContent = &atrest.ForwardedEncrypted{Msg: forwarded.Msg}
-	}
-	return fields, quoted, forwarded, nil
+	// Split before Strip — Strip blanks the very bodies Split promotes.
+	fields := atrest.SplitForEncryption(&row)
+	atrest.StripEncryptedFields(&row)
+	return fields, row.QuotedParentMessage, row.ForwardedMessage, nil
 }
 
 // editOne runs the appropriate plaintext or encrypted UPDATE for one of

@@ -67,6 +67,14 @@ type QuotedParentMessage struct {
 	TShow bool `json:"tshow,omitempty" cql:"-"`
 }
 
+// RoomType is the room classification stored on a forwarded snapshot and shared
+// with the Mongo room/subscription documents. The canonical constants
+// (RoomTypeChannel, RoomTypeDM, RoomTypeBotDM, RoomTypeDiscussion) live in
+// pkg/model/room.go alongside the alias; only the type itself lives here, so
+// ForwardedMessage.RoomType can name it without an import cycle (pkg/model
+// imports this package, not the other way round).
+type RoomType string
+
 // ForwardedMessage maps to the Cassandra "ForwardedMessage" UDT — the immutable
 // snapshot of a forwarded source message, captured at forward time by
 // message-gatekeeper. Text-only by design: sources carrying attachments or

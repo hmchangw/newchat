@@ -2308,15 +2308,13 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		buildData     func() []byte
-		setupStore    func(s *MockStore)
-		setupFetcher  func(f *MockParentMessageFetcher) // optional; nil → no fetcher expectations
-		wantErr       bool
-		wantInfra     bool
-		checkErr      func(t *testing.T, err error) // optional; called on wantErr cases
-		wantNoPublish bool                          // assert published slice is empty on wantErr
-		checkResult   func(t *testing.T, data []byte, published []publishedMsg)
+		name         string
+		buildData    func() []byte
+		setupStore   func(s *MockStore)
+		setupFetcher func(f *MockParentMessageFetcher) // optional; nil → no fetcher expectations
+		wantErr      bool
+		checkErr     func(t *testing.T, err error) // optional; called on wantErr cases
+		checkResult  func(t *testing.T, data []byte, published []publishedMsg)
 	}{
 		{
 			name:       "happy path with comment",
@@ -2374,9 +2372,8 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				})
 				return data
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 		},
 		{
 			name: "forwardedRoomId without forwardedMessageId → bad_request",
@@ -2387,9 +2384,8 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				})
 				return data
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 		},
 		{
 			name: "invalid forwardedMessageId → bad_request",
@@ -2400,9 +2396,8 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				})
 				return data
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 		},
 		{
 			name: "forward + quotedParentMessageId → bad_request",
@@ -2414,9 +2409,8 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				})
 				return data
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 		},
 		{
 			name: "forward + threadParentMessageId → bad_request",
@@ -2428,9 +2422,8 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				})
 				return data
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 		},
 		{
 			name: "forward + attachments on the new message → bad_request",
@@ -2442,9 +2435,8 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				})
 				return data
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 		},
 		{
 			name:       "source not found → typed not_found, no publish",
@@ -2455,8 +2447,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(nil, errcode.NotFound("message not found"))
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 			checkErr: func(t *testing.T, err error) {
 				var ee *errcode.Error
 				require.True(t, errors.As(err, &ee))
@@ -2472,8 +2463,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(nil, errcode.Forbidden("not subscribed to room"))
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 			checkErr: func(t *testing.T, err error) {
 				var ee *errcode.Error
 				require.True(t, errors.As(err, &ee))
@@ -2489,9 +2479,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(nil, fmt.Errorf("history request: nats: timeout"))
 			},
-			wantErr:       true,
-			wantInfra:     false,
-			wantNoPublish: true,
+			wantErr: true,
 			checkErr: func(t *testing.T, err error) {
 				var ee *errcode.Error
 				require.True(t, errors.As(err, &ee))
@@ -2509,8 +2497,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(src, nil)
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 		},
 		{
 			name:       "system-message source → bad_request",
@@ -2523,8 +2510,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(src, nil)
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 		},
 		{
 			name:       "source with attachments → bad_request",
@@ -2537,8 +2523,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(src, nil)
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 		},
 		{
 			name:       "source with card → bad_request",
@@ -2551,8 +2536,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(src, nil)
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 		},
 		{
 			name:       "forward-of-forward with comment → snapshot carries the comment only",
@@ -2589,8 +2573,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(src, nil)
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 		},
 		{
 			name:       "forwardedContent overrides the fetched body, every other snapshot field still from the source",
@@ -2648,18 +2631,16 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 				})
 				return data
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 		},
 		{
 			name: "oversized forwardedContent → bad_request",
 			buildData: func() []byte {
 				return fwdReqOverride("check this", strings.Repeat("a", maxContentBytes+1))
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 			checkErr: func(t *testing.T, err error) {
 				var ee *errcode.Error
 				require.True(t, errors.As(err, &ee))
@@ -2756,9 +2737,8 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 			buildData: func() []byte {
 				return fwdReq(strings.Repeat("a", maxContentBytes+1))
 			},
-			setupStore:    func(s *MockStore) {},
-			wantErr:       true,
-			wantNoPublish: true,
+			setupStore: func(s *MockStore) {},
+			wantErr:    true,
 			checkErr: func(t *testing.T, err error) {
 				var ee *errcode.Error
 				require.True(t, errors.As(err, &ee))
@@ -2792,8 +2772,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(nil, errcode.NotFound("message not found"))
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 			checkErr: func(t *testing.T, err error) {
 				var ee *errcode.Error
 				require.True(t, errors.As(err, &ee))
@@ -2809,8 +2788,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(nil, errcode.Forbidden("message is outside access window"))
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 			checkErr: func(t *testing.T, err error) {
 				var ee *errcode.Error
 				require.True(t, errors.As(err, &ee))
@@ -2830,8 +2808,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(src, nil)
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 		},
 		{
 			name:       "forward-of-forward with empty comment → bad_request even with forwardedContent",
@@ -2845,8 +2822,7 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 					FetchForwardedSource(gomock.Any(), validAccount, srcRoomID, validSiteID, fwdID).
 					Return(src, nil)
 			},
-			wantErr:       true,
-			wantNoPublish: true,
+			wantErr: true,
 		},
 		{
 			name:       "bot source → snapshot sender carries isBot and the app identity",
@@ -2945,18 +2921,11 @@ func TestHandler_ProcessMessage_Forward(t *testing.T) {
 			if tc.wantErr {
 				require.Error(t, err)
 				var ee *errcode.Error
-				hasErrcode := errors.As(err, &ee)
-				if tc.wantInfra {
-					assert.False(t, hasErrcode, "expected infra error (no *errcode.Error), got %T: %v", err, err)
-				} else {
-					assert.True(t, hasErrcode, "expected validation *errcode.Error, got %T: %v", err, err)
-				}
+				assert.True(t, errors.As(err, &ee), "expected validation *errcode.Error, got %T: %v", err, err)
 				if tc.checkErr != nil {
 					tc.checkErr(t, err)
 				}
-				if tc.wantNoPublish {
-					assert.Empty(t, published, "no canonical publish should occur on rejection")
-				}
+				assert.Empty(t, published, "no canonical publish should occur on rejection")
 				return
 			}
 			require.NoError(t, err)
