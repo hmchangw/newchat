@@ -8,4 +8,8 @@ const (
 	PortalBotLoginDisabled Reason = "bot_login_disabled"
 	// PortalFailoverUnauthorized: the failover control surface rejected a request whose ops bearer token was missing or wrong.
 	PortalFailoverUnauthorized Reason = "failover_unauthorized"
+	// PortalFailoverIllegalTransition: the requested failover action is not valid from the site's current status.
+	PortalFailoverIllegalTransition Reason = "failover_illegal_transition"
+	// PortalFailoverVersionConflict: the failover state changed concurrently (optimistic-concurrency CAS lost); retry.
+	PortalFailoverVersionConflict Reason = "failover_version_conflict"
 )
