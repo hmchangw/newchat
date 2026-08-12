@@ -2506,8 +2506,9 @@ func TestHandleThreadCreated_BotDMRoom_EmitsNewThreadMessage(t *testing.T) {
 
 	msgTime := time.Date(2026, 4, 1, 11, 0, 0, 0, time.UTC)
 
-	// botDM thread replies fan out per member (unlike an ordinary botDM new_message,
-	// which is suppressed) — the production branch handles RoomTypeBotDM too.
+	// botDM thread replies fan out per member — the human member gets the event,
+	// the bot account is skipped (same as an ordinary botDM new_message). The
+	// production branch handles RoomTypeBotDM too.
 	botDMRoom := &model.Room{ID: "dm-1", Type: model.RoomTypeBotDM, SiteID: "site-a", UserCount: 2}
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(botDMRoom), nil)
 	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
