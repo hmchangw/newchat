@@ -111,17 +111,17 @@ func main() {
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 
-	var metaValkey valkeyutil.Client
+	var valkeyClient valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkeyClient, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk),
 			valkeyutil.WithRequireParentSpan(true),
 		)
 		if err != nil {
-			slog.Error("valkey connect (room-meta L2) failed", "error", err)
+			slog.Error("valkey connect failed", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
+		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2TTL, "user_ttl", cfg.UserL2TTL)
 	}
 
 	// Separate instances so a warm room-meta L2 hit can't reset the subscription
@@ -132,7 +132,7 @@ func main() {
 	metaBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
 		circuitbreaker.Tracked(ctx, "roommeta"),
 		circuitbreaker.WithFailurePredicate(MetaBreakerFailure))
-	mongoStore := NewMongoStore(db, metaValkey, cfg.RoomMetaL2TTL, cfg.SubL2TTL, subBreaker, metaBreaker)
+	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2TTL, cfg.SubL2TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
 		slog.Error("init room meta cache failed", "error", err)
@@ -149,11 +149,8 @@ func main() {
 	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
 		circuitbreaker.Tracked(ctx, "user"),
 		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
-	users, err := userstore.NewCache(
-		userstore.NewL2Store(
-			userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
-			metaValkey, cfg.UserL2TTL, nil),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
+	users, err := userstore.Resilient(db.Collection("users"), userBreaker,
+		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user meta cache failed", "error", err)
 		os.Exit(1)
@@ -250,7 +247,7 @@ func main() {
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
-		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }

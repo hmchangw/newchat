@@ -135,43 +135,40 @@ func main() {
 		os.Exit(1)
 	}
 	db := mongoClient.Database(cfg.MongoDB)
-	// Valkey fronting the at-rest DEK L2. Empty VALKEY_ADDRS disables the tier
-	// (the DEK store falls straight through to Mongo, as before).
+	// One Valkey client for every L2 tier in this service (at-rest DEK, users).
+	// Empty VALKEY_ADDRS disables all of them; each tier falls straight through
+	// to Mongo, as before.
 	//
 	// A connect failure must NOT be fatal. This worker is the sole persister of
 	// message history to Cassandra; exiting here would crash-loop the pod over a
 	// fail-open cache tier and stop every write — strictly worse than the outage
 	// the L2 exists to survive. A nil client is the documented "L2 off" contract
 	// (NewL2DEKStore and valkeyutil.Disconnect both accept it).
-	var dekValkey valkeyutil.Client
+	var valkeyClient valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
 		client, connErr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk),
 			valkeyutil.WithRequireParentSpan(true),
 		)
 		if connErr != nil {
-			slog.Error("valkey connect (dek L2) failed; DEK L2 disabled", "error", connErr)
+			slog.Error("valkey connect failed; the DEK and user L2 tiers are disabled", "error", connErr)
 		} else {
-			dekValkey = client
+			valkeyClient = client
 		}
-		slog.Info("at-rest DEK L2 configured", "enabled", dekValkey != nil && cfg.DEKL2TTL > 0, "ttl", cfg.DEKL2TTL)
+		slog.Info("valkey L2 tiers configured", "dek_enabled", valkeyClient != nil && cfg.DEKL2TTL > 0, "dek_ttl", cfg.DEKL2TTL)
 	}
 
-	// Fenced inside both cache tiers so an open breaker still serves warm users.
 	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
 		circuitbreaker.Tracked(ctx, "user"),
 		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
-	us, err := userstore.NewCache(
-		userstore.NewL2Store(
-			userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
-			dekValkey, cfg.UserL2TTL, nil),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
+	us, err := userstore.Resilient(db.Collection("users"), userBreaker,
+		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL,
-		"l2_enabled", dekValkey != nil && cfg.UserL2TTL > 0, "l2_ttl", cfg.UserL2TTL)
+		"l2_enabled", valkeyClient != nil && cfg.UserL2TTL > 0, "l2_ttl", cfg.UserL2TTL)
 
 	var (
 		cipher       atrest.Cipher
@@ -189,7 +186,7 @@ func main() {
 		// difference between messages being written and being parked. Publish it.
 		dekBreaker := circuitbreaker.New(cfg.DEKBreakerFails, cfg.DEKBreakerCooldown,
 			circuitbreaker.Tracked(ctx, "atrestdek"))
-		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), dekValkey,
+		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), valkeyClient,
 			cfg.DEKL2TTL, dekBreaker, atrest.DefaultL2Recorder())
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
 	}
@@ -328,7 +325,7 @@ func main() {
 			}
 			return nil
 		},
-		func(_ context.Context) error { valkeyutil.Disconnect(dekValkey); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)

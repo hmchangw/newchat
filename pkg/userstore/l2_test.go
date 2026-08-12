@@ -82,7 +82,7 @@ var alice = model.User{ID: "u-alice", Account: "alice", EngName: "Alice", SiteID
 func TestL2Store_MissPopulatesBothKeys(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{user: &alice}
-	s := NewL2Store(inner, vk, time.Minute, nil)
+	s := NewL2Store(inner, vk, time.Minute)
 
 	got, err := s.FindUserByAccount(context.Background(), "alice")
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestL2Store_MissPopulatesBothKeys(t *testing.T) {
 func TestL2Store_HitSkipsTheStore(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{user: &alice}
-	s := NewL2Store(inner, vk, time.Minute, nil)
+	s := NewL2Store(inner, vk, time.Minute)
 	ctx := context.Background()
 
 	_, err := s.FindUserByID(ctx, "u-alice")
@@ -115,7 +115,7 @@ func TestL2Store_StaleEntrySurvivesStoreOutageViaTTLSlide(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{user: &alice}
 	now := time.Now()
-	s := newL2StoreWithClock(inner, vk, time.Minute, nil, func() time.Time { return now })
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
 	ctx := context.Background()
 
 	_, err := s.FindUserByID(ctx, "u-alice")
@@ -153,7 +153,7 @@ func TestL2Store_SlideUsesExpireSoItCannotResurrect(t *testing.T) {
 	ctx := context.Background()
 
 	// Warm the entry through a healthy store first.
-	warm := newL2StoreWithClock(&countingStore{user: &alice}, vk, time.Minute, nil, func() time.Time { return now })
+	warm := newL2StoreWithClock(&countingStore{user: &alice}, vk, time.Minute, func() time.Time { return now })
 	_, err := warm.FindUserByID(ctx, "u-alice")
 	require.NoError(t, err)
 	require.Contains(t, vk.data, idKey("u-alice"))
@@ -164,7 +164,7 @@ func TestL2Store_SlideUsesExpireSoItCannotResurrect(t *testing.T) {
 	evicting := &hookStore{onCall: func() {
 		_ = vk.Del(ctx, idKey("u-alice"), accountKey("alice"))
 	}}
-	s := newL2StoreWithClock(evicting, vk, time.Minute, nil, func() time.Time { return now })
+	s := newL2StoreWithClock(evicting, vk, time.Minute, func() time.Time { return now })
 	now = now.Add(59 * time.Second)
 
 	got, err := s.FindUserByID(ctx, "u-alice")
@@ -177,7 +177,7 @@ func TestL2Store_SlideUsesExpireSoItCannotResurrect(t *testing.T) {
 func TestL2Store_ColdMissDuringOutageStillFails(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{err: errors.New("mongo down")}
-	s := NewL2Store(inner, vk, time.Minute, nil)
+	s := NewL2Store(inner, vk, time.Minute)
 
 	_, err := s.FindUserByID(context.Background(), "nobody")
 	require.Error(t, err, "an uncached user cannot be invented")
@@ -186,7 +186,7 @@ func TestL2Store_ColdMissDuringOutageStillFails(t *testing.T) {
 func TestL2Store_NotFoundIsNotCached(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{err: fmt.Errorf("find user u1: %w", ErrUserNotFound)}
-	s := NewL2Store(inner, vk, time.Minute, nil)
+	s := NewL2Store(inner, vk, time.Minute)
 
 	_, err := s.FindUserByID(context.Background(), "u1")
 	require.ErrorIs(t, err, ErrUserNotFound)
@@ -197,7 +197,7 @@ func TestL2Store_FindUsersByAccounts_ReturnsPartialHitsOnStoreError(t *testing.T
 	vk := newFakeValkey()
 	bob := model.User{ID: "u-bob", Account: "bob"}
 	inner := &countingStore{user: &alice}
-	s := NewL2Store(inner, vk, time.Minute, nil)
+	s := NewL2Store(inner, vk, time.Minute)
 	ctx := context.Background()
 
 	// Warm alice only.
@@ -216,7 +216,7 @@ func TestL2Store_FindUsersByAccounts_ReturnsPartialHitsOnStoreError(t *testing.T
 func TestL2Store_FindUsersByAccounts_OnlyFetchesMisses(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{user: &alice}
-	s := NewL2Store(inner, vk, time.Minute, nil)
+	s := NewL2Store(inner, vk, time.Minute)
 	ctx := context.Background()
 
 	_, err := s.FindUserByAccount(ctx, "alice")
@@ -234,7 +234,7 @@ func TestL2Store_ValkeyDownFallsThroughToStore(t *testing.T) {
 	vk.getErr = errors.New("valkey down")
 	vk.setErr = errors.New("valkey down")
 	inner := &countingStore{user: &alice}
-	s := NewL2Store(inner, vk, time.Minute, nil)
+	s := NewL2Store(inner, vk, time.Minute)
 
 	got, err := s.FindUserByAccount(context.Background(), "alice")
 	require.NoError(t, err, "a broken cache must never fail a request the store can serve")
@@ -243,7 +243,7 @@ func TestL2Store_ValkeyDownFallsThroughToStore(t *testing.T) {
 
 func TestL2Store_NilClientIsPassThrough(t *testing.T) {
 	inner := &countingStore{user: &alice}
-	s := NewL2Store(inner, nil, time.Minute, nil)
+	s := NewL2Store(inner, nil, time.Minute)
 
 	got, err := s.FindUserByID(context.Background(), "u-alice")
 	require.NoError(t, err)
@@ -254,7 +254,7 @@ func TestL2Store_NilClientIsPassThrough(t *testing.T) {
 func TestL2Store_BustRemovesBothKeys(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{user: &alice}
-	s := NewL2Store(inner, vk, time.Minute, nil)
+	s := NewL2Store(inner, vk, time.Minute)
 	ctx := context.Background()
 
 	_, err := s.FindUserByAccount(ctx, "alice")
@@ -269,7 +269,7 @@ func TestL2Store_StaleEntryEvictedWhenUserGenuinelyGone(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{user: &alice}
 	now := time.Now()
-	s := newL2StoreWithClock(inner, vk, time.Minute, nil, func() time.Time { return now })
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
 	ctx := context.Background()
 
 	_, err := s.FindUserByID(ctx, "u-alice")
@@ -291,7 +291,7 @@ func TestL2Store_SuccessfulRefreshRewritesAndResetsTheWindow(t *testing.T) {
 	vk := newFakeValkey()
 	inner := &countingStore{user: &alice}
 	now := time.Now()
-	s := newL2StoreWithClock(inner, vk, time.Minute, nil, func() time.Time { return now })
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
 	ctx := context.Background()
 
 	_, err := s.FindUserByID(ctx, "u-alice")

@@ -261,3 +261,29 @@ func TestState_String(t *testing.T) {
 		})
 	}
 }
+
+func TestDo_NilBreakerPassesThrough(t *testing.T) {
+	var b *Breaker
+	calls := 0
+	for i := 0; i < 3; i++ {
+		err := b.Do(func() error { calls++; return errors.New("boom") })
+		require.Error(t, err)
+	}
+	assert.Equal(t, 3, calls, "a nil breaker must never fence a call")
+}
+
+func TestDo1_ReturnsValueAndZeroOnError(t *testing.T) {
+	b := New(1, time.Minute)
+
+	got, err := Do1(b, func() (string, error) { return "ok", nil })
+	require.NoError(t, err)
+	assert.Equal(t, "ok", got)
+
+	// Trip it, then confirm an open breaker yields the zero value, not the last
+	// successful one.
+	_, err = Do1(b, func() (string, error) { return "stale", errors.New("boom") })
+	require.Error(t, err)
+	got, err = Do1(b, func() (string, error) { return "unreachable", nil })
+	require.ErrorIs(t, err, ErrOpen)
+	assert.Empty(t, got)
+}

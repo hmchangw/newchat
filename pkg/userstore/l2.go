@@ -2,12 +2,16 @@ package userstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/mongo"
+
 	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -40,13 +44,18 @@ type cachedUser struct {
 // When the source is unreachable the deadline is re-armed instead (see
 // serveHit), so warm entries outlive an outage longer than the TTL.
 type l2Store struct {
-	inner        UserStore
-	client       valkeyutil.Client // nil disables the tier entirely
-	ttl          time.Duration
-	refreshAfter time.Duration
-	metrics      Recorder
-	now          func() time.Time
+	inner   UserStore
+	client  valkeyutil.Client // nil disables the tier entirely
+	ttl     time.Duration
+	metrics Recorder
+	now     func() time.Time
 }
+
+// refreshAfterFor derives the re-validation window from the entry TTL. It must
+// exceed the L1 TTL in front of this tier, or every L1 miss would also pay a
+// refresh and the L2 would stop absorbing load. Same derivation as the other
+// read-through tiers (pkg/subauthcache, pkg/atrest).
+func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
 
 // NewL2Store wraps store with a Valkey read-through tier. A nil client (or a
 // non-positive ttl) returns store unchanged, so callers can wire it
@@ -54,34 +63,33 @@ type l2Store struct {
 //
 // Compose it inside the L1 and, where present, inside the breaker:
 //
-//	NewCache(NewL2Store(NewBreakerStore(NewMongoStore(col), b), vk, ttl, rec), ...)
+//	NewCache(NewL2Store(NewBreakerStore(NewMongoStore(col), b), vk, ttl), ...)
 //
 // so an open breaker still serves both cache tiers.
-func NewL2Store(store UserStore, client valkeyutil.Client, ttl time.Duration, rec Recorder) UserStore {
-	return newL2StoreWithClock(store, client, ttl, rec, time.Now)
+func NewL2Store(store UserStore, client valkeyutil.Client, ttl time.Duration) UserStore {
+	return newL2StoreWithClock(store, client, ttl, time.Now)
 }
 
-func newL2StoreWithClock(store UserStore, client valkeyutil.Client, ttl time.Duration, rec Recorder, now func() time.Time) UserStore {
+func newL2StoreWithClock(store UserStore, client valkeyutil.Client, ttl time.Duration, now func() time.Time) UserStore {
 	if client == nil || ttl <= 0 {
 		return store
 	}
-	if rec == nil {
-		rec = cachemetrics.For("user", "l2")
-	}
 	return &l2Store{
-		inner:        store,
-		client:       client,
-		ttl:          ttl,
-		refreshAfter: ttl / 4 * 3,
-		metrics:      rec,
-		now:          now,
+		inner:   store,
+		client:  client,
+		ttl:     ttl,
+		metrics: cachemetrics.For("user", "l2"),
+		now:     now,
 	}
 }
 
-// Bust drops both key spaces for a user. Callers that mutate a user record
-// should invoke it so a rename or transfer is not served from L2 until the TTL
-// lapses — a stale display name here does not just render wrong, message-worker
-// persists it onto the Cassandra message row. Either argument may be empty.
+// Bust drops both key spaces for a user. Either argument may be empty.
+//
+// No write path calls this yet, so a rename is currently reconciled only by the
+// TTL and by refresh-on-read — a known gap, not a wired invariant. It matters
+// because a stale display name does not merely render wrong: message-worker
+// persists it onto the Cassandra message row. The user identity feed
+// (hr-sync-worker) is the single choke point that should call it.
 func Bust(ctx context.Context, client valkeyutil.Client, userID, account string) {
 	if client == nil {
 		return
@@ -135,7 +143,7 @@ func (l *l2Store) resolve(ctx context.Context, key string, load func(context.Con
 // currently down, so the deadline is re-armed and the cached user is served.
 // A cold (uncached) lookup still fails, since a user cannot be invented.
 func (l *l2Store) serveHit(ctx context.Context, key string, entry *cachedUser, load func(context.Context) (*model.User, error)) (*model.User, error) {
-	if l.now().Sub(time.UnixMilli(entry.CachedAt)) < l.refreshAfter {
+	if l.now().Sub(time.UnixMilli(entry.CachedAt)) < refreshAfterFor(l.ttl) {
 		return &entry.User, nil
 	}
 	u, err := load(ctx)
@@ -209,15 +217,22 @@ func (l *l2Store) write(ctx context.Context, u *model.User) {
 	if u == nil || u.ID == "" {
 		return
 	}
-	entry := cachedUser{User: *u, CachedAt: l.now().UnixMilli()}
-	if err := valkeyutil.SetJSONWithTTL(ctx, l.client, idKey(u.ID), entry, l.ttl); err != nil {
-		slog.WarnContext(ctx, "user L2 write failed (TTL will reconcile)", "user_id", u.ID, "error", err)
-	}
-	if u.Account == "" {
+	// Marshalled once and reused: the two key spaces hold the identical envelope,
+	// so encoding it per key would double the serialization cost of every write.
+	data, err := json.Marshal(cachedUser{User: *u, CachedAt: l.now().UnixMilli()})
+	if err != nil {
+		slog.WarnContext(ctx, "user L2 encode failed (TTL will reconcile)", "user_id", u.ID, "error", err)
 		return
 	}
-	if err := valkeyutil.SetJSONWithTTL(ctx, l.client, accountKey(u.Account), entry, l.ttl); err != nil {
-		slog.WarnContext(ctx, "user L2 write failed (TTL will reconcile)", "user_id", u.ID, "error", err)
+	keys := []string{idKey(u.ID)}
+	if u.Account != "" {
+		keys = append(keys, accountKey(u.Account))
+	}
+	for _, k := range keys {
+		if err := l.client.Set(ctx, k, string(data), l.ttl); err != nil {
+			slog.WarnContext(ctx, "user L2 write failed (TTL will reconcile)",
+				"user_id", u.ID, "key", k, "error", err)
+		}
 	}
 }
 
@@ -228,4 +243,24 @@ func (l *l2Store) slide(ctx context.Context, key string) {
 		slog.WarnContext(ctx, "user L2 TTL slide failed (entry keeps its current deadline)",
 			"key", key, "error", err)
 	}
+}
+
+// Resilient builds the full user-lookup stack: Mongo fenced by breaker, behind
+// a shared Valkey L2, behind the pod-local L1.
+//
+// The nesting order is the whole point of having this constructor. The breaker
+// must be innermost and the caches outermost, so that an open breaker still
+// serves both cache tiers — during the outage that opened it, they are the only
+// tiers that can answer. Wiring the layers by hand at each service compiles
+// just as well in the wrong order and silently loses outage survival, so the
+// order lives here rather than in a doc comment three services must obey.
+//
+// A nil valkey (or non-positive l2TTL) drops the L2; a nil breaker fences
+// nothing. Both are supported deployments.
+func Resilient(col *mongo.Collection, breaker *circuitbreaker.Breaker, valkey valkeyutil.Client,
+	l2TTL time.Duration, l1Size int, l1TTL time.Duration,
+) (*Cache, error) {
+	return NewCache(
+		NewL2Store(NewBreakerStore(NewMongoStore(col), breaker), valkey, l2TTL),
+		l1Size, l1TTL)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
+	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -39,17 +40,10 @@ type mongoStore struct {
 	metaRec       roommetacache.Recorder
 	metaOpts      []roommetacache.ReadThroughOption
 	members       *roomsubcache.Lookup
-	breaker       *circuitbreaker.Breaker
-}
-
-// guard runs fn behind the store's breaker so that once Mongo is known to be
-// down, a fail-open caller returns immediately instead of paying a fresh
-// server-selection timeout on every message. A nil breaker runs fn directly.
-func (m *mongoStore) guard(fn func() error) error {
-	if m.breaker == nil {
-		return fn()
-	}
-	return m.breaker.Do(fn)
+	// breaker fences the fail-open writes below: once Mongo is known to be down
+	// they return immediately instead of each paying a server-selection timeout
+	// on every message.
+	breaker *circuitbreaker.Breaker
 }
 
 func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, mongoBreaker *circuitbreaker.Breaker) *mongoStore {
@@ -78,10 +72,17 @@ func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valk
 	return s
 }
 
-// MongoBreakerFailure is the failure predicate the store's breaker must be
-// built with: a missing document is a healthy answer, not a sign Mongo is unwell.
+// MongoBreakerFailure is the failure predicate this service's single Mongo
+// breaker must be built with. It exempts every "healthy absence" sentinel the
+// fenced call sites can return — a missing document or a missing user is an
+// answer from a working Mongo, not evidence it is unwell. A new fenced call
+// site with its own not-found sentinel must be added here rather than given a
+// breaker of its own, or it re-splits the failure budget.
 func MongoBreakerFailure(err error) bool {
-	return err != nil && !errors.Is(err, mongo.ErrNoDocuments)
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, mongo.ErrNoDocuments) && !errors.Is(err, userstore.ErrUserNotFound)
 }
 
 func (m *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, error) {
@@ -123,7 +124,7 @@ func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID st
 	filter := bson.M{"_id": roomID}
 	update := bson.M{"$set": fields}
 
-	if err := m.guard(func() error {
+	if err := m.breaker.Do(func() error {
 		res, err := m.roomCol.UpdateOne(ctx, filter, update)
 		if err != nil {
 			return err
@@ -180,7 +181,7 @@ func subscriptionMentionsFilter(roomID string, accounts []string, msgCreatedAt t
 func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
 	filter := subscriptionMentionsFilter(roomID, accounts, msgCreatedAt)
 	update := bson.M{"$set": bson.M{"hasMention": true}}
-	if err := m.guard(func() error {
+	if err := m.breaker.Do(func() error {
 		_, err := m.subCol.UpdateMany(ctx, filter, update)
 		return err
 	}); err != nil {
@@ -193,7 +194,7 @@ func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string,
 // never regresses a sender who already read later. A missing subscription is a
 // best-effort no-op (MatchedCount unchecked).
 func (m *mongoStore) AdvanceSubscriptionLastSeen(ctx context.Context, roomID, account string, at time.Time) error {
-	if err := m.guard(func() error {
+	if err := m.breaker.Do(func() error {
 		_, err := m.subCol.UpdateOne(ctx,
 			bson.M{"roomId": roomID, "u.account": account},
 			bson.M{"$max": bson.M{"lastSeenAt": at}},

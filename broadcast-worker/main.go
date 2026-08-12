@@ -62,7 +62,7 @@ type config struct {
 	MongoBreakerCooldown time.Duration   `env:"BROADCAST_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
 	MongoSelectTimeout   time.Duration   `env:"MONGO_SERVER_SELECTION_TIMEOUT"   envDefault:"2s"`
 	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
-	RoomSubCacheTTL      time.Duration   `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"` // shared with notification-worker; same key, keep the TTLs aligned
+	RoomSubCacheTTL      time.Duration   `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"` // shared key; see pkg/roomsubcache docs
 	ValkeyAddrs          []string        `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
 	ValkeyKeyGracePeriod time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
@@ -128,27 +128,30 @@ func main() {
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
-	var metaValkey valkeyutil.Client
+	var valkeyClient valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkeyClient, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk),
 			valkeyutil.WithRequireParentSpan(true),
 		)
 		if err != nil {
-			slog.Error("valkey connect (room-meta L2) failed", "error", err)
+			slog.Error("valkey connect failed", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
+		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2TTL, "user_ttl", cfg.UserL2TTL)
 	}
-	// One breaker for every Mongo call site in this service, not one per site:
-	// a failure seen anywhere should immediately stop the others from paying a
-	// server-selection timeout too. Per-site breakers each need their own
-	// threshold of slow failures before they fence, multiplying the delay.
+	// One breaker for every Mongo call site in this service, not one per site.
+	// The breaker tracks a single fact — is Mongo reachable — and every call site
+	// is evidence about it, so they share one failure budget: N breakers at
+	// threshold T cost N*T stalled calls before the service is fully fenced,
+	// which is the delay the breaker exists to remove. Call sites differ only in
+	// which "healthy absence" they can return, and MongoBreakerFailure exempts
+	// all of them.
 	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
 		circuitbreaker.Tracked(ctx, "mongo"),
 		circuitbreaker.WithFailurePredicate(MongoBreakerFailure))
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"),
-		metaValkey, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
+		valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
@@ -159,15 +162,8 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("room-meta-cache enabled", "size", cfg.RoomMetaCacheSize, "ttl", cfg.RoomMetaCacheTTL)
-	// Fenced inside both cache tiers so an open breaker still serves warm users.
-	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
-		circuitbreaker.Tracked(ctx, "user"),
-		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
-	us, err := userstore.NewCache(
-		userstore.NewL2Store(
-			userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
-			metaValkey, cfg.UserL2TTL, nil),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
+	us, err := userstore.Resilient(db.Collection("users"), mongoBreaker,
+		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)
 		os.Exit(1)
@@ -304,7 +300,7 @@ func main() {
 	hooks = append(hooks,
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
-		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		// Flush observability LAST so all prior teardown telemetry is exported.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)

@@ -101,7 +101,9 @@ func fireTransition(cb func(from, to State), old, newState State) {
 // New builds a breaker that opens after threshold consecutive failures and
 // stays open for cooldown before allowing a half-open probe. A non-positive
 // threshold disables the breaker: calls always pass through and it never opens,
-// so a service can turn the protection off by config without unwiring it.
+// so a service can turn the protection off by config without unwiring it. A nil
+// *Breaker behaves the same way, so an optional breaker needs no nil guard at
+// the call site.
 func New(threshold int, cooldown time.Duration, opts ...Option) *Breaker {
 	b := &Breaker{
 		threshold: threshold, cooldown: cooldown, now: time.Now, state: StateClosed,
@@ -131,7 +133,10 @@ func (b *Breaker) State() State {
 // result of fn updates the breaker: success closes it, failure increments the
 // counter and may (re)open it.
 func (b *Breaker) Do(fn func() error) error {
-	if b.threshold <= 0 { // disabled: always pass through, never open
+	// A nil breaker and a non-positive threshold are the same thing — protection
+	// turned off — so callers can hold an optional *Breaker without each one
+	// re-inventing its own nil check.
+	if b == nil || b.threshold <= 0 {
 		return fn()
 	}
 
@@ -211,4 +216,23 @@ func (b *Breaker) maybeHalfOpenLocked() {
 		b.state = StateHalfOpen
 		b.probing = false
 	}
+}
+
+// Do1 is Do for a function that also returns a value. It exists because the
+// value-returning form is otherwise four lines of capture-and-reassign at every
+// call site, repeated once per wrapped method.
+//
+// On failure the zero value is returned alongside the error, including when the
+// breaker is open and fn never ran.
+func Do1[T any](b *Breaker, fn func() (T, error)) (T, error) {
+	var out T
+	if err := b.Do(func() error {
+		var innerErr error
+		out, innerErr = fn()
+		return innerErr
+	}); err != nil {
+		var zero T
+		return zero, err
+	}
+	return out, nil
 }

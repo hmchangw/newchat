@@ -5,6 +5,21 @@
 // The cache stores the fan-out path's per-member input set — see Member.
 // Entries are written with a caller-supplied TTL and may be eagerly
 // invalidated via Invalidate; staleness is otherwise bounded by the TTL.
+//
+// # Shared key
+//
+// The key is per room and carries no service namespace, so every service that
+// caches a room shares one entry. Two consequences bind all of them:
+//
+//   - Writers must fill every Member field. NewMongoLoader is the only
+//     sanctioned production loader; a partial writer would silently unmute
+//     muted users and widen history access windows for the services that gate
+//     on Muted and HistorySharedSince.
+//   - Readers should configure the same TTL (ROOMSUBCACHE_TTL), since whichever
+//     service writes an entry sets the staleness bound every other one gets.
+//
+// notification-worker additionally invalidates on membership and mute changes;
+// services that only read benefit from that without wiring anything.
 package roomsubcache
 
 import (

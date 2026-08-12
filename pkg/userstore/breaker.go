@@ -27,50 +27,26 @@ type breakerStore struct {
 	breaker *circuitbreaker.Breaker
 }
 
-// NewBreakerStore returns store fenced by breaker. A nil breaker returns the
-// store unchanged, so callers can wire this unconditionally.
+// NewBreakerStore returns store fenced by breaker. A nil breaker fences
+// nothing (see circuitbreaker.Do), so callers can wire this unconditionally.
 func NewBreakerStore(store UserStore, breaker *circuitbreaker.Breaker) UserStore {
-	if breaker == nil {
-		return store
-	}
 	return &breakerStore{inner: store, breaker: breaker}
 }
 
 func (b *breakerStore) FindUserByID(ctx context.Context, id string) (*model.User, error) {
-	var u *model.User
-	err := b.breaker.Do(func() error {
-		var innerErr error
-		u, innerErr = b.inner.FindUserByID(ctx, id)
-		return innerErr
+	return circuitbreaker.Do1(b.breaker, func() (*model.User, error) {
+		return b.inner.FindUserByID(ctx, id)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return u, nil
 }
 
 func (b *breakerStore) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
-	var u *model.User
-	err := b.breaker.Do(func() error {
-		var innerErr error
-		u, innerErr = b.inner.FindUserByAccount(ctx, account)
-		return innerErr
+	return circuitbreaker.Do1(b.breaker, func() (*model.User, error) {
+		return b.inner.FindUserByAccount(ctx, account)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return u, nil
 }
 
 func (b *breakerStore) FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error) {
-	var users []model.User
-	err := b.breaker.Do(func() error {
-		var innerErr error
-		users, innerErr = b.inner.FindUsersByAccounts(ctx, accounts)
-		return innerErr
+	return circuitbreaker.Do1(b.breaker, func() ([]model.User, error) {
+		return b.inner.FindUsersByAccounts(ctx, accounts)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return users, nil
 }
