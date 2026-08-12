@@ -24,27 +24,32 @@ func TestNoopPresence_EmptySnapshot(t *testing.T) {
 	assert.Empty(t, snap)
 }
 
-// stubPresenceFlags swaps the isDND/isPresenting stubs for one test and restores
-// them afterwards, so a row that flips them cannot leak into a sibling test.
-func stubPresenceFlags(t *testing.T, dnd, presenting bool) {
+// swapPresenceFlags installs both stubs for one test and restores them afterwards,
+// so a test that flips them cannot leak into a sibling. Sole owner of the
+// save/restore; the two helpers below differ only in the predicates they build.
+func swapPresenceFlags(t *testing.T, dnd, presenting func(model.Presence) bool) {
 	t.Helper()
 	origDND, origPresenting := isDND, isPresenting
-	isDND = func(model.Presence) bool { return dnd }
-	isPresenting = func(model.Presence) bool { return presenting }
+	isDND, isPresenting = dnd, presenting
 	t.Cleanup(func() { isDND, isPresenting = origDND, origPresenting })
 }
 
-// stubPresenceFlagsByStatus points the isDND/isPresenting stubs at one status
-// each, restoring them afterwards. Lets a handler test prove the gate consults
-// both without asserting any real status mapping; "" disables that stub.
+// stubPresenceFlags forces both stubs to a constant, for the shouldPush table.
+func stubPresenceFlags(t *testing.T, dnd, presenting bool) {
+	t.Helper()
+	swapPresenceFlags(t,
+		func(model.Presence) bool { return dnd },
+		func(model.Presence) bool { return presenting })
+}
+
+// stubPresenceFlagsByStatus points each stub at one status. Lets a handler test
+// prove the gate consults both without asserting any real status mapping; ""
+// disables that stub.
 func stubPresenceFlagsByStatus(t *testing.T, dndStatus, presentingStatus string) {
 	t.Helper()
-	origDND, origPresenting := isDND, isPresenting
-	isDND = func(p model.Presence) bool { return dndStatus != "" && p.AggregatedStatus == dndStatus }
-	isPresenting = func(p model.Presence) bool {
-		return presentingStatus != "" && p.AggregatedStatus == presentingStatus
-	}
-	t.Cleanup(func() { isDND, isPresenting = origDND, origPresenting })
+	swapPresenceFlags(t,
+		func(p model.Presence) bool { return dndStatus != "" && p.AggregatedStatus == dndStatus },
+		func(p model.Presence) bool { return presentingStatus != "" && p.AggregatedStatus == presentingStatus })
 }
 
 func TestShouldPush(t *testing.T) {
@@ -59,47 +64,47 @@ func TestShouldPush(t *testing.T) {
 	}{
 		// Zero notifSettings with both stubs inert must reproduce the pre-change
 		// truth table exactly: no stored settings means no behaviour change.
-		{"zero settings online", "online", false, false, notifSettings{}, false, true},
-		{"zero settings offline", "offline", false, false, notifSettings{}, false, true},
-		{"zero settings away", "away", false, false, notifSettings{}, false, true},
-		{"zero settings busy", "busy", false, false, notifSettings{}, false, false},
-		{"zero settings in-call", "in-call", false, false, notifSettings{}, false, false},
-		{"zero settings missing status", "", false, false, notifSettings{}, false, true},
-		{"zero settings unknown status", "unknown", false, false, notifSettings{}, false, true},
+		{name: "zero settings online", status: "online", want: true},
+		{name: "zero settings offline", status: "offline", want: true},
+		{name: "zero settings away", status: "away", want: true},
+		{name: "zero settings busy", status: "busy", want: false},
+		{name: "zero settings in-call", status: "in-call", want: false},
+		{name: "zero settings missing status", status: "", want: true},
+		{name: "zero settings unknown status", status: "unknown", want: true},
 
 		// muteAll suppresses unless a priority sender pierces it.
-		{"muted, no pierce", "online", false, false, notifSettings{muteAll: true}, false, false},
-		{"muted, priority sender but pierce disabled", "online", false, false, notifSettings{muteAll: true}, true, false},
-		{"muted, pierce enabled but sender not priority", "online", false, false, notifSettings{muteAll: true, allowPriority: true}, false, false},
-		{"muted, pierce enabled and sender is priority", "online", false, false, notifSettings{muteAll: true, allowPriority: true}, true, true},
-		{"unmuted, pierce enabled, non-priority sender", "online", false, false, notifSettings{allowPriority: true}, false, true},
+		{name: "muted, no pierce", status: "online", ns: notifSettings{muteAll: true}, want: false},
+		{name: "muted, priority sender but pierce disabled", status: "online", ns: notifSettings{muteAll: true}, isPrioritySender: true, want: false},
+		{name: "muted, pierce enabled but sender not priority", status: "online", ns: notifSettings{muteAll: true, allowPriority: true}, want: false},
+		{name: "muted, pierce enabled and sender is priority", status: "online", ns: notifSettings{muteAll: true, allowPriority: true}, isPrioritySender: true, want: true},
+		{name: "unmuted, pierce enabled, non-priority sender", status: "online", ns: notifSettings{allowPriority: true}, want: true},
 
 		// Rule 2: DND and presenting suppress on their own, and the in-call opt-in
 		// does not rescue them — showNotificationsInCall governs in-call only.
-		{"dnd", "online", true, false, notifSettings{}, false, false},
-		{"dnd, in-call opt-in does not rescue", "online", true, false, notifSettings{showInCall: true}, false, false},
-		{"presenting", "online", false, true, notifSettings{}, false, false},
-		{"presenting, in-call opt-in does not rescue", "online", false, true, notifSettings{showInCall: true}, false, false},
-		{"dnd and presenting together", "online", true, true, notifSettings{}, false, false},
+		{name: "dnd", status: "online", dnd: true, want: false},
+		{name: "dnd, in-call opt-in does not rescue", status: "online", dnd: true, ns: notifSettings{showInCall: true}, want: false},
+		{name: "presenting", status: "online", presenting: true, want: false},
+		{name: "presenting, in-call opt-in does not rescue", status: "online", presenting: true, ns: notifSettings{showInCall: true}, want: false},
+		{name: "dnd and presenting together", status: "online", dnd: true, presenting: true, want: false},
 
 		// showNotificationsInCall governs the in-call bucket, for non-priority senders.
-		{"in-call, opted in", "in-call", false, false, notifSettings{showInCall: true}, false, true},
-		{"busy, opted in", "busy", false, false, notifSettings{showInCall: true}, false, true},
-		{"in-call, not opted in", "in-call", false, false, notifSettings{}, false, false},
+		{name: "in-call, opted in", status: "in-call", ns: notifSettings{showInCall: true}, want: true},
+		{name: "busy, opted in", status: "busy", ns: notifSettings{showInCall: true}, want: true},
+		{name: "in-call, not opted in", status: "in-call", want: false},
 
 		// The pierce crosses every suppressor, DND and presenting included.
-		{"dnd, priority pierce", "online", true, false, notifSettings{allowPriority: true}, true, true},
-		{"presenting, priority pierce", "online", false, true, notifSettings{allowPriority: true}, true, true},
-		{"in-call, priority pierce without in-call opt-in", "in-call", false, false, notifSettings{allowPriority: true}, true, true},
-		{"muted+dnd, priority pierce", "in-call", true, false, notifSettings{muteAll: true, allowPriority: true}, true, true},
+		{name: "dnd, priority pierce", status: "online", dnd: true, ns: notifSettings{allowPriority: true}, isPrioritySender: true, want: true},
+		{name: "presenting, priority pierce", status: "online", presenting: true, ns: notifSettings{allowPriority: true}, isPrioritySender: true, want: true},
+		{name: "in-call, priority pierce without in-call opt-in", status: "in-call", ns: notifSettings{allowPriority: true}, isPrioritySender: true, want: true},
+		{name: "muted+dnd, priority pierce", status: "in-call", dnd: true, ns: notifSettings{muteAll: true, allowPriority: true}, isPrioritySender: true, want: true},
 
 		// ...but only with its opt-in. A priority sender alone pierces nothing.
-		{"dnd, priority sender but pierce disabled", "online", true, false, notifSettings{}, true, false},
-		{"presenting, priority sender but pierce disabled", "online", false, true, notifSettings{}, true, false},
-		{"in-call, priority sender but pierce disabled", "in-call", false, false, notifSettings{}, true, false},
+		{name: "dnd, priority sender but pierce disabled", status: "online", dnd: true, isPrioritySender: true, want: false},
+		{name: "presenting, priority sender but pierce disabled", status: "online", presenting: true, isPrioritySender: true, want: false},
+		{name: "in-call, priority sender but pierce disabled", status: "in-call", isPrioritySender: true, want: false},
 
 		// Every suppressor clear.
-		{"muted+pierced, online", "online", false, false, notifSettings{muteAll: true, allowPriority: true, showInCall: true}, true, true},
+		{name: "muted+pierced, online", status: "online", ns: notifSettings{muteAll: true, allowPriority: true, showInCall: true}, isPrioritySender: true, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -314,3 +314,18 @@ Converting the vars back to plain funcs is fine — `stubPresenceFlags` and
 the var form, and both are test-only. That change must also drop `"busy"` from
 `isInCall`, delete `TestDNDAndPresentingStubsAreInert`, and add the DND sentence
 to the `showNotificationsInCall` row in `docs/client-api.md`.
+
+**Move the classification to `pkg/model` in that same change.** All three
+predicates match raw strings inside one worker, while `pkg/model/presence.go`
+already declares the `StatusBusy`/`StatusInCall` constants *and* states the rule
+in prose on the `Presence` type — "Only `"busy"` and `"in-call"` suppress push" —
+with no code behind it. `pkg/model` is where this repo puts type classification
+(`IsBot`, `IsSystemMessageType`, `IsRoomMember`, `IsPlatformAdmin`,
+`IsBuiltinSection`), so `model.IsInCall` / `model.IsDND` / `model.IsPresenting`
+built on the constants is the right home; any second consumer of `model.Presence`
+otherwise reimplements the matching with nothing keeping it aligned.
+
+It is deferred rather than done now for one reason: the stubs have to stay
+swappable to keep rule 2 under test, and an exported mutable `var` in `pkg/model`
+is a worse defect than the split it would fix. Once they are real plain funcs
+that objection disappears, and the move is mechanical.
