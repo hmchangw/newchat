@@ -44,6 +44,8 @@ type Metrics struct {
 	FailureRecovered     prometheus.Counter
 	FailureInvalidations *prometheus.CounterVec
 	FailureJournalBytes  prometheus.Gauge
+	FailureUntracked     *prometheus.CounterVec
+	FailureDropped       prometheus.Counter
 
 	NATSConnected        *prometheus.GaugeVec
 	NATSConnectionEvents *prometheus.CounterVec
@@ -214,6 +216,19 @@ func NewMetrics() *Metrics {
 			Help: "Current persistent failure-ledger WAL size in bytes.",
 		},
 	)
+	m.FailureUntracked = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_untracked_total",
+			Help: "Operations the ledger could not account for, by bounded reason.",
+		},
+		[]string{"reason"},
+	)
+	m.FailureDropped = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_dropped_total",
+			Help: "Recovered operations discarded at startup because the journal exceeded capacity.",
+		},
+	)
 	m.NATSConnected = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "loadgen_nats_connected",
@@ -249,6 +264,7 @@ func NewMetrics() *Metrics {
 		m.SoakMutationTargetMissing, m.SoakSaturation,
 		m.FailureOperations, m.FailureObservations, m.FailureInflight,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
+		m.FailureUntracked, m.FailureDropped,
 		m.NATSConnected, m.NATSConnectionEvents, m.NATSOutageDuration,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),

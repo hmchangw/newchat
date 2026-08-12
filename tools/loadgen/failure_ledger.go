@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"container/heap"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,20 +25,32 @@ const (
 type failureObservation string
 
 const (
-	failureObservationGood                 failureObservation = "good"
-	failureObservationBad                  failureObservation = "bad"
+	failureObservationGood failureObservation = "good"
+	failureObservationBad  failureObservation = "bad"
+	// failureObservationUnverified records that the observer itself could not
+	// answer. It is an availability signal, never evidence of data loss.
+	failureObservationUnverified           failureObservation = "unverified"
 	failureObservationMissingAfterDeadline failureObservation = "missing_after_deadline"
 )
 
 type failureResult string
 
 const (
-	failureResultGood                 failureResult = "good"
-	failureResultBad                  failureResult = "bad"
+	failureResultGood       failureResult = "good"
+	failureResultBad        failureResult = "bad"
+	failureResultUnverified failureResult = "unverified"
+	// failureResultNotSent terminates an operation whose intent was journaled
+	// but whose publish never left the process, so no side effect is expected.
+	failureResultNotSent              failureResult = "not_sent"
 	failureResultMissingAfterDeadline failureResult = "missing_after_deadline"
 )
 
-var errFailureLedgerCapacity = errors.New("failure ledger capacity exceeded")
+var (
+	errFailureLedgerCapacity     = errors.New("failure ledger capacity exceeded")
+	errFailureOperationNotActive = errors.New("failure operation is not active")
+)
+
+const invalidReasonCapacity = "capacity"
 
 type failureOperation struct {
 	ID            string                                 `json:"id"`
@@ -52,6 +66,9 @@ type failureOperation struct {
 
 	nextVerifyAt time.Time
 	claimed      bool
+	// heapIndex is the operation's position in the ledger's verification queue,
+	// or -1 when it is not queued.
+	heapIndex int
 }
 
 type failureLedgerEvent struct {
@@ -98,6 +115,7 @@ type failureLedgerRecorder interface {
 type failureLedgerSnapshot struct {
 	Active        int
 	Recovered     int
+	Dropped       int
 	InvalidReason string
 	Results       map[failureResult]uint64
 	JournalBytes  int64
@@ -113,11 +131,49 @@ type failureLedger struct {
 	recorder     failureLedgerRecorder
 
 	active                map[string]*failureOperation
+	verifyQueue           failureVerifyQueue
 	results               map[failureResult]uint64
 	recovered             int
+	dropped               int
 	invalidReason         string
 	closed                bool
 	finalizedSinceCompact int
+}
+
+// failureVerifyQueue orders unclaimed operations by their next verification
+// time so ClaimDue is O(log n) instead of scanning every in-flight operation
+// under the lock that also serializes fsync-bearing journal appends.
+type failureVerifyQueue []*failureOperation
+
+func (q failureVerifyQueue) Len() int { return len(q) }
+
+func (q failureVerifyQueue) Less(i, j int) bool {
+	return q[i].nextVerifyAt.Before(q[j].nextVerifyAt)
+}
+
+func (q failureVerifyQueue) Swap(i, j int) {
+	q[i], q[j] = q[j], q[i]
+	q[i].heapIndex = i
+	q[j].heapIndex = j
+}
+
+func (q *failureVerifyQueue) Push(item any) {
+	operation, ok := item.(*failureOperation)
+	if !ok {
+		return
+	}
+	operation.heapIndex = len(*q)
+	*q = append(*q, operation)
+}
+
+func (q *failureVerifyQueue) Pop() any {
+	old := *q
+	last := len(old) - 1
+	operation := old[last]
+	old[last] = nil
+	operation.heapIndex = -1
+	*q = old[:last]
+	return operation
 }
 
 func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
@@ -177,7 +233,7 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 		return fmt.Errorf("failure operation %q is already active", tracked.ID)
 	}
 	if len(l.active) >= l.capacity {
-		l.invalidateLocked("capacity")
+		l.invalidateLocked(invalidReasonCapacity)
 		return fmt.Errorf("start failure operation %q: %w", tracked.ID, errFailureLedgerCapacity)
 	}
 	event := failureLedgerEvent{
@@ -189,8 +245,39 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 		return fmt.Errorf("persist failure operation %q: %w", tracked.ID, err)
 	}
 	l.active[tracked.ID] = tracked
+	l.enqueueLocked(tracked)
 	if l.recorder != nil {
 		l.recorder.OperationStarted(cloneFailureOperation(tracked))
+	}
+	return nil
+}
+
+// Abandon terminates an active operation with an explicit result. It exists for
+// outcomes that no observer can report, most importantly a send whose intent was
+// journaled before a publish that never left the process: without this the
+// unresolved history observer would later expire into the data-loss bucket.
+func (l *failureLedger) Abandon(
+	operationID string,
+	result failureResult,
+	at time.Time,
+) error {
+	if !validFailureResult(result) {
+		return fmt.Errorf("invalid failure result %q", result)
+	}
+	if at.IsZero() {
+		at = l.now()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.ensureOpen(); err != nil {
+		return err
+	}
+	operation := l.active[operationID]
+	if operation == nil {
+		return fmt.Errorf("abandon failure operation %q: %w", operationID, errFailureOperationNotActive)
+	}
+	if err := l.finalizeLocked(operation, result, at); err != nil {
+		return err
 	}
 	return nil
 }
@@ -208,7 +295,9 @@ func (l *failureLedger) Observe(
 	}
 	operation := l.active[operationID]
 	if operation == nil {
-		return false, fmt.Errorf("failure operation %q is not active", operationID)
+		return false, fmt.Errorf(
+			"observe failure operation %q: %w", operationID, errFailureOperationNotActive,
+		)
 	}
 	if !slices.Contains(operation.Expected, observer) {
 		return false, fmt.Errorf(
@@ -243,6 +332,9 @@ func (l *failureLedger) Observe(
 		return false, fmt.Errorf("persist failure observation for %q: %w", operationID, err)
 	}
 	operation.Observations[observer] = observation
+	if observer == failureObserverHistory {
+		l.dequeueLocked(operation)
+	}
 	if l.recorder != nil {
 		l.recorder.ObservationRecorded(
 			cloneFailureOperation(operation), observer, observation,
@@ -269,6 +361,12 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 	finalized := 0
 	for _, operation := range l.active {
 		if now.Before(operation.Deadline) {
+			continue
+		}
+		// A claimed operation is mid-verification. Finalizing it here would
+		// discard a read-back that is about to succeed and report the message
+		// as missing; the next pass picks it up once the claim is released.
+		if operation.claimed {
 			continue
 		}
 		for _, observer := range operation.Expected {
@@ -312,22 +410,11 @@ func (l *failureLedger) ClaimDue(now time.Time) (failureOperation, bool) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var selected *failureOperation
-	for _, operation := range l.active {
-		if operation.claimed || now.Before(operation.nextVerifyAt) {
-			continue
-		}
-		if !slices.Contains(operation.Expected, failureObserverHistory) {
-			continue
-		}
-		if _, observed := operation.Observations[failureObserverHistory]; observed {
-			continue
-		}
-		if selected == nil || operation.nextVerifyAt.Before(selected.nextVerifyAt) {
-			selected = operation
-		}
+	if l.verifyQueue.Len() == 0 || now.Before(l.verifyQueue[0].nextVerifyAt) {
+		return failureOperation{}, false
 	}
-	if selected == nil {
+	selected, ok := heap.Pop(&l.verifyQueue).(*failureOperation)
+	if !ok {
 		return failureOperation{}, false
 	}
 	selected.claimed = true
@@ -339,11 +426,34 @@ func (l *failureLedger) ReleaseClaim(operationID string, next time.Time) error {
 	defer l.mu.Unlock()
 	operation := l.active[operationID]
 	if operation == nil {
-		return fmt.Errorf("release failure operation %q: not active", operationID)
+		return fmt.Errorf(
+			"release failure operation %q: %w", operationID, errFailureOperationNotActive,
+		)
 	}
 	operation.claimed = false
 	operation.nextVerifyAt = next.UTC()
+	l.enqueueLocked(operation)
 	return nil
+}
+
+func (l *failureLedger) enqueueLocked(operation *failureOperation) {
+	if operation.heapIndex >= 0 || operation.claimed {
+		return
+	}
+	if !slices.Contains(operation.Expected, failureObserverHistory) {
+		return
+	}
+	if _, observed := operation.Observations[failureObserverHistory]; observed {
+		return
+	}
+	heap.Push(&l.verifyQueue, operation)
+}
+
+func (l *failureLedger) dequeueLocked(operation *failureOperation) {
+	if operation.heapIndex < 0 {
+		return
+	}
+	heap.Remove(&l.verifyQueue, operation.heapIndex)
 }
 
 func (l *failureLedger) Snapshot() failureLedgerSnapshot {
@@ -358,7 +468,7 @@ func (l *failureLedger) Snapshot() failureLedgerSnapshot {
 		journalBytes = l.journal.Size()
 	}
 	return failureLedgerSnapshot{
-		Active: len(l.active), Recovered: l.recovered,
+		Active: len(l.active), Recovered: l.recovered, Dropped: l.dropped,
 		InvalidReason: l.invalidReason, Results: results,
 		JournalBytes: journalBytes,
 	}
@@ -394,6 +504,7 @@ func (l *failureLedger) finalizeLocked(
 		return fmt.Errorf("persist finalized failure operation %q: %w", operation.ID, err)
 	}
 	l.results[result]++
+	l.dequeueLocked(operation)
 	delete(l.active, operation.ID)
 	if l.recorder != nil {
 		l.recorder.OperationFinalized(cloneFailureOperation(operation), result)
@@ -458,6 +569,11 @@ func (l *failureLedger) appendLocked(event *failureLedgerEvent) error {
 }
 
 func (l *failureLedger) replay(events []failureLedgerEvent) error {
+	// A retained volume outlives any single configuration, so a journal can
+	// legitimately hold more unresolved operations than the current capacity
+	// admits. Dropping the excess degrades observation for this run; failing
+	// would crash-loop the pod with no way out.
+	dropped := make(map[string]struct{})
 	for index, event := range events {
 		switch event.Type {
 		case failureLedgerEventStarted:
@@ -469,12 +585,17 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 				return fmt.Errorf("replay failure ledger event %d: %w", index, err)
 			}
 			if len(l.active) >= l.capacity {
-				return fmt.Errorf("replay failure ledger event %d: %w", index, errFailureLedgerCapacity)
+				dropped[operation.ID] = struct{}{}
+				l.dropped++
+				continue
 			}
 			operation.nextVerifyAt = operation.VerifyAfter
 			operation.claimed = false
 			l.active[operation.ID] = operation
 		case failureLedgerEventObserved:
+			if _, skipped := dropped[event.OperationID]; skipped {
+				continue
+			}
 			operation := l.active[event.OperationID]
 			if operation == nil {
 				return fmt.Errorf(
@@ -485,6 +606,11 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 			}
 			operation.Observations[event.Observer] = event.Observation
 		case failureLedgerEventFinalized:
+			if _, skipped := dropped[event.OperationID]; skipped {
+				delete(dropped, event.OperationID)
+				l.dropped--
+				continue
+			}
 			if _, exists := l.active[event.OperationID]; !exists {
 				return fmt.Errorf(
 					"replay failure ledger event %d: operation %q is not active",
@@ -496,6 +622,17 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 		default:
 			return fmt.Errorf("replay failure ledger event %d: unknown type %q", index, event.Type)
 		}
+	}
+	if l.dropped > 0 {
+		slog.Warn(
+			"failure ledger dropped recovered operations over capacity",
+			"dropped", l.dropped,
+			"capacity", l.capacity,
+		)
+		l.invalidateLocked(invalidReasonCapacity)
+	}
+	for _, operation := range l.active {
+		l.enqueueLocked(operation)
 	}
 	return nil
 }
@@ -549,6 +686,7 @@ func validateFailureOperation(operation *failureOperation) error {
 	if operation.Observations == nil {
 		operation.Observations = make(map[failureObserver]failureObservation)
 	}
+	operation.heapIndex = -1
 	return nil
 }
 
@@ -556,6 +694,7 @@ func validFailureObservation(observation failureObservation) bool {
 	switch observation {
 	case failureObservationGood,
 		failureObservationBad,
+		failureObservationUnverified,
 		failureObservationMissingAfterDeadline:
 		return true
 	default:
@@ -563,6 +702,23 @@ func validFailureObservation(observation failureObservation) bool {
 	}
 }
 
+func validFailureResult(result failureResult) bool {
+	switch result {
+	case failureResultGood,
+		failureResultBad,
+		failureResultUnverified,
+		failureResultNotSent,
+		failureResultMissingAfterDeadline:
+		return true
+	default:
+		return false
+	}
+}
+
+// failureOperationResult collapses an operation's observations into one verdict.
+// Precedence runs from strongest evidence to weakest: a confirmed absence
+// outranks an ambiguous observation, which outranks "the observer could not
+// answer", which outranks success.
 func failureOperationResult(operation *failureOperation) failureResult {
 	result := failureResultGood
 	for _, observation := range operation.Observations {
@@ -572,6 +728,10 @@ func failureOperationResult(operation *failureOperation) failureResult {
 			return failureResultMissingAfterDeadline
 		case failureObservationBad:
 			result = failureResultBad
+		case failureObservationUnverified:
+			if result == failureResultGood {
+				result = failureResultUnverified
+			}
 		}
 	}
 	return result
@@ -582,6 +742,7 @@ func cloneFailureOperation(operation *failureOperation) *failureOperation {
 		return nil
 	}
 	cloned := *operation
+	cloned.heapIndex = -1
 	cloned.Expected = append([]failureObserver(nil), operation.Expected...)
 	cloned.Attributes = make(map[string]string, len(operation.Attributes))
 	for key, value := range operation.Attributes {

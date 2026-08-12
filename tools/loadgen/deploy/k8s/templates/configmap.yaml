@@ -52,6 +52,7 @@ data:
   SOAK_LEDGER_CAPACITY: {{ .Values.ledger.capacity | quote }}
   SOAK_RECONCILE_DEADLINE: {{ .Values.ledger.reconcileDeadline | quote }}
   SOAK_RECONCILE_RETRY_INTERVAL: {{ .Values.ledger.reconcileRetryInterval | quote }}
+  SOAK_RECONCILE_READ_SHARE: {{ .Values.ledger.reconcileReadShare | quote }}
   SOAK_CASSANDRA_CLEANUP: {{ .Values.cassandra.cleanup | quote }}
   SOAK_CONFIRM_KEYSPACE: {{ .Values.cassandra.confirmKeyspace | quote }}
   SOAK_TEARDOWN_BATCH_ROOMS: {{ .Values.teardown.batchRooms | quote }}

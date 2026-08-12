@@ -273,6 +273,7 @@ Run A environment variables:
 | `SOAK_LEDGER_CAPACITY` | `200000` | Maximum unresolved message operations before evidence is invalidated. |
 | `SOAK_RECONCILE_DEADLINE` | `10m` | Deadline for admission and Cassandra history terminal observations. |
 | `SOAK_RECONCILE_RETRY_INTERVAL` | `1s` | Earliest retry after a missing or transient history read-back. |
+| `SOAK_RECONCILE_READ_SHARE` | `0.5` | Maximum fraction of the read lane reconciliation may claim, so the mixed read workload keeps running during a fault. |
 | `SOAK_CASSANDRA_CLEANUP` | `none` | `none` or guarded `truncate`. |
 | `SOAK_CONFIRM_KEYSPACE` | empty | Must exactly match the keyspace for `truncate`. |
 | `SOAK_TEARDOWN_BATCH_ROOMS` | `250` | Maximum owned room IDs per Mongo deletion batch. |

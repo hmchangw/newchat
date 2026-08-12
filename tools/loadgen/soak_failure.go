@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/subject"
@@ -50,11 +52,26 @@ func openSoakFailureLedger(
 	return ledger, nil
 }
 
+const (
+	failureUntrackedReasonStart   = "start"
+	failureUntrackedReasonObserve = "observe"
+	failureUntrackedReasonAbandon = "abandon"
+)
+
 type soakFailureTracker struct {
 	ledger       *failureLedger
 	persistGrace time.Duration
 	deadline     time.Duration
 	now          func() time.Time
+	metrics      *Metrics
+}
+
+type soakFailureTrackerOption func(*soakFailureTracker)
+
+func withSoakFailureMetrics(metrics *Metrics) soakFailureTrackerOption {
+	return func(tracker *soakFailureTracker) {
+		tracker.metrics = metrics
+	}
 }
 
 func newSoakFailureTracker(
@@ -62,14 +79,26 @@ func newSoakFailureTracker(
 	persistGrace time.Duration,
 	deadline time.Duration,
 	now func() time.Time,
+	options ...soakFailureTrackerOption,
 ) *soakFailureTracker {
 	if now == nil {
 		now = time.Now
 	}
-	return &soakFailureTracker{
+	tracker := &soakFailureTracker{
 		ledger: ledger, persistGrace: max(0, persistGrace),
 		deadline: max(time.Second, deadline), now: now,
 	}
+	for _, option := range options {
+		option(tracker)
+	}
+	return tracker
+}
+
+func (t *soakFailureTracker) countUntracked(reason string) {
+	if t.metrics == nil {
+		return
+	}
+	t.metrics.FailureUntracked.WithLabelValues(reason).Inc()
 }
 
 func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
@@ -101,9 +130,35 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 	return nil
 }
 
+// AbandonUnsent closes an operation whose publish never left the process. The
+// intent is journaled before publishing, so without this the never-sent message
+// would expire as missing history and be reported as data loss.
+func (t *soakFailureTracker) AbandonUnsent(pending *soakPendingSend) error {
+	if t == nil || t.ledger == nil {
+		return fmt.Errorf("soak failure ledger is required")
+	}
+	if pending == nil || pending.MessageID == "" {
+		return fmt.Errorf("soak pending send requires message ID")
+	}
+	err := t.ledger.Abandon(pending.MessageID, failureResultNotSent, t.now().UTC())
+	if errors.Is(err, errFailureOperationNotActive) {
+		t.countUntracked(failureUntrackedReasonAbandon)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("abandon unsent soak operation: %w", err)
+	}
+	return nil
+}
+
 func (t *soakFailureTracker) ObserveReply(result *soakSendReplyResult) error {
 	if t == nil || t.ledger == nil {
 		return fmt.Errorf("soak failure ledger is required")
+	}
+	// A reply with no matching pending send belongs to no ledger operation —
+	// typically a late response whose send already expired.
+	if result.Status == soakSendReplyUnmatched {
+		return nil
 	}
 	if result.MessageID == "" {
 		return fmt.Errorf("soak send result requires message ID")
@@ -112,12 +167,19 @@ func (t *soakFailureTracker) ObserveReply(result *soakSendReplyResult) error {
 	if result.Status == soakSendReplyAccepted {
 		observation = failureObservationGood
 	}
-	if _, err := t.ledger.Observe(
+	_, err := t.ledger.Observe(
 		result.MessageID,
 		failureObserverAdmission,
 		observation,
 		t.now().UTC(),
-	); err != nil {
+	)
+	// A send the ledger never accepted (or already finalized) still has to move
+	// traffic; the counter keeps the accounting gap visible instead of silent.
+	if errors.Is(err, errFailureOperationNotActive) {
+		t.countUntracked(failureUntrackedReasonObserve)
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("record soak admission observation: %w", err)
 	}
 	return nil
@@ -277,40 +339,75 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	result, verifyErr := r.verifier.Verify(ctx, &operation)
-	if verifyErr != nil || result == soakFailureHistoryMissing ||
-		result == soakFailureHistoryMismatch {
-		if now.Before(operation.Deadline) {
-			if err := r.ledger.ReleaseClaim(
-				operation.ID,
-				now.Add(r.retryInterval),
-			); err != nil {
-				return true, err
-			}
-			return true, nil
-		}
-		observation := failureObservationMissingAfterDeadline
-		if result == soakFailureHistoryMismatch {
-			observation = failureObservationBad
-		}
-		_, err := r.ledger.Observe(
+	if verifyErr == nil && result == soakFailureHistoryFound {
+		return true, r.observe(operation.ID, failureObservationGood, now)
+	}
+	if now.Before(operation.Deadline) {
+		if err := r.ledger.ReleaseClaim(
 			operation.ID,
-			failureObserverHistory,
-			observation,
-			now,
-		)
-		if err != nil {
-			return true, fmt.Errorf("record missing soak history: %w", err)
+			now.Add(r.retryInterval),
+		); err != nil {
+			return true, err
 		}
 		return true, nil
 	}
 
+	// Past the deadline the verdict depends on what the verifier could actually
+	// establish. An unreachable history service proves nothing, so it must not
+	// be recorded as a missing message: that would turn every dependency outage
+	// longer than the deadline into a data-loss report.
+	observation := failureObservationMissingAfterDeadline
+	switch {
+	case verifyErr != nil:
+		observation = failureObservationUnverified
+	case result == soakFailureHistoryMismatch:
+		observation = failureObservationBad
+	}
+	return true, r.observe(operation.ID, observation, now)
+}
+
+func (r *soakFailureReconciler) observe(
+	operationID string,
+	observation failureObservation,
+	now time.Time,
+) error {
 	if _, err := r.ledger.Observe(
-		operation.ID,
+		operationID,
 		failureObserverHistory,
-		failureObservationGood,
+		observation,
 		now,
 	); err != nil {
-		return true, fmt.Errorf("record soak history observation: %w", err)
+		// Leave the operation claimable so a later pass can retry it rather
+		// than stranding it in-flight forever.
+		_ = r.ledger.ReleaseClaim(operationID, now.Add(r.retryInterval))
+		return fmt.Errorf("record soak history observation: %w", err)
 	}
-	return true, nil
+	return nil
+}
+
+// soakShareGate admits a fixed fraction of calls. Reconciliation runs inside the
+// read lane, so without a cap a large unresolved backlog would consume every
+// read slot and stop the production-like read mix during the fault window.
+type soakShareGate struct {
+	mu     sync.Mutex
+	share  float64
+	credit float64
+}
+
+func newSoakShareGate(share float64) *soakShareGate {
+	return &soakShareGate{share: min(max(share, 0), 1)}
+}
+
+func (g *soakShareGate) Allow() bool {
+	if g == nil {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.credit += g.share
+	if g.credit < 1 {
+		return false
+	}
+	g.credit--
+	return true
 }

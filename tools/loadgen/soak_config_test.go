@@ -299,6 +299,16 @@ func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 			mutate: func(cfg *soakConfig) { cfg.ReconcileRetryInterval = 0 },
 			want:   "SOAK_RECONCILE_RETRY_INTERVAL",
 		},
+		{
+			name:   "zero read share",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = 0 },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+		{
+			name:   "read share claims the whole read lane",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = 1.5 },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

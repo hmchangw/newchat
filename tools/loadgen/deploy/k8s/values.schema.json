@@ -99,7 +99,8 @@
         "mountPath",
         "capacity",
         "reconcileDeadline",
-        "reconcileRetryInterval"
+        "reconcileRetryInterval",
+        "reconcileReadShare"
       ],
       "properties": {
         "enabled": {"type": "boolean"},
@@ -113,7 +114,8 @@
         "mountPath": {"type": "string", "pattern": "^/"},
         "capacity": {"type": "string", "minLength": 1},
         "reconcileDeadline": {"type": "string", "minLength": 1},
-        "reconcileRetryInterval": {"type": "string", "minLength": 1}
+        "reconcileRetryInterval": {"type": "string", "minLength": 1},
+        "reconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
       }
     },
     "seed": {

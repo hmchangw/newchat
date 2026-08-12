@@ -76,7 +76,9 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
       "targets": [
         {"expr": "sum by (lane) (loadgen_failure_inflight)", "legendFormat": "{{lane}} inflight", "refId": "A"},
-        {"expr": "sum by (reason) (increase(loadgen_failure_invalidations_total[5m]))", "legendFormat": "{{reason}} invalidations/5m", "refId": "B"}
+        {"expr": "sum by (reason) (increase(loadgen_failure_invalidations_total[5m]))", "legendFormat": "{{reason}} invalidations/5m", "refId": "B"},
+        {"expr": "sum by (reason) (increase(loadgen_failure_untracked_total[5m]))", "legendFormat": "{{reason}} untracked/5m", "refId": "C"},
+        {"expr": "increase(loadgen_failure_dropped_total[5m])", "legendFormat": "dropped on recovery/5m", "refId": "D"}
       ]
     },
     {

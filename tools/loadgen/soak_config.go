@@ -56,6 +56,7 @@ type soakConfig struct {
 	LedgerCapacity              int           `env:"LEDGER_CAPACITY"                  envDefault:"200000"`
 	ReconcileDeadline           time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
 	ReconcileRetryInterval      time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
+	ReconcileReadShare          float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
 	CassandraCleanup            string        `env:"CASSANDRA_CLEANUP"                envDefault:"none"`
 	ConfirmKeyspace             string        `env:"CONFIRM_KEYSPACE"                 envDefault:""`
 	TeardownBatchRooms          int           `env:"TEARDOWN_BATCH_ROOMS"              envDefault:"250"`
@@ -178,6 +179,9 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if cfg.ReconcileRetryInterval <= 0 {
 		return fmt.Errorf("SOAK_RECONCILE_RETRY_INTERVAL must be greater than zero")
+	}
+	if cfg.ReconcileReadShare <= 0 || cfg.ReconcileReadShare > 1 {
+		return fmt.Errorf("SOAK_RECONCILE_READ_SHARE must be greater than zero and at most 1")
 	}
 
 	if cfg.MaxUsers <= 0 || cfg.MaxUsers > maxBorrowedSoakUsers {
