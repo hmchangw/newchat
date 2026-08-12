@@ -2262,6 +2262,30 @@ func TestSearchMessagesRequestJSON(t *testing.T) {
 		_, present := raw["roomIds"]
 		assert.False(t, present, "roomIds must be omitted when nil")
 	})
+
+	t.Run("dateRange omitzero drops an open (zero) bound", func(t *testing.T) {
+		start := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+		// start-only: End is zero and must be omitted (not "0001-01-01T00:00:00Z").
+		data, err := json.Marshal(&model.SearchMessagesRequest{DateRange: &model.DateRange{Start: start}})
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		dr := raw["dateRange"].(map[string]any)
+		_, hasStart := dr["start"]
+		_, hasEnd := dr["end"]
+		assert.True(t, hasStart, "start present")
+		assert.False(t, hasEnd, "zero end must be omitted by omitzero")
+
+		// end-only: symmetric.
+		data, err = json.Marshal(&model.SearchMessagesRequest{DateRange: &model.DateRange{End: start}})
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(data, &raw))
+		dr = raw["dateRange"].(map[string]any)
+		_, hasStart = dr["start"]
+		_, hasEnd = dr["end"]
+		assert.False(t, hasStart, "zero start must be omitted by omitzero")
+		assert.True(t, hasEnd, "end present")
+	})
 }
 
 func TestSearchMessagesResponseJSON(t *testing.T) {

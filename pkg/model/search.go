@@ -28,8 +28,11 @@ type SearchMessagesRequest struct {
 // DateRange bounds a createdAt filter; presets (today/thisWeek/…) are resolved
 // client-side into a concrete range before the request is sent.
 type DateRange struct {
-	Start time.Time `json:"start,omitempty"`
-	End   time.Time `json:"end,omitempty"`
+	// omitzero (not omitempty): a zero time.Time is a non-empty struct, so
+	// omitempty would still marshal it as "0001-01-01T00:00:00Z"; omitzero
+	// drops it so a client can leave one bound open by zeroing it.
+	Start time.Time `json:"start,omitzero"`
+	End   time.Time `json:"end,omitzero"`
 }
 
 // SearchMessagesResponse is the NATS reply for `search.messages`.
