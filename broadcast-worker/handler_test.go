@@ -2497,6 +2497,44 @@ func TestHandleThreadCreated_DMRoom_FansOutToAllMembers(t *testing.T) {
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
 }
 
+func TestHandleThreadCreated_BotDMRoom_EmitsNewThreadMessage(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 11, 0, 0, 0, time.UTC)
+
+	// botDM thread replies fan out per member (unlike an ordinary botDM new_message,
+	// which is suppressed) — the production branch handles RoomTypeBotDM too.
+	botDMRoom := &model.Room{ID: "dm-1", Type: model.RoomTypeBotDM, SiteID: "site-a", UserCount: 2}
+	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(botDMRoom), nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    "site-a",
+		Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "thread reply in botDM", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-dm", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.NotEmpty(t, pub.records, "botDM thread reply fans out per member")
+	for _, r := range pub.records {
+		roomEvt := decodeRoomEvent(t, r.data)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "botDM thread reply must publish new_thread_message")
+	}
+}
+
 func TestHandleThreadCreated_DMRoom_WithMention_NoSubscriptionWrite(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)

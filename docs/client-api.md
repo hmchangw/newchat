@@ -6317,7 +6317,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 
 #### Triggered events — success path
 
-After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape, see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). **`botDM` rooms receive no fan-out at all:** `broadcast-worker` only handles `channel` and `dm` room types, so a `botDM` falls through to the default branch and is skipped — the human participant in a `botDM` does **not** receive a `new_message` room event from this pipeline. (Bot integrations consume `botDM` messages through a separate backend path.)
+After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). **An ordinary `botDM` `new_message` receives no fan-out:** for a non-thread message `broadcast-worker` only handles `channel` and `dm` room types, so a `botDM` falls through the default branch — its human participant does **not** receive a `new_message` room event from this pipeline. A `botDM` **thread reply**, however, **does** fan out per member as `new_thread_message`. (Bot integrations consume `botDM` messages through a separate backend path.)
 
 **1. For channel rooms — `chat.room.{roomID}.event`** (`publishChannelEvent`)
 
@@ -6325,7 +6325,7 @@ A `RoomEvent`. Recipients: every client subscribed to the room (which includes t
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | string | Always `"new_message"`. |
+| `type` | string | `"new_message"` for this room-wide channel path. A thread reply carries `"new_thread_message"` instead and is delivered per-subscriber (see [new_thread_message](client-api/events.md#new_thread_message-roomevent)). |
 | `roomId` | string | |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 | `eventTimestamp` | number | Milliseconds since Unix epoch (UTC). When message-worker published the canonical event. Omitted for legacy events. |

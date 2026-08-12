@@ -48,8 +48,8 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.event.settings.update` | SettingsUpdateEvent |
 | `chat.user.{account}.event.chatlist.update` | ChatlistUpdateEvent |
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
-| `chat.room.{roomID}.event` | new_message, new_thread_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
-| `chat.user.{account}.event.room` | same event types as above, per-user fan-out for DM/botDM rooms |
+| `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
+| `chat.user.{account}.event.room` | same event types as above (per-user fan-out for DM/botDM rooms); **plus `new_thread_message`** — channel thread replies fan out per-subscriber on this subject, not the room subject |
 | `chat.room.{roomID}.event.member` (or `chat.local.room.{roomID}.event.member` for same-site rooms, by `crossSite`) | member_added, member_left / member_removed |
 | `chat.user.{account}.notification` | NotificationEvent (reaction only) |
 | `chat.user.presence.state.{account}` | PresenceState |
@@ -484,7 +484,12 @@ Triggered by [Send Message](request-reply.md#send-message) when `threadParentMes
 is set. Thread edits/deletes still publish `message_edited` / `message_deleted`; only the
 create event gets the distinct type.
 
-**botDM rooms receive no fan-out** — same as `new_message`.
+**Delivery differs from `new_message`.** A channel thread reply is **not** published room-wide on
+`chat.room.{roomID}.event`; it fans out **per-subscriber** on `chat.user.{account}.event.room` to the
+reply sender, the parent-message author, thread followers (anyone who has replied in the thread), and
+history-gated @-mentioned accounts. DM/botDM thread replies fan out **per member** on the same
+`chat.user.{account}.event.room` subject — **including `botDM`** (unlike an ordinary `new_message`, whose
+`botDM` fan-out is suppressed).
 
 | Field | Type | Notes |
 |---|---|---|
