@@ -268,8 +268,11 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// roomsEnrichStages(true) drops locally soft-deleted (^Del-) rooms; cross-site
 	// rooms have no local room doc and are kept (their deletion isn't visible here).
 	pipeline := bson.A{bson.M{"$match": match}}
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	// Origin filter runs BEFORE enrichment: it reads the sub's own origin, which is
+	// reliable cross-site. roomsEnrichStages overwrites origin with $room.origin (null
+	// for a remote room with no local doc), so filtering after enrich would leak it.
 	pipeline = append(pipeline, r.originFilterStage()...)
+	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	// Activity window keys on the room's lastMsgAt (surfaced by the enrich stage),
 	// not the subscription's _updatedAt. rooms-type only; cross-site / no-message
 	// rooms (null lastMsgAt) fall outside the window.
@@ -287,8 +290,10 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 }
 
 // originFilterStage excludes Teams-migrated rooms (origin "teams") when
-// showTeamsRoom is false; empty (no-op) otherwise. Must run after
-// roomsEnrichStages, which surfaces the joined room's origin field.
+// showTeamsRoom is false; empty (no-op) otherwise. Must run BEFORE
+// roomsEnrichStages: it filters on the subscription's own origin field (reliable
+// cross-site), which enrichment later overwrites with the null $room.origin of a
+// remote room that has no local doc.
 func (r *SubscriptionRepo) originFilterStage() bson.A {
 	if r.showTeamsRoom {
 		return bson.A{}
@@ -436,8 +441,10 @@ func activeSubscriptionFilter(account string) bson.M {
 // CountActiveSubscriptions counts the deleted-filtered active set via $count over the enriched pipeline (CountDocuments cannot see the join).
 func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account string) (int, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	// Filter on the sub's own origin before enrichment overwrites it with the
+	// (null cross-site) $room.origin — see AggregateSubscriptions.
 	pipeline = append(pipeline, r.originFilterStage()...)
+	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	pipeline = append(pipeline, bson.M{"$count": "n"})
 	cur, err := r.subscriptionsSecondary.Raw().Aggregate(ctx, pipeline)
 	if err != nil {

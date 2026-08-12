@@ -198,6 +198,10 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			HistorySharedSince: historySharedSince,
 			JoinedAt:           joinedAt,
 			Open:               true,
+			// Stamp provenance on the federated sub so the origin filter (which reads
+			// the sub's own origin, not the null cross-site $room.origin) can hide a
+			// Teams room from a remote member. Empty for native rooms.
+			Origin: event.Origin,
 		}
 		subs = append(subs, sub)
 	}

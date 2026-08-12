@@ -344,6 +344,38 @@ func TestAggregateSubscriptions_CrossSite_Integration(t *testing.T) {
 	assert.Nil(t, crossSite["sub-local-only"], "room without crossSite must decode as nil (unclassified)")
 }
 
+// TestAggregateSubscriptions_HidesCrossSiteTeamsRoom_Integration proves the origin
+// filter reads the SUB's own origin, not the enriched $room.origin. A Teams room owned
+// by site-a has no local room doc here, so $room.origin is null; only the sub carries
+// origin="teams". With showTeamsRoom=false (default) the Teams sub must be hidden while a
+// native cross-site sub (no origin, also no local room) stays visible.
+func TestAggregateSubscriptions_HidesCrossSiteTeamsRoom_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// No rooms seeded for either roomId → both are remote (no local doc), the cross-site case.
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "sub-xsite-teams", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-xsite-teams",
+			"name": "Migrated", "roomType": "channel", "siteId": "site-a", "origin": "teams", "createdAt": now},
+		bson.M{"_id": "sub-xsite-native", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-xsite-native",
+			"name": "Native", "roomType": "channel", "siteId": "site-a", "createdAt": now},
+	)
+
+	page, err := r.AggregateSubscriptions(ctx, "alice", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
+	require.NoError(t, err)
+	byID := map[string]bool{}
+	for _, sub := range page.Data {
+		byID[sub.ID] = true
+	}
+	assert.False(t, byID["sub-xsite-teams"], "cross-site Teams room must be hidden when showTeamsRoom=false")
+	assert.True(t, byID["sub-xsite-native"], "native cross-site room must stay visible")
+
+	n, err := r.CountActiveSubscriptions(ctx, "alice")
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "count must exclude the cross-site Teams room, include the native one")
+}
+
 // TestFindChannelsByMembers_CrossSite_Integration exercises the SEPARATE roomMatchStages
 // pipeline plus the terminal subscriptionProjection — an inclusion-only $project that
 // silently drops any field not explicitly whitelisted, so crossSite must be listed there
