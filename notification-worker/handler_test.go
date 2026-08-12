@@ -1232,4 +1232,100 @@ func TestHandle_PriorityContactSenderPiercesMute(t *testing.T) {
 		"bob listed helper.bot as priority; carol did not")
 }
 
+// TestHandle_PriorityContactPiercesPresenceSuppression pins the reversal
+// end-to-end: the pierce crosses the presence gate, and it is keyed on the
+// sender's account — bob lists the sender, carol lists someone else, and both
+// have the same suppressing presence.
+func TestHandle_PriorityContactPiercesPresenceSuppression(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	presence := &stubPresence{out: map[string]model.Presence{
+		"bob":   {AggregatedStatus: "busy"},
+		"carol": {AggregatedStatus: "busy"},
+	}}
+	settings := &stubSettings{out: map[string]notifSettings{
+		"bob":   {allowPriority: true, priorityContacts: map[string]struct{}{"alice": {}}},
+		"carol": {allowPriority: true, priorityContacts: map[string]struct{}{"dave": {}}},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithSettings(members, presence, settings, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"bob"}, emit.accounts(),
+		"bob lists the sender as a priority contact and is pierced out of presence suppression; carol does not")
+}
+
+// TestHandle_DNDAndPresentingSuppressPush proves the handler consults both stubs
+// once they go live. Every recipient here has showNotificationsInCall set, so
+// only a suppressor the opt-in does NOT govern can drop them — which is exactly
+// rule 2. Uses invented statuses so the test asserts the wiring, not a mapping
+// the presence side has yet to define.
+func TestHandle_DNDAndPresentingSuppressPush(t *testing.T) {
+	stubPresenceFlagsByStatus(t, "stub-dnd", "stub-presenting")
+
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+			{ID: "dave", Account: "dave"},
+		},
+	}}
+	presence := &stubPresence{out: map[string]model.Presence{
+		"bob":   {AggregatedStatus: "stub-dnd"},
+		"carol": {AggregatedStatus: "stub-presenting"},
+		"dave":  {AggregatedStatus: "online"},
+	}}
+	settings := &stubSettings{out: map[string]notifSettings{
+		"bob":   {showInCall: true},
+		"carol": {showInCall: true},
+		"dave":  {showInCall: true},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithSettings(members, presence, settings, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"dave"}, emit.accounts(),
+		"DND and presenting suppress regardless of showNotificationsInCall")
+}
+
+// TestHandle_PriorityContactPiercesDNDStub is the pierce counterpart: the same
+// suppressed recipient survives when the sender is one of their priority contacts.
+func TestHandle_PriorityContactPiercesDNDStub(t *testing.T) {
+	stubPresenceFlagsByStatus(t, "stub-dnd", "")
+
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	presence := &stubPresence{out: map[string]model.Presence{
+		"bob":   {AggregatedStatus: "stub-dnd"},
+		"carol": {AggregatedStatus: "stub-dnd"},
+	}}
+	settings := &stubSettings{out: map[string]notifSettings{
+		"bob":   {allowPriority: true, priorityContacts: map[string]struct{}{"alice": {}}},
+		"carol": {allowPriority: true, priorityContacts: map[string]struct{}{"dave": {}}},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithSettings(members, presence, settings, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+	assert.Equal(t, []string{"bob"}, emit.accounts(),
+		"bob lists the sender as a priority contact and is pierced out of DND; carol does not")
+}
+
 func int64Ptr(v int64) *int64 { return &v }
