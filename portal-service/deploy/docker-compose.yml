@@ -37,6 +37,10 @@ services:
       - PORTAL_OTEL_BASE_URL=http://localhost:4318/v1
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
+      # Operator failover control surface (SP4). Dev-only token — never a real
+      # secret. Bound on an internal-only listener, off the public :8085 API.
+      - FAILOVER_OPS_TOKEN=dev-failover-token
+      - FAILOVER_INTERNAL_ADDR=:8090
     networks:
       - chat-local
 

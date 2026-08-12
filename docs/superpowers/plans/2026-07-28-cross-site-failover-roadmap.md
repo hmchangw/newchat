@@ -30,7 +30,7 @@ SP1  DR feed + backup materialization   (LINCHPIN — design not yet resolved)
         ▼               ▼                        ▼
 SP2  Backup serving   SP3  Routing brain       SP4  Failover trigger /
      stack + identity      (portal health-           health detection
-     (needs key custody)   aware override)           (feeds SP3)
+     (identity resolved)   aware override)           (feeds SP3)
         │               │                        │
         └───────┬───────┴────────────────────────┘
                 ▼
@@ -75,13 +75,18 @@ alongside from SP1 onward.
   - **SP1b (operational slice)** — rooms/subs/members/user-slice → backup Mongo via
     the mechanism chosen above. Blocked on §11.1.
 
-### SP2 — Backup serving stack + identity  *(needs SP1; needs key-custody design)*
-- **Deliverable:** the backup runs the impersonation — `auth-service` mints JWTs
-  for any site's accounts (incl. the `chat.local.room.>` grant), and the
-  send/receive + history-read paths serve from the materialized copy.
-- **Ready to plan?** **No.** Resolve §11.4 first (own brainstorm, security-
-  sensitive): concrete shared-signing / KMS scheme for cross-site JWT minting.
-  Serving-path work is plannable once SP1 exists and the key scheme is chosen.
+### SP2 — Backup serving stack + identity  *(identity resolved — World 1; serving needs SP1)*
+- **Deliverable:** the backup runs `auth-service` to mint displaced users' JWTs,
+  and the send/receive + history-read paths serve from the materialized copy.
+- **Identity — RESOLVED (World 1), spec `specs/2026-08-11-sp2-backup-identity-jwt-minting.md`.**
+  Production runs **one shared NATS account**, so the backup mints in that same
+  account (not impersonation, no per-site keys) and reuses `auth-service`
+  **unchanged**. The earlier "key-custody / KMS" brainstorm (old §11.4) is
+  **moot**. The only identity deliverables are config/ops: the shared-template
+  `chat.local.room.>` grant (SP0-coupled) and deploying `auth-service` at the
+  backup (SP6) — **no new minting code**.
+- **Serving path — still needs SP1.** Plannable once SP1 materialization exists;
+  that (not identity) is the remaining SP2 substance.
 
 ### SP3 — Routing brain: portal-service health-aware override  *(needs SP4 signal)*
 - **Deliverable:** `portal-service` becomes the single source of truth for "who
@@ -107,7 +112,8 @@ alongside from SP1 onward.
 ### SP6 — Ops / IaC / platform  *(cross-cutting runbook, not a TDD plan)*
 - Backup deployment (HA multi-AZ); backup as supercluster gateway peer; leaf-node
   `chat.local.>` deny on the backup's leaf; canonical restore-log `MaxAge` sizing
-  (spec §6.5); NKey/KMS provisioning (with SP2); **per-site replication-lag
+  (spec §6.5); backup `auth-service` deploy with the **shared** account creds
+  (World 1 — no per-site NKey/KMS provisioning); **per-site replication-lag
   monitoring + alerting** (spec §8 — the RPO-decay signal). Tracked as an ops
   checklist coordinated with the platform/NATS team, delivered alongside SP1–SP5.
 

@@ -40,6 +40,22 @@ func (m *MockDirectoryStore) EXPECT() *MockDirectoryStoreMockRecorder {
 	return m.recorder
 }
 
+// GetByAccount mocks base method.
+func (m *MockDirectoryStore) GetByAccount(ctx context.Context, account string) (employee, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetByAccount", ctx, account)
+	ret0, _ := ret[0].(employee)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetByAccount indicates an expected call of GetByAccount.
+func (mr *MockDirectoryStoreMockRecorder) GetByAccount(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetByAccount", reflect.TypeOf((*MockDirectoryStore)(nil).GetByAccount), ctx, account)
+}
+
 // ListEmployees mocks base method.
 func (m *MockDirectoryStore) ListEmployees(ctx context.Context) ([]employee, error) {
 	m.ctrl.T.Helper()
@@ -55,18 +71,70 @@ func (mr *MockDirectoryStoreMockRecorder) ListEmployees(ctx any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListEmployees", reflect.TypeOf((*MockDirectoryStore)(nil).ListEmployees), ctx)
 }
 
-// GetByAccount mocks base method.
-func (m *MockDirectoryStore) GetByAccount(ctx context.Context, account string) (employee, bool, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetByAccount", ctx, account)
-	ret0, _ := ret[0].(employee)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+// MockFailoverStore is a mock of FailoverStore interface.
+type MockFailoverStore struct {
+	ctrl     *gomock.Controller
+	recorder *MockFailoverStoreMockRecorder
+	isgomock struct{}
 }
 
-// GetByAccount indicates an expected call of GetByAccount.
-func (mr *MockDirectoryStoreMockRecorder) GetByAccount(ctx, account any) *gomock.Call {
+// MockFailoverStoreMockRecorder is the mock recorder for MockFailoverStore.
+type MockFailoverStoreMockRecorder struct {
+	mock *MockFailoverStore
+}
+
+// NewMockFailoverStore creates a new mock instance.
+func NewMockFailoverStore(ctrl *gomock.Controller) *MockFailoverStore {
+	mock := &MockFailoverStore{ctrl: ctrl}
+	mock.recorder = &MockFailoverStoreMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockFailoverStore) EXPECT() *MockFailoverStoreMockRecorder {
+	return m.recorder
+}
+
+// Get mocks base method.
+func (m *MockFailoverStore) Get(ctx context.Context, siteID string) (FailoverState, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Get", ctx, siteID)
+	ret0, _ := ret[0].(FailoverState)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Get indicates an expected call of Get.
+func (mr *MockFailoverStoreMockRecorder) Get(ctx, siteID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetByAccount", reflect.TypeOf((*MockDirectoryStore)(nil).GetByAccount), ctx, account)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockFailoverStore)(nil).Get), ctx, siteID)
+}
+
+// List mocks base method.
+func (m *MockFailoverStore) List(ctx context.Context) ([]FailoverState, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "List", ctx)
+	ret0, _ := ret[0].([]FailoverState)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// List indicates an expected call of List.
+func (mr *MockFailoverStoreMockRecorder) List(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "List", reflect.TypeOf((*MockFailoverStore)(nil).List), ctx)
+}
+
+// Transition mocks base method.
+func (m *MockFailoverStore) Transition(ctx context.Context, next *FailoverState) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Transition", ctx, next)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Transition indicates an expected call of Transition.
+func (mr *MockFailoverStoreMockRecorder) Transition(ctx, next any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Transition", reflect.TypeOf((*MockFailoverStore)(nil).Transition), ctx, next)
 }
