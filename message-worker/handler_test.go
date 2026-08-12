@@ -316,6 +316,23 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 		},
 		{
+			// A degraded lookup that answers some accounts must persist those. The
+			// L1 in pkg/userstore returns exactly this shape while Mongo is down;
+			// dropping it would bake a resolvable mention into Cassandra as plain
+			// text, unfixable after the outage ends.
+			name: "mention lookup degrades with partial hits — persists the resolved half",
+			data: dataWithMention,
+			setupMocks: func(store *MockStore, us *MockUserStore, ts *MockThreadStore) {
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+					Return([]model.User{{
+						ID: "u-bob", Account: "bob", SiteID: "site-a",
+						ChineseName: "鮑勃", EngName: "Bob Chen",
+					}}, errors.New("mongo: connection refused"))
+				us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+				store.EXPECT().SaveMessage(gomock.Any(), &msgWithMention, &expectedSender, "site-a").Return(nil)
+			},
+		},
+		{
 			name: "system message with unknown user — saved with nil sender",
 			data: func() []byte {
 				sysMsg := model.Message{

@@ -56,8 +56,10 @@ type ResolveResult struct {
 }
 
 // Resolve parses @mentions from content, looks up users via lookupFn,
-// and builds Participants. On lookup error, returns partial result
-// (MentionAll and Accounts populated, Participants empty) with the error.
+// and builds Participants. On lookup error it still returns everything it could
+// resolve — any users lookupFn managed to return, plus the @all entry, which
+// needs no lookup — alongside the error, so a degraded lookup loses only the
+// accounts it genuinely could not answer.
 func Resolve(ctx context.Context, content string, lookupFn LookupFunc) (*ResolveResult, error) {
 	parsed := Parse(content)
 	if len(parsed.Accounts) == 0 && !parsed.MentionAll {
@@ -68,20 +70,23 @@ func Resolve(ctx context.Context, content string, lookupFn LookupFunc) (*Resolve
 	}
 
 	users := map[string]model.User{}
+	var lookupErr error
 	if len(parsed.Accounts) > 0 {
+		// fetched is used even when err != nil: a degraded lookup answers what it
+		// can and reports the failure (pkg/userstore.Cache returns its L1 hits
+		// alongside the error when Mongo is down). Dropping those would persist a
+		// resolvable mention as plain text forever, so resolve what came back and
+		// let the caller decide what the error means.
 		fetched, err := lookupFn(ctx, parsed.Accounts)
-		if err != nil {
-			return &ResolveResult{
-				Accounts:   parsed.Accounts,
-				MentionAll: parsed.MentionAll,
-			}, fmt.Errorf("find mentioned users: %w", err)
-		}
 		users = make(map[string]model.User, len(fetched))
 		for i := range fetched {
 			users[fetched[i].Account] = fetched[i]
 		}
+		if err != nil {
+			lookupErr = fmt.Errorf("find mentioned users: %w", err)
+		}
 	}
-	return ResolveFromParsed(parsed, users), nil
+	return ResolveFromParsed(parsed, users), lookupErr
 }
 
 // ResolveFromParsed builds a ResolveResult from pre-parsed input and a caller-supplied user map.

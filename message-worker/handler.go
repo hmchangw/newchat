@@ -80,15 +80,17 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 	resolved, err := mention.Resolve(ctx, evt.Message.Content, h.userStore.FindUsersByAccounts)
 	if err != nil {
 		// Fail-open: mention resolution is enrichment, not durability. The content
-		// (including the literal @tokens) persists intact; only the resolved
-		// participant list is lost, so a mentioned user may miss a notification
-		// during the outage. Blocking the write would be strictly worse.
-		slog.WarnContext(ctx, "mention resolution failed, persisting without mentions",
+		// (including the literal @tokens) persists intact. Resolve still returns
+		// whatever it could — the user store's warm entries, plus @all, which needs
+		// no lookup — so keep those rather than discarding a partial answer; the
+		// unresolved accounts are the only ones that lose their notification.
+		// Blocking the write would be strictly worse.
+		slog.WarnContext(ctx, "mention resolution degraded, persisting the mentions that resolved",
 			"error", err, "message_id", evt.Message.ID,
+			"resolved", len(resolved.Participants), "parsed", len(resolved.Accounts),
 			"request_id", natsutil.RequestIDFromContext(ctx))
-	} else {
-		evt.Message.Mentions = resolved.Participants
 	}
+	evt.Message.Mentions = resolved.Participants
 	// debug: mention resolution is the first decision step — count only, no content.
 	slog.DebugContext(ctx, "message-worker mentions resolved",
 		"request_id", natsutil.RequestIDFromContext(ctx), "mentions", len(evt.Message.Mentions))
