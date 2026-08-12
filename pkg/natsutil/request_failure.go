@@ -33,6 +33,13 @@ import (
 // context.Canceled is not handled here. Only admin-service maps it today, with
 // a rationale specific to that idempotent call; see the spec's "Sites
 // deliberately excluded".
+//
+// A nil err returns nil. Every caller today already guards with if err != nil,
+// so that arm never fires in production — it is here because the alternative is
+// silent and nasty: without it, an unguarded call would reach
+// fmt.Errorf("%s: %w", op, nil) and hand back a NON-nil error reading
+// "op: %!w(<nil>)", turning a success into a failure that reads like correct
+// code at the call site.
 func RequestFailure(op string, err error) error {
 	switch {
 	case err == nil:
