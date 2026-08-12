@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -23,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -2265,4 +2269,113 @@ func TestHandler_processMessage_NonThreadMessage_NoParentFetch(t *testing.T) {
 	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
 	require.NoError(t, err)
 	require.Len(t, *published, 1)
+}
+
+// enableIdentityTelemetry turns the o11y master switch on (pillars off, so no
+// exporters or listeners start) and restores the OTel/slog globals afterwards.
+// obs.ContextWithIdentity no-ops until the SDK has been initialized, so an
+// identity assertion needs this.
+func enableIdentityTelemetry(t *testing.T) {
+	t.Helper()
+
+	previousTracer := otel.GetTracerProvider()
+	previousMeter := otel.GetMeterProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	previousLogger := slog.Default()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousTracer)
+		otel.SetMeterProvider(previousMeter)
+		otel.SetTextMapPropagator(previousPropagator)
+		slog.SetDefault(previousLogger)
+	})
+
+	t.Setenv("O11Y_ENABLED", "true")
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+	t.Setenv("OTEL_SERVICE_NAME", "message-gatekeeper-identity-test")
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", "0")
+
+	_, shutdown, err := obs.Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+}
+
+// TestHandleJetStreamMsg_AttachesIdentityToContext proves the identity the
+// handler derives from the subject reaches both downstream callbacks — the
+// canonical publish and the client reply — as baggage, on the accepted and the
+// rejected path alike. The account is asserted in its DECODED form, which only
+// obs.ContextWithIdentity(subject.DecodeAccount(...)) can produce.
+func TestHandleJetStreamMsg_AttachesIdentityToContext(t *testing.T) {
+	const (
+		reqUUID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+		subj    = "chat.user.weather_bot.room.room-1.site-A.msg.send"
+	)
+
+	assertIdentity := func(t *testing.T, ctx context.Context, what string) {
+		t.Helper()
+		bag := baggage.FromContext(ctx)
+		assert.Equal(t, "weather.bot", bag.Member("user.name").Value(), what+" carries the decoded account")
+		assert.Equal(t, "room-1", bag.Member(obs.RoomIDKey).Value(), what+" carries the room")
+		assert.Equal(t, "site-A", bag.Member(obs.SiteIDKey).Value(), what+" carries the site")
+	}
+
+	newMsg := func() *fakeJSMsg {
+		req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hi", RequestID: reqUUID}
+		data, err := json.Marshal(req)
+		require.NoError(t, err)
+		return &fakeJSMsg{subject: subj, data: data}
+	}
+
+	t.Run("accepted send", func(t *testing.T) {
+		enableIdentityTelemetry(t)
+
+		store := NewMockStore(gomock.NewController(t))
+		store.EXPECT().
+			GetSubscription(gomock.Any(), "weather.bot", "room-1").
+			Return(&model.Subscription{
+				User:  model.SubscriptionUser{ID: "u-bot", Account: "weather.bot"},
+				Roles: []model.Role{model.RoleMember},
+			}, nil)
+
+		var publishCtx, replyCtx context.Context
+		publish := func(ctx context.Context, _ *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+			publishCtx = ctx
+			return &jetstream.PubAck{}, nil
+		}
+		reply := func(ctx context.Context, _ *nats.Msg) error {
+			replyCtx = ctx
+			return nil
+		}
+		h := NewHandler(store, nil, publish, reply, "site-A", nil, 500, 1, 8192, "")
+
+		h.HandleJetStreamMsg(context.Background(), newMsg())
+
+		require.NotNil(t, publishCtx, "canonical publish must run")
+		require.NotNil(t, replyCtx, "client reply must run")
+		assertIdentity(t, publishCtx, "canonical publish context")
+		assertIdentity(t, replyCtx, "reply context")
+	})
+
+	t.Run("rejected send still carries identity", func(t *testing.T) {
+		enableIdentityTelemetry(t)
+
+		store := NewMockStore(gomock.NewController(t))
+		store.EXPECT().
+			GetSubscription(gomock.Any(), "weather.bot", "room-1").
+			Return(nil, fmt.Errorf("user weather.bot not subscribed to room room-1: %w", errNotSubscribed))
+
+		var replyCtx context.Context
+		reply := func(ctx context.Context, _ *nats.Msg) error {
+			replyCtx = ctx
+			return nil
+		}
+		h := NewHandler(store, nil, makePublishFunc(nil, nil), reply, "site-A", nil, 500, 1, 8192, "")
+
+		h.HandleJetStreamMsg(context.Background(), newMsg())
+
+		require.NotNil(t, replyCtx, "error reply must run")
+		assertIdentity(t, replyCtx, "error reply context")
+	})
 }
