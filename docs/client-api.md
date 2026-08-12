@@ -4066,7 +4066,9 @@ See [Error envelope](#6-error-envelope-reference).
 
 **Cross-site results:** results may include messages from rooms hosted on remote sites (the index is searched across the local and remote clusters). The `siteId` on each `SearchMessage` identifies the originating site; there is no client opt-in/opt-out.
 
-**Searched fields:** one query matches message text (`content`), attachment text (`attachmentText` — every attachment's file name and description pooled into one field), and tcard data (`cardData`, the card's data document indexed verbatim as text). All terms of the query must match within a single one of these fields (`multi_match` with `AND`) — a query mixing a word from the message text with a word from a filename matches neither field and returns no hit; a query mixing a filename word with a description word DOES match, since both live in `attachmentText`.
+**Searched fields:** one query matches message text (`content`), sender display name (`userName`), attachment text (`attachmentText` — every attachment's file name and description pooled into one field), and tcard data (`cardData`, the card's data document indexed verbatim as text). All terms of the query must match within a single one of these fields (`multi_match` with `AND`) — a query mixing a word from the message text with a word from a filename matches neither field and returns no hit; a query mixing a filename word with a description word DOES match, since both live in `attachmentText`.
+
+**File search folds into this RPC** — there is no separate subject. Pass `fileTypes` to filter to messages carrying an attachment of the given categories; this is what backs the Files tab in the UI.
 
 **System messages are never returned.** Server-generated room chrome (`type` of `room_created`, `members_added`, `member_removed`, `member_left`, `room_renamed`, `room_restricted`, `teams_meet_started` — see [`Message.type`](#message-schema)) is excluded from the search index, so it can never appear in `messages`. A client-set `type: "important"` message is normal user content and remains searchable.
 
@@ -4076,6 +4078,10 @@ See [Error envelope](#6-error-envelope-reference).
 {
   "query": "hello world",
   "roomIds": ["r1", "r2"],
+  "senders": ["bob", "carol"],
+  "dateRange": { "start": "2026-07-01T00:00:00Z", "end": "2026-07-31T23:59:59Z" },
+  "hasAttachment": true,
+  "fileTypes": ["pdf", "zip"],
   "size": 25,
   "offset": 0
 }
@@ -4083,8 +4089,12 @@ See [Error envelope](#6-error-envelope-reference).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `query` | string | **yes** | Full-text query. Empty string is rejected. |
-| `roomIds` | string[] | no | Scope the search to these rooms. Omit for global search across all accessible rooms. Unknown room IDs and rooms the user cannot access are silently excluded (enforced by the ES terms-lookup + restricted-rooms floor). |
+| `query` | string | **yes** | Full-text query. Empty string is rejected. Matches `content` and `userName` (see above). |
+| `roomIds` | string[] | no | Scope the search to these rooms. Omit for global search across all accessible rooms. Unknown room IDs and rooms the user cannot access are silently excluded (enforced by the ES terms-lookup + restricted-rooms floor). A single-room ("In room") search sends a 1-element list — the field stays a list, never a single `roomId`. |
+| `senders` | string[] | no | Filter to messages from any of these `userAccount`s (multi-select From). |
+| `dateRange` | { start, end } | no | Filter `createdAt` to this range (RFC3339 timestamps). Either bound may be omitted to leave that side open. Date presets (today/yesterday/thisWeek/thisMonth/custom) are resolved client-side into a concrete range before sending. |
+| `hasAttachment` | boolean | no | `true` filters to messages carrying at least one attachment. |
+| `fileTypes` | string[] | no | Filter to messages with an attachment in any of these categories: `image`, `pdf`, `excel`, `powerpoint`, `word`, `zip`, `others`. This is also how file search is served — no new subject. Existing messages indexed before this field shipped are not backfilled and won't match. |
 | `size` | integer | no | Page size. Default `25`, capped at `100`. |
 | `offset` | integer | no | Page offset. Default `0`. |
 
@@ -4149,6 +4159,7 @@ See [Error envelope](#6-error-envelope-reference).
 | `roomId` | string | — |
 | `siteId` | string | — |
 | `userAccount` | string | — |
+| `userName` | string | omitted when the sender's display name was never composed (pre-composition predates `UserDisplayName`) |
 | `content` | string | — |
 | `createdAt` | RFC3339 timestamp | — |
 | `editedAt` | RFC3339 timestamp (nullable) | omitted when the message has never been edited |
@@ -4234,8 +4245,9 @@ See [Error envelope](#6-error-envelope-reference).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `query` | string | **yes** | Case-insensitive prefix/substring match on room name. Whitespace-only is rejected. |
-| `roomType` | string | no | `"all"` (default), `"channel"`, or `"dm"`. The value `"app"` and any other value are rejected with `bad_request`. |
+| `query` | string | conditionally | Case-insensitive prefix/substring match on room name. Whitespace-only is treated as empty. May be omitted only when `members` is set — at least one of `query`/`members` is required. |
+| `roomType` | string | no | `"all"` (default), `"channel"`, `"dm"`, or `"app"` (currently rejected with `bad_request` — MVP-unsupported). Any other value is also rejected. |
+| `members` | string[] | no | Filter to channels containing all of these accounts (plus the requester). Resolved via user-service's `subscription.getChannels`. Works with an empty `query` — that's the "From" filter on the Chatrooms tab. |
 | `size` | number | no | Page size. Default `25`, capped at `100`. |
 | `offset` | number | no | Pagination offset. Default `0`. |
 
@@ -4244,6 +4256,13 @@ See [Error envelope](#6-error-envelope-reference).
   "query": "engineering",
   "roomType": "channel",
   "size": 20
+}
+```
+
+```json
+{
+  "members": ["bob"],
+  "roomType": "channel"
 }
 ```
 
@@ -4281,7 +4300,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 | Code | Reason |
 |---|---|
-| `bad_request` | `query` is missing, empty, or whitespace-only; or `roomType` is `"app"` or an unrecognized value; or `size`/`offset` is negative. |
+| `bad_request` | both `query` and `members` are empty/omitted; or `roomType` is `"app"` or an unrecognized value; or `size`/`offset` is negative. |
 | `internal` | Elasticsearch backend failure (transient or permanent). The raw error is never leaked to the client. |
 
 ##### Triggered events — success path

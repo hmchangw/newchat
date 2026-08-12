@@ -17,10 +17,13 @@ const (
 )
 
 // buildRoomQuery composes the ES `_search` body for a subscription
-// search against the spotlight index. It returns a user-facing *errcode.Error
-// on invalid/unsupported roomType values and a plain error on marshalling
-// failures.
-func buildRoomQuery(req model.SearchRoomsRequest, account string) (json.RawMessage, error) {
+// search against the spotlight index. memberRoomIDs, when non-nil, scopes
+// results to that set (resolved upstream via subscription.getChannels for
+// req.Members) — an empty non-nil slice means "no room matched all the
+// requested members" and the query is built to match nothing.
+// It returns a user-facing *errcode.Error on invalid/unsupported roomType
+// values and a plain error on marshalling failures.
+func buildRoomQuery(req model.SearchRoomsRequest, account string, memberRoomIDs []string) (json.RawMessage, error) {
 	roomTypeFilter, rerr := roomTypeFilterClause(req.RoomType)
 	if rerr != nil {
 		return nil, rerr
@@ -32,29 +35,35 @@ func buildRoomQuery(req model.SearchRoomsRequest, account string) (json.RawMessa
 	if roomTypeFilter != nil {
 		filters = append(filters, roomTypeFilter)
 	}
+	if memberRoomIDs != nil {
+		filters = append(filters, map[string]any{"terms": map[string]any{"roomId": memberRoomIDs}})
+	}
+
+	query := map[string]any{"filter": filters}
+	if req.Query != "" {
+		query["must"] = []any{
+			map[string]any{
+				"multi_match": map[string]any{
+					"query":    req.Query,
+					"type":     "bool_prefix",
+					"operator": "AND",
+					"fields":   []string{"roomName"},
+				},
+			},
+		}
+	}
 
 	body := map[string]any{
 		"from":             req.Offset,
 		"size":             req.Size,
 		"track_total_hits": true,
-		"query": map[string]any{
-			"bool": map[string]any{
-				"must": []any{
-					map[string]any{
-						"multi_match": map[string]any{
-							"query":    req.Query,
-							"type":     "bool_prefix",
-							"operator": "AND",
-							"fields":   []string{"roomName"},
-						},
-					},
-				},
-				"filter": filters,
-			},
-		},
+		"query":            map[string]any{"bool": query},
 		"sort": []any{
 			"_score",
 			map[string]any{"joinedAt": map[string]any{"order": "desc"}},
+			// Deterministic tie-breaker: the empty-query members path gives every
+			// hit the same _score, so equal joinedAt would otherwise page unstably.
+			map[string]any{"roomId": map[string]any{"order": "asc"}},
 		},
 	}
 

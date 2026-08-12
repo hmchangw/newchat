@@ -83,6 +83,54 @@ func TestNewMessageDoc_CardPopulatesCardData(t *testing.T) {
 	assert.Equal(t, `{"k":"v"}`, doc.CardData)
 }
 
+func TestNewMessageDoc_UserNameAndMentionsCopied(t *testing.T) {
+	doc, err := searchindex.NewMessageDoc(searchindex.MessageFields{
+		MessageID:       "msg1",
+		UserName:        "Alice Wong 王愛麗",
+		MentionAccounts: []string{"bob", "carol", "bob"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Alice Wong 王愛麗", doc.UserName)
+	assert.Equal(t, []string{"bob", "carol"}, doc.Mentions, "mentions must be deduped")
+}
+
+func TestNewMessageDoc_FileTypesDerivedFromAttachments(t *testing.T) {
+	blob1, _ := jsonMarshal(cassandra.Attachment{Title: "invoice.pdf", FileType: "application/pdf"})
+	blob2, _ := jsonMarshal(cassandra.Attachment{Title: "logo.png", FileType: "image/png"})
+	blob3, _ := jsonMarshal(cassandra.Attachment{Title: "archive.zip", FileType: "application/zip"})
+
+	doc, err := searchindex.NewMessageDoc(searchindex.MessageFields{
+		MessageID:   "msg1",
+		Attachments: [][]byte{blob1, blob2, blob3},
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"pdf", "image", "zip"}, doc.FileTypes)
+}
+
+func TestNewMessageDoc_JSONRoundTrip(t *testing.T) {
+	createdAt := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
+	doc, err := searchindex.NewMessageDoc(searchindex.MessageFields{
+		MessageID:       "msg1",
+		RoomID:          "room1",
+		SiteID:          "site-a",
+		UserAccount:     "alice",
+		Content:         "hello",
+		CreatedAt:       createdAt,
+		UserName:        "Alice Wong",
+		MentionAccounts: []string{"bob"},
+		Attachments:     [][]byte{},
+	})
+	require.NoError(t, err)
+
+	data, err := json.Marshal(doc)
+	require.NoError(t, err)
+	var got searchindex.MessageDoc
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, "Alice Wong", got.UserName)
+	assert.Equal(t, []string{"bob"}, got.Mentions)
+	assert.Nil(t, got.FileTypes, "no attachments → no fileTypes")
+}
+
 func TestMessageIndexName(t *testing.T) {
 	got := searchindex.MessageIndexName("messages-a-v2", time.Date(2026, 3, 9, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, "messages-a-v2-2026-03", got)

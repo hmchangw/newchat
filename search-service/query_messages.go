@@ -28,8 +28,25 @@ var MessageIndexPattern = []string{"messages-*", "*:messages-*"}
 // (req.RoomIDs != nil), the inline terms clause is STILL gated by the
 // terms-lookup so a caller can't reach rooms they don't belong to by
 // passing arbitrary roomIds.
-func buildMessageQuery(req model.SearchMessagesRequest, account string, restricted map[string]int64, recentWindow time.Duration, userRoomIndex string) (json.RawMessage, error) {
+func buildMessageQuery(req model.SearchMessagesRequest, account string, restricted map[string]int64, recentWindow time.Duration, userRoomIndex string) (json.RawMessage, error) { //nolint:gocritic // hugeParam: req copied once per search request, not a hot path
 	clauses := roomAccessClauses(req.RoomIDs, account, restricted, userRoomIndex)
+
+	filters := []any{
+		map[string]any{
+			"range": map[string]any{
+				"createdAt": map[string]any{
+					"gte": fmt.Sprintf("now-%s", recentWindowToGte(recentWindow)),
+				},
+			},
+		},
+		map[string]any{
+			"bool": map[string]any{
+				"should":               clauses,
+				"minimum_should_match": 1,
+			},
+		},
+	}
+	filters = append(filters, messageFilterClauses(req)...)
 
 	body := map[string]any{
 		"from":             req.Offset,
@@ -46,27 +63,14 @@ func buildMessageQuery(req model.SearchMessagesRequest, account string, restrict
 							"query":    req.Query,
 							"type":     "bool_prefix",
 							"operator": "AND",
-							// Message text, attachment titles+descriptions (one
-							// pooled field) and tcard data — one query box.
-							"fields": []string{"content", "attachmentText", "cardData"},
+							// Message text, sender display name, attachment
+							// titles+descriptions (one pooled field), and tcard
+							// data — one query box.
+							"fields": []string{"content", "userName", "attachmentText", "cardData"},
 						},
 					},
 				},
-				"filter": []any{
-					map[string]any{
-						"range": map[string]any{
-							"createdAt": map[string]any{
-								"gte": fmt.Sprintf("now-%s", recentWindowToGte(recentWindow)),
-							},
-						},
-					},
-					map[string]any{
-						"bool": map[string]any{
-							"should":               clauses,
-							"minimum_should_match": 1,
-						},
-					},
-				},
+				"filter": filters,
 			},
 		},
 		"sort": []any{
@@ -80,6 +84,38 @@ func buildMessageQuery(req model.SearchMessagesRequest, account string, restrict
 		return nil, fmt.Errorf("marshal message query: %w", err)
 	}
 	return data, nil
+}
+
+// messageFilterClauses translates the additive request-level filters
+// (senders/dateRange/hasAttachment/fileTypes) into ES filter clauses.
+func messageFilterClauses(req model.SearchMessagesRequest) []any { //nolint:gocritic // hugeParam: req copied once per search request, not a hot path
+	var clauses []any
+	if len(req.Senders) > 0 {
+		clauses = append(clauses, map[string]any{"terms": map[string]any{"userAccount": req.Senders}})
+	}
+	if req.DateRange != nil {
+		rng := map[string]any{}
+		if !req.DateRange.Start.IsZero() {
+			rng["gte"] = req.DateRange.Start
+		}
+		if !req.DateRange.End.IsZero() {
+			rng["lte"] = req.DateRange.End
+		}
+		if len(rng) > 0 {
+			clauses = append(clauses, map[string]any{"range": map[string]any{"createdAt": rng}})
+		}
+	}
+	if req.HasAttachment != nil && *req.HasAttachment {
+		// fileTypes is populated 1:1 with attachments (every attachment maps to a
+		// category, "others" included), so "has an attachment" == "fileTypes is
+		// non-empty" — reuses the indexed keyword field instead of `exists` on
+		// the disabled `attachments` object, which isn't reliably indexed.
+		clauses = append(clauses, map[string]any{"exists": map[string]any{"field": "fileTypes"}})
+	}
+	if len(req.FileTypes) > 0 {
+		clauses = append(clauses, map[string]any{"terms": map[string]any{"fileTypes": req.FileTypes}})
+	}
+	return clauses
 }
 
 func roomAccessClauses(roomIDs []string, account string, restricted map[string]int64, userRoomIndex string) []any {

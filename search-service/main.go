@@ -210,6 +210,7 @@ func main() {
 		SpotlightOrgReadPattern: spotlightOrgReadPattern,
 	})
 	handler.room = newRoomClient(nc)
+	handler.members = newMembersClient(nc)
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto Elasticsearch/MongoDB.

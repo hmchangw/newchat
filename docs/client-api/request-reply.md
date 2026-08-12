@@ -1310,8 +1310,10 @@ search-service on that site.
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
 Full-text message search. Auto-scoped to rooms the user is a member of. May include
-messages from remote sites. One query matches message text, attachment text (file
-names + descriptions, pooled into one searched field), and tcard data.
+messages from remote sites. One query matches message text, sender display name
+(`userName`), attachment text (file names + descriptions, pooled into one searched
+field), and tcard data. **File search folds into this RPC** via `fileTypes` — no
+separate subject.
 
 System messages (`room_created`, `members_added`, `member_removed`, `member_left`,
 `room_renamed`, `room_restricted`, `teams_meet_started`) are never returned — they are
@@ -1324,8 +1326,12 @@ excluded from the index. A client-set `type: "important"` message stays searchab
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `query` | string | yes | Full-text query. Empty string rejected. |
-| `roomIds` | string[] | no | Scope to specific rooms. Unknown or inaccessible rooms silently excluded. |
+| `query` | string | yes | Full-text query. Empty string rejected. Matches `content`, `userName`, attachment text, and tcard data. |
+| `roomIds` | string[] | no | Scope to specific rooms. Unknown or inaccessible rooms silently excluded. Stays a list (single-select sends a 1-element list — no rename). |
+| `senders` | string[] | no | Filter to these `userAccount`s (multi-select From). |
+| `dateRange` | `{start, end}` | no | Filter `createdAt`; either bound may be omitted. Presets resolved client-side. |
+| `hasAttachment` | boolean | no | `true` filters to messages with an attachment. |
+| `fileTypes` | string[] | no | Filter by attachment category: `image`/`pdf`/`excel`/`powerpoint`/`word`/`zip`/`others`. Existing messages are not backfilled. |
 | `size` | integer | no | Page size. Default 25, max 100. |
 | `offset` | integer | no | Page offset. Default 0. |
 
@@ -1339,7 +1345,8 @@ excluded from the index. A client-set `type: "important"` message stays searchab
 All terms of the query must match within a single searched field (`multi_match`
 with `AND`) — terms split across e.g. message text and a filename match nothing.
 
-`SearchMessage` fields: `messageId`, `roomId`, `siteId`, `userAccount`, `content`,
+`SearchMessage` fields: `messageId`, `roomId`, `siteId`, `userAccount`, `userName`
+(sender's pre-composed display name, omitted when never composed), `content`,
 `createdAt`, `editedAt` (nullable), `updatedAt` (nullable), `threadParentMessageId`
 (omitted when not a reply), `threadParentMessageCreatedAt` (omitted when not a reply),
 `attachments` (`Attachment[]`, omitted when the message has no attachments),
@@ -1375,8 +1382,9 @@ ES index.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `query` | string | yes | Case-insensitive prefix/substring on room name. Whitespace-only rejected. |
-| `roomType` | string | no | `"all"` (default), `"channel"`, or `"dm"`. `"app"` and unknown values rejected. |
+| `query` | string | conditionally | Case-insensitive prefix/substring on room name. May be omitted only when `members` is set — at least one of the two is required. |
+| `roomType` | string | no | `"all"` (default), `"channel"`, or `"dm"`. `"app"` (MVP-unsupported) and unknown values rejected. |
+| `members` | string[] | no | Filter to channels containing all of these accounts plus the requester (via `subscription.getChannels`). Works with an empty `query`, but must itself be non-empty to be a room-search criterion. |
 | `size` | number | no | Default 25, max 100. |
 | `offset` | number | no | Default 0. |
 

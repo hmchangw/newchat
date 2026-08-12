@@ -2366,6 +2366,30 @@ func TestSearchMessagesRequestJSON(t *testing.T) {
 		_, present := raw["roomIds"]
 		assert.False(t, present, "roomIds must be omitted when nil")
 	})
+
+	t.Run("dateRange omitzero drops an open (zero) bound", func(t *testing.T) {
+		start := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+		// start-only: End is zero and must be omitted (not "0001-01-01T00:00:00Z").
+		data, err := json.Marshal(&model.SearchMessagesRequest{DateRange: &model.DateRange{Start: start}})
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		dr := raw["dateRange"].(map[string]any)
+		_, hasStart := dr["start"]
+		_, hasEnd := dr["end"]
+		assert.True(t, hasStart, "start present")
+		assert.False(t, hasEnd, "zero end must be omitted by omitzero")
+
+		// end-only: symmetric.
+		data, err = json.Marshal(&model.SearchMessagesRequest{DateRange: &model.DateRange{End: start}})
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(data, &raw))
+		dr = raw["dateRange"].(map[string]any)
+		_, hasStart = dr["start"]
+		_, hasEnd = dr["end"]
+		assert.False(t, hasStart, "zero start must be omitted by omitzero")
+		assert.True(t, hasEnd, "end present")
+	})
 }
 
 func TestSearchMessagesResponseJSON(t *testing.T) {
@@ -2499,6 +2523,48 @@ func TestSearchRoomsRequestJSON(t *testing.T) {
 		assert.False(t, hasSize, "size must be omitted when zero")
 		assert.False(t, hasOffset, "offset must be omitted when zero")
 	})
+}
+
+func TestSearchMessagesRequestJSON_NewFilters(t *testing.T) {
+	senders := true
+	req := model.SearchMessagesRequest{
+		Query:   "hello",
+		Senders: []string{"bob", "carol"},
+		DateRange: &model.DateRange{
+			Start: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+			End:   time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC),
+		},
+		HasAttachment: &senders,
+		FileTypes:     []string{"pdf", "zip"},
+	}
+	roundTrip(t, &req, &model.SearchMessagesRequest{})
+
+	reqBare := model.SearchMessagesRequest{Query: "hello"}
+	data, err := json.Marshal(&reqBare)
+	require.NoError(t, err)
+	for _, key := range []string{"senders", "dateRange", "hasAttachment", "fileTypes"} {
+		assert.NotContains(t, string(data), `"`+key+`"`, "%s must be omitted when unset", key)
+	}
+}
+
+func TestSearchMessageJSON_UserName(t *testing.T) {
+	msg := model.SearchMessage{MessageID: "m1", RoomID: "r1", UserName: "Alice Wong 王愛麗"}
+	roundTrip(t, &msg, &model.SearchMessage{})
+
+	bare := model.SearchMessage{MessageID: "m1", RoomID: "r1"}
+	data, err := json.Marshal(&bare)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"userName"`, "userName must be omitted when empty")
+}
+
+func TestSearchRoomsRequestJSON_Members(t *testing.T) {
+	req := model.SearchRoomsRequest{Members: []string{"bob", "carol"}}
+	roundTrip(t, &req, &model.SearchRoomsRequest{})
+
+	bare := model.SearchRoomsRequest{Query: "x"}
+	data, err := json.Marshal(&bare)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"members"`, "members must be omitted when empty")
 }
 
 func TestSearchRoomsResponseJSON(t *testing.T) {

@@ -88,3 +88,11 @@ type RoomInfoClient interface {
 type SearchUsersClient interface {
 	SearchUsers(ctx context.Context, query string, offset, limit int) ([]model.SearchUser, error)
 }
+
+// MembersClient resolves person→room membership for the room-search "members"
+// filter via user-service's subscription.getChannels RPC (channels containing
+// every given account plus the caller). Returns the first page of matching
+// room IDs; an empty non-nil slice means no channel matched.
+type MembersClient interface {
+	getChannels(ctx context.Context, account, siteID string, members []string) ([]string, error)
+}
