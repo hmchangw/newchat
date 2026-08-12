@@ -92,9 +92,16 @@ alongside from SP1 onward.
 - **Deliverable:** `portal-service` becomes the single source of truth for "who
   serves account X right now"; returns the backup for a down site's accounts;
   acts as the split-brain fence (spec §4.2).
-- **Ready to plan?** **Partially.** Codebase-local (`portal-service` exists), but
-  needs the health signal from SP4 and the failback-flip protocol (spec §6.3).
-  Plannable in parallel once SP4's signal shape is decided.
+- **Ready to plan?** **Resolved & building** — spec `specs/2026-08-11-sp3-portal-routing-override.md`
+  (rewritten to World 1 / operator-driven SP4). SP3-core scopes the override to the
+  SSO `/api/userInfo` path only.
+- **Deferred, CRITICAL follow-up — bot failover.** The bot/admin `/api/v1/login`
+  path is intentionally left un-rerouted in SP3-core because bots are out of
+  lifeboat scope today and their login forwards to the (down) home botplatform.
+  Bots ARE business-critical; re-adding them is a follow-up whose weight is in SP1
+  (materialize bot/botplatform state) + SP2 (run botplatform at the backup, wire
+  the backup auth-service session branch). The SP3 routing hook is then a single
+  `servingURLs(...)` call in `HandleLogin`. Tracked so this is not lost.
 
 ### SP4 — Failover trigger / health detection  *(own design)*
 - **Deliverable:** auto-detect a down site (+ manual operator override) and drive
