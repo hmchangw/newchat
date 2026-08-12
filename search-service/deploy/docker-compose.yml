@@ -30,9 +30,12 @@ services:
       # (OTEL_EXPORTER_PROMETHEUS_PORT, default :2112), not here.
       - SEARCH_HEALTH_ADDR=${SEARCH_HEALTH_ADDR:-:9090}
       # Local dev pins to site-suffixed indices; prod uses aliases owned by ops/IaC.
-      - SEARCH_USER_ROOM_INDEX=${SEARCH_USER_ROOM_INDEX:-user-room-mv-${SITE_ID:-site-local}}
-      - SEARCH_SPOTLIGHT_INDEX=${SEARCH_SPOTLIGHT_INDEX:-spotlight-${SITE_ID:-site-local}-v1}
-      - SEARCH_SPOTLIGHT_ORG_INDEX=${SEARCH_SPOTLIGHT_ORG_INDEX:-spotlightorg-${SITE_ID:-site-local}-v1}
+      # Unprefixed, and MUST match search-sync-worker's SPOTLIGHT_INDEX /
+      # USER_ROOM_INDEX exactly — a mismatch reads an index nobody writes and
+      # returns empty hits with no error.
+      - USER_ROOM_INDEX=${USER_ROOM_INDEX:-user-room-mv-${SITE_ID:-site-local}}
+      - SPOTLIGHT_INDEX=${SPOTLIGHT_INDEX:-spotlight-${SITE_ID:-site-local}-v1}
+      - SPOTLIGHT_ORG_INDEX=${SPOTLIGHT_ORG_INDEX:-spotlightorg-${SITE_ID:-site-local}-v1}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}

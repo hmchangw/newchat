@@ -83,13 +83,15 @@ func (h *Handler) Add(msg jetstream.Msg) {
 func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 	data, err := natsutil.DecodePayload(msg)
 	if err != nil {
-		slog.Error("decode payload", "error", err)
+		slog.ErrorContext(ctx, "decode payload", "error", err, "subject", msg.Subject(), "consumer", h.collection.ConsumerName())
 		natsutil.Ack(msg, "decode payload failed")
 		return
 	}
 	actions, err := h.collection.BuildAction(data)
 	if err != nil {
-		slog.Error("build action", "error", err)
+		// Every BuildAction error is parse/validation poison — Ack drops it for
+		// good, so this line is the only trace; keep it identifying the message.
+		slog.ErrorContext(ctx, "build action", "error", err, "subject", msg.Subject(), "consumer", h.collection.ConsumerName())
 		natsutil.Ack(msg, "build action failed")
 		return
 	}

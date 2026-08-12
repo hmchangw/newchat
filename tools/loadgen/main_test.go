@@ -316,6 +316,24 @@ func TestDispatch_MembersCapacity_RequiresTargetSize(t *testing.T) {
 	assert.Equal(t, 2, code)
 }
 
+func TestMembersCapacityDeliveryExitCode(t *testing.T) {
+	tests := []struct {
+		name                          string
+		missingReplies, missingEvents int
+		want                          int
+	}{
+		{name: "complete delivery", want: 0},
+		{name: "missing reply", missingReplies: 1, want: 1},
+		{name: "missing member event", missingEvents: 1, want: 1},
+		{name: "both deliveries missing", missingReplies: 1, missingEvents: 1, want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, membersCapacityDeliveryExitCode(tt.missingReplies, tt.missingEvents))
+		})
+	}
+}
+
 func TestDispatch_DailySubcommand(t *testing.T) {
 	// dispatch should accept "daily" and return non-zero for unknown preset
 	// (so we don't actually run a daily session — just exercise routing).

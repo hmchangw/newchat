@@ -81,6 +81,8 @@ paths.
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
     - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/validate (admin)](#112-http--post-apiv1cardsvalidate-admin)
+12. [Client Update Service](#12-client-update-service)
+    - [POST /api/v1/version](#post-apiv1version) · [GET /api/v1/version/:fileName](#get-apiv1versionfilename)
 
 ---
 
@@ -4066,6 +4068,8 @@ See [Error envelope](#6-error-envelope-reference).
 
 **Searched fields:** one query matches message text (`content`), attachment text (`attachmentText` — every attachment's file name and description pooled into one field), and tcard data (`cardData`, the card's data document indexed verbatim as text). All terms of the query must match within a single one of these fields (`multi_match` with `AND`) — a query mixing a word from the message text with a word from a filename matches neither field and returns no hit; a query mixing a filename word with a description word DOES match, since both live in `attachmentText`.
 
+**System messages are never returned.** Server-generated room chrome (`type` of `room_created`, `members_added`, `member_removed`, `member_left`, `room_renamed`, `room_restricted`, `teams_meet_started` — see [`Message.type`](#message-schema)) is excluded from the search index, so it can never appear in `messages`. A client-set `type: "important"` message is normal user content and remains searchable.
+
 ##### Request body
 
 ```json
@@ -4759,9 +4763,9 @@ The stored settings object. All ten fields are optional and appear only when the
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
 | `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
 | `muteAllNotifications` | boolean | Mute all notifications. Enforced server-side by `notification-worker`: push delivery is suppressed for this user unless pierced — see `alwaysAllowPriorityNotifications`. |
-| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) pierces `muteAllNotifications` in **any** room type — DM and channel alike — and for `.bot` senders as well as users. The pierce does not override `showNotificationsInCall`. |
+| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) is pushed regardless of `muteAllNotifications` and regardless of a suppressing presence (`"busy"` / `"in-call"`) — in **any** room type, DM and channel alike, and for `.bot` senders as well as users. This setting is the only opt-in for that pierce; listing a priority contact without enabling it changes nothing. Per-room mute is not pierced. |
 | `showPreviewsInNotifications` | boolean | Show previews in notifications. |
-| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce of `muteAllNotifications` does not bypass this — set both to receive priority pushes while in a call. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
+| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce bypasses this — see `alwaysAllowPriorityNotifications`. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
 | `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
 | `priorityContacts` | string[] | Read-only here — raw contact accounts (not enriched), stored order. Written only by [`settings.priorityContacts.add`](#settingsprioritycontactsadd) / [`settings.priorityContacts.remove`](#settingsprioritycontactsremove), never by `settings.set`. |
 
@@ -6449,8 +6453,12 @@ The worker filters recipients per message:
 - In rooms with more than `LARGE_ROOM_THRESHOLD` members (default 500),
   pushes only to mentioned recipients (`@user`, `@all`, `@here`).
 - Bots never receive a mobile push.
-- Presence-busy / in-call recipients are not pushed; everyone else
-  (online, offline, away, missing) receives one.
+- Presence-busy / in-call recipients are not pushed unless they set
+  `showNotificationsInCall`; everyone else (online, offline, away, missing)
+  receives one.
+- A sender in the recipient's `priorityContacts` bypasses `muteAllNotifications`
+  and presence suppression alike, but only when the recipient enabled
+  `alwaysAllowPriorityNotifications`. Per-room mute is never bypassed.
 
 ---
 
@@ -8069,3 +8077,89 @@ Ordering is judged against the in-memory cache, which is as fresh as the last re
 #### Triggered events — error path
 
 `None.`
+
+---
+
+## 12. Client Update Service
+
+Public HTTP endpoints served by `client-update-service`. Distributes client
+software-update artifacts (a `.yaml` descriptor + an executable) stored in MinIO.
+Uploads and downloads stream end-to-end; downloads are fronted by a bounded
+TTL+size in-memory cache.
+
+> [!WARNING]
+> **These endpoints are UNAUTHENTICATED in v1.** Anyone who can reach the service
+> can upload or download update artifacts. **They MUST be network-restricted
+> before any production exposure.**
+
+### POST /api/v1/version
+
+**Auth:** none (v1)
+
+Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
+and streamed straight to MinIO (no size cap). An upload of an existing file name
+overwrites it and evicts any cached copy.
+
+#### Request
+
+| Part | Type | Required | Notes |
+|---|---|---|---|
+| `configFile` | file (`.yaml`/`.yml`) | yes | Update descriptor. Stored with the part's declared `Content-Type` (fallback `application/x-yaml` when the part sends none). Rejected if empty or not `.yaml`/`.yml`. |
+| `executeFile` | file (binary) | yes | The executable. Stored with the part's declared `Content-Type` (fallback `application/octet-stream` when the part sends none). Rejected if empty. |
+
+#### Response
+
+| Status | Condition |
+|---|---|
+| `200 OK` | Both files stored. |
+| `400 Bad Request` | Missing/empty `configFile` or `executeFile`; `configFile` not `.yaml`/`.yml`; malformed multipart body. |
+| `500 Internal Server Error` | MinIO write failure. |
+
+##### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `result` | string | Always `"success"`. |
+
+```json
+{ "result": "success" }
+```
+
+### GET /api/v1/version/:fileName
+
+**Auth:** none (v1)
+
+Downloads an artifact by file name. Served from an in-memory cache when present
+(TTL `CACHE_TTL`, default 24h); on a miss the object is fetched from MinIO and
+cached if it is within `CACHE_MAX_OBJECT_BYTES` (default 512 MiB), otherwise
+streamed uncached. A re-upload of the same name busts the cache.
+
+#### Response
+
+| Status | Condition | Notes |
+|---|---|---|
+| `200 OK` | Artifact found | Streams the bytes. `Content-Type` as stored; `Content-Disposition: attachment; filename="<fileName>"`; `Content-Length` set. |
+| `400 Bad Request` | Empty or path-unsafe `fileName` (contains `/`, `\`, or `..`) | |
+| `404 Not Found` | No artifact with that name | |
+| `500 Internal Server Error` | MinIO read failure | |
+
+```
+GET /api/v1/version/app.yaml   -> 200 (application/x-yaml)
+GET /api/v1/version/app.exe    -> 200 (application/octet-stream)
+```
+
+### GET /healthz
+
+**Auth:** none
+
+Liveness probe.
+
+#### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+
+```json
+{ "status": "ok" }
+```

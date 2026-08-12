@@ -5,6 +5,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -167,19 +170,79 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 		defer cc.Stop()
 	}
 
-	// Fake gatekeeper: frontdoor send -> canonical event.
+	// Fake gatekeeper: frontdoor send -> canonical event, plus the reply and the
+	// room broadcast a real pipeline would produce. Both legs matter: the step
+	// verdict now scores publishes that are never answered, so a stub that only
+	// republished to canonical would leave every send unmatched and report a
+	// ~100% miss rate — the harness failing, not the system under test.
+	//
+	// Subject shape is chat.user.{account}.room.{roomID}.{siteID}.msg.send.
+	var callbackErrMu sync.Mutex
+	var callbackErr error
+	recordCallbackErr := func(err error) {
+		callbackErrMu.Lock()
+		defer callbackErrMu.Unlock()
+		if callbackErr == nil {
+			callbackErr = err
+		}
+	}
+	callbackFailed := func() bool {
+		callbackErrMu.Lock()
+		defer callbackErrMu.Unlock()
+		return callbackErr != nil
+	}
+
 	gkSub, err := nc.Subscribe(subject.MsgSendWildcard(siteID), func(m *nats.Msg) {
-		var req model.SendMessageRequest
-		if err := json.Unmarshal(m.Data, &req); err != nil {
+		if callbackFailed() {
 			return
 		}
+		var req model.SendMessageRequest
+		if err := json.Unmarshal(m.Data, &req); err != nil {
+			recordCallbackErr(fmt.Errorf("unmarshal fake gatekeeper request: %w", err))
+			return
+		}
+		tokens := strings.Split(m.Subject, ".")
+		if len(tokens) < 5 {
+			recordCallbackErr(fmt.Errorf("parse fake gatekeeper subject %q: expected at least 5 tokens", m.Subject))
+			return
+		}
+		account, roomID := tokens[2], tokens[4]
+
 		evt := model.MessageEvent{
 			Message:   model.Message{ID: req.ID, Content: req.Content, CreatedAt: time.Now().UTC()},
 			SiteID:    siteID,
 			Timestamp: time.Now().UnixMilli(),
 		}
-		data, _ := json.Marshal(evt)
-		_, _ = js.Publish(ctx, subject.MsgCanonicalCreated(siteID), data)
+		data, err := json.Marshal(evt)
+		if err != nil {
+			recordCallbackErr(fmt.Errorf("marshal fake canonical event: %w", err))
+			return
+		}
+		if _, err := js.Publish(ctx, subject.MsgCanonicalCreated(siteID), data); err != nil {
+			recordCallbackErr(fmt.Errorf("publish fake canonical event: %w", err))
+			return
+		}
+
+		// E1: reply on the per-request response subject.
+		if err := nc.Publish(subject.UserResponse(account, req.RequestID), []byte(`{}`)); err != nil {
+			recordCallbackErr(fmt.Errorf("publish fake user response: %w", err))
+			return
+		}
+		// E2: room broadcast carrying lastMsgId, which is what newE2Handler
+		// correlates against the publish.
+		roomEvent := model.RoomEvent{
+			Type:      model.RoomEventNewMessage,
+			Message:   &model.ClientMessage{Message: model.Message{ID: req.ID}},
+			LastMsgID: req.ID,
+		}
+		bcast, err := json.Marshal(roomEvent)
+		if err != nil {
+			recordCallbackErr(fmt.Errorf("marshal fake room event: %w", err))
+			return
+		}
+		if err := nc.Publish(subject.RoomEvent(roomID, true), bcast); err != nil {
+			recordCallbackErr(fmt.Errorf("publish fake room event: %w", err))
+		}
 	})
 	require.NoError(t, err)
 	defer gkSub.Unsubscribe()
@@ -187,7 +250,7 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 	cfg := &config{NatsURL: testutil.NATS(t), SiteID: siteID, MetricsAddr: ":0", MaxInFlight: 100}
 	preset, _ := BuiltinPreset("small")
 
-	w, cleanup, err := newMessagesWorkload(ctx, cfg, &preset, InjectFrontdoor, 42)
+	w, cleanup, err := newMessagesWorkload(ctx, cfg, &preset, InjectFrontdoor, 42, resolveDrainWindow(0))
 	require.NoError(t, err)
 	defer cleanup()
 
@@ -199,12 +262,22 @@ func TestMaxRPS_Messages_TwoStepRamp(t *testing.T) {
 		},
 		StopOnTrip: true,
 	})
+	callbackErrMu.Lock()
+	err = callbackErr
+	callbackErrMu.Unlock()
+	require.NoError(t, err)
 
 	require.Len(t, results, 2)
 	for _, r := range results {
 		require.NotEqual(t, verdictTrip, r.Kind, "reasons=%v", r.Reasons)
 		require.Greater(t, r.AttemptedOps, 0)
 		require.Greater(t, r.AchievedRPS, 0.0)
+		// A miss rate above 1.0 is arithmetically impossible for a real ratio:
+		// it means a publish was counted as missing without being counted as
+		// attempted, i.e. the generator was still emitting when the denominator
+		// was snapshotted.
+		require.LessOrEqual(t, r.MissingReplyRate, 1.0, "miss rate cannot exceed the denominator")
+		require.LessOrEqual(t, r.MissingBroadcastRate, 1.0, "miss rate cannot exceed the denominator")
 	}
 }
 

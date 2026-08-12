@@ -61,6 +61,7 @@ const (
 	soakErrorAssertion             soakErrorClass = "assertion"
 	soakErrorAmbiguous             soakErrorClass = "ambiguous"
 	soakErrorMutationTargetMissing soakErrorClass = "mutation_target_missing"
+	soakErrorResponseTooLarge      soakErrorClass = "response_too_large"
 )
 
 func validSoakErrorClass(class soakErrorClass) bool {
@@ -69,7 +70,7 @@ func validSoakErrorClass(class soakErrorClass) bool {
 		soakErrorUnavailable, soakErrorInternal, soakErrorNotFound,
 		soakErrorForbidden, soakErrorBadRequest, soakErrorConflict,
 		soakErrorDecode, soakErrorAssertion, soakErrorAmbiguous,
-		soakErrorMutationTargetMissing:
+		soakErrorMutationTargetMissing, soakErrorResponseTooLarge:
 		return true
 	default:
 		return false
@@ -93,6 +94,12 @@ func parseSoakErrorEnvelope(data []byte) error {
 	}
 	return parsed
 }
+
+// soakReasonResponseTooLarge mirrors the reason in pkg/natsutil's oversize
+// reply envelope. Declared here rather than in pkg/errcode so this change stays
+// inside tools/loadgen; if a named constant is ever added upstream, this should
+// become an alias for it.
+const soakReasonResponseTooLarge errcode.Reason = "response_too_large"
 
 func classifySoakRPCError(err error) soakErrorClass {
 	if err == nil {
@@ -126,6 +133,14 @@ func classifySoakRPCError(err error) soakErrorClass {
 		case errcode.CodeTooManyRequests, errcode.CodeUnavailable:
 			return soakErrorUnavailable
 		case errcode.CodeInternal:
+			// pkg/natsutil replies with a compact oversize envelope when a
+			// response would exceed the broker's max_payload. It is code
+			// `internal`, so without this branch an over-large page reads as a
+			// server fault and the operator cannot tell "lower --page-limit"
+			// from "the service is broken".
+			if envelope.Reason == soakReasonResponseTooLarge {
+				return soakErrorResponseTooLarge
+			}
 			return soakErrorInternal
 		default:
 			return soakErrorInternal

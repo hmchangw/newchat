@@ -59,14 +59,25 @@ func sendMessage(a actionCtx, u *userState, content string) error {
 	if err != nil {
 		return fmt.Errorf("marshal send-message: %w", err)
 	}
+	// Daily expects no reply, so only the message-ID correlation is stored, and
+	// it is stored *before* the publish. Registering afterwards was a race: the
+	// broker can flush, the worker can emit the room event and the subscriber
+	// can call RecordBroadcast while this goroutine is still descheduled. That
+	// broadcast finds no entry and is dropped, and the late registration is
+	// then reported as a dropped broadcast — a delivery that actually happened,
+	// counted as a loss. The denominator still moves only on success, so the
+	// two sides of the ratio remain the same accepted set.
 	if a.Collector != nil {
-		a.Collector.RecordPublish(reqID, msgID, time.Now())
+		a.Collector.RecordPublishBroadcastOnly(msgID, time.Now())
 	}
 	if err := a.Publish(a.Ctx, subject.MsgSend(u.Account, roomID, a.SiteID), data); err != nil {
 		if a.Collector != nil {
-			a.Collector.RecordPublishFailed(reqID, msgID)
+			a.Collector.DiscardBroadcastPublish(msgID)
 		}
 		return fmt.Errorf("publish send-message: %w", err)
+	}
+	if a.Collector != nil {
+		a.Collector.RecordBroadcastEligible()
 	}
 	return nil
 }
@@ -182,14 +193,18 @@ func threadReply(a actionCtx, u *userState, parentID, content string) error {
 	if err != nil {
 		return fmt.Errorf("marshal thread-reply: %w", err)
 	}
+	// Same pre-publish registration as sendMessage, for the same race.
 	if a.Collector != nil {
-		a.Collector.RecordPublish(reqID, msgID, time.Now())
+		a.Collector.RecordPublishBroadcastOnly(msgID, time.Now())
 	}
 	if err := a.Publish(a.Ctx, subject.MsgSend(u.Account, roomID, a.SiteID), data); err != nil {
 		if a.Collector != nil {
-			a.Collector.RecordPublishFailed(reqID, msgID)
+			a.Collector.DiscardBroadcastPublish(msgID)
 		}
 		return fmt.Errorf("publish thread-reply: %w", err)
+	}
+	if a.Collector != nil {
+		a.Collector.RecordBroadcastEligible()
 	}
 	return nil
 }

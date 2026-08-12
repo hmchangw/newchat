@@ -33,6 +33,7 @@ For connection, auth, shared schemas, and error reference, see [../client-api.md
    - [GET /api/v1/file-upload/:fileId/:fileName](#get-apiv1file-uploadfileidfilename)
    - [Media Service — avatar endpoints](#media-service--avatar-endpoints)
    - [Media Service — emoji endpoints](#media-service--emoji-endpoints)
+   - [HTTP — Client Update Service](#http--client-update-service)
 2. [HTTP — Botplatform Service](#http--botplatform-service)
 3. [HTTP — Admin Service](#http--admin-service)
 4. [room-service (§3.1)](#room-service)
@@ -206,6 +207,23 @@ Full decision logic, limits, and response schemas are in
 |---|---|---|
 | `GET /api/v1/emoji/:shortcode` | synchronous HTTP (image bytes, `304`, `307`, or `404`) | Serve a custom emoji image. Defaults to this cluster's site; optional lowercase `?siteid=` names a site — known remote `307`-redirects, unknown `404`. No generated default (unlike avatars). Cache-bust with `?v={etag}`. |
 | `PUT /api/v1/emoji/:shortcode` | synchronous HTTP | Upload (upsert) a custom emoji — PNG/JPEG/GIF, env-capped size/dimensions. Always writes to this cluster's site. ⚠️ Unauthenticated; optional `?uploader={account}` is audit-only. |
+
+**Emits:** `None — HTTP-only.`
+
+---
+
+### HTTP — Client Update Service
+
+Public HTTP endpoints served by `client-update-service` (no `ssoToken`/auth in v1
+— must be network-restricted). Full request/response schemas and the download
+cache behavior are in
+[../client-api.md §12](../client-api.md#12-client-update-service).
+
+| Endpoint | Reply | Purpose |
+|---|---|---|
+| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, streamed to MinIO, no size cap). |
+| `GET /api/v1/version/:fileName` | synchronous HTTP (raw bytes) | Download an artifact by name; served from a bounded TTL+size cache, else streamed from MinIO. |
+| `GET /healthz` | synchronous HTTP | Liveness (`{"status":"ok"}`). |
 
 **Emits:** `None — HTTP-only.`
 
@@ -1294,6 +1312,10 @@ search-service on that site.
 Full-text message search. Auto-scoped to rooms the user is a member of. May include
 messages from remote sites. One query matches message text, attachment text (file
 names + descriptions, pooled into one searched field), and tcard data.
+
+System messages (`room_created`, `members_added`, `member_removed`, `member_left`,
+`room_renamed`, `room_restricted`, `teams_meet_started`) are never returned — they are
+excluded from the index. A client-set `type: "important"` message stays searchable.
 
 > **Breaking change (v2):** Response changed from `{total, results}` to `{messages, total}`.
 > The `results` field no longer exists.

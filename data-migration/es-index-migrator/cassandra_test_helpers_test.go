@@ -16,7 +16,9 @@ import (
 // testutil.CassandraKeyspace) with the Participant/Card UDTs and a
 // messages_by_room table scoped to exactly the columns this service reads
 // (see messageColumns — including enc_payload, which the encryption guard
-// needs to be present in every SELECT this service issues), then returns a
+// needs to be present in every SELECT this service issues). Adding a column
+// to messageColumns without adding it here fails every read with "Undefined
+// column name". Returns a
 // session pinned to that keyspace so production queries (which use
 // unqualified table names) work unmodified. Shared by every integration test
 // in this package that needs a real Cassandra table — a second, drifted copy
@@ -59,6 +61,7 @@ func newTestCassandraSession(t *testing.T, prefix string) (keyspace, hostAddr st
 			edited_at                TIMESTAMP,
 			updated_at               TIMESTAMP,
 			enc_payload              BLOB,
+			type                     TEXT,
 			PRIMARY KEY ((room_id, bucket), created_at, message_id)
 		) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`),
 	}

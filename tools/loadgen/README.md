@@ -15,9 +15,10 @@ make -C tools/loadgen/deploy run  PRESET=medium RATE=500 DURATION=60s
 
 `make up` brings up the shared `docker-local` stack (NATS, MongoDB,
 Cassandra, Valkey, Elasticsearch, every microservice) and then the
-load-test-only overlay (loadgen, Prometheus, Grafana). The overlay joins
-the `chat-local` network so it can reach the same services any developer
-sees with `make up` at the repo root.
+load-test-only overlay (loadgen, Prometheus, Grafana, cAdvisor and a
+prometheus-nats-exporter sidecar). The overlay joins the `chat-local`
+network so it can reach the same services any developer sees with
+`make up` at the repo root.
 
 For live dashboards:
 
@@ -25,6 +26,25 @@ For live dashboards:
 make -C tools/loadgen/deploy run-dashboards PRESET=medium
 # Grafana at http://localhost:3000 (anonymous admin)
 ```
+
+### What Prometheus scrapes
+
+Beyond loadgen's own series, the overlay's Prometheus collects the three
+sources needed to tell "the service is too slow" apart from "the harness is
+too slow":
+
+| Target | Port | Carries |
+|---|---|---|
+| `nats-exporter` | `:7777` | JetStream consumer backlog — `num_pending`, `num_ack_pending`, `num_redelivered` |
+| every `chat-local-services` container (Docker SD) | `:2112` | o11y SDK metrics — `http.server.request.duration`, `db.client.operation.duration` |
+| 7 services (static) | `:9090` | hand-rolled counters, incl. `search_service_requests_total{type,status}` |
+| `cadvisor` | `:8080` | per-container CPU/memory |
+
+Consumer backlog matters most: per `docs/load-testing/system/sli-slo.md` §0.1 and §7 it
+is the *primary* enforcement signal for every async SLO, because the event
+ratios behind those SLOs are approximate until the outcome ledger lands. A run
+where latency looks fine but `num_pending` climbs monotonically is a run that
+found a bottleneck.
 
 Tear down:
 
@@ -149,6 +169,22 @@ export SOAK_WARMUP=30s
 /loadgen soak --seed=42
 /loadgen teardown --workload=soak
 ```
+
+`soak` accepts `--page-limit` (default 15) for how many messages each read
+fetches per page. It is a broker-payload knob, not a throughput one: a reply
+carries `--page-limit` messages of up to `SOAK_PAYLOAD_MAX_BYTES` each (10 KB by
+default — well under history-service's 20 KB content cap, which this workload
+never reaches), against a 256 KB `max_payload` (`notification-worker`'s
+`NATS_MAX_PAYLOAD_BYTES`). The old hardcoded 50 was ~500 KB and came back as
+`pkg/natsutil`'s compact oversize envelope instead of data, so the run measured
+rejections rather than reads.
+
+The two settings multiply, so neither is safe alone — raising
+`SOAK_PAYLOAD_MAX_BYTES` without lowering `--page-limit` reintroduces the
+problem. The run validates the pair at startup and exits before generating load
+if it cannot fit. Oversize replies that still occur are counted under the
+`response_too_large` error class rather than folded into `internal`, so they
+read as "lower the page size", not "the service is broken".
 
 Seed and run are restart-safe at the process level. Seed replaces only
 partial topology owned by the same run ID. `duration` mode stores the run
@@ -409,7 +445,9 @@ make -C tools/loadgen/deploy teardown-roomread PRESET=medium
 
 - Synchronous request/reply: gated on p95/p99 latency and error rate only
   (no consumer-pending signal). Defaults: `--slo-p95=100ms`, `--slo-p99=250ms`,
-  `--slo-error-rate=0.001`; override via the shared `max-rps` flags.
+  `--slo-error-rate=0.001`; override via the shared `max-rps` flags. The
+  per-SLO ratio flags (`--slo3-*`, `--slo7-*`, `--slo8-*`) are separate and
+  default to the spec's values.
 - Single-site only: all seeded users are local, so no cross-site inbox event is
   published on the read path.
 - Presets are the messages presets (`small`/`medium`/`large`/`realistic`); room
@@ -624,7 +662,7 @@ list of steps, holds at each step for a measurement window, evaluates SLO
 signals, and reports the largest step at which every signal passed.
 
 ```bash
-loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read --preset=<name> [flags]
+loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read|login|search --preset=<name> [flags]
 ```
 
 ### Quick start
@@ -639,6 +677,13 @@ loadgen max-rps --workload=history --preset=history-medium --steps=200,500,1k,2k
 # read-receipt: seed reader state first, then ramp
 loadgen seed --workload=read-receipt --preset=history-medium --read-ratio=0.7
 loadgen max-rps --workload=read-receipt --preset=history-medium --steps=200,500,1k,2k
+
+# login: drive auth-service's HTTP leg (no seeding needed)
+# SLO-3 defaults to the spec's 1s / 99%; no flag needed to score it.
+loadgen max-rps --workload=login --preset=medium
+
+# search: drive search-service request/reply (reads the existing index)
+loadgen max-rps --workload=search --preset=medium
 ```
 
 Via the deploy Makefile:
@@ -652,16 +697,24 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium 
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, or `thread-read` |
-| `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets) |
-| `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt `200,500,1k,2k,5k` | explicit ordered RPS list; `k` suffix = ×1000 |
-| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read**: per-request reply timeout |
+| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, `thread-read`, `login`, or `search` |
+| `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets; `login` and `search` reuse the message presets for their account set) |
+| `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt `200,500,1k,2k,5k` / login `50,100,200,500,1k` / search `100,200,500,1k,2k` | explicit ordered RPS list; `k` suffix = ×1000 |
+| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read / login / search**: per-request reply timeout |
+| `--auth-url` | `$AUTH_URL` | **login only**: auth-service base URL |
+| `--login-key-pool` | `256` | **login only**: pre-generated NKey pool size |
+| `--search-mix` | `messages:60,rooms:30,users:10` | **search only**: endpoint mix |
 | `--warmup` | `10s` | per-step warmup (samples discarded) |
 | `--hold` | `30s` | per-step measurement window |
 | `--cooldown` | `5s` | per-step settle gap before next step |
-| `--slo-p95` | `100ms` | applied to **every** gated latency series |
-| `--slo-p99` | `250ms` | applied to **every** gated latency series |
-| `--slo-error-rate` | `0.001` | `failed / attempted` (0.1%) |
+| `--slo-p95` | `100ms` | p95 latency gate (messages / thread / history / …) |
+| `--slo-p99` | `250ms` | p99 latency gate (messages / thread / history / …) |
+| `--slo-error-rate` | `0.001` | `failed / attempted` (0.1%); diagnostic-only for login and search, whose own SLO ratios already score failures |
+| `--slo3-latency` | `1s` | **login only**: SLO-3 latency bound |
+| `--slo3-target` | `0.99` | **login only**: SLO-3 good-ratio target |
+| `--slo7-target` | `0.995` | **search only**: SLO-7 availability target (no latency component) |
+| `--slo8-latency` | `1s` | **search only**: SLO-8 latency bound |
+| `--slo8-target` | `0.95` | **search only**: SLO-8 good-ratio target |
 | `--slo-pending-growth` | `1000` | **messages only**: per-durable end−start `NumPending` delta |
 | `--rate-tolerance` | `0.05` | achieved-vs-target shortfall band for the INCONCLUSIVE guard |
 | `--stop-on-trip` | `true` | stop the ramp at the first TRIP (does **not** stop on INCONCLUSIVE) |
@@ -681,6 +734,30 @@ ANSWER: max RPS = 2000 (workload=messages, preset=medium)
 This is the largest step at which **all** SLO signals passed; the
 `Next limit:` line names why the first failing step tripped. If no step
 passed, the output is `ANSWER: no step passed (workload=…, preset=…)`.
+
+Event-based latency SLOs add a `SLO-N good%` column. The console shows the
+evaluated `good / valid` ratio; CSV adds matching `_good`, `_valid`,
+`_good_ratio`, and `_target` columns so the verdict and error-budget
+consumption are reproducible. Percentile columns remain available as
+diagnostics even when the event ratio is the only latency verdict gate.
+
+**Missing deliveries** get their own `miss% (r/b)` column: the share of
+publishes whose reply (`r`) or broadcast (`b`) never arrived, measured after
+a drain window that gives in-flight stragglers time to land. Both are gated
+at the same threshold as `err%` (`--slo-error-rate`), because from the
+sender's side a reply that never comes is no better than an error reply.
+
+They are counted and gated separately rather than summed, mirroring the way
+`docs/load-testing/system/sli-slo.md` §2 scores persistence (SLO-1a) and publication
+(SLO-1b) as independent ratios: one send has two deliverables, so a fully
+dropped message would otherwise be counted twice against a denominator that
+counted it once. The CSV carries `missing_replies`, `missing_broadcasts`,
+`missing_reply_rate` and `missing_broadcast_rate`.
+
+> A rising `miss%` alongside flat or *improving* percentiles is the signature
+> of a saturated pipeline: the dropped messages are the slow ones, so the
+> surviving samples get faster as the system gets worse. Read `miss%` before
+> the percentiles.
 
 **INCONCLUSIVE rows** appear when the achieved throughput fell more than
 `--rate-tolerance` below the target while the SLO signals still looked
@@ -748,6 +825,94 @@ everything (dropping `subscriptions` removes the stamped `lastSeenAt` too):
 ```bash
 loadgen teardown --workload=history --preset=history-medium
 ```
+
+### Login workload (`--workload=login`)
+
+Drives `POST /api/v1/auth` on auth-service so **SLO-3** — *successful login
+within 1 s / eligible login attempts* (`docs/load-testing/system/sli-slo.md` §3) — can
+be measured under load. Every other workload connects to NATS with a
+pre-provisioned creds file (`NATS_CREDS_FILE`) and never touches the HTTP auth
+leg, which is why auth was the one already-measurable SLO no workload could
+exercise.
+
+```bash
+loadgen max-rps --workload=login --preset=medium
+```
+
+No seeding step: accounts come from the chosen message preset's fixtures, and
+NKey user keys are pre-generated into a pool (`--login-key-pool`) so ed25519
+key minting stays off the request path — generating one per request puts the
+load box's CPU, not auth-service, on the critical path.
+
+It posts the **tokenless (dev-mode) body** — `{account, natsPublicKey}` — which
+exercises the real handler, nkey validation and JWT signing without standing up
+an OIDC provider or botplatform-service. auth-service must be running with dev
+mode enabled.
+
+**Outcome eligibility** follows the error-budget table in `sli-slo.md` §0.1
+rather than the usual "2xx good, everything else bad":
+
+| Response | Counted as | Why |
+|---|---|---|
+| 2xx | good (and timed) | the journey succeeded |
+| 4xx except 429 | **excluded from valid entirely** | a legitimate client outcome — not our fault, so it neither burns budget nor counts as success |
+| 429, 5xx, timeout, transport error | failed | ours: overload, bug, or capacity |
+
+So `attempted = good + failed`, with excluded attempts dropped from the
+denominator. The SLO-3 gate is the spec's single event predicate:
+`successful login within --slo3-latency / eligible attempts >= --slo3-target`,
+defaulting to the spec's 1 s and 99%. The reported
+error rate and login p95/p99 remain diagnostic and do not independently gate
+the step. That matters in a lab: a preset whose accounts auth-service rejects
+yields a small sample and an honest INCONCLUSIVE, instead of a 100% error rate
+that looks like a service failure.
+
+### Search workload (`--workload=search`)
+
+Drives search-service's request/reply endpoints so **SLO-7** — *search returns
+ok / eligible search requests* (`docs/load-testing/system/sli-slo.md` §5) — can be
+measured under load.
+
+```bash
+loadgen max-rps --workload=search --preset=medium
+```
+
+No seeding step: search reads whatever the index already holds, so run it
+after a messages or daily run has produced indexable traffic — against an
+empty index the queries still exercise the full path but every hit list is
+empty, which measures neither scoring nor the enrichment path.
+
+Accounts come from the chosen message preset. `--search-mix` sets the endpoint
+share (default `messages:60,rooms:30,users:10`). Per-endpoint p95/p99 values are
+diagnostic because an ES query over messages and a spotlight-index room lookup
+have different cost models. The SLO-8 gate is the aggregate event predicate
+`successful search within --slo8-latency / successful searches >= --slo8-target`,
+defaulting to the spec's 1 s and 95%.
+
+Outcome classification uses the shared `sli-slo.md` §0.1 eligibility rule
+(see the login workload above), applied to the reply's `errcode` envelope:
+`bad_request`/`unauthenticated`/`forbidden`/`not_found`/`conflict` leave the
+denominator, while `internal`/`unavailable`/`too_many_requests` and a request
+timeout burn budget. Only successful searches are timed, matching SLO-8's
+"successful search returns within 1 s / **successful** searches". SLO-7 is
+scored as its own event ratio — `successes / eligible requests >=
+--slo7-target` (default 99.5%), with no latency component — so the generic
+`--slo-error-rate` gate is diagnostic-only for this workload. SLO-8 is evaluated
+from its joint good/valid counts rather than from a percentile threshold.
+
+**What this cannot tell you.** Two limits are worth stating before reading a
+green run as proof search is healthy:
+
+- **SLO-8 is not scorable server-side yet.** `search_service_request_duration`
+  carries only a `kind` attribute — no status — so successful requests can't be
+  isolated from failed ones in the service's own histogram. This workload
+  measures latency client-side, but the §8 P4 status label is still required
+  before SLO-8 can be enforced from production recording rules.
+- **A total outage does not show up as a failed ratio server-side.** §5 calls
+  this out: SLO-7's denominator is search-service-local, so a dead service
+  reads as *no traffic* rather than as failures. Client-side this workload does
+  see it — timeouts classify as failures — which is a useful cross-check, but
+  it is not a substitute for the health-check/prober backstop §5 asks for.
 
 ### Bottleneck attribution
 
@@ -914,8 +1079,11 @@ A step's verdict is one of `PASS`, `TRIP`, or `INCONCLUSIVE`.
 - `p95_latency_ms` > 500 — publish→broadcast latency, measured by correlating `RoomEvent.LastMsgID` with `RecordPublish` timestamps
 - `p99_latency_ms` > 1000 — same source
 - `error_rate` > 0.001 (0.1%) — failed publishes, request timeouts, gatekeeper 4xx/5xx; counted by the action emitter
+- `missing broadcast rate` > 0.001 (0.1%, same threshold as `error_rate`) — sends whose broadcast never arrived within a 2 s delivery grace. These are invisible to `error_rate`: the action returned nil because the *publish* succeeded, so the send counts in `attempted_ops` but never in `failed_ops` and contributes no latency sample. Without this signal a step that drops deliveries reads as healthy — and reads *better* the more it drops, because the dropped sends are the slow ones that would have widened the tail. Emitters run continuously across steps, so there is no quiet point to drain at: the step waits out the 2 s grace after the hold ends, then counts publishes from the hold window that are still unmatched. Cutting at the hold boundary rather than at "now minus grace" matters — the latter would permanently exclude the last 2 s of every hold, and the next step's collector reset would discard those entries unscored.
+
+  The denominator is `broadcast_eligible_ops`, **not** `attempted_ops`. Only `sendMessage` registers a broadcast correlation; `mark_read`, `scroll_history`, `refresh_room_list`, `member_add`, `room_create` and `mute_toggle` cannot lose a broadcast, and under the default weights sends are only ~64% of actions. Dividing by `attempted_ops` would scale every rate down by that share — a real 0.15% send-loss would report as 0.095% and pass the 0.1% gate. Sends that never registered (user has no rooms) or whose publish failed (correlation entry removed again) are excluded from both sides, so numerator and denominator are drawn from the same set of publishes
 - any JetStream consumer's `num_pending` grew by more than 1000 over the hold — polled via `/jsz?consumers=true` at hold start and end. The `notification-worker` durable is exempt: push-notification delivery delay is tolerated by design, so its backlog never fails the run (still shown in `worst-pending-delta` for observability)
-- any service's `slog_errors_total` counter increased over the hold — currently a no-op since backend services don't expose `/metrics` HTTP endpoints; see known limitations
+- any service's `slog_errors_total` counter increased over the hold — currently a no-op because no service emits that counter; see known limitations
 - any durable that existed at hold-start was *missing* at hold-end (consumer crashed or was deleted) — applies to `notification-worker` too, since a vanished consumer is an availability failure, not a tolerated delay
 
 **INCONCLUSIVE** (overrides PASS/TRIP — means "verdict signals can't be trusted") when:
@@ -937,12 +1105,12 @@ don't count as PASS and don't stop the ramp.
 Console table at end of run:
 
 ```
-N        p50    p95    p99    err%    worst-pending-delta             verdict
-1000     12     45     89     0.00%   broadcast-worker +12             PASS
-2000     14     58     112    0.00%   broadcast-worker +34             PASS
-5000     22     94     180    0.01%   broadcast-worker +180            PASS
-10000    38     210    430    0.02%   broadcast-worker +890            PASS
-20000(10000) 71  480  980    0.04%   broadcast-worker +1240           INCONCLUSIVE
+N        p50    p95    p99    err%    miss%   worst-pending-delta             verdict
+1000     12     45     89     0.00%   0.00%   broadcast-worker +12             PASS
+2000     14     58     112    0.00%   0.00%   broadcast-worker +34             PASS
+5000     22     94     180    0.01%   0.00%   broadcast-worker +180            PASS
+10000    38     210    430    0.02%   0.01%   broadcast-worker +890            PASS
+20000(10000) 71  480  980    0.04%   0.02%   broadcast-worker +1240           INCONCLUSIVE
     reasons: inconclusive: only 10000/20000 users activated (pool caps too low)
 
 ANSWER: N = 10000 (last passing step)
@@ -958,8 +1126,12 @@ CSV columns (`--csv=results.csv`):
 
 ```
 n,effective_n,started_at,p50_ms,p95_ms,p99_ms,error_rate,attempted_ops,failed_ops,
+missing_broadcasts,broadcast_eligible_ops,missing_broadcast_rate,
 worst_durable,worst_pending_delta,tripped,inconclusive,tripped_reasons
 ```
+
+Per-action columns (`<action>_count`, `_p50_ms`, `_p95_ms`, `_p99_ms`) and the
+`presence_*` columns follow, in that order.
 
 One row per step, sorted ascending by N. Use this for post-hoc plotting
 or regression comparison across runs.
@@ -989,7 +1161,22 @@ run:
 
 - **Large-band rooms are gatekeeper-blocked.** Daily fixtures have ~3 large rooms per user with `UserCount` in [500, 2000]; the gatekeeper rejects non-thread sends from member-role users to these. Roughly 3/56 = 5% of `sendMessage` calls land on a large room and fail. Workarounds: raise `LARGE_ROOM_THRESHOLD` (operator side) or change fixtures to seed users as RoleAdmin in large rooms (loadgen side, requires re-seed).
 - **Auth-service JWT minting is a no-op stub.** `mintJWT` exists in `prodEnvFactory.Build` but doesn't call auth-service. All loadgen connections use the shared `backend.creds`. To exercise per-user auth, implement `mintJWT` and have `directPool.Add` open the user's conn with the minted JWT.
-- **Service-error signal is dormant.** The verdict's `service_errors > 0 → trip` arm is wired but the URL map is empty because backend services don't expose `/metrics`. To enable: add a Prometheus endpoint per service and populate `svcURLs` in `prodEnvFactory.Build`.
+- **Service-error signal is dormant — and populating `svcURLs` alone will not
+  fix it.** The verdict's `service_errors > 0 → trip` arm is wired and the URL
+  map is empty, but the blocker is the *metric*, not the endpoints: services do
+  expose `/metrics` (`:9090` hand-rolled counters, `:2112` o11y SDK), and
+  nothing in this repo emits `slog_errors_total`. Wiring URLs today would
+  scrape real endpoints, find no such family, and report a permanent zero that
+  reads as "no service errors".
+
+  Enabling it needs a uniform per-service error counter first. The intended
+  source is the natsrouter middleware in `docs/load-testing/system/sli-slo.md` §8 P1
+  (`rpc_server_duration_seconds{subject_pattern, errcode_category}`); once it
+  ships, point `serviceErrorCounterName` at it and fill `svcURLs` in
+  `prodEnvFactory.Build`. A scrape that cannot find the family now fails with
+  `errCounterFamilyAbsent`, logs a warning, and lands in
+  `serviceScraper.Unavailable()` — so a half-done wiring is visible rather than
+  silently green.
 - **CPU% in self-metrics is disabled.** The earlier goroutine-count-as-CPU proxy made the tool unusable at scale (every step INCONCLUSIVE above ~4000 users). Real CPU measurement (gopsutil) is a follow-up. The GC pause p99 signal still fires the loadgen-saturation INCONCLUSIVE branch.
 - **Reconnect / presence storms are out of scope.** That's a separate scenario PR.
 - **Cross-site federation (INBOX) is out of scope.** Single-site only.
@@ -1029,6 +1216,7 @@ make -C tools/loadgen/deploy run-max-room-size PRESET=botroom-medium RATE=200
 (default `100,500,1000,2000,5000`), `--rooms-per-size` (default 4), `--reads`
 (room-service read rate, default 0 = off), `--warmup`/`--hold`/`--cooldown`,
 `--stop-on-trip`, `--slo-p95`/`--slo-p99`/`--slo-error-rate`/`--slo-pending-growth`,
+`--slo3-latency`/`--slo3-target`/`--slo7-target`/`--slo8-latency`/`--slo8-target`,
 `--rate-tolerance`, `--seed`, `--csv`.
 
 ### Reading the output

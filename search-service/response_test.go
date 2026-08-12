@@ -11,6 +11,45 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
+// With allow_no_indices=true a pattern matching nothing returns 200 + empty
+// hits, indistinguishable from "no results" — `_shards.total` is the one field
+// that separates them, so both spotlight parsers surface it.
+func TestParseSpotlight_ShardTotal(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{
+			name: "pattern matched no index",
+			raw:  `{"took":1,"_shards":{"total":0,"successful":0},"hits":{"total":{"value":0},"hits":[]}}`,
+			want: 0,
+		},
+		{
+			name: "index exists, no matching docs",
+			raw:  `{"took":1,"_shards":{"total":3,"successful":3},"hits":{"total":{"value":0},"hits":[]}}`,
+			want: 3,
+		},
+		{
+			name: "absent _shards reads as zero",
+			raw:  `{"hits":{"total":{"value":0},"hits":[]}}`,
+			want: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run("rooms: "+tt.name, func(t *testing.T) {
+			_, shards, err := parseRooms(json.RawMessage(tt.raw))
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, shards)
+		})
+		t.Run("orgs: "+tt.name, func(t *testing.T) {
+			_, shards, err := parseOrgs(json.RawMessage(tt.raw))
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, shards)
+		})
+	}
+}
+
 func TestParseMessagesResponse_HappyPath(t *testing.T) {
 	body := json.RawMessage(`{
 		"hits": {
@@ -185,7 +224,7 @@ func TestParseRooms_HappyPath(t *testing.T) {
 		}
 	}`)
 
-	rooms, err := parseRooms(body)
+	rooms, _, err := parseRooms(body)
 	require.NoError(t, err)
 	require.Len(t, rooms, 2)
 	assert.Equal(t, model.SearchRoom{RoomID: "r1", Name: "general", RoomType: "channel", SiteID: "site-a"}, rooms[0])
@@ -194,14 +233,14 @@ func TestParseRooms_HappyPath(t *testing.T) {
 
 func TestParseRooms_Empty(t *testing.T) {
 	body := json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`)
-	rooms, err := parseRooms(body)
+	rooms, _, err := parseRooms(body)
 	require.NoError(t, err)
 	assert.Empty(t, rooms)
 	assert.NotNil(t, rooms, "must be empty slice, not nil")
 }
 
 func TestParseRooms_Malformed(t *testing.T) {
-	_, err := parseRooms(json.RawMessage(`{`))
+	_, _, err := parseRooms(json.RawMessage(`{`))
 	assert.Error(t, err)
 }
 
@@ -216,7 +255,7 @@ func TestParseRooms_PreservesOrder(t *testing.T) {
 			]
 		}
 	}`)
-	rooms, err := parseRooms(body)
+	rooms, _, err := parseRooms(body)
 	require.NoError(t, err)
 	got := []string{rooms[0].RoomID, rooms[1].RoomID, rooms[2].RoomID}
 	assert.Equal(t, []string{"r3", "r1", "r2"}, got, "ES relevance order must be preserved")
@@ -240,7 +279,7 @@ func TestParseOrgs_HappyPath(t *testing.T) {
 		}
 	}`)
 
-	orgs, err := parseOrgs(body)
+	orgs, _, err := parseOrgs(body)
 	require.NoError(t, err)
 	require.Len(t, orgs, 2)
 	assert.Equal(t, model.SearchOrg{
@@ -253,14 +292,14 @@ func TestParseOrgs_HappyPath(t *testing.T) {
 
 func TestParseOrgs_Empty(t *testing.T) {
 	body := json.RawMessage(`{"hits":{"total":{"value":0},"hits":[]}}`)
-	orgs, err := parseOrgs(body)
+	orgs, _, err := parseOrgs(body)
 	require.NoError(t, err)
 	assert.Empty(t, orgs)
 	assert.NotNil(t, orgs, "must be empty slice, not nil")
 }
 
 func TestParseOrgs_Malformed(t *testing.T) {
-	_, err := parseOrgs(json.RawMessage(`{`))
+	_, _, err := parseOrgs(json.RawMessage(`{`))
 	assert.Error(t, err)
 }
 
@@ -275,7 +314,7 @@ func TestParseOrgs_PreservesOrder(t *testing.T) {
 			]
 		}
 	}`)
-	orgs, err := parseOrgs(body)
+	orgs, _, err := parseOrgs(body)
 	require.NoError(t, err)
 	got := []string{orgs[0].SectID, orgs[1].SectID, orgs[2].SectID}
 	assert.Equal(t, []string{"S3", "S1", "S2"}, got, "ES relevance order must be preserved")

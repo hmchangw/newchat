@@ -15,6 +15,12 @@ type rawHit[T any] struct {
 }
 
 type rawResponse[T any] struct {
+	// Shards.Total is 0 when the read pattern matched no concrete index —
+	// allow_no_indices=true turns that into 200 + empty hits, so it is the only
+	// field distinguishing a misconfigured index from a query that found nothing.
+	Shards struct {
+		Total int `json:"total"`
+	} `json:"_shards"`
 	Hits struct {
 		Total struct {
 			Value int64 `json:"value"`
@@ -96,19 +102,20 @@ func toSearchMessage(hit *messageSearchHit) model.SearchMessage {
 	}
 }
 
-// parseRooms extracts the ordered list of rooms from a spotlight ES
-// response, preserving ES relevance order.
-func parseRooms(raw json.RawMessage) ([]model.SearchRoom, error) {
+// parseRooms extracts the ordered list of rooms from a spotlight ES response,
+// preserving ES relevance order. Also returns the searched shard count, which
+// only matters on an empty result — see rawResponse.Shards.
+func parseRooms(raw json.RawMessage) ([]model.SearchRoom, int, error) {
 	var rr rawResponse[roomSearchHit]
 	if err := json.Unmarshal(raw, &rr); err != nil {
-		return nil, fmt.Errorf("parse spotlight rooms response: %w", err)
+		return nil, 0, fmt.Errorf("parse spotlight rooms response: %w", err)
 	}
 
 	rooms := make([]model.SearchRoom, 0, len(rr.Hits.Hits))
 	for i := range rr.Hits.Hits {
 		rooms = append(rooms, toSearchRoom(rr.Hits.Hits[i].Source))
 	}
-	return rooms, nil
+	return rooms, rr.Shards.Total, nil
 }
 
 // orgSearchHit is the spotlight-org ES `_source` shape for an organization
@@ -140,17 +147,18 @@ func toSearchOrg(h *orgSearchHit) model.SearchOrg {
 	}
 }
 
-// parseOrgs extracts the ordered list of organizations from a spotlight-org
-// ES response, preserving ES relevance order.
-func parseOrgs(raw json.RawMessage) ([]model.SearchOrg, error) {
+// parseOrgs extracts the ordered list of organizations from a spotlight-org ES
+// response, preserving ES relevance order. Also returns the searched shard
+// count — see parseRooms.
+func parseOrgs(raw json.RawMessage) ([]model.SearchOrg, int, error) {
 	var rr rawResponse[orgSearchHit]
 	if err := json.Unmarshal(raw, &rr); err != nil {
-		return nil, fmt.Errorf("parse spotlight orgs response: %w", err)
+		return nil, 0, fmt.Errorf("parse spotlight orgs response: %w", err)
 	}
 
 	orgs := make([]model.SearchOrg, 0, len(rr.Hits.Hits))
 	for i := range rr.Hits.Hits {
 		orgs = append(orgs, toSearchOrg(&rr.Hits.Hits[i].Source))
 	}
-	return orgs, nil
+	return orgs, rr.Shards.Total, nil
 }

@@ -59,6 +59,34 @@ type soakConfig struct {
 	TeardownBatchTimeout        time.Duration `env:"TEARDOWN_BATCH_TIMEOUT"            envDefault:"30s"`
 }
 
+// soakPayloadBudgetRatio is the share of max_payload a page of message bodies
+// may occupy. The rest is headroom for JSON structure, per-message metadata and
+// the response envelope, none of which is counted by the message-body estimate.
+const soakPayloadBudgetRatio = 0.75
+
+// validateSoakPageBudget rejects a page size that cannot fit in the broker's
+// max_payload at the configured message size.
+//
+// Neither value is safe alone: --page-limit and SOAK_PAYLOAD_MAX_BYTES multiply,
+// so raising the payload size silently reintroduces oversize replies that the
+// run would score as read failures rather than as a misconfiguration.
+func validateSoakPageBudget(pageLimit, payloadMaxBytes int, brokerMaxPayload int64) error {
+	if pageLimit <= 0 || payloadMaxBytes <= 0 || brokerMaxPayload <= 0 {
+		return nil // caller validates these separately
+	}
+	budget := int64(float64(brokerMaxPayload) * soakPayloadBudgetRatio)
+	// Divide rather than multiply: pageLimit*payloadMaxBytes can overflow for
+	// large inputs and read as comfortably under budget. The error path also
+	// avoids recomputing that unsafe product.
+	if int64(pageLimit) > budget/int64(payloadMaxBytes) {
+		return fmt.Errorf(
+			"page-limit %d with SOAK_PAYLOAD_MAX_BYTES %d exceeds the %d-byte page budget "+
+				"(%d-byte broker max_payload); lower --page-limit or SOAK_PAYLOAD_MAX_BYTES",
+			pageLimit, payloadMaxBytes, budget, brokerMaxPayload)
+	}
+	return nil
+}
+
 func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if strings.TrimSpace(cfg.RunID) == "" {
 		return fmt.Errorf("SOAK_RUN_ID is required")

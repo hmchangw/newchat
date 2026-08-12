@@ -116,9 +116,22 @@ func chunkStrings(in []string, size int) [][]string {
 	return out
 }
 
+// isDND and isPresenting are stubs: deriving these two statuses belongs to the
+// presence side of the system, which has not shipped them yet. They are vars so
+// tests can supply the eventual behaviour and prove the gate ordering now.
+//
+// Deliberately NOT inferred from any status we currently receive — mapping DND
+// onto "busy" or presenting onto "in-call" would invent a contract we do not own.
+// Until the real predicates land, both return false and rule 2 of the decision
+// table is inert.
+var (
+	isDND        = func(model.Presence) bool { return false }
+	isPresenting = func(model.Presence) bool { return false }
+)
+
 // isInCall reports whether presence alone suppresses push. "busy" and "in-call"
-// are deliberately one bucket: showNotificationsInCall is the only user-facing
-// control over either, so splitting them would leave "busy" ungovernable.
+// are one bucket while isDND is inert: showNotificationsInCall is the only
+// user-facing control over either, so splitting them now would push to DND users.
 func isInCall(p model.Presence) bool {
 	switch p.AggregatedStatus {
 	case "busy", "in-call":
@@ -128,12 +141,18 @@ func isInCall(p model.Presence) bool {
 	}
 }
 
-// shouldPush applies the two independent suppressors. Mute is pierced by a
-// priority sender only when the recipient enabled alwaysAllowPriorityNotifications;
-// the pierce deliberately does not cross the in-call gate, which
-// showNotificationsInCall governs on its own. Unknown presence fails open.
+// shouldPush applies the priority-contact pierce, then the suppressors in the
+// issue's stated priority order. alwaysAllowPriorityNotifications is the single
+// opt-in for "priority contacts reach me anyway", so the pierce crosses all of
+// them. Unknown presence fails open.
 func shouldPush(p model.Presence, ns notifSettings, isPrioritySender bool) bool {
-	if ns.muteAll && (!ns.allowPriority || !isPrioritySender) {
+	if ns.allowPriority && isPrioritySender {
+		return true
+	}
+	if ns.muteAll {
+		return false
+	}
+	if isDND(p) || isPresenting(p) {
 		return false
 	}
 	if isInCall(p) && !ns.showInCall {
