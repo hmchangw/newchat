@@ -2,8 +2,7 @@
 
 package main
 
-// Demo harness — serves the real handler + UI on :8091 with seeded data, no
-// NATS/Mongo/Cassandra needed. Excluded from normal builds/tests by the tag.
+// Demo harness — the real handler + UI on :8091 with seeded data, no backing services.
 // Run: go test -tags demoharness -count=1 -run TestDemoHarness ./tools/cdc-verify/
 
 import (

@@ -649,9 +649,8 @@ type InspectTarget struct {
 	Verbatim      bool           `json:"verbatim,omitempty"`
 }
 
-// InspectResult is the live source + destination state for one document,
-// fetched at request time — independent of any past check. SourceFields lists
-// every plain source path the mapping reads (fields, derived, keys, resolvers).
+// InspectResult is the live source + destination state for one document, read
+// at request time; SourceFields lists every plain source path the mapping reads.
 type InspectResult struct {
 	Collection   string          `json:"collection"`
 	DocID        string          `json:"docId"`
@@ -664,9 +663,8 @@ type InspectResult struct {
 // errUnmapped marks an inspect request for a collection the mapping doesn't cover.
 var errUnmapped = errors.New("unmapped collection")
 
-// Inspect fetches the current source doc and every mapped destination record
-// for (collection, docID), live. A missing source falls back to a bare
-// {"_id": docID} view so _id-keyed targets stay inspectable after a delete.
+// Inspect fetches the current source doc and every mapped destination record, live.
+// A missing source falls back to {"_id": docID} so _id-keyed targets survive a delete.
 func (v *verifier) Inspect(ctx context.Context, collection, docID string) (InspectResult, error) {
 	cs, ok := v.compiled[collection]
 	if !ok {
@@ -741,9 +739,8 @@ func (v *verifier) Inspect(ctx context.Context, collection, docID string) (Inspe
 	return res, nil
 }
 
-// mappedSourceFields lists every plain (non-resolver) source path the mapping
-// reads for this collection: compared fields, derived inputs, dest keys, and
-// resolver keys — what the UI highlights on the source document.
+// mappedSourceFields lists every plain source path the mapping reads (compared,
+// derived, dest keys, resolver keys) — what the UI highlights on the source doc.
 func mappedSourceFields(cs *compiledSource) []string {
 	set := map[string]bool{}
 	add := func(paths []string) {

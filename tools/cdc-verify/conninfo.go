@@ -32,9 +32,8 @@ type ConnInfo struct {
 	MappingFile string `json:"mappingFile"`
 }
 
-// redactURI replaces any userinfo (credentials) ahead of the host with "***@".
-// Only the authority part is inspected — an "@" after the first path slash is
-// data, not credentials.
+// redactURI replaces any userinfo ahead of the host with "***@"; only the
+// authority is inspected — an "@" past the first path slash is data, not credentials.
 func redactURI(uri string) string {
 	rest, ok := strings.CutPrefix(uri, schemeOf(uri))
 	if !ok || rest == uri {
