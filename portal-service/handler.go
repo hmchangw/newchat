@@ -115,6 +115,17 @@ type PortalHandler struct {
 	// store is the optional live directory lookup used as the /api/v1/login
 	// role-gate fallback on a cache miss; nil-safe (miss stays a miss).
 	store DirectoryStore
+
+	// failover resolves per-site failover routing (SP4). nil => always home.
+	failover failoverTargeter
+	// backupSiteID is the reserved PORTAL_SITE_URLS entry served during failover.
+	backupSiteID string
+}
+
+// failoverTargeter reads SP4's per-site serving target. *failoverReader
+// implements it; defined here (the consumer) so tests can inject a fake.
+type failoverTargeter interface {
+	ServingTarget(ctx context.Context, siteID string) ServingTarget
 }
 
 // PortalHandlerOption configures optional PortalHandler dependencies.
@@ -130,6 +141,38 @@ func WithRestyClient(c *resty.Client) PortalHandlerOption {
 // can log in immediately.
 func WithDirectoryStore(s DirectoryStore) PortalHandlerOption {
 	return func(h *PortalHandler) { h.store = s }
+}
+
+// WithFailoverReader injects the SP4 failover target reader that drives the
+// health-aware routing override. Without it, routing is always home.
+func WithFailoverReader(f failoverTargeter) PortalHandlerOption {
+	return func(h *PortalHandler) { h.failover = f }
+}
+
+// WithBackupSiteID sets the reserved PORTAL_SITE_URLS id served for a
+// failed-over site (PORTAL_BACKUP_SITE_ID).
+func WithBackupSiteID(id string) PortalHandlerOption {
+	return func(h *PortalHandler) { h.backupSiteID = id }
+}
+
+// servingURLs returns the coordinates to hand a client for an account homed on
+// siteID, applying SP4's failover override. siteID (the home site) is never
+// changed by this — only which registry entry's URLs are returned. A configured
+// backup that is missing from the registry is a loud internal error rather than
+// a silent mis-route to the down home site.
+func (h *PortalHandler) servingURLs(ctx context.Context, siteID string) (siteURL, error) {
+	if h.failover != nil && h.failover.ServingTarget(ctx, siteID) == ServingBackup {
+		b, ok := h.sites[h.backupSiteID]
+		if !ok {
+			return siteURL{}, fmt.Errorf("serving target is backup but backup site %q missing from registry", h.backupSiteID)
+		}
+		return b, nil
+	}
+	home, ok := h.sites[siteID]
+	if !ok {
+		return siteURL{}, fmt.Errorf("no URLs configured for siteId %q", siteID)
+	}
+	return home, nil
 }
 
 // NewPortalHandler creates a PortalHandler. devMode synthesizes a dev-site
@@ -186,25 +229,34 @@ func (h *PortalHandler) resolve(ctx context.Context, c *gin.Context, account str
 		devFallback = true
 	}
 
-	site, siteOK := h.sites[e.SiteID]
-	if !siteOK && !devFallback {
-		// A directory entry homed on a site missing from the registry is an ops
-		// misconfiguration, not a client error — surface it as internal.
-		errhttp.Write(ctx, c, fmt.Errorf("no URLs configured for siteId %q", e.SiteID))
-		return
-	}
-	natsURL := site.NATSURL
-	if !siteOK {
-		// The dev-fallback site itself isn't in the registry — fall back to
-		// the legacy PORTAL_DEV_FALLBACK_NATS_URL so local logins keep working.
-		natsURL = h.devFallbackNatsURL
+	var baseURL, natsURL string
+	if devFallback {
+		// Dev-fallback site never fails over; keep the legacy URL handling.
+		site, siteOK := h.sites[e.SiteID]
+		baseURL, natsURL = site.BaseURL, site.NATSURL
+		if !siteOK {
+			// The dev-fallback site itself isn't in the registry — fall back to
+			// the legacy PORTAL_DEV_FALLBACK_NATS_URL so local logins keep working.
+			natsURL = h.devFallbackNatsURL // baseURL stays "" as before
+		}
+	} else {
+		// Provisioned account: apply SP4's failover override. siteId stays home;
+		// only the transport URLs may swap to the backup.
+		su, err := h.servingURLs(ctx, e.SiteID)
+		if err != nil {
+			// A missing home/backup registry entry is an ops misconfiguration,
+			// not a client error — surface it as internal.
+			errhttp.Write(ctx, c, err)
+			return
+		}
+		baseURL, natsURL = su.BaseURL, su.NATSURL
 	}
 
 	// Bot/admin accounts get the minimal URL bundle; everyone else the rich employee shape.
 	if model.HasLoginRole(e.Roles) {
 		c.JSON(http.StatusOK, userInfoBotResponse{
 			Account: e.Account,
-			BaseURL: site.BaseURL,
+			BaseURL: baseURL,
 			NATSURL: natsURL,
 			SiteID:  e.SiteID,
 		})
@@ -214,7 +266,7 @@ func (h *PortalHandler) resolve(ctx context.Context, c *gin.Context, account str
 	c.JSON(http.StatusOK, userInfoResponse{
 		Account:    e.Account,
 		EmployeeID: e.EmployeeID,
-		BaseURL:    site.BaseURL,
+		BaseURL:    baseURL,
 		NATSURL:    natsURL,
 		SiteID:     e.SiteID,
 	})
