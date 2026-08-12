@@ -200,7 +200,7 @@ flowchart TB
 **Total for one message ≈ 6 traces** — the **browser** publish span is its own
 trace (linked, not parent, into the gatekeeper), plus gatekeeper +
 message-worker + broadcast-worker + notification-worker + search-sync; the push
-service adds a 7th linked off notification. They are
+service adds a 7th linked from notification. They are
 stitched by links, not a shared trace ID: browser → gatekeeper (link), and
 gatekeeper's `publish …canonical.created` → each of the 4 canonical consumers
 (link).
@@ -322,7 +322,7 @@ The DM-specific piece is **first-time room provisioning**: `user-service`'s
 `serverCreateDM` on `chat.server.request.room.{site}.create.dm`
 (`subject.RoomCreateDMSync`).
 
-- `〔Trace: user-service〕` `process …request…dm` → `mongo` → `send
+- `〔Trace: user-service〕` `process …request…dm` → `mongo` → `publish
   …room.{site}.create.dm` (PRODUCER) + reply to client.
 - `〔Trace: room-worker〕` (linked to the `publish …create.dm`) `process` →
   `mongo rooms/subscriptions insert` → atrest DEK provision (`vault` +
@@ -396,7 +396,7 @@ Client → `history-service` (`…request.room.{r}.{s}.msg.edit` / `…msg.delet
 (reindex / remove).
 
 - `〔Trace: history-service〕` (linked to browser) `process …msg.edit` →
-  `mongo` access checks → `cassandra … UPDATE` (or soft-delete) → `send
+  `mongo` access checks → `cassandra … UPDATE` (or soft-delete) → `publish
   …canonical.edited` (PRODUCER, link target) + reply.
 - `〔Trace: broadcast-worker〕` `process …canonical.edited` (linked) →
   `mongo`/`valkey` → `publish chat.room.{r}.event.*` (edit).
@@ -426,7 +426,7 @@ Prometheus) with NATS tracing enabled, then in Tempo assert:
 
 - the per-service span trees in §1–§7 exist with the listed DB spans
   (`mongodb.*`, `cassandra.*`, `redis.*`, `elasticsearch.*`),
-- each downstream `process` span carries a **link** to the upstream `send` span,
+- each downstream `process` span carries a **link** to the upstream `publish` span,
 - log lines for a span (Loki) share its `traceId`/`spanId`,
 - the §8 limitations are understood (especially bare-context request/reply
   callers), not mistaken for missing telemetry.
@@ -434,7 +434,7 @@ Prometheus) with NATS tracing enabled, then in Tempo assert:
 The `pkg/natsutil` continuity integration test asserts the correct **link-based**
 contract across a publish→consume hop — the consumer handler gets a *valid* span
 context whose span carries a **link** back to the producer, **not** a shared
-trace ID (ground truth: `o11y` v0.9.1 / `akira-core/otel-nats` v0.7.0 add
+trace ID (ground truth: `o11y` v0.11.0 / `akira-core/otel-nats` v0.9.1 add
 `trace.WithLinks(originSpanCtx)` on the consumer span per the OTel messaging
 semconv). Asserting `traceId` equality across a hop would be *wrong*. These
 scenarios extend that single-hop gate to the real multi-service pipelines.
