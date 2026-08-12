@@ -55,7 +55,9 @@ func newMembersClient(nc *o11ynats.Conn) *membersClient { return &membersClient{
 // getChannels until hasMore is false so large memberships aren't truncated.
 func (c *membersClient) GetChannels(ctx context.Context, account, siteID string, members []string) ([]string, error) {
 	subj := subject.UserSubscriptionGetChannels(account, siteID)
-	var roomIDs []string
+	// Non-nil so a zero-match result filters the room search to no rooms,
+	// rather than a nil slice that buildRoomQuery reads as "no member filter".
+	roomIDs := make([]string, 0)
 	for offset := 0; ; {
 		body, err := json.Marshal(getChannelsRequest{AccountNames: members, Offset: offset, Limit: membersPageLimit})
 		if err != nil {
@@ -75,9 +77,13 @@ func (c *membersClient) GetChannels(ctx context.Context, account, siteID string,
 		for _, sub := range out.Subscriptions {
 			roomIDs = append(roomIDs, sub.RoomID)
 		}
-		// Last page, or defensively an empty page while hasMore stays true.
-		if !out.HasMore || len(out.Subscriptions) == 0 {
+		if !out.HasMore {
 			break
+		}
+		// hasMore is set but the page is empty: the offset can't advance, so
+		// fail rather than silently returning a truncated member-room set.
+		if len(out.Subscriptions) == 0 {
+			return nil, fmt.Errorf("getChannels returned an empty page with hasMore set for %s", account)
 		}
 		offset += len(out.Subscriptions)
 	}

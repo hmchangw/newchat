@@ -148,6 +148,12 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 	ctx, cancel := h.withRequestTimeout(c)
 	defer cancel()
 
+	// Reject an invalid roomType before the member-resolution RPC, so bad input
+	// fails fast instead of doing upstream work only to be rejected in buildRoomQuery.
+	if _, rerr := roomTypeFilterClause(req.RoomType); rerr != nil {
+		return nil, rerr
+	}
+
 	// memberRoomIDs stays nil (no filter) when Members is unset; an empty
 	// non-nil slice means no channel matched every requested member, so the
 	// query is built to match nothing rather than falling back to unfiltered.

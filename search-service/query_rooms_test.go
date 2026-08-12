@@ -92,10 +92,12 @@ func TestBuildSubscriptionQuery_SortByScoreThenJoinedAtDesc(t *testing.T) {
 	require.NoError(t, err)
 
 	sort := parseQuery(t, raw)["sort"].([]any)
-	require.Len(t, sort, 2)
+	require.Len(t, sort, 3)
 	assert.Equal(t, "_score", sort[0])
 	joinedAt := sort[1].(map[string]any)["joinedAt"].(map[string]any)
 	assert.Equal(t, "desc", joinedAt["order"])
+	roomID := sort[2].(map[string]any)["roomId"].(map[string]any)
+	assert.Equal(t, "asc", roomID["order"], "deterministic tie-breaker after joinedAt")
 }
 
 func TestBuildSubscriptionQuery_QueryFieldFlowsToESBody(t *testing.T) {

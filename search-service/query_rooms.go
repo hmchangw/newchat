@@ -61,6 +61,9 @@ func buildRoomQuery(req model.SearchRoomsRequest, account string, memberRoomIDs 
 		"sort": []any{
 			"_score",
 			map[string]any{"joinedAt": map[string]any{"order": "desc"}},
+			// Deterministic tie-breaker: the empty-query members path gives every
+			// hit the same _score, so equal joinedAt would otherwise page unstably.
+			map[string]any{"roomId": map[string]any{"order": "asc"}},
 		},
 	}
 
