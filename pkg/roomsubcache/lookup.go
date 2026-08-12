@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -100,5 +101,28 @@ func (c *Lookup) Invalidate(ctx context.Context, roomID string) {
 	}
 	if err := c.cache.Invalidate(ctx, roomID); err != nil {
 		slog.Warn("roomsubcache invalidate failed", "error", err, "roomId", roomID)
+	}
+}
+
+// GuardLoader fences load behind breaker so a stalled backend costs one
+// server-selection timeout instead of one per lookup. Guard the loader, not
+// the Lookup: an open breaker must still serve L2 hits, which are the only
+// thing that can answer during the outage that opened it. A nil breaker
+// returns load unchanged.
+func GuardLoader(load Loader, breaker *circuitbreaker.Breaker) Loader {
+	if breaker == nil {
+		return load
+	}
+	return func(ctx context.Context, roomID string) ([]Member, error) {
+		var out []Member
+		err := breaker.Do(func() error {
+			var innerErr error
+			out, innerErr = load(ctx, roomID)
+			return innerErr
+		})
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
 	}
 }

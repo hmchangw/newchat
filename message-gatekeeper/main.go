@@ -48,6 +48,7 @@ type config struct {
 	SubL2TTL           time.Duration           `env:"GATEKEEPER_SUB_L2_TTL"        envDefault:"90m"`
 	MongoBreakerFails  int                     `env:"GATEKEEPER_MONGO_BREAKER_FAILS"    envDefault:"5"`
 	MongoBreakerCool   time.Duration           `env:"GATEKEEPER_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
+	MongoSelectTimeout time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT"   envDefault:"2s"`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
 	HealthAddr         string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
@@ -98,7 +99,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		// A stopped Mongo must error rather than block: this handler gates every
+		// send, and the driver default (30s) dwarfs any useful budget.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -137,7 +142,14 @@ func main() {
 		slog.Error("init subscription cache failed", "error", err)
 		os.Exit(1)
 	}
-	users, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
+	// Fenced inside the cache, not outside it: an open breaker must still serve
+	// warm entries. Unfenced, the display-name lookup pays a server-selection
+	// timeout on every send for as long as Mongo is down.
+	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "user"),
+		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
+	users, err := userstore.NewCache(
+		userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
 		cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user meta cache failed", "error", err)

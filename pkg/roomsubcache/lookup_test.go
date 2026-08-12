@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -246,4 +247,48 @@ func TestLookup_LoaderErrorIsReturned(t *testing.T) {
 	_, err := lookup.GetMembers(context.Background(), "r1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mongo down")
+}
+
+func TestGuardLoader_OpenBreakerSkipsTheLoader(t *testing.T) {
+	loader := &fakeLoader{err: errors.New("mongo down")}
+	b := circuitbreaker.New(2, time.Minute)
+	guarded := GuardLoader(loader.Load, b)
+
+	for i := 0; i < 2; i++ {
+		_, err := guarded(context.Background(), "r1")
+		require.Error(t, err)
+	}
+	require.Equal(t, int32(2), loader.calls.Load())
+
+	for i := 0; i < 3; i++ {
+		_, err := guarded(context.Background(), "r1")
+		require.Error(t, err)
+	}
+	assert.Equal(t, int32(2), loader.calls.Load(), "an open breaker must not reach the loader")
+}
+
+func TestGuardLoader_ServesL2WhileBreakerIsOpen(t *testing.T) {
+	cache := newFakeCache()
+	warm := []Member{{ID: "u1", Account: "alice"}}
+	require.NoError(t, cache.Set(context.Background(), "r1", warm, time.Minute))
+
+	loader := &fakeLoader{err: errors.New("mongo down")}
+	b := circuitbreaker.New(1, time.Minute)
+	lookup := NewLookup(cache, GuardLoader(loader.Load, b), time.Minute)
+
+	// Trip the breaker on a cold room, then confirm the warm room still answers:
+	// fencing the loader must never fence the cache in front of it.
+	_, err := lookup.GetMembers(context.Background(), "cold")
+	require.Error(t, err)
+
+	got, err := lookup.GetMembers(context.Background(), "r1")
+	require.NoError(t, err)
+	assert.Equal(t, warm, got)
+}
+
+func TestGuardLoader_NilBreakerIsPassThrough(t *testing.T) {
+	loader := &fakeLoader{out: []Member{{ID: "u1", Account: "alice"}}}
+	got, err := GuardLoader(loader.Load, nil)(context.Background(), "r1")
+	require.NoError(t, err)
+	assert.Equal(t, loader.out, got)
 }

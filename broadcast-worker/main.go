@@ -139,11 +139,15 @@ func main() {
 		}
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
-	metaBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
-		circuitbreaker.Tracked(ctx, "roommeta"),
-		circuitbreaker.WithFailurePredicate(MetaBreakerFailure))
+	// One breaker for every Mongo call site in this service, not one per site:
+	// a failure seen anywhere should immediately stop the others from paying a
+	// server-selection timeout too. Per-site breakers each need their own
+	// threshold of slow failures before they fence, multiplying the delay.
+	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+		circuitbreaker.Tracked(ctx, "mongo"),
+		circuitbreaker.WithFailurePredicate(MongoBreakerFailure))
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"),
-		metaValkey, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, metaBreaker)
+		metaValkey, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
@@ -154,7 +158,12 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("room-meta-cache enabled", "size", cfg.RoomMetaCacheSize, "ttl", cfg.RoomMetaCacheTTL)
-	us, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
+	// Fenced inside the cache so an open breaker still serves warm users.
+	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+		circuitbreaker.Tracked(ctx, "user"),
+		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
+	us, err := userstore.NewCache(
+		userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
 		cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)

@@ -57,6 +57,9 @@ type config struct {
 	ValkeyAddrs        []string                `env:"VALKEY_ADDRS"    envSeparator:","`
 	ValkeyPassword     string                  `env:"VALKEY_PASSWORD" envDefault:""`
 	DEKL2TTL           time.Duration           `env:"ATREST_DEK_L2_TTL"           envDefault:"90m"`
+	MongoBreakerFails  int                     `env:"MONGO_BREAKER_FAILS"         envDefault:"5"`
+	MongoBreakerCool   time.Duration           `env:"MONGO_BREAKER_COOLDOWN"      envDefault:"10s"`
+	MongoSelectTimeout time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	DEKBreakerFails    int                     `env:"ATREST_DEK_BREAKER_FAILS"    envDefault:"5"`
 	DEKBreakerCooldown time.Duration           `env:"ATREST_DEK_BREAKER_COOLDOWN" envDefault:"10s"`
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -121,13 +124,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		// A stopped Mongo must error rather than block: enrichment here is
+		// best-effort, and the driver default (30s) stalls the persist path.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongodb connect failed", "error", err)
 		os.Exit(1)
 	}
 	db := mongoClient.Database(cfg.MongoDB)
-	us, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
+	// Fenced inside the cache so an open breaker still serves warm users.
+	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "user"),
+		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
+	us, err := userstore.NewCache(
+		userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
 		cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)

@@ -39,9 +39,20 @@ type mongoStore struct {
 	metaRec       roommetacache.Recorder
 	metaOpts      []roommetacache.ReadThroughOption
 	members       *roomsubcache.Lookup
+	breaker       *circuitbreaker.Breaker
 }
 
-func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, metaBreaker *circuitbreaker.Breaker) *mongoStore {
+// guard runs fn behind the store's breaker so that once Mongo is known to be
+// down, a fail-open caller returns immediately instead of paying a fresh
+// server-selection timeout on every message. A nil breaker runs fn directly.
+func (m *mongoStore) guard(fn func() error) error {
+	if m.breaker == nil {
+		return fn()
+	}
+	return m.breaker.Do(fn)
+}
+
+func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, mongoBreaker *circuitbreaker.Breaker) *mongoStore {
 	// A nil valkey leaves the Lookup cacheless (straight to Mongo). The loader
 	// is always the shared full-projection one: notification-worker reads the
 	// same key and gates on Muted/HistorySharedSince, so a partial write here
@@ -57,17 +68,19 @@ func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valk
 		valkey:        valkey,
 		metaTTL:       metaTTL,
 		metaRec:       cachemetrics.For("roommeta", "l2"),
-		members:       roomsubcache.NewLookup(subCache, roomsubcache.NewMongoLoader(subCol), subTTL),
+		members: roomsubcache.NewLookup(subCache,
+			roomsubcache.GuardLoader(roomsubcache.NewMongoLoader(subCol), mongoBreaker), subTTL),
+		breaker: mongoBreaker,
 	}
-	if metaBreaker != nil {
-		s.metaOpts = []roommetacache.ReadThroughOption{roommetacache.WithFetchGuard(metaBreaker.Do)}
+	if mongoBreaker != nil {
+		s.metaOpts = []roommetacache.ReadThroughOption{roommetacache.WithFetchGuard(mongoBreaker.Do)}
 	}
 	return s
 }
 
-// MetaBreakerFailure is the failure predicate the room-meta breaker must be
-// built with: a missing room is a healthy answer, not a sign Mongo is unwell.
-func MetaBreakerFailure(err error) bool {
+// MongoBreakerFailure is the failure predicate the store's breaker must be
+// built with: a missing document is a healthy answer, not a sign Mongo is unwell.
+func MongoBreakerFailure(err error) bool {
 	return err != nil && !errors.Is(err, mongo.ErrNoDocuments)
 }
 
@@ -110,12 +123,17 @@ func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID st
 	filter := bson.M{"_id": roomID}
 	update := bson.M{"$set": fields}
 
-	res, err := m.roomCol.UpdateOne(ctx, filter, update)
-	if err != nil {
+	if err := m.guard(func() error {
+		res, err := m.roomCol.UpdateOne(ctx, filter, update)
+		if err != nil {
+			return err
+		}
+		if res.MatchedCount == 0 {
+			return mongo.ErrNoDocuments
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("update room last message %s: %w", roomID, err)
-	}
-	if res.MatchedCount == 0 {
-		return fmt.Errorf("update room last message %s: %w", roomID, mongo.ErrNoDocuments)
 	}
 	return nil
 }
@@ -162,8 +180,10 @@ func subscriptionMentionsFilter(roomID string, accounts []string, msgCreatedAt t
 func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
 	filter := subscriptionMentionsFilter(roomID, accounts, msgCreatedAt)
 	update := bson.M{"$set": bson.M{"hasMention": true}}
-	_, err := m.subCol.UpdateMany(ctx, filter, update)
-	if err != nil {
+	if err := m.guard(func() error {
+		_, err := m.subCol.UpdateMany(ctx, filter, update)
+		return err
+	}); err != nil {
 		return fmt.Errorf("set subscription mentions for room %s: %w", roomID, err)
 	}
 	return nil
@@ -173,10 +193,13 @@ func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string,
 // never regresses a sender who already read later. A missing subscription is a
 // best-effort no-op (MatchedCount unchecked).
 func (m *mongoStore) AdvanceSubscriptionLastSeen(ctx context.Context, roomID, account string, at time.Time) error {
-	if _, err := m.subCol.UpdateOne(ctx,
-		bson.M{"roomId": roomID, "u.account": account},
-		bson.M{"$max": bson.M{"lastSeenAt": at}},
-	); err != nil {
+	if err := m.guard(func() error {
+		_, err := m.subCol.UpdateOne(ctx,
+			bson.M{"roomId": roomID, "u.account": account},
+			bson.M{"$max": bson.M{"lastSeenAt": at}},
+		)
+		return err
+	}); err != nil {
 		return fmt.Errorf("advance lastSeenAt for %q in room %q: %w", account, roomID, err)
 	}
 	return nil
