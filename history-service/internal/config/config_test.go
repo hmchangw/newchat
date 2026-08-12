@@ -14,14 +14,20 @@ import (
 // doesn't touch them.
 func baseValid() Config {
 	return Config{
-		SubCacheSize:     100000,
-		SubCacheTTL:      2 * time.Minute,
-		RoomCacheSize:    50000,
-		RoomCacheTTL:     10 * time.Second,
-		PreviewCacheSize: 50000,
-		PreviewCacheTTL:  10 * time.Second,
-		MaxConcurrency:   256,
-		RequestTimeout:   10 * time.Second,
+		SubCacheSize:         100000,
+		SubCacheTTL:          2 * time.Minute,
+		RoomCacheSize:        50000,
+		RoomCacheTTL:         10 * time.Second,
+		PreviewCacheSize:     50000,
+		PreviewCacheTTL:      10 * time.Second,
+		MaxConcurrency:       256,
+		RequestTimeout:       10 * time.Second,
+		SubL2TTL:             90 * time.Minute,
+		MongoBreakerFails:    5,
+		MongoBreakerCooldown: 10 * time.Second,
+		DEKL2TTL:             90 * time.Minute,
+		DEKBreakerFails:      5,
+		DEKBreakerCooldown:   10 * time.Second,
 		Mongo: MongoConfig{
 			MaxPoolSize: 100,
 			MinPoolSize: 0,
@@ -42,6 +48,9 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	cfg.RoomCacheTTL = 0
 	cfg.PreviewCacheSize = 0
 	cfg.PreviewCacheTTL = 0
+	cfg.SubL2TTL = 0
+	cfg.MongoBreakerFails = 0
+	cfg.MongoBreakerCooldown = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
@@ -195,4 +204,52 @@ func unsetEnv(t *testing.T, key string) {
 			_ = os.Setenv(key, prev)
 		}
 	})
+}
+
+func TestValidate_RejectsNegativeSubL2TTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.SubL2TTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_SUB_L2_TTL")
+}
+
+func TestValidate_RejectsNegativeMongoBreakerFails(t *testing.T) {
+	cfg := baseValid()
+	cfg.MongoBreakerFails = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_MONGO_BREAKER_FAILS")
+}
+
+func TestValidate_RejectsNegativeMongoBreakerCooldown(t *testing.T) {
+	cfg := baseValid()
+	cfg.MongoBreakerCooldown = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_MONGO_BREAKER_COOLDOWN")
+}
+
+func TestValidate_RejectsNegativeDEKL2TTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.DEKL2TTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ATREST_DEK_L2_TTL")
+}
+
+func TestValidate_RejectsNegativeDEKBreakerFails(t *testing.T) {
+	cfg := baseValid()
+	cfg.DEKBreakerFails = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ATREST_DEK_BREAKER_FAILS")
+}
+
+func TestValidate_RejectsNegativeDEKBreakerCooldown(t *testing.T) {
+	cfg := baseValid()
+	cfg.DEKBreakerCooldown = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ATREST_DEK_BREAKER_COOLDOWN")
 }

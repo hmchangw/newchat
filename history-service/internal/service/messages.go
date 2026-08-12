@@ -210,7 +210,7 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 	}
 
 	now := time.Now().UTC()
-	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(c, roomID, req.Meta, now)
+	lastMsgAt, createdAt, _, err := s.resolveRoomTimesOrError(c, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
