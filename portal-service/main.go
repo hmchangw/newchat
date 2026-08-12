@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -57,6 +58,13 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+
+	// FailoverOpsToken gates the operator failover control surface. Empty
+	// disables the internal control server entirely (no control surface).
+	FailoverOpsToken string `env:"FAILOVER_OPS_TOKEN" envDefault:""`
+	// FailoverInternalAddr is the listen address for the internal-only control
+	// surface — kept off the public browser-facing server.
+	FailoverInternalAddr string `env:"FAILOVER_INTERNAL_ADDR" envDefault:":8090"`
 
 	// BotLoginEnabled gates portal's bot-role password login. Flip to false
 	// once the dedicated bot-devs client (which talks to botplatform directly)
@@ -138,6 +146,39 @@ func run() error {
 	r.Use(ginutil.AccessLog())
 	registerRoutes(r, handler)
 
+	// Optional internal-only failover control surface. Bound on a separate
+	// listener so no privileged write shares the public discovery server.
+	var internalSrv *http.Server
+	if cfg.FailoverOpsToken != "" {
+		failoverStore := newMongoFailoverStore(mongoClient.Database(cfg.MongoDB))
+		failoverHandler := NewFailoverHandler(failoverStore)
+
+		ir := gin.New()
+		ir.Use(gin.Recovery())
+		ir.Use(ginutil.RequestID())
+		ir.Use(ginutil.AccessLog())
+		registerFailoverRoutes(ir, failoverHandler, cfg.FailoverOpsToken)
+
+		// net.Listen up front so a bad bind fails startup, not silently later.
+		ln, lerr := net.Listen("tcp", cfg.FailoverInternalAddr)
+		if lerr != nil {
+			return fmt.Errorf("bind failover control surface %q: %w", cfg.FailoverInternalAddr, lerr)
+		}
+		internalSrv = &http.Server{
+			Handler:      ir,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+		}
+		go func() {
+			slog.Info("failover control surface starting", "addr", cfg.FailoverInternalAddr)
+			if serveErr := internalSrv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+				slog.Error("failover control surface stopped", "error", serveErr)
+			}
+		}()
+	} else {
+		slog.Info("failover control surface disabled (FAILOVER_OPS_TOKEN unset)")
+	}
+
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
 		Addr:         addr,
@@ -158,6 +199,11 @@ func run() error {
 		shutdown.Wait(ctx, 25*time.Second,
 			func(ctx context.Context) error {
 				slog.Info("shutting down portal service")
+				if internalSrv != nil {
+					if err := internalSrv.Shutdown(ctx); err != nil {
+						slog.Error("shutdown failover control surface", "error", err)
+					}
+				}
 				err := srv.Shutdown(ctx)
 				refreshCancel()
 				refreshWG.Wait()

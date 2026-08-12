@@ -76,7 +76,7 @@ func TestFailoverHandler_PostFailoverHappyPath(t *testing.T) {
 	store.EXPECT().Get(gomock.Any(), "site-a").Return(
 		FailoverState{SiteID: "site-a", Status: StatusHealthy, Version: 0}, nil)
 	store.EXPECT().Transition(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ any, next FailoverState) error {
+		func(_ any, next *FailoverState) error {
 			assert.Equal(t, StatusFailedOver, next.Status)
 			assert.Equal(t, int64(1), next.Version)
 			assert.Equal(t, "jane", next.Operator)
@@ -138,9 +138,36 @@ func TestFailoverHandler_PostValidation(t *testing.T) {
 	}
 }
 
+func TestFailoverHandler_ListStoreError(t *testing.T) {
+	r, store := newFailoverTestServer(t)
+	store.EXPECT().List(gomock.Any()).Return(nil, errors.New("mongo down"))
+
+	w := do(t, r, http.MethodGet, "/internal/v1/failover", "")
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestFailoverHandler_GetStoreError(t *testing.T) {
+	r, store := newFailoverTestServer(t)
+	store.EXPECT().Get(gomock.Any(), "site-a").Return(FailoverState{}, errors.New("mongo down"))
+
+	w := do(t, r, http.MethodGet, "/internal/v1/failover/site-a", "")
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
 func TestFailoverHandler_PostGetStoreError(t *testing.T) {
 	r, store := newFailoverTestServer(t)
 	store.EXPECT().Get(gomock.Any(), "site-a").Return(FailoverState{}, errors.New("mongo down"))
+
+	w := do(t, r, http.MethodPost, "/internal/v1/failover/site-a",
+		`{"action":"failover","operator":"jane","reason":"x"}`)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestFailoverHandler_PostTransitionStoreError(t *testing.T) {
+	r, store := newFailoverTestServer(t)
+	store.EXPECT().Get(gomock.Any(), "site-a").Return(
+		FailoverState{SiteID: "site-a", Status: StatusHealthy, Version: 0}, nil)
+	store.EXPECT().Transition(gomock.Any(), gomock.Any()).Return(errors.New("mongo down"))
 
 	w := do(t, r, http.MethodPost, "/internal/v1/failover/site-a",
 		`{"action":"failover","operator":"jane","reason":"x"}`)
