@@ -136,6 +136,11 @@ func main() {
 		mongoutil.WithReadPreference(readPref),
 		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
 		mongoutil.WithMinPoolSize(cfg.Mongo.MinPoolSize),
+		// Must stay well under REQUEST_TIMEOUT: the fail-open paths on the read
+		// hot path can only serve a fallback if the Mongo read fails with time
+		// left in the request budget. The driver default (30s) exceeds every
+		// budget here, so a stopped Mongo would hang instead of erroring.
+		mongoutil.WithServerSelectionTimeout(cfg.Mongo.ServerSelectionTimeout),
 	)
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
@@ -271,9 +276,17 @@ func main() {
 		)
 	}
 
-	var roomSource service.RoomRepository = roomRepo
+	// Fence the room reads before the L1 cache wraps them: they fail open, but
+	// only once they fail FAST (see breakerRoomRepo). Its own breaker, so
+	// room-read health and subscription-read health cannot mask each other.
+	guardedRooms := newBreakerRoomRepo(roomRepo, circuitbreaker.New(
+		cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+		circuitbreaker.Tracked(ctx, "roomtimes"),
+		circuitbreaker.WithFailurePredicate(roomBreakerFailure)))
+
+	var roomSource service.RoomRepository = guardedRooms
 	if cfg.RoomCacheSize > 0 && cfg.RoomCacheTTL > 0 {
-		rc, err := readcache.NewRoomCache(roomRepo, cfg.RoomCacheSize, cfg.RoomCacheTTL)
+		rc, err := readcache.NewRoomCache(guardedRooms, cfg.RoomCacheSize, cfg.RoomCacheTTL)
 		if err != nil {
 			slog.Error("init room cache failed", "error", err)
 			os.Exit(1)

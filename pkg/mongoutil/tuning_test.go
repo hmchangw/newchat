@@ -2,6 +2,7 @@ package mongoutil
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,4 +33,23 @@ func TestApplyTuning_UnsetLeavesOptionsUntouched(t *testing.T) {
 
 	assert.Nil(t, clientOpts.MaxPoolSize, "unset WithMaxPoolSize must not write MaxPoolSize")
 	assert.Nil(t, clientOpts.MinPoolSize, "unset WithMinPoolSize must not write MinPoolSize")
+}
+
+// A stopped MongoDB does not return errors — it blocks on server selection for
+// the driver default of 30s, which is longer than any request budget in this
+// system. Every fail-open path downstream depends on the read failing FAST
+// enough to leave time to serve a cached answer, so this bound is what makes
+// those paths reachable at all.
+func TestWithServerSelectionTimeout(t *testing.T) {
+	clientOpts := options.Client()
+	newConnectConfig(WithServerSelectionTimeout(2 * time.Second)).applyTuning(clientOpts)
+	require.NotNil(t, clientOpts.ServerSelectionTimeout)
+	assert.Equal(t, 2*time.Second, *clientOpts.ServerSelectionTimeout)
+}
+
+func TestWithServerSelectionTimeout_UnsetLeavesDriverDefault(t *testing.T) {
+	clientOpts := options.Client()
+	newConnectConfig().applyTuning(clientOpts)
+	assert.Nil(t, clientOpts.ServerSelectionTimeout,
+		"unset must not clobber a URI-provided or driver default value")
 }

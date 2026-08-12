@@ -37,7 +37,12 @@ type MongoConfig struct {
 	// (a handler holds at most one at a time), so this is a generous headroom
 	// ceiling, not a count of connections that get opened. Operators must keep
 	// pods × MaxPoolSize under the cluster's connection limit.
-	MaxPoolSize uint64 `env:"MAX_POOL_SIZE" envDefault:"500"`
+	// ServerSelectionTimeout bounds how long a read waits for a usable server.
+	// Deliberately far below the driver's 30s default and below REQUEST_TIMEOUT,
+	// so a stopped MongoDB errors while the request still has budget to serve a
+	// cached fallback rather than dying on an expired deadline.
+	ServerSelectionTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	MaxPoolSize            uint64        `env:"MAX_POOL_SIZE" envDefault:"500"`
 	// MinPoolSize keeps a warm connection floor; 0 lets the pool drain to empty.
 	MinPoolSize uint64 `env:"MIN_POOL_SIZE" envDefault:"0"`
 }
@@ -180,6 +185,18 @@ func validate(cfg *Config) error {
 	}
 	if cfg.RequestTimeout < 0 {
 		return fmt.Errorf("REQUEST_TIMEOUT must be >= 0, got %s", cfg.RequestTimeout)
+	}
+	if cfg.Mongo.ServerSelectionTimeout <= 0 {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT must be > 0, got %s", cfg.Mongo.ServerSelectionTimeout)
+	}
+	// A server-selection bound at or above the request budget cannot do its job:
+	// the handler deadline fires first, so the read never returns an error and
+	// the fail-open paths that depend on one never run. RequestTimeout == 0 means
+	// unbounded, so there is no budget to undercut.
+	if cfg.RequestTimeout > 0 && cfg.Mongo.ServerSelectionTimeout >= cfg.RequestTimeout {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT (%s) must be less than REQUEST_TIMEOUT (%s), "+
+			"otherwise a stalled MongoDB consumes the whole request budget instead of failing open",
+			cfg.Mongo.ServerSelectionTimeout, cfg.RequestTimeout)
 	}
 	if cfg.SubL2TTL < 0 {
 		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2TTL)

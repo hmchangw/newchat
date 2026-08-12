@@ -29,8 +29,9 @@ func baseValid() Config {
 		DEKBreakerFails:      5,
 		DEKBreakerCooldown:   10 * time.Second,
 		Mongo: MongoConfig{
-			MaxPoolSize: 100,
-			MinPoolSize: 0,
+			MaxPoolSize:            100,
+			MinPoolSize:            0,
+			ServerSelectionTimeout: 2 * time.Second,
 		},
 	}
 }
@@ -252,4 +253,24 @@ func TestValidate_RejectsNegativeDEKBreakerCooldown(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ATREST_DEK_BREAKER_COOLDOWN")
+}
+
+func TestValidate_RejectsNonPositiveServerSelectionTimeout(t *testing.T) {
+	cfg := baseValid()
+	cfg.Mongo.ServerSelectionTimeout = 0
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_SERVER_SELECTION_TIMEOUT")
+}
+
+// The bound only works if it undercuts the request budget — otherwise the
+// handler deadline fires first and the read never returns the error the
+// fail-open paths need.
+func TestValidate_RejectsServerSelectionTimeoutAtOrAboveRequestTimeout(t *testing.T) {
+	cfg := baseValid()
+	cfg.RequestTimeout = 5 * time.Second
+	cfg.Mongo.ServerSelectionTimeout = 5 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be less than REQUEST_TIMEOUT")
 }
