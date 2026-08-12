@@ -148,7 +148,7 @@ func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest)
 		}
 		return nil, fmt.Errorf("get requester: %w", err)
 	}
-	if requester.EngName == "" || requester.ChineseName == "" {
+	if requester.EngName == "" && requester.ChineseName == "" {
 		return nil, errInvalidUserData
 	}
 
@@ -252,7 +252,7 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 		}
 		return nil, fmt.Errorf("get counterpart: %w", err)
 	}
-	if roomType == model.RoomTypeDM && (other.EngName == "" || other.ChineseName == "") {
+	if roomType == model.RoomTypeDM && (other.EngName == "" && other.ChineseName == "") {
 		// botDMs counterpart is an app/bot whose users-collection record
 		// typically has empty name fields; the GetApp + Assistant.Enabled
 		// check below is the right validation for that case.
