@@ -634,7 +634,10 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 		},
 		{
-			name:    "GetRoom infra failure — wrapped as infraError",
+			// Fail-open: the large-room cap is spam control, not access control,
+			// so a GetRoomMeta infra failure (Mongo down / breaker open) must
+			// still allow the send rather than block it.
+			name:    "GetRoom infra failure — fails open, send still published",
 			account: validAccount,
 			roomID:  validRoomID,
 			siteID:  validSiteID,
@@ -655,19 +658,19 @@ func TestHandler_ProcessMessage(t *testing.T) {
 					Return(roommetacache.Meta{}, errors.New("mongo unreachable"))
 			},
 			setupPub: func() (publishFunc, *[]publishedMsg) {
-				return makePublishFunc(nil, nil), nil
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
 			},
-			wantErr:   true,
-			wantInfra: true,
+			wantErr: false,
+			checkResult: func(t *testing.T, _ []byte, published []publishedMsg) {
+				assert.Len(t, published, 1, "room-meta infra failure must fail open and still publish")
+			},
 		},
 		{
 			// Distinct from the generic-error case above: GetRoom returns
-			// ErrNoDocuments (wrapped, mirroring MongoStore.GetRoom). The
-			// handler must still classify this as infraError — unlike
-			// GetSubscription, GetRoom does not convert ErrNoDocuments to a
-			// user-facing error, since reaching this call already implies a
-			// subscription for the room exists.
-			name:    "GetRoom returns ErrNoDocuments — wrapped as infraError",
+			// ErrNoDocuments (wrapped, mirroring MongoStore.GetRoom). Same
+			// fail-open contract applies regardless of the underlying cause.
+			name:    "GetRoom returns ErrNoDocuments — fails open, send still published",
 			account: validAccount,
 			roomID:  validRoomID,
 			siteID:  validSiteID,
@@ -688,10 +691,13 @@ func TestHandler_ProcessMessage(t *testing.T) {
 					Return(roommetacache.Meta{}, fmt.Errorf("get room meta %q: %w", validRoomID, mongo.ErrNoDocuments))
 			},
 			setupPub: func() (publishFunc, *[]publishedMsg) {
-				return makePublishFunc(nil, nil), nil
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
 			},
-			wantErr:   true,
-			wantInfra: true,
+			wantErr: false,
+			checkResult: func(t *testing.T, _ []byte, published []publishedMsg) {
+				assert.Len(t, published, 1, "room-meta infra failure must fail open and still publish")
+			},
 		},
 		{
 			name:    "custom threshold (env=2), 3-person room — rejected",
@@ -2500,4 +2506,33 @@ func mustMember(t *testing.T, key, value string) baggage.Member {
 	member, err := baggage.NewMember(key, value)
 	require.NoError(t, err)
 	return member
+}
+
+// TestProcessMessage_RoomMetaError_FailsOpen asserts that a GetRoomMeta error
+// (Mongo down + breaker open) fails open: a non-thread, non-bypass send is
+// still allowed rather than Nak'd, because the large-room cap is spam
+// control, not access control.
+func TestProcessMessage_RoomMetaError_FailsOpen(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	// Subscriber with no bypass role -> large-room cap would normally apply.
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "room1").
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}}, nil)
+	// Mongo down: room-meta lookup errors.
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room1").
+		Return(roommetacache.Meta{}, errors.New("mongo unavailable"))
+
+	var published []publishedMsg
+	pub := makePublishFunc(&published, nil)
+	reply := func(_ context.Context, _ *nats.Msg) error { return nil }
+	h := NewHandler(store, nil, pub, reply, "site1", nil, 500, 1, 8192, "")
+
+	req := &model.SendMessageRequest{
+		ID:        idgen.GenerateMessageID(),
+		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+		Content:   "hi",
+	}
+	_, err := h.processMessage(context.Background(), "alice", "room1", "site1", req)
+	require.NoError(t, err, "room-meta error must fail-open, not block the send")
+	require.Len(t, published, 1, "message should still be published to canonical")
 }
