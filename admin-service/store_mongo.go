@@ -71,12 +71,15 @@ func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
 		return fmt.Errorf("create permission_grants siteId_permission_subjectAccount_recordedAt_id index: %w", err)
 	}
 
-	// Backs the audit/BI browse (no subjectAccount equality, so index 1 above doesn't apply).
+	// Backs the audit/BI browse (no subjectAccount equality, so index 1 above
+	// doesn't apply). The _id tiebreaker mirrors the list sort {recordedAt:-1,_id:-1}
+	// — without it every browse pays a blocking in-memory SORT, and recordedAt ties
+	// are guaranteed because a multi-subject batch stamps one shared timestamp.
 	_, err = s.permGrants.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "recordedAt", Value: -1}},
+		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "recordedAt", Value: -1}, {Key: "_id", Value: -1}},
 	})
 	if err != nil {
-		return fmt.Errorf("create permission_grants siteId_recordedAt index: %w", err)
+		return fmt.Errorf("create permission_grants siteId_recordedAt_id index: %w", err)
 	}
 
 	return nil

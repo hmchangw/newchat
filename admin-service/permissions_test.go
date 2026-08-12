@@ -25,7 +25,7 @@ import (
 // the real bodyLimit middleware, wired to only the permission routes.
 func setupPermissionsRouter(h *Handler) *gin.Engine {
 	r := gin.New()
-	r.Use(bodyLimit(maxPermissionBodyBytes))
+	r.Use(bodyLimit(maxRequestBodyBytes))
 	r.Use(func(c *gin.Context) {
 		c.Set(ctxPrincipal, session.Session{
 			ID:      "sess-1",
@@ -214,7 +214,7 @@ func TestHandler_createPermissions(t *testing.T) {
 		setupMock  func(m *MockAdminStore)
 		wantStatus int
 		wantReason string
-		checkBody  func(t *testing.T, body map[string]any, raw []byte)
+		checkBody  func(t *testing.T, body map[string]any)
 	}{
 		{
 			name: "unknown permission → 400 unknown_permission",
@@ -377,7 +377,7 @@ func TestHandler_createPermissions(t *testing.T) {
 			setupMock:  func(m *MockAdminStore) {},
 			wantStatus: http.StatusBadRequest,
 			wantReason: string(errcode.PermissionInvalidWindow),
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				// effectiveFrom was never sent — the message must name expiresAt, not
 				// misreport an effectiveFrom/expiresAt ordering problem the caller
 				// never created (from defaults to now, which is > any past expiresAt).
@@ -422,7 +422,7 @@ func TestHandler_createPermissions(t *testing.T) {
 				m.EXPECT().AppendAuditMany(gomock.Any(), gomock.Any()).Return(nil)
 			},
 			wantStatus: http.StatusCreated,
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Equal(t, float64(2), body["created"])
 				assert.Equal(t, []any{"alice"}, body["duplicatesIgnored"])
 			},
@@ -440,7 +440,7 @@ func TestHandler_createPermissions(t *testing.T) {
 			},
 			wantStatus: http.StatusNotFound,
 			wantReason: string(errcode.PermissionUnknownAccounts),
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Contains(t, body["error"], "ghost")
 				md, _ := body["metadata"].(map[string]any)
 				assert.Equal(t, "ghost", md["accounts"]) // console renders metadata.accounts
@@ -461,7 +461,7 @@ func TestHandler_createPermissions(t *testing.T) {
 			},
 			wantStatus: http.StatusNotFound,
 			wantReason: string(errcode.PermissionUnknownAccounts),
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Contains(t, body["error"], "ghost-applicant")
 				md, _ := body["metadata"].(map[string]any)
 				assert.Equal(t, "ghost-applicant", md["accounts"])
@@ -480,7 +480,7 @@ func TestHandler_createPermissions(t *testing.T) {
 			},
 			wantStatus: http.StatusNotFound,
 			wantReason: string(errcode.PermissionUnknownAccounts),
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Contains(t, body["error"], "ghost-approver")
 				md, _ := body["metadata"].(map[string]any)
 				assert.Equal(t, "ghost-approver", md["accounts"])
@@ -499,7 +499,7 @@ func TestHandler_createPermissions(t *testing.T) {
 			},
 			wantStatus: http.StatusBadRequest,
 			wantReason: string(errcode.PermissionInactiveSubject),
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Contains(t, body["error"], "alice")
 				md, _ := body["metadata"].(map[string]any)
 				assert.Equal(t, "alice", md["accounts"]) // console renders metadata.accounts
@@ -522,7 +522,7 @@ func TestHandler_createPermissions(t *testing.T) {
 				m.EXPECT().AppendAuditMany(gomock.Any(), gomock.Any()).Return(nil)
 			},
 			wantStatus: http.StatusCreated,
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Equal(t, float64(1), body["created"])
 			},
 		},
@@ -598,7 +598,7 @@ func TestHandler_createPermissions(t *testing.T) {
 					})
 			},
 			wantStatus: http.StatusCreated,
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Equal(t, float64(2), body["created"])
 				assert.Equal(t, []any{}, body["duplicatesIgnored"])
 				grants, ok := body["grants"].([]any)
@@ -669,7 +669,7 @@ func TestHandler_createPermissions(t *testing.T) {
 				m.EXPECT().AppendAuditMany(gomock.Any(), gomock.Any()).Return(nil)
 			},
 			wantStatus: http.StatusCreated,
-			checkBody: func(t *testing.T, body map[string]any, raw []byte) {
+			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Equal(t, float64(model.MaxSubjects), body["created"])
 			},
 		},
@@ -711,7 +711,7 @@ func TestHandler_createPermissions(t *testing.T) {
 			}
 			if tc.checkBody != nil {
 				body := respBody(t, w)
-				tc.checkBody(t, body, w.Body.Bytes())
+				tc.checkBody(t, body)
 			}
 		})
 	}
@@ -721,11 +721,11 @@ func TestHandler_createPermissions(t *testing.T) {
 // listPermissions
 // -------------------------------------------------------------------------
 
-// ptrTime returns a pointer to t, for constructing model.PermissionGrant
-// fixtures returned by mocked store calls. Distinct name from
-// integration_test.go's timePtr — that file compiles into the same package
-// under -tags integration, so the two helpers must not collide.
-func ptrTime(t time.Time) *time.Time { return &t }
+// timePtr returns a pointer to t, for constructing model.PermissionGrant
+// time-window fixtures. integration_test.go shares it — that file compiles
+// into the same package under -tags integration, while this untagged file is
+// part of every build.
+func timePtr(t time.Time) *time.Time { return &t }
 
 func TestHandler_listPermissions(t *testing.T) {
 	knownPermission := string(model.PermissionExternalImageView)
@@ -843,7 +843,7 @@ func TestHandler_listPermissions(t *testing.T) {
 				latest := &model.PermissionGrant{
 					ID: "g1", SiteID: "site-A", Permission: model.PermissionExternalImageView,
 					SubjectAccount: "alice", Granted: true,
-					EffectiveFrom: ptrTime(now.Add(-time.Hour)), ExpiresAt: ptrTime(now.Add(time.Hour)),
+					EffectiveFrom: timePtr(now.Add(-time.Hour)), ExpiresAt: timePtr(now.Add(time.Hour)),
 					ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "r", RecordedBy: "p_admin", RecordedAt: now.Add(-time.Hour),
 				}
 				m.EXPECT().ListPermissionGrants(gomock.Any(), "site-A", "alice", model.PermissionExternalImageView, 1, 20).
@@ -863,8 +863,8 @@ func TestHandler_listPermissions(t *testing.T) {
 				grantRow := model.PermissionGrant{
 					ID: "g-grant", SiteID: "site-A", Permission: model.PermissionExternalImageView,
 					SubjectAccount: "alice", Granted: true,
-					EffectiveFrom:    ptrTime(time.Date(2026, 9, 1, 0, 0, 0, 0, tzTaipei)),
-					ExpiresAt:        ptrTime(time.Date(2027, 1, 1, 0, 0, 0, 0, tzTaipei)),
+					EffectiveFrom:    timePtr(time.Date(2026, 9, 1, 0, 0, 0, 0, tzTaipei)),
+					ExpiresAt:        timePtr(time.Date(2027, 1, 1, 0, 0, 0, 0, tzTaipei)),
 					ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "r1",
 					RecordedBy: "p_admin", RecordedAt: time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC),
 				}

@@ -179,13 +179,13 @@ func TestBodyLimit(t *testing.T) {
 		wantStatus int
 	}{
 		{"body within the limit passes through to the handler", 10, http.StatusOK},
-		{"body over the limit fails JSON binding → 400", maxPermissionBodyBytes + 1024, http.StatusBadRequest},
+		{"body over the limit fails JSON binding → 400", maxRequestBodyBytes + 1024, http.StatusBadRequest},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := gin.New()
-			r.Use(bodyLimit(maxPermissionBodyBytes))
+			r.Use(bodyLimit(maxRequestBodyBytes))
 			r.POST("/echo", func(c *gin.Context) {
 				var body map[string]any
 				if err := c.ShouldBindJSON(&body); err != nil {

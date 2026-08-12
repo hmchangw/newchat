@@ -595,9 +595,6 @@ func TestIntegration_EnsureIndexes_Idempotent(t *testing.T) {
 // + GetLatestPermissionGrant (latest-wins) + FindAccountStates + AppendAuditMany
 // -------------------------------------------------------------------------
 
-// timePtr returns a pointer to t, for constructing PermissionGrant.EffectiveFrom/ExpiresAt test fixtures.
-func timePtr(t time.Time) *time.Time { return &t }
-
 func TestIntegration_InsertPermissionGrants_AllOrNothing(t *testing.T) {
 	db := testutil.MongoDBReplicaSet(t, "adminsvc")
 	st := newStoreMongo(db)
@@ -908,57 +905,85 @@ func TestIntegration_ListPermissionGrants_UsesIndexNoInMemorySort(t *testing.T) 
 		{ID: idgen.GenerateUUIDv7(), SiteID: "site-a", Permission: model.PermissionExternalImageView, SubjectAccount: "gina", Granted: true, EffectiveFrom: timePtr(now), ExpiresAt: timePtr(now.AddDate(0, 1, 0)), ApplicantAccount: "carol", ApproverAccount: "dave", Reason: "r1", RecordedBy: "p_admin", RecordedAt: now},
 	}))
 
-	// Resolve the compound index's real auto-generated name at runtime
-	// (rather than hardcoding mongod's naming convention), so the assertion
-	// below can prove WHICH index served the query, not just that some index did.
-	wantIndexName := indexNameForKeys(ctx, t, st.permGrants.Indexes(), bson.D{
-		{Key: "siteId", Value: 1},
-		{Key: "permission", Value: 1},
-		{Key: "subjectAccount", Value: 1},
-		{Key: "recordedAt", Value: -1},
-		{Key: "_id", Value: -1},
-	})
-	t.Logf("compound index resolved to name %q", wantIndexName)
-
-	cmd := bson.D{
-		{Key: "explain", Value: bson.D{
-			{Key: "find", Value: "permission_grants"},
-			{Key: "filter", Value: bson.D{
+	tests := []struct {
+		name      string
+		filter    bson.D
+		indexKeys bson.D // the compound index that must serve the query
+	}{
+		{
+			name: "subjectAccount+permission lookup",
+			filter: bson.D{
 				{Key: "siteId", Value: "site-a"},
 				{Key: "permission", Value: string(model.PermissionExternalImageView)},
 				{Key: "subjectAccount", Value: "gina"},
-			}},
-			{Key: "sort", Value: bson.D{{Key: "recordedAt", Value: -1}, {Key: "_id", Value: -1}}},
-		}},
-		{Key: "verbosity", Value: "queryPlanner"},
+			},
+			indexKeys: bson.D{
+				{Key: "siteId", Value: 1},
+				{Key: "permission", Value: 1},
+				{Key: "subjectAccount", Value: 1},
+				{Key: "recordedAt", Value: -1},
+				{Key: "_id", Value: -1},
+			},
+		},
+		{
+			// The default landing view: GET with no subjectAccount/permission filters.
+			// Ties on recordedAt are guaranteed (createPermissions stamps one `now`
+			// across a multi-subject batch), so the browse index must also carry the
+			// _id tiebreaker or every page load pays a blocking in-memory SORT.
+			name:   "no-filter browse",
+			filter: bson.D{{Key: "siteId", Value: "site-a"}},
+			indexKeys: bson.D{
+				{Key: "siteId", Value: 1},
+				{Key: "recordedAt", Value: -1},
+				{Key: "_id", Value: -1},
+			},
+		},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Resolve the compound index's real auto-generated name at runtime
+			// (rather than hardcoding mongod's naming convention), so the assertion
+			// below can prove WHICH index served the query, not just that some index did.
+			wantIndexName := indexNameForKeys(ctx, t, st.permGrants.Indexes(), tc.indexKeys)
+			t.Logf("compound index resolved to name %q", wantIndexName)
 
-	var result struct {
-		QueryPlanner struct {
-			WinningPlan bson.Raw `bson:"winningPlan"`
-		} `bson:"queryPlanner"`
+			cmd := bson.D{
+				{Key: "explain", Value: bson.D{
+					{Key: "find", Value: "permission_grants"},
+					{Key: "filter", Value: tc.filter},
+					{Key: "sort", Value: bson.D{{Key: "recordedAt", Value: -1}, {Key: "_id", Value: -1}}},
+				}},
+				{Key: "verbosity", Value: "queryPlanner"},
+			}
+
+			var result struct {
+				QueryPlanner struct {
+					WinningPlan bson.Raw `bson:"winningPlan"`
+				} `bson:"queryPlanner"`
+			}
+			require.NoError(t, db.RunCommand(ctx, cmd).Decode(&result))
+
+			stages := collectStages(t, result.QueryPlanner.WinningPlan)
+
+			var ixscanNames []string
+			sawSort := false
+			for _, s := range stages {
+				switch s.Stage {
+				case "IXSCAN":
+					ixscanNames = append(ixscanNames, s.IndexName)
+				case "SORT":
+					sawSort = true
+				}
+			}
+
+			require.NotEmpty(t, ixscanNames, "the hot query must use an index, not a collection scan")
+			assert.Equal(t, []string{wantIndexName}, ixscanNames,
+				"the query must be served by the expected compound index; a different index could still "+
+					"IXSCAN with no SORT stage — identical shape, wrong index — which is exactly what this "+
+					"assertion (as opposed to a stage-names-only check) catches")
+			assert.False(t, sawSort, "recordedAt desc,_id desc must come free from the index — no in-memory sort")
+		})
 	}
-	require.NoError(t, db.RunCommand(ctx, cmd).Decode(&result))
-
-	stages := collectStages(t, result.QueryPlanner.WinningPlan)
-
-	var ixscanNames []string
-	sawSort := false
-	for _, s := range stages {
-		switch s.Stage {
-		case "IXSCAN":
-			ixscanNames = append(ixscanNames, s.IndexName)
-		case "SORT":
-			sawSort = true
-		}
-	}
-
-	require.NotEmpty(t, ixscanNames, "the hot query must use an index, not a collection scan")
-	assert.Equal(t, []string{wantIndexName}, ixscanNames,
-		"the hot query must be served by the siteId+permission+subjectAccount+recordedAt+_id compound index; "+
-			"a narrower index (e.g. siteId+recordedAt alone) would still IXSCAN with no SORT stage — identical "+
-			"shape, wrong index — which is exactly what this assertion (as opposed to a stage-names-only check) catches")
-	assert.False(t, sawSort, "recordedAt desc,_id desc must come free from the index — no in-memory sort")
 }
 
 // -------------------------------------------------------------------------

@@ -86,6 +86,10 @@ func principalFrom(c *gin.Context) session.Session {
 	return s
 }
 
+// maxRequestBodyBytes caps every admin-service request body (registered on the
+// root engine in main.go), not any single endpoint's.
+const maxRequestBodyBytes = 1 << 20 // 1MB
+
 // bodyLimit caps request bodies at max bytes; a caller that exceeds it gets a
 // truncated read, which fails ShouldBindJSON downstream and surfaces as an
 // ordinary 400 (spec §9 — no 413 in this service's closed Code set).
