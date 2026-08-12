@@ -2357,7 +2357,7 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 		subjects[r.subject] = true
 		var roomEvt model.RoomEvent
 		require.NoError(t, json.Unmarshal(r.data, &roomEvt))
-		assert.Equal(t, model.RoomEventNewMessage, roomEvt.Type)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "thread reply must publish new_thread_message, not new_message")
 		assert.Positive(t, roomEvt.Timestamp, "Timestamp must be the broadcast-worker publish time")
 		assert.Equal(t, msgTime.UnixMilli(), roomEvt.EventTimestamp)
 	}
@@ -2490,6 +2490,8 @@ func TestHandleThreadCreated_DMRoom_FansOutToAllMembers(t *testing.T) {
 	subjects := map[string]bool{}
 	for _, r := range pub.records {
 		subjects[r.subject] = true
+		roomEvt := decodeRoomEvent(t, r.data)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "DM thread reply must publish new_thread_message, not new_message")
 	}
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])

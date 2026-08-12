@@ -275,6 +275,7 @@ const (
 	RoomEventThreadMetadataUpdated RoomEventType = "thread_metadata_updated"
 	RoomEventMessageRead           RoomEventType = "message_read"
 	RoomEventThreadMessageRead     RoomEventType = "thread_message_read"
+	RoomEventNewThreadMessage      RoomEventType = "new_thread_message"
 )
 
 // ThreadAction identifies what operation triggered a ThreadMetadataUpdatedEvent.

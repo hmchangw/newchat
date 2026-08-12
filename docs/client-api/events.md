@@ -21,6 +21,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 4. [room.key — room encryption key delivery](#roomkey--room-encryption-key-delivery)
 5. [Room events — per-room live events](#room-events--per-room-live-events)
    - [new_message (RoomEvent)](#new_message-roomevent)
+   - [new_thread_message (RoomEvent)](#new_thread_message-roomevent)
    - [message_edited (EditRoomEvent)](#message_edited-editroomevent)
    - [message_deleted (DeleteRoomEvent)](#message_deleted-deleteroomevent)
    - [message_pinned / message_unpinned (PinStateRoomEvent)](#message_pinned--message_unpinned-pinstateroomevent)
@@ -47,7 +48,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.event.settings.update` | SettingsUpdateEvent |
 | `chat.user.{account}.event.chatlist.update` | ChatlistUpdateEvent |
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
-| `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
+| `chat.room.{roomID}.event` | new_message, new_thread_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above, per-user fan-out for DM/botDM rooms |
 | `chat.room.{roomID}.event.member` (or `chat.local.room.{roomID}.event.member` for same-site rooms, by `crossSite`) | member_added, member_left / member_removed |
 | `chat.user.{account}.notification` | NotificationEvent (reaction only) |
@@ -364,8 +365,9 @@ The `type` field discriminates the event. All payloads carry `type`, `roomId`,
 
 ### new_message (RoomEvent)
 
-The live fan-out for a newly created message (plain send, thread reply, quoted send, or
-system message). Triggered by [Send Message](request-reply.md#send-message).
+The live fan-out for a newly created non-thread message (plain send, quoted send, or
+system message). Triggered by [Send Message](request-reply.md#send-message). Thread
+replies publish [`new_thread_message`](#new_thread_message-roomevent) instead.
 
 **botDM rooms receive no `new_message` fan-out** — `broadcast-worker` skips `botDM`
 room types; bots consume messages through a separate backend path.
@@ -462,6 +464,54 @@ DM example (plaintext):
     "userAccount": "alice",
     "content": "morning team",
     "createdAt": "2026-05-06T07:55:00Z",
+    "sender": {
+      "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+      "account": "alice",
+      "chineseName": "愛麗絲",
+      "engName": "Alice"
+    }
+  }
+}
+```
+
+---
+
+### new_thread_message (RoomEvent)
+
+The live fan-out for a newly created thread reply. Same [RoomEvent](#new_message-roomevent)
+shape as `new_message` (see field table + `ClientMessage` above) — only `type` differs.
+Triggered by [Send Message](request-reply.md#send-message) when `threadParentMessageId`
+is set. Thread edits/deletes still publish `message_edited` / `message_deleted`; only the
+create event gets the distinct type.
+
+**botDM rooms receive no fan-out** — same as `new_message`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `type` | string | Always `"new_thread_message"`. |
+
+Channel example:
+
+```json
+{
+  "type": "new_thread_message",
+  "roomId": "01970a4f8c2d7c9aQ",
+  "timestamp": 1746518100123,
+  "eventTimestamp": 1746518100100,
+  "roomName": "engineering-announcements",
+  "roomType": "channel",
+  "siteId": "siteA",
+  "userCount": 12,
+  "lastMsgAt": "2026-05-06T07:55:00Z",
+  "lastMsgId": "01970a4f8c2d7c9aQRST",
+  "message": {
+    "id": "01970a4f8c2d7c9aQRST",
+    "roomId": "01970a4f8c2d7c9aQ",
+    "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+    "userAccount": "alice",
+    "content": "replying in thread",
+    "createdAt": "2026-05-06T07:55:00Z",
+    "threadParentMessageId": "01970a4f8c2d7c9aPARENT",
     "sender": {
       "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
       "account": "alice",
