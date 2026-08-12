@@ -51,6 +51,7 @@ type config struct {
 	MongoSelectTimeout time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT"   envDefault:"2s"`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
+	UserL2TTL          time.Duration           `env:"USER_L2_TTL" envDefault:"15m"` // 0 disables the shared user L2
 	HealthAddr         string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
 	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string                  `env:"METRICS_ADDR"               envDefault:":9090"`
@@ -149,7 +150,9 @@ func main() {
 		circuitbreaker.Tracked(ctx, "user"),
 		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
 	users, err := userstore.NewCache(
-		userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
+		userstore.NewL2Store(
+			userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
+			metaValkey, cfg.UserL2TTL, nil),
 		cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user meta cache failed", "error", err)

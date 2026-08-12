@@ -51,6 +51,7 @@ type config struct {
 	MongoPassword      string                  `env:"MONGO_PASSWORD"       envDefault:""`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"      envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"       envDefault:"5m"`
+	UserL2TTL          time.Duration           `env:"USER_L2_TTL" envDefault:"15m"` // 0 disables the shared user L2
 	HealthAddr         string                  `env:"HEALTH_ADDR"          envDefault:":8081"`
 	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string                  `env:"METRICS_ADDR"         envDefault:":9090"`
@@ -134,19 +135,6 @@ func main() {
 		os.Exit(1)
 	}
 	db := mongoClient.Database(cfg.MongoDB)
-	// Fenced inside the cache so an open breaker still serves warm users.
-	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
-		circuitbreaker.Tracked(ctx, "user"),
-		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
-	us, err := userstore.NewCache(
-		userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
-	if err != nil {
-		slog.Error("init user cache failed", "error", err)
-		os.Exit(1)
-	}
-	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
-
 	// Valkey fronting the at-rest DEK L2. Empty VALKEY_ADDRS disables the tier
 	// (the DEK store falls straight through to Mongo, as before).
 	//
@@ -168,6 +156,22 @@ func main() {
 		}
 		slog.Info("at-rest DEK L2 configured", "enabled", dekValkey != nil && cfg.DEKL2TTL > 0, "ttl", cfg.DEKL2TTL)
 	}
+
+	// Fenced inside both cache tiers so an open breaker still serves warm users.
+	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "user"),
+		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
+	us, err := userstore.NewCache(
+		userstore.NewL2Store(
+			userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
+			dekValkey, cfg.UserL2TTL, nil),
+		cfg.UserCacheSize, cfg.UserCacheTTL)
+	if err != nil {
+		slog.Error("init user cache failed", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL,
+		"l2_enabled", dekValkey != nil && cfg.UserL2TTL > 0, "l2_ttl", cfg.UserL2TTL)
 
 	var (
 		cipher       atrest.Cipher

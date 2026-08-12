@@ -52,6 +52,7 @@ type config struct {
 	LastMsgFlushInterval time.Duration   `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
 	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
 	UserCacheTTL         time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	UserL2TTL            time.Duration   `env:"USER_L2_TTL" envDefault:"15m"` // 0 disables the shared user L2
 	RoomMetaCacheSize    int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
 	RoomMetaCacheTTL     time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
 	RoomKeyGracePeriod   time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
@@ -158,12 +159,14 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("room-meta-cache enabled", "size", cfg.RoomMetaCacheSize, "ttl", cfg.RoomMetaCacheTTL)
-	// Fenced inside the cache so an open breaker still serves warm users.
+	// Fenced inside both cache tiers so an open breaker still serves warm users.
 	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
 		circuitbreaker.Tracked(ctx, "user"),
 		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
 	us, err := userstore.NewCache(
-		userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
+		userstore.NewL2Store(
+			userstore.NewBreakerStore(userstore.NewMongoStore(db.Collection("users")), userBreaker),
+			metaValkey, cfg.UserL2TTL, nil),
 		cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)

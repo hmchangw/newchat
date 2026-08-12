@@ -16,9 +16,10 @@ import (
 
 // countingStore records how many calls actually reached the backing store.
 type countingStore struct {
-	calls int
-	user  *model.User
-	err   error
+	calls        int
+	user         *model.User
+	err          error
+	lastAccounts []string
 }
 
 func (c *countingStore) FindUserByID(context.Context, string) (*model.User, error) {
@@ -31,8 +32,9 @@ func (c *countingStore) FindUserByAccount(context.Context, string) (*model.User,
 	return c.user, c.err
 }
 
-func (c *countingStore) FindUsersByAccounts(context.Context, []string) ([]model.User, error) {
+func (c *countingStore) FindUsersByAccounts(_ context.Context, accounts []string) ([]model.User, error) {
 	c.calls++
+	c.lastAccounts = accounts
 	if c.err != nil {
 		return nil, c.err
 	}
