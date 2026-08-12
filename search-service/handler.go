@@ -159,7 +159,7 @@ func (h *handler) searchRooms(c *natsrouter.Context, req model.SearchRoomsReques
 	// query is built to match nothing rather than falling back to unfiltered.
 	var memberRoomIDs []string
 	if len(req.Members) > 0 {
-		memberRoomIDs, err = h.members.GetChannels(ctx, account, h.cfg.SiteID, req.Members)
+		memberRoomIDs, err = h.members.getChannels(ctx, account, h.cfg.SiteID, req.Members)
 		if err != nil {
 			return nil, fmt.Errorf("resolving members: %w", err)
 		}

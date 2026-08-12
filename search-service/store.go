@@ -94,5 +94,5 @@ type SearchUsersClient interface {
 // every given account plus the caller). Returns the first page of matching
 // room IDs; an empty non-nil slice means no channel matched.
 type MembersClient interface {
-	GetChannels(ctx context.Context, account, siteID string, members []string) ([]string, error)
+	getChannels(ctx context.Context, account, siteID string, members []string) ([]string, error)
 }

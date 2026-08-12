@@ -16,7 +16,7 @@ import (
 const (
 	// membersRPCTimeout bounds each subscription.getChannels round trip.
 	membersRPCTimeout = 5 * time.Second
-	// membersPageLimit is the page size per getChannels round trip; GetChannels
+	// membersPageLimit is the page size per getChannels round trip; getChannels
 	// pages until hasMore is false so a member in many rooms isn't truncated.
 	membersPageLimit = 200
 )
@@ -37,7 +37,7 @@ type getChannelsResponse struct {
 	HasMore bool `json:"hasMore"`
 }
 
-// subscriptionRequester is the narrow NATS request surface GetChannels needs;
+// subscriptionRequester is the narrow NATS request surface getChannels needs;
 // *o11ynats.Conn satisfies it, and tests inject a stub.
 type subscriptionRequester interface {
 	Request(ctx context.Context, subj string, data []byte, timeout time.Duration) (*nats.Msg, error)
@@ -51,9 +51,9 @@ type membersClient struct {
 
 func newMembersClient(nc *o11ynats.Conn) *membersClient { return &membersClient{req: nc} }
 
-// GetChannels returns every room id the members share, paging through
+// getChannels returns every room id the members share, paging through
 // getChannels until hasMore is false so large memberships aren't truncated.
-func (c *membersClient) GetChannels(ctx context.Context, account, siteID string, members []string) ([]string, error) {
+func (c *membersClient) getChannels(ctx context.Context, account, siteID string, members []string) ([]string, error) {
 	subj := subject.UserSubscriptionGetChannels(account, siteID)
 	// Non-nil so a zero-match result filters the room search to no rooms,
 	// rather than a nil slice that buildRoomQuery reads as "no member filter".

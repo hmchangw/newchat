@@ -53,7 +53,7 @@ func TestMembersClient_GetChannels_PagesUntilExhausted(t *testing.T) {
 	}}
 	c := &membersClient{req: stub}
 
-	rooms, err := c.GetChannels(context.Background(), "alice", "site-a", []string{"bob"})
+	rooms, err := c.getChannels(context.Background(), "alice", "site-a", []string{"bob"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"r1", "r2", "r3"}, rooms, "all pages accumulated, not just page 1")
 	require.Len(t, stub.calls, 2, "paged twice")
@@ -68,7 +68,7 @@ func TestMembersClient_GetChannels_SinglePageNoExtraRoundTrip(t *testing.T) {
 	stub := &stubMembersRequester{pages: [][]byte{membersPage(false, "r1")}}
 	c := &membersClient{req: stub}
 
-	rooms, err := c.GetChannels(context.Background(), "alice", "site-a", []string{"bob"})
+	rooms, err := c.getChannels(context.Background(), "alice", "site-a", []string{"bob"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"r1"}, rooms)
 	require.Len(t, stub.calls, 1, "no extra round trip when hasMore is false")
@@ -78,7 +78,7 @@ func TestMembersClient_GetChannels_ZeroMatchReturnsNonNilEmpty(t *testing.T) {
 	stub := &stubMembersRequester{pages: [][]byte{membersPage(false)}}
 	c := &membersClient{req: stub}
 
-	rooms, err := c.GetChannels(context.Background(), "alice", "site-a", []string{"bob"})
+	rooms, err := c.getChannels(context.Background(), "alice", "site-a", []string{"bob"})
 	require.NoError(t, err)
 	require.NotNil(t, rooms, "zero-match must be non-nil so the room search filters to no rooms, not all")
 	assert.Empty(t, rooms)
@@ -88,7 +88,7 @@ func TestMembersClient_GetChannels_EmptyPageWithHasMoreErrors(t *testing.T) {
 	stub := &stubMembersRequester{pages: [][]byte{membersPage(true)}}
 	c := &membersClient{req: stub}
 
-	_, err := c.GetChannels(context.Background(), "alice", "site-a", []string{"bob"})
+	_, err := c.getChannels(context.Background(), "alice", "site-a", []string{"bob"})
 	require.Error(t, err, "an empty page with hasMore set can't advance the offset")
 	assert.Contains(t, err.Error(), "empty page with hasMore")
 }

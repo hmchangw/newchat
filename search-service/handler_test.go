@@ -402,7 +402,7 @@ type fakeMembers struct {
 	calls   []string // members passed on the last call, for assertions
 }
 
-func (f *fakeMembers) GetChannels(_ context.Context, _, _ string, members []string) ([]string, error) {
+func (f *fakeMembers) getChannels(_ context.Context, _, _ string, members []string) ([]string, error) {
 	f.calls = members
 	if f.err != nil {
 		return nil, f.err
@@ -422,7 +422,7 @@ func TestHandler_SearchRooms_MembersAllowsEmptyQuery(t *testing.T) {
 	resp, err := h.searchRooms(ctxWithAccount("alice"), model.SearchRoomsRequest{Members: []string{"bob"}})
 	require.NoError(t, err)
 	require.Len(t, resp.Rooms, 1)
-	assert.Equal(t, []string{"bob"}, fake.calls, "handler forwards the requested members to GetChannels")
+	assert.Equal(t, []string{"bob"}, fake.calls, "handler forwards the requested members to getChannels")
 }
 
 func TestHandler_SearchRooms_EmptyQueryAndMembersRejected(t *testing.T) {
