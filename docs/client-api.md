@@ -6317,7 +6317,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 
 #### Triggered events — success path
 
-After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. **`botDM` rooms receive no `new_message` fan-out at all:** `broadcast-worker` only handles `channel` and `dm` room types, so a `botDM` falls through to the default branch and is skipped — the human participant in a `botDM` does **not** receive a `new_message` room event from this pipeline. (Bot integrations consume `botDM` messages through a separate backend path.)
+After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
 
 **1. For channel rooms — `chat.room.{roomID}.event`** (`publishChannelEvent`)
 
@@ -6325,7 +6325,7 @@ A `RoomEvent`. Recipients: every client subscribed to the room (which includes t
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | string | Always `"new_message"`. |
+| `type` | string | `"new_message"` for this room-wide channel path. A thread reply carries `"new_thread_message"` instead and is delivered per-subscriber (see [new_thread_message](client-api/events.md#new_thread_message-roomevent)). |
 | `roomId` | string | |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 | `eventTimestamp` | number | Milliseconds since Unix epoch (UTC). When message-worker published the canonical event. Omitted for legacy events. |
@@ -6506,7 +6506,7 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 
 #### When it fires
 
-- **Reply added (`action: "reply_added"`):** fired when a new thread reply is successfully persisted (triggered by a `Send Message` RPC with `threadParentId` set). Published in addition to the per-subscriber `new_message` `RoomEvent` that carries the reply content.
+- **Reply added (`action: "reply_added"`):** fired when a new thread reply is successfully persisted (triggered by a `Send Message` RPC with `threadParentId` set). Published in addition to the per-subscriber `new_thread_message` `RoomEvent` that carries the reply content.
 - **Reply deleted (`action: "reply_deleted"`):** fired when a thread reply is soft-deleted (triggered by a `Delete Message` RPC). Published in addition to the `DeleteRoomEvent` that carries the delete notification.
 
 #### Client handling
