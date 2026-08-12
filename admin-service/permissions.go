@@ -21,8 +21,6 @@ import (
 var tzTaipei = time.FixedZone("UTC+8", 8*60*60)
 
 const (
-	maxPermissionBodyBytes = 1 << 20 // 1MB
-
 	auditActionPermissionGrant  = "permission.grant"
 	auditActionPermissionRevoke = "permission.revoke"
 )
@@ -191,20 +189,8 @@ func (h *Handler) createPermissions(c *gin.Context) {
 	// FindAccountStates must see every account this request references — subjects
 	// plus applicant/approver, deduped into one batch (spec §4.4 step 10: "all
 	// accounts exist at this site; subjects additionally pass IsActive()"). subjects
-	// is already deduped above; applicant/approver may coincide with a subject or
-	// with each other, so they're only added below if new.
-	checkAccounts := make([]string, 0, len(subjects)+2)
-	seenAccount := make(map[string]bool, len(subjects)+2)
-	for _, acct := range subjects {
-		seenAccount[acct] = true
-		checkAccounts = append(checkAccounts, acct)
-	}
-	for _, acct := range []string{req.ApplicantAccount, req.ApproverAccount} {
-		if !seenAccount[acct] {
-			seenAccount[acct] = true
-			checkAccounts = append(checkAccounts, acct)
-		}
-	}
+	// is already deduped above, so only applicant/approver can introduce repeats.
+	checkAccounts, _ := dedupPreserveOrder(append(append(make([]string, 0, len(subjects)+2), subjects...), req.ApplicantAccount, req.ApproverAccount))
 
 	states, err := h.store.FindAccountStates(ctx, h.cfg.SiteID, checkAccounts)
 	if err != nil {
@@ -215,23 +201,17 @@ func (h *Handler) createPermissions(c *gin.Context) {
 	// Existence applies to subjects AND applicant/approver; IsActive() applies to
 	// subjects only — an inactive applicant/approver is explicitly allowed (spec
 	// §4.4 step 10; docs/client-api.md §9.13).
-	var unknown, inactive []string
-	unknownSeen := make(map[string]bool, 2)
+	subjectSet := make(map[string]bool, len(subjects))
 	for _, acct := range subjects {
+		subjectSet[acct] = true
+	}
+	var unknown, inactive []string
+	for _, acct := range checkAccounts {
 		active, exists := states[acct]
 		if !exists {
 			unknown = append(unknown, acct)
-			unknownSeen[acct] = true
-			continue
-		}
-		if !active {
+		} else if subjectSet[acct] && !active {
 			inactive = append(inactive, acct)
-		}
-	}
-	for _, acct := range []string{req.ApplicantAccount, req.ApproverAccount} {
-		if _, exists := states[acct]; !exists && !unknownSeen[acct] {
-			unknown = append(unknown, acct)
-			unknownSeen[acct] = true
 		}
 	}
 	// Metadata "accounts" is CLIENT-VISIBLE by design (errcode doc.go) — the console
