@@ -6,4 +6,6 @@ const (
 	PortalAccountNotReady Reason = "account_not_ready"
 	// PortalBotLoginDisabled: portal /api/v1/login rejects a bot-role login because BOT_LOGIN_ENABLED=false.
 	PortalBotLoginDisabled Reason = "bot_login_disabled"
+	// PortalFailoverUnauthorized: the failover control surface rejected a request whose ops bearer token was missing or wrong.
+	PortalFailoverUnauthorized Reason = "failover_unauthorized"
 )
