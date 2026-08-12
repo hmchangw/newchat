@@ -32,6 +32,7 @@ services:
       # Valkey backs the room-meta L2 cache.
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - ROOM_META_L2_TTL=${ROOM_META_L2_TTL:-15m}
+      - ROOMSUBCACHE_TTL=${ROOMSUBCACHE_TTL:-5m}
       # BOT-MESSAGES-CANONICAL is owned by bot-message-handler; consumers only verify.
       # true like the user variants — false means verify-and-exit, and the bot
       # streams' creator (bot-message-handler) is not in compose.services.yaml.

@@ -61,6 +61,7 @@ type config struct {
 	MongoBreakerCooldown time.Duration   `env:"BROADCAST_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
 	MongoSelectTimeout   time.Duration   `env:"MONGO_SERVER_SELECTION_TIMEOUT"   envDefault:"2s"`
 	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	RoomSubCacheTTL      time.Duration   `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"` // shared with notification-worker; same key, keep the TTLs aligned
 	ValkeyAddrs          []string        `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
 	ValkeyKeyGracePeriod time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
@@ -142,7 +143,7 @@ func main() {
 		circuitbreaker.Tracked(ctx, "roommeta"),
 		circuitbreaker.WithFailurePredicate(MetaBreakerFailure))
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"),
-		metaValkey, cfg.RoomMetaL2TTL, metaBreaker)
+		metaValkey, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, metaBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)

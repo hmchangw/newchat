@@ -12,9 +12,6 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
@@ -64,60 +61,6 @@ type config struct {
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-}
-
-type mongoMemberLoader struct {
-	col *mongo.Collection
-}
-
-func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
-	projection := bson.M{
-		"u._id":              1,
-		"u.account":          1,
-		"u.isBot":            1,
-		"roomType":           1,
-		"muted":              1,
-		"historySharedSince": 1,
-	}
-	cur, err := m.col.Find(ctx, bson.M{"roomId": roomID}, options.Find().SetProjection(projection))
-	if err != nil {
-		return nil, fmt.Errorf("find subscriptions for room %s: %w", roomID, err)
-	}
-	defer cur.Close(ctx)
-
-	var out []roomsubcache.Member
-	for cur.Next(ctx) {
-		var doc struct {
-			User struct {
-				ID      string `bson:"_id"`
-				Account string `bson:"account"`
-				IsBot   bool   `bson:"isBot"`
-			} `bson:"u"`
-			RoomType           model.RoomType `bson:"roomType"`
-			Muted              bool           `bson:"muted"`
-			HistorySharedSince *time.Time     `bson:"historySharedSince"`
-		}
-		if err := cur.Decode(&doc); err != nil {
-			return nil, fmt.Errorf("decode subscription: %w", err)
-		}
-		var hssMs *int64
-		if doc.HistorySharedSince != nil {
-			ms := doc.HistorySharedSince.UnixMilli()
-			hssMs = &ms
-		}
-		out = append(out, roomsubcache.Member{
-			ID:                 doc.User.ID,
-			Account:            doc.User.Account,
-			RoomType:           doc.RoomType,
-			IsBot:              doc.User.IsBot,
-			Muted:              doc.Muted,
-			HistorySharedSince: hssMs,
-		})
-	}
-	if err := cur.Err(); err != nil {
-		return nil, fmt.Errorf("iterate subscriptions: %w", err)
-	}
-	return out, nil
 }
 
 func main() {
@@ -182,8 +125,7 @@ func main() {
 	}
 
 	cache := roomsubcache.NewValkeyCache(valkeyClient)
-	loader := &mongoMemberLoader{col: subCol}
-	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
+	memberLookup := roomsubcache.NewLookup(cache, roomsubcache.NewMongoLoader(subCol), cfg.RoomSubCacheTTL)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -37,9 +38,18 @@ type mongoStore struct {
 	metaTTL       time.Duration
 	metaRec       roommetacache.Recorder
 	metaOpts      []roommetacache.ReadThroughOption
+	members       *roomsubcache.Lookup
 }
 
-func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration, metaBreaker *circuitbreaker.Breaker) *mongoStore {
+func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, metaBreaker *circuitbreaker.Breaker) *mongoStore {
+	// A nil valkey leaves the Lookup cacheless (straight to Mongo). The loader
+	// is always the shared full-projection one: notification-worker reads the
+	// same key and gates on Muted/HistorySharedSince, so a partial write here
+	// would silently unmute users and widen their history windows.
+	var subCache roomsubcache.Cache
+	if valkey != nil {
+		subCache = roomsubcache.NewValkeyCache(valkey)
+	}
 	s := &mongoStore{
 		roomCol:       roomCol,
 		subCol:        subCol,
@@ -47,6 +57,7 @@ func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valk
 		valkey:        valkey,
 		metaTTL:       metaTTL,
 		metaRec:       cachemetrics.For("roommeta", "l2"),
+		members:       roomsubcache.NewLookup(subCache, roomsubcache.NewMongoLoader(subCol), subTTL),
 	}
 	if metaBreaker != nil {
 		s.metaOpts = []roommetacache.ReadThroughOption{roommetacache.WithFetchGuard(metaBreaker.Do)}
@@ -69,18 +80,14 @@ func (m *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, e
 	return &room, nil
 }
 
-func (m *mongoStore) ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error) {
-	filter := bson.M{"roomId": roomID}
-	cursor, err := m.subCol.Find(ctx, filter)
+// ListRoomMembers reads through the shared roomsubcache. The Lookup owns the
+// Mongo fallback, so during an outage a warm room still fans out from L2.
+func (m *mongoStore) ListRoomMembers(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
+	members, err := m.members.GetMembers(ctx, roomID)
 	if err != nil {
-		return nil, fmt.Errorf("query subscriptions for room %s: %w", roomID, err)
+		return nil, fmt.Errorf("list members for room %s: %w", roomID, err)
 	}
-	defer cursor.Close(ctx)
-	var subs []model.Subscription
-	if err := cursor.All(ctx, &subs); err != nil {
-		return nil, fmt.Errorf("decode subscriptions: %w", err)
-	}
-	return subs, nil
+	return members, nil
 }
 
 // GetRoomMeta fences only the Mongo fetch, never the L2 read in front of it: an

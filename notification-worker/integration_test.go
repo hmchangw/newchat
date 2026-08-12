@@ -36,8 +36,7 @@ func TestNotificationWorker_CacheBackedFanOut(t *testing.T) {
 	seedSubscriptions(t, ctx, subCol)
 
 	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
-	loader := &mongoMemberLoader{col: subCol}
-	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+	lookup := roomsubcache.NewLookup(cache, roomsubcache.NewMongoLoader(subCol), time.Minute)
 
 	nc, err := nats.Connect(natsURL)
 	require.NoError(t, err)
@@ -180,63 +179,6 @@ func TestMongoThreadFollowers_Lookup(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, got.Followers)
 	})
-}
-
-// TestMongoMemberLoader_Load_HistorySharedSince verifies the aggregation loader
-// maps the nested subscription shape into the flat roomsubcache.Member and
-// converts historySharedSince (a Date) to epoch-ms — leaving it nil for
-// full-access members (the $$REMOVE branch of the projection).
-func TestMongoMemberLoader_Load_HistorySharedSince(t *testing.T) {
-	db := testutil.MongoDB(t, "notification_worker_loader")
-	ctx := context.Background()
-	col := db.Collection("subscriptions")
-
-	shared := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	_, err := col.InsertMany(ctx, []any{
-		// restricted member: history-shared window set, muted
-		model.Subscription{
-			ID: "s1", RoomID: "rX", RoomType: model.RoomTypeChannel,
-			User:               model.SubscriptionUser{ID: "alice", Account: "alice"},
-			Muted:              true,
-			HistorySharedSince: &shared,
-		},
-		// full-access member: no history-shared window (nil), a bot
-		model.Subscription{
-			ID: "s2", RoomID: "rX", RoomType: model.RoomTypeChannel,
-			User: model.SubscriptionUser{ID: "botty", Account: "botty", IsBot: true},
-		},
-		// different room: must not leak into the rX result
-		model.Subscription{
-			ID: "s3", RoomID: "rY", RoomType: model.RoomTypeChannel,
-			User: model.SubscriptionUser{ID: "carol", Account: "carol"},
-		},
-	})
-	require.NoError(t, err)
-
-	loader := &mongoMemberLoader{col: col}
-	got, err := loader.Load(ctx, "rX")
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-
-	byAccount := make(map[string]roomsubcache.Member, len(got))
-	for _, m := range got {
-		byAccount[m.Account] = m
-	}
-
-	alice, ok := byAccount["alice"]
-	require.True(t, ok)
-	assert.Equal(t, "alice", alice.ID, "nested u._id maps to flat ID")
-	assert.Equal(t, model.RoomTypeChannel, alice.RoomType)
-	assert.False(t, alice.IsBot)
-	assert.True(t, alice.Muted)
-	require.NotNil(t, alice.HistorySharedSince, "restricted member must carry the window")
-	assert.Equal(t, shared.UnixMilli(), *alice.HistorySharedSince, "Date converted to epoch-ms")
-
-	botty, ok := byAccount["botty"]
-	require.True(t, ok)
-	assert.Equal(t, "botty", botty.ID)
-	assert.True(t, botty.IsBot, "nested u.isBot maps to flat IsBot")
-	assert.Nil(t, botty.HistorySharedSince, "full-access member must have nil HistorySharedSince")
 }
 
 func seedUserSettings(t *testing.T, ctx context.Context, col *mongo.Collection) {
