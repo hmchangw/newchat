@@ -2,9 +2,10 @@
 
 Issue #221. Spec 1 (`2026-08-08-priority-contacts-storage-api-design.md`) stored the
 settings. Spec 2 (`2026-08-10-notification-settings-enforcement-design.md`) made
-`notification-worker` enforce three of them. This spec finishes the decision table:
-presence-based suppression gains a priority-contact exemption, and manual
-do-not-disturb stops borrowing the in-call checkbox.
+`notification-worker` enforce three of them. This spec changes one thing today —
+presence-based suppression gains a priority-contact exemption — and wires the rule
+that will stop manual do-not-disturb borrowing the in-call checkbox as inert
+predicates, for the presence side to implement.
 
 The issue calls the component "push-notification-worker". That is
 `notification-worker`: its push path (`mobileEmitter` → `PUSH-NOTIFICATION` →
@@ -263,6 +264,17 @@ narrows `isInCall` to `in-call` only. It should size
 `{"settings.showNotificationsInCall": true, "active": {"$ne": false}}` against
 production first, because those users stop receiving pushes while in
 do-not-disturb.
+
+**And it must be sequenced consumer-first.** `shouldPush` fails open on
+unrecognized presence, and `isInCall` matches the literal strings `busy` and
+`in-call`. So if the presence service begins emitting a new representation for
+do-not-disturb while any `notification-worker` is still on the old binary, that
+worker sees an unknown status, fails open, and pushes to precisely the users the
+change exists to protect — a rolling deploy would produce exactly the bug being
+fixed, intermittently. Deploy recognition to every `notification-worker` **before**
+any producer emits the new representation, and keep emitting the old suppressing
+representation (or dual-encode) until the last old worker and every rollback target
+is gone.
 
 ## Files
 

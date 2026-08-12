@@ -443,3 +443,5 @@ When the presence side ships do-not-disturb and presenting, that change:
 3. Deletes `TestDNDAndPresentingStubsAreInert` and converts the test helpers if the vars become plain funcs.
 4. Adds the do-not-disturb sentence to the `showNotificationsInCall` row in `docs/client-api.md`.
 5. Sizes `{"settings.showNotificationsInCall": true, "active": {"$ne": false}}` in production first — those users stop receiving pushes while in do-not-disturb, the one delivery reduction in this whole series.
+
+**Sequence it consumer-first.** `shouldPush` fails open on unrecognized presence and `isInCall` matches literal status strings, so a producer emitting a new do-not-disturb representation while any `notification-worker` is still on the old binary makes that worker fail open and push to the users the change protects. Roll recognition out to every worker before any producer emits the new representation, and keep the old suppressing representation (or dual-encode) until the last old worker and every rollback target is gone.

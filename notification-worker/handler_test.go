@@ -1259,7 +1259,7 @@ func TestHandle_PriorityContactPiercesPresenceSuppression(t *testing.T) {
 		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
 	})))
 	assert.Equal(t, []string{"bob"}, emit.accounts(),
-		"bob lists the sender as a priority contact and is pierced out of DND; carol does not")
+		"bob lists the sender as a priority contact and is pierced out of presence suppression; carol does not")
 }
 
 // TestHandle_DNDAndPresentingSuppressPush proves the handler consults both stubs
