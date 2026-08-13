@@ -26,7 +26,7 @@ services:
       # and message-worker). Defaults: 10000 entries, 5m TTL.
       - USER_CACHE_SIZE=${USER_CACHE_SIZE:-10000}
       - USER_CACHE_TTL=${USER_CACHE_TTL:-5m}
-      - USER_L2_TTL=${USER_L2_TTL:-15m}
+      - USER_L2_TTL=${USER_L2_TTL:-90m}
       # Room keys live in the MongoDB rooms collection (read when ENCRYPTION_ENABLED=true);
       # this grace window keeps a rotated-out previous key valid for decrypt.
       - ROOM_KEY_GRACE_PERIOD=${ROOM_KEY_GRACE_PERIOD:-24h}

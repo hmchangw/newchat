@@ -24,7 +24,7 @@ services:
       # and broadcast-worker). Defaults: 10000 entries, 5m TTL.
       - USER_CACHE_SIZE=10000
       - USER_CACHE_TTL=5m
-      - USER_L2_TTL=${USER_L2_TTL:-15m}
+      - USER_L2_TTL=${USER_L2_TTL:-90m}
       - BOOTSTRAP_STREAMS=true
       - ATREST_ENABLED=true
       - VAULT_ADDR=http://vault:8200

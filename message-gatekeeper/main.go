@@ -51,7 +51,7 @@ type config struct {
 	MongoSelectTimeout time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT"   envDefault:"2s"`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
-	UserL2TTL          time.Duration           `env:"USER_L2_TTL" envDefault:"15m"` // 0 disables the shared user L2
+	UserL2TTL          time.Duration           `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
 	HealthAddr         string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
 	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string                  `env:"METRICS_ADDR"               envDefault:":9090"`

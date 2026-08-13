@@ -52,7 +52,7 @@ type config struct {
 	LastMsgFlushInterval time.Duration   `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
 	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
 	UserCacheTTL         time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	UserL2TTL            time.Duration   `env:"USER_L2_TTL" envDefault:"15m"` // 0 disables the shared user L2
+	UserL2TTL            time.Duration   `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
 	RoomMetaCacheSize    int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
 	RoomMetaCacheTTL     time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
 	RoomKeyGracePeriod   time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
