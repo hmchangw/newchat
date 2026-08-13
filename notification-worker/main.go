@@ -59,8 +59,7 @@ type config struct {
 	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
 	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
 	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
-	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
-	Mode                   stream.Pipeline         `env:"MODE,required"`                                 // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	Mode                   stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
@@ -213,7 +212,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, wiring.PushSendSubject, cfg.NatsMaxPayloadBytes)
+	// The broker advertises max_payload in its INFO on connect, so this is
+	// always in step with the server. An env var was a second source of truth
+	// that silently dropped batches whenever it drifted below the real limit.
+	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, wiring.PushSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
 
 	var presence PresenceSnapshotter = noopPresenceSnapshotter{}
 	if cfg.PresenceEnabled {

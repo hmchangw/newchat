@@ -5560,6 +5560,8 @@ PUT-like idempotent endpoint to subscribe or unsubscribe the calling user from a
 | `appId` missing | `bad_request` | — | `"appId required"` |
 | App not found | `not_found` | `app_not_found` | `"app not found"` |
 | App has no assistant | `bad_request` | `app_disabled` | `"app has no assistant"` |
+| room-service unreachable | `unavailable` | `no_responders` | `"create-dm rpc: no service responding"` — subscribing with no existing DM room creates a botDM room via room-service. Retryable. |
+| room-service did not answer | `unavailable` | `upstream_timeout` | `"create-dm rpc: upstream did not respond in time"` — same path, request delivered but unanswered. Retryable. |
 | Internal failure | `internal` | — | — |
 
 ---
@@ -6718,6 +6720,8 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `priority_contact_limit` | forbidden | user-service `settings.priorityContacts.add` (list already at the 30-entry cap and the contact is not already on it) |
 | `priority_contact_not_found` | not_found | user-service `settings.priorityContacts.add` (contact account does not resolve — inactive/unknown user, or app not found for a `.bot` account) |
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
+| `no_responders` | unavailable | any request/reply RPC whose upstream subject had no subscriber (`natsutil.RequestFailure`) — the upstream service is down, not yet started, or not routed to this site. Retry. |
+| `upstream_timeout` | unavailable | any request/reply RPC delivered to the upstream but not answered within the caller's timeout (`natsutil.RequestFailure`). Retry. |
 | `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
 | `invalid_credentials` | unauthenticated | admin-service `POST /v1/login` (§9.10) (unknown account, wrong password, not admin, or deactivated — uniform response) |

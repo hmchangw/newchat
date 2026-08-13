@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 
@@ -90,4 +91,33 @@ func TestMobileEmitter_RejectsOversizedBatch(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds NATS max_payload")
 	assert.Empty(t, pub.records, "oversized batch must not reach the publisher")
+}
+
+func TestClampPayloadCap(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int64
+		want int
+	}{
+		{name: "typical broker value", in: 1048576, want: 1048576},
+		{name: "zero disables the guard", in: 0, want: 0},
+		{name: "negative clamps to zero", in: -1, want: 0},
+		{
+			// On a 64-bit build — what we ship — math.MaxInt == math.MaxInt64, so
+			// this passes straight through rather than exercising the clamp. The
+			// clamp branch guards a 32-bit int, where math.MaxInt is MaxInt32; it
+			// is unreachable here and cannot be covered by a test on this
+			// platform. It stays because it is correct on 32-bit and because it
+			// is what satisfies gosec G115 on the narrowing conversion.
+			name: "MaxInt64 passes through unchanged on 64-bit int",
+			in:   math.MaxInt64,
+			want: math.MaxInt,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, clampPayloadCap(tt.in))
+		})
+	}
 }

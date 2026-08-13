@@ -1919,7 +1919,10 @@ PUT-like idempotent endpoint to subscribe or unsubscribe from a bot app.
 #### Errors
 
 `"appId required"`, `"app not found"` (`not_found`, `app_not_found`),
-`"app has no assistant"` (`bad_request`, `app_disabled`).
+`"app has no assistant"` (`bad_request`, `app_disabled`),
+`"create-dm rpc: no service responding"` (`unavailable`, `no_responders`) and
+`"create-dm rpc: upstream did not respond in time"` (`unavailable`, `upstream_timeout`)
+when room-service is unreachable while creating the botDM room — both retryable.
 
 **Emits:** None.
 

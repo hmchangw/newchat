@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -74,7 +75,7 @@ func (f *historyParentFetcher) FetchQuotedParent(
 	subj := subject.MsgGet(account, roomID, siteID)
 	msg, err := f.nc.Request(ctx, subj, reqBytes, historyRequestTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("history request: %w", err)
+		return nil, natsutil.RequestFailure("history request", err)
 	}
 
 	// Detect the errcode error envelope first; a real Message has no top-level

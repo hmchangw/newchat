@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -36,7 +37,7 @@ func (c *Client) GetThreadList(ctx context.Context, siteID string, req model.Thr
 	}
 	msg, err := c.nc.Request(ctx, subject.ThreadSubscriptionList(siteID), body, historyRPCTimeout)
 	if err != nil {
-		return model.ThreadSubscriptionListResponse{}, fmt.Errorf("thread-list rpc: %w", err)
+		return model.ThreadSubscriptionListResponse{}, natsutil.RequestFailure("thread-list rpc", err)
 	}
 	if e, ok := errcode.Parse(msg.Data); ok {
 		return model.ThreadSubscriptionListResponse{}, e
@@ -62,7 +63,7 @@ func (c *Client) RoomsGet(ctx context.Context, siteID string, roomIDs []string, 
 	}
 	msg, err := c.nc.Request(ctx, subject.RoomsGet(siteID), body, historyRPCTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("rooms-get rpc: %w", err)
+		return nil, natsutil.RequestFailure("rooms-get rpc", err)
 	}
 	if e, ok := errcode.Parse(msg.Data); ok {
 		return nil, e

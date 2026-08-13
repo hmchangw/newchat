@@ -503,8 +503,10 @@ func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, sit
 // quoteFetchErrIsTerminal reports whether a quoted-parent fetch error is a
 // permanent reason not to quote (reject) vs a transient infra failure (degrade
 // to the placeholder). Only unavailable/internal errcodes and non-errcode infra
-// failures (NATS timeout, no-responders, unmarshal) are transient; every other
-// errcode category (not_found, forbidden, bad_request, …) is terminal.
+// failures (unmarshal) are transient; every other errcode category (not_found,
+// forbidden, bad_request, …) is terminal. NATS timeout and no-responders arrive
+// as errcode.CodeUnavailable (via natsutil.RequestFailure) and are handled by
+// the unavailable case below, not the non-errcode fallback.
 // history-service collapses a Cassandra read failure to code=internal, so
 // internal is treated as transient here.
 func quoteFetchErrIsTerminal(err error) bool {

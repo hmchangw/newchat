@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/bytedance/sonic"
 
@@ -54,6 +55,19 @@ func (e *mobileEmitter) Emit(ctx context.Context, evt model.PushNotificationEven
 		return fmt.Errorf("publish push batch %s: %w", evt.ID, err)
 	}
 	return nil
+}
+
+// clampPayloadCap narrows the broker's advertised max_payload to int without
+// an unchecked conversion (gosec G115). A non-positive value disables the
+// pre-flight guard, matching the emitter's existing `> 0` check.
+func clampPayloadCap(n int64) int {
+	if n <= 0 {
+		return 0
+	}
+	if n > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(n)
 }
 
 // jsPublisher adapts o11y/nats JetStream to the publisher interface by discarding the PubAck.

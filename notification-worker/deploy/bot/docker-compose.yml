@@ -33,10 +33,6 @@ services:
       - USER_SETTINGS_ENABLED=${USER_SETTINGS_ENABLED:-true}
       - USER_SETTINGS_BATCH_SIZE=${USER_SETTINGS_BATCH_SIZE:-512}
       - USER_SETTINGS_TIMEOUT=${USER_SETTINGS_TIMEOUT:-2s}
-      # Must match the broker's max_payload. Emitter rejects batches larger
-      # than this before publish so the failure surfaces with a clear error
-      # instead of a NATS NACK.
-      - NATS_MAX_PAYLOAD_BYTES=${NATS_MAX_PAYLOAD_BYTES:-262144}
       # BOT-MESSAGES-CANONICAL owned by bot-message-handler; BOT-PUSH-NOTIFICATION is ops/IaC-owned.
       # true like the user variants — false means verify-and-exit, and the bot
       # streams' creator (bot-message-handler) is not in compose.services.yaml.
