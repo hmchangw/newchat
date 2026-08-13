@@ -57,6 +57,9 @@ type Config struct {
 	// appear in the subscription list/count; false hides them (reversible
 	// read-time filter — see pkg/model.OriginTeams).
 	ShowTeamsRoom bool `env:"SHOW_TEAMS_ROOM" envDefault:"false"`
+	// ShowTeamsAccounts allowlists accounts that see Teams rooms even when
+	// ShowTeamsRoom is false — an ops-managed set, comma-separated.
+	ShowTeamsAccounts []string `env:"SHOW_TEAMS_ROOM_ACCOUNTS" envSeparator:","`
 }
 
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.

@@ -36,6 +36,9 @@ type SubscriptionRepo struct {
 	// showTeamsRoom mirrors SHOW_TEAMS_ROOM: false (default) excludes
 	// Teams-migrated rooms (origin "teams") from list/count results.
 	showTeamsRoom bool
+	// showTeamsAccounts (SHOW_TEAMS_ROOM_ACCOUNTS) allowlists accounts that see
+	// Teams rooms even when showTeamsRoom is false.
+	showTeamsAccounts map[string]bool
 }
 
 // NewSubscriptionRepo builds a SubscriptionRepo over db; the deleted-filter keeps cross-site rows, drops local rows with missing/soft-deleted rooms.
@@ -51,6 +54,7 @@ func NewSubscriptionRepo(db *mongo.Database, siteID string, opts ...Option) *Sub
 		enrichedSecondary:      enriched.WithReadPreference(s.readPref),
 		siteID:                 siteID,
 		showTeamsRoom:          s.showTeamsRoom,
+		showTeamsAccounts:      s.showTeamsAccounts,
 	}
 }
 
@@ -268,7 +272,7 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// roomsEnrichStages(true) drops locally soft-deleted (^Del-) rooms; cross-site
 	// rooms have no local room doc and are kept (their deletion isn't visible here).
 	pipeline := bson.A{bson.M{"$match": match}}
-	pipeline = append(pipeline, r.originFilterStage()...)
+	pipeline = append(pipeline, r.originFilterStage(account)...)
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	// Activity window keys on the room's lastMsgAt (surfaced by the enrich stage),
 	// not the subscription's _updatedAt. rooms-type only; cross-site / no-message
@@ -286,12 +290,12 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	return r.enriched.AggregatePagedHasMore(ctx, pipeline, page)
 }
 
-// originFilterStage excludes Teams-migrated rooms (origin "teams") when
-// showTeamsRoom is false; empty (no-op) otherwise. Filters on the subscription's
-// own origin field (reliable cross-site — a remote room has no local doc); enrichment
-// no longer overwrites it, so this is position-independent in the pipeline.
-func (r *SubscriptionRepo) originFilterStage() bson.A {
-	if r.showTeamsRoom {
+// originFilterStage excludes Teams-migrated rooms (origin "teams") for account
+// unless SHOW_TEAMS_ROOM is true or account is allowlisted; empty (no-op) otherwise.
+// Filters on the subscription's own origin field (reliable cross-site — a remote room
+// has no local doc); enrichment no longer overwrites it, so this is position-independent.
+func (r *SubscriptionRepo) originFilterStage(account string) bson.A {
+	if r.showTeamsRoom || r.showTeamsAccounts[account] {
 		return bson.A{}
 	}
 	return bson.A{bson.M{"$match": bson.M{"origin": bson.M{"$ne": model.OriginTeams}}}}
@@ -437,7 +441,7 @@ func activeSubscriptionFilter(account string) bson.M {
 // CountActiveSubscriptions counts the deleted-filtered active set via $count over the enriched pipeline (CountDocuments cannot see the join).
 func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account string) (int, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
-	pipeline = append(pipeline, r.originFilterStage()...)
+	pipeline = append(pipeline, r.originFilterStage(account)...)
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	pipeline = append(pipeline, bson.M{"$count": "n"})
 	cur, err := r.subscriptionsSecondary.Raw().Aggregate(ctx, pipeline)
@@ -459,7 +463,7 @@ func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account
 // GetActiveSubscriptions returns the deleted-filtered active set used by the unread count, capped by limit.
 func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
-	pipeline = append(pipeline, r.originFilterStage()...)
+	pipeline = append(pipeline, r.originFilterStage(account)...)
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	// MongoDB rejects $limit:0 — callers short-circuit zero; stay defensive here.
 	if limit > 0 {

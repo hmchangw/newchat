@@ -12,13 +12,21 @@ import (
 
 func TestOriginFilterStage_ShowTeamsRoomFalse_ExcludesTeams(t *testing.T) {
 	r := &SubscriptionRepo{showTeamsRoom: false}
-	stages := r.originFilterStage()
+	stages := r.originFilterStage("alice")
 	require.Len(t, stages, 1)
 	assert.Equal(t, bson.M{"$match": bson.M{"origin": bson.M{"$ne": model.OriginTeams}}}, stages[0])
 }
 
 func TestOriginFilterStage_ShowTeamsRoomTrue_NoOp(t *testing.T) {
 	r := &SubscriptionRepo{showTeamsRoom: true}
-	stages := r.originFilterStage()
+	stages := r.originFilterStage("alice")
 	assert.Len(t, stages, 0)
+}
+
+func TestOriginFilterStage_AllowlistedAccount_NoOp(t *testing.T) {
+	r := &SubscriptionRepo{showTeamsRoom: false, showTeamsAccounts: map[string]bool{"alice": true}}
+	// Allowlisted account sees Teams rooms → no filter.
+	assert.Len(t, r.originFilterStage("alice"), 0)
+	// A non-allowlisted account is still filtered.
+	require.Len(t, r.originFilterStage("bob"), 1)
 }
