@@ -47,10 +47,10 @@ type config struct {
 	PushRecipientBatchSize int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
 	RoomMetaCacheSize      int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
 	RoomMetaCacheTTL       time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomMetaL2TTL          time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	RoomMetaL2TTL          time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
 	ValkeyAddrs            []string                `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword         string                  `env:"VALKEY_PASSWORD"           envDefault:""`
-	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
+	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"`
 	MongoBreakerFails      int                     `env:"MONGO_BREAKER_FAILS"       envDefault:"5"`
 	MongoBreakerCool       time.Duration           `env:"MONGO_BREAKER_COOLDOWN"    envDefault:"10s"`
 	MongoSelectTimeout     time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`

@@ -30,9 +30,13 @@ func MetaKey(roomID string) string {
 // FetchFromMongo always populates it, so a zero Meta means the key holds
 // something that is not a Meta — and serving it would hand out an empty SiteID
 // and type, which downstream routing reads.
-func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Recorder) (Meta, bool) {
+// readL2 requires both a non-empty ID and a confirmation stamp. The stamp check
+// is what makes an entry written before the envelope existed (a bare Meta) read
+// as a miss and reload, rather than being served with a zero CachedAt that would
+// mark it permanently stale.
+func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Recorder) (cachedMeta, bool) {
 	return valkeyutil.ReadCachedJSON(ctx, client, MetaKey(roomID), "room meta", rec,
-		func(m *Meta) bool { return m.ID != "" }, "room_id", roomID)
+		func(c *cachedMeta) bool { return c.Meta.ID != "" && c.CachedAt != 0 }, "room_id", roomID)
 }
 
 // ReadThroughOption configures a ReadThrough call.
@@ -40,6 +44,13 @@ type ReadThroughOption func(*readThroughOpts)
 
 type readThroughOpts struct {
 	guard func(func() error) error
+	// fetch defaults to FetchFromMongo. Overridden only by this package's tests,
+	// so the read-through's cache decisions can be exercised without a Mongo.
+	fetch func(context.Context, *mongo.Collection, string) (Meta, error)
+}
+
+func withFetcherForTest(f func(context.Context, *mongo.Collection, string) (Meta, error)) ReadThroughOption {
+	return func(o *readThroughOpts) { o.fetch = f }
 }
 
 // WithFetchGuard runs the Mongo fetch inside guard — typically a circuit
@@ -63,40 +74,87 @@ func WithFetchGuard(guard func(fn func() error) error) ReadThroughOption {
 // cachemetrics.For("roommeta", "l2") so every service emits the same series.
 // A nil client (L2 disabled) records nothing — there is no L2 to hit or miss.
 func ReadThrough(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder, opts ...ReadThroughOption) (Meta, error) {
-	var o readThroughOpts
+	return readThroughAt(ctx, client, rooms, roomID, ttl, rec, time.Now(), opts...)
+}
+
+// cachedMeta is the L2 envelope. CachedAt records when Mongo last confirmed the
+// entry, which is what lets a reader tell a fresh entry from one due for
+// re-validation — and what makes surviving an outage possible rather than
+// waiting for the key to vanish.
+type cachedMeta struct {
+	Meta     Meta  `json:"meta"`
+	CachedAt int64 `json:"cachedAt"`
+}
+
+// refreshAfterFor derives the re-validation window from the entry TTL. Same
+// derivation as the other read-through tiers (pkg/subauthcache, pkg/atrest,
+// pkg/userstore, pkg/roomsubcache).
+func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
+
+func readThroughAt(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder, now time.Time, opts ...ReadThroughOption) (Meta, error) {
+	o := readThroughOpts{fetch: FetchFromMongo}
 	for _, opt := range opts {
 		opt(&o)
 	}
 
 	if client == nil {
-		return fetchGuarded(ctx, o.guard, rooms, roomID)
+		return fetchGuarded(ctx, &o, rooms, roomID)
 	}
 
-	if meta, found := readL2(ctx, client, roomID, rec); found {
+	if entry, found := readL2(ctx, client, roomID, rec); found {
+		// Fresh: serve as a pure read.
+		if now.Sub(time.UnixMilli(entry.CachedAt)) < refreshAfterFor(ttl) {
+			return entry.Meta, nil
+		}
+		// Stale: re-validate. On failure keep serving and re-arm the deadline —
+		// broadcast-worker treats a room-meta failure as fatal, so letting the
+		// entry lapse mid-outage stops delivery for the room entirely. EXPIRE
+		// rather than SET so an entry busted since the read stays busted.
+		meta, err := fetchGuarded(ctx, &o, rooms, roomID)
+		if err != nil {
+			slideL2(ctx, client, roomID, ttl)
+			return entry.Meta, nil //nolint:nilerr // fail-open by design; see above
+		}
+		writeL2(ctx, client, roomID, &meta, ttl, now)
 		return meta, nil
 	}
 
-	meta, err := fetchGuarded(ctx, o.guard, rooms, roomID)
+	meta, err := fetchGuarded(ctx, &o, rooms, roomID)
 	if err != nil {
 		return Meta{}, fmt.Errorf("l2 read-through: %w", err)
 	}
-	if err := valkeyutil.SetJSONWithTTL(ctx, client, MetaKey(roomID), meta, ttl); err != nil {
+	writeL2(ctx, client, roomID, &meta, ttl, now)
+	return meta, nil
+}
+
+// writeL2 stores meta with a fresh confirmation stamp. Best-effort: the caller
+// already has the value and the next read repopulates.
+func writeL2(ctx context.Context, client valkeyutil.Client, roomID string, meta *Meta, ttl time.Duration, now time.Time) {
+	entry := cachedMeta{Meta: *meta, CachedAt: now.UnixMilli()}
+	if err := valkeyutil.SetJSONWithTTL(ctx, client, MetaKey(roomID), entry, ttl); err != nil {
 		slog.WarnContext(ctx, "room meta L2 populate failed (TTL will reconcile)",
 			"room_id", roomID, "error", err)
 	}
-	return meta, nil
+}
+
+// slideL2 re-arms the entry's deadline without rewriting it.
+func slideL2(ctx context.Context, client valkeyutil.Client, roomID string, ttl time.Duration) {
+	if _, err := client.Expire(ctx, MetaKey(roomID), ttl); err != nil {
+		slog.WarnContext(ctx, "room meta L2 TTL slide failed (entry keeps its current deadline)",
+			"room_id", roomID, "error", err)
+	}
 }
 
 // fetchGuarded runs FetchFromMongo, inside guard when one was supplied. A nil
 // guard (the common case) calls straight through.
-func fetchGuarded(ctx context.Context, guard func(func() error) error, rooms *mongo.Collection, roomID string) (Meta, error) {
-	if guard == nil {
-		return FetchFromMongo(ctx, rooms, roomID)
+func fetchGuarded(ctx context.Context, o *readThroughOpts, rooms *mongo.Collection, roomID string) (Meta, error) {
+	if o.guard == nil {
+		return o.fetch(ctx, rooms, roomID)
 	}
 	var meta Meta
-	err := guard(func() error {
+	err := o.guard(func() error {
 		var e error
-		meta, e = FetchFromMongo(ctx, rooms, roomID)
+		meta, e = o.fetch(ctx, rooms, roomID)
 		return e
 	})
 	if err != nil {

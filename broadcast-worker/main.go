@@ -61,8 +61,8 @@ type config struct {
 	MongoBreakerFails    int             `env:"BROADCAST_MONGO_BREAKER_FAILS"    envDefault:"5"`
 	MongoBreakerCooldown time.Duration   `env:"BROADCAST_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
 	MongoSelectTimeout   time.Duration   `env:"MONGO_SERVER_SELECTION_TIMEOUT"   envDefault:"2s"`
-	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
-	RoomSubCacheTTL      time.Duration   `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"` // shared key; see pkg/roomsubcache docs
+	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
+	RoomSubCacheTTL      time.Duration   `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"` // shared key; see pkg/roomsubcache docs
 	ValkeyAddrs          []string        `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
 	ValkeyKeyGracePeriod time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`

@@ -44,7 +44,7 @@ type config struct {
 	RoomMetaCacheTTL   time.Duration           `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
 	ValkeyAddrs        []string                `env:"VALKEY_ADDRS"               envSeparator:","`
 	ValkeyPassword     string                  `env:"VALKEY_PASSWORD"            envDefault:""`
-	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"15m"`
+	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"90m"`
 	SubL2TTL           time.Duration           `env:"GATEKEEPER_SUB_L2_TTL"        envDefault:"90m"`
 	MongoBreakerFails  int                     `env:"GATEKEEPER_MONGO_BREAKER_FAILS"    envDefault:"5"`
 	MongoBreakerCool   time.Duration           `env:"GATEKEEPER_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`

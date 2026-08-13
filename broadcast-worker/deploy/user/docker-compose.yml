@@ -32,8 +32,12 @@ services:
       - ROOM_KEY_GRACE_PERIOD=${ROOM_KEY_GRACE_PERIOD:-24h}
       # Valkey backs the room-meta L2 cache.
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
-      - ROOM_META_L2_TTL=${ROOM_META_L2_TTL:-15m}
-      - ROOMSUBCACHE_TTL=${ROOMSUBCACHE_TTL:-5m}
+      - ROOM_META_L2_TTL=${ROOM_META_L2_TTL:-90m}
+      - ROOMSUBCACHE_TTL=${ROOMSUBCACHE_TTL:-90m}
+      # Retry budget for the message fan-out. jsretry's backoff clamps at 2m, so the
+      # window is 36s + 120s*(MAX_DELIVER-4) — 40 gives ~72 min, enough to ride out
+      # a one-hour Mongo outage instead of dropping the message after ~2.6 min.
+      - CONSUMER_MAX_DELIVER=${CONSUMER_MAX_DELIVER:-40}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - ENCRYPTION_ENABLED=${ENCRYPTION_ENABLED:-false}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full

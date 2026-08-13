@@ -33,7 +33,7 @@ func TestValkeyCache_Integration_SetGetInvalidate(t *testing.T) {
 
 	got, err := cache.Get(ctx, "room-1")
 	require.NoError(t, err)
-	assert.Equal(t, members, got)
+	assert.Equal(t, members, got.Members)
 
 	require.NoError(t, cache.Invalidate(ctx, "room-1"))
 

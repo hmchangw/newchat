@@ -36,6 +36,7 @@ type Lookup struct {
 	cache Cache // nil disables the L2 tier — every read goes to the loader
 	load  Loader
 	ttl   time.Duration
+	now   func() time.Time
 	sf    singleflight.Group
 }
 
@@ -43,8 +44,17 @@ type Lookup struct {
 // populating cache with the given TTL. A nil cache is allowed and turns the
 // Lookup into a pass-through to load, for deployments with no Valkey.
 func NewLookup(cache Cache, load Loader, ttl time.Duration) *Lookup {
-	return &Lookup{cache: cache, load: load, ttl: ttl}
+	return newLookupWithClock(cache, load, ttl, time.Now)
 }
+
+func newLookupWithClock(cache Cache, load Loader, ttl time.Duration, now func() time.Time) *Lookup {
+	return &Lookup{cache: cache, load: load, ttl: ttl, now: now}
+}
+
+// refreshAfterFor derives the re-validation window from the entry TTL. Same
+// derivation as the other read-through tiers (pkg/subauthcache, pkg/atrest,
+// pkg/userstore).
+func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
 
 // GetMembers returns the member list, populating Valkey on a loader round-trip.
 // Callers must not mutate the slice.
@@ -59,8 +69,8 @@ func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error
 
 	// Fast path: cache hits skip singleflight to avoid serializing concurrent
 	// readers behind one in-flight caller.
-	if got, err := c.cache.Get(ctx, roomID); err == nil {
-		return got, nil
+	if entry, err := c.cache.Get(ctx, roomID); err == nil {
+		return c.serveHit(ctx, roomID, entry)
 	} else if !errors.Is(err, valkeyutil.ErrCacheMiss) {
 		slog.Warn("roomsubcache get failed, falling back to loader", "error", err, "roomId", roomID)
 	}
@@ -70,16 +80,14 @@ func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), memberFetchTimeout)
 		defer cancel()
 		// Re-check inside the flight in case a sibling caller already populated.
-		if got, err := c.cache.Get(fetchCtx, roomID); err == nil {
-			return got, nil
+		if entry, err := c.cache.Get(fetchCtx, roomID); err == nil {
+			return entry.Members, nil
 		}
 		loaded, lerr := c.load(fetchCtx, roomID)
 		if lerr != nil {
 			return nil, fmt.Errorf("load members for room %s: %w", roomID, lerr)
 		}
-		if setErr := c.cache.Set(fetchCtx, roomID, loaded, c.ttl); setErr != nil {
-			slog.Warn("roomsubcache set failed", "error", setErr, "roomId", roomID)
-		}
+		c.write(fetchCtx, roomID, loaded)
 		return loaded, nil
 	})
 	select {
@@ -90,6 +98,35 @@ func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error
 		return res.Val.([]Member), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// serveHit decides what a cache hit means.
+//
+// Confirmed within the refresh window it is served as a pure read. Older than
+// that it is re-validated, and the failure branch is what keeps delivery alive:
+// a room the loader confirmed once must not become unresolvable because Mongo
+// is down, so the deadline is re-armed and the cached list is served. Without
+// it the entry simply expires mid-outage and fan-out starts failing.
+func (c *Lookup) serveHit(ctx context.Context, roomID string, entry Entry) ([]Member, error) {
+	if c.now().Sub(time.UnixMilli(entry.CachedAt)) < refreshAfterFor(c.ttl) {
+		return entry.Members, nil
+	}
+	loaded, err := c.load(ctx, roomID)
+	if err != nil {
+		if slideErr := c.cache.Slide(ctx, roomID, c.ttl); slideErr != nil {
+			slog.Warn("roomsubcache TTL slide failed (entry keeps its current deadline)",
+				"error", slideErr, "roomId", roomID)
+		}
+		return entry.Members, nil //nolint:nilerr // fail-open by design; see above
+	}
+	c.write(ctx, roomID, loaded)
+	return loaded, nil
+}
+
+func (c *Lookup) write(ctx context.Context, roomID string, members []Member) {
+	if err := c.cache.Set(ctx, roomID, members, c.ttl); err != nil {
+		slog.Warn("roomsubcache set failed", "error", err, "roomId", roomID)
 	}
 }
 

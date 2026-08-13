@@ -65,15 +65,30 @@ type Member struct {
 // An empty (non-nil) slice is a valid cache hit and must not be confused
 // with a miss — callers can negative-cache empty rooms by Set-ing nil.
 type Cache interface {
-	Get(ctx context.Context, roomID string) ([]Member, error)
+	Get(ctx context.Context, roomID string) (Entry, error)
 	Set(ctx context.Context, roomID string, members []Member, ttl time.Duration) error
+	// Slide re-arms an entry's deadline without rewriting it, so a room stays
+	// resolvable while the source of truth is unreachable. It uses EXPIRE, which
+	// no-ops on an absent key — an entry invalidated since the read must stay
+	// invalidated rather than be resurrected.
+	Slide(ctx context.Context, roomID string, ttl time.Duration) error
 	Invalidate(ctx context.Context, roomID string) error
+}
+
+// Entry is a cached member list plus the moment the source of truth last
+// confirmed it. CachedAt drives refresh-on-read: it is what lets a reader tell
+// a recently-confirmed entry from one that should be re-validated, and it is
+// why a Mongo outage can extend an entry rather than lose it.
+type Entry struct {
+	Members  []Member `json:"members"`
+	CachedAt int64    `json:"cachedAt"`
 }
 
 type valkeyCache struct {
 	client        valkeyutil.Client
 	maxValueBytes int
 	metrics       Recorder
+	now           func() time.Time
 }
 
 // Option configures a valkeyCache at construction.
@@ -98,6 +113,7 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 		client:        client,
 		maxValueBytes: DefaultMaxValueBytes,
 		metrics:       cachemetrics.For("roomsub", "l2"),
+		now:           time.Now,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -114,9 +130,9 @@ func cacheKey(roomID string) string {
 // errors.Is. An empty cached value is a hit and returns a non-nil empty
 // slice, distinguishable from a miss. Returns an error if roomID is
 // empty or if the cached blob exceeds the configured size cap.
-func (c *valkeyCache) Get(ctx context.Context, roomID string) ([]Member, error) {
+func (c *valkeyCache) Get(ctx context.Context, roomID string) (Entry, error) {
 	if roomID == "" {
-		return nil, errors.New("roomsubcache: empty roomID")
+		return Entry{}, errors.New("roomsubcache: empty roomID")
 	}
 	raw, err := c.client.Get(ctx, cacheKey(roomID))
 	if err != nil {
@@ -125,19 +141,39 @@ func (c *valkeyCache) Get(ctx context.Context, roomID string) ([]Member, error) 
 		} else {
 			c.metrics.Error(ctx)
 		}
-		return nil, fmt.Errorf("get cached subscriptions for room %s: %w", roomID, err)
+		return Entry{}, fmt.Errorf("get cached subscriptions for room %s: %w", roomID, err)
 	}
 	if c.maxValueBytes > 0 && len(raw) > c.maxValueBytes {
 		c.metrics.Error(ctx)
-		return nil, fmt.Errorf("get cached subscriptions for room %s: blob exceeds max %d bytes (got %d)", roomID, c.maxValueBytes, len(raw))
+		return Entry{}, fmt.Errorf("get cached subscriptions for room %s: blob exceeds max %d bytes (got %d)", roomID, c.maxValueBytes, len(raw))
 	}
-	members := []Member{}
-	if err := json.Unmarshal([]byte(raw), &members); err != nil {
+	var entry Entry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		// Also the path an entry written before the envelope existed takes: a
+		// bare array fails to decode here and is reloaded as a miss.
 		c.metrics.Error(ctx)
-		return nil, fmt.Errorf("get cached subscriptions for room %s: unmarshal: %w", roomID, err)
+		return Entry{}, fmt.Errorf("get cached subscriptions for room %s: unmarshal: %w", roomID, err)
+	}
+	if entry.CachedAt == 0 {
+		c.metrics.Miss(ctx)
+		return Entry{}, fmt.Errorf("get cached subscriptions for room %s: %w", roomID, valkeyutil.ErrCacheMiss)
+	}
+	if entry.Members == nil {
+		entry.Members = []Member{}
 	}
 	c.metrics.Hit(ctx)
-	return members, nil
+	return entry, nil
+}
+
+// Slide re-arms the entry's deadline. See Cache.Slide.
+func (c *valkeyCache) Slide(ctx context.Context, roomID string, ttl time.Duration) error {
+	if roomID == "" {
+		return errors.New("roomsubcache: empty roomID")
+	}
+	if _, err := c.client.Expire(ctx, cacheKey(roomID), ttl); err != nil {
+		return fmt.Errorf("slide cached subscriptions for room %s: %w", roomID, err)
+	}
+	return nil
 }
 
 // Set stores members under roomID with the given TTL. A nil members
@@ -153,7 +189,8 @@ func (c *valkeyCache) Set(ctx context.Context, roomID string, members []Member, 
 	if members == nil {
 		members = []Member{}
 	}
-	if err := valkeyutil.SetJSONWithTTL(ctx, c.client, cacheKey(roomID), members, ttl); err != nil {
+	entry := Entry{Members: members, CachedAt: c.now().UnixMilli()}
+	if err := valkeyutil.SetJSONWithTTL(ctx, c.client, cacheKey(roomID), entry, ttl); err != nil {
 		return fmt.Errorf("set cached subscriptions for room %s: %w", roomID, err)
 	}
 	return nil
@@ -171,3 +208,7 @@ func (c *valkeyCache) Invalidate(ctx context.Context, roomID string) error {
 	}
 	return nil
 }
+
+// CacheKeyForTest exposes the key layout to this package's external test
+// package, which asserts on the exact key the cache touches.
+func CacheKeyForTest(roomID string) string { return cacheKey(roomID) }

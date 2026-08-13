@@ -16,18 +16,22 @@ import (
 )
 
 type fakeCache struct {
-	mu   sync.Mutex
-	data map[string][]Member
+	mu     sync.Mutex
+	data   map[string]Entry
+	slides int
+	now    func() time.Time
 }
 
-func newFakeCache() *fakeCache { return &fakeCache{data: map[string][]Member{}} }
+func newFakeCache() *fakeCache {
+	return &fakeCache{data: map[string]Entry{}, now: time.Now}
+}
 
-func (f *fakeCache) Get(_ context.Context, roomID string) ([]Member, error) {
+func (f *fakeCache) Get(_ context.Context, roomID string) (Entry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	v, ok := f.data[roomID]
 	if !ok {
-		return nil, valkeyutil.ErrCacheMiss
+		return Entry{}, valkeyutil.ErrCacheMiss
 	}
 	return v, nil
 }
@@ -36,7 +40,16 @@ func (f *fakeCache) Set(_ context.Context, roomID string, members []Member, _ ti
 	defer f.mu.Unlock()
 	cp := make([]Member, len(members))
 	copy(cp, members)
-	f.data[roomID] = cp
+	f.data[roomID] = Entry{Members: cp, CachedAt: f.now().UnixMilli()}
+	return nil
+}
+func (f *fakeCache) Slide(_ context.Context, roomID string, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.slides++
+	if _, ok := f.data[roomID]; !ok {
+		return nil // EXPIRE no-ops on an absent key
+	}
 	return nil
 }
 func (f *fakeCache) Invalidate(_ context.Context, roomID string) error {
@@ -150,13 +163,14 @@ func TestLookup_InvalidateClearsValkey(t *testing.T) {
 
 type erroringCache struct{ err error }
 
-func (e *erroringCache) Get(context.Context, string) ([]Member, error) {
-	return nil, e.err
+func (e *erroringCache) Get(context.Context, string) (Entry, error) {
+	return Entry{}, e.err
 }
 func (e *erroringCache) Set(context.Context, string, []Member, time.Duration) error {
 	return nil
 }
-func (e *erroringCache) Invalidate(context.Context, string) error { return nil }
+func (e *erroringCache) Slide(context.Context, string, time.Duration) error { return nil }
+func (e *erroringCache) Invalidate(context.Context, string) error           { return nil }
 
 func TestLookup_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
 	cache := newFakeCache()
@@ -291,4 +305,70 @@ func TestGuardLoader_NilBreakerIsPassThrough(t *testing.T) {
 	got, err := GuardLoader(loader.Load, nil)(context.Background(), "r1")
 	require.NoError(t, err)
 	assert.Equal(t, loader.out, got)
+}
+
+func TestLookup_StaleEntrySurvivesLoaderOutageViaTTLSlide(t *testing.T) {
+	cache := newFakeCache()
+	warm := []Member{{ID: "u1", Account: "alice"}}
+	loader := &fakeLoader{out: warm}
+	now := time.Now()
+	clock := func() time.Time { return now }
+	cache.now = clock
+	lookup := newLookupWithClock(cache, loader.Load, time.Hour, clock)
+	ctx := context.Background()
+
+	// Populate, then age past the refresh window and break the loader.
+	got, err := lookup.GetMembers(ctx, "r1")
+	require.NoError(t, err)
+	require.Equal(t, warm, got)
+
+	now = now.Add(59 * time.Minute)
+	loader.err = errors.New("mongo down")
+	loader.out = nil
+
+	// Without the slide the entry would simply expire mid-outage and DM fan-out
+	// would start failing — the 5-minute wall this exists to remove.
+	got, err = lookup.GetMembers(ctx, "r1")
+	require.NoError(t, err, "a warm room must survive the loader being down")
+	assert.Equal(t, warm, got)
+	assert.Positive(t, cache.slides, "the deadline must be re-armed, not left to expire")
+}
+
+func TestLookup_FreshEntryDoesNotReload(t *testing.T) {
+	cache := newFakeCache()
+	loader := &fakeLoader{out: []Member{{ID: "u1", Account: "alice"}}}
+	now := time.Now()
+	clock := func() time.Time { return now }
+	cache.now = clock
+	lookup := newLookupWithClock(cache, loader.Load, time.Hour, clock)
+	ctx := context.Background()
+
+	_, err := lookup.GetMembers(ctx, "r1")
+	require.NoError(t, err)
+	now = now.Add(10 * time.Minute) // well inside the refresh window
+	_, err = lookup.GetMembers(ctx, "r1")
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), loader.calls.Load(), "a fresh entry must not re-validate")
+}
+
+func TestLookup_StaleEntryRefreshesWhenLoaderHealthy(t *testing.T) {
+	cache := newFakeCache()
+	loader := &fakeLoader{out: []Member{{ID: "u1", Account: "alice"}}}
+	now := time.Now()
+	clock := func() time.Time { return now }
+	cache.now = clock
+	lookup := newLookupWithClock(cache, loader.Load, time.Hour, clock)
+	ctx := context.Background()
+
+	_, err := lookup.GetMembers(ctx, "r1")
+	require.NoError(t, err)
+
+	// Past the refresh window with a healthy loader: pick up the change a missed
+	// invalidation would otherwise hide until the TTL.
+	now = now.Add(59 * time.Minute)
+	loader.out = []Member{{ID: "u2", Account: "bob"}}
+	got, err := lookup.GetMembers(ctx, "r1")
+	require.NoError(t, err)
+	assert.Equal(t, []Member{{ID: "u2", Account: "bob"}}, got)
+	assert.Equal(t, int32(2), loader.calls.Load())
 }

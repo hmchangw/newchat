@@ -23,6 +23,7 @@ type fakeClient struct {
 	getErr   error
 	delErr   error
 	delCalls [][]string
+	expired  []string
 }
 
 func newFakeClient() *fakeClient {
@@ -63,7 +64,12 @@ func (f *fakeClient) Del(_ context.Context, keys ...string) error {
 	}
 	return nil
 }
-func (f *fakeClient) Expire(context.Context, string, time.Duration) (bool, error) {
+func (f *fakeClient) Expire(_ context.Context, key string, ttl time.Duration) (bool, error) {
+	f.expired = append(f.expired, key)
+	if _, ok := f.store[key]; !ok {
+		return false, nil // EXPIRE no-ops on an absent key
+	}
+	f.ttls[key] = ttl
 	return true, nil
 }
 
@@ -92,7 +98,7 @@ func TestValkeyCache_SetThenGet_RoundTrip(t *testing.T) {
 
 	got, err := cache.Get(ctx, "room123")
 	require.NoError(t, err)
-	assert.Equal(t, members, got)
+	assert.Equal(t, members, got.Members)
 }
 
 func TestValkeyCache_Set_UsesExpectedKey(t *testing.T) {
@@ -133,8 +139,8 @@ func TestValkeyCache_Get_EmptyListIsCacheHit(t *testing.T) {
 
 	got, err := cache.Get(ctx, "empty-room")
 	require.NoError(t, err)
-	assert.NotNil(t, got, "empty cache hit must return non-nil slice to distinguish from miss")
-	assert.Empty(t, got)
+	assert.NotNil(t, got.Members, "empty cache hit must return non-nil slice to distinguish from miss")
+	assert.Empty(t, got.Members)
 }
 
 func TestValkeyCache_Get_MalformedJSON_IsNotMiss(t *testing.T) {
@@ -243,7 +249,7 @@ func TestValkeyCache_Get_BlobAtMaxSize_IsAllowed(t *testing.T) {
 
 	got, err := cache.Get(ctx, "ok")
 	require.NoError(t, err)
-	assert.Len(t, got, 1)
+	assert.Len(t, got.Members, 1)
 }
 
 func keysOf(m map[string]string) []string {
@@ -309,4 +315,35 @@ func (f *fakeClient) MGet(ctx context.Context, keys []string) (map[string]string
 		out[k] = v
 	}
 	return out, nil
+}
+
+func TestValkeyCache_Slide_ReArmsTTLWithoutRewriting(t *testing.T) {
+	ctx := context.Background()
+	client := newFakeClient()
+	cache := roomsubcache.NewValkeyCache(client)
+	members := []roomsubcache.Member{{ID: "u1", Account: "alice"}}
+	require.NoError(t, cache.Set(ctx, "r1", members, time.Minute))
+	before := client.store[roomsubcache.CacheKeyForTest("r1")]
+
+	require.NoError(t, cache.Slide(ctx, "r1", time.Hour))
+
+	assert.Equal(t, []string{roomsubcache.CacheKeyForTest("r1")}, client.expired)
+	assert.Equal(t, time.Hour, client.ttls[roomsubcache.CacheKeyForTest("r1")], "the deadline must move")
+	assert.Equal(t, before, client.store[roomsubcache.CacheKeyForTest("r1")], "the value must not be rewritten")
+}
+
+func TestValkeyCache_Slide_DoesNotResurrectAnEvictedEntry(t *testing.T) {
+	ctx := context.Background()
+	client := newFakeClient()
+	cache := roomsubcache.NewValkeyCache(client)
+
+	// EXPIRE on an absent key must be a no-op, not a create — otherwise a room
+	// invalidated mid-outage would come back with its stale member list.
+	require.NoError(t, cache.Slide(ctx, "never-written", time.Hour))
+	assert.NotContains(t, client.store, roomsubcache.CacheKeyForTest("never-written"))
+}
+
+func TestValkeyCache_Slide_EmptyRoomID_ReturnsError(t *testing.T) {
+	cache := roomsubcache.NewValkeyCache(newFakeClient())
+	require.Error(t, cache.Slide(context.Background(), "", time.Hour))
 }
