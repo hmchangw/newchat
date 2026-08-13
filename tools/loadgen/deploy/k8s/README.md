@@ -21,7 +21,9 @@ seed Job -> soak Deployment -> stopped -> teardown Job
   read-only, creates run-owned room/subscription topology, seeds room
   transport keys, and writes the ownership manifest.
 - `phase=soak` renders one single-replica Deployment. It runs continuously
-  through the real service path until the release changes phase.
+  through the real service path until the release changes phase. Its
+  operation ledger uses a run-specific PVC and resumes unresolved Cassandra
+  message reconciliation after pod replacement.
 - `phase=stopped` renders no workload controller. Argo CD removes the
   Deployment and Kubernetes sends SIGTERM, allowing loadgen to drain
   in-flight work and mark the run stopped.
@@ -36,6 +38,11 @@ Deployment has no duration or Kubernetes deadline.
 The phase resources are ordinary Argo CD managed resources, not
 `PreSync`/`Sync`/`PostSync` hooks. In particular, teardown can never run
 automatically after soak completion.
+
+The ledger PVC is annotated with `helm.sh/resource-policy: keep` and
+`argocd.argoproj.io/sync-options: Prune=false`. It intentionally survives
+`phase=stopped`, `phase=teardown`, and release removal until an operator has
+retained the evidence and explicitly deletes the claim.
 
 ## Required release inputs
 
@@ -61,6 +68,17 @@ cassandra:
   cleanup: none
   confirmKeyspace: chat_soak_20260725
   messageBucketHours: 72
+
+ledger:
+  enabled: true
+  existingClaim: ""
+  storageClassName: ""
+  accessMode: ReadWriteOnce
+  size: 20Gi
+  mountPath: /var/lib/loadgen/ledger
+  capacity: "200000"
+  reconcileDeadline: 10m
+  reconcileRetryInterval: 1s
 ```
 
 Staging releases must use an immutable digest. A mutable tag is accepted only
@@ -135,8 +153,10 @@ Cassandra soak encryption preflight passed
 
 The Deployment then runs until another release changes its phase. Pod
 replacement reloads the Mongo manifest, increments the restart count, starts
-a fresh warm-up, and rebuilds the in-memory recent-message catalog. Prometheus
-counters are the authoritative cross-restart evidence.
+a fresh warm-up, rebuilds the in-memory recent-message catalog, and reloads
+unresolved operations from the PVC-backed WAL. Prometheus retains aggregate
+cross-restart evidence while the WAL retains unresolved per-operation
+evidence. The interrupted traffic/SLO interval remains inconclusive.
 
 Freeze the image and workload configuration while collecting a comparable
 run. A values change restarts the Deployment because the Pod template carries
@@ -166,6 +186,8 @@ Before teardown, retain:
 - Deployment/Pod status, events, node identity, and restart history;
 - logs and process-local reports;
 - Prometheus rate, error, retry, latency, saturation, and verification data;
+- operation outcome, inflight, recovery, invalidation, WAL-size, NATS
+  connection, Go runtime, and process metrics;
 - Cassandra service metrics, disk usage, compaction, timeout, and latency
   evidence;
 - Mongo owned-object counts before and after cleanup.
@@ -219,7 +241,8 @@ The Chart and binary both require exact keyspace confirmation. A shared
 staging keyspace must never use `truncate`.
 
 After the Teardown Job completes and cleanup evidence is retained, remove the
-run release from desired state.
+run release from desired state. Delete the retained ledger PVC only through a
+separate, explicitly targeted operator action.
 
 ## Validation
 

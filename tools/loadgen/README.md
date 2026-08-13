@@ -116,6 +116,16 @@ loadgen -> message-gatekeeper -> message-worker -> Cassandra
 loadgen -> history-service -> Cassandra
 ```
 
+The continuous workload also maintains a per-message operation ledger. When
+`SOAK_LEDGER_DIR` is configured, it persists the ledger there and recovers
+unresolved operations after restart; the default empty value used by direct
+invocation is in-memory only and is not restart-durable. The ledger records an
+intent before publish, observes the gatekeeper result, and consumes existing
+read-lane slots to reconcile every ledger-admitted message through
+`GetMessageByID`. Fault injection remains external and does not change the
+configured traffic profile. See
+[`docs/load-testing/loadgen-failure-observation.md`](../../docs/load-testing/loadgen-failure-observation.md).
+
 It is not a full-newchat capacity test and it does not establish product SLOs.
 Run B/C, direct-CQL injection, historical backfill, and the optional service
 o11y domain metric are deferred.
@@ -196,7 +206,9 @@ lease. Teardown refuses to change data while that lease is fresh; this guard
 does not require loadgen to access the Kubernetes API. Every process start has
 a fresh warm-up. The recent-message catalog is intentionally in-memory, so
 mutations, threads, and verification skip until new accepted messages age
-past `SOAK_PERSIST_GRACE`.
+past `SOAK_PERSIST_GRACE`. When `SOAK_LEDGER_DIR` is configured, unresolved
+message observations are independently restored from the persistent WAL and
+continue reconciling after restart.
 
 Run must have access to MongoDB, NATS, message-gatekeeper, message-worker, and
 history-service. Cassandra credentials are not used by normal Run A traffic.
@@ -260,6 +272,11 @@ Run A environment variables:
 | `SOAK_RETRY_MAX_BACKOFF` | `5s` | Maximum retry delay. |
 | `SOAK_RECENT_PER_ROOM` | `128` | Per-room recent-message ring capacity. |
 | `SOAK_RECENT_TOTAL` | `200000` | Global bounded recent-message capacity. |
+| `SOAK_LEDGER_DIR` | empty | Persistent operation-ledger directory; the Helm chart mounts `/var/lib/loadgen/ledger`. |
+| `SOAK_LEDGER_CAPACITY` | `200000` | Maximum unresolved message operations before evidence is invalidated. |
+| `SOAK_RECONCILE_DEADLINE` | `10m` | Deadline for admission and Cassandra history terminal observations. |
+| `SOAK_RECONCILE_RETRY_INTERVAL` | `1s` | Earliest retry after a missing or transient history read-back. |
+| `SOAK_RECONCILE_READ_SHARE` | `0.5` | Maximum fraction of the read lane reconciliation may claim, so the mixed read workload keeps running during a fault. |
 | `SOAK_CASSANDRA_CLEANUP` | `none` | `none` or guarded `truncate`. |
 | `SOAK_CONFIRM_KEYSPACE` | empty | Must exactly match the keyspace for `truncate`. |
 | `SOAK_TEARDOWN_BATCH_ROOMS` | `250` | Maximum owned room IDs per Mongo deletion batch. |

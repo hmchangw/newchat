@@ -479,6 +479,80 @@ func TestSoakSender_UnmatchedReplyDoesNotTouchCatalog(t *testing.T) {
 	assert.Equal(t, soakSendReplyUnmatched, result.Status)
 }
 
+func TestSoakSender_PersistsLifecycleBeforePublishing(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	publisher := &soakRecordingPublisher{}
+	lifecycle := &recordingSoakSendLifecycle{}
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, clock), publisher, clock,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(lifecycle, nil),
+	)
+
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	require.Len(t, lifecycle.started, 1)
+	assert.Equal(t, pending.MessageID, lifecycle.started[0].MessageID)
+	assert.True(t, pending.Tracked)
+	subjects, _ := publisher.snapshot()
+	assert.Len(t, subjects, 1)
+}
+
+func TestSoakSender_LifecycleFailureKeepsTrafficFlowing(t *testing.T) {
+	wantErr := errors.New("ledger disk full")
+	publisher := &soakRecordingPublisher{}
+	lifecycle := &recordingSoakSendLifecycle{err: wantErr}
+	var observed []error
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, nil), publisher, nil,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(lifecycle, func(err error) {
+			observed = append(observed, err)
+		}),
+	)
+
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err, "observation is best-effort and must not stop the workload")
+	require.NotNil(t, pending)
+	assert.False(t, pending.Tracked)
+	require.Len(t, observed, 1)
+	assert.ErrorIs(t, observed[0], wantErr)
+	subjects, _ := publisher.snapshot()
+	assert.Len(t, subjects, 1)
+	assert.Equal(t, 1, sender.Pending())
+}
+
+func TestSoakSender_ExpireResultsRetainsCorrelation(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	sender := newTestSoakSender(
+		newSoakCatalog(8, 100, 0, clock),
+		&soakRecordingPublisher{},
+		clock,
+		0,
+	)
+	_, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	clock.Advance(5 * time.Second)
+
+	results := sender.ExpireResults()
+	require.Len(t, results, 1)
+	assert.Equal(t, soakTestMessageID, results[0].MessageID)
+	assert.Equal(t, soakTestRequestID, results[0].RequestID)
+	assert.Equal(t, soakErrorTimeout, results[0].ErrorClass)
+}
+
 func newTestSoakSender(
 	catalog *soakCatalog,
 	publisher Publisher,
@@ -500,6 +574,16 @@ type fakeSoakResponseSource struct {
 	flushErr     error
 	flushed      bool
 	handled      int
+}
+
+type recordingSoakSendLifecycle struct {
+	started []*soakPendingSend
+	err     error
+}
+
+func (l *recordingSoakSendLifecycle) Start(pending *soakPendingSend) error {
+	l.started = append(l.started, cloneSoakPendingSend(pending))
+	return l.err
 }
 
 func (f *fakeSoakResponseSource) Subscribe(
@@ -526,4 +610,34 @@ type fakeSoakSubscription struct {
 func (s *fakeSoakSubscription) Unsubscribe() error {
 	s.unsubscribed = true
 	return nil
+}
+
+func TestSoakSender_DiscardDropsNeverPublishedSend(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	publisher := &soakRecordingPublisher{}
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, clock), publisher, clock,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		},
+	)
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	require.Equal(t, 1, sender.Pending())
+
+	sender.Discard(pending.RequestID)
+
+	assert.Zero(t, sender.Pending())
+	clock.Advance(10 * time.Second)
+	assert.Empty(
+		t, sender.ExpireResults(),
+		"a discarded send must not be counted again at its reply deadline",
+	)
+
+	sender.Discard("unknown-request")
+	assert.Zero(t, sender.Pending())
 }

@@ -9,6 +9,12 @@ come from **dedicated exporters** (infra, not the app SDK). Companion to
 > against the Docker Compose o11y stack (`docker-local/compose.o11y.yaml` ->
 > Prometheus `:9090`).
 
+> Storage note (2026-08-11): the authoritative, code-reverified MongoDB and
+> Cassandra metric set, direct-client coverage, exporter gaps, and shared
+> dashboard contract are maintained in
+> [`storage-dependency-metrics.md`](storage-dependency-metrics.md). Older storage
+> service lists and shorthand metric names below are historical snapshots.
+
 ### Local verification update (2026-07-12)
 
 After rebasing onto the unified gateway/admin/botplatform upstream change, all
@@ -78,9 +84,9 @@ Enabled wherever the matching `WithObservability` / middleware is wired.
 | Instrumentation | Key metrics (otelprom names may add `_total`/unit suffix + `otel_scope_*` labels) | Emitted by |
 |---|---|---|
 | **HTTP server** (`o11y/gin`) | `http.server.request.duration` (histogram, by route/method/status) | auth, portal, upload |
-| **MongoDB** (`mongoutil`) | `db.client.operation.duration`; pool: `db.client.connection.count` / `.wait_time` / `.use_time` / `.create_time` | every service with Mongo |
+| **MongoDB** (`mongoutil`) | `db.client.operation.duration`; pool count, idle-min, max, pending-requests, timeouts, and create-time | direct clients passing `mongoutil.WithObservability`; see the storage contract for gaps |
 | **Valkey/Redis** (`valkeyutil`) | `db.client.operation.duration`; connection-pool usage/wait/use/create metrics | gatekeeper, broadcast, notification, room-*, search-*, user-* |
-| **Cassandra** (`cassutil`) | `db.client.operation.duration`, `db.client.connection.create_time` | message-worker, history-service, room-* |
+| **Cassandra** (`cassutil`) | `db.client.operation.duration`, `cassandra.query.attempts`, `db.client.connection.create_time`, `cassandra.connection.attempts` | message-worker, bot-message-worker, history-service ordinary queries; raw batches remain a gap |
 | **Go runtime** (`WithRuntimeMetrics`, **on by default**) | goroutines, GC pauses/count, heap/alloc, memory, GOMAXPROCS | **all** services |
 
 **Two notable auto-gaps (spans only, NO metrics):**

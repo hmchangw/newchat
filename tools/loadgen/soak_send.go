@@ -66,6 +66,8 @@ type soakPendingSend struct {
 	Payload        []byte
 	PublishedAt    time.Time
 	Deadline       time.Time
+	// Tracked reports whether the failure ledger accepted this send's intent.
+	Tracked bool
 }
 
 type soakSendReplyStatus string
@@ -86,6 +88,25 @@ type soakSendReplyResult struct {
 	ErrorClass soakErrorClass
 }
 
+type soakSendLifecycle interface {
+	Start(*soakPendingSend) error
+}
+
+type soakSenderOption func(*soakSender)
+
+// withSoakSendLifecycle attaches durable send accounting. onError is invoked
+// when the lifecycle refuses an intent; the send still goes out, because losing
+// observation is a lesser evil than stalling the traffic under observation.
+func withSoakSendLifecycle(
+	lifecycle soakSendLifecycle,
+	onError func(error),
+) soakSenderOption {
+	return func(sender *soakSender) {
+		sender.lifecycle = lifecycle
+		sender.lifecycleError = onError
+	}
+}
+
 type soakSender struct {
 	cfg       soakSendConfig
 	catalog   *soakCatalog
@@ -93,6 +114,9 @@ type soakSender struct {
 	clock     soakClock
 	rng       *rand.Rand
 	ids       *soakSendIDs
+	lifecycle soakSendLifecycle
+
+	lifecycleError func(error)
 
 	rngMu     sync.Mutex
 	pendingMu sync.Mutex
@@ -106,6 +130,7 @@ func newSoakSender(
 	clock soakClock,
 	rng *rand.Rand,
 	ids *soakSendIDs,
+	options ...soakSenderOption,
 ) *soakSender {
 	if clock == nil {
 		clock = soakRealClock{}
@@ -119,10 +144,14 @@ func newSoakSender(
 	if cfg.ReplyTimeout <= 0 {
 		cfg.ReplyTimeout = 10 * time.Second
 	}
-	return &soakSender{
+	sender := &soakSender{
 		cfg: cfg, catalog: catalog, publisher: publisher, clock: clock,
 		rng: rng, ids: ids, pending: make(map[string]*soakPendingSend),
 	}
+	for _, option := range options {
+		option(sender)
+	}
+	return sender
 }
 
 func (s *soakSender) Publish(
@@ -191,11 +220,22 @@ func (s *soakSender) Publish(
 		s.rejectPending(pending)
 		return nil, err
 	}
-
-	if err := s.publisher.Publish(ctx, pending.Subject, pending.Payload); err != nil {
-		return cloneSoakPendingSend(pending), fmt.Errorf("publish soak send: %w", err)
+	if s.lifecycle != nil {
+		if err := s.lifecycle.Start(cloneSoakPendingSend(pending)); err != nil {
+			s.reportLifecycleError(fmt.Errorf("persist soak send intent: %w", err))
+		} else {
+			s.markPendingTracked(pending.RequestID)
+		}
 	}
-	return cloneSoakPendingSend(pending), nil
+
+	published := s.clonePending(pending.RequestID)
+	if published == nil {
+		published = cloneSoakPendingSend(pending)
+	}
+	if err := s.publisher.Publish(ctx, pending.Subject, pending.Payload); err != nil {
+		return published, fmt.Errorf("publish soak send: %w", err)
+	}
+	return published, nil
 }
 
 func (s *soakSender) Retry(ctx context.Context, requestID string) error {
@@ -262,6 +302,10 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 }
 
 func (s *soakSender) Expire() int {
+	return len(s.ExpireResults())
+}
+
+func (s *soakSender) ExpireResults() []soakSendReplyResult {
 	now := s.clock.Now()
 	expired := make([]*soakPendingSend, 0)
 	s.pendingMu.Lock()
@@ -276,7 +320,15 @@ func (s *soakSender) Expire() int {
 	for _, pending := range expired {
 		s.rejectPending(pending)
 	}
-	return len(expired)
+	results := make([]soakSendReplyResult, 0, len(expired))
+	for _, pending := range expired {
+		results = append(results, soakSendReplyResult{
+			Status: soakSendReplyRejected, Kind: pending.Kind,
+			RequestID: pending.RequestID, MessageID: pending.MessageID,
+			Latency: now.Sub(pending.PublishedAt), ErrorClass: soakErrorTimeout,
+		})
+	}
+	return results
 }
 
 func (s *soakSender) rejectPending(pending *soakPendingSend) {
@@ -331,6 +383,43 @@ func (s *soakSender) takePending(
 	}
 	delete(s.pending, requestID)
 	return pending
+}
+
+// Discard drops a pending send that never reached NATS. Without it the send is
+// counted once for the publish error and again when its reply deadline passes.
+func (s *soakSender) Discard(requestID string) {
+	s.pendingMu.Lock()
+	pending := s.pending[requestID]
+	delete(s.pending, requestID)
+	s.pendingMu.Unlock()
+	if pending == nil {
+		return
+	}
+	s.rejectPending(pending)
+}
+
+func (s *soakSender) markPendingTracked(requestID string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if pending := s.pending[requestID]; pending != nil {
+		pending.Tracked = true
+	}
+}
+
+func (s *soakSender) clonePending(requestID string) *soakPendingSend {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	pending := s.pending[requestID]
+	if pending == nil {
+		return nil
+	}
+	return cloneSoakPendingSend(pending)
+}
+
+func (s *soakSender) reportLifecycleError(err error) {
+	if s.lifecycleError != nil {
+		s.lifecycleError(err)
+	}
 }
 
 func matchingSoakSendReply(

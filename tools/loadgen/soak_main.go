@@ -364,7 +364,8 @@ func runSoakWorkload(
 		return 1
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
 	if err != nil {
 		slog.Error("connect NATS for Cassandra soak", "error", err)
 		return 1
@@ -386,7 +387,6 @@ func runSoakWorkload(
 		return 2
 	}
 
-	metrics := NewMetrics()
 	metricsServer := startSoakMetricsServer(cfg.MetricsAddr, metrics)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -408,6 +408,26 @@ func runSoakWorkload(
 		collectorDuration,
 	)
 	recorders := newSoakCollectorRecorders(collector, now)
+	ledger, err := openSoakFailureLedger(&cfg.Soak, metrics, now)
+	if err != nil {
+		slog.Error("open Cassandra soak failure ledger", "error", err)
+		return 1
+	}
+	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
+		metrics.FailureDropped.Add(float64(dropped))
+	}
+	defer func() {
+		if err := ledger.Close(); err != nil {
+			slog.Error("close Cassandra soak failure ledger", "error", err)
+		}
+	}()
+	failureTracker := newSoakFailureTracker(
+		ledger,
+		cfg.Soak.PersistGrace,
+		cfg.Soak.ReconcileDeadline,
+		now,
+		withSoakFailureMetrics(metrics),
+	)
 	catalog := newSoakCatalog(
 		cfg.Soak.RecentPerRoom,
 		cfg.Soak.RecentTotal,
@@ -430,6 +450,11 @@ func runSoakWorkload(
 		nil,
 		rand.New(rand.NewSource(seed+4)),
 		nil,
+		withSoakSendLifecycle(failureTracker, func(error) {
+			// The ledger reports the reason through its own invalidation and
+			// untracked counters; logging per send would flood during an outage.
+			metrics.FailureUntracked.WithLabelValues(failureUntrackedReasonStart).Inc()
+		}),
 	)
 	sendReplies := make(chan soakSendObservation, cfg.MaxInFlight+1)
 	responseSub, err := startSoakSendResponsesWithObserver(
@@ -453,6 +478,11 @@ func runSoakWorkload(
 				Action: action, Outcome: outcome, At: now(),
 				Latency: result.Latency, ErrorClass: errorClass,
 			})
+			if result.Status != soakSendReplyUnmatched {
+				if err := failureTracker.ObserveReply(&result); err != nil {
+					slog.Error("record Cassandra soak send observation", "error", err)
+				}
+			}
 			select {
 			case sendReplies <- soakSendObservation{result: result}:
 			default:
@@ -488,6 +518,20 @@ func runSoakWorkload(
 		nil,
 		nil,
 	)
+	failureVerifier := newSoakFailureRPCVerifier(
+		cfg.SiteID,
+		rpc,
+		catalog,
+		recorders.verify,
+		now,
+	)
+	failureReconciler := newSoakFailureReconciler(
+		ledger,
+		failureVerifier,
+		cfg.Soak.ReconcileRetryInterval,
+		now,
+	)
+	reconcileGate := newSoakShareGate(cfg.Soak.ReconcileReadShare)
 	warmReader := newSoakReader(
 		soakReadConfig{
 			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
@@ -550,11 +594,19 @@ func runSoakWorkload(
 	var verificationSequence atomic.Uint64
 	actions := soakWorkloadActions{
 		Send: func(actionCtx context.Context, _ bool) error {
-			for range sender.Expire() {
-				_ = collector.Record(&soakOperationSample{
+			for _, result := range sender.ExpireResults() {
+				if err := collector.Record(&soakOperationSample{
 					Action: soakRPCSend, Outcome: soakOutcomeFailed, At: now(),
 					ErrorClass: soakErrorTimeout,
-				})
+				}); err != nil {
+					slog.Error("record expired Cassandra soak send timeout", "error", err)
+				}
+				if err := failureTracker.ObserveReply(&result); err != nil {
+					slog.Error("record expired Cassandra soak send", "error", err)
+				}
+			}
+			if _, err := ledger.Expire(now()); err != nil {
+				slog.Error("expire Cassandra soak failure operations", "error", err)
 			}
 			target, content := selector.nextSend()
 			pending, publishErr := sender.Publish(actionCtx, target, content)
@@ -569,9 +621,34 @@ func runSoakWorkload(
 				Action: action, Outcome: soakOutcomeFailed, At: now(),
 				ErrorClass: classifySoakRPCError(publishErr),
 			})
+			// The publish never left the process, so no downstream side effect
+			// is expected and no reply can arrive. Closing the operation keeps
+			// it out of the data-loss bucket that an unresolved history observer
+			// would land in; dropping the pending entry keeps the failed send
+			// from being counted again at its reply deadline.
+			if pending != nil {
+				sender.Discard(pending.RequestID)
+				if pending.Tracked {
+					if err := failureTracker.AbandonUnsent(pending); err != nil {
+						slog.Error("abandon unsent Cassandra soak send", "error", err)
+					}
+				}
+			}
 			return nil
 		},
 		Read: func(actionCtx context.Context, _ bool) error {
+			// Reconciliation borrows read slots so verification adds no read RPS,
+			// but it may only take its configured share: a large unresolved
+			// backlog must not stop the production-like read mix mid-fault.
+			if reconcileGate.Allow() {
+				reconciled, err := failureReconciler.Try(actionCtx)
+				if err != nil {
+					slog.Error("reconcile Cassandra soak operation", "error", err)
+				}
+				if reconciled {
+					return nil
+				}
+			}
 			_, _ = reader.ReadMixed(actionCtx, selector.nextRoom())
 			return nil
 		},

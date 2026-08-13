@@ -52,6 +52,11 @@ type soakConfig struct {
 	RetryMaxBackoff             time.Duration `env:"RETRY_MAX_BACKOFF"                envDefault:"5s"`
 	RecentPerRoom               int           `env:"RECENT_PER_ROOM"                  envDefault:"128"`
 	RecentTotal                 int           `env:"RECENT_TOTAL"                     envDefault:"200000"`
+	LedgerDir                   string        `env:"LEDGER_DIR"                       envDefault:""`
+	LedgerCapacity              int           `env:"LEDGER_CAPACITY"                  envDefault:"200000"`
+	ReconcileDeadline           time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
+	ReconcileRetryInterval      time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
+	ReconcileReadShare          float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
 	CassandraCleanup            string        `env:"CASSANDRA_CLEANUP"                envDefault:"none"`
 	ConfirmKeyspace             string        `env:"CONFIRM_KEYSPACE"                 envDefault:""`
 	TeardownBatchRooms          int           `env:"TEARDOWN_BATCH_ROOMS"              envDefault:"250"`
@@ -165,6 +170,19 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if cfg.RecentTotal < cfg.RecentPerRoom {
 		return fmt.Errorf("SOAK_RECENT_TOTAL must be at least SOAK_RECENT_PER_ROOM")
+	}
+	if cfg.LedgerCapacity <= 0 {
+		return fmt.Errorf("SOAK_LEDGER_CAPACITY must be greater than zero")
+	}
+	if cfg.ReconcileDeadline <= cfg.PersistGrace {
+		return fmt.Errorf("SOAK_RECONCILE_DEADLINE must be greater than SOAK_PERSIST_GRACE")
+	}
+	if cfg.ReconcileRetryInterval <= 0 {
+		return fmt.Errorf("SOAK_RECONCILE_RETRY_INTERVAL must be greater than zero")
+	}
+	if !isFinite(cfg.ReconcileReadShare) ||
+		cfg.ReconcileReadShare <= 0 || cfg.ReconcileReadShare > 1 {
+		return fmt.Errorf("SOAK_RECONCILE_READ_SHARE must be greater than zero and at most 1")
 	}
 
 	if cfg.MaxUsers <= 0 || cfg.MaxUsers > maxBorrowedSoakUsers {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"testing"
 	"time"
 
@@ -276,6 +277,55 @@ func validSoakConfig(t *testing.T) soakConfig {
 	cfg.RunID = "run-a-test"
 	cfg.TeardownBatchDelay = 0
 	return cfg
+}
+
+func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*soakConfig)
+		want   string
+	}{
+		{
+			name:   "zero capacity",
+			mutate: func(cfg *soakConfig) { cfg.LedgerCapacity = 0 },
+			want:   "SOAK_LEDGER_CAPACITY",
+		},
+		{
+			name:   "deadline does not exceed persistence grace",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileDeadline = cfg.PersistGrace },
+			want:   "SOAK_RECONCILE_DEADLINE",
+		},
+		{
+			name:   "zero retry interval",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileRetryInterval = 0 },
+			want:   "SOAK_RECONCILE_RETRY_INTERVAL",
+		},
+		{
+			name:   "zero read share",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = 0 },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+		{
+			name:   "read share claims the whole read lane",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = 1.5 },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+		{
+			name:   "read share is not a number",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = math.NaN() },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			tt.mutate(&cfg)
+
+			err := validateSoakConfig(&cfg, "chat")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
 }
 
 // The page limit is a payload knob, so its safe value depends on how large the
