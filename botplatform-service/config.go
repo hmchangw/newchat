@@ -15,6 +15,9 @@ type config struct {
 	MongoSelectTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	MongoBreakerFails  int           `env:"MONGO_BREAKER_FAILS"            envDefault:"5"`
 	MongoBreakerCool   time.Duration `env:"MONGO_BREAKER_COOLDOWN"         envDefault:"10s"`
+	// SessionCacheTTL keeps already-authenticated bots working while Mongo is
+	// unreachable. 0 disables the tier. Matches the other L2 tiers at 90m.
+	SessionCacheTTL time.Duration `env:"SESSION_CACHE_TTL" envDefault:"90m"`
 
 	// SessionsMaxPerAccount is the per-user FIFO cap; excess sessions are evicted oldest-first.
 	SessionsMaxPerAccount int `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`

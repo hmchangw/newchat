@@ -65,28 +65,9 @@ func run() error {
 	if err := sessionStore.EnsureIndexes(ctx); err != nil {
 		return fmt.Errorf("ensure session indexes: %w", err)
 	}
-	// One breaker for every Mongo read in this service: they are all evidence
-	// about the same fact — is Mongo reachable — so they share a failure budget
-	// rather than each re-learning the outage.
-	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
-		circuitbreaker.Tracked(ctx, "mongo"),
-		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
-	st := newStoreMongo(db, mongoBreaker)
-	subStore := newMongoSubscriptionStore(db, mongoBreaker)
-	h := newHandler(st, &cfg)
-	h.subs = subStore
-
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
-	if err != nil {
-		return fmt.Errorf("connect nats: %w", err)
-	}
-
-	// 3s msg-flow timeout; bot-message-handler receives req/reply on the shared NATS conn.
-	h.forwarder = newBotForwarder(nc.NatsConn(), 3*time.Second)
-	// 15s DM-ensure timeout (room-mgmt budget) — first-DM creates room + federates member_added.
-	h.dmEnsurer = newNATSDMEnsurer(nc.NatsConn(), cfg.SiteID, 15*time.Second)
-
-	// Empty VALKEY_ADDRS silently disables rate-limit + idempotency (dev only; prod must supply).
+	// Empty VALKEY_ADDRS silently disables rate-limit + idempotency, and leaves
+	// session validation reading Mongo on every bot request (dev only; prod must
+	// supply). Connected before the stores so the session cache can use it.
 	var valkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
 		valkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
@@ -102,9 +83,31 @@ func run() error {
 			"msg_ttl", cfg.BotIdempotencyMsgTTL,
 			"room_mgmt_ttl", cfg.BotIdempotencyRoomMgmtTTL,
 		)
+		slog.Info("bot session L2 cache enabled", "ttl", cfg.SessionCacheTTL)
 	} else {
 		slog.Warn("bot rate-limit + idempotency DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
+
+	// One breaker for every Mongo read in this service: they are all evidence
+	// about the same fact — is Mongo reachable — so they share a failure budget
+	// rather than each re-learning the outage.
+	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "mongo"),
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
+	st := newStoreMongo(db, mongoBreaker, valkey, cfg.SessionCacheTTL)
+	subStore := newMongoSubscriptionStore(db, mongoBreaker)
+	h := newHandler(st, &cfg)
+	h.subs = subStore
+
+	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	if err != nil {
+		return fmt.Errorf("connect nats: %w", err)
+	}
+
+	// 3s msg-flow timeout; bot-message-handler receives req/reply on the shared NATS conn.
+	h.forwarder = newBotForwarder(nc.NatsConn(), 3*time.Second)
+	// 15s DM-ensure timeout (room-mgmt budget) — first-DM creates room + federates member_added.
+	h.dmEnsurer = newNATSDMEnsurer(nc.NatsConn(), cfg.SiteID, 15*time.Second)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
