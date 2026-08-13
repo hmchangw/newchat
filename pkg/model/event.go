@@ -132,6 +132,10 @@ type InboxMemberEvent struct {
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty"`
 	JoinedAt           int64    `json:"joinedAt,omitempty"`
 	Timestamp          int64    `json:"timestamp" bson:"timestamp"`
+	// Origin marks provenance (e.g. OriginTeams for Teams-migrated room
+	// membership); empty for natively-created rooms. Propagated into the
+	// spotlight search doc.
+	Origin string `json:"origin,omitempty"`
 }
 
 // NotificationEvent is the per-user reaction notification on chat.user.{account}.notification;
@@ -237,8 +241,12 @@ type MemberAddEvent struct {
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
 	// Members carries the member.list (enrich=true) display entries; org-expanded accounts ride Accounts only.
 	// Room-scoped event only — INBOX copies omit it (remote sites re-resolve display data).
-	Members   []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`
-	Timestamp int64             `json:"timestamp"         bson:"timestamp"`
+	Members []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`
+	// Origin marks provenance (OriginTeams for a Teams-migrated room); empty for
+	// native rooms. Shared json tag with InboxMemberEvent.Origin so the Teams lane's
+	// origin survives the inbox-worker decode into this struct and stamps the sub.
+	Origin    string `json:"origin,omitempty" bson:"origin,omitempty"`
+	Timestamp int64  `json:"timestamp"        bson:"timestamp"`
 }
 
 // Participant represents a user with display name info for client rendering. DisplayName is the

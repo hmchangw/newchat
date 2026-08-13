@@ -550,6 +550,52 @@ func TestHandleEvent_MemberAdded(t *testing.T) {
 
 }
 
+// TestHandleEvent_MemberAdded_OriginStamped proves the Teams federation lane's
+// origin survives the decode: the producer marshals an InboxMemberEvent (which
+// carries Origin), the consumer decodes into MemberAddEvent, and the created sub
+// must be stamped so the remote-side origin filter can hide it. A native add
+// (no origin) leaves the sub origin empty.
+func TestHandleEvent_MemberAdded_OriginStamped(t *testing.T) {
+	run := func(t *testing.T, payload any, wantOrigin string) {
+		store := &stubInboxStore{users: []model.User{{ID: "uid-bob", Account: "bob", SiteID: "site-b"}}}
+		h := NewHandler(store)
+		payloadData, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		evtData, err := json.Marshal(model.InboxEvent{
+			Type: "member_added", SiteID: "site-a", DestSiteID: "site-b", Payload: payloadData,
+		})
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		if err := h.HandleEvent(context.Background(), evtData); err != nil {
+			t.Fatalf("HandleEvent: %v", err)
+		}
+		subs := store.getSubscriptions()
+		if len(subs) != 1 {
+			t.Fatalf("expected 1 subscription, got %d", len(subs))
+		}
+		if subs[0].Origin != wantOrigin {
+			t.Errorf("subscription Origin = %q, want %q", subs[0].Origin, wantOrigin)
+		}
+	}
+
+	t.Run("teams federation lane stamps origin", func(t *testing.T) {
+		// The Teams lane's real wire shape (room-worker federateTeamsMembership).
+		run(t, model.InboxMemberEvent{
+			RoomID: "room-teams", RoomType: model.RoomTypeChannel, SiteID: "site-a",
+			Accounts: []string{"bob"}, Origin: model.OriginTeams, Timestamp: 1,
+		}, model.OriginTeams)
+	})
+	t.Run("native add leaves origin empty", func(t *testing.T) {
+		run(t, model.MemberAddEvent{
+			Type: "member_added", RoomID: "room-native", SiteID: "site-a",
+			Accounts: []string{"bob"}, Timestamp: 1,
+		}, "")
+	})
+}
+
 func TestHandleEvent_MemberAdded_SetsTimestamps(t *testing.T) {
 	store := &stubInboxStore{
 		users: []model.User{

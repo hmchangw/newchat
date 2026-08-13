@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -100,6 +101,27 @@ type Config struct {
 	// door (ErrUnavailable) instead of piling unbounded work onto Elasticsearch/
 	// MongoDB. 0 disables the cap (unbounded spawn).
 	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+	// ShowTeamsRoom controls whether Teams-migrated rooms/messages (origin
+	// "teams") appear in search results; false hides them (reversible read-time
+	// filter — see pkg/model.OriginTeams).
+	ShowTeamsRoom bool `env:"SHOW_TEAMS_ROOM" envDefault:"false"`
+	// ShowTeamsAccounts allowlists accounts that see Teams rooms/messages even when
+	// ShowTeamsRoom is false — an ops-managed set, comma-separated.
+	ShowTeamsAccounts []string `env:"SHOW_TEAMS_ROOM_ACCOUNTS" envSeparator:","`
+}
+
+// teamsAccountSet builds a lookup set from the SHOW_TEAMS_ROOM_ACCOUNTS list, dropping blanks.
+func teamsAccountSet(accounts []string) map[string]bool {
+	if len(accounts) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(accounts))
+	for _, a := range accounts {
+		if a = strings.TrimSpace(a); a != "" {
+			set[a] = true
+		}
+	}
+	return set
 }
 
 func main() {
@@ -208,6 +230,8 @@ func main() {
 		UserRoomIndex:           cfg.UserRoomIndex,
 		SpotlightReadPattern:    spotlightReadPattern,
 		SpotlightOrgReadPattern: spotlightOrgReadPattern,
+		ShowTeamsRoom:           cfg.ShowTeamsRoom,
+		ShowTeamsAccounts:       teamsAccountSet(cfg.ShowTeamsAccounts),
 	})
 	handler.room = newRoomClient(nc)
 

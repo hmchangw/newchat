@@ -12,6 +12,10 @@ type SpotlightDoc struct {
 	RoomType    string    `json:"roomType"    es:"keyword"`
 	SiteID      string    `json:"siteId"      es:"keyword"`
 	JoinedAt    time.Time `json:"joinedAt"    es:"date"`
+	// Origin marks provenance (e.g. model.OriginTeams for Teams-migrated
+	// rooms); empty for natively-created rooms. Filtered by search-service
+	// when SHOW_TEAMS_ROOM is false.
+	Origin string `json:"origin,omitempty" es:"keyword"`
 }
 
 // SpotlightFields is the minimal, source-agnostic input to NewSpotlightDoc.
@@ -22,6 +26,7 @@ type SpotlightFields struct {
 	RoomType    string
 	SiteID      string
 	JoinedAt    time.Time
+	Origin      string
 }
 
 // NewSpotlightDoc builds the ES document for the spotlight index from f.

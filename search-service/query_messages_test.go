@@ -35,7 +35,7 @@ func shouldClauses(t *testing.T, q map[string]any) []any {
 
 func TestBuildMessageQuery_GlobalUnrestricted(t *testing.T) {
 	req := model.SearchMessagesRequest{Query: "hello", Size: 25, Offset: 0}
-	raw, err := buildMessageQuery(req, "alice", nil, 365*24*time.Hour, "user-room")
+	raw, err := buildMessageQuery(req, "alice", nil, 365*24*time.Hour, "user-room", false)
 	require.NoError(t, err)
 
 	q := parseQuery(t, raw)
@@ -56,7 +56,7 @@ func TestBuildMessageQuery_GlobalUnrestricted(t *testing.T) {
 // text together.
 func TestBuildMessageQuery_SearchesAttachmentAndCardFields(t *testing.T) {
 	req := model.SearchMessagesRequest{Query: "report", Size: 25}
-	raw, err := buildMessageQuery(req, "alice", nil, 365*24*time.Hour, "user-room")
+	raw, err := buildMessageQuery(req, "alice", nil, 365*24*time.Hour, "user-room", false)
 	require.NoError(t, err)
 
 	q := parseQuery(t, raw)
@@ -82,7 +82,7 @@ func TestBuildMessageQuery_GlobalWithRestricted(t *testing.T) {
 		"room-b": 1_700_000_000_000,
 		"room-a": 1_600_000_000_000,
 	}
-	raw, err := buildMessageQuery(req, "alice", restricted, 24*time.Hour, "user-room")
+	raw, err := buildMessageQuery(req, "alice", restricted, 24*time.Hour, "user-room", false)
 	require.NoError(t, err)
 
 	q := parseQuery(t, raw)
@@ -141,7 +141,7 @@ func TestBuildMessageQuery_ScopedInlineTerms(t *testing.T) {
 		Query:   "hi",
 		RoomIDs: []string{"r1", "r2", "r3"},
 	}
-	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room")
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room", false)
 	require.NoError(t, err)
 
 	shoulds := shouldClauses(t, parseQuery(t, raw))
@@ -157,7 +157,7 @@ func TestBuildMessageQuery_ScopedMixed(t *testing.T) {
 		RoomIDs: []string{"r1", "restricted-r2", "r3"},
 	}
 	restricted := map[string]int64{"restricted-r2": 1_600_000_000_000}
-	raw, err := buildMessageQuery(req, "alice", restricted, time.Hour, "user-room")
+	raw, err := buildMessageQuery(req, "alice", restricted, time.Hour, "user-room", false)
 	require.NoError(t, err)
 
 	shoulds := shouldClauses(t, parseQuery(t, raw))
@@ -180,7 +180,7 @@ func TestBuildMessageQuery_ScopedMixed(t *testing.T) {
 
 func TestBuildMessageQuery_UserRoomIndexOverride(t *testing.T) {
 	req := model.SearchMessagesRequest{Query: "hi"}
-	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "custom-user-room")
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "custom-user-room", false)
 	require.NoError(t, err)
 
 	shoulds := shouldClauses(t, parseQuery(t, raw))
@@ -194,7 +194,7 @@ func TestBuildMessageQuery_ScopedAllRestricted(t *testing.T) {
 		RoomIDs: []string{"ra"},
 	}
 	restricted := map[string]int64{"ra": 1_700_000_000_000}
-	raw, err := buildMessageQuery(req, "alice", restricted, time.Hour, "user-room")
+	raw, err := buildMessageQuery(req, "alice", restricted, time.Hour, "user-room", false)
 	require.NoError(t, err)
 
 	shoulds := shouldClauses(t, parseQuery(t, raw))
@@ -205,7 +205,7 @@ func TestBuildMessageQuery_ScopedAllRestricted(t *testing.T) {
 
 func TestBuildMessageQuery_RecentWindow(t *testing.T) {
 	req := model.SearchMessagesRequest{Query: "hi"}
-	raw, err := buildMessageQuery(req, "alice", nil, 48*time.Hour, "user-room")
+	raw, err := buildMessageQuery(req, "alice", nil, 48*time.Hour, "user-room", false)
 	require.NoError(t, err)
 
 	filters := filterClauses(t, parseQuery(t, raw))
@@ -216,13 +216,35 @@ func TestBuildMessageQuery_RecentWindow(t *testing.T) {
 
 func TestBuildMessageQuery_RecentWindowDefault(t *testing.T) {
 	req := model.SearchMessagesRequest{Query: "hi"}
-	raw, err := buildMessageQuery(req, "alice", nil, 0, "user-room")
+	raw, err := buildMessageQuery(req, "alice", nil, 0, "user-room", false)
 	require.NoError(t, err)
 
 	filters := filterClauses(t, parseQuery(t, raw))
 	rng := filters[0].(map[string]any)["range"].(map[string]any)["createdAt"].(map[string]any)
 	// Zero / negative window defaults to 1 year (365 * 24h = 8760h).
 	assert.Equal(t, "now-8760h", rng["gte"])
+}
+
+func TestBuildMessageQuery_ShowTeamsRoomFalse_AddsMustNotOrigin(t *testing.T) {
+	req := model.SearchMessagesRequest{Query: "hi"}
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room", false)
+	require.NoError(t, err)
+
+	q := parseQuery(t, raw)
+	mustNot := q["query"].(map[string]any)["bool"].(map[string]any)["must_not"].([]any)
+	require.Len(t, mustNot, 1)
+	term := mustNot[0].(map[string]any)["term"].(map[string]any)
+	assert.Equal(t, model.OriginTeams, term["origin"])
+}
+
+func TestBuildMessageQuery_ShowTeamsRoomTrue_OmitsMustNotOrigin(t *testing.T) {
+	req := model.SearchMessagesRequest{Query: "hi"}
+	raw, err := buildMessageQuery(req, "alice", nil, time.Hour, "user-room", true)
+	require.NoError(t, err)
+
+	q := parseQuery(t, raw)
+	mustNot := q["query"].(map[string]any)["bool"].(map[string]any)["must_not"].([]any)
+	assert.Len(t, mustNot, 0)
 }
 
 func TestRecentWindowToGte_Units(t *testing.T) {

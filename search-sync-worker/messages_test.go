@@ -721,3 +721,40 @@ func TestMessageCollection_BuildAction_TeamsBatch_MalformedRecordDoesNotDropSibl
 	require.Len(t, actions, 1, "the malformed record must be skipped, not abort the whole batch")
 	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
 }
+
+func TestMessageCollection_BuildAction_TeamsBatch_SetsOrigin(t *testing.T) {
+	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	ts := time.Now().UTC()
+
+	valid, err := json.Marshal(teamsmigrate.Message{
+		ID: "tm-1", RoomID: "room-1", MessageType: "message", CreatedDateTime: ts,
+	})
+	require.NoError(t, err)
+	req := model.TeamsBatchRequest{Messages: []json.RawMessage{valid}}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	actions, buildErr := c.BuildAction(data)
+	require.NoError(t, buildErr)
+	require.Len(t, actions, 1)
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(actions[0].Doc, &doc))
+	assert.Equal(t, model.OriginTeams, doc["origin"], "Teams-migrated docs must carry origin=teams")
+}
+
+func TestBuildMessageAction_NormalPath_OmitsOrigin(t *testing.T) {
+	ts := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	evt := &model.MessageEvent{
+		Event:     model.EventCreated,
+		Message:   model.Message{ID: "msg-1", RoomID: "r1", UserID: "u1", UserAccount: "alice", CreatedAt: ts},
+		SiteID:    "site-a",
+		Timestamp: 1737964678390,
+	}
+	action := buildMessageAction(evt, "msgs-v1")
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(action.Doc, &doc))
+	_, hasOrigin := doc["origin"]
+	assert.False(t, hasOrigin, "non-Teams docs must not carry an origin field")
+}

@@ -19,7 +19,7 @@ func subscriptionFilters(t *testing.T, q map[string]any) []any {
 
 func TestBuildSubscriptionQuery_RoomTypeAll(t *testing.T) {
 	req := model.SearchRoomsRequest{Query: "general", Size: 10, Offset: 0}
-	raw, err := buildRoomQuery(req, "alice")
+	raw, err := buildRoomQuery(req, "alice", false)
 	require.NoError(t, err)
 
 	q := parseQuery(t, raw)
@@ -35,7 +35,7 @@ func TestBuildSubscriptionQuery_RoomTypeAll(t *testing.T) {
 
 func TestBuildSubscriptionQuery_RoomTypeExplicitAll(t *testing.T) {
 	req := model.SearchRoomsRequest{Query: "general", RoomType: "all"}
-	raw, err := buildRoomQuery(req, "alice")
+	raw, err := buildRoomQuery(req, "alice", false)
 	require.NoError(t, err)
 
 	filters := subscriptionFilters(t, parseQuery(t, raw))
@@ -44,7 +44,7 @@ func TestBuildSubscriptionQuery_RoomTypeExplicitAll(t *testing.T) {
 
 func TestBuildSubscriptionQuery_RoomTypeChannel(t *testing.T) {
 	req := model.SearchRoomsRequest{Query: "general", RoomType: "channel"}
-	raw, err := buildRoomQuery(req, "alice")
+	raw, err := buildRoomQuery(req, "alice", false)
 	require.NoError(t, err)
 
 	filters := subscriptionFilters(t, parseQuery(t, raw))
@@ -55,7 +55,7 @@ func TestBuildSubscriptionQuery_RoomTypeChannel(t *testing.T) {
 
 func TestBuildSubscriptionQuery_RoomTypeDM(t *testing.T) {
 	req := model.SearchRoomsRequest{Query: "alice", RoomType: "dm"}
-	raw, err := buildRoomQuery(req, "alice")
+	raw, err := buildRoomQuery(req, "alice", false)
 	require.NoError(t, err)
 
 	filters := subscriptionFilters(t, parseQuery(t, raw))
@@ -66,7 +66,7 @@ func TestBuildSubscriptionQuery_RoomTypeDM(t *testing.T) {
 
 func TestBuildSubscriptionQuery_RoomTypeAppRejected(t *testing.T) {
 	req := model.SearchRoomsRequest{Query: "bot", RoomType: "app"}
-	_, err := buildRoomQuery(req, "alice")
+	_, err := buildRoomQuery(req, "alice", false)
 	require.Error(t, err)
 
 	var rerr *errcode.Error
@@ -77,7 +77,7 @@ func TestBuildSubscriptionQuery_RoomTypeAppRejected(t *testing.T) {
 
 func TestBuildSubscriptionQuery_UnknownRoomTypeRejected(t *testing.T) {
 	req := model.SearchRoomsRequest{Query: "x", RoomType: "orb"}
-	_, err := buildRoomQuery(req, "alice")
+	_, err := buildRoomQuery(req, "alice", false)
 	require.Error(t, err)
 
 	var rerr *errcode.Error
@@ -88,7 +88,7 @@ func TestBuildSubscriptionQuery_UnknownRoomTypeRejected(t *testing.T) {
 
 func TestBuildSubscriptionQuery_SortByScoreThenJoinedAtDesc(t *testing.T) {
 	req := model.SearchRoomsRequest{Query: "x"}
-	raw, err := buildRoomQuery(req, "alice")
+	raw, err := buildRoomQuery(req, "alice", false)
 	require.NoError(t, err)
 
 	sort := parseQuery(t, raw)["sort"].([]any)
@@ -98,9 +98,31 @@ func TestBuildSubscriptionQuery_SortByScoreThenJoinedAtDesc(t *testing.T) {
 	assert.Equal(t, "desc", joinedAt["order"])
 }
 
+func TestBuildRoomQuery_ShowTeamsRoomFalse_AddsMustNotOrigin(t *testing.T) {
+	req := model.SearchRoomsRequest{Query: "x"}
+	raw, err := buildRoomQuery(req, "alice", false)
+	require.NoError(t, err)
+
+	q := parseQuery(t, raw)
+	mustNot := q["query"].(map[string]any)["bool"].(map[string]any)["must_not"].([]any)
+	require.Len(t, mustNot, 1)
+	term := mustNot[0].(map[string]any)["term"].(map[string]any)
+	assert.Equal(t, model.OriginTeams, term["origin"])
+}
+
+func TestBuildRoomQuery_ShowTeamsRoomTrue_OmitsMustNotOrigin(t *testing.T) {
+	req := model.SearchRoomsRequest{Query: "x"}
+	raw, err := buildRoomQuery(req, "alice", true)
+	require.NoError(t, err)
+
+	q := parseQuery(t, raw)
+	mustNot := q["query"].(map[string]any)["bool"].(map[string]any)["must_not"].([]any)
+	assert.Len(t, mustNot, 0)
+}
+
 func TestBuildSubscriptionQuery_QueryFieldFlowsToESBody(t *testing.T) {
 	req := model.SearchRoomsRequest{Query: "engineering", Size: 5}
-	raw, err := buildRoomQuery(req, "alice")
+	raw, err := buildRoomQuery(req, "alice", false)
 	require.NoError(t, err)
 
 	q := parseQuery(t, raw)

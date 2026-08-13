@@ -32,6 +32,10 @@ type MessageDoc struct {
 	CardData              string                 `json:"cardData,omitempty"                      es:"text,custom_analyzer"`
 	Attachments           []cassandra.Attachment `json:"attachments,omitempty" es:"object_disabled"`
 	Card                  *cassandra.Card        `json:"card,omitempty"        es:"object_disabled"`
+	// Origin marks provenance (e.g. model.OriginTeams for Teams-migrated
+	// messages); empty for natively-created messages. Filtered by search-service
+	// when SHOW_TEAMS_ROOM is false.
+	Origin string `json:"origin,omitempty" es:"keyword"`
 }
 
 // MessageFields is the minimal, source-agnostic set of fields needed to
