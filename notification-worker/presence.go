@@ -10,9 +10,11 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -39,6 +41,7 @@ type bulkPresenceSource struct {
 	siteID    string
 	batchSize int
 	timeout   time.Duration
+	metrics   *natsmetrics.Metrics
 }
 
 func newBulkPresenceSource(req presenceRequester, siteID string, batchSize int, timeout time.Duration) *bulkPresenceSource {
@@ -48,7 +51,7 @@ func newBulkPresenceSource(req presenceRequester, siteID string, batchSize int, 
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
-	return &bulkPresenceSource{req: req, siteID: siteID, batchSize: batchSize, timeout: timeout}
+	return &bulkPresenceSource{req: req, siteID: siteID, batchSize: batchSize, timeout: timeout, metrics: natsmetrics.New(otel.Meter("chat.nats"))}
 }
 
 func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (map[string]model.Presence, error) {
@@ -73,7 +76,11 @@ func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (m
 				slog.Warn("presence marshal failed", "error", err)
 				return
 			}
+			started := time.Now()
 			msg, err := b.req.Request(ctx, subj, data, b.timeout)
+			if b.metrics != nil {
+				b.metrics.Publisher("notification-worker", b.siteID).Request(ctx, natsmetrics.OperationPresenceLookup, time.Since(started), err)
+			}
 			if err != nil {
 				slog.Warn("presence rpc failed", "error", err, "chunk", len(ch))
 				return

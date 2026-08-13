@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
@@ -105,6 +106,8 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
+	sharedMetrics := natsmetrics.New(sdk.MeterProvider().Meter("chat.nats"))
+	publishMetrics := sharedMetrics.Publisher("broadcast-worker", cfg.SiteID)
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
 	if err != nil {
@@ -182,13 +185,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("broadcast-worker"), wiring.CanonicalWildcard))
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("broadcast-worker"), wiring.CanonicalWildcard)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "broadcast-worker", Site: cfg.SiteID,
+		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
+	})
+	consumerMetrics.LoopStopped(ctx)
+	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
 
-	publisher := &natsPublisher{nc: nc}
+	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
 	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
 	// UpdateRoomLastMessage; the coalescing wrapper buffers it and drains via flushCtx/Run.
 	coalescer := newCoalescingStore(cachedStore, store)
@@ -235,9 +244,15 @@ func main() {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
+	consumerMetrics.LoopStarted(ctx)
 
 	var wg sync.WaitGroup
-	go consumeLoop(iter, broadcastProcessor(handler), cfg.MaxWorkers, &wg)
+	processor := broadcastProcessor(handler)
+	go natsmetrics.Consume(iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		classifyBroadcastDelivery,
+		func(msgCtx context.Context, msg *natsmetrics.Message) {
+			jobguard.Run(msg, func() { processor(msgCtx, msg) })
+		})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -254,6 +269,7 @@ func main() {
 			return broadcastSub.Unsubscribe()
 		},
 		func(ctx context.Context) error {
+			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
 			return nil
 		},
@@ -290,11 +306,14 @@ func main() {
 
 // natsPublisher adapts *o11ynats.Conn to the Publisher interface.
 type natsPublisher struct {
-	nc *o11ynats.Conn
+	nc      *o11ynats.Conn
+	metrics natsmetrics.Publisher
 }
 
 func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte) error {
-	if err := p.nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subject, data)); err != nil {
+	err := p.nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subject, data))
+	p.metrics.Attempt(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish, err)
+	if err != nil {
 		return fmt.Errorf("publish to %q: %w", subject, err)
 	}
 	return nil
@@ -350,6 +369,9 @@ func consumeLoop(iter messageIterator, process messageProcessor, maxWorkers int,
 				wg.Done()
 			}()
 			jobguard.Run(msg, func() { process(msgCtx, msg) })
+			if tracked, ok := msg.(interface{ FinishPending(context.Context) }); ok {
+				tracked.FinishPending(msgCtx)
+			}
 		}()
 	}
 }

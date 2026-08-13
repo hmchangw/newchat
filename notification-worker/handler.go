@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -50,7 +52,8 @@ type HandlerDeps struct {
 // Handler runs the per-message fan-out pipeline: exclusion filters, hook veto, EligibleForPush
 // routing, then the settings- and presence-gated shouldPush — one Emitter.Emit per surviving recipient.
 type Handler struct {
-	deps HandlerDeps
+	deps    HandlerDeps
+	metrics *notificationMetrics
 }
 
 // isNotifiable reports whether a message type produces push notifications.
@@ -71,12 +74,20 @@ func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one
 	if deps.Settings == nil {
 		deps.Settings = noopUserSettings{}
 	}
-	return &Handler{deps: deps}
+	return &Handler{deps: deps, metrics: newNotificationMetrics(otel.Meter("notification-worker"))}
 }
 
-func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
+func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error) {
+	outcome := "suppressed"
+	defer func() {
+		if retErr != nil && outcome == "suppressed" {
+			outcome = "failed"
+		}
+		h.metrics.Record(ctx, "push", outcome)
+	}()
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		// Malformed payload — it will never parse on redelivery. Mark permanent so the caller Acks (drops) it instead of retrying until MaxDeliver.
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
@@ -255,6 +266,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		evt.ID = fmt.Sprintf("%s-b%d", msg.ID, batchIdx)
 		evt.Accounts = batchAccounts
 		if err := h.deps.Emitter.Emit(ctx, evt); err != nil {
+			outcome = "publish_failed"
 			slog.Error("emit push batch failed", "error", err, "batch", batchIdx,
 				"recipients", len(batchAccounts), "messageId", msg.ID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
@@ -264,6 +276,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	if len(emitErrs) > 0 {
 		return fmt.Errorf("emit push batches for message %s: %w", msg.ID, errors.Join(emitErrs...))
 	}
+	outcome = "sent"
 	return nil
 }
 

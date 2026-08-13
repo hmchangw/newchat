@@ -8,8 +8,10 @@ import (
 	"github.com/bytedance/sonic"
 
 	o11ynats "github.com/flywindy/o11y/nats"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -35,11 +37,12 @@ type ParentFetcher interface {
 // historyParentFetcher resolves the parent via a NATS request to history-service's
 // GetMessageByID handler, reading the author + createdAt the fan-out needs.
 type historyParentFetcher struct {
-	nc *o11ynats.Conn
+	nc      *o11ynats.Conn
+	metrics *natsmetrics.Metrics
 }
 
 func newHistoryParentFetcher(nc *o11ynats.Conn) *historyParentFetcher {
-	return &historyParentFetcher{nc: nc}
+	return &historyParentFetcher{nc: nc, metrics: natsmetrics.New(otel.Meter("chat.nats"))}
 }
 
 // getMessageByIDRequest mirrors history-service's GetMessageByIDRequest wire shape.
@@ -66,7 +69,11 @@ func (f *historyParentFetcher) FetchParent(ctx context.Context, account, roomID,
 	if err != nil {
 		return nil, fmt.Errorf("marshal GetMessageByID request: %w", err)
 	}
+	started := time.Now()
 	msg, err := f.nc.Request(ctx, subject.MsgGet(account, roomID, siteID), reqBytes, parentFetchTimeout)
+	if f.metrics != nil {
+		f.metrics.Publisher("notification-worker", siteID).Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), err)
+	}
 	if err != nil {
 		return nil, natsutil.RequestFailure(fmt.Sprintf("history request for parent %s", messageID), err)
 	}

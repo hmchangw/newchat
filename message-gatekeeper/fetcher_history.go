@@ -7,9 +7,11 @@ import (
 
 	"github.com/bytedance/sonic"
 	o11ynats "github.com/flywindy/o11y/nats"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -23,10 +25,11 @@ const historyRequestTimeout = 2 * time.Second
 type historyParentFetcher struct {
 	nc          *o11ynats.Conn
 	chatBaseURL string
+	metrics     *natsmetrics.Metrics
 }
 
 func newHistoryParentFetcher(nc *o11ynats.Conn, chatBaseURL string) *historyParentFetcher {
-	return &historyParentFetcher{nc: nc, chatBaseURL: chatBaseURL}
+	return &historyParentFetcher{nc: nc, chatBaseURL: chatBaseURL, metrics: natsmetrics.New(otel.Meter("chat.nats"))}
 }
 
 // getMessageByIDRequest mirrors history-service's GetMessageByIDRequest wire
@@ -73,7 +76,11 @@ func (f *historyParentFetcher) FetchQuotedParent(
 	}
 
 	subj := subject.MsgGet(account, roomID, siteID)
+	started := time.Now()
 	msg, err := f.nc.Request(ctx, subj, reqBytes, historyRequestTimeout)
+	if f.metrics != nil {
+		f.metrics.Publisher("message-gatekeeper", siteID).Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), err)
+	}
 	if err != nil {
 		return nil, natsutil.RequestFailure("history request", err)
 	}

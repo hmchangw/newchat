@@ -8,10 +8,12 @@ import (
 	"github.com/bytedance/sonic"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/teamsmigrate"
 )
@@ -30,6 +32,7 @@ type teamsBatchHandler struct {
 	siteID   string
 	resolver identityResolver
 	tr       MessageTransformer
+	metrics  *persistenceMetrics
 }
 
 func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string, publishUsers func(ctx context.Context, users []model.IUserWithChange) error) *teamsBatchHandler {
@@ -40,6 +43,7 @@ func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string, p
 		siteID:   siteID,
 		resolver: resolver,
 		tr:       NewDefaultTransformer(resolver),
+		metrics:  newPersistenceMetrics(otel.Meter("message-worker")),
 	}
 }
 
@@ -49,12 +53,14 @@ func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string, p
 func (h *teamsBatchHandler) consume(ctx context.Context, msg jetstream.Msg) {
 	data, err := natsutil.DecodePayload(msg)
 	if err != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		// A corrupt frame never decodes on redelivery — drop it as poison.
 		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest("decode teams batch payload")))
 		return
 	}
 	var req model.TeamsBatchRequest
 	if err := sonic.Unmarshal(data, &req); err != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		// A malformed batch can never parse on redelivery — drop it as poison.
 		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest("malformed teams batch")))
 		return
@@ -123,11 +129,13 @@ func (h *teamsBatchHandler) migrateOne(ctx context.Context, raw json.RawMessage)
 	cass := &cassParticipant{ID: sender.UserID, EngName: sender.EngName, CompanyName: sender.ChineseName, Account: sender.Account}
 
 	if err := h.store.SaveMessage(ctx, &msg, cass, h.siteID); err != nil {
+		h.metrics.Record(ctx, "teams_migration", "error")
 		// A persist failure is infra: surface it so the batch Naks and replays.
 		slog.ErrorContext(ctx, "teams batch: save message failed", "teamsMsgId", head.ID, "error", err)
 		res.Status, res.Error = model.TeamsBatchError, "save message failed"
 		return res, err
 	}
+	h.metrics.Record(ctx, "teams_migration", "success")
 	res.Status = model.TeamsBatchPersisted
 	return res, nil
 }

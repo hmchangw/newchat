@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
@@ -68,18 +70,21 @@ type Handler struct {
 	encrypt       bool
 	encoder       *roomcrypto.Encoder
 	routeMode     subject.RoomRouteMode
+	metrics       *broadcastMetrics
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode) *Handler {
+	metrics := newBroadcastMetrics(otel.Meter("broadcast-worker"))
 	return &Handler{
 		store:         store,
 		userStore:     userStore,
-		pub:           pub,
+		pub:           &broadcastMetricPublisher{next: pub, metrics: metrics},
 		keyStore:      keyStore,
 		parentFetcher: parentFetcher,
 		encrypt:       encrypt,
 		encoder:       roomcrypto.NewEncoder(),
 		routeMode:     routeMode,
+		metrics:       metrics,
 	}
 }
 
@@ -87,11 +92,13 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		// Malformed payload — it will never parse on redelivery. Mark permanent
 		// so the caller Acks (drops) it instead of retrying until MaxDeliver.
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
 	ctx = obs.ContextWithIdentity(ctx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
+	ctx = withBroadcastMetricLabels(ctx, "unknown", string(evt.Event))
 
 	switch evt.Event {
 	case model.EventCreated:
@@ -464,6 +471,8 @@ func (h *Handler) handleThreadTCountUpdated(ctx context.Context, evt *model.Mess
 
 func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, newTcount int, newTlm *time.Time,
 	parentMsgID, replyMsgID string, action model.ThreadAction, eventTimestamp int64) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomKind(room.Type), labels.eventType)
 	evt := model.ThreadMetadataUpdatedEvent{
 		Type:               model.RoomEventThreadMetadataUpdated,
 		RoomID:             room.ID,
@@ -665,6 +674,7 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 			"request_id", natsutil.RequestIDFromContext(ctx),
 		)
 	} else if pubErr := h.pub.Publish(ctx, subject.Notification(authorAccount), data); pubErr != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
 		slog.ErrorContext(ctx, "publish reaction author notification failed",
 			"error", pubErr,
 			"author", authorAccount,
@@ -681,6 +691,8 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 // type: channel events go to the room stream, DM/botDM events fan out per
 // non-bot member. evt must marshal to the wire payload for roomEvtType.
 func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvtType model.RoomEventType, messageID string, evt any) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomKind(room.Type), labels.eventType)
 	payload, err := sonic.Marshal(evt)
 	if err != nil {
 		return fmt.Errorf("marshal %s event: %w", roomEvtType, err)
@@ -691,11 +703,14 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 		return h.publishRoomEvent(ctx, room.ID, room.CrossSite, room.CrossSiteAt, payload, fmt.Sprintf("%s event (message %s)", roomEvtType, messageID))
 
 	case model.RoomTypeDM, model.RoomTypeBotDM:
+		attempted, failed := 0, 0
 		for _, account := range room.Accounts {
 			if isBot(account) {
 				continue
 			}
+			attempted++
 			if err := h.pub.Publish(ctx, subject.UserRoomEvent(account), payload); err != nil {
+				failed++
 				slog.ErrorContext(ctx, "publish DM mutation event failed",
 					"error", err,
 					"type", roomEvtType,
@@ -705,6 +720,10 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 					"request_id", natsutil.RequestIDFromContext(ctx),
 				)
 			}
+		}
+		h.metrics.Fanout(ctx, roomKind(room.Type), labels.eventType, attempted)
+		if failed > 0 {
+			natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
 		}
 		return nil
 
@@ -834,12 +853,15 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.M
 	slog.Log(ctx, logctx.LevelFlow, "broadcast fan-out", "phase", "fanout",
 		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", meta.ID,
 		"type", string(meta.Type), "delivery", "room-stream", "audience", meta.UserCount)
+	h.metrics.Fanout(ctx, "channel", broadcastLabels(ctx).eventType, meta.UserCount)
 	return h.publishRoomEvent(ctx, meta.ID, meta.CrossSite, meta.CrossSiteAt, payload, "channel event")
 }
 
 // publishRoomEvent fans a channel room's .event out via subject.RoomEventTargets — the
 // sanctioned path enforced by .semgrep room-subject-publish-must-route (never inline a subject).
 func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, "channel", labels.eventType)
 	now := time.Now().UTC()
 	var pubErr error
 	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
@@ -869,6 +891,8 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 }
 
 func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string, roomEventType model.RoomEventType) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomKind(meta.Type), labels.eventType)
 	subs, err := h.store.ListSubscriptions(ctx, meta.ID)
 	if err != nil {
 		return fmt.Errorf("list subscriptions for DM room %s: %w", meta.ID, err)
@@ -916,6 +940,10 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 		debugTraceDelivered(ctx, account, meta.ID)
 	}
 	debugFlowFanout(ctx, meta.ID, string(meta.Type), "per-member", recipients, failed)
+	h.metrics.Fanout(ctx, roomKind(meta.Type), labels.eventType, recipients)
+	if failed > 0 {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
+	}
 	return nil
 }
 
@@ -969,6 +997,9 @@ func buildClientMessage(msg *model.Message, userMap map[string]model.User) *mode
 // publish fails — partial failure is tolerated to avoid duplicate delivery to
 // accounts that already received the event on the first attempt.
 func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string, payload []byte, parentMsgID string) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, "thread", labels.eventType)
+	h.metrics.Fanout(ctx, "thread", labels.eventType, len(accounts))
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -996,7 +1027,23 @@ func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string
 	if failCount.Load() == int64(len(accounts)) {
 		return fmt.Errorf("all %d thread account publishes failed for parent %s", len(accounts), parentMsgID)
 	}
+	if failCount.Load() > 0 {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
+	}
 	return nil
+}
+
+func roomKind(roomType model.RoomType) string {
+	switch roomType {
+	case model.RoomTypeChannel:
+		return "channel"
+	case model.RoomTypeDM:
+		return "dm"
+	case model.RoomTypeBotDM:
+		return "bot_dm"
+	default:
+		return "unknown"
+	}
 }
 
 // threadFanOutAccounts builds the deduplicated fan-out recipient list for a

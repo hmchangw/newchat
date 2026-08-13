@@ -13,6 +13,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -21,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -32,6 +34,18 @@ const maxContentBytes = 20 * 1024 // 20 KB
 // when the authoritative fetch fails transiently. It never persists —
 // message-worker re-projects the real snapshot before the durable write.
 const quotedParentUnavailablePlaceholder = "Content temporarily unavailable"
+
+var errCanonicalPublish = errors.New("canonical publish failed")
+
+type canonicalPublishError struct{ cause error }
+
+func (e *canonicalPublishError) Error() string {
+	return fmt.Sprintf("canonical publish failed: publish to MESSAGES-CANONICAL: %v", e.cause)
+}
+
+func (e *canonicalPublishError) Unwrap() error { return e.cause }
+
+func (e *canonicalPublishError) Is(target error) bool { return target == errCanonicalPublish }
 
 // replyFunc is the function signature for publishing a reply to a NATS subject.
 type replyFunc func(ctx context.Context, msg *nats.Msg) error
@@ -61,6 +75,7 @@ type Handler struct {
 	// snapshot, from trusted inputs (the send room + the validated quoted message
 	// ID) so the link is correct even on the outage path.
 	chatBaseURL string
+	metrics     *gatekeeperMetrics
 }
 
 // NewHandler constructs a new Handler with the given dependencies.
@@ -78,6 +93,7 @@ func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyF
 		maxAttachments:     maxAttachments,
 		maxAttachmentBytes: maxAttachmentBytes,
 		chatBaseURL:        chatBaseURL,
+		metrics:            newGatekeeperMetrics(otel.Meter("message-gatekeeper")),
 	}
 }
 
@@ -104,6 +120,8 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		// there is nothing to overwrite the sender's baggage with, so drop it
 		// rather than let a forged value ride the reply and this span.
 		ctx = obs.ContextWithPublicIdentity(ctx, "", "", "")
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		h.metrics.Record(ctx, "rejected", "invalid_subject")
 		slog.Warn("invalid subject", "subject", msg.Subject())
 		debugFlowRejected(ctx, req.RequestID, "invalid_subject")
 		// Best-effort error reply so the client doesn't hang; sendReply no-ops
@@ -120,6 +138,8 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	ctx = errcode.WithLogValues(ctx, "room_id", roomID)
 
 	if parseErr != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		h.metrics.Record(ctx, "rejected", "invalid_payload")
 		// Do not WithCause(parseErr) — JSON parse error strings embed the
 		// offending substring from an unauthenticated entry-point (see doc.go).
 		bad := errcode.BadRequest("unmarshal send message request")
@@ -146,12 +166,30 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		// validation branch must NOT also log here. Infra branch owns its log.
 		var ee *errcode.Error
 		if errors.As(err, &ee) {
+			if ee.Code == errcode.CodeBadRequest {
+				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+			} else {
+				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+			}
+			h.metrics.Record(ctx, "rejected", gatekeeperReason(ee))
 			debugFlowRejected(ctx, req.RequestID, string(ee.Code))
 			h.sendReply(ctx, account, &req, errnats.Marshal(ctx, err))
 			if err := msg.Ack(); err != nil {
 				slog.Error("failed to ack message", "error", err)
 			}
 		} else {
+			result := "retry"
+			if natsmetrics.IsFinalDeliveryFromContext(ctx) {
+				result = "failed"
+			}
+			reason := "dependency"
+			if errors.Is(err, errCanonicalPublish) {
+				reason = "canonical_publish"
+			}
+			h.metrics.Record(ctx, result, reason)
+			if errors.Is(err, errCanonicalPublish) && natsmetrics.IsFinalDeliveryFromContext(ctx) {
+				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
+			}
 			// flow terminal for the infra path; the Error line below carries the cause.
 			slog.Log(ctx, logctx.LevelFlow, "gatekeeper nak", "phase", "nak", "request_id", req.RequestID)
 			slog.ErrorContext(ctx, "process message failed (infra)", "error", err, "account", account, "room_id", roomID)
@@ -163,10 +201,25 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	h.sendReply(ctx, account, &req, replyData)
+	h.metrics.Record(ctx, "accepted", "none")
 
 	if err := msg.Ack(); err != nil {
 		slog.Error("failed to ack message", "err", err)
 	}
+}
+
+func gatekeeperReason(err *errcode.Error) string {
+	switch err.Reason {
+	case errcode.MessageNotSubscribed:
+		return "not_subscribed"
+	case errcode.MessageLargeRoomPostRestricted:
+		return "room_restricted"
+	default:
+	}
+	if err.Code == errcode.CodeBadRequest {
+		return "invalid_payload"
+	}
+	return "unknown"
 }
 
 // debugFlowReceived emits the flow-rung "received" breadcrumb at the gatekeeper
@@ -408,7 +461,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	canonicalSubj := subject.MsgCanonicalCreated(siteID)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
-		return nil, fmt.Errorf("publish to MESSAGES-CANONICAL: %w", err)
+		return nil, &canonicalPublishError{cause: err}
 	}
 	// flow: the message cleared the gate and was handed off to MESSAGES-CANONICAL.
 	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",
