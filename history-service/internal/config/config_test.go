@@ -207,52 +207,30 @@ func unsetEnv(t *testing.T, key string) {
 	})
 }
 
-func TestValidate_RejectsNegativeSubL2TTL(t *testing.T) {
-	cfg := baseValid()
-	cfg.SubL2TTL = -1 * time.Second
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_SUB_L2_TTL")
-}
-
-func TestValidate_RejectsNegativeMongoBreakerFails(t *testing.T) {
-	cfg := baseValid()
-	cfg.MongoBreakerFails = -1
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_MONGO_BREAKER_FAILS")
-}
-
-func TestValidate_RejectsNegativeMongoBreakerCooldown(t *testing.T) {
-	cfg := baseValid()
-	cfg.MongoBreakerCooldown = -1 * time.Second
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_MONGO_BREAKER_COOLDOWN")
-}
-
-func TestValidate_RejectsNegativeDEKL2TTL(t *testing.T) {
-	cfg := baseValid()
-	cfg.DEKL2TTL = -1 * time.Second
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ATREST_DEK_L2_TTL")
-}
-
-func TestValidate_RejectsNegativeDEKBreakerFails(t *testing.T) {
-	cfg := baseValid()
-	cfg.DEKBreakerFails = -1
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ATREST_DEK_BREAKER_FAILS")
-}
-
-func TestValidate_RejectsNegativeDEKBreakerCooldown(t *testing.T) {
-	cfg := baseValid()
-	cfg.DEKBreakerCooldown = -1 * time.Second
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ATREST_DEK_BREAKER_COOLDOWN")
+// Every knob this branch added is rejected when negative. Table-driven: the
+// next validated field is one row, not another six-line copy.
+func TestValidate_RejectsNegativeValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		set     func(*Config)
+		wantEnv string
+	}{
+		{"sub L2 TTL", func(c *Config) { c.SubL2TTL = -time.Second }, "HISTORY_SUB_L2_TTL"},
+		{"mongo breaker fails", func(c *Config) { c.MongoBreakerFails = -1 }, "HISTORY_MONGO_BREAKER_FAILS"},
+		{"mongo breaker cooldown", func(c *Config) { c.MongoBreakerCooldown = -time.Second }, "HISTORY_MONGO_BREAKER_COOLDOWN"},
+		{"DEK L2 TTL", func(c *Config) { c.DEKL2TTL = -time.Second }, "ATREST_DEK_L2_TTL"},
+		{"DEK breaker fails", func(c *Config) { c.DEKBreakerFails = -1 }, "ATREST_DEK_BREAKER_FAILS"},
+		{"DEK breaker cooldown", func(c *Config) { c.DEKBreakerCooldown = -time.Second }, "ATREST_DEK_BREAKER_COOLDOWN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseValid()
+			tt.set(&cfg)
+			err := validate(&cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantEnv)
+		})
+	}
 }
 
 func TestValidate_RejectsNonPositiveServerSelectionTimeout(t *testing.T) {

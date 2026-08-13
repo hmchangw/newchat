@@ -52,31 +52,19 @@ func (r *breakerRoomRepo) GetRoomTimes(ctx context.Context, roomID string) (last
 }
 
 func (r *breakerRoomRepo) GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error) {
-	var t *time.Time
-	err := r.breaker.Do(func() error {
-		var e error
-		t, e = r.inner.GetMinUserLastSeenAt(ctx, roomID)
-		return e
+	return circuitbreaker.Do1(r.breaker, func() (*time.Time, error) {
+		return r.inner.GetMinUserLastSeenAt(ctx, roomID)
 	})
-	return t, err
 }
 
 func (r *breakerRoomRepo) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
-	var out map[string]mongorepo.RoomTimes
-	err := r.breaker.Do(func() error {
-		var e error
-		out, e = r.inner.GetRoomTimesByIDs(ctx, ids)
-		return e
+	return circuitbreaker.Do1(r.breaker, func() (map[string]mongorepo.RoomTimes, error) {
+		return r.inner.GetRoomTimesByIDs(ctx, ids)
 	})
-	return out, err
 }
 
 func (r *breakerRoomRepo) GetRoomUserCount(ctx context.Context, roomID string) (int, error) {
-	var n int
-	err := r.breaker.Do(func() error {
-		var e error
-		n, e = r.inner.GetRoomUserCount(ctx, roomID)
-		return e
+	return circuitbreaker.Do1(r.breaker, func() (int, error) {
+		return r.inner.GetRoomUserCount(ctx, roomID)
 	})
-	return n, err
 }

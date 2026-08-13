@@ -12,21 +12,24 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
+// memberFindOpts is built once: the loader runs per room, and rebuilding the
+// projection on every call allocates for no benefit.
+var memberFindOpts = options.Find().SetProjection(bson.M{
+	"u._id":              1,
+	"u.account":          1,
+	"u.isBot":            1,
+	"roomType":           1,
+	"muted":              1,
+	"historySharedSince": 1,
+})
+
 // NewMongoLoader returns the canonical Loader over the subscriptions
 // collection. It is the only sanctioned production loader: every Member field
 // is filled, so the entry it writes is safe for any service reading the shared
 // key — including the ones that gate on Muted and HistorySharedSince.
 func NewMongoLoader(subscriptions *mongo.Collection) Loader {
 	return func(ctx context.Context, roomID string) ([]Member, error) {
-		projection := bson.M{
-			"u._id":              1,
-			"u.account":          1,
-			"u.isBot":            1,
-			"roomType":           1,
-			"muted":              1,
-			"historySharedSince": 1,
-		}
-		cur, err := subscriptions.Find(ctx, bson.M{"roomId": roomID}, options.Find().SetProjection(projection))
+		cur, err := subscriptions.Find(ctx, bson.M{"roomId": roomID}, memberFindOpts)
 		if err != nil {
 			return nil, fmt.Errorf("find subscriptions for room %s: %w", roomID, err)
 		}

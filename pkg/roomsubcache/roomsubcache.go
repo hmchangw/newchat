@@ -208,7 +208,3 @@ func (c *valkeyCache) Invalidate(ctx context.Context, roomID string) error {
 	}
 	return nil
 }
-
-// CacheKeyForTest exposes the key layout to this package's external test
-// package, which asserts on the exact key the cache touches.
-func CacheKeyForTest(roomID string) string { return cacheKey(roomID) }

@@ -19,6 +19,10 @@ import (
 // speaks the same cluster protocol and serves every command these tests use.
 var valkeyBinaryNames = []string{"valkey-server", "redis-server"}
 
+// valkeyReadyTimeout bounds both startup waits: accepting connections, and
+// reporting a healthy cluster once the slots are claimed.
+const valkeyReadyTimeout = 30 * time.Second
+
 // startValkeyBinary spawns a cluster-enabled server on a free local port and
 // assigns it all 16384 slots, matching the single-node cluster the
 // testcontainers path builds. Returns the address, a stop func, or an error;
@@ -101,28 +105,25 @@ func formValkeyCluster(addr string) error {
 }
 
 func waitForValkeyPing(ctx context.Context, node *redis.Client) error {
-	for {
-		if err := node.Ping(ctx).Err(); err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("valkey never accepted connections: %w", ctx.Err())
-		case <-time.After(100 * time.Millisecond):
-		}
+	if err := retryUntil(valkeyReadyTimeout, func() error { return node.Ping(ctx).Err() }); err != nil {
+		return fmt.Errorf("valkey never accepted connections: %w", err)
 	}
+	return nil
 }
 
 func waitForValkeyClusterOK(ctx context.Context, node *redis.Client) error {
-	for {
+	err := retryUntil(valkeyReadyTimeout, func() error {
 		info, err := node.ClusterInfo(ctx).Result()
-		if err == nil && strings.Contains(info, "cluster_state:ok") {
-			return nil
+		if err != nil {
+			return err
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("valkey cluster never reached ok state: %w", ctx.Err())
-		case <-time.After(100 * time.Millisecond):
+		if !strings.Contains(info, "cluster_state:ok") {
+			return fmt.Errorf("cluster_state not ok: %s", info)
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("valkey cluster never reached ok state: %w", err)
 	}
+	return nil
 }

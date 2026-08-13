@@ -58,8 +58,6 @@ type config struct {
 	MongoUsername      string        `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword      string        `env:"MONGO_PASSWORD" envDefault:""`
 	MongoSelectTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
-	MongoBreakerFails  int           `env:"MONGO_BREAKER_FAILS"            envDefault:"5"`
-	MongoBreakerCool   time.Duration `env:"MONGO_BREAKER_COOLDOWN"         envDefault:"10s"`
 	// MongoReadPreference: read-only service (directory lookups); secondaryPreferred
 	// offloads the primary.
 	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`

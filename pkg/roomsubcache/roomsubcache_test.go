@@ -323,13 +323,13 @@ func TestValkeyCache_Slide_ReArmsTTLWithoutRewriting(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client)
 	members := []roomsubcache.Member{{ID: "u1", Account: "alice"}}
 	require.NoError(t, cache.Set(ctx, "r1", members, time.Minute))
-	before := client.store[roomsubcache.CacheKeyForTest("r1")]
+	before := client.store["room:r1:subs"]
 
 	require.NoError(t, cache.Slide(ctx, "r1", time.Hour))
 
-	assert.Equal(t, []string{roomsubcache.CacheKeyForTest("r1")}, client.expired)
-	assert.Equal(t, time.Hour, client.ttls[roomsubcache.CacheKeyForTest("r1")], "the deadline must move")
-	assert.Equal(t, before, client.store[roomsubcache.CacheKeyForTest("r1")], "the value must not be rewritten")
+	assert.Equal(t, []string{"room:r1:subs"}, client.expired)
+	assert.Equal(t, time.Hour, client.ttls["room:r1:subs"], "the deadline must move")
+	assert.Equal(t, before, client.store["room:r1:subs"], "the value must not be rewritten")
 }
 
 func TestValkeyCache_Slide_DoesNotResurrectAnEvictedEntry(t *testing.T) {
@@ -340,7 +340,7 @@ func TestValkeyCache_Slide_DoesNotResurrectAnEvictedEntry(t *testing.T) {
 	// EXPIRE on an absent key must be a no-op, not a create — otherwise a room
 	// invalidated mid-outage would come back with its stale member list.
 	require.NoError(t, cache.Slide(ctx, "never-written", time.Hour))
-	assert.NotContains(t, client.store, roomsubcache.CacheKeyForTest("never-written"))
+	assert.NotContains(t, client.store, "room:never-written:subs")
 }
 
 func TestValkeyCache_Slide_EmptyRoomID_ReturnsError(t *testing.T) {

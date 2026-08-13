@@ -37,12 +37,12 @@ type MongoConfig struct {
 	// (a handler holds at most one at a time), so this is a generous headroom
 	// ceiling, not a count of connections that get opened. Operators must keep
 	// pods × MaxPoolSize under the cluster's connection limit.
+	MaxPoolSize uint64 `env:"MAX_POOL_SIZE" envDefault:"500"`
 	// ServerSelectionTimeout bounds how long a read waits for a usable server.
 	// Deliberately far below the driver's 30s default and below REQUEST_TIMEOUT,
 	// so a stopped MongoDB errors while the request still has budget to serve a
 	// cached fallback rather than dying on an expired deadline.
 	ServerSelectionTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
-	MaxPoolSize            uint64        `env:"MAX_POOL_SIZE" envDefault:"500"`
 	// MinPoolSize keeps a warm connection floor; 0 lets the pool drain to empty.
 	MinPoolSize uint64 `env:"MIN_POOL_SIZE" envDefault:"0"`
 }

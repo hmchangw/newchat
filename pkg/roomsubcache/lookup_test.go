@@ -372,3 +372,42 @@ func TestLookup_StaleEntryRefreshesWhenLoaderHealthy(t *testing.T) {
 	assert.Equal(t, []Member{{ID: "u2", Account: "bob"}}, got)
 	assert.Equal(t, int32(2), loader.calls.Load())
 }
+
+// A stale entry is revalidated once per room, not once per caller. This Lookup
+// has no process-local tier in front of it — notification-worker calls it per
+// message — so an uncollapsed refresh means every in-flight message for a hot
+// room issues its own loader call and its own write the moment the refresh
+// window opens.
+func TestLookup_SingleFlightCollapsesRefreshes(t *testing.T) {
+	cache := newFakeCache()
+	warm := []Member{{ID: "u1", Account: "alice"}}
+	loader := &fakeLoader{out: warm}
+	now := time.Now()
+	clock := func() time.Time { return now }
+	cache.now = clock
+	lookup := newLookupWithClock(cache, loader.Load, time.Hour, clock)
+	ctx := context.Background()
+
+	_, err := lookup.GetMembers(ctx, "r1")
+	require.NoError(t, err)
+	require.Equal(t, int32(1), loader.calls.Load())
+
+	// Age past the refresh window, then hit it concurrently.
+	now = now.Add(59 * time.Minute)
+	loader.delay = 50 * time.Millisecond
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := lookup.GetMembers(ctx, "r1")
+			assert.NoError(t, err)
+			assert.Equal(t, warm, got)
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int32(2), loader.calls.Load(),
+		"ten concurrent stale reads must trigger one revalidation, not ten")
+}

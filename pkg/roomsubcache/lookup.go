@@ -72,7 +72,7 @@ func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error
 	if entry, err := c.cache.Get(ctx, roomID); err == nil {
 		return c.serveHit(ctx, roomID, entry)
 	} else if !errors.Is(err, valkeyutil.ErrCacheMiss) {
-		slog.Warn("roomsubcache get failed, falling back to loader", "error", err, "roomId", roomID)
+		slog.WarnContext(ctx, "roomsubcache get failed, falling back to loader", "error", err, "roomId", roomID)
 	}
 
 	// Miss path: singleflight collapses concurrent loads on the same room.
@@ -112,21 +112,34 @@ func (c *Lookup) serveHit(ctx context.Context, roomID string, entry Entry) ([]Me
 	if c.now().Sub(time.UnixMilli(entry.CachedAt)) < refreshAfterFor(c.ttl) {
 		return entry.Members, nil
 	}
-	loaded, err := c.load(ctx, roomID)
-	if err != nil {
-		if slideErr := c.cache.Slide(ctx, roomID, c.ttl); slideErr != nil {
-			slog.Warn("roomsubcache TTL slide failed (entry keeps its current deadline)",
-				"error", slideErr, "roomId", roomID)
+	// Collapse concurrent revalidations of the same room. Unlike the other
+	// read-through tiers this one has no process-local cache in front of it and
+	// is called per message, so an uncollapsed refresh means one loader call and
+	// one write per in-flight message the moment the window opens. Its own key
+	// space, so a refresh and a cold miss can never share a result.
+	res, _, _ := c.sf.Do("refresh:"+roomID, func() (any, error) {
+		// Detached like the miss path: the shared load outlives whichever caller
+		// happened to lead it, so one cancellation cannot poison the waiters.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), memberFetchTimeout)
+		defer cancel()
+
+		loaded, err := c.load(fetchCtx, roomID)
+		if err != nil {
+			if slideErr := c.cache.Slide(fetchCtx, roomID, c.ttl); slideErr != nil {
+				slog.WarnContext(fetchCtx, "roomsubcache TTL slide failed (entry keeps its current deadline)",
+					"error", slideErr, "roomId", roomID)
+			}
+			return entry.Members, nil // fail-open by design; see above
 		}
-		return entry.Members, nil //nolint:nilerr // fail-open by design; see above
-	}
-	c.write(ctx, roomID, loaded)
-	return loaded, nil
+		c.write(fetchCtx, roomID, loaded)
+		return loaded, nil
+	})
+	return res.([]Member), nil
 }
 
 func (c *Lookup) write(ctx context.Context, roomID string, members []Member) {
 	if err := c.cache.Set(ctx, roomID, members, c.ttl); err != nil {
-		slog.Warn("roomsubcache set failed", "error", err, "roomId", roomID)
+		slog.WarnContext(ctx, "roomsubcache set failed", "error", err, "roomId", roomID)
 	}
 }
 
@@ -137,7 +150,7 @@ func (c *Lookup) Invalidate(ctx context.Context, roomID string) {
 		return
 	}
 	if err := c.cache.Invalidate(ctx, roomID); err != nil {
-		slog.Warn("roomsubcache invalidate failed", "error", err, "roomId", roomID)
+		slog.WarnContext(ctx, "roomsubcache invalidate failed", "error", err, "roomId", roomID)
 	}
 }
 

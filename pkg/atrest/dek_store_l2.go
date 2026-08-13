@@ -181,11 +181,8 @@ func (s *l2DEKStore) serveHit(ctx context.Context, roomID string, entry cachedDE
 // fetchInner runs the inner Get under the breaker, so both the read-through and
 // the refresh feed the same health signal.
 func (s *l2DEKStore) fetchInner(ctx context.Context, roomID string) (*RoomDataKey, error) {
-	var row *RoomDataKey
-	err := s.breaker.Do(func() error {
-		var e error
-		row, e = s.inner.Get(ctx, roomID)
-		return e
+	row, err := circuitbreaker.Do1(s.breaker, func() (*RoomDataKey, error) {
+		return s.inner.Get(ctx, roomID)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dek inner get: %w", err)
