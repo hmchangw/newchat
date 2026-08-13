@@ -29,16 +29,36 @@ func WithBearerToken(token string) Option {
 	return func(c *resty.Client) { c.SetAuthToken(token) }
 }
 
-// WithTransport replaces the default transport; OTel is wrapped on for you.
+// WithTransport replaces the default transport; OTel is wrapped on for you by New.
 func WithTransport(rt http.RoundTripper) Option {
-	return func(c *resty.Client) { c.SetTransport(otelhttp.NewTransport(rt)) }
+	return func(c *resty.Client) { c.SetTransport(rt) }
+}
+
+// WithMaxIdleConns sizes the idle keep-alive pool for a single-host client: the
+// stdlib keeps only 2, so a third concurrent request pays a fresh handshake. It
+// tunes the transport installed when it runs, so place it after WithTransport.
+func WithMaxIdleConns(n int) Option {
+	return func(c *resty.Client) {
+		// A RoundTripper that is not an *http.Transport has no pool to size.
+		tr, ok := c.GetClient().Transport.(*http.Transport)
+		if n <= 0 || !ok {
+			return
+		}
+		tr.MaxIdleConnsPerHost = n
+		// MaxIdleConns == 0 means unlimited, so only raise a finite value.
+		if tr.MaxIdleConns > 0 && tr.MaxIdleConns < n {
+			tr.MaxIdleConns = n
+		}
+	}
 }
 
 func New(baseURL string, opts ...Option) *resty.Client {
+	// A mutable clone, so transport-tuning options can adjust it in place; the
+	// OTel wrap happens after the options so it can never be clobbered by one.
 	c := resty.New().
 		SetBaseURL(baseURL).
 		SetTimeout(defaultTimeout).
-		SetTransport(otelhttp.NewTransport(http.DefaultTransport))
+		SetTransport(http.DefaultTransport.(*http.Transport).Clone())
 
 	c.OnAfterResponse(logResponse)
 	c.OnError(logError)
@@ -46,6 +66,8 @@ func New(baseURL string, opts ...Option) *resty.Client {
 	for _, opt := range opts {
 		opt(c)
 	}
+
+	c.SetTransport(otelhttp.NewTransport(c.GetClient().Transport))
 	return c
 }
 

@@ -21,6 +21,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/drive"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/principal"
 )
 
 const (
@@ -108,6 +109,59 @@ func newUploadCtx(t *testing.T, roomID string, body *bytes.Buffer, contentType s
 		c.Set(ctxUserKey, user)
 	}
 	return c, w
+}
+
+// botUser is a session-authenticated caller: no directory metadata, and by
+// default no email — the state a bot upload actually arrives in.
+func botUser() *AuthenticatedUser {
+	p := principal.Principal{UserID: "u1", Account: "alerts.sa.bot", SiteID: "site-a", Roles: []string{"bot"}}
+	return &AuthenticatedUser{User: model.User{Account: p.Account, SiteID: p.SiteID}, Session: &p}
+}
+
+// driveOKResponse is a single successful Drive upload result.
+func driveOKResponse() []drive.UploadGroupImageResponse {
+	return []drive.UploadGroupImageResponse{{
+		Status: driveStatusSuccess,
+		File:   drive.GroupImageObject{GroupID: "r1", FileID: "f1", Filename: "a.png"},
+	}}
+}
+
+func TestUpload_SessionCaller_NoEmail_Succeeds(t *testing.T) {
+	// An SSO caller with no email is a broken token (500); a session caller with
+	// no email is the normal case, because bots have no directory record.
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "r1", "alerts.sa.bot").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-a", nil)
+	fd := &fakeDrive{uploadResp: driveOKResponse()}
+	h := newHandler(store, fd)
+
+	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x")})
+	c, w := newUploadCtx(t, "r1", body, ct, botUser())
+	h.HandleUploadImages(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "alerts.sa.bot", fd.uploadGot.userID)
+	assert.Empty(t, fd.uploadGot.email, "an unset BOT_EMAIL_DOMAIN sends no email")
+	assert.Equal(t, "alerts.sa.bot", fd.uploadGot.username, "DisplayName falls back to the account")
+}
+
+func TestUpload_SessionCaller_SynthesizedEmail_ReachesDrive(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "r1", "alerts.sa.bot").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-a", nil)
+	fd := &fakeDrive{uploadResp: driveOKResponse()}
+	h := newHandler(store, fd)
+
+	u := botUser()
+	u.Email = "alerts.sa.bot@bots.example.com"
+	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x")})
+	c, w := newUploadCtx(t, "r1", body, ct, u)
+	h.HandleUploadImages(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "alerts.sa.bot@bots.example.com", fd.uploadGot.email)
 }
 
 func okUser() *AuthenticatedUser {
@@ -503,7 +557,7 @@ func TestRegisterRoutes_HealthAndAuthGuard(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	// devMode=true so the auth middleware doesn't need a validator.
-	registerRoutes(r, h, nil, true)
+	registerRoutes(r, h, authDeps{devMode: true})
 
 	// healthz is open.
 	w := httptest.NewRecorder()
@@ -521,7 +575,7 @@ func TestRegisterRoutes_UploadFilePath(t *testing.T) {
 	h := newHandler(NewMockStore(ctrl), &fakeDrive{})
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, h, nil, true)
+	registerRoutes(r, h, authDeps{devMode: true})
 
 	// New path is registered: with no ssoToken the auth middleware returns 401
 	// (NOT 404 — 404 would mean the route does not exist).
@@ -540,7 +594,7 @@ func TestRegisterRoutes_S3DownloadAuthGuard(t *testing.T) {
 	h := newHandler(NewMockStore(ctrl), &fakeDrive{})
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, h, nil, true)
+	registerRoutes(r, h, authDeps{devMode: true})
 
 	// no ssoToken header -> 401 from authMiddleware before the handler runs.
 	w := httptest.NewRecorder()
@@ -929,7 +983,7 @@ func TestDownloadV3_RouteRegistered(t *testing.T) {
 	h := newHandler(NewMockStore(ctrl), &fakeDrive{})
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, h, nil, true)
+	registerRoutes(r, h, authDeps{devMode: true})
 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
@@ -991,6 +1045,24 @@ func TestHandleUploadFile_Success(t *testing.T) {
 	assert.Equal(t, "Q2", resp.Attachments[0].Description)
 	assert.Contains(t, resp.Attachments[0].TitleLink, "drive-file-1")
 	assert.NotContains(t, w.Body.String(), `"message"`)
+}
+
+// TestHandleUploadFile_SessionCaller_NoEmail_Succeeds mirrors the image endpoint's
+// case: HandleUploadFile carries its own copy of the email guard, so it needs its own test.
+func TestHandleUploadFile_SessionCaller_NoEmail_Succeeds(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "room-1", "alerts.sa.bot").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	fd := okFileDrive()
+
+	body, ct := multipartTyped(t, "file", "report.pdf", []byte("pdfbytes"), "application/pdf", nil)
+	c, w := newUploadCtx(t, "room-1", body, ct, botUser())
+	fileHandler(store, fd).HandleUploadFile(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "alerts.sa.bot", fd.uploadGot.userID)
+	assert.Empty(t, fd.uploadGot.email, "an unset BOT_EMAIL_DOMAIN sends no email")
 }
 
 func TestHandleUploadFile_ImageSuccess(t *testing.T) {
@@ -1094,7 +1166,7 @@ func TestHandleUploadFile_DriveStatusFailure(t *testing.T) {
 func TestRoute_UploadRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, &Handler{}, nil, true)
+	registerRoutes(r, &Handler{}, authDeps{devMode: true})
 	found := false
 	for _, ri := range r.Routes() {
 		if ri.Method == http.MethodPost && ri.Path == "/api/v1/file/rooms/:roomId/upload/file" {
@@ -1107,7 +1179,7 @@ func TestRoute_UploadRegistered(t *testing.T) {
 func TestRoute_SetCookieRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, &Handler{}, nil, true)
+	registerRoutes(r, &Handler{}, authDeps{devMode: true})
 	found := false
 	for _, ri := range r.Routes() {
 		if ri.Method == http.MethodPost && ri.Path == "/api/v1/file/setCookie" {
@@ -1171,6 +1243,7 @@ func TestHandler_HandleSetCookie_SetsCookieAttributes(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/file/setCookie", nil)
 	c.Request.Header.Set("ssoToken", "jwt-abc")
+	c.Set(ctxUserKey, okUser())
 
 	h.HandleSetCookie(c)
 
@@ -1194,6 +1267,7 @@ func TestHandler_HandleSetCookie_FallsBackToCookie(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/file/setCookie", nil)
 	c.Request.Header.Set("Cookie", "ssoToken=cookie-jwt")
+	c.Set(ctxUserKey, okUser())
 
 	h.HandleSetCookie(c)
 
@@ -1210,6 +1284,7 @@ func TestHandler_HandleSetCookie_NoToken(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/file/setCookie", nil)
+	c.Set(ctxUserKey, okUser())
 
 	h.HandleSetCookie(c)
 

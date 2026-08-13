@@ -9,7 +9,9 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,8 +48,8 @@ func TestEmojiUpload_Success_StoresBlobThenUpsertsDoc(t *testing.T) {
 		assert.Equal(t, "/api/v1/emoji/party", e.ImageURL)
 		assert.Equal(t, "emoji/s1/party", e.MinioKey)
 		assert.Equal(t, "image/png", e.ContentType)
-		assert.Equal(t, "alice", e.CreatedBy)
-		assert.Equal(t, "alice", e.UpdatedBy)
+		assert.Equal(t, "p_admin", e.CreatedBy)
+		assert.Equal(t, "p_admin", e.UpdatedBy)
 		assert.NotEmpty(t, e.ETag)
 		assert.Positive(t, e.UpdatedAt)
 		return nil
@@ -145,4 +147,48 @@ func TestEmojiUpload_UpsertError_500(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, putReq("/api/v1/emoji/party", pngSized(t, 2, 2), "image/png"))
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestEmojiUpload_UploaderComesFromSessionNotQueryParam(t *testing.T) {
+	// ?uploader= is client-controlled; the authenticated session is not. The
+	// audit fields must record the session and ignore the param entirely.
+	r, _, emojis, _ := newEmojiTestRouter(t)
+	emojis.EXPECT().UpsertEmoji(gomock.Any(), gomock.Any()).DoAndReturn(func(_ any, e *model.CustomEmoji) error {
+		assert.Equal(t, "p_admin", e.CreatedBy)
+		assert.Equal(t, "p_admin", e.UpdatedBy)
+		return nil
+	})
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, putReq("/api/v1/emoji/party?uploader=spoofed", pngSized(t, 2, 2), "image/png"))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestTruncateAudit(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "short account passes through", in: "p_admin", want: "p_admin"},
+		{name: "exactly at the limit", in: strings.Repeat("a", 64), want: strings.Repeat("a", 64)},
+		{name: "over the limit is cut", in: strings.Repeat("a", 70), want: strings.Repeat("a", 64)},
+		{
+			// The byte at 64 lands mid-rune; cutting there would store broken UTF-8.
+			name: "multibyte cut lands on a rune boundary",
+			in:   strings.Repeat("a", 63) + "日本",
+			want: strings.Repeat("a", 63),
+		},
+		{name: "empty", in: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateAudit(tt.in)
+			assert.Equal(t, tt.want, got)
+			assert.True(t, utf8.ValidString(got), "result must stay valid UTF-8")
+			assert.LessOrEqual(t, len(got), 64)
+		})
+	}
 }

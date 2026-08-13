@@ -245,7 +245,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "account must be a single NATS subject token (no '.', '*', '>' or whitespace)" }` — the account becomes a NATS subject token, so separator/wildcard/whitespace characters are refused. |
 | 401 | `unauthenticated` | `sso_token_expired` | `{ "code": "unauthenticated", "reason": "sso_token_expired", "error": "SSO token has expired, please re-login" }` |
 | 401 | `unauthenticated` | `invalid_sso_token` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid SSO token" }` |
-| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "session token invalid" }` — botplatform session token failed validation. |
+| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — botplatform session token failed validation. Same envelope every service returns for a rejected session token. |
 | 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — auth-service cannot reach botplatform to validate a session token. |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — the real cause is logged server-side and never sent to the client. |
 
@@ -423,13 +423,37 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 ### 2.4 HTTP — Protected file/image upload/download
 
 HTTP endpoints on `upload-service` for protected file uploads and downloads,
-proxied to/from an internal Drive. All require an OIDC-validated `ssoToken` — sent
-as the `ssoToken` header, or (for browser `<img>` downloads that cannot set headers)
-as an `ssoToken` cookie obtained from `POST /api/v1/file/setCookie` below; the header takes
-precedence. Room-scoped endpoints also require that the caller is a member (has a
-subscription) of `:roomId`. Cross-origin browsers are served credentialed CORS headers
-only when their `Origin` is in the server's `CORS_ALLOWED_ORIGINS` allowlist. Errors use
-the standard [§6](#6-error-envelope-reference) envelope `{ code, reason?, error }`.
+proxied to/from an internal Drive.
+
+**Auth — either credential is accepted:**
+
+| Caller | Credential |
+|---|---|
+| SSO user | An OIDC-validated `ssoToken`, sent as the `ssoToken` header, or (for browser `<img>` downloads that cannot set headers) as an `ssoToken` cookie obtained from `POST /api/v1/file/setCookie` below. The header takes precedence over the cookie. |
+| Bot / admin | A botplatform session token (§10.1), sent as `x-user-id` + `x-auth-token`. |
+
+Selection rules: sending **both** an `ssoToken` header and an `x-auth-token` header is
+`400 ambiguous_token`. An `x-auth-token` header takes precedence over an `ssoToken`
+**cookie** — the cookie is ambient state a browser attaches automatically, the header is
+an explicit act, so only two explicit headers are treated as a conflict.
+
+`POST /api/v1/file/setCookie` is the one exception: it is SSO-only and returns `400` to a
+session-token caller, because it exists solely to mirror an `ssoToken` into a cookie for
+browser downloads. Bots send headers on every request and need no cookie.
+
+Room-scoped endpoints also require that the caller is a member (has a subscription) of
+`:roomId` — this applies identically to bots, which hold real subscription rows.
+Cross-origin browsers are served credentialed CORS headers only when their `Origin` is in
+the server's `CORS_ALLOWED_ORIGINS` allowlist. Errors use the standard
+[§6](#6-error-envelope-reference) envelope `{ code, reason?, error }`.
+
+**Errors common to every endpoint below** (in addition to each endpoint's own):
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | `ambiguous_token` | `{ "code": "bad_request", "reason": "ambiguous_token", "error": "set exactly one of ssoToken / x-auth-token" }` |
+| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — missing, unknown, or mismatched session credential. The three cases are deliberately indistinguishable. |
+| 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — the session token could not be validated. Distinct from `401`: the credential was not rejected, it could not be checked. |
 
 #### POST /api/v1/file/setCookie
 
@@ -447,7 +471,7 @@ cannot refresh the cookie from an already-expired token.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; validated before the cookie is set. |
+| `ssoToken` | header | string | yes | OIDC-issued SSO token; validated before the cookie is set. **This endpoint is SSO-only** — a session-token caller gets `400`. |
 
 Cross-origin callers must send the request with credentials (e.g. `fetch(..., { credentials: "include" })`) and be served from an origin in `CORS_ALLOWED_ORIGINS`.
 
@@ -477,6 +501,7 @@ Uses the [§6](#6-error-envelope-reference) envelope. HTTP statuses:
 
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "setCookie requires an ssoToken; session-token callers send credentials as headers" }` — this endpoint is SSO-only. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 
 #### Triggered events — success path
@@ -504,7 +529,8 @@ success/failure in a single `200` (partial success).
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; identifies the uploader. |
+| `ssoToken` | header | string | conditional | OIDC-issued SSO token; identifies the uploader. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1); identifies a bot/admin uploader. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Target room ID; the caller must be a member. |
 | `images` | form file | file[] | yes | One or more images (`.png`/`.jpeg`/`.jpg`/`.heic`), each ≤ `MAX_IMAGE_SIZE_BYTES` (default 25 MiB); at most `MAX_IMAGES` (default 10). Repeat the field once per file. |
 
@@ -573,7 +599,8 @@ pure-HTTP endpoint — it does **not** publish a message.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; identifies the uploader. |
+| `ssoToken` | header | string | conditional | OIDC-issued SSO token; identifies the uploader. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1); identifies a bot/admin uploader. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Target room ID; the caller must be a member. |
 | `file` | form file | file | yes | The single file, ≤ `FILE_UPLOAD_MAX_FILE_SIZE` (default 100 MiB). At most `MAX_ATTACHMENTS` (default 1) parts may be sent under this field; more is rejected with `too many files`. Its MIME type must pass the server's allow/deny lists (`FILE_UPLOAD_MEDIA_TYPE_WHITELIST`/`BLACKLIST`; `image/svg+xml` is blocked by default). |
 | `description` | form field | string | no | Optional attachment description. |
@@ -640,7 +667,8 @@ or `titleLink` (file upload) returned by the upload endpoints.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Room the image belongs to; the caller must be a member. |
 | `fileId` | path | string | yes | Drive file ID (from the upload response). |
 | `drive_host` | query | string | yes | Drive base URL (from the upload response). |
@@ -687,7 +715,8 @@ calls this with the old-style path preserved in legacy messages.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Room the image belongs to; the caller must be a member. |
 | `fileId` | path | string | yes | Legacy Drive file ID (from the original message data). |
 | `drive_host` | query | string | yes | Legacy Drive base URL carried in the legacy message data. |
@@ -732,7 +761,8 @@ The response is always served as an attachment.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `fileId` | path | string | yes | Upload ID (the `uploads._id`); used for the metadata lookup. |
 | `fileName` | path | string | yes | Cosmetic — accepted but ignored; the served filename comes from the stored metadata. |
 
@@ -6714,7 +6744,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `pin_room_too_large` | forbidden | history-service pin/unpin (non-owner/admin/bot in a room above `LARGE_ROOM_THRESHOLD`) |
 | `sso_token_expired` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token expired), `sso.refresh` (refresh failed, re-login required) |
 | `invalid_sso_token` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token fails verification) |
-| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot reach botplatform); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site) |
+| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot reach botplatform); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site); upload-service (§2.4) and media-service (§7) — a session token could not be validated against botplatform |
 | `invalid_request` | bad_request | auth-service (body parse / required field missing) |
 | `invalid_nkey` | bad_request | auth-service (natsPublicKey format) |
 | `missing_fields` | bad_request | auth-service (ssoToken/account/natsPublicKey missing); portal-service `GET /api/userInfo` (account missing); user-service `sso.set` (ssoToken/refreshToken missing) |
@@ -6729,8 +6759,9 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
 | `no_responders` | unavailable | any request/reply RPC whose upstream subject had no subscriber (`natsutil.RequestFailure`) — the upstream service is down, not yet started, or not routed to this site. Retry. |
 | `upstream_timeout` | unavailable | any request/reply RPC delivered to the upstream but not answered within the caller's timeout (`natsutil.RequestFailure`). Retry. |
-| `invalid_token` | unauthenticated | admin-service (every `Authorization: Bearer` route — §9.11 and all `/v1/admin/…`; token missing, unknown, or session not found), botplatform-service (session token failed validation, §7) |
-| `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
+| `invalid_token` | unauthenticated | admin-service (every `Authorization: Bearer` route — §9.11 and all `/v1/admin/…`; token missing, unknown, or session not found), botplatform-service (session token failed validation, §10); upload-service (§2.4) and media-service (§7) — `x-user-id`/`x-auth-token` missing, unknown, or disagreeing with the session (deliberately indistinguishable) |
+| `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match); media-service (§7) — avatar PUT by a session that is neither the named bot nor an admin, emoji PUT without the `admin` role, or either PUT with a session issued for another site |
+| `ambiguous_token` | bad_request | auth-service `POST /api/v1/auth` (§2.2) — both `ssoToken` and `authToken` set; upload-service (§2.4) — both an `ssoToken` header and an `x-auth-token` header set |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
 | `invalid_credentials` | unauthenticated | admin-service `POST /v1/login` (§9.10) (unknown account, wrong password, not admin, or deactivated — uniform response) |
 | `old_password_mismatch` | unauthenticated | admin-service `POST /v1/password/change` (§9.11) (`oldPassword` does not match) |
@@ -6749,7 +6780,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 
 - **NATS sync replies** — on the reply subject for §3/§4 RPCs.
 - **JetStream async results** — `model.AsyncJobResult` carries the same `code` + `reason` fields when `status == "error"`, so a failed async job is surfaced the same way as a sync error.
-- **HTTP** — auth-service `POST /api/v1/auth` (§2.2), portal-service `GET /api/userInfo` (§2.3), and upload-service's image endpoints (§2.4) write the envelope as the response body with the matching HTTP status from the table above.
+- **HTTP** — auth-service `POST /api/v1/auth` (§2.2), portal-service `GET /api/userInfo` (§2.3), upload-service's file/image endpoints (§2.4), and media-service's avatar and emoji PUTs (§7) write the envelope as the response body with the matching HTTP status from the table above.
 
 ### Client branching guidance
 
@@ -6759,7 +6790,7 @@ Compute the trigger as `reason ?? code` and branch on that. Use `code` for gener
 
 ## 7. Media Service
 
-Public HTTP endpoints served by `media-service`. GET image responses (streamed custom image and generated default SVG) set `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`; redirects do not, and the upload sets `nosniff` only.
+HTTP endpoints served by `media-service` — the three GETs are public, the two PUTs require a session token (see each). GET image responses (streamed custom image and generated default SVG) set `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`; redirects do not, and the upload sets `nosniff` only.
 
 **Bot detection:** an account takes the bot avatar path if it ends in `.bot` **or** is the `p_admin` platform-admin pseudo-account. Everything else — including plain `p_` QA test accounts — is a user.
 
@@ -6841,10 +6872,9 @@ GET /api/v1/avatar/room/<dm-room-id>         → 200 (default SVG — use Endpoi
 
 ### PUT /api/v1/avatar/bot/:botName
 
-> [!WARNING]
-> **This endpoint is UNAUTHENTICATED in v1.** Anyone who can reach the service can upload or overwrite any bot's avatar. Auth is deferred until the authorization model is decided. **It MUST be network-restricted or gated before any production exposure.**
-
-**Auth:** none (v1)
+**Auth:** `x-user-id` + `x-auth-token` (botplatform session token, §10.1). The session must
+either **be** the bot named in the path (`account == :botName`) or hold the `admin` role;
+anything else is `403 not_admin`. A bot manages its own avatar; an admin manages any bot's.
 
 Uploads a custom PNG or JPEG avatar for a bot. The body is the raw image bytes; `Content-Type` declares the format.
 
@@ -6852,7 +6882,7 @@ Uploads a custom PNG or JPEG avatar for a bot. The body is the raw image bytes; 
 
 | | Notes |
 |---|---|
-| Path | `:botName` — bare bot account (stray `@…` is stripped). Must satisfy the bot pattern (ends in `.bot` or is the `p_admin` platform-admin pseudo-account). |
+| Path | `:botName` — bare bot account, matched exactly against the session's account. Do **not** prefix `@`. Must satisfy the bot pattern (ends in `.bot` or is the `p_admin` platform-admin pseudo-account). |
 | Body | Raw image bytes (PNG or JPEG). SVG and non-image payloads are rejected. |
 | `Content-Type` header | Advisory. Validation is by decoding the body — a valid PNG or JPEG is accepted regardless of the declared header; non-images are rejected. |
 | Max size | `MAX_UPLOAD_BYTES` (default 1 MiB). |
@@ -6864,9 +6894,12 @@ The service decodes the image bytes to verify they are a valid PNG or JPEG — m
 | Status | Condition |
 |---|---|
 | `200 OK` | Upload accepted and stored. Body returns the new avatar metadata (below). |
-| `400 Bad Request` | `botName` does not match the bot pattern; `Content-Type` is not `image/png` or `image/jpeg`; body is not a valid image; body exceeds `MAX_UPLOAD_BYTES`. |
+| `400 Bad Request` | `botName` does not match the bot pattern; body does not decode as a PNG or JPEG; body exceeds `MAX_UPLOAD_BYTES`. A wrong `Content-Type` alone is not rejected — the header is advisory, as the request table above states. |
+| `401 Unauthenticated` | `invalid_token` — missing, unknown, or mismatched session credential (the three are indistinguishable). |
+| `403 Forbidden` | `not_admin` — a valid session that is neither the named bot nor an admin, or one issued for another site. |
 | `404 Not Found` | No user record for `botName` — unknown bot. |
 | `409 Conflict` | Bot is owned by a different cluster. Response body names the correct domain. |
+| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against botplatform. |
 
 ##### Success response (`200`)
 
@@ -6919,7 +6952,11 @@ Serves a custom emoji image. The path no longer carries siteID: v1's FE only eve
 
 ### PUT /api/v1/emoji/:shortcode
 
-Uploads (or replaces — PUT is an upsert) a custom emoji. v1: no auth; the optional `?uploader={account}` query parameter is recorded for audit only. Values longer than 64 bytes are truncated. The upload always writes to **this** cluster's site — there is no cross-cluster upload in v1, so there is no declared-intent check to fail.
+Uploads (or replaces — PUT is an upsert) a custom emoji. The upload always writes to **this** cluster's site — there is no cross-cluster upload in v1, so there is no declared-intent check to fail.
+
+**Auth:** `x-user-id` + `x-auth-token` (botplatform session token, §10.1), **admin role required**. A shortcode is a site-wide shared name that every user on the site renders, so uploading one is an admin operation — a bot cannot overwrite an emoji for everybody. A valid non-admin session is `403 not_admin`.
+
+The `?uploader={account}` query parameter is **accepted and ignored**. The `createdBy` / `updatedBy` audit fields are taken from the authenticated session, which cannot be spoofed by a caller.
 
 #### Request
 
@@ -6932,6 +6969,9 @@ Raw image bytes as the body. PNG, JPEG, or GIF (animated GIFs are stored and ser
 | `200 OK` | Upload accepted and stored. Body returns the new emoji metadata (below). |
 | `400 Bad Request` | Malformed shortcode; body not a valid PNG/JPEG/GIF; body or dimensions over the limits. |
 | `400 Bad Request` | Reason `emoji_shortcode_reserved` — shortcode collides with a built-in standard emoji (would be permanently shadowed). |
+| `401 Unauthenticated` | `invalid_token` — missing, unknown, or mismatched session credential (the three are indistinguishable). |
+| `403 Forbidden` | `not_admin` — a valid session without the `admin` role, or one issued for another site. |
+| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against botplatform. |
 
 ##### Success response (`200`)
 

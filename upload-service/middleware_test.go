@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/botauth"
+	"github.com/hmchangw/chat/pkg/errcode"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
+	"github.com/hmchangw/chat/pkg/principal"
 )
 
 type fakeValidator struct {
@@ -23,11 +27,23 @@ func (f *fakeValidator) Validate(_ context.Context, _ string) (pkgoidc.Claims, e
 	return f.claims, f.err
 }
 
-func runAuth(t *testing.T, v TokenValidator, devMode bool, token string) (*httptest.ResponseRecorder, *AuthenticatedUser) {
+// fakeBotValidator implements botauth.TokenValidator for middleware tests.
+type fakeBotValidator struct {
+	principal principal.Principal
+	err       error
+}
+
+func (f *fakeBotValidator) Validate(_ context.Context, _ string) (principal.Principal, error) {
+	return f.principal, f.err
+}
+
+// runAuthReq drives authMiddleware over a caller-built request, returning the
+// recorder and whatever AuthenticatedUser reached the handler.
+func runAuthReq(t *testing.T, d authDeps, req *http.Request) (*httptest.ResponseRecorder, *AuthenticatedUser) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(authMiddleware(v, devMode))
+	r.Use(authMiddleware(d))
 	var captured *AuthenticatedUser
 	r.GET("/x", func(c *gin.Context) {
 		if u, ok := userFromContext(c); ok {
@@ -35,28 +51,49 @@ func runAuth(t *testing.T, v TokenValidator, devMode bool, token string) (*httpt
 		}
 		c.Status(http.StatusOK)
 	})
-	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	if token != "" {
-		req.Header.Set("ssoToken", token)
-	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w, captured
 }
 
-func TestAuthMiddleware_MissingToken_401(t *testing.T) {
-	w, _ := runAuth(t, &fakeValidator{}, false, "")
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
+// runAuth preserves the original SSO-only call shape used by the existing tests.
+func runAuth(t *testing.T, v TokenValidator, devMode bool, token string) (*httptest.ResponseRecorder, *AuthenticatedUser) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	if token != "" {
+		req.Header.Set("ssoToken", token)
+	}
+	return runAuthReq(t, authDeps{sso: v, devMode: devMode}, req)
 }
 
-func TestAuthMiddleware_InvalidToken_401(t *testing.T) {
-	w, _ := runAuth(t, &fakeValidator{err: errors.New("bad")}, false, "tok")
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
-}
+// The SSO reasons are what distinguish these 401s from the session branch's
+// uniform invalid_token. Asserting only the status would let a regression in the
+// credential routing send every SSO rejection down the session path unnoticed —
+// 401 equals 401.
+func TestAuthMiddleware_SSORejectionReasons(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      TokenValidator
+		token  string
+		reason string
+	}{
+		{"no credential at all", &fakeValidator{}, "", "missing_fields"},
+		{"unverifiable token", &fakeValidator{err: errors.New("bad")}, "tok", "invalid_sso_token"},
+		{"expired token", &fakeValidator{err: pkgoidc.ErrTokenExpired}, "tok", "sso_token_expired"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w, u := runAuth(t, tc.v, false, tc.token)
 
-func TestAuthMiddleware_ExpiredToken_401(t *testing.T) {
-	w, _ := runAuth(t, &fakeValidator{err: pkgoidc.ErrTokenExpired}, false, "tok")
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
+			assert.Equal(t, http.StatusUnauthorized, w.Code)
+			assert.Nil(t, u)
+			var body struct {
+				Reason string `json:"reason"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, tc.reason, body.Reason)
+		})
+	}
 }
 
 func TestAuthMiddleware_ValidToken_PopulatesUser(t *testing.T) {
@@ -126,7 +163,7 @@ func TestAuthMiddleware_CookieFallback_PopulatesUser(t *testing.T) {
 	v := &fakeValidator{claims: pkgoidc.Claims{PreferredUsername: "bob", Email: "bob@x.com"}}
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(authMiddleware(v, false))
+	r.Use(authMiddleware(authDeps{sso: v}))
 	var captured *AuthenticatedUser
 	r.GET("/x", func(c *gin.Context) {
 		if u, ok := userFromContext(c); ok {
@@ -229,4 +266,189 @@ func TestAccessLogMiddleware_PassThrough(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/x", nil))
 	assert.True(t, called)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// botReq builds a request carrying the bot credential headers.
+func botReq(userID, token string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	if userID != "" {
+		req.Header.Set(botauth.HeaderUserID, userID)
+	}
+	if token != "" {
+		req.Header.Set(botauth.HeaderAuthToken, token)
+	}
+	return req
+}
+
+func okPrincipal() principal.Principal {
+	return principal.Principal{
+		UserID: "u1", Account: "alerts.sa.bot", SiteID: "site-a", Roles: []string{"bot"},
+	}
+}
+
+func TestAuthMiddleware_SessionToken_PopulatesUser(t *testing.T) {
+	d := authDeps{bot: &fakeBotValidator{principal: okPrincipal()}}
+
+	w, u := runAuthReq(t, d, botReq("u1", "tok"))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, u)
+	assert.Equal(t, "alerts.sa.bot", u.Account)
+	assert.Equal(t, "site-a", u.SiteID)
+	require.NotNil(t, u.Session, "session callers must carry their principal")
+	assert.Equal(t, []string{"bot"}, u.Session.Roles)
+	// No directory metadata on a session principal, so DisplayName falls back.
+	assert.Equal(t, "alerts.sa.bot", u.DisplayName())
+}
+
+func TestAuthMiddleware_SessionToken_Failures(t *testing.T) {
+	tests := []struct {
+		name       string
+		userID     string
+		deps       authDeps
+		wantStatus int
+		wantReason string
+	}{
+		{
+			name: "unknown token", userID: "u1",
+			deps: authDeps{bot: &fakeBotValidator{err: errcode.Unauthenticated("nope",
+				errcode.WithReason(errcode.BotplatformInvalidToken))}},
+			wantStatus: http.StatusUnauthorized, wantReason: "invalid_token",
+		},
+		{
+			name: "user id disagrees with session", userID: "someone-else",
+			deps:       authDeps{bot: &fakeBotValidator{principal: okPrincipal()}},
+			wantStatus: http.StatusUnauthorized, wantReason: "invalid_token",
+		},
+		{
+			name: "missing user id header", userID: "",
+			deps:       authDeps{bot: &fakeBotValidator{principal: okPrincipal()}},
+			wantStatus: http.StatusUnauthorized, wantReason: "invalid_token",
+		},
+		{
+			name: "botplatform unreachable", userID: "u1",
+			deps:       authDeps{bot: &fakeBotValidator{err: errors.New("connection refused")}},
+			wantStatus: http.StatusServiceUnavailable, wantReason: "upstream_unavailable",
+		},
+		{
+			name: "session auth not configured", userID: "u1",
+			deps:       authDeps{},
+			wantStatus: http.StatusServiceUnavailable, wantReason: "upstream_unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, u := runAuthReq(t, tt.deps, botReq(tt.userID, "tok"))
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+			assert.Nil(t, u, "a rejected request must not reach the handler")
+			var body struct {
+				Reason string `json:"reason"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, tt.wantReason, body.Reason)
+		})
+	}
+}
+
+func TestAuthMiddleware_BothHeaders_400Ambiguous(t *testing.T) {
+	d := authDeps{sso: &fakeValidator{}, bot: &fakeBotValidator{principal: okPrincipal()}}
+	req := botReq("u1", "tok")
+	req.Header.Set("ssoToken", "sso-tok")
+
+	w, u := runAuthReq(t, d, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Nil(t, u)
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ambiguous_token", body.Reason)
+}
+
+func TestAuthMiddleware_SessionTokenBeatsSSOCookie(t *testing.T) {
+	// The cookie is ambient state a browser attaches automatically; the header is
+	// an explicit act, so it wins rather than being ambiguous.
+	d := authDeps{sso: &fakeValidator{}, bot: &fakeBotValidator{principal: okPrincipal()}}
+	req := botReq("u1", "tok")
+	req.Header.Set("Cookie", "ssoToken=c-tok")
+
+	w, u := runAuthReq(t, d, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, u)
+	assert.Equal(t, "alerts.sa.bot", u.Account)
+	assert.NotNil(t, u.Session)
+}
+
+func TestAuthMiddleware_SessionToken_Email(t *testing.T) {
+	tests := []struct {
+		name   string
+		domain string
+		want   string
+	}{
+		{name: "unset domain sends empty email", domain: "", want: ""},
+		{name: "configured domain synthesizes an address", domain: "bots.example.com", want: "alerts.sa.bot@bots.example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := authDeps{bot: &fakeBotValidator{principal: okPrincipal()}, botEmailDomain: tt.domain}
+
+			w, u := runAuthReq(t, d, botReq("u1", "tok"))
+
+			require.Equal(t, http.StatusOK, w.Code)
+			require.NotNil(t, u)
+			assert.Equal(t, tt.want, u.Email)
+		})
+	}
+}
+
+// TestAuthMiddleware_PartialSessionCredential pins the contract documented in
+// client-api.md §2.4: a session credential that is missing a half is still a
+// session attempt, so it gets the uniform 401 rather than the SSO branch's
+// "missing ssoToken" / missing_fields.
+func TestAuthMiddleware_PartialSessionCredential(t *testing.T) {
+	tests := []struct {
+		name   string
+		userID string
+		token  string
+	}{
+		{name: "user id without token", userID: "u1"},
+		{name: "token without user id", token: "tok"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := authDeps{sso: &fakeValidator{}, bot: &fakeBotValidator{principal: okPrincipal()}}
+
+			w, u := runAuthReq(t, d, botReq(tt.userID, tt.token))
+
+			assert.Equal(t, http.StatusUnauthorized, w.Code)
+			assert.Nil(t, u)
+			var body struct {
+				Reason string `json:"reason"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, "invalid_token", body.Reason, "must not leak that one half was present")
+		})
+	}
+}
+
+// TestAuthMiddleware_SSOUnaffectedByStraySessionHeader proves the partial-credential
+// routing does not hijack a caller who supplied a real ssoToken.
+func TestAuthMiddleware_SSOUnaffectedByStraySessionHeader(t *testing.T) {
+	v := &fakeValidator{claims: pkgoidc.Claims{PreferredUsername: "alice", Email: "alice@x.com"}}
+	d := authDeps{sso: v, bot: &fakeBotValidator{principal: okPrincipal()}}
+	req := botReq("u1", "") // stray x-user-id, no x-auth-token
+	req.Header.Set("ssoToken", "sso-tok")
+
+	w, u := runAuthReq(t, d, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, u)
+	assert.Equal(t, "alice", u.Account, "the SSO credential still wins")
+	assert.Nil(t, u.Session)
 }

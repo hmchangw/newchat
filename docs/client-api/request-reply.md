@@ -1,6 +1,6 @@
 > Request/Reply and Events views of the chat client API — see also [client-api.md](../client-api.md).
 
-<!-- last synced: client-api.md @ 117da0c -->
+<!-- last synced: client-api.md @ 6b584e7 -->
 
 # Chat — Request/Reply Methods & Publish Operations
 
@@ -89,6 +89,15 @@ and the OTEL telemetry base URL (`otelBaseUrl`). See
 
 ---
 
+> **upload-service credentials.** Every `/api/v1/file*`, `/api/v1/file-upload*` and
+> `/api/v3/rooms/*` endpoint below accepts **either** an OIDC `ssoToken` (header, or
+> cookie for `<img>` downloads) **or** a botplatform session token (`x-user-id` +
+> `x-auth-token`) for bot/admin callers — except `POST /api/v1/file/setCookie`,
+> which is SSO-only and rejects a session caller with `400`. Sending both explicit headers is
+> `400 ambiguous_token`; a session header beats an ambient `ssoToken` cookie. Room-scoped
+> endpoints still require membership, bots included. Full table in
+> [../client-api.md §2.4](../client-api.md#24-http--protected-fileimage-uploaddownload).
+
 ### POST /api/v1/file/setCookie
 
 **Endpoint:** `POST /api/v1/file/setCookie`
@@ -96,7 +105,8 @@ and the OTEL telemetry base URL (`otelBaseUrl`). See
 
 Exchanges the `ssoToken` header for an `ssoToken` cookie so the browser can load
 protected files via `<img src>` (which cannot send headers). Token is validated before
-the cookie is issued. Credentialed request; caller's `Origin` must be in the server's
+the cookie is issued. **SSO-only** — a session-token caller gets `400`; bots send
+credential headers on every request and need no cookie. Credentialed request; caller's `Origin` must be in the server's
 `CORS_ALLOWED_ORIGINS` allowlist. See
 [../client-api.md §2.4](../client-api.md#post-apiv1filesetcookie).
 
@@ -110,8 +120,8 @@ the cookie is issued. Credentialed request; caller's `Origin` must be in the ser
 **Reply:** synchronous HTTP response
 
 Uploads one or more protected inline images. `Content-Type: multipart/form-data`.
-`ssoToken` header required; caller must be a room member. Returns per-file
-success/failure in one `200`. See
+`ssoToken` header **or** `x-user-id` + `x-auth-token` required; caller must be a room
+member. Returns per-file success/failure in one `200`. See
 [../client-api.md §2.4](../client-api.md#post-apiv1fileroomsroomiduploadimages).
 
 **Emits:** `None — HTTP-only.`
@@ -126,7 +136,8 @@ success/failure in one `200`. See
 Uploads a single file (image/audio/video/document) and returns a render-ready
 [Attachment](../client-api.md#attachment) for the client to embed in a `msg.send`
 (§4) — pure HTTP, does **not** itself publish a message. `Content-Type:
-multipart/form-data`. `ssoToken` header required; caller must be a room member. See
+multipart/form-data`. `ssoToken` header **or** `x-user-id` + `x-auth-token` required;
+caller must be a room member. See
 [../client-api.md §2.4](../client-api.md#post-apiv1fileroomsroomiduploadfile).
 
 **Emits:** `None — HTTP-only.`
@@ -138,9 +149,9 @@ multipart/form-data`. `ssoToken` header required; caller must be a room member. 
 **Endpoint:** `GET /api/v1/file/rooms/:roomId/file/:fileId`
 **Reply:** synchronous HTTP response (raw file bytes, any type)
 
-Downloads a protected file (image/audio/video/document). `ssoToken` required (header,
-or the `ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>` downloads;
-header wins); caller must be a room member. `drive_host` query param required.
+Downloads a protected file (image/audio/video/document). `ssoToken` (header, or the
+`ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>` downloads; header
+wins) **or** `x-user-id` + `x-auth-token`; caller must be a room member. `drive_host` query param required.
 Called with the `relativePath` (image upload) or `titleLink` (file upload)
 returned by the upload endpoints. See
 [../client-api.md §2.4](../client-api.md#get-apiv1fileroomsroomidfilefileid).
@@ -157,9 +168,9 @@ returned by the upload endpoints. See
 Backward-compatible download for inline images in **legacy message data** (prior
 system version). Identical to `GET /api/v1/file/rooms/:roomId/file/:fileId` but
 proxied from a separate (legacy) Drive backend with its own credentials.
-`ssoToken` required (header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie`
-for browser `<img>` downloads; header wins); caller must be a room member.
-`drive_host` query param required. See
+`ssoToken` (header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie` for
+browser `<img>` downloads; header wins) **or** `x-user-id` + `x-auth-token`; caller must
+be a room member. `drive_host` query param required. See
 [../client-api.md §2.4](../client-api.md#get-apiv3roomsroomidprotected-imagefileid).
 
 **Emits:** `None — HTTP-only.`
@@ -172,9 +183,9 @@ for browser `<img>` downloads; header wins); caller must be a room member.
 **Reply:** synchronous HTTP response (raw file bytes, not JSON)
 
 Downloads a previously-uploaded file by `fileId` (resolved via the `uploads`
-collection, streamed from MinIO/S3); `fileName` is cosmetic. `ssoToken` required
-(header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>`
-downloads; header wins); caller must be a member of the file's room. See
+collection, streamed from MinIO/S3); `fileName` is cosmetic. `ssoToken` (header, or the
+`ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>` downloads; header
+wins) **or** `x-user-id` + `x-auth-token`; caller must be a member of the file's room. See
 [../client-api.md §2.4](../client-api.md#get-apiv1file-uploadfileidfilename).
 
 **Emits:** `None — HTTP-only.`
@@ -183,7 +194,9 @@ downloads; header wins); caller must be a member of the file's room. See
 
 ### Media Service — avatar endpoints
 
-Public HTTP endpoints served by `media-service` (no `ssoToken`/auth required).
+HTTP endpoints served by `media-service`. The `GET`s are public (the frontend loads
+them from `<img src>`, which cannot send headers); the `PUT` requires a botplatform
+session token (`x-user-id` + `x-auth-token`).
 Full decision logic, redirect/caching rules, and the `PUT` upload contract are in
 [../client-api.md §7](../client-api.md#7-media-service).
 
@@ -191,7 +204,7 @@ Full decision logic, redirect/caching rules, and the `PUT` upload contract are i
 |---|---|---|
 | `GET /api/v1/avatar/:accountName` | synchronous HTTP (redirect, image bytes, or default SVG) | User/bot avatar; frontend also uses this for DM/botDM room avatars. |
 | `GET /api/v1/avatar/room/:roomID` | synchronous HTTP (image bytes or default SVG) | Channel/discussion room avatar. |
-| `PUT /api/v1/avatar/bot/:botName` | synchronous HTTP | Upload a bot's custom avatar. ⚠️ Unauthenticated — must be network-restricted. |
+| `PUT /api/v1/avatar/bot/:botName` | synchronous HTTP | Upload a bot's custom avatar. Session token required; caller must be the named bot or hold `admin`, else `403 not_admin`. |
 
 **Emits:** `None — HTTP-only.`
 
@@ -199,14 +212,15 @@ Full decision logic, redirect/caching rules, and the `PUT` upload contract are i
 
 ### Media Service — emoji endpoints
 
-Public HTTP endpoints served by `media-service` (no `ssoToken`/auth required).
+HTTP endpoints served by `media-service`. The `GET` is public; the `PUT` requires a
+botplatform session token (`x-user-id` + `x-auth-token`) with the `admin` role.
 Full decision logic, limits, and response schemas are in
 [../client-api.md §7](../client-api.md#7-media-service).
 
 | Endpoint | Reply | Purpose |
 |---|---|---|
 | `GET /api/v1/emoji/:shortcode` | synchronous HTTP (image bytes, `304`, `307`, or `404`) | Serve a custom emoji image. Defaults to this cluster's site; optional lowercase `?siteid=` names a site — known remote `307`-redirects, unknown `404`. No generated default (unlike avatars). Cache-bust with `?v={etag}`. |
-| `PUT /api/v1/emoji/:shortcode` | synchronous HTTP | Upload (upsert) a custom emoji — PNG/JPEG/GIF, env-capped size/dimensions. Always writes to this cluster's site. ⚠️ Unauthenticated; optional `?uploader={account}` is audit-only. |
+| `PUT /api/v1/emoji/:shortcode` | synchronous HTTP | Upload (upsert) a custom emoji — PNG/JPEG/GIF, env-capped size/dimensions. Always writes to this cluster's site. Admin session required (a shortcode is a site-wide shared name), else `403 not_admin`; `?uploader=` is accepted and ignored — audit fields come from the session. |
 
 **Emits:** `None — HTTP-only.`
 

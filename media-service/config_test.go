@@ -54,6 +54,7 @@ func TestConfig_EmojiAndNATSDefaults(t *testing.T) {
 	t.Setenv("MINIO_ACCESS_KEY", "k")
 	t.Setenv("MINIO_SECRET_KEY", "s")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("BOTPLATFORM_URL", "https://botplatform.example.com")
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
@@ -73,6 +74,7 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 	t.Setenv("MINIO_ACCESS_KEY", "k")
 	t.Setenv("MINIO_SECRET_KEY", "s")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("BOTPLATFORM_URL", "https://botplatform.example.com")
 
 	t.Run("default", func(t *testing.T) {
 		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
@@ -86,6 +88,44 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
 		assert.Equal(t, 64, cfg.MaxConcurrency)
+	})
+}
+
+// TestConfig_BotplatformURLRequired guards the tag that keeps the write endpoints
+// from ever being served anonymously: absent and empty must both refuse to start.
+func TestConfig_BotplatformURLRequired(t *testing.T) {
+	setOtherRequired := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("SITE_ID", "s1")
+		t.Setenv("CLUSTER_DOMAINS", `[]`)
+		t.Setenv("EMPLOYEE_PHOTO_BASE_URL", "https://photos.example.com")
+		t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+		t.Setenv("MINIO_ENDPOINT", "localhost:9000")
+		t.Setenv("MINIO_ACCESS_KEY", "k")
+		t.Setenv("MINIO_SECRET_KEY", "s")
+		t.Setenv("NATS_URL", "nats://localhost:4222")
+	}
+
+	t.Run("unset", func(t *testing.T) {
+		setOtherRequired(t)
+		require.NoError(t, os.Unsetenv("BOTPLATFORM_URL"))
+
+		_, err := env.ParseAs[config]()
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "BOTPLATFORM_URL")
+	})
+
+	// `required` alone only checks presence, so an empty value would boot without
+	// `notEmpty` — the case that would silently leave the PUTs unauthenticated.
+	t.Run("present but empty", func(t *testing.T) {
+		setOtherRequired(t)
+		t.Setenv("BOTPLATFORM_URL", "")
+
+		_, err := env.ParseAs[config]()
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "BOTPLATFORM_URL")
 	})
 }
 
