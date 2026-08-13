@@ -48,7 +48,6 @@ type config struct {
 	// offloads reads (a just-joined member is recovered via history).
 	MongoReadPreference  string          `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
 	MaxWorkers           int             `env:"MAX_WORKERS"               envDefault:"100"`
-	LastMsgFlushInterval time.Duration   `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
 	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
 	UserCacheTTL         time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
 	RoomMetaCacheSize    int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
@@ -189,12 +188,6 @@ func main() {
 	}
 
 	publisher := &natsPublisher{nc: nc}
-	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
-	// UpdateRoomLastMessage; the coalescing wrapper buffers it and drains via flushCtx/Run.
-	coalescer := newCoalescingStore(cachedStore, store)
-	flushCtx, flushCancel := context.WithCancel(context.Background())
-	go coalescer.Run(flushCtx, cfg.LastMsgFlushInterval, 5*time.Second)
-	slog.Info("last-msg coalescer enabled", "flush_interval", cfg.LastMsgFlushInterval)
 
 	var keyProvider RoomKeyProvider = keyStore
 	var keyCache *CachedKeyProvider
@@ -214,7 +207,7 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode)
+	handler := NewHandler(cachedStore, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode)
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
@@ -266,11 +259,6 @@ func main() {
 			case <-ctx.Done():
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
-		},
-		// Stop the coalescer AFTER in-flight handlers drain so any final buffered UpdateRoomLastMessage calls land in this last flush.
-		func(_ context.Context) error {
-			flushCancel()
-			return nil
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 	}

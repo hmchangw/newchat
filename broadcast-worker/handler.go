@@ -173,26 +173,9 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
-	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
-		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
-	}
-	// Sending implies the sender has read up to their own message: advance the
-	// sender's lastSeenAt so the room read-floor (minUserLastSeenAt) doesn't count
-	// the sender against their own message (#396). Best-effort.
-	if err := h.store.AdvanceSubscriptionLastSeen(ctx, msg.RoomID, msg.UserAccount, msg.CreatedAt); err != nil {
-		slog.WarnContext(ctx, "advance sender lastSeenAt failed",
-			"error", err, "room_id", msg.RoomID, "account", msg.UserAccount,
-			"request_id", natsutil.RequestIDFromContext(ctx))
-	}
 	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
 	if err != nil {
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
-	}
-
-	if len(resolved.Accounts) > 0 {
-		if err := h.store.SetSubscriptionMentions(ctx, meta.ID, resolved.Accounts, msg.CreatedAt); err != nil {
-			return fmt.Errorf("set subscription mentions: %w", err)
-		}
 	}
 
 	clientMsg := buildClientMessage(&msg, userByAccount)
@@ -261,8 +244,9 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
-		// Do NOT call SetSubscriptionMentions here: TShow=false replies are invisible
-		// in the main channel, so a room-level mention badge would appear with no
+		// room-state-worker (not broadcast-worker) owns the room-level mention badge
+		// derived from MESSAGES-CANONICAL, and correctly skips it here: TShow=false
+		// replies are invisible in the main channel, so a badge would appear with no
 		// visible message to explain it.
 		roomEvt := buildRoomEvent(&meta, clientMsg, evt.Timestamp)
 		roomEvt.Type = model.RoomEventNewThreadMessage
@@ -305,10 +289,6 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
-		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
-	}
-
 	edit := buildEditRoomEvent(room, evt)
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
@@ -316,18 +296,6 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		}
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
-}
-
-// badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
-// handleCreated. Additive only: SetSubscriptionMentions' filter skips
-// non-subscribers and accounts that have already read past the edit, so a
-// removed mention is never cleared and an already-read one is never re-flagged.
-func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
-	parsed := mention.Parse(msg.Content)
-	if len(parsed.Accounts) == 0 {
-		return nil
-	}
-	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
