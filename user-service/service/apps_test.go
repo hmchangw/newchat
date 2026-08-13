@@ -1,8 +1,11 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/user-service/models"
 )
 
@@ -85,11 +89,163 @@ func TestSetAppSubscription_CreateDMRoomError(t *testing.T) {
 	requireCode(t, err, errcode.CodeInternal)
 }
 
+// resubExisting is the pre-write row GetAppSubscription returns on the re-subscribe path.
+func resubExisting() *model.Subscription {
+	return &model.Subscription{
+		ID:       "ex",
+		User:     model.SubscriptionUser{ID: "u1", Account: "alice", IsBot: false},
+		RoomID:   "r1",
+		SiteID:   "site-a",
+		Name:     "helper.bot",
+		RoomType: model.RoomTypeBotDM,
+		Muted:    true,
+	}
+}
+
+// resubEnriched is the room-enriched row GetSubscriptionByRoomID returns for the
+// resub fan-out; isSubscribed/muted still carry the pre-write state on purpose —
+// the publish path must patch them.
+func resubEnriched() *model.EnrichedSubscription {
+	lastMsg := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	local := false
+	return &model.EnrichedSubscription{
+		Subscription: *resubExisting(),
+		RoomName:     "Helper",
+		UserCount:    1,
+		AppCount:     1,
+		LastMsgAt:    &lastMsg,
+		LastMsgID:    "m1",
+		CrossSite:    &local,
+	}
+}
+
 func TestSetAppSubscription_Reactivate_ClearsMuted(t *testing.T) {
+	svc, subs, _, apps, _, _, pub := newSvc(t)
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(resubExisting(), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").Return(resubEnriched(), nil)
+	pub.EXPECT().Publish(gomock.Any(), subject.SubscriptionUpdate("alice"), gomock.Any()).Return(nil)
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
+}
+
+func TestSetAppSubscription_Resub_PublishesAddedEvent(t *testing.T) {
+	svc, subs, _, apps, _, _, pub := newSvc(t)
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(resubExisting(), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").Return(resubEnriched(), nil)
+
+	var published []byte
+	pub.EXPECT().Publish(gomock.Any(), subject.SubscriptionUpdate("alice"), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte) error {
+			published = data
+			return nil
+		})
+
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
+
+	require.NotNil(t, published, "resub must fan out a subscription.update event")
+	var evt model.SubscriptionUpdateEvent
+	require.NoError(t, json.Unmarshal(published, &evt))
+	assert.Equal(t, "added", evt.Action)
+	assert.Equal(t, "u1", evt.UserID)
+	assert.Equal(t, "Helper", evt.RoomName, "roomName is the app display name")
+	require.NotNil(t, evt.AppInfo)
+	assert.Equal(t, model.CounterpartAppInfo{ID: "app1", Name: "Helper", AssistantName: "helper.bot"}, *evt.AppInfo)
+	assert.Nil(t, evt.HRInfo, "botDM counterpart is an app, never HR info")
+	assert.Positive(t, evt.Timestamp)
+
+	sub := evt.Subscription
+	assert.Equal(t, "ex", sub.ID)
+	assert.True(t, sub.IsSubscribed, "event must carry the post-write state, not the pre-write read")
+	assert.False(t, sub.Muted, "event must carry the post-write state, not the pre-write read")
+	require.NotNil(t, sub.Room, "added events embed the room baseline")
+	assert.Equal(t, "Helper", sub.Room.Name)
+	assert.Equal(t, "site-a", sub.Room.SiteID)
+	assert.Equal(t, 1, sub.Room.UserCount)
+	assert.Equal(t, 1, sub.Room.AppCount)
+	assert.Equal(t, "m1", sub.Room.LastMsgID)
+	require.NotNil(t, sub.Room.LastMsgAt)
+	assert.True(t, sub.Room.LastMsgAt.Equal(time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)))
+	require.NotNil(t, sub.Room.CrossSite)
+	assert.False(t, *sub.Room.CrossSite)
+	assert.Nil(t, sub.Room.PreviewMessage, "added events never leak a preview message")
+}
+
+func TestSetAppSubscription_Resub_RoomNameFallsBackToBotAccount(t *testing.T) {
+	svc, subs, _, apps, _, _, pub := newSvc(t)
+	nameless := &model.App{ID: "app1", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(nameless, nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(resubExisting(), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").Return(resubEnriched(), nil)
+
+	var published []byte
+	pub.EXPECT().Publish(gomock.Any(), subject.SubscriptionUpdate("alice"), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte) error {
+			published = data
+			return nil
+		})
+
+	_, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
+	require.NoError(t, err)
+	require.NotNil(t, published)
+	var evt model.SubscriptionUpdateEvent
+	require.NoError(t, json.Unmarshal(published, &evt))
+	assert.Equal(t, "helper.bot", evt.RoomName, "empty app name falls back to the bot account")
+	require.NotNil(t, evt.AppInfo)
+	assert.Empty(t, evt.AppInfo.Name)
+}
+
+func TestSetAppSubscription_Resub_EnrichErrorStillSucceeds(t *testing.T) {
 	svc, subs, _, apps, _, _, _ := newSvc(t)
 	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
-	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(&model.Subscription{ID: "ex", Muted: true}, nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(resubExisting(), nil)
 	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").Return(nil, errors.New("db down"))
+	// No Publish expectation: the fan-out is best-effort and skipped on enrich failure.
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
+}
+
+func TestSetAppSubscription_Resub_EnrichMissStillSucceeds(t *testing.T) {
+	svc, subs, _, apps, _, _, _ := newSvc(t)
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(resubExisting(), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").Return(nil, nil)
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
+}
+
+func TestSetAppSubscription_Resub_DeletedRoomSkipsPublish(t *testing.T) {
+	svc, subs, _, apps, _, _, _ := newSvc(t)
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(resubExisting(), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	deleted := resubEnriched()
+	deleted.RoomName = "Del-Helper"
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").Return(deleted, nil)
+	// No Publish expectation: an "added" for a soft-deleted room would resurrect a row subscription.list drops.
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
+}
+
+func TestSetAppSubscription_Resub_PublishErrorStillSucceeds(t *testing.T) {
+	svc, subs, _, apps, _, _, pub := newSvc(t)
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(resubExisting(), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").Return(resubEnriched(), nil)
+	pub.EXPECT().Publish(gomock.Any(), subject.SubscriptionUpdate("alice"), gomock.Any()).Return(errors.New("nats down"))
 	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
 	require.NoError(t, err)
 	assert.True(t, resp.Success)

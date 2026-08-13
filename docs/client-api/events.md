@@ -200,7 +200,8 @@ fields are sent.
 }
 ```
 
-**Triggered by:** Add Members (`added`), Remove Member (`removed`), Update Member Role
+**Triggered by:** Add Members (`added`), subscription.setAppSubscription (`added` — first
+subscribe and re-subscribe), Remove Member (`removed`), Update Member Role
 (`role_updated`), Toggle Mute (`mute_toggled`), Toggle Favorite (`favorite_toggled`),
 Open Room (`opened`), Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
 

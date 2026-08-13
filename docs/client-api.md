@@ -5564,6 +5564,15 @@ PUT-like idempotent endpoint to subscribe or unsubscribe the calling user from a
 | room-service did not answer | `unavailable` | `upstream_timeout` | `"create-dm rpc: upstream did not respond in time"` — same path, request delivered but unanswered. Retryable. |
 | Internal failure | `internal` | — | — |
 
+##### Triggered events — success path
+
+**`chat.user.{account}.event.subscription.update`** — a [`subscription.update` event](#subscriptionupdate-event) with `action: "added"`, fired on both subscribe paths. Ephemeral core-NATS fan-out, best-effort — a lost event is reconciled by the next `subscription.list`.
+
+- **First subscribe** (botDM room created): emitted during room creation, one event per pair subscription (the subscriber and the bot).
+- **Re-subscribe** (existing subscription re-enabled): emitted for the re-subscriber only — the bot counterpart's subscription is unchanged. The embedded `subscription` carries the post-update state (`isSubscribed: true`, `muted: false`) and a populated `room` object; `roomName` is the app's display name (bot account when the app is unnamed) and `appInfo` identifies the app. Skipped when the botDM room is soft-deleted.
+
+No event is emitted on unsubscribe.
+
 ---
 
 #### apps.list

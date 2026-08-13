@@ -1924,7 +1924,7 @@ PUT-like idempotent endpoint to subscribe or unsubscribe from a bot app.
 `"create-dm rpc: upstream did not respond in time"` (`unavailable`, `upstream_timeout`)
 when room-service is unreachable while creating the botDM room — both retryable.
 
-**Emits:** None.
+**Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "added"` — first subscribe: one per pair subscription during botDM creation; re-subscribe: to the re-subscriber only. Nothing on unsubscribe.) → [events.md](events.md)
 
 ---
 
