@@ -374,6 +374,16 @@ func TestAggregateSubscriptions_HidesCrossSiteTeamsRoom_Integration(t *testing.T
 	n, err := r.CountActiveSubscriptions(ctx, "alice")
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "count must exclude the cross-site Teams room, include the native one")
+
+	// Unread path (GetActiveSubscriptions) must exclude it too.
+	subs, err := r.GetActiveSubscriptions(ctx, "alice", 100)
+	require.NoError(t, err)
+	unreadIDs := map[string]bool{}
+	for _, s := range subs {
+		unreadIDs[s.ID] = true
+	}
+	assert.False(t, unreadIDs["sub-xsite-teams"], "unread set must exclude the cross-site Teams room")
+	assert.True(t, unreadIDs["sub-xsite-native"], "unread set must include the native cross-site room")
 }
 
 // TestFindChannelsByMembers_CrossSite_Integration exercises the SEPARATE roomMatchStages

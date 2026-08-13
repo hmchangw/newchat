@@ -97,7 +97,6 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 					"encKey.priv":       1,
 					"encKey.ver":        1,
 					"crossSite":         1,
-					"origin":            1,
 				}},
 			},
 			"as": "room",
@@ -118,7 +117,8 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 			"appCount":          "$room.appCount",
 			"roomName":          "$room.name",
 			"crossSite":         "$room.crossSite",
-			"origin":            "$room.origin",
+			// origin is NOT set from room here — the subscription's own origin is kept
+			// (reliable cross-site; a remote room's $room.origin is null). See originFilterStage.
 			// Sort key: room activity (lastMsgAt), falling back to room.createdAt for
 			// rooms with no messages. Null for cross-site/missing rooms (they sort last).
 			"__sortKey": bson.M{"$ifNull": bson.A{"$room.lastMsgAt", "$room.createdAt"}},
@@ -268,9 +268,6 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// roomsEnrichStages(true) drops locally soft-deleted (^Del-) rooms; cross-site
 	// rooms have no local room doc and are kept (their deletion isn't visible here).
 	pipeline := bson.A{bson.M{"$match": match}}
-	// Origin filter runs BEFORE enrichment: it reads the sub's own origin, which is
-	// reliable cross-site. roomsEnrichStages overwrites origin with $room.origin (null
-	// for a remote room with no local doc), so filtering after enrich would leak it.
 	pipeline = append(pipeline, r.originFilterStage()...)
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	// Activity window keys on the room's lastMsgAt (surfaced by the enrich stage),
@@ -290,10 +287,9 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 }
 
 // originFilterStage excludes Teams-migrated rooms (origin "teams") when
-// showTeamsRoom is false; empty (no-op) otherwise. Must run BEFORE
-// roomsEnrichStages: it filters on the subscription's own origin field (reliable
-// cross-site), which enrichment later overwrites with the null $room.origin of a
-// remote room that has no local doc.
+// showTeamsRoom is false; empty (no-op) otherwise. Filters on the subscription's
+// own origin field (reliable cross-site — a remote room has no local doc); enrichment
+// no longer overwrites it, so this is position-independent in the pipeline.
 func (r *SubscriptionRepo) originFilterStage() bson.A {
 	if r.showTeamsRoom {
 		return bson.A{}
@@ -441,8 +437,6 @@ func activeSubscriptionFilter(account string) bson.M {
 // CountActiveSubscriptions counts the deleted-filtered active set via $count over the enriched pipeline (CountDocuments cannot see the join).
 func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account string) (int, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
-	// Filter on the sub's own origin before enrichment overwrites it with the
-	// (null cross-site) $room.origin — see AggregateSubscriptions.
 	pipeline = append(pipeline, r.originFilterStage()...)
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	pipeline = append(pipeline, bson.M{"$count": "n"})
@@ -465,6 +459,7 @@ func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account
 // GetActiveSubscriptions returns the deleted-filtered active set used by the unread count, capped by limit.
 func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
+	pipeline = append(pipeline, r.originFilterStage()...)
 	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	// MongoDB rejects $limit:0 — callers short-circuit zero; stay defensive here.
 	if limit > 0 {
