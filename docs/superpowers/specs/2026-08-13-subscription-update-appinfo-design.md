@@ -12,12 +12,14 @@ this PR.
 When a user subscribes to a bot for the first time, `user-service` creates a
 botDM room and `room-worker` fans out a `subscription.update` event with
 `action: "added"`. The human member's copy carries `appInfo`
-(`CounterpartAppInfo`), which the event exists to provide: per
-`docs/client-api.md`, the counterpart record is sent "so the client can render
-the new sidebar row without a `subscription.list` refetch".
+(`CounterpartAppInfo`), which the event exists to provide: the documented
+intent sits on the sibling `hrInfo` row (`docs/client-api.md:1312`) — the
+counterpart record is sent "so the client can render the new sidebar row
+without a `subscription.list` refetch" — and `appInfo` is its botDM
+counterpart, same purpose.
 
 Today `appInfo` carries only `{id, name, assistantName}`
-(`pkg/model/event.go:99-102`). The frontend also needs the app's
+(`pkg/model/event.go:98-102`). The frontend also needs the app's
 `description` and `appViewUrl` to render the bot row and its app view. Both
 fields already exist on the stored app document and on `model.App`
 (`pkg/model/app.go:7-8`), and a `subscription.list` refetch already returns
@@ -35,14 +37,14 @@ naming nuance: the fields are `name` and `assistantName` (not a full
 
 | Fact | Where |
 |---|---|
-| `CounterpartAppInfo{ID, Name, AssistantName}` — no `description`, no `appViewUrl` | `pkg/model/event.go:99-102` |
+| `CounterpartAppInfo{ID, Name, AssistantName}` — no `description`, no `appViewUrl` | `pkg/model/event.go:98-102` |
 | Single production constructor: `&model.CounterpartAppInfo{ID: app.ID, Name: app.Name, AssistantName: cp}` | `room-worker/handler.go:2129` (`resolveSubUpdateCounterpart`) |
 | `GetApp` projects only `{"name": 1, "_id": 1}`; `Assistant` deliberately unprojected | `room-worker/store_mongo.go:211-226` |
 | `model.App` has `Description string` and `AppViewURL map[string]string`, both with real `bson` tags | `pkg/model/app.go:7-8` |
-| `apps` collection is provisioned upstream; this repo only reads it — both fields optional (`omitempty`) on the doc | `pkg/model/app.go:3`, repo-wide grep: no non-test writers |
+| `apps` collection is provisioned upstream; this repo only reads it (room-service/user-service create indexes, nothing writes documents) — both fields optional (`omitempty`) on the doc | `pkg/model/app.go:3`, repo-wide grep: no non-test writers |
 | Event is core-NATS ephemeral (msgID `""`), per-user subject `chat.user.{account}.event.subscription.update`, marshaled with `encoding/json` (room-worker is not a sonic service) | `room-worker/main.go:211-219`, `handler.go:109-114`, `pkg/subject/subject.go:257-261` |
-| `appInfo` fires only on the `added` fan-out at botDM creation — once per (user, bot) pair ever; a re-subscribe just flips a Mongo flag and publishes nothing | `user-service/service/apps.go:12-50` |
-| `appInfo` never rides OUTBOX/INBOX — the one federated reuse of this struct's bytes (`role_updated` → `InboxRoleUpdated`) is produced by room-service, which never sets counterpart fields | `room-service/handler.go:796-806, 820-826`, `inbox-worker/handler.go:268` |
+| `appInfo` fires only on the `added` fan-out at botDM room creation — reached via user-service first-time subscribe (a re-subscribe just flips a Mongo flag and publishes nothing) or the client `room.create` dm path; JetStream redelivery can re-emit it (at-least-once). Cold either way. | `user-service/service/apps.go:12-50`, `room-service/handler.go:246-300` |
+| `appInfo` never rides OUTBOX/INBOX — the federated reuse of this struct's bytes (`role_updated` → `InboxRoleUpdated`) has two producers, room-service and the oplog migration transformer, and neither sets counterpart fields | `room-service/handler.go:796-806, 820-826`, `data-migration/oplog-collections-transformer/subscriptions.go:253-264`, `inbox-worker/handler.go:268` |
 
 ## Approaches considered
 
@@ -59,7 +61,7 @@ projection by two fields, and copy them at the one construction site.
   fields are wire-safe in a mixed-version fleet (every decoder on the path is
   lenient — no `DisallowUnknownFields`, TS parses structurally; no consumer
   hashes or dedups this payload). The path is cold: two events per botDM
-  creation, first-time subscribe only.
+  room creation.
 - **Cons:** Event payload grows slightly (an app description plus a small URL
   map). Three test files and two doc files must be touched (enumerated below).
 
@@ -69,8 +71,9 @@ Leave the event as-is; FE fetches `description`/`appViewUrl` when a botDM
 `added` event arrives.
 
 - **Pros:** Zero backend change; event payload stays minimal.
-- **Cons:** There is **no app-by-id RPC** to call. The existing surfaces that
-  return these fields are `apps.list` (paginated full catalog, no id filter)
+- **Cons:** There is **no app-by-id RPC** to call. The client surfaces that
+  return these fields today are the nested `app` object on `subscription.list`
+  botDM rows, `apps.list` (paginated full catalog, no id filter),
   and Search Apps (substring match on `app.name`, non-empty query required —
   which cannot address the known nameless-app case, and the endpoint is
   flagged prototype / not subscription-scoped). So FE would either page the
@@ -152,24 +155,29 @@ nameless app now ships its `description`/`appViewUrl` too, if present.
   - `description` — string — Optional. App description. Omitted when the app
     document has none.
   - `appViewUrl` — map<string, string> — Optional. App-view URLs keyed by view
-    name (e.g. `{"main": "…"}`). Omitted when the app document has none.
-  (Wording mirrors the existing `App` schema rows at client-api.md:4331-4345.)
+    name (e.g. `{"main": "..."}`). Omitted when the app document has none.
+  (Wording mirrors the existing `App` schema rows at client-api.md:4337-4338.)
 - `docs/client-api.md:1372-1381` — extend the botDM `added` JSON example's
   `appInfo` object with both fields.
 - `docs/client-api/events.md:112` — the `appInfo` row inlines the field list
   in prose; update `{id, name, assistantName}` to include the two new fields
   and their optionality.
 - `docs/client-api/request-reply.md` — no reference to `CounterpartAppInfo`;
-  untouched. The `last synced` marker in the derived views is left as-is
-  (recent PRs edit the views without touching it).
+  untouched. Note: the `appInfo` prose at request-reply.md:1348-1351 is
+  `MessageAppInfo` (the search-hit sender schema), a different struct that
+  coincidentally shares the 3-field shape — do **not** "update" it. Since
+  CLAUDE.md names both derived views in the same-PR rule, the PR description
+  should state this no-reference justification explicitly. The `last synced`
+  marker in the derived views is left as-is (recent PRs edit the views without
+  touching it).
 
 ### 5. Tests (TDD: red first, then the ~5 production lines)
 
 | File | Change |
 |---|---|
-| `pkg/model/model_test.go` | Extend `TestCounterpartAppInfoJSON`: round-trip a fully-populated struct (both new fields); keep the minimal-app `JSONEq` pinning that zero-valued new fields are **omitted** (assertion unchanged — that's the point of `omitempty`); add a populated-case `JSONEq` for the exact 5-key wire shape. Extend `TestSubscriptionUpdateEventCounterpartJSON`'s "botDM carries appInfo" case with `wantKeys` for `"description"` and `"appViewUrl"`. |
-| `room-worker/handler_test.go` | `TestHandler_resolveSubUpdateCounterpart`: add a table case where `GetApp` returns `Description` + `AppViewURL` and `wantApp` carries them; existing cases keep proving zero-values pass through as omitted. Update one end-to-end path (`TestServerCreateDM_BotDM_SetsCounterpartAppInfo` or `TestProcessCreateRoom_BotDM_HasIsSubscribed`) so the mocked `GetApp` returns the new fields and the decoded human-side event asserts them. Refresh the stale mock comments that pin "the real store's `{"name":1}` projection". |
-| `room-worker/integration_test.go` | `TestMongoStore_GetApp_Integration`: seed the inserted app with `Description` and `AppViewURL`; assert both come back projected. **Keep** `assert.Nil(t, app.Assistant)` — assistant stays unprojected. |
+| `pkg/model/model_test.go` | Extend `TestCounterpartAppInfoJSON`: round-trip a fully-populated struct (both new fields); keep the minimal-app `JSONEq` pinning that zero-valued new fields are **omitted** (assertion unchanged — that's the point of `omitempty`), but rewrite the comment above it (line 1336, "No field is omitempty…"), which becomes false once two of five fields are; add a populated-case `JSONEq` for the exact 5-key wire shape. Extend `TestSubscriptionUpdateEventCounterpartJSON`'s "botDM carries appInfo" case: populate the case's `AppInfo` with both new fields **and** add `wantKeys` for `"description"` / `"appViewUrl"` (with `omitempty`, `wantKeys` alone would never go green). |
+| `room-worker/handler_test.go` | `TestHandler_resolveSubUpdateCounterpart`: add a table case where `GetApp` returns `Description` + `AppViewURL` and `wantApp` carries them; existing cases keep proving zero-values pass through as omitted. Update one end-to-end path (`TestServerCreateDM_BotDM_SetsCounterpartAppInfo` or `TestProcessCreateRoom_BotDM_HasIsSubscribed`) so the mocked `GetApp` returns the new fields and the decoded human-side event asserts them. Three sites mock `GetApp` (≈3225-3227, 7093, 7145; the third belongs to `TestServerCreateDM_BotDM_SetsAppNameForHuman`, which asserts RoomName only and stays green) — refresh the two stale comments pinning "the real store's `{"name":1}` projection" (3226, 7144). |
+| `room-worker/integration_test.go` | `TestMongoStore_GetApp_Integration`: seed the inserted app with `Description` and `AppViewURL`; assert both come back projected. **Keep** `assert.Nil(t, app.Assistant)` — assistant stays unprojected — and update the comment at line 2401 ("Both projected fields feed appInfo"), since the projection now feeds four. |
 
 No new test files; no mock regeneration. Coverage: the touched functions are
 already covered; the new table cases keep the changed lines at 100%.
