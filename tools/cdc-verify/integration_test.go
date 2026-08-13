@@ -70,7 +70,7 @@ func startPipeline(t *testing.T, mapping *Mapping, srcDB, tgtDB *mongo.Database,
 	results = newResultsStore(200, 1000, nil)
 	v := newVerifier(mapping, newMongoStore(srcDB), newMongoStore(tgtDB), cass, reg, results, cfg)
 
-	w := newWatcher(js, streamCfg.Name, time.Time{}, v)
+	w := newWatcher(js, streamCfg.Name, subject.MigrationOplogWildcard(siteID), time.Time{}, v)
 	runCtx, runCancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
 	go func() { runErr <- w.Run(runCtx) }()

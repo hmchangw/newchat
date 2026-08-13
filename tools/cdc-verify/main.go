@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -194,15 +195,18 @@ func main() {
 	if cfg.StartAtTime != "" {
 		startAt, _ = time.Parse(time.RFC3339, cfg.StartAtTime) // validated already
 	}
-	w := newWatcher(js, streamName, startAt, v)
+	filter := subject.MigrationOplogWildcard(cfg.SiteID)
+	w := newWatcher(js, streamName, filter, startAt, v)
 	go func() {
 		if err := w.Run(ctx); err != nil {
-			slog.Error("watcher stopped", "error", err)
-			os.Exit(1) // a dead feed makes the dashboard lie; die loudly
+			// A dead feed makes the dashboard lie; die loudly — but through the
+			// signal path so shutdown.Wait still drains connections cleanly.
+			slog.Error("watcher stopped; shutting down", "error", err)
+			if p, perr := os.FindProcess(os.Getpid()); perr == nil {
+				_ = p.Signal(syscall.SIGTERM)
+			}
 		}
 	}()
-
-	filter := subject.MigrationOplogWildcard(cfg.SiteID)
 	poller := newStatsPoller(streamName,
 		func(ctx context.Context) (*jetstream.StreamInfo, error) {
 			return s.Info(ctx, jetstream.WithSubjectFilter(filter))

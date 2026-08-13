@@ -931,6 +931,18 @@ func TestVerifier_SkipEventSupersedesPending(t *testing.T) {
 	})
 }
 
+func TestVerifier_SubmitUndecodable(t *testing.T) {
+	v, _, _, _, results := testVerifier(t, verifierConfig{Poll: time.Second, Timeout: time.Second, MaxChecks: 4, SamplePercent: 100})
+	v.SubmitUndecodable("rocketchat_message", "insert")
+	recent := results.Recent()
+	require.Len(t, recent, 1)
+	assert.Equal(t, StateSkipped, recent[0].State)
+	assert.Equal(t, "decode-error", recent[0].SkipReason)
+	assert.Equal(t, "rocketchat_message", recent[0].Collection)
+	assert.Equal(t, "insert", recent[0].Op)
+	assert.Empty(t, recent[0].DocID)
+}
+
 func TestNewVerifier_DefaultSampleFn(t *testing.T) {
 	v := newVerifier(verifierMapping(), nil, nil, nil,
 		newTransformRegistry(msgbucket.New(72*time.Hour)), newResultsStore(1, 1, nil),

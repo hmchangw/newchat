@@ -286,6 +286,19 @@ func (v *verifier) Submit(ev CDCEvent) {
 	}()
 }
 
+// SubmitUndecodable records a skipped row for an event whose payload failed to
+// decode; collection/op come from the subject, so the row is still routable.
+func (v *verifier) SubmitUndecodable(collection, op string) {
+	nowMs := v.now().UTC().UnixMilli()
+	row := CheckResult{
+		ID:          idgen.GenerateID(),
+		Collection:  collection,
+		Op:          op,
+		StartedAtMs: nowMs,
+	}
+	v.skip(&row, "decode-error", nowMs)
+}
+
 func (v *verifier) skip(row *CheckResult, reason string, nowMs int64) {
 	row.State = StateSkipped
 	row.SkipReason = reason
