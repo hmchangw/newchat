@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -116,7 +117,7 @@ func teamsAccountSet(accounts []string) map[string]bool {
 	}
 	set := make(map[string]bool, len(accounts))
 	for _, a := range accounts {
-		if a != "" {
+		if a = strings.TrimSpace(a); a != "" {
 			set[a] = true
 		}
 	}

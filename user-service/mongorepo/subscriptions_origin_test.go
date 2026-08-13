@@ -30,3 +30,11 @@ func TestOriginFilterStage_AllowlistedAccount_NoOp(t *testing.T) {
 	// A non-allowlisted account is still filtered.
 	require.Len(t, r.originFilterStage("bob"), 1)
 }
+
+func TestWithShowTeamsAccounts_TrimsWhitespace(t *testing.T) {
+	s := applyOptions([]Option{WithShowTeamsAccounts([]string{"alice", " bob", "  ", ""})})
+	r := &SubscriptionRepo{showTeamsAccounts: s.showTeamsAccounts}
+	assert.Len(t, r.originFilterStage("alice"), 0, "alice allowlisted")
+	assert.Len(t, r.originFilterStage("bob"), 0, "bob allowlisted despite leading space in env")
+	require.Len(t, r.originFilterStage("carol"), 1, "non-listed still filtered")
+}

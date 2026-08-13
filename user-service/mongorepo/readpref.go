@@ -1,6 +1,10 @@
 package mongorepo
 
-import "go.mongodb.org/mongo-driver/v2/mongo/readpref"
+import (
+	"strings"
+
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+)
 
 // Option customizes repo construction.
 type Option func(*settings)
@@ -33,7 +37,7 @@ func WithShowTeamsAccounts(accounts []string) Option {
 		}
 		s.showTeamsAccounts = make(map[string]bool, len(accounts))
 		for _, a := range accounts {
-			if a != "" {
+			if a = strings.TrimSpace(a); a != "" {
 				s.showTeamsAccounts[a] = true
 			}
 		}

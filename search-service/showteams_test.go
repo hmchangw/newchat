@@ -22,3 +22,13 @@ func TestEffectiveShowTeams(t *testing.T) {
 		})
 	}
 }
+
+func TestTeamsAccountSet_TrimsWhitespace(t *testing.T) {
+	set := teamsAccountSet([]string{"alice", " bob", "  ", ""})
+	if !set["alice"] || !set["bob"] {
+		t.Fatalf("expected alice+bob (trimmed), got %v", set)
+	}
+	if set[" bob"] || len(set) != 2 {
+		t.Fatalf("blank/untrimmed entries must be dropped, got %v", set)
+	}
+}
