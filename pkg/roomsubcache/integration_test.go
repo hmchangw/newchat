@@ -83,3 +83,42 @@ func TestValkeyCache_Integration_EmptyListIsCacheHit(t *testing.T) {
 	assert.Empty(t, got.Members, "an empty member list must round-trip as a hit, not a miss")
 	assert.NotZero(t, got.CachedAt, "a hit must carry a confirmation stamp, or it can never be refreshed")
 }
+
+// Slide is what keeps delivery alive: when Mongo cannot re-confirm an entry,
+// the deadline is pushed back and the cached members are served anyway. If it
+// did not extend a real TTL the entry would expire mid-outage and fan-out
+// would start failing, so this exercises it against a real server rather than
+// a fake.
+func TestValkeyCache_Integration_SlideExtendsTheDeadline(t *testing.T) {
+	client := setupValkey(t)
+	cache := NewValkeyCache(client)
+	ctx := context.Background()
+
+	require.NoError(t, cache.Set(ctx, "room-slide", []Member{{ID: "u1", Account: "alice"}}, 2*time.Second))
+	require.NoError(t, cache.Slide(ctx, "room-slide", time.Hour))
+
+	// Well past the original 2s deadline: without the slide this key is gone.
+	time.Sleep(3 * time.Second)
+
+	got, err := cache.Get(ctx, "room-slide")
+	require.NoError(t, err, "the slid entry must outlive its original TTL")
+	assert.Equal(t, []Member{{ID: "u1", Account: "alice"}}, got.Members)
+}
+
+// The slide must use EXPIRE, not SET. A membership change can bust the entry
+// between the read and the slide, and a slide that rewrote the value would
+// resurrect members who were just removed — handing back access the source of
+// truth had already withdrawn.
+func TestValkeyCache_Integration_SlideCannotResurrectAnInvalidatedEntry(t *testing.T) {
+	client := setupValkey(t)
+	cache := NewValkeyCache(client)
+	ctx := context.Background()
+
+	require.NoError(t, cache.Set(ctx, "room-busted", []Member{{ID: "u1", Account: "alice"}}, time.Minute))
+	require.NoError(t, cache.Invalidate(ctx, "room-busted"))
+
+	require.NoError(t, cache.Slide(ctx, "room-busted", time.Hour), "sliding an absent key is a no-op, not an error")
+
+	_, err := cache.Get(ctx, "room-busted")
+	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss, "a slide must never resurrect an invalidated entry")
+}
