@@ -405,7 +405,7 @@ func TestContextWithPublicIdentity_MasterOffZeroesSpanAttributes(t *testing.T) {
 
 	recorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
-	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	t.Cleanup(func() { assert.NoError(t, tp.Shutdown(context.Background())) })
 
 	forged, err := baggage.New(
 		mustBaggageMember(t, o11y.UserNameKey, "forged-user"),
