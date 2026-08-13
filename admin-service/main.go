@@ -49,13 +49,9 @@ func run() error {
 
 	db := mongoClient.Database(cfg.MongoDB)
 	st := newStoreMongo(db)
-	if err := st.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure indexes: %w", err)
-	}
+	mongoutil.EnsureIndexesBestEffort(ctx, "admin-service store", st.EnsureIndexes)
 	sessStore := session.NewMongoStore(db)
-	if err := sessStore.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure session indexes: %w", err)
-	}
+	mongoutil.EnsureIndexesBestEffort(ctx, "admin-service sessions", sessStore.EnsureIndexes)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {

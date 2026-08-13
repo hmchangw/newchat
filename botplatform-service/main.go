@@ -57,9 +57,7 @@ func run() error {
 
 	db := mongoClient.Database(cfg.MongoDB)
 	sessionStore := session.NewMongoStore(db)
-	if err := sessionStore.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure session indexes: %w", err)
-	}
+	mongoutil.EnsureIndexesBestEffort(ctx, "botplatform-service sessions", sessionStore.EnsureIndexes)
 	st := newStoreMongo(db)
 	subStore := newMongoSubscriptionStore(db)
 	h := newHandler(st, &cfg)

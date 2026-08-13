@@ -69,9 +69,7 @@ func run() error {
 	}
 
 	store := newMongoCardStore(mongoClient.Database(cfg.MongoDB))
-	if err := store.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure cards indexes: %w", err)
-	}
+	mongoutil.EnsureIndexesBestEffort(ctx, "tcard-service cards", store.EnsureIndexes)
 
 	// Populate the card cache in the background; /readyz stays unavailable
 	// until the first successful load.

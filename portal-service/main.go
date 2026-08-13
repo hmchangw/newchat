@@ -111,9 +111,7 @@ func run() error {
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	store := newMongoDirectoryStore(mongoClient.Database(cfg.MongoDB))
-	if err := store.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure directory indexes: %w", err)
-	}
+	mongoutil.EnsureIndexesBestEffort(ctx, "portal-service directory", store.EnsureIndexes)
 
 	// Populate the directory cache in the background; /readyz stays
 	// unavailable until the first successful load.

@@ -191,13 +191,9 @@ func main() {
 	slog.Info("mongo secondary-read preference configured", "readPreference", readPref.Mode().String())
 
 	store := NewMongoStore(db, WithReadPreference(readPref))
-	// Bounded timeout so a hung createIndexes surfaces at startup.
+	// Bounded timeout so a hung createIndexes can't stall startup.
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := store.EnsureIndexes(ensureCtx); err != nil {
-		ensureCancel()
-		slog.Error("ensure store indexes failed", "error", err)
-		os.Exit(1)
-	}
+	mongoutil.EnsureIndexesBestEffort(ensureCtx, "room-service store", store.EnsureIndexes)
 	ensureCancel()
 
 	// Read receipts resolve the target message through history-service (which

@@ -626,10 +626,7 @@ func main() {
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	if err := store.ensureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
-	}
+	mongoutil.EnsureIndexesBestEffort(ctx, "inbox-worker thread_subscriptions", store.ensureIndexes)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
