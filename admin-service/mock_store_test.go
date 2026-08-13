@@ -55,6 +55,20 @@ func (mr *MockAdminStoreMockRecorder) AppendAudit(ctx, e any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppendAudit", reflect.TypeOf((*MockAdminStore)(nil).AppendAudit), ctx, e)
 }
 
+// AppendAuditMany mocks base method.
+func (m *MockAdminStore) AppendAuditMany(ctx context.Context, entries []*AuditEntry) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AppendAuditMany", ctx, entries)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AppendAuditMany indicates an expected call of AppendAuditMany.
+func (mr *MockAdminStoreMockRecorder) AppendAuditMany(ctx, entries any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppendAuditMany", reflect.TypeOf((*MockAdminStore)(nil).AppendAuditMany), ctx, entries)
+}
+
 // CreateUser mocks base method.
 func (m *MockAdminStore) CreateUser(ctx context.Context, u *model.User) error {
 	m.ctrl.T.Helper()
@@ -97,6 +111,21 @@ func (mr *MockAdminStoreMockRecorder) EnsureIndexes(ctx any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureIndexes", reflect.TypeOf((*MockAdminStore)(nil).EnsureIndexes), ctx)
 }
 
+// FindAccountStates mocks base method.
+func (m *MockAdminStore) FindAccountStates(ctx context.Context, accounts []string) (map[string]bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindAccountStates", ctx, accounts)
+	ret0, _ := ret[0].(map[string]bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindAccountStates indicates an expected call of FindAccountStates.
+func (mr *MockAdminStoreMockRecorder) FindAccountStates(ctx, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindAccountStates", reflect.TypeOf((*MockAdminStore)(nil).FindAccountStates), ctx, accounts)
+}
+
 // GetUserByAccount mocks base method.
 func (m *MockAdminStore) GetUserByAccount(ctx context.Context, siteID, account string) (*model.User, error) {
 	m.ctrl.T.Helper()
@@ -127,6 +156,36 @@ func (mr *MockAdminStoreMockRecorder) GetUserForAuth(ctx, siteID, account any) *
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserForAuth", reflect.TypeOf((*MockAdminStore)(nil).GetUserForAuth), ctx, siteID, account)
 }
 
+// GetUserPermissions mocks base method.
+func (m *MockAdminStore) GetUserPermissions(ctx context.Context, account string) (*model.UserPermissions, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUserPermissions", ctx, account)
+	ret0, _ := ret[0].(*model.UserPermissions)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUserPermissions indicates an expected call of GetUserPermissions.
+func (mr *MockAdminStoreMockRecorder) GetUserPermissions(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserPermissions", reflect.TypeOf((*MockAdminStore)(nil).GetUserPermissions), ctx, account)
+}
+
+// GetUserPermissionsForAccounts mocks base method.
+func (m *MockAdminStore) GetUserPermissionsForAccounts(ctx context.Context, accounts []string) (map[string]*model.UserPermissions, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUserPermissionsForAccounts", ctx, accounts)
+	ret0, _ := ret[0].(map[string]*model.UserPermissions)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUserPermissionsForAccounts indicates an expected call of GetUserPermissionsForAccounts.
+func (mr *MockAdminStoreMockRecorder) GetUserPermissionsForAccounts(ctx, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserPermissionsForAccounts", reflect.TypeOf((*MockAdminStore)(nil).GetUserPermissionsForAccounts), ctx, accounts)
+}
+
 // ListAudit mocks base method.
 func (m *MockAdminStore) ListAudit(ctx context.Context, siteID string, f AuditFilter, page, limit int) ([]AuditEntry, int64, error) {
 	m.ctrl.T.Helper()
@@ -143,6 +202,22 @@ func (mr *MockAdminStoreMockRecorder) ListAudit(ctx, siteID, f, page, limit any)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListAudit", reflect.TypeOf((*MockAdminStore)(nil).ListAudit), ctx, siteID, f, page, limit)
 }
 
+// ListPermissionGrants mocks base method.
+func (m *MockAdminStore) ListPermissionGrants(ctx context.Context, subjectAccount string, permission model.PermissionKey, page, limit int) ([]model.PermissionGrant, int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListPermissionGrants", ctx, subjectAccount, permission, page, limit)
+	ret0, _ := ret[0].([]model.PermissionGrant)
+	ret1, _ := ret[1].(int64)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// ListPermissionGrants indicates an expected call of ListPermissionGrants.
+func (mr *MockAdminStoreMockRecorder) ListPermissionGrants(ctx, subjectAccount, permission, page, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPermissionGrants", reflect.TypeOf((*MockAdminStore)(nil).ListPermissionGrants), ctx, subjectAccount, permission, page, limit)
+}
+
 // Ping mocks base method.
 func (m *MockAdminStore) Ping(ctx context.Context) error {
 	m.ctrl.T.Helper()
@@ -155,6 +230,20 @@ func (m *MockAdminStore) Ping(ctx context.Context) error {
 func (mr *MockAdminStoreMockRecorder) Ping(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Ping", reflect.TypeOf((*MockAdminStore)(nil).Ping), ctx)
+}
+
+// RecordPermissionChange mocks base method.
+func (m *MockAdminStore) RecordPermissionChange(ctx context.Context, grants []*model.PermissionGrant, state model.PermissionState) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RecordPermissionChange", ctx, grants, state)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RecordPermissionChange indicates an expected call of RecordPermissionChange.
+func (mr *MockAdminStoreMockRecorder) RecordPermissionChange(ctx, grants, state any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecordPermissionChange", reflect.TypeOf((*MockAdminStore)(nil).RecordPermissionChange), ctx, grants, state)
 }
 
 // SearchUsers mocks base method.

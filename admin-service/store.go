@@ -72,6 +72,37 @@ type AdminStore interface {
 	AppendAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, siteID string, f AuditFilter, page, limit int) ([]AuditEntry, int64, error)
 
+	// RecordPermissionChange appends the batch to the ledger and applies the derived
+	// state to the subjects' user documents under the per-key watermark guard — one
+	// transaction, all-or-nothing. Subject accounts are derived from the grants.
+	RecordPermissionChange(ctx context.Context, grants []*model.PermissionGrant, state model.PermissionState) error
+
+	// GetUserPermissions returns the account's materialized permission snapshot;
+	// (nil, nil) when the user or snapshot does not exist. Site-unfiltered: subjects
+	// may be homed at any site.
+	GetUserPermissions(ctx context.Context, account string) (*model.UserPermissions, error)
+
+	// GetUserPermissionsForAccounts returns the materialized snapshots for the given
+	// accounts in one read; accounts with no user doc are absent from the map.
+	// Site-unfiltered, like GetUserPermissions. Used by the resync endpoint, which only
+	// re-delivers this snapshot — never writes.
+	GetUserPermissionsForAccounts(ctx context.Context, accounts []string) (map[string]*model.UserPermissions, error)
+
+	// ListPermissionGrants returns the ledger newest-first (recordedAt desc, _id
+	// desc), company-wide (site-unfiltered — subjects may be homed at any site).
+	// subjectAccount == "" means all subjects; permission == "" means all
+	// permissions. The two filters are independent and any combination —
+	// including both empty — is valid.
+	ListPermissionGrants(ctx context.Context, subjectAccount string, permission model.PermissionKey, page, limit int) ([]model.PermissionGrant, int64, error)
+
+	// FindAccountStates reports account -> IsActive company-wide (the local users
+	// collection covers every site's users; subjects may be homed anywhere).
+	FindAccountStates(ctx context.Context, accounts []string) (map[string]bool, error)
+
+	// AppendAuditMany inserts all entries in one InsertMany. Best-effort contract same
+	// as AppendAudit (caller logs, never fails the request).
+	AppendAuditMany(ctx context.Context, entries []*AuditEntry) error
+
 	EnsureIndexes(ctx context.Context) error
 	Ping(ctx context.Context) error
 }

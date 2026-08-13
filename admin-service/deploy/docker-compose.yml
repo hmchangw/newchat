@@ -13,6 +13,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - PORT=8082
       - SITE_ID=${SITE_ID:-site-local}
+      - ALL_SITE_IDS=${ALL_SITE_IDS:-${SITE_ID:-site-local}}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}
       - NATS_URL=${NATS_URL:-nats://nats:4222}

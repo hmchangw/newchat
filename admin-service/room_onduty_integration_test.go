@@ -93,7 +93,7 @@ func newOnDutyRig(t *testing.T, siteID string, reply func(model.RoomRestrictedRe
 	t.Cleanup(func() { _ = clientConn.NatsConn().Drain() })
 
 	cfg := Config{SiteID: siteID, BcryptCost: 4, SessionsMaxPerAccount: 100, RoomRPCTimeout: 5 * time.Second}
-	h := newHandler(store, sessions, cfg, clientConn)
+	h := newHandler(store, sessions, cfg, clientConn, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -218,7 +218,7 @@ func TestIntegration_SetRoomOnDuty_RPCTimeout(t *testing.T) {
 
 	const rpcTimeout = 300 * time.Millisecond
 	cfg := Config{SiteID: "site-c", BcryptCost: 4, SessionsMaxPerAccount: 100, RoomRPCTimeout: rpcTimeout}
-	h := newHandler(store, sessions, cfg, clientConn)
+	h := newHandler(store, sessions, cfg, clientConn, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
