@@ -14,6 +14,7 @@ import (
 
 	o11ygin "github.com/flywindy/o11y/gin"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -49,7 +50,12 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		// Bot login and every authenticated bot request read Mongo, so a stopped
+		// Mongo must error rather than hold each request for the driver's 30s
+		// default.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
@@ -59,8 +65,14 @@ func run() error {
 	if err := sessionStore.EnsureIndexes(ctx); err != nil {
 		return fmt.Errorf("ensure session indexes: %w", err)
 	}
-	st := newStoreMongo(db)
-	subStore := newMongoSubscriptionStore(db)
+	// One breaker for every Mongo read in this service: they are all evidence
+	// about the same fact — is Mongo reachable — so they share a failure budget
+	// rather than each re-learning the outage.
+	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "mongo"),
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
+	st := newStoreMongo(db, mongoBreaker)
+	subStore := newMongoSubscriptionStore(db, mongoBreaker)
 	h := newHandler(st, &cfg)
 	h.subs = subStore
 

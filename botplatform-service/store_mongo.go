@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/session"
 )
@@ -15,29 +17,40 @@ import (
 type storeMongo struct {
 	users    *mongo.Collection
 	sessions session.Store
+	breaker  *circuitbreaker.Breaker
 }
 
-func newStoreMongo(db *mongo.Database) *storeMongo {
+func newStoreMongo(db *mongo.Database, breaker *circuitbreaker.Breaker) *storeMongo {
 	return &storeMongo{
 		users:    db.Collection("users"),
 		sessions: session.NewMongoStore(db),
+		breaker:  breaker,
 	}
+}
+
+// mongoBreakerFailure exempts the "healthy absence" sentinels: an unknown
+// account or an unrecognised session is an answer from a working Mongo, not
+// evidence it is down.
+func mongoBreakerFailure(err error) bool {
+	return err != nil && !errors.Is(err, mongo.ErrNoDocuments) && !errors.Is(err, model.ErrSubscriptionNotFound)
 }
 
 func (s *storeMongo) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
 	var u model.User
-	err := s.users.FindOne(ctx, bson.M{"account": account},
-		options.FindOne().SetProjection(bson.M{
-			"_id":                   1,
-			"account":               1,
-			"siteId":                1,
-			"engName":               1,
-			"chineseName":           1,
-			"roles":                 1,
-			"requirePasswordChange": 1,
-			"services.password":     1,
-			"active":                1,
-		})).Decode(&u)
+	err := s.breaker.Do(func() error {
+		return s.users.FindOne(ctx, bson.M{"account": account},
+			options.FindOne().SetProjection(bson.M{
+				"_id":                   1,
+				"account":               1,
+				"siteId":                1,
+				"engName":               1,
+				"chineseName":           1,
+				"roles":                 1,
+				"requirePasswordChange": 1,
+				"services.password":     1,
+				"active":                1,
+			})).Decode(&u)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("find user by account: %w", err)
 	}
@@ -49,7 +62,9 @@ func (s *storeMongo) InsertSession(ctx context.Context, sess *session.Session) e
 }
 
 func (s *storeMongo) FindSessionByHash(ctx context.Context, hash string) (*session.Session, error) {
-	return s.sessions.FindByHash(ctx, hash)
+	return circuitbreaker.Do1(s.breaker, func() (*session.Session, error) {
+		return s.sessions.FindByHash(ctx, hash)
+	})
 }
 
 func (s *storeMongo) DeleteSessionsBeyondCap(ctx context.Context, account string, max int) (int64, error) {

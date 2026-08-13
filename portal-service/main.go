@@ -53,10 +53,13 @@ type config struct {
 	// cron so a newly provisioned user appears within a couple of hours.
 	CacheRefreshInterval time.Duration `env:"PORTAL_CACHE_REFRESH_INTERVAL" envDefault:"2h"`
 
-	MongoURI      string `env:"MONGO_URI,required"`
-	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	MongoURI           string        `env:"MONGO_URI,required"`
+	MongoDB            string        `env:"MONGO_DB"       envDefault:"chat"`
+	MongoUsername      string        `env:"MONGO_USERNAME" envDefault:""`
+	MongoPassword      string        `env:"MONGO_PASSWORD" envDefault:""`
+	MongoSelectTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	MongoBreakerFails  int           `env:"MONGO_BREAKER_FAILS"            envDefault:"5"`
+	MongoBreakerCool   time.Duration `env:"MONGO_BREAKER_COOLDOWN"         envDefault:"10s"`
 	// MongoReadPreference: read-only service (directory lookups); secondaryPreferred
 	// offloads the primary.
 	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
@@ -104,7 +107,12 @@ func run() error {
 		return fmt.Errorf("parse mongo read preference %q: %w", cfg.MongoReadPreference, err)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		// The directory cache answers every login for a known account without
+		// touching Mongo, so this bounds only the cache-miss fallback — which
+		// otherwise holds a login request open for the driver's 30s default
+		// before denying an account that does not exist.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
