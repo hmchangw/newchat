@@ -523,16 +523,17 @@ func TestVerifier_ShutdownBoundedByContext(t *testing.T) {
 
 	expired, cancel := context.WithCancel(context.Background())
 	cancel()
-	done := make(chan struct{})
-	go func() { v.Shutdown(expired); close(done) }()
+	done := make(chan error, 1)
+	go func() { done <- v.Shutdown(expired) }()
 	select {
-	case <-done:
+	case err := <-done:
+		require.Error(t, err, "an expired context must surface as a shutdown error")
 	case <-time.After(2 * time.Second):
 		t.Fatal("Shutdown did not honour its context deadline")
 	}
 
 	close(release) // let the parked check finish, then drain it
-	v.Shutdown(context.Background())
+	assert.NoError(t, v.Shutdown(context.Background()))
 }
 
 func TestSleepCtx(t *testing.T) {
@@ -846,6 +847,88 @@ func TestCompile_DefensiveSkipAndSort(t *testing.T) {
 	assert.Equal(t, "b", cs.pairs["m"][1].DestField)
 	assert.NotContains(t, cs.pairs, "ghost")
 	assert.Empty(t, cs.pairs["v"]) // verbatim target carries no pairs
+}
+
+// Inspect must share lookupDest's nil-cassandra guard — a mapping with a
+// cassandra target but no wired store degrades to a lookup error, not a panic.
+func TestVerifier_Inspect_NilCassandraStore(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	src := NewMockSourceStore(ctrl)
+	tgt := NewMockTargetStore(ctrl)
+	results := newResultsStore(10, 10, nil)
+	v := newVerifier(verifierMapping(), src, tgt, nil,
+		newTransformRegistry(msgbucket.New(72*time.Hour)), results,
+		verifierConfig{Poll: time.Second, Timeout: time.Minute, MaxChecks: 4, SamplePercent: 100})
+
+	src.EXPECT().FindByID(gomock.Any(), "rocketchat_message", "m1").Return(srcDoc(), nil)
+	tgt.EXPECT().FindOne(gomock.Any(), "rooms", map[string]any{"_id": "r1"}, nil).
+		Return(map[string]any{"_id": "r1"}, nil)
+
+	got, err := v.Inspect(context.Background(), "rocketchat_message", "m1")
+	require.NoError(t, err)
+	require.Len(t, got.Targets, 2) // sorted: byId (cassandra), room (mongo)
+	assert.Contains(t, got.Targets[0].Error, "lookup-error:")
+	assert.Contains(t, got.Targets[0].Error, "no cassandra store")
+	assert.NotNil(t, got.Targets[1].Doc)
+}
+
+// A check queued behind MAX_CHECKS must still terminate at VERIFY_TIMEOUT —
+// the deadline counts from Submit, semaphore wait included.
+func TestVerifier_QueuedCheckFailsAtDeadline(t *testing.T) {
+	v, src, tgt, cass, results := testVerifier(t,
+		verifierConfig{Poll: 10 * time.Millisecond, Timeout: 80 * time.Millisecond, MaxChecks: 1, SamplePercent: 100})
+	src.EXPECT().FindByID(gomock.Any(), gomock.Any(), gomock.Any()).Return(srcDoc(), nil).AnyTimes()
+	tgt.EXPECT().FindOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errNotFound).AnyTimes()
+	cass.EXPECT().SelectOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errNotFound).AnyTimes()
+	// Park the semaphore holder between polls; only its context can free it.
+	v.sleep = func(ctx context.Context, _ time.Duration) bool {
+		<-ctx.Done()
+		return false
+	}
+
+	v.Submit(insertEvent("m1")) // takes the only semaphore slot, parks
+	v.Submit(insertEvent("m2")) // queued behind m1
+
+	waitState(t, results, "m2", StateFailed)
+	waitState(t, results, "m1", StateFailed)
+	v.Shutdown(context.Background())
+}
+
+// A skipped newer event on the same key still supersedes the pending check:
+// the doc changed again, so the old convergence target is stale.
+func TestVerifier_SkipEventSupersedesPending(t *testing.T) {
+	newParked := func(t *testing.T) (*verifier, *resultsStore) {
+		t.Helper()
+		v, src, tgt, cass, results := testVerifier(t,
+			verifierConfig{Poll: time.Second, Timeout: 60 * time.Second, MaxChecks: 4, SamplePercent: 100})
+		src.EXPECT().FindByID(gomock.Any(), gomock.Any(), "m1").Return(srcDoc(), nil).AnyTimes()
+		tgt.EXPECT().FindOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errNotFound).AnyTimes()
+		cass.EXPECT().SelectOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errNotFound).AnyTimes()
+		v.sleep = func(ctx context.Context, _ time.Duration) bool {
+			<-ctx.Done()
+			return false
+		}
+		v.Submit(insertEvent("m1"))
+		waitState(t, results, "m1", StatePending)
+		return v, results
+	}
+
+	t.Run("op-skip supersedes", func(t *testing.T) {
+		v, results := newParked(t)
+		v.Submit(CDCEvent{Collection: "rocketchat_message", Op: "update", DocID: "m1"}) // update -> op-skip
+		waitState(t, results, "m1", StateSuperseded)
+		waitState(t, results, "m1", StateSkipped)
+		v.Shutdown(context.Background())
+	})
+
+	t.Run("sampled-out supersedes", func(t *testing.T) {
+		v, results := newParked(t)
+		v.sampleFn = func() int { return 100 } // >= SamplePercent -> sampled out
+		v.Submit(insertEvent("m1"))
+		waitState(t, results, "m1", StateSuperseded)
+		waitState(t, results, "m1", StateSkipped)
+		v.Shutdown(context.Background())
+	})
 }
 
 func TestNewVerifier_DefaultSampleFn(t *testing.T) {

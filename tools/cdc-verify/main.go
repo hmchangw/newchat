@@ -241,7 +241,7 @@ func main() {
 
 	shutdown.Wait(context.Background(), 25*time.Second,
 		func(sctx context.Context) error { return srv.Shutdown(sctx) },
-		func(sctx context.Context) error { cancel(); v.Shutdown(sctx); return nil },
+		func(sctx context.Context) error { cancel(); return v.Shutdown(sctx) },
 		func(_ context.Context) error { return nc.Drain() },
 		func(sctx context.Context) error {
 			mongoutil.Disconnect(sctx, srcClient)

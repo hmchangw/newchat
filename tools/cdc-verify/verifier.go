@@ -247,10 +247,12 @@ func (v *verifier) Submit(ev CDCEvent) {
 	}
 	action := cs.src.Action(ev.Op)
 	if action == OpSkip {
+		v.supersedeKey(pendingKey(ev.Collection, ev.DocID))
 		v.skip(&row, "op-skip", nowMs)
 		return
 	}
 	if v.sampleFn() >= v.cfg.SamplePercent {
+		v.supersedeKey(pendingKey(ev.Collection, ev.DocID))
 		v.skip(&row, "sampled-out", nowMs)
 		return
 	}
@@ -261,7 +263,10 @@ func (v *verifier) Submit(ev CDCEvent) {
 		row.Targets[i] = TargetResult{Alias: alias}
 	}
 
-	ctx, cancel := context.WithCancel(v.baseCtx)
+	// The verify deadline counts from Submit — semaphore wait included — so a
+	// queued check expires instead of parking forever behind MAX_CHECKS.
+	deadline := v.now().Add(v.cfg.Timeout)
+	ctx, cancel := context.WithTimeout(v.baseCtx, v.cfg.Timeout)
 	h := &checkHandle{cancel: cancel}
 	key := pendingKey(ev.Collection, ev.DocID)
 	prev, started := v.beginCheck(key, h)
@@ -277,7 +282,7 @@ func (v *verifier) Submit(ev CDCEvent) {
 
 	go func() {
 		defer v.wg.Done()
-		v.runCheck(ctx, h, key, &row, cs, action)
+		v.runCheck(ctx, h, key, &row, cs, action, deadline)
 	}()
 }
 
@@ -286,6 +291,18 @@ func (v *verifier) skip(row *CheckResult, reason string, nowMs int64) {
 	row.SkipReason = reason
 	row.EndedAtMs = nowMs
 	v.results.Upsert(*row)
+}
+
+// supersedeKey cancels any pending check on key as superseded: a newer event
+// on the doc — even one this verifier skips — makes the old target stale.
+func (v *verifier) supersedeKey(key string) {
+	v.mu.Lock()
+	prev := v.pending[key]
+	v.mu.Unlock()
+	if prev != nil {
+		prev.superseded.Store(true)
+		prev.cancel()
+	}
 }
 
 func pendingKey(collection, docID string) string { return collection + "\x00" + docID }
@@ -324,24 +341,23 @@ type targetState struct {
 // runCheck owns one row from PENDING to a terminal state; its goroutine is the
 // row's sole writer and hands copies to the store.
 func (v *verifier) runCheck(ctx context.Context, h *checkHandle, key string, row *CheckResult,
-	cs *compiledSource, action OpAction,
+	cs *compiledSource, action OpAction, deadline time.Time,
 ) {
 	defer v.unregisterPending(key, h)
 	defer h.cancel() // release the context even on the terminal-state paths
-
-	select {
-	case v.sem <- struct{}{}:
-	case <-ctx.Done():
-		v.finishCancelled(h, row)
-		return
-	}
-	defer func() { <-v.sem }()
 
 	states := make([]targetState, len(cs.aliases))
 	for i, alias := range cs.aliases {
 		states[i] = targetState{alias: alias}
 	}
-	deadline := v.now().Add(v.cfg.Timeout)
+
+	select {
+	case v.sem <- struct{}{}:
+	case <-ctx.Done():
+		v.finishInterrupted(ctx, h, row, states)
+		return
+	}
+	defer func() { <-v.sem }()
 
 	for {
 		row.Attempts++
@@ -349,10 +365,10 @@ func (v *verifier) runCheck(ctx context.Context, h *checkHandle, key string, row
 
 		switch {
 		case allMatched(states):
-			v.finish(row, StateMatched, states)
+			v.finish(h, row, StateMatched, states)
 			return
 		case failNow, !v.now().Before(deadline):
-			v.finish(row, StateFailed, states)
+			v.finish(h, row, StateFailed, states)
 			return
 		}
 
@@ -361,7 +377,7 @@ func (v *verifier) runCheck(ctx context.Context, h *checkHandle, key string, row
 		v.results.Upsert(*row)
 
 		if !v.sleep(ctx, v.cfg.Poll) {
-			v.finishCancelled(h, row)
+			v.finishInterrupted(ctx, h, row, states)
 			return
 		}
 	}
@@ -600,26 +616,36 @@ func snapshotTargets(states []targetState, withDiffs bool) []TargetResult {
 	return out
 }
 
-func (v *verifier) finish(row *CheckResult, state CheckState, states []targetState) {
+// finish publishes the terminal state; a supersede that raced the terminal
+// transition wins, so the row never shows matched/failed for a stale target.
+func (v *verifier) finish(h *checkHandle, row *CheckResult, state CheckState, states []targetState) {
+	if h.superseded.Load() {
+		state = StateSuperseded
+	}
 	row.State = state
 	row.Targets = snapshotTargets(states, state == StateFailed)
 	row.EndedAtMs = v.now().UTC().UnixMilli()
 	v.results.Upsert(*row)
 }
 
-// finishCancelled: a superseded check records that outcome; a shutdown one
-// keeps its last observed state.
-func (v *verifier) finishCancelled(h *checkHandle, row *CheckResult) {
-	if !h.superseded.Load() {
-		return
+// finishInterrupted classifies a ctx-done wakeup: superseded by a newer event,
+// expired at the verify deadline (failed), or shutting down (keep last state).
+func (v *verifier) finishInterrupted(ctx context.Context, h *checkHandle, row *CheckResult, states []targetState) {
+	switch {
+	case h.superseded.Load():
+		v.finish(h, row, StateSuperseded, states)
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		for i := range states {
+			if !states[i].matched && states[i].cause == "" {
+				states[i].cause = "timeout"
+			}
+		}
+		v.finish(h, row, StateFailed, states)
 	}
-	row.State = StateSuperseded
-	row.EndedAtMs = v.now().UTC().UnixMilli()
-	v.results.Upsert(*row)
 }
 
 // Shutdown cancels every in-flight check and waits for them, bounded by ctx.
-func (v *verifier) Shutdown(ctx context.Context) {
+func (v *verifier) Shutdown(ctx context.Context) error {
 	v.mu.Lock()
 	v.closed = true
 	v.mu.Unlock()
@@ -631,7 +657,9 @@ func (v *verifier) Shutdown(ctx context.Context) {
 	}()
 	select {
 	case <-done:
+		return nil
 	case <-ctx.Done():
+		return fmt.Errorf("verifier shutdown: checks still in flight: %w", ctx.Err())
 	}
 }
 
@@ -717,13 +745,9 @@ func (v *verifier) Inspect(ctx context.Context, collection, docID string) (Inspe
 			continue
 		}
 		it.Key = key
-		// nil columns/fields => whole doc / SELECT * — the inspect view wants everything
-		var doc map[string]any
-		if t.Kind == "cassandra" {
-			doc, err = v.cass.SelectOne(ctx, t.Table, key, nil)
-		} else {
-			doc, err = v.target.FindOne(ctx, t.Collection, key, nil)
-		}
+		// nil columns/fields => whole doc / SELECT * — the inspect view wants
+		// everything; lookupDest also guards the no-cassandra-store case.
+		doc, err := v.lookupDest(ctx, &t, key, nil)
 		switch {
 		case errors.Is(err, errNotFound):
 			it.Error = "not-found"
