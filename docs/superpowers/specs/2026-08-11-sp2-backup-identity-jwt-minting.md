@@ -62,22 +62,24 @@ time — so the mint path needs nothing from SP1.
 
 Neither is new minting logic; both are config/ops.
 
-### 4.1 The `chat.local.room.>` grant (shared template, SP0-coupled)
+### 4.1 The `chat.local.room.>` grant (shared template — ALREADY LANDED on `main`)
+> **Status update (2026-08-12): this deliverable is DONE on `main`.** SP0 has
+> merged to `main`, and the `chat.local.room.>` subscribe grant is already
+> present in the shared scoped-signing template (`docker-local/setup.sh:58`,
+> `--allow-sub "chat.local.room.>"`) and in the `signNATSJWT` "effective grants"
+> docstring (`auth-service/handler.go`, "Sub allow: … chat.room.>,
+> chat.local.room.> …"). Under the shared org account this was always **one edit
+> to one shared template**, and it has been made. **SP2 has no grant work left.**
+> (The failover branch family predates this on an older base — merge-base
+> `fc828a6`, ~67 commits behind `main` — which is why earlier revisions of this
+> spec framed the grant as forward-looking.)
+
 Post-SP0, same-site rooms move to `chat.local.room.{id}.>`. A user's JWT must then
 **subscribe `chat.local.room.>`** or they lose the majority of their rooms
-(design §7, req #1). Under the shared account this is **one edit to the shared
-scoped-signing template** (`docker-local/setup.sh` and its prod equivalent): add
-`--allow-sub "chat.local.room.>"` next to the existing `chat.room.>`. Because the
-template is shared, *every* user — home and displaced — gets it identically,
-which **eliminates** the design's "backup silently missing the grant" failure mode
-rather than mitigating it (there is no separate backup template to drift).
-
-Coupled to SP0 landing (the prefix must exist first). Granting a subscribe on a
-prefix nobody publishes to yet is a harmless no-op, so it *may* ship early, but
-there is nothing to exercise until SP0 is live. Ship it **with or immediately
-after SP0**, and in the same change update the `signNATSJWT` "effective grants"
-docstring and `docs/client-api.md §2.1` (both must stay in sync with the
-template).
+(design §7, req #1). Because the template is shared, *every* user — home and
+displaced — gets the grant identically, which **eliminates** the design's "backup
+silently missing the grant" failure mode rather than mitigating it (there is no
+separate backup template to drift). This is exactly what `main` already ships.
 
 ### 4.2 Backup `auth-service` deployment (ops / SP6 handoff)
 Deploy `auth-service` at the backup with the **shared** `AUTH_SCOPED_SIGNING_KEY`
@@ -162,9 +164,11 @@ assurance is config-level:
 
 ## 12. Open sub-decisions (call out in the plan)
 
-1. **Grant timing** — ship `chat.local.room.>` on the shared template *now* (a
-   harmless no-op until SP0) vs. bundled into the SP0 PR. *Leaning: with SP0*, so
-   it is exercised the moment the prefix exists.
+1. ~~**Grant timing** — ship `chat.local.room.>` on the shared template now vs.
+   with the SP0 PR.~~ **RESOLVED — already landed on `main`** (§4.1): SP0 shipped
+   the grant in the shared template and the `signNATSJWT` docstring. No SP2 grant
+   work remains; this only needs picking up when the failover branch rebases onto
+   current `main`.
 2. **Eligibility gate** — leave `auth-service` OIDC-only (status quo, this spec's
    choice) vs. introduce a system-wide mint-time gate later. Not a failover
    decision; noted only so the option is on record.

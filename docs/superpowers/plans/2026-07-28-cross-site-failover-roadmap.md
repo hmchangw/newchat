@@ -47,15 +47,19 @@ alongside from SP1 onward.
 
 ## Sub-projects
 
-### SP0 — Local/global room subjects  *(external dependency — do not re-plan here)*
-- **Owner:** `claude/nats-subscription-reduction-z0wcya` (design + plan already
-  written there).
-- **Why it's here:** the backup's delivery correctness (spec §7) rests on the
-  `CrossSite` flag and the `chat.local.room.>` prefix. SP1b must carry `CrossSite`
-  on the DR feed; SP2 must add the `chat.local.room.>` subscribe grant to the
-  backup's JWTs.
-- **Action:** track it as a dependency; do not duplicate. Coordinate the two
-  integration points above when it lands.
+### SP0 — Local/global room subjects  *(LANDED on `main` — external, do not re-plan)*
+- **Owner:** `claude/nats-subscription-reduction-z0wcya` — **merged to `main`.**
+- **Status (2026-08-12): SHIPPED.** `main` has the `chat.local.room.{id}` subject
+  builders (`pkg/subject/subject.go`, with a `global` flag + `RouteDual`/`RouteLocal`
+  migration modes), the `CrossSite *bool` flag on `model.Room`/`SubscriptionRoom`,
+  and the `chat.local.room.>` subscribe grant in the shared scoped-signing template
+  (`docker-local/setup.sh`) + `signNATSJWT` docstring.
+- **Integration points — now resolved on `main`:** (1) the `chat.local.room.>`
+  grant SP2 needed **already exists** (SP2 has no grant work left); (2) SP1b must
+  carry `CrossSite` on the DR feed — free with whole-document oplog replication.
+- **Action:** the failover branch family is ~67 commits behind `main` (merge-base
+  `fc828a6`) and predates this. When it rebases onto current `main`, SP0 is simply
+  present — no coordination needed beyond the rebase itself.
 
 ### SP1 — DR feed + backup materialization  *(LINCHPIN — needs a design cycle first)*
 - **Deliverable:** every site continuously ships its whole-site state to the
@@ -82,9 +86,10 @@ alongside from SP1 onward.
   Production runs **one shared NATS account**, so the backup mints in that same
   account (not impersonation, no per-site keys) and reuses `auth-service`
   **unchanged**. The earlier "key-custody / KMS" brainstorm (old §11.4) is
-  **moot**. The only identity deliverables are config/ops: the shared-template
-  `chat.local.room.>` grant (SP0-coupled) and deploying `auth-service` at the
-  backup (SP6) — **no new minting code**.
+  **moot**. The shared-template `chat.local.room.>` grant is **already on `main`**
+  (SP0 shipped it — see SP0 above), so **identity is effectively complete**; the
+  only remaining identity task is deploying `auth-service` at the backup (SP6) —
+  **no new minting code, no grant work**.
 - **Serving path — still needs SP1.** Plannable once SP1 materialization exists;
   that (not identity) is the remaining SP2 substance.
 
