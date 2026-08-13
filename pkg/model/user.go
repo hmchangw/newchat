@@ -70,6 +70,9 @@ type User struct {
 	Services Services `json:"-" bson:"services,omitempty"`
 	// Settings is the per-user client-preferences sub-document; nil = never set.
 	Settings *UserSettings `json:"settings,omitempty" bson:"settings,omitempty"`
+	// Permissions is the admin-managed permission snapshot — a sibling of Settings so
+	// the settings whole-object replace can never touch it; nil = nothing ever recorded.
+	Permissions *UserPermissions `json:"permissions,omitempty" bson:"permissions,omitempty"`
 	// Chatlist is the per-user section-definition overlay; nil = never customized.
 	Chatlist *ChatlistState `json:"chatlist,omitempty" bson:"chatlist,omitempty"`
 }

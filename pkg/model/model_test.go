@@ -16,6 +16,8 @@ import (
 )
 
 func TestUserJSON(t *testing.T) {
+	from := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
 	u := model.User{
 		ID:          "u1",
 		Account:     "alice",
@@ -25,8 +27,78 @@ func TestUserJSON(t *testing.T) {
 		EngName:     "Alice Wang",
 		ChineseName: "愛麗絲",
 		EmployeeID:  "EMP001",
+		Permissions: &model.UserPermissions{
+			ExternalImageView: &model.PermissionState{
+				Granted:       true,
+				EffectiveFrom: &from,
+				ExpiresAt:     &until,
+				UpdatedAt:     time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+			},
+		},
 	}
 	roundTrip(t, &u, &model.User{})
+}
+
+func TestPermissionGrantJSON(t *testing.T) {
+	from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := model.PermissionGrant{
+		ID:               "0199f2c3a4b5701e8f2a4c6e9b1d3f00",
+		Permission:       model.PermissionExternalImageView,
+		SubjectAccount:   "alice",
+		Granted:          true,
+		EffectiveFrom:    &from,
+		ExpiresAt:        &until,
+		ApplicantAccount: "carol",
+		ApproverAccount:  "dave",
+		Reason:           "On-call staff must review production line photos from outside the fab.",
+		RecordedBy:       "p_admin_wang",
+		RecordedAt:       time.Date(2026, 8, 11, 3, 0, 0, 0, time.UTC),
+	}
+	roundTrip(t, &g, &model.PermissionGrant{})
+}
+
+func TestPermissionGrantRevokeJSON(t *testing.T) {
+	g := model.PermissionGrant{
+		ID:               "0199f2c3a4b6802f9a3b5d7fac2e4011",
+		Permission:       model.PermissionExternalImageView,
+		SubjectAccount:   "alice",
+		Granted:          false,
+		EffectiveFrom:    nil,
+		ExpiresAt:        nil,
+		ApplicantAccount: "carol",
+		ApproverAccount:  "dave",
+		Reason:           "Project ended.",
+		RecordedBy:       "p_admin_wang",
+		RecordedAt:       time.Date(2026, 8, 11, 3, 5, 0, 0, time.UTC),
+	}
+	roundTrip(t, &g, &model.PermissionGrant{})
+}
+
+func TestPermissionStateJSON(t *testing.T) {
+	from := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	ps := model.PermissionState{
+		Granted:       true,
+		EffectiveFrom: &from,
+		ExpiresAt:     &until,
+		UpdatedAt:     time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+	}
+	roundTrip(t, &ps, &model.PermissionState{})
+}
+
+func TestUserPermissionsJSON(t *testing.T) {
+	from := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	up := model.UserPermissions{
+		ExternalImageView: &model.PermissionState{
+			Granted:       true,
+			EffectiveFrom: &from,
+			ExpiresAt:     &until,
+			UpdatedAt:     time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+		},
+	}
+	roundTrip(t, &up, &model.UserPermissions{})
 }
 
 func TestUserJSON_WithSectAndDept(t *testing.T) {
@@ -4667,6 +4739,24 @@ func TestUserSettingsUpdated_UnsetSettingsOmittedFromJSON(t *testing.T) {
 	require.True(t, ok)
 	_, present := settings["fullWidth"]
 	assert.False(t, present, "an unset setting must be omitted, so absent keeps meaning client-default")
+}
+
+func TestUserPermissionsUpdatedJSON(t *testing.T) {
+	from := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	src := model.UserPermissionsUpdated{
+		Permission: model.PermissionExternalImageView,
+		Accounts:   []string{"alice", "bob"},
+		State: model.PermissionState{
+			Granted:       true,
+			EffectiveFrom: &from,
+			ExpiresAt:     &until,
+			UpdatedAt:     time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+		},
+		Timestamp: 1735689600000,
+	}
+	dst := model.UserPermissionsUpdated{}
+	roundTrip(t, &src, &dst)
 }
 
 func TestUserStatusUpdated_StatusIsShowOmittedWhenNil(t *testing.T) {
