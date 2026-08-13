@@ -249,7 +249,7 @@ func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) co
 	}
 
 	if account != "" {
-		ctx = withoutBaggageAttribute(ctx, o11y.UserNameKey)
+		ctx = withoutBaggageAttributes(ctx, o11y.UserNameKey)
 		if userBaggageEnabled.Load() {
 			next, err := o11y.ContextWithUser(ctx, account)
 			if err != nil {
@@ -260,9 +260,10 @@ func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) co
 			}
 		}
 	}
-	ctx = contextWithBaggageAttribute(ctx, RoomIDKey, roomID)
-	ctx = contextWithBaggageAttribute(ctx, SiteIDKey, siteID)
-	return ctx
+	return contextWithBaggageAttributes(ctx,
+		attribute.String(RoomIDKey, roomID),
+		attribute.String(SiteIDKey, siteID),
+	)
 }
 
 // ContextWithPublicIdentity is ContextWithIdentity for a boundary a client can
@@ -278,39 +279,86 @@ func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) co
 // entry span's attributes, which the SDK's OnStart processor materialized from
 // the forged values before any handler ran.
 func ContextWithPublicIdentity(ctx context.Context, account, roomID, siteID string) context.Context {
-	for _, key := range managedBaggageKeys {
-		ctx = withoutBaggageAttribute(ctx, key)
-	}
 	if !contextAttributesEnabled.Load() {
-		return ctx
+		// Emission is off — NATS tracing can still be forced on by
+		// OTEL_NATS_TRACING_ENABLED or the flag relay, so the caller's values can
+		// reach an observability-enabled downstream service. Nothing here will
+		// overwrite them, so every managed key has to go.
+		return withoutBaggageAttributes(ctx, managedBaggageKeys...)
 	}
+	// ContextWithIdentity drops each key it has a trusted value for, so only the
+	// unsupplied ones need clearing here.
+	ctx = withoutBaggageAttributes(ctx, unsuppliedManagedKeys(account, roomID, siteID)...)
 	return ContextWithIdentity(ctx, account, roomID, siteID)
 }
 
-func contextWithBaggageAttribute(ctx context.Context, key, value string) context.Context {
-	if value == "" {
-		return ctx
+// unsuppliedManagedKeys returns the managed keys this boundary has no trusted
+// value for. TestUnsuppliedManagedKeys pins it against ManagedBaggageKeys so a
+// key added to one is not forgotten here.
+func unsuppliedManagedKeys(account, roomID, siteID string) []string {
+	keys := make([]string, 0, len(managedBaggageKeys))
+	if account == "" {
+		keys = append(keys, o11y.UserNameKey)
 	}
-	ctx = withoutBaggageAttribute(ctx, key)
-	next, err := o11y.ContextWithBaggageValue(ctx, key, value)
-	if err != nil {
-		slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", key, "error", err)
-		return ctx
+	if roomID == "" {
+		keys = append(keys, RoomIDKey)
 	}
-	trace.SpanFromContext(next).SetAttributes(attribute.String(key, value))
-	return next
+	if siteID == "" {
+		keys = append(keys, SiteIDKey)
+	}
+	return keys
 }
 
-// withoutBaggageAttribute removes a superseded inbound value before setting a
-// trusted one. If the replacement is rejected (for example, over the SDK size
+// contextWithBaggageAttributes sets each non-empty attribute as baggage and
+// materializes the accepted ones onto the current span in one write. Empty
+// values are skipped, which preserves trusted baggage from an internal hop.
+// The o11y SDK validates one member per call, so the baggage rebuilds cannot be
+// batched; the span write can, and is.
+func contextWithBaggageAttributes(ctx context.Context, kvs ...attribute.KeyValue) context.Context {
+	accepted := make([]attribute.KeyValue, 0, len(kvs))
+	for _, kv := range kvs {
+		key, value := string(kv.Key), kv.Value.AsString()
+		if value == "" {
+			continue
+		}
+		ctx = withoutBaggageAttributes(ctx, key)
+		next, err := o11y.ContextWithBaggageValue(ctx, key, value)
+		if err != nil {
+			slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", key, "error", err)
+			continue
+		}
+		ctx = next
+		accepted = append(accepted, kv)
+	}
+	if len(accepted) > 0 {
+		trace.SpanFromContext(ctx).SetAttributes(accepted...)
+	}
+	return ctx
+}
+
+// withoutBaggageAttributes removes superseded inbound values before trusted
+// ones are set. If a replacement is rejected (for example, over the SDK size
 // limit), the old value must not survive in propagation or on the current entry
 // span. Empty span attributes are used only when OnStart already materialized a
 // value that OpenTelemetry cannot otherwise delete.
-func withoutBaggageAttribute(ctx context.Context, key string) context.Context {
-	if baggage.FromContext(ctx).Member(key).Key() == "" {
+//
+// Keys absent from the baggage are skipped, so the common case costs one map
+// lookup each and neither a baggage rebuild nor a span write.
+func withoutBaggageAttributes(ctx context.Context, keys ...string) context.Context {
+	bag := baggage.FromContext(ctx)
+	present := make([]string, 0, len(keys))
+	cleared := make([]attribute.KeyValue, 0, len(keys))
+	for _, key := range keys {
+		if bag.Member(key).Key() == "" {
+			continue
+		}
+		present = append(present, key)
+		cleared = append(cleared, attribute.String(key, ""))
+	}
+	if len(present) == 0 {
 		return ctx
 	}
-	ctx = o11y.ContextWithoutBaggageValues(ctx, key)
-	trace.SpanFromContext(ctx).SetAttributes(attribute.String(key, ""))
+	ctx = o11y.ContextWithoutBaggageValues(ctx, present...)
+	trace.SpanFromContext(ctx).SetAttributes(cleared...)
 	return ctx
 }

@@ -397,6 +397,18 @@ func mustBaggageMember(t *testing.T, key, value string) baggage.Member {
 	return member
 }
 
+// TestUnsuppliedManagedKeys guards the drift the public-ingress optimization
+// introduces: it clears only the keys no trusted value will overwrite, so a
+// managed key this helper forgets would stay caller-controlled.
+func TestUnsuppliedManagedKeys(t *testing.T) {
+	assert.ElementsMatch(t, ManagedBaggageKeys(), unsuppliedManagedKeys("", "", ""),
+		"with no trusted values every managed key must be cleared")
+	assert.Empty(t, unsuppliedManagedKeys("alice", "room-42", "site-a"),
+		"a fully supplied identity leaves nothing to pre-clear")
+	assert.Equal(t, []string{SiteIDKey}, unsuppliedManagedKeys("alice", "room-42", ""))
+	assert.Equal(t, []string{o11y.UserNameKey, RoomIDKey}, unsuppliedManagedKeys("", "", "site-a"))
+}
+
 // TestManagedBaggageKeys_MatchesMaterializedKeys guards the single source of
 // truth: a key registered for materialization but missing from the clear list
 // would be forgeable at public ingress.
