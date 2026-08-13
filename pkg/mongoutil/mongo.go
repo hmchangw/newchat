@@ -59,15 +59,28 @@ func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string,
 		runCleanup(cleanup)
 		return nil, fmt.Errorf("mongo connect: %w", err)
 	}
-	if err := client.Ping(ctx, nil); err != nil {
-		_ = client.Disconnect(context.Background())
-		runCleanup(cleanup)
-		return nil, fmt.Errorf("mongo ping: %w", err)
+	// mongo.Connect is lazy in driver v2, so this ping is the reachability
+	// check. Skipping it lets a service boot while MongoDB is down; the first
+	// operation then fails on the normal bounded path instead. See
+	// WithLazyConnect for who may opt in and why.
+	if !cfg.lazy {
+		if err := client.Ping(ctx, nil); err != nil {
+			_ = client.Disconnect(context.Background())
+			runCleanup(cleanup)
+			return nil, fmt.Errorf("mongo ping: %w", err)
+		}
 	}
 	if cleanup != nil {
 		cleanups.Store(client, cleanup)
 	}
-	slog.Info("connected to MongoDB", "uri", sanitizeURI(uri))
+	if cfg.lazy {
+		// WARN, not Info: this boot has not proven MongoDB is reachable, so
+		// it is worth seeing in logs when diagnosing a degraded service.
+		slog.Warn("MongoDB client created without startup ping (lazy connect)",
+			"uri", sanitizeURI(uri))
+	} else {
+		slog.Info("connected to MongoDB", "uri", sanitizeURI(uri))
+	}
 	return client, nil
 }
 

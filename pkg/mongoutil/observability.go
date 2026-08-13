@@ -25,6 +25,9 @@ type connectConfig struct {
 	// from the connection URI (or the driver default) survives.
 	maxPoolSize *uint64
 	minPoolSize *uint64
+	// lazy skips the startup ping so a service can boot while MongoDB is
+	// unreachable. False (ping) is the default — see WithLazyConnect.
+	lazy bool
 }
 
 // Option configures Connect. Options are additive; the zero config attaches no
