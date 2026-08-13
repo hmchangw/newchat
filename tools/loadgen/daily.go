@@ -794,7 +794,8 @@ type prodEnvFactory struct {
 
 //nolint:gocritic // cfg passed by value to satisfy envFactory interface
 func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
-	col := NewCollector(NewMetrics(), cfg.Preset)
+	metrics := NewMetrics()
+	col := NewCollector(metrics, cfg.Preset)
 	direct := newDirectPool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile, col)
 	var mux *multiplexPool
 	if cfg.MultiplexPoolSize > 0 {
@@ -808,7 +809,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 
 	// Dedicated publisher connection for emitter actions. Separate from the
 	// receiver pools so a slow consumer can't backpressure publishes.
-	pubConn, err := connectWithCreds(f.baseCfg.NatsURL, "loadgen-daily-publisher", f.baseCfg.NatsCredsFile)
+	pubConn, err := connectWithCredsHealth(f.baseCfg.NatsURL, "loadgen-daily-publisher", f.baseCfg.NatsCredsFile, "daily", metrics)
 	if err != nil {
 		slog.Error("publisher connection failed; emitters will no-op", "err", err)
 		pubConn = nil
@@ -886,7 +887,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 	if cfg.Presence {
 		presenceCollector = newPresenceCollector()
 		pp, err := newPresencePool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile,
-			cfg.PresencePublisherConns, cfg.PresenceObserverConns, presenceCollector)
+			cfg.PresencePublisherConns, cfg.PresenceObserverConns, presenceCollector, metrics)
 		if err != nil {
 			slog.Error("presence pool init failed; presence emission disabled", "err", err)
 			presencePool = nil

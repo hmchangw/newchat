@@ -1,0 +1,29 @@
+{{- if .Values.failureEvidence.enabled }}
+{{- $manifest := dict
+  "schemaVersion" 1
+  "runId" .Values.runId
+  "scenarioId" .Values.failureEvidence.scenarioId
+  "gitSha" .Values.failureEvidence.gitSha
+  "environment" .Values.failureEvidence.environment
+  "sites" (list .Values.siteId)
+  "seed" .Values.soak.randomSeed
+  "trafficProfile" .Values.failureEvidence.trafficProfile
+  "topology" (dict "natsServers" .Values.failureEvidence.natsServers "streamReplicas" .Values.failureEvidence.streamReplicas)
+  "requiredObservers" .Values.failureEvidence.requiredObservers
+  "requiredMetricContracts" .Values.failureEvidence.requiredMetricContracts
+  "faultPolicy" (dict "allowCombined" .Values.failureEvidence.allowCombinedFaults "allowDeliveryDuplicate" .Values.failureEvidence.allowDeliveryDuplicates)
+  "createdAt" .Values.failureEvidence.createdAt
+-}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cassandra-soak.failureManifestName" . }}
+  labels:
+    {{- include "cassandra-soak.labels" . | nindent 4 }}
+  annotations:
+    loadgen.newchat/run-id: {{ .Values.runId | quote }}
+immutable: true
+data:
+  manifest.json: |
+{{ $manifest | toPrettyJson | indent 4 }}
+{{- end }}

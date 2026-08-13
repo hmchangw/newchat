@@ -315,6 +315,19 @@ func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = math.NaN() },
 			want:   "SOAK_RECONCILE_READ_SHARE",
 		},
+		{
+			name:   "zero recipient observer queue",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverQueue = 0 },
+			want:   "SOAK_RECIPIENT_OBSERVER_QUEUE",
+		},
+		{
+			name: "formal manifest without retained ledger directory",
+			mutate: func(cfg *soakConfig) {
+				cfg.FailureManifestPath = "manifest.json"
+				cfg.LedgerDir = ""
+			},
+			want: "SOAK_LEDGER_DIR",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -1,4 +1,4 @@
-.PHONY: lint fmt tidy test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
+.PHONY: lint fmt tidy test test-integration test-loadgen-failure test-loadgen-failure-integration coverage-loadgen-failure coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
         o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
 
@@ -88,6 +88,22 @@ else
 	go test -race -tags integration ./...
 endif
 
+FAILURE_TEST_PATTERN := 'Failure|Manifest|FaultTimeline|Observer|Recipient|EvidenceReport|ConsumerSampler|SoakSender|SoakRuntimeSelector|LoadgenNATSHealth'
+
+test-loadgen-failure:
+	go test -race -run $(FAILURE_TEST_PATTERN) ./tools/loadgen/...
+
+test-loadgen-failure-integration:
+	go test -race -tags integration -run '^TestFailureEvidence_' ./tools/loadgen/...
+
+FAILURE_COVERAGE_PROFILE ?= coverage-loadgen-failure.out
+coverage-loadgen-failure:
+	go test -race -run $(FAILURE_TEST_PATTERN) -coverprofile=$(FAILURE_COVERAGE_PROFILE) ./tools/loadgen/...
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_ -min 80
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_observer.go -min 90
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_verdict.go -min 90
+	go run ./tools/coveragecheck -profile $(FAILURE_COVERAGE_PROFILE) -include tools/loadgen/failure_metrics.go -min 90
+
 # Run only Cassandra Run A tests (unit + integration), then enforce the scoped
 # coverage contract. CLI/environment wiring and the Mongo adapter stay in the
 # Run A aggregate; the core threshold excludes those two boundary files.
@@ -133,6 +149,7 @@ validate-loadgen-k8s:
 	helm lint --strict $(LOADGEN_CHART) -f $(LOADGEN_LOCAL_VALUES)
 	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=seed --show-only templates/seed-job.yaml > $(NULL_DEVICE)
 	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=soak --show-only templates/soak-deployment.yaml > $(NULL_DEVICE)
+	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=soak --set failureEvidence.enabled=true --set failureEvidence.gitSha=0123456789abcdef --set failureEvidence.createdAt=2026-08-13T00:00:00Z > $(NULL_DEVICE)
 	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=stopped > $(NULL_DEVICE)
 	helm template cassandra-soak $(LOADGEN_CHART) -f $(LOADGEN_VALUES) --set phase=teardown --set teardown.approved=true --show-only templates/teardown-job.yaml > $(NULL_DEVICE)
 ifeq ($(KUBE_DRY_RUN),true)

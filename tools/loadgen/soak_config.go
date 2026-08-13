@@ -57,6 +57,10 @@ type soakConfig struct {
 	ReconcileDeadline           time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
 	ReconcileRetryInterval      time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
 	ReconcileReadShare          float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
+	RecipientObserverQueue      int           `env:"RECIPIENT_OBSERVER_QUEUE"          envDefault:"8192"`
+	FailureManifestPath         string        `env:"FAILURE_MANIFEST_PATH"             envDefault:""`
+	FailureTimelinePath         string        `env:"FAILURE_TIMELINE_PATH"             envDefault:""`
+	FailureReportDir            string        `env:"FAILURE_REPORT_DIR"                envDefault:""`
 	CassandraCleanup            string        `env:"CASSANDRA_CLEANUP"                envDefault:"none"`
 	ConfirmKeyspace             string        `env:"CONFIRM_KEYSPACE"                 envDefault:""`
 	TeardownBatchRooms          int           `env:"TEARDOWN_BATCH_ROOMS"              envDefault:"250"`
@@ -95,6 +99,9 @@ func validateSoakPageBudget(pageLimit, payloadMaxBytes int, brokerMaxPayload int
 func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if strings.TrimSpace(cfg.RunID) == "" {
 		return fmt.Errorf("SOAK_RUN_ID is required")
+	}
+	if !failureRunIDPattern.MatchString(cfg.RunID) || cfg.RunID == "." || cfg.RunID == ".." {
+		return fmt.Errorf("SOAK_RUN_ID must be a filename-safe run identifier")
 	}
 	switch cfg.RunMode {
 	case soakRunModeDuration:
@@ -183,6 +190,12 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if !isFinite(cfg.ReconcileReadShare) ||
 		cfg.ReconcileReadShare <= 0 || cfg.ReconcileReadShare > 1 {
 		return fmt.Errorf("SOAK_RECONCILE_READ_SHARE must be greater than zero and at most 1")
+	}
+	if cfg.RecipientObserverQueue <= 0 {
+		return fmt.Errorf("SOAK_RECIPIENT_OBSERVER_QUEUE must be greater than zero")
+	}
+	if cfg.FailureManifestPath != "" && cfg.LedgerDir == "" {
+		return fmt.Errorf("SOAK_LEDGER_DIR is required with SOAK_FAILURE_MANIFEST_PATH")
 	}
 
 	if cfg.MaxUsers <= 0 || cfg.MaxUsers > maxBorrowedSoakUsers {

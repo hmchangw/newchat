@@ -12,6 +12,19 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
+func memberRoomSizeBucket(size int) string {
+	switch {
+	case size < 100:
+		return "lt_100"
+	case size < 500:
+		return "100_499"
+	case size < 1000:
+		return "500_999"
+	default:
+		return "gte_1000"
+	}
+}
+
 // SustainedMembersConfig is the parameter bundle for an open-loop members
 // generator.
 type SustainedMembersConfig struct {
@@ -403,7 +416,7 @@ func (g *CapacityMembersGenerator) runRoom(ctx context.Context, room *model.Room
 		select {
 		case <-ack:
 			size += g.cfg.UsersPerAdd
-			g.cfg.Metrics.MemberRoomSize.WithLabelValues(room.ID).Set(float64(size))
+			g.cfg.Metrics.MemberRoomSize.WithLabelValues(memberRoomSizeBucket(size)).Set(float64(size))
 		case <-time.After(g.cfg.E2Timeout):
 			g.cfg.Metrics.MemberPublishErrors.WithLabelValues("timeout").Inc()
 			return

@@ -50,9 +50,11 @@ func newProductionSoakSendIDs() *soakSendIDs {
 }
 
 type soakSendTarget struct {
-	UserID  string
-	Account string
-	RoomID  string
+	UserID     string
+	Account    string
+	RoomID     string
+	RoomType   model.RoomType
+	Recipients []string
 }
 
 type soakPendingSend struct {
@@ -154,6 +156,7 @@ func newSoakSender(
 	return sender
 }
 
+//nolint:gocritic // Publish snapshots the target by value into the durable pending operation.
 func (s *soakSender) Publish(
 	ctx context.Context,
 	target soakSendTarget,
@@ -184,6 +187,13 @@ func (s *soakSender) Publish(
 			kind = soakSendTopLevel
 		} else {
 			threadParentID = parent.ID
+			if target.RoomType == model.RoomTypeChannel {
+				target.Recipients = s.catalog.ThreadRecipients(
+					target.RoomID,
+					threadParentID,
+					target.Account,
+				)
+			}
 		}
 	}
 
@@ -437,6 +447,7 @@ func matchingSoakSendReply(
 func cloneSoakPendingSend(pending *soakPendingSend) *soakPendingSend {
 	cloned := *pending
 	cloned.Payload = append([]byte(nil), pending.Payload...)
+	cloned.Target.Recipients = append([]string(nil), pending.Target.Recipients...)
 	return &cloned
 }
 

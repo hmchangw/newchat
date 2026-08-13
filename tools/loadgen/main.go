@@ -581,7 +581,8 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "members", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -592,7 +593,6 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 		return 1
 	}
 
-	metrics := NewMetrics()
 	metricsSrv := &http.Server{
 		Addr:              cfg.MetricsAddr,
 		Handler:           metrics.Handler(),
@@ -810,7 +810,8 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "members", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -821,7 +822,6 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 		return 1
 	}
 
-	metrics := NewMetrics()
 	metricsSrv := &http.Server{
 		Addr:              cfg.MetricsAddr,
 		Handler:           metrics.Handler(),
@@ -1029,7 +1029,8 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "general", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -1040,7 +1041,6 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 		return 1
 	}
 
-	metrics := NewMetrics()
 	metricsSrv := &http.Server{
 		Addr:              cfg.MetricsAddr,
 		Handler:           metrics.Handler(),
@@ -1401,7 +1401,8 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 
 	_, layout := BuildBotRoomFixtures(&p, *seed, cfg.SiteID)
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "general", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -1412,7 +1413,6 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 		return 1
 	}
 
-	metrics := NewMetrics()
 	metricsSrv := &http.Server{Addr: cfg.MetricsAddr, Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

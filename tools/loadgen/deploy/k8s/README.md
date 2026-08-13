@@ -44,6 +44,21 @@ The ledger PVC is annotated with `helm.sh/resource-policy: keep` and
 `phase=stopped`, `phase=teardown`, and release removal until an operator has
 retained the evidence and explicitly deletes the claim.
 
+For a formal failure campaign, set `failureEvidence.enabled=true` and supply
+the immutable Git SHA and a UTC RFC3339 creation timestamp. The chart mounts a
+schema-v1 manifest from an immutable ConfigMap. Loadgen validates it and writes
+an fsynced retained copy to the ledger PVC before the first eligible send.
+The same PVC retains the versioned WAL, authoritative fault timeline,
+recipient anomaly journals, deterministic `report.json`, derived
+`summary.md`, and SHA-256-addressed sidecars.
+
+Fault injection remains external. Fault events correlate baseline, fault,
+recovery, settle, and reconciliation windows; they never alter the workload
+profile or perform Kubernetes actions. Recipient observation uses a separate
+NATS pool whose subscriptions are flushed before measurement. Observer or
+evidence failure makes the dependent interval inconclusive while production-
+shaped traffic continues where safe.
+
 ## Required release inputs
 
 Create one values file per run in the deployment configuration repository.
@@ -188,12 +203,18 @@ Before teardown, retain:
 - Prometheus rate, error, retry, latency, saturation, and verification data;
 - operation outcome, inflight, recovery, invalidation, WAL-size, NATS
   connection, Go runtime, and process metrics;
+- the immutable failure manifest, fault timeline, WAL, `report.json`,
+  `summary.md`, exact-ID sidecars, and every recorded SHA-256 digest;
 - Cassandra service metrics, disk usage, compaction, timeout, and latency
   evidence;
 - Mongo owned-object counts before and after cleanup.
 
 Never export Secret values, NATS credentials, plaintext message bodies, or
 wrapped key material into the evidence bundle.
+
+The controller intentionally remains a single-replica `Deployment` with
+`Recreate`, not a StatefulSet. Do not approve teardown until the retained PVC
+has been copied and its evidence digests verified.
 
 ### 5. Teardown
 

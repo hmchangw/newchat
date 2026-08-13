@@ -18,6 +18,13 @@ type Metrics struct {
 	ConsumerPending     *prometheus.GaugeVec
 	ConsumerAckPending  *prometheus.GaugeVec
 	ConsumerRedelivered *prometheus.GaugeVec
+	ConsumerUp          *prometheus.GaugeVec
+	ConsumerDelivered   *prometheus.GaugeVec
+	ConsumerAckFloor    *prometheus.GaugeVec
+	ConsumerStreamFloor *prometheus.GaugeVec
+	ConsumerMaxDeliver  *prometheus.GaugeVec
+	ConsumerAckWait     *prometheus.GaugeVec
+	ConsumerLastActive  *prometheus.GaugeVec
 
 	MemberPublished     *prometheus.CounterVec
 	MemberPublishErrors *prometheus.CounterVec
@@ -47,9 +54,15 @@ type Metrics struct {
 	FailureUntracked     *prometheus.CounterVec
 	FailureDropped       prometheus.Counter
 
-	NATSConnected        *prometheus.GaugeVec
-	NATSConnectionEvents *prometheus.CounterVec
-	NATSOutageDuration   *prometheus.HistogramVec
+	NATSConnected             *prometheus.GaugeVec
+	NATSConnectionEvents      *prometheus.CounterVec
+	NATSOutageDuration        *prometheus.HistogramVec
+	NATSCurrentOutage         *prometheus.GaugeVec
+	FailureObserverUp         *prometheus.GaugeVec
+	FailureObserverEvents     *prometheus.CounterVec
+	FailureObserverQueueDepth *prometheus.GaugeVec
+	ConsumerSampleErrors      *prometheus.CounterVec
+	RunInfo                   *prometheus.GaugeVec
 }
 
 // NewMetrics constructs a dedicated Prometheus registry with all loadgen
@@ -90,6 +103,34 @@ func NewMetrics() *Metrics {
 			prometheus.GaugeOpts{Name: "loadgen_consumer_redelivered", Help: "JetStream consumer num_redelivered."},
 			[]string{"stream", "durable"},
 		),
+		ConsumerUp: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_up", Help: "Whether the configured durable consumer was sampled successfully."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerDelivered: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_delivered_sequence", Help: "Latest delivered consumer sequence."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerAckFloor: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_ack_floor_sequence", Help: "Latest acknowledged consumer sequence."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerStreamFloor: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_ack_floor_stream_sequence", Help: "Latest acknowledged stream sequence."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerMaxDeliver: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_max_deliver", Help: "Configured maximum delivery attempts."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerAckWait: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_ack_wait_seconds", Help: "Configured acknowledgment wait duration."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerLastActive: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_last_active_timestamp_seconds", Help: "Timestamp of the latest consumer delivery sample."},
+			[]string{"stream", "durable"},
+		),
 	}
 	m.MemberPublished = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "loadgen_member_published_total", Help: "Member-add requests published by preset/phase/inject/shape."},
@@ -108,8 +149,8 @@ func NewMetrics() *Metrics {
 		[]string{"preset", "inject"},
 	)
 	m.MemberRoomSize = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{Name: "loadgen_member_room_size", Help: "Current member count per room (capacity mode only)."},
-		[]string{"room_id"},
+		prometheus.GaugeOpts{Name: "loadgen_member_room_size", Help: "Current member count by bounded size bucket (capacity mode only)."},
+		[]string{"size_bucket"},
 	)
 	m.BotRoomPublished = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "loadgen_botroom_published_total", Help: "Bot messages published by preset/phase/size."},
@@ -251,10 +292,36 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"pool"},
 	)
+	m.NATSCurrentOutage = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_nats_current_outage_seconds", Help: "Current duration of an in-progress loadgen NATS outage."},
+		[]string{"pool"},
+	)
+	m.FailureObserverUp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_failure_observer_up", Help: "Whether a required failure observer is healthy."},
+		[]string{"observer"},
+	)
+	m.FailureObserverEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_failure_observer_events_total", Help: "Normalized failure observer events."},
+		[]string{"observer", "result"},
+	)
+	m.FailureObserverQueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_failure_observer_queue_depth", Help: "Queued failure observer events."},
+		[]string{"observer"},
+	)
+	m.ConsumerSampleErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_consumer_sample_errors_total", Help: "Configured consumer sampling failures by bounded reason."},
+		[]string{"stream", "durable", "reason"},
+	)
+	m.RunInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_run_info", Help: "Bounded failure-campaign run metadata without a run ID."},
+		[]string{"environment", "scenario", "traffic_profile"},
+	)
 	r.MustRegister(
 		m.Published, m.PublishErrors,
 		m.E1Latency, m.E2Latency,
 		m.ConsumerPending, m.ConsumerAckPending, m.ConsumerRedelivered,
+		m.ConsumerUp, m.ConsumerDelivered, m.ConsumerAckFloor, m.ConsumerStreamFloor,
+		m.ConsumerMaxDeliver, m.ConsumerAckWait, m.ConsumerLastActive,
 		m.MemberPublished, m.MemberPublishErrors,
 		m.MemberE1Latency, m.MemberE2Latency, m.MemberRoomSize,
 		m.BotRoomPublished, m.BotRoomPublishErrors,
@@ -265,7 +332,9 @@ func NewMetrics() *Metrics {
 		m.FailureOperations, m.FailureObservations, m.FailureInflight,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
 		m.FailureUntracked, m.FailureDropped,
-		m.NATSConnected, m.NATSConnectionEvents, m.NATSOutageDuration,
+		m.NATSConnected, m.NATSConnectionEvents, m.NATSOutageDuration, m.NATSCurrentOutage,
+		m.FailureObserverUp, m.FailureObserverEvents, m.FailureObserverQueueDepth,
+		m.ConsumerSampleErrors, m.RunInfo,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

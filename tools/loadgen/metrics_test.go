@@ -118,6 +118,12 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 	metrics.FailureJournalBytes.Set(123)
 	metrics.NATSConnected.WithLabelValues("soak").Set(1)
 	metrics.NATSConnectionEvents.WithLabelValues("soak", "reconnected").Inc()
+	metrics.NATSCurrentOutage.WithLabelValues("soak").Set(0)
+	metrics.FailureObserverUp.WithLabelValues("recipient_broadcast").Set(1)
+	metrics.FailureObserverEvents.WithLabelValues("recipient_broadcast", "good").Inc()
+	metrics.FailureObserverQueueDepth.WithLabelValues("recipient_broadcast").Set(0)
+	metrics.ConsumerSampleErrors.WithLabelValues("MESSAGES_CANONICAL_site-local", "broadcast-worker", "lookup").Inc()
+	metrics.RunInfo.WithLabelValues("staging", "F02", "nats-core-message-v1").Set(1)
 
 	mfs, err := metrics.Registry.Gather()
 	require.NoError(t, err)
@@ -130,6 +136,12 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 		"loadgen_failure_journal_bytes",
 		"loadgen_nats_connected",
 		"loadgen_nats_connection_events_total",
+		"loadgen_nats_current_outage_seconds",
+		"loadgen_failure_observer_up",
+		"loadgen_failure_observer_events_total",
+		"loadgen_failure_observer_queue_depth",
+		"loadgen_consumer_sample_errors_total",
+		"loadgen_run_info",
 		"go_goroutines",
 		"process_resident_memory_bytes",
 	} {

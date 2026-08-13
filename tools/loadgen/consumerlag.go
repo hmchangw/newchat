@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -11,11 +12,13 @@ import (
 // ConsumerSampler polls a single durable consumer's info every interval and
 // records min/peak/final samples. Start with Run(ctx); stop by cancelling ctx.
 type ConsumerSampler struct {
+	mu       sync.Mutex
 	js       jetstream.JetStream
 	stream   string
 	durable  string
 	metrics  *Metrics
 	interval time.Duration
+	sample   func(context.Context) (*jetstream.ConsumerInfo, error)
 
 	hasSample        bool
 	minPending       uint64
@@ -45,16 +48,42 @@ func (s *ConsumerSampler) Run(ctx context.Context) {
 }
 
 func (s *ConsumerSampler) sampleOnce(ctx context.Context) {
+	if s.sample != nil {
+		info, err := s.sample(ctx)
+		if err != nil {
+			s.recordSampleError("lookup", err)
+			return
+		}
+		s.recordInfo(info)
+		return
+	}
 	cons, err := s.js.Consumer(ctx, s.stream, s.durable)
 	if err != nil {
-		slog.Warn("consumer lookup failed", "stream", s.stream, "durable", s.durable, "error", err)
+		s.recordSampleError("lookup", err)
 		return
 	}
 	info, err := cons.Info(ctx)
 	if err != nil {
-		slog.Warn("consumer info failed", "stream", s.stream, "durable", s.durable, "error", err)
+		s.recordSampleError("info", err)
 		return
 	}
+	s.recordInfo(info)
+}
+
+func (s *ConsumerSampler) recordSampleError(reason string, err error) {
+	if s.metrics != nil {
+		s.metrics.ConsumerSampleErrors.WithLabelValues(s.stream, s.durable, reason).Inc()
+		s.metrics.ConsumerUp.WithLabelValues(s.stream, s.durable).Set(0)
+	}
+	slog.Warn("consumer sample failed", "stream", s.stream, "durable", s.durable, "reason", reason, "error", err)
+}
+
+func (s *ConsumerSampler) recordInfo(info *jetstream.ConsumerInfo) {
+	if info == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	pending := info.NumPending
 	ack := uint64(info.NumAckPending)
 	redel := uint64(info.NumRedelivered)
@@ -62,6 +91,15 @@ func (s *ConsumerSampler) sampleOnce(ctx context.Context) {
 	s.metrics.ConsumerPending.WithLabelValues(s.stream, s.durable).Set(float64(pending))
 	s.metrics.ConsumerAckPending.WithLabelValues(s.stream, s.durable).Set(float64(ack))
 	s.metrics.ConsumerRedelivered.WithLabelValues(s.stream, s.durable).Set(float64(redel))
+	s.metrics.ConsumerUp.WithLabelValues(s.stream, s.durable).Set(1)
+	s.metrics.ConsumerDelivered.WithLabelValues(s.stream, s.durable).Set(float64(info.Delivered.Consumer))
+	s.metrics.ConsumerAckFloor.WithLabelValues(s.stream, s.durable).Set(float64(info.AckFloor.Consumer))
+	s.metrics.ConsumerStreamFloor.WithLabelValues(s.stream, s.durable).Set(float64(info.AckFloor.Stream))
+	s.metrics.ConsumerMaxDeliver.WithLabelValues(s.stream, s.durable).Set(float64(info.Config.MaxDeliver))
+	s.metrics.ConsumerAckWait.WithLabelValues(s.stream, s.durable).Set(info.Config.AckWait.Seconds())
+	if info.Delivered.Last != nil {
+		s.metrics.ConsumerLastActive.WithLabelValues(s.stream, s.durable).Set(float64(info.Delivered.Last.UTC().Unix()))
+	}
 
 	if !s.hasSample {
 		s.hasSample = true
@@ -88,6 +126,8 @@ func (s *ConsumerSampler) sampleOnce(ctx context.Context) {
 // passed to Run has been cancelled and its goroutine has exited);
 // concurrent calls to Snapshot while Run is still ticking are unsafe.
 func (s *ConsumerSampler) Snapshot() ConsumerStat {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return ConsumerStat{
 		Stream:         s.stream,
 		Durable:        s.durable,

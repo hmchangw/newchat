@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "manifestDigest": "manifest-sha",
+  "window": {
+    "startedAt": "2026-08-12T01:02:03Z",
+    "endedAt": "2026-08-12T01:03:03Z"
+  },
+  "lanes": [
+    {
+      "scenario": "F02",
+      "lane": "message_send",
+      "offered": 4,
+      "eligible": 4,
+      "terminals": {
+        "good": 2,
+        "bad": 1,
+        "unverified": 1,
+        "notSent": 0,
+        "missingAfterDeadline": 0
+      },
+      "latency": {
+        "p50": "10ms",
+        "p95": "100ms",
+        "p99": "250ms",
+        "max": "300ms"
+      }
+    }
+  ],
+  "observers": [
+    {
+      "observer": "recipient_broadcast",
+      "outcomes": {
+        "good": 2,
+        "bad": 0,
+        "unverified": 1,
+        "missingAfterDeadline": 1
+      }
+    }
+  ],
+  "gates": [
+    {
+      "id": "observer_health",
+      "verdict": "INCONCLUSIVE",
+      "reason": "observer gap"
+    }
+  ],
+  "sidecars": [
+    {
+      "path": "missing-recipients.json",
+      "sha256": "9690961de3375cad76be62cbd57ed302af462a0ea104c2239188957e50c33404",
+      "count": 2
+    }
+  ],
+  "verdict": "INCONCLUSIVE",
+  "reasons": [
+    "observer gap"
+  ]
+}

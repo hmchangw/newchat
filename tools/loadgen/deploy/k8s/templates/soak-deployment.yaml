@@ -64,11 +64,21 @@ spec:
             - name: failure-ledger
               mountPath: {{ .Values.ledger.mountPath | quote }}
             {{- end }}
+            {{- if .Values.failureEvidence.enabled }}
+            - name: failure-manifest
+              mountPath: /etc/loadgen/failure
+              readOnly: true
+            {{- end }}
       volumes:
         {{- include "cassandra-soak.credentialsVolume" . | nindent 8 }}
         {{- if .Values.ledger.enabled }}
         - name: failure-ledger
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-ledger" (include "cassandra-soak.fullname" .)) .Values.ledger.existingClaim | quote }}
+        {{- end }}
+        {{- if .Values.failureEvidence.enabled }}
+        - name: failure-manifest
+          configMap:
+            name: {{ include "cassandra-soak.failureManifestName" . }}
         {{- end }}
 {{- end }}

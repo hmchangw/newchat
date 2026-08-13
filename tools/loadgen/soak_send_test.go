@@ -169,6 +169,37 @@ func TestSoakSender_ThreadReplyUsesEligibleParentFromSameRoom(t *testing.T) {
 	assert.Equal(t, parentID, child.ThreadParentID)
 }
 
+func TestSoakSender_ChannelThreadReplySnapshotsExactFollowerSet(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	catalog := newSoakCatalog(8, 100, 0, clock)
+	parentID := "AAAAAAAAAAAAAAAAAAAA"
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: parentID, RoomID: "room-1", Author: "alice", Content: "parent",
+		CreatedAt: clock.Now(), ThreadReplyLimit: 4,
+	}))
+	require.True(t, catalog.Accept("room-1", parentID))
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: "BBBBBBBBBBBBBBBBBBBB", RoomID: "room-1", Author: "bob", Content: "first",
+		CreatedAt: clock.Now(), ThreadParentID: parentID,
+	}))
+	require.True(t, catalog.Accept("room-1", "BBBBBBBBBBBBBBBBBBBB"))
+
+	lifecycle := &recordingSoakSendLifecycle{}
+	sender := newSoakSender(
+		soakSendConfig{SiteID: "site-1", ThreadShare: 1, ReplyTimeout: time.Second},
+		catalog, &soakRecordingPublisher{}, clock, rand.New(rand.NewSource(1)),
+		&soakSendIDs{messageID: func() string { return soakTestMessageID }, requestID: func() string { return soakTestRequestID }},
+		withSoakSendLifecycle(lifecycle, nil),
+	)
+	_, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-3", Account: "carol", RoomID: "room-1", RoomType: model.RoomTypeChannel,
+		Recipients: []string{"alice", "bob", "carol", "not-a-thread-follower"},
+	}, "next reply")
+	require.NoError(t, err)
+	require.Len(t, lifecycle.started, 1)
+	assert.Equal(t, []string{"alice", "bob", "carol"}, lifecycle.started[0].Target.Recipients)
+}
+
 func TestSoakSender_RejectedThreadReplyReleasesParentBudget(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
 	catalog := newSoakCatalog(8, 100, 0, clock)

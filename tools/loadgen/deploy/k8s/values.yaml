@@ -42,6 +42,29 @@ ledger:
   reconcileRetryInterval: 1s
   reconcileReadShare: 0.5
 
+# Formal failure campaigns opt in to an immutable manifest. The loadgen copies
+# this ConfigMap input to the retained ledger PVC before the first eligible
+# operation; ordinary Cassandra soak runs remain backward compatible.
+failureEvidence:
+  enabled: false
+  scenarioId: F02
+  gitSha: ""
+  environment: staging
+  trafficProfile: nats-core-message-v1
+  createdAt: ""
+  natsServers: 3
+  streamReplicas: 3
+  requiredObservers:
+    - admission
+    - cassandra_history
+    - recipient_broadcast
+  requiredMetricContracts:
+    - nats-core-v1
+    - loadgen-health-v1
+  allowCombinedFaults: false
+  allowDeliveryDuplicates: false
+  recipientObserverQueue: 8192
+
 seed:
   randomSeed: 42
   activeDeadlineSeconds: 7200

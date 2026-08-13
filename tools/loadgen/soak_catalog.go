@@ -554,6 +554,37 @@ func (c *soakCatalog) ConfirmThreadReply(roomID, messageID string) bool {
 	})
 }
 
+// ThreadRecipients snapshots the recipient accounts that the broadcast worker
+// will include for a channel thread reply without mentions: the sender, parent
+// author, and authors of accepted replies that already follow the thread.
+func (c *soakCatalog) ThreadRecipients(roomID, parentID, sender string) []string {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return nil
+	}
+	recipients := make(map[string]struct{})
+	if sender != "" {
+		recipients[sender] = struct{}{}
+	}
+	if parent := room.messages[parentID]; parent != nil && parent.Author != "" {
+		recipients[parent.Author] = struct{}{}
+	}
+	for _, entry := range room.order {
+		if entry.ThreadParentID == parentID && entry.Author != "" {
+			recipients[entry.Author] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(recipients))
+	for account := range recipients {
+		result = append(result, account)
+	}
+	sort.Strings(result)
+	return result
+}
+
 func (c *soakCatalog) Size() int {
 	c.globalMu.Lock()
 	defer c.globalMu.Unlock()

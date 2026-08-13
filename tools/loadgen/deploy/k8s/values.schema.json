@@ -12,6 +12,7 @@
     "cassandra",
     "metrics",
     "ledger",
+    "failureEvidence",
     "seed",
     "soak",
     "teardown"
@@ -116,6 +117,48 @@
         "reconcileDeadline": {"type": "string", "minLength": 1},
         "reconcileRetryInterval": {"type": "string", "minLength": 1},
         "reconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      }
+    },
+    "failureEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "scenarioId",
+        "gitSha",
+        "environment",
+        "trafficProfile",
+        "createdAt",
+        "natsServers",
+        "streamReplicas",
+        "requiredObservers",
+        "requiredMetricContracts",
+        "allowCombinedFaults",
+        "allowDeliveryDuplicates",
+        "recipientObserverQueue"
+      ],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "scenarioId": {"type": "string", "enum": ["F01", "F02", "F03", "F04", "F07a", "F07b"]},
+        "gitSha": {"type": "string"},
+        "environment": {"type": "string", "enum": ["local", "development", "staging", "production"]},
+        "trafficProfile": {"type": "string", "enum": ["nats-core-message-v1"]},
+        "createdAt": {"type": "string"},
+        "natsServers": {"type": "integer", "minimum": 1},
+        "streamReplicas": {"type": "integer", "minimum": 1},
+        "requiredObservers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["admission", "cassandra_history", "recipient_broadcast"]}
+        },
+        "requiredMetricContracts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["nats-core-v1", "loadgen-health-v1"]}
+        },
+        "allowCombinedFaults": {"type": "boolean"},
+        "allowDeliveryDuplicates": {"type": "boolean"},
+        "recipientObserverQueue": {"type": "integer", "minimum": 1}
       }
     },
     "seed": {

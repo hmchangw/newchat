@@ -22,6 +22,39 @@ const (
 	failureObserverHistory   failureObserver = "cassandra_history"
 )
 
+type failureOperationType string
+
+const failureOperationMessageCreate failureOperationType = "message_create"
+
+type failureEffect string
+
+const (
+	failureEffectAdmission        failureEffect = "admission"
+	failureEffectMessagePersisted failureEffect = "message_persisted"
+	failureEffectRecipientEvent   failureEffect = "recipient_event"
+)
+
+type failureCardinality struct {
+	Mode   string `json:"mode"`
+	Count  int    `json:"count"`
+	SHA256 string `json:"sha256"`
+}
+
+type failureExpectedEffect struct {
+	Effect      failureEffect       `json:"effect"`
+	Observer    failureObserver     `json:"observer"`
+	Required    bool                `json:"required"`
+	Cardinality *failureCardinality `json:"cardinality,omitempty"`
+}
+
+func messageCreateExpectedEffects(recipientCount int, recipientHash string) []failureExpectedEffect {
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: failureEffectMessagePersisted, Observer: failureObserverHistory, Required: true},
+		{Effect: failureEffectRecipientEvent, Observer: failureObserverRecipient, Required: true, Cardinality: &failureCardinality{Mode: "exact_set_hash", Count: recipientCount, SHA256: recipientHash}},
+	}
+}
+
 type failureObservation string
 
 const (
@@ -52,17 +85,40 @@ var (
 
 const invalidReasonCapacity = "capacity"
 
+var failureInvalidationReasonRegistry = map[string]struct{}{
+	"capacity": {}, "wal": {}, "accounting_invariant": {}, "observer_queue": {},
+	"observer_malformed": {}, "recipient_recovery": {}, "recipient_observer": {},
+	"timeline": {}, "other": {},
+	"sidecar": {},
+}
+
+var failureOperationScenarioRegistry = map[string]struct{}{
+	"cassandra_soak": {}, "F01": {}, "F02": {}, "F03": {}, "F04": {},
+	"F07a": {}, "F07b": {},
+}
+
+var failureOperationLaneRegistry = map[string]struct{}{
+	"message_send": {},
+}
+
 type failureOperation struct {
-	ID            string                                 `json:"id"`
+	SchemaVersion int                                    `json:"schemaVersion,omitempty"`
+	ID            string                                 `json:"operationId"`
 	CorrelationID string                                 `json:"correlationId,omitempty"`
+	RunID         string                                 `json:"runId,omitempty"`
 	Scenario      string                                 `json:"scenario"`
 	Lane          string                                 `json:"lane"`
+	OperationType failureOperationType                   `json:"operationType,omitempty"`
 	StartedAt     time.Time                              `json:"startedAt"`
 	VerifyAfter   time.Time                              `json:"verifyAfter"`
 	Deadline      time.Time                              `json:"deadline"`
-	Expected      []failureObserver                      `json:"expected"`
+	Targets       map[string]string                      `json:"targets,omitempty"`
+	Effects       []failureExpectedEffect                `json:"expectedEffects,omitempty"`
+	Expected      []failureObserver                      `json:"expected,omitempty"`
 	Attributes    map[string]string                      `json:"attributes,omitempty"`
 	Observations  map[failureObserver]failureObservation `json:"observations,omitempty"`
+	FinalResult   failureResult                          `json:"finalResult,omitempty"`
+	EvidenceRefs  []string                               `json:"evidenceRefs,omitempty"`
 
 	nextVerifyAt time.Time
 	claimed      bool
@@ -72,19 +128,55 @@ type failureOperation struct {
 }
 
 type failureLedgerEvent struct {
-	Type        string             `json:"type"`
-	Operation   *failureOperation  `json:"operation,omitempty"`
-	OperationID string             `json:"operationId,omitempty"`
-	Observer    failureObserver    `json:"observer,omitempty"`
-	Observation failureObservation `json:"observation,omitempty"`
-	Result      failureResult      `json:"result,omitempty"`
-	At          time.Time          `json:"at"`
+	SchemaVersion     int                                               `json:"schemaVersion,omitempty"`
+	Type              string                                            `json:"type"`
+	Operation         *failureOperation                                 `json:"operation,omitempty"`
+	OperationID       string                                            `json:"operationId,omitempty"`
+	Observer          failureObserver                                   `json:"observer,omitempty"`
+	Observation       failureObservation                                `json:"observation,omitempty"`
+	Result            failureResult                                     `json:"result,omitempty"`
+	Results           map[failureResult]uint64                          `json:"results,omitempty"`
+	ObservationCounts map[failureObserver]map[failureObservation]uint64 `json:"observationCounts,omitempty"`
+	NotSent           []string                                          `json:"notSent,omitempty"`
+	At                time.Time                                         `json:"at"`
+}
+
+//nolint:gocritic // A value receiver preserves json.Marshaler behavior for operation values and pointers.
+func (o failureOperation) MarshalJSON() ([]byte, error) {
+	type operationAlias failureOperation
+	if o.SchemaVersion == 0 {
+		legacy := struct {
+			ID string `json:"id"`
+			operationAlias
+		}{ID: o.ID, operationAlias: operationAlias(o)}
+		legacy.operationAlias.ID = ""
+		return json.Marshal(legacy)
+	}
+	return json.Marshal(operationAlias(o))
+}
+
+func (o *failureOperation) UnmarshalJSON(data []byte) error {
+	type operationAlias failureOperation
+	var decoded struct {
+		LegacyID string `json:"id"`
+		operationAlias
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*o = failureOperation(decoded.operationAlias)
+	if o.ID == "" {
+		o.ID = decoded.LegacyID
+	}
+	return nil
 }
 
 const (
-	failureLedgerEventStarted   = "started"
-	failureLedgerEventObserved  = "observed"
-	failureLedgerEventFinalized = "finalized"
+	failureLedgerEventStarted    = "started"
+	failureLedgerEventObserved   = "observed"
+	failureLedgerEventFinalized  = "finalized"
+	failureLedgerEventCheckpoint = "checkpoint"
+	failureLedgerEventInvariant  = "accounting_invariant"
 )
 
 type failureJournal interface {
@@ -118,6 +210,7 @@ type failureLedgerSnapshot struct {
 	Dropped       int
 	InvalidReason string
 	Results       map[failureResult]uint64
+	Observations  map[failureObserver]map[failureObservation]uint64
 	JournalBytes  int64
 }
 
@@ -133,6 +226,9 @@ type failureLedger struct {
 	active                map[string]*failureOperation
 	verifyQueue           failureVerifyQueue
 	results               map[failureResult]uint64
+	observations          map[failureObserver]map[failureObservation]uint64
+	notSent               map[string]struct{}
+	notSentOrder          []string
 	recovered             int
 	dropped               int
 	invalidReason         string
@@ -194,6 +290,8 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 		recorder:     cfg.Recorder,
 		active:       make(map[string]*failureOperation, cfg.Capacity),
 		results:      make(map[failureResult]uint64),
+		observations: make(map[failureObserver]map[failureObservation]uint64),
+		notSent:      make(map[string]struct{}),
 	}
 	if cfg.Journal == nil {
 		return ledger, nil
@@ -204,6 +302,11 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 	}
 	if err := ledger.replay(events); err != nil {
 		return nil, err
+	}
+	if upgrade, ok := cfg.Journal.(interface{ NeedsUpgrade() bool }); ok && upgrade.NeedsUpgrade() {
+		if err := ledger.compactLocked(cfg.Now().UTC()); err != nil {
+			return nil, fmt.Errorf("upgrade legacy failure ledger journal: %w", err)
+		}
 	}
 	ledger.recovered = len(ledger.active)
 	if ledger.recorder != nil {
@@ -295,6 +398,18 @@ func (l *failureLedger) Observe(
 	}
 	operation := l.active[operationID]
 	if operation == nil {
+		if _, notSent := l.notSent[operationID]; notSent {
+			event := failureLedgerEvent{
+				Type: failureLedgerEventInvariant, OperationID: operationID,
+				Observer: observer, Observation: observation, At: at.UTC(),
+			}
+			if err := l.appendLocked(&event); err != nil {
+				l.invalidateLocked("wal")
+				return false, fmt.Errorf("persist accounting invariant for %q: %w", operationID, err)
+			}
+			l.invalidateLocked("accounting_invariant")
+			return false, fmt.Errorf("failure operation %q accounting invariant: downstream effect observed after not_sent", operationID)
+		}
 		return false, fmt.Errorf(
 			"observe failure operation %q: %w", operationID, errFailureOperationNotActive,
 		)
@@ -332,16 +447,16 @@ func (l *failureLedger) Observe(
 		return false, fmt.Errorf("persist failure observation for %q: %w", operationID, err)
 	}
 	operation.Observations[observer] = observation
-	if observer == failureObserverHistory {
-		operation.claimed = false
-		l.dequeueLocked(operation)
-	}
+	l.countObservationLocked(observer, observation)
+	operation.claimed = false
+	l.dequeueLocked(operation)
 	if l.recorder != nil {
 		l.recorder.ObservationRecorded(
 			cloneFailureOperation(operation), observer, observation,
 		)
 	}
 	if len(operation.Observations) != len(operation.Expected) {
+		l.enqueueLocked(operation)
 		return false, nil
 	}
 	if err := l.finalizeLocked(operation, failureOperationResult(operation), at); err != nil {
@@ -441,13 +556,34 @@ func (l *failureLedger) enqueueLocked(operation *failureOperation) {
 	if operation.heapIndex >= 0 || operation.claimed {
 		return
 	}
-	if !slices.Contains(operation.Expected, failureObserverHistory) {
-		return
-	}
-	if _, observed := operation.Observations[failureObserverHistory]; observed {
+	if !l.scheduleNextLocked(operation) {
 		return
 	}
 	heap.Push(&l.verifyQueue, operation)
+}
+
+func (l *failureLedger) scheduleNextLocked(operation *failureOperation) bool {
+	if slices.Contains(operation.Expected, failureObserverHistory) {
+		if _, observed := operation.Observations[failureObserverHistory]; !observed {
+			if operation.nextVerifyAt.IsZero() {
+				operation.nextVerifyAt = operation.VerifyAfter
+			}
+			return true
+		}
+	}
+	if slices.Contains(operation.Expected, failureObserverRecipient) {
+		if _, observed := operation.Observations[failureObserverRecipient]; !observed {
+			operation.nextVerifyAt = operation.Deadline
+			return true
+		}
+	}
+	for _, observer := range operation.Expected {
+		if _, observed := operation.Observations[observer]; !observed {
+			operation.nextVerifyAt = operation.Deadline
+			return true
+		}
+	}
+	return false
 }
 
 func (l *failureLedger) dequeueLocked(operation *failureOperation) {
@@ -464,15 +600,59 @@ func (l *failureLedger) Snapshot() failureLedgerSnapshot {
 	for result, count := range l.results {
 		results[result] = count
 	}
+	observations := cloneFailureObservationCounts(l.observations)
 	journalBytes := int64(0)
 	if l.journal != nil {
 		journalBytes = l.journal.Size()
 	}
 	return failureLedgerSnapshot{
 		Active: len(l.active), Recovered: l.recovered, Dropped: l.dropped,
-		InvalidReason: l.invalidReason, Results: results,
+		InvalidReason: l.invalidReason, Results: results, Observations: observations,
 		JournalBytes: journalBytes,
 	}
+}
+
+func (l *failureLedger) Active(operationID string) (failureOperation, bool) {
+	if l == nil {
+		return failureOperation{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	operation := l.active[operationID]
+	if operation == nil {
+		return failureOperation{}, false
+	}
+	return *cloneFailureOperation(operation), true
+}
+
+func (l *failureLedger) ActiveOperations() []failureOperation {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	operationIDs := make([]string, 0, len(l.active))
+	for operationID := range l.active {
+		operationIDs = append(operationIDs, operationID)
+	}
+	slices.Sort(operationIDs)
+	operations := make([]failureOperation, 0, len(operationIDs))
+	for _, operationID := range operationIDs {
+		operations = append(operations, *cloneFailureOperation(l.active[operationID]))
+	}
+	return operations
+}
+
+func (l *failureLedger) Invalidate(reason string) {
+	if l == nil || reason == "" {
+		return
+	}
+	if _, known := failureInvalidationReasonRegistry[reason]; !known {
+		reason = "other"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.invalidateLocked(reason)
 }
 
 func (l *failureLedger) Close() error {
@@ -505,6 +685,10 @@ func (l *failureLedger) finalizeLocked(
 		return fmt.Errorf("persist finalized failure operation %q: %w", operation.ID, err)
 	}
 	l.results[result]++
+	operation.FinalResult = result
+	if result == failureResultNotSent {
+		l.rememberNotSentLocked(operation.ID)
+	}
 	l.dequeueLocked(operation)
 	delete(l.active, operation.ID)
 	if l.recorder != nil {
@@ -527,7 +711,16 @@ func (l *failureLedger) compactLocked(at time.Time) error {
 		operationIDs = append(operationIDs, operationID)
 	}
 	slices.Sort(operationIDs)
-	events := make([]failureLedgerEvent, 0, len(l.active)*2)
+	checkpointResults := make(map[failureResult]uint64, len(l.results))
+	for result, count := range l.results {
+		checkpointResults[result] = count
+	}
+	events := make([]failureLedgerEvent, 0, 1+len(l.active)*2)
+	events = append(events, failureLedgerEvent{
+		Type: failureLedgerEventCheckpoint, Results: checkpointResults,
+		ObservationCounts: cloneFailureObservationCounts(l.observations),
+		NotSent:           append([]string(nil), l.notSentOrder...), At: at.UTC(),
+	})
 	for _, operationID := range operationIDs {
 		operation := l.active[operationID]
 		started := cloneFailureOperation(operation)
@@ -575,8 +768,33 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 	// admits. Dropping the excess degrades observation for this run; failing
 	// would crash-loop the pod with no way out.
 	dropped := make(map[string]struct{})
-	for index, event := range events {
+	for index := range events {
+		event := &events[index]
 		switch event.Type {
+		case failureLedgerEventCheckpoint:
+			if index != 0 {
+				return fmt.Errorf("replay failure ledger event %d: checkpoint must be first", index)
+			}
+			for result, count := range event.Results {
+				if !validFailureResult(result) {
+					return fmt.Errorf("replay failure ledger event %d: invalid checkpoint result %q", index, result)
+				}
+				l.results[result] = count
+			}
+			for observer, counts := range event.ObservationCounts {
+				if _, known := failureObserverRegistry[observer]; !known {
+					return fmt.Errorf("replay failure ledger event %d: invalid checkpoint observer %q", index, observer)
+				}
+				for observation, count := range counts {
+					if !validFailureObservation(observation) {
+						return fmt.Errorf("replay failure ledger event %d: invalid checkpoint observation %q", index, observation)
+					}
+					l.countObservationByLocked(observer, observation, count)
+				}
+			}
+			for _, operationID := range event.NotSent {
+				l.rememberNotSentLocked(operationID)
+			}
 		case failureLedgerEventStarted:
 			if event.Operation == nil {
 				return fmt.Errorf("replay failure ledger event %d: started operation is missing", index)
@@ -584,6 +802,9 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 			operation := cloneFailureOperation(event.Operation)
 			if err := validateFailureOperation(operation); err != nil {
 				return fmt.Errorf("replay failure ledger event %d: %w", index, err)
+			}
+			if _, duplicate := l.active[operation.ID]; duplicate {
+				return fmt.Errorf("replay failure ledger event %d: operation %q is already active", index, operation.ID)
 			}
 			if len(l.active) >= l.capacity {
 				dropped[operation.ID] = struct{}{}
@@ -605,21 +826,38 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 					event.OperationID,
 				)
 			}
+			if !slices.Contains(operation.Expected, event.Observer) || !validFailureObservation(event.Observation) {
+				return fmt.Errorf("replay failure ledger event %d: invalid observation", index)
+			}
+			if existing, duplicate := operation.Observations[event.Observer]; duplicate {
+				return fmt.Errorf("replay failure ledger event %d: observer %q already recorded as %q", index, event.Observer, existing)
+			}
 			operation.Observations[event.Observer] = event.Observation
+			l.countObservationLocked(event.Observer, event.Observation)
 		case failureLedgerEventFinalized:
 			if _, skipped := dropped[event.OperationID]; skipped {
 				delete(dropped, event.OperationID)
 				l.dropped--
 				continue
 			}
-			if _, exists := l.active[event.OperationID]; !exists {
+			operation, exists := l.active[event.OperationID]
+			if !exists {
 				return fmt.Errorf(
 					"replay failure ledger event %d: operation %q is not active",
 					index,
 					event.OperationID,
 				)
 			}
+			if !validFailureResult(event.Result) {
+				return fmt.Errorf("replay failure ledger event %d: invalid result %q", index, event.Result)
+			}
+			l.results[event.Result]++
+			if event.Result == failureResultNotSent {
+				l.rememberNotSentLocked(operation.ID)
+			}
 			delete(l.active, event.OperationID)
+		case failureLedgerEventInvariant:
+			l.invalidateLocked("accounting_invariant")
 		default:
 			return fmt.Errorf("replay failure ledger event %d: unknown type %q", index, event.Type)
 		}
@@ -636,6 +874,46 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 		l.enqueueLocked(operation)
 	}
 	return nil
+}
+
+func (l *failureLedger) rememberNotSentLocked(operationID string) {
+	if operationID == "" {
+		return
+	}
+	if _, exists := l.notSent[operationID]; exists {
+		return
+	}
+	if len(l.notSentOrder) >= l.capacity {
+		oldest := l.notSentOrder[0]
+		l.notSentOrder = l.notSentOrder[1:]
+		delete(l.notSent, oldest)
+	}
+	l.notSent[operationID] = struct{}{}
+	l.notSentOrder = append(l.notSentOrder, operationID)
+}
+
+func (l *failureLedger) countObservationLocked(observer failureObserver, observation failureObservation) {
+	l.countObservationByLocked(observer, observation, 1)
+}
+
+func (l *failureLedger) countObservationByLocked(observer failureObserver, observation failureObservation, count uint64) {
+	if l.observations[observer] == nil {
+		l.observations[observer] = make(map[failureObservation]uint64)
+	}
+	l.observations[observer][observation] += count
+}
+
+func cloneFailureObservationCounts(
+	input map[failureObserver]map[failureObservation]uint64,
+) map[failureObserver]map[failureObservation]uint64 {
+	cloned := make(map[failureObserver]map[failureObservation]uint64, len(input))
+	for observer, counts := range input {
+		cloned[observer] = make(map[failureObservation]uint64, len(counts))
+		for observation, count := range counts {
+			cloned[observer][observation] = count
+		}
+	}
+	return cloned
 }
 
 func (l *failureLedger) ensureOpen() error {
@@ -661,6 +939,39 @@ func validateFailureOperation(operation *failureOperation) error {
 	}
 	if operation.ID == "" || operation.Scenario == "" || operation.Lane == "" {
 		return fmt.Errorf("failure operation requires ID, scenario, and lane")
+	}
+	if _, known := failureOperationScenarioRegistry[operation.Scenario]; !known {
+		return fmt.Errorf("failure operation %q has unsupported scenario %q", operation.ID, operation.Scenario)
+	}
+	if _, known := failureOperationLaneRegistry[operation.Lane]; !known {
+		return fmt.Errorf("failure operation %q has unsupported lane %q", operation.ID, operation.Lane)
+	}
+	if operation.SchemaVersion != 0 && operation.SchemaVersion != 2 {
+		return fmt.Errorf("failure operation %q has unsupported schema version %d", operation.ID, operation.SchemaVersion)
+	}
+	if operation.SchemaVersion == 2 {
+		if operation.RunID == "" || operation.OperationType != failureOperationMessageCreate || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
+			return fmt.Errorf("version 2 failure operation %q requires run, type, targets, and effects", operation.ID)
+		}
+		operation.Expected = operation.Expected[:0]
+		seenEffects := make(map[string]struct{}, len(operation.Effects))
+		for _, effect := range operation.Effects {
+			definition, known := failureObserverRegistry[effect.Observer]
+			if !known || !slices.Contains(definition.Effects, effect.Effect) {
+				return fmt.Errorf("failure operation %q has unsupported effect %q for observer %q", operation.ID, effect.Effect, effect.Observer)
+			}
+			key := string(effect.Effect) + "\x00" + string(effect.Observer)
+			if _, duplicate := seenEffects[key]; duplicate {
+				return fmt.Errorf("failure operation %q repeats effect %q", operation.ID, effect.Effect)
+			}
+			seenEffects[key] = struct{}{}
+			if effect.Cardinality != nil && (effect.Cardinality.Mode != "exact_set_hash" || effect.Cardinality.Count <= 0 || effect.Cardinality.SHA256 == "") {
+				return fmt.Errorf("failure operation %q has invalid effect cardinality", operation.ID)
+			}
+			if effect.Required {
+				operation.Expected = append(operation.Expected, effect.Observer)
+			}
+		}
 	}
 	if operation.StartedAt.IsZero() || operation.VerifyAfter.IsZero() || operation.Deadline.IsZero() {
 		return fmt.Errorf("failure operation %q requires timestamps", operation.ID)
@@ -755,6 +1066,18 @@ func cloneFailureOperation(operation *failureOperation) *failureOperation {
 	cloned := *operation
 	cloned.heapIndex = -1
 	cloned.Expected = append([]failureObserver(nil), operation.Expected...)
+	cloned.Effects = append([]failureExpectedEffect(nil), operation.Effects...)
+	for index := range cloned.Effects {
+		if operation.Effects[index].Cardinality != nil {
+			cardinality := *operation.Effects[index].Cardinality
+			cloned.Effects[index].Cardinality = &cardinality
+		}
+	}
+	cloned.Targets = make(map[string]string, len(operation.Targets))
+	for key, value := range operation.Targets {
+		cloned.Targets[key] = value
+	}
+	cloned.EvidenceRefs = append([]string(nil), operation.EvidenceRefs...)
 	cloned.Attributes = make(map[string]string, len(operation.Attributes))
 	for key, value := range operation.Attributes {
 		cloned.Attributes[key] = value
@@ -767,11 +1090,19 @@ func cloneFailureOperation(operation *failureOperation) *failureOperation {
 }
 
 type fileFailureWAL struct {
-	mu   sync.Mutex
-	path string
-	file *os.File
-	size int64
+	mu     sync.Mutex
+	path   string
+	file   *os.File
+	size   int64
+	legacy bool
 }
+
+type failureWALHeader struct {
+	RecordType    string `json:"recordType"`
+	SchemaVersion int    `json:"schemaVersion"`
+}
+
+const failureWALSchemaVersion = 2
 
 func openFailureWAL(path string) (*fileFailureWAL, error) {
 	if path == "" {
@@ -817,6 +1148,7 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 	events := make([]failureLedgerEvent, 0)
 	reader := bufio.NewReader(file)
 	line := 0
+	headerSeen := false
 	durableBytes := int64(0)
 	tornFinalRecord := false
 	for {
@@ -832,12 +1164,30 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 			return nil, fmt.Errorf("read failure WAL line %d: %w", line+1, readErr)
 		}
 		line++
+		var header failureWALHeader
+		if err := json.Unmarshal(encoded, &header); err == nil && header.RecordType != "" {
+			if line != 1 || header.RecordType != "header" || header.SchemaVersion != failureWALSchemaVersion {
+				return nil, fmt.Errorf("decode failure WAL line %d: unsupported header version %d", line, header.SchemaVersion)
+			}
+			durableBytes += int64(len(encoded))
+			headerSeen = true
+			continue
+		}
+		if line == 1 {
+			w.legacy = true
+		}
 		var event failureLedgerEvent
 		if err := json.Unmarshal(encoded, &event); err != nil {
 			return nil, fmt.Errorf("decode failure WAL line %d: %w", line, err)
 		}
+		if event.SchemaVersion != 0 && event.SchemaVersion != failureWALSchemaVersion {
+			return nil, fmt.Errorf("decode failure WAL line %d: unsupported record version %d", line, event.SchemaVersion)
+		}
 		events = append(events, event)
 		durableBytes += int64(len(encoded))
+	}
+	if line == 0 && !headerSeen {
+		w.legacy = false
 	}
 	if err := file.Close(); err != nil {
 		return nil, fmt.Errorf("close replayed failure WAL: %w", err)
@@ -866,11 +1216,35 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 	return events, nil
 }
 
+func (w *fileFailureWAL) NeedsUpgrade() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.legacy
+}
+
 func (w *fileFailureWAL) Append(event *failureLedgerEvent) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file == nil {
 		return fmt.Errorf("failure WAL is closed")
+	}
+	if w.size == 0 {
+		header, err := json.Marshal(failureWALHeader{RecordType: "header", SchemaVersion: failureWALSchemaVersion})
+		if err != nil {
+			return fmt.Errorf("encode failure WAL header: %w", err)
+		}
+		header = append(header, '\n')
+		written, err := w.file.Write(header)
+		if err != nil {
+			return fmt.Errorf("append failure WAL header: %w", err)
+		}
+		if written != len(header) {
+			return fmt.Errorf("append failure WAL header: wrote %d of %d bytes", written, len(header))
+		}
+		w.size += int64(written)
+	}
+	if event.SchemaVersion == 0 {
+		event.SchemaVersion = failureWALSchemaVersion
 	}
 	encoded, err := json.Marshal(event)
 	if err != nil {
@@ -914,7 +1288,24 @@ func (w *fileFailureWAL) Compact(events []failureLedgerEvent) error {
 		}
 	}()
 	var compactedSize int64
-	for _, event := range events {
+	header, err := json.Marshal(failureWALHeader{RecordType: "header", SchemaVersion: failureWALSchemaVersion})
+	if err != nil {
+		return fmt.Errorf("encode compacted failure WAL header: %w", err)
+	}
+	header = append(header, '\n')
+	written, err := temporary.Write(header)
+	if err != nil {
+		return fmt.Errorf("write compacted failure WAL header: %w", err)
+	}
+	if written != len(header) {
+		return fmt.Errorf("write compacted failure WAL header: wrote %d of %d bytes", written, len(header))
+	}
+	compactedSize += int64(written)
+	for index := range events {
+		event := &events[index]
+		if event.SchemaVersion == 0 {
+			event.SchemaVersion = failureWALSchemaVersion
+		}
 		encoded, err := json.Marshal(event)
 		if err != nil {
 			return fmt.Errorf("encode compacted failure WAL event: %w", err)
@@ -967,6 +1358,7 @@ func (w *fileFailureWAL) Compact(events []failureLedgerEvent) error {
 	}
 	w.file = file
 	w.size = compactedSize
+	w.legacy = false
 	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove failure WAL backup: %w", err)
 	}

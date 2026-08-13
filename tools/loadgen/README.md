@@ -116,7 +116,12 @@ loadgen -> message-gatekeeper -> message-worker -> Cassandra
 loadgen -> history-service -> Cassandra
 ```
 
-The continuous workload also maintains a per-message operation ledger. When
+The continuous workload also maintains a per-message operation ledger. Every
+new message independently requires gatekeeper admission, Cassandra history,
+and exact recipient-broadcast evidence. Recipient subscriptions use a separate
+NATS observer pool, are established before measurement, and retain missing,
+unexpected, duplicate, unverified, and untracked identifiers outside
+Prometheus labels. When
 `SOAK_LEDGER_DIR` is configured, it persists the ledger there and recovers
 unresolved operations after restart; the default empty value used by direct
 invocation is in-memory only and is not restart-durable. The ledger records an
@@ -277,6 +282,10 @@ Run A environment variables:
 | `SOAK_RECONCILE_DEADLINE` | `10m` | Deadline for admission and Cassandra history terminal observations. |
 | `SOAK_RECONCILE_RETRY_INTERVAL` | `1s` | Earliest retry after a missing or transient history read-back. |
 | `SOAK_RECONCILE_READ_SHARE` | `0.5` | Maximum fraction of the read lane reconciliation may claim, so the mixed read workload keeps running during a fault. |
+| `SOAK_RECIPIENT_OBSERVER_QUEUE` | `8192` | Bounded recipient-event queue; overflow invalidates the affected evidence interval without blocking sends. |
+| `SOAK_FAILURE_MANIFEST_PATH` | empty | Enables a formal campaign from a schema-v1 manifest; loadgen installs an immutable retained copy before traffic. |
+| `SOAK_FAILURE_TIMELINE_PATH` | empty | Authoritative local schema-v1 fault-event JSONL path under `SOAK_LEDGER_DIR`. |
+| `SOAK_FAILURE_REPORT_DIR` | empty | Retained output directory for deterministic report, summary, and exact-ID sidecars; defaults to `SOAK_LEDGER_DIR`. |
 | `SOAK_CASSANDRA_CLEANUP` | `none` | `none` or guarded `truncate`. |
 | `SOAK_CONFIRM_KEYSPACE` | empty | Must exactly match the keyspace for `truncate`. |
 | `SOAK_TEARDOWN_BATCH_ROOMS` | `250` | Maximum owned room IDs per Mongo deletion batch. |
