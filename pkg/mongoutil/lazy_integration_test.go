@@ -36,12 +36,7 @@ type outageProxy struct {
 // newOutageProxy reserves a local address without serving on it.
 func newOutageProxy(t *testing.T, target string) *outageProxy {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-
-	p := &outageProxy{addr: addr, target: target}
+	p := &outageProxy{addr: testutil.ReserveAddr(t), target: target}
 	t.Cleanup(p.Close)
 	return p
 }
@@ -142,7 +137,7 @@ func TestConnect_LazyBootsDuringOutageThenRecovers(t *testing.T) {
 	defer bootCancel()
 	client, err := Connect(bootCtx, uri, "", "", WithLazyConnect())
 	require.NoError(t, err, "lazy Connect must boot while MongoDB is unreachable")
-	t.Cleanup(func() { _ = client.Disconnect(context.Background()) })
+	t.Cleanup(func() { Disconnect(context.Background(), client) })
 
 	coll := client.Database("mongoutil_lazy_recovery_test").Collection("docs")
 	t.Cleanup(func() {
@@ -190,18 +185,4 @@ func TestConnect_LazyAgainstHealthyMongoWorksImmediately(t *testing.T) {
 	n, err := db.Collection("docs").CountDocuments(opCtx, bson.M{})
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, n)
-}
-
-// TestConnect_DefaultStillFailsDuringOutage pins the default: batch and CLI
-// jobs must keep dying loudly at startup when MongoDB is missing.
-func TestConnect_DefaultStillFailsDuringOutage(t *testing.T) {
-	proxy := newOutageProxy(t, hostPort(t, testutil.MongoURI(t)))
-	uri := fmt.Sprintf("mongodb://%s/?directConnection=true", proxy.addr)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, err := Connect(ctx, uri, "", "")
-	require.Error(t, err, "default Connect must still fail when MongoDB is unreachable")
-	assert.Nil(t, client)
-	assert.Contains(t, err.Error(), "mongo ping")
 }

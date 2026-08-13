@@ -191,10 +191,7 @@ func main() {
 	slog.Info("mongo secondary-read preference configured", "readPreference", readPref.Mode().String())
 
 	store := NewMongoStore(db, WithReadPreference(readPref))
-	// Bounded timeout so a hung createIndexes can't stall startup.
-	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
-	mongoutil.EnsureIndexesBestEffort(ensureCtx, "room-service store", store.EnsureIndexes)
-	ensureCancel()
+	mongoutil.EnsureIndexesBestEffort(ctx, "room-service store", store.EnsureIndexes)
 
 	// Read receipts resolve the target message through history-service (which
 	// owns message history) over NATS, so room-service has no direct Cassandra

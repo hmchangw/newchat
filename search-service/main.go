@@ -213,9 +213,7 @@ func main() {
 	cache := newValkeyCache(valkey)
 	mongoStore := newMongoStore(mongoDB)
 
-	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
-	mongoutil.EnsureIndexesBestEffort(ensureCtx, "search-service store", mongoStore.ensureIndexes)
-	ensureCancel()
+	mongoutil.EnsureIndexesBestEffort(ctx, "search-service store", mongoStore.ensureIndexes)
 	handler := newHandler(store, mongoStore, usersClient, cache, &handlerConfig{
 		SiteID:                  cfg.SiteID,
 		DocCounts:               cfg.Search.DocCounts,
