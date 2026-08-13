@@ -80,6 +80,6 @@ func TestValkeyCache_Integration_EmptyListIsCacheHit(t *testing.T) {
 
 	got, err := cache.Get(ctx, "empty-room")
 	require.NoError(t, err)
-	assert.NotNil(t, got)
-	assert.Empty(t, got)
+	assert.Empty(t, got.Members, "an empty member list must round-trip as a hit, not a miss")
+	assert.NotZero(t, got.CachedAt, "a hit must carry a confirmation stamp, or it can never be refreshed")
 }
