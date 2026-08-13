@@ -1656,3 +1656,117 @@ func TestInboxWorker_UpdateUserSettings_Integration(t *testing.T) {
 		assert.Equal(t, int64(0), count)
 	})
 }
+
+func TestInboxWorker_ApplyUserPermissions_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	store := &mongoInboxStore{
+		subCol:  db.Collection("subscriptions"),
+		roomCol: db.Collection("rooms"),
+		userCol: db.Collection("users"),
+	}
+
+	effectiveFrom := time.UnixMilli(500).UTC()
+	expiresAt := time.UnixMilli(9000).UTC()
+	state := model.PermissionState{
+		Granted:       true,
+		EffectiveFrom: &effectiveFrom,
+		ExpiresAt:     &expiresAt,
+		UpdatedAt:     time.UnixMilli(1000).UTC(),
+	}
+
+	// Each subtest owns its own account(s) so it passes standalone under -run.
+	seed := func(t *testing.T, account string) {
+		t.Helper()
+		_, err := db.Collection("users").InsertOne(ctx, model.User{ID: "u-" + account, Account: account, SiteID: "site-b"})
+		require.NoError(t, err)
+	}
+
+	t.Run("fresh apply sets externalImageView on every listed account", func(t *testing.T) {
+		seed(t, "perm-alice")
+		seed(t, "perm-bob")
+
+		require.NoError(t, store.ApplyUserPermissions(ctx, model.PermissionExternalImageView, []string{"perm-alice", "perm-bob"}, state))
+
+		for _, account := range []string{"perm-alice", "perm-bob"} {
+			var got model.User
+			require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": account}).Decode(&got))
+			require.NotNil(t, got.Permissions)
+			require.NotNil(t, got.Permissions.ExternalImageView)
+			assert.Equal(t, state.Granted, got.Permissions.ExternalImageView.Granted)
+			assert.True(t, state.UpdatedAt.Equal(got.Permissions.ExternalImageView.UpdatedAt))
+		}
+	})
+
+	t.Run("stored updatedAt newer than the event's — doc unchanged", func(t *testing.T) {
+		seed(t, "perm-newer")
+		newerState := model.PermissionState{Granted: false, UpdatedAt: time.UnixMilli(2000).UTC()}
+		_, err := db.Collection("users").UpdateOne(ctx,
+			bson.M{"account": "perm-newer"},
+			bson.M{"$set": bson.M{"permissions.externalImageView": newerState}},
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, store.ApplyUserPermissions(ctx, model.PermissionExternalImageView, []string{"perm-newer"}, state))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "perm-newer"}).Decode(&got))
+		require.NotNil(t, got.Permissions)
+		require.NotNil(t, got.Permissions.ExternalImageView)
+		assert.False(t, got.Permissions.ExternalImageView.Granted, "newer stored state must not be regressed")
+		assert.True(t, newerState.UpdatedAt.Equal(got.Permissions.ExternalImageView.UpdatedAt))
+	})
+
+	t.Run("equal updatedAt is applied ($lte)", func(t *testing.T) {
+		seed(t, "perm-equal")
+		equalState := model.PermissionState{Granted: false, UpdatedAt: state.UpdatedAt}
+		_, err := db.Collection("users").UpdateOne(ctx,
+			bson.M{"account": "perm-equal"},
+			bson.M{"$set": bson.M{"permissions.externalImageView": equalState}},
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, store.ApplyUserPermissions(ctx, model.PermissionExternalImageView, []string{"perm-equal"}, state))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "perm-equal"}).Decode(&got))
+		require.NotNil(t, got.Permissions)
+		require.NotNil(t, got.Permissions.ExternalImageView)
+		assert.True(t, got.Permissions.ExternalImageView.Granted, "equal updatedAt must still apply — $lte, not strictly less-than")
+	})
+
+	t.Run("account with no user doc is a no-op; others still applied", func(t *testing.T) {
+		seed(t, "perm-real")
+
+		require.NoError(t, store.ApplyUserPermissions(ctx, model.PermissionExternalImageView, []string{"perm-real", "perm-ghost"}, state))
+
+		var got model.User
+		require.NoError(t, store.userCol.FindOne(ctx, bson.M{"account": "perm-real"}).Decode(&got))
+		require.NotNil(t, got.Permissions)
+		require.NotNil(t, got.Permissions.ExternalImageView)
+		assert.True(t, got.Permissions.ExternalImageView.Granted)
+
+		count, err := store.userCol.CountDocuments(ctx, bson.M{"account": "perm-ghost"})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), count, "ApplyUserPermissions must never create a user document")
+	})
+
+	t.Run("per-key independence: a sibling permissions field is untouched", func(t *testing.T) {
+		seed(t, "perm-sibling")
+		_, err := db.Collection("users").UpdateOne(ctx,
+			bson.M{"account": "perm-sibling"},
+			bson.M{"$set": bson.M{"permissions.somethingElse": "keep-me"}},
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, store.ApplyUserPermissions(ctx, model.PermissionExternalImageView, []string{"perm-sibling"}, state))
+
+		var raw struct {
+			Permissions bson.M `bson:"permissions"`
+		}
+		require.NoError(t, db.Collection("users").FindOne(ctx, bson.M{"account": "perm-sibling"}).Decode(&raw))
+		assert.Equal(t, "keep-me", raw.Permissions["somethingElse"])
+		assert.NotNil(t, raw.Permissions["externalImageView"])
+	})
+}
