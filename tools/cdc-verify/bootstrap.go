@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -17,12 +18,21 @@ type bootstrapConfig struct {
 
 // bootstrapStreams creates MIGRATION-OPLOG-{siteID} from schema (Name+Subjects) for
 // dev stacks without oplog-connector; disabled it no-ops and js.Stream fails fast.
+// Create-only: an existing stream is owned by the real pipeline and never updated —
+// a bare Name+Subjects update would strip its retention/replica config.
 func bootstrapStreams(ctx context.Context, js jetstream.JetStream, siteID string, enabled bool) error {
 	if !enabled {
 		return nil
 	}
 	cfg := stream.MigrationOplog(siteID)
-	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+	_, err := js.Stream(ctx, cfg.Name)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, jetstream.ErrStreamNotFound) {
+		return fmt.Errorf("check MIGRATION-OPLOG stream: %w", err)
+	}
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
 		Name:     cfg.Name,
 		Subjects: cfg.Subjects,
 	}); err != nil {

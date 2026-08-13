@@ -13,7 +13,6 @@ import (
 	"github.com/gocql/gocql"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -32,6 +31,9 @@ type config struct {
 	SourceMongoUsername string `env:"SOURCE_MONGO_USERNAME" envDefault:""`
 	SourceMongoPassword string `env:"SOURCE_MONGO_PASSWORD" envDefault:""`
 	SourceDB            string `env:"SOURCE_DB" envDefault:"rocketchat"`
+	// primary by default: a verifier polling a stale secondary would report
+	// convergence lag that isn't there. Relax deliberately per deployment.
+	SourceReadPreference string `env:"SOURCE_READ_PREFERENCE" envDefault:"primary"`
 
 	TargetMongoURI      string `env:"TARGET_MONGO_URI,required"`
 	TargetMongoUsername string `env:"TARGET_MONGO_USERNAME" envDefault:""`
@@ -77,6 +79,12 @@ func (c *config) validate() error {
 	}
 	if c.MessageBucketHours <= 0 {
 		return fmt.Errorf("MESSAGE_BUCKET_HOURS must be positive, got %d", c.MessageBucketHours)
+	}
+	if c.StatsInterval <= 0 {
+		return fmt.Errorf("STATS_INTERVAL must be positive, got %s", c.StatsInterval)
+	}
+	if _, err := mongoutil.ParseReadPreference(c.SourceReadPreference); err != nil {
+		return fmt.Errorf("SOURCE_READ_PREFERENCE: %w", err)
 	}
 	if c.StartAtTime != "" {
 		if _, err := time.Parse(time.RFC3339, c.StartAtTime); err != nil {
@@ -150,8 +158,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	srcReadPref, err := mongoutil.ParseReadPreference(cfg.SourceReadPreference) // validated already
+	if err != nil {
+		slog.Error("parse source read preference", "error", err)
+		os.Exit(1)
+	}
 	srcClient, err := mongoutil.Connect(ctx, cfg.SourceMongoURI, cfg.SourceMongoUsername, cfg.SourceMongoPassword,
-		mongoutil.WithReadPreference(readpref.PrimaryPreferred()))
+		mongoutil.WithReadPreference(srcReadPref))
 	if err != nil {
 		slog.Error("connect source mongo", "error", err)
 		os.Exit(1)

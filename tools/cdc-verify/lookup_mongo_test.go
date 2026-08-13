@@ -29,12 +29,13 @@ func TestBsonToMap(t *testing.T) {
 func TestBuildSelect(t *testing.T) {
 	q, args, err := buildSelect("messages_by_id", map[string]any{"message_id": "m1"}, []string{"body", "created_at"})
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT body, created_at FROM messages_by_id WHERE message_id = ?", q)
+	// LIMIT 2: one row proves presence, a second proves ambiguity — never more.
+	assert.Equal(t, "SELECT body, created_at FROM messages_by_id WHERE message_id = ? LIMIT 2", q)
 	assert.Equal(t, []any{"m1"}, args)
 
 	q, args, err = buildSelect("t", map[string]any{"b": int64(2), "a": "x"}, []string{"c"})
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT c FROM t WHERE a = ? AND b = ?", q) // sorted key columns
+	assert.Equal(t, "SELECT c FROM t WHERE a = ? AND b = ? LIMIT 2", q) // sorted key columns
 	assert.Equal(t, []any{"x", int64(2)}, args)
 
 	_, _, err = buildSelect("bad;table", map[string]any{"a": 1}, []string{"c"})
@@ -48,6 +49,6 @@ func TestBuildSelect(t *testing.T) {
 func TestBuildSelect_AllColumns(t *testing.T) {
 	q, args, err := buildSelect("messages_by_id", map[string]any{"message_id": "m1"}, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM messages_by_id WHERE message_id = ?", q)
+	assert.Equal(t, "SELECT * FROM messages_by_id WHERE message_id = ? LIMIT 2", q)
 	assert.Equal(t, []any{"m1"}, args)
 }

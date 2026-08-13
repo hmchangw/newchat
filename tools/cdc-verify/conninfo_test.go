@@ -32,21 +32,22 @@ func TestRedactURI(t *testing.T) {
 
 func TestBuildConnInfo_NeverCarriesSecrets(t *testing.T) {
 	cfg := config{
-		SiteID:              "site1",
-		NATSURL:             "nats://tok3n@nats:4222",
-		CredsFile:           "/etc/creds/verify.creds",
-		SourceMongoURI:      "mongodb://root:sup3rs3cret@src:27017",
-		SourceMongoUsername: "srcuser",
-		SourceMongoPassword: "srcpass",
-		SourceDB:            "rocketchat",
-		TargetMongoURI:      "mongodb://tgt:27017",
-		TargetMongoPassword: "tgtpass",
-		TargetDB:            "chat",
-		CassandraHosts:      "cass1:9042,cass2:9042",
-		CassandraKeyspace:   "chat",
-		CassandraUsername:   "cassuser",
-		CassandraPassword:   "casspass",
-		MappingFile:         "/etc/cdc-verify/mapping.json",
+		SiteID:               "site1",
+		NATSURL:              "nats://tok3n@nats:4222",
+		CredsFile:            "/etc/creds/verify.creds",
+		SourceMongoURI:       "mongodb://root:sup3rs3cret@src:27017",
+		SourceMongoUsername:  "srcuser",
+		SourceMongoPassword:  "srcpass",
+		SourceDB:             "rocketchat",
+		TargetMongoURI:       "mongodb://tgt:27017",
+		TargetMongoPassword:  "tgtpass",
+		TargetDB:             "chat",
+		CassandraHosts:       "cass1:9042,cass2:9042",
+		CassandraKeyspace:    "chat",
+		CassandraUsername:    "cassuser",
+		CassandraPassword:    "casspass",
+		MappingFile:          "/etc/cdc-verify/mapping.json",
+		SourceReadPreference: "secondaryPreferred",
 	}
 	info := buildConnInfo(&cfg, "MIGRATION-OPLOG-site1", true)
 
@@ -55,7 +56,7 @@ func TestBuildConnInfo_NeverCarriesSecrets(t *testing.T) {
 	assert.Equal(t, "nats://***@nats:4222", info.NATS.URL)
 	assert.Equal(t, "mongodb://***@src:27017", info.SourceMongo.URI)
 	assert.Equal(t, "rocketchat", info.SourceMongo.DB)
-	assert.Equal(t, "primaryPreferred", info.SourceMongo.ReadPreference)
+	assert.Equal(t, "secondaryPreferred", info.SourceMongo.ReadPreference)
 	assert.Equal(t, "mongodb://tgt:27017", info.TargetMongo.URI)
 	assert.Equal(t, "chat", info.TargetMongo.DB)
 	assert.True(t, info.Cassandra.InUse)
