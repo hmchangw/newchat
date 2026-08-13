@@ -390,6 +390,50 @@ func TestContextWithPublicIdentity_MasterOffStillDropsManagedKeys(t *testing.T) 
 		"sanitization must remove only application-managed identity keys")
 }
 
+// TestContextWithPublicIdentity_MasterOffZeroesSpanAttributes is the span half
+// of the master-off contract. Emission being off does not mean nothing was
+// materialized: NATS tracing can be forced on independently, so the entry span
+// can already carry the caller's forged values by the time a handler runs, and
+// OpenTelemetry cannot delete an attribute once set.
+func TestContextWithPublicIdentity_MasterOffZeroesSpanAttributes(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("OTEL_SERVICE_NAME", "public-identity-master-off-span-svc")
+
+	_, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, shutdown(context.Background())) })
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	forged, err := baggage.New(
+		mustBaggageMember(t, o11y.UserNameKey, "forged-user"),
+		mustBaggageMember(t, RoomIDKey, "forged-room"),
+		mustBaggageMember(t, SiteIDKey, "forged-site"),
+	)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), forged)
+
+	ctx, span := tp.Tracer("test").Start(ctx, "entry")
+	for _, key := range ManagedBaggageKeys() {
+		span.SetAttributes(attribute.String(key, "forged"))
+	}
+
+	ContextWithPublicIdentity(ctx, "alice", "room-42", "site-a")
+	span.End()
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	attrs := make(map[string]string)
+	for _, attr := range ended[0].Attributes() {
+		attrs[string(attr.Key)] = attr.Value.AsString()
+	}
+	for _, key := range ManagedBaggageKeys() {
+		assert.Empty(t, attrs[key], "master-off must leave no forged %s on the entry span", key)
+	}
+}
+
 func mustBaggageMember(t *testing.T, key, value string) baggage.Member {
 	t.Helper()
 	member, err := baggage.NewMember(key, value)

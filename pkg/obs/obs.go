@@ -312,17 +312,30 @@ func unsuppliedManagedKeys(account, roomID, siteID string) []string {
 // contextWithBaggageAttributes sets each non-empty attribute as baggage and
 // materializes the accepted ones onto the current span in one write. Empty
 // values are skipped, which preserves trusted baggage from an internal hop.
-// The o11y SDK validates one member per call, so the baggage rebuilds cannot be
-// batched; the span write can, and is.
+//
+// Superseded values are dropped for the whole set up front — one rebuild rather
+// than one per key — which also strengthens the fail-safe: if any replacement
+// is rejected below, no stale value survives for any key. The o11y SDK
+// validates one member per call, so only the set loop remains per-key.
 func contextWithBaggageAttributes(ctx context.Context, kvs ...attribute.KeyValue) context.Context {
-	accepted := make([]attribute.KeyValue, 0, len(kvs))
+	supplied := make([]attribute.KeyValue, 0, len(kvs))
+	superseded := make([]string, 0, len(kvs))
 	for _, kv := range kvs {
-		key, value := string(kv.Key), kv.Value.AsString()
-		if value == "" {
+		if kv.Value.AsString() == "" {
 			continue
 		}
-		ctx = withoutBaggageAttributes(ctx, key)
-		next, err := o11y.ContextWithBaggageValue(ctx, key, value)
+		supplied = append(supplied, kv)
+		superseded = append(superseded, string(kv.Key))
+	}
+	if len(supplied) == 0 {
+		return ctx
+	}
+	ctx = withoutBaggageAttributes(ctx, superseded...)
+
+	accepted := make([]attribute.KeyValue, 0, len(supplied))
+	for _, kv := range supplied {
+		key := string(kv.Key)
+		next, err := o11y.ContextWithBaggageValue(ctx, key, kv.Value.AsString())
 		if err != nil {
 			slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", key, "error", err)
 			continue
