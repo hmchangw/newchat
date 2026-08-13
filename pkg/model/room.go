@@ -12,14 +12,39 @@ const (
 )
 
 type Room struct {
-	ID                string     `json:"id" bson:"_id"`
-	Name              string     `json:"name" bson:"name"`
-	Type              RoomType   `json:"type" bson:"type"`
-	SiteID            string     `json:"siteId" bson:"siteId"`
-	UserCount         int        `json:"userCount" bson:"userCount"`
-	AppCount          int        `json:"appCount" bson:"appCount"`
-	LastMsgAt         *time.Time `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
-	LastMsgID         string     `json:"lastMsgId" bson:"lastMsgId"`
+	ID        string     `json:"id" bson:"_id"`
+	Name      string     `json:"name" bson:"name"`
+	Type      RoomType   `json:"type" bson:"type"`
+	SiteID    string     `json:"siteId" bson:"siteId"`
+	UserCount int        `json:"userCount" bson:"userCount"`
+	AppCount  int        `json:"appCount" bson:"appCount"`
+	LastMsgAt *time.Time `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
+	LastMsgID string     `json:"lastMsgId" bson:"lastMsgId"`
+	// PreviewMeta is the plaintext half of the memoized room-list preview —
+	// exactly what Cassandra also leaves unencrypted.
+	//
+	// Two services write these fields, split by who holds the information: on an
+	// insert broadcast-worker seals from the message it is already fanning out, and
+	// on an edit/delete or a read-time miss history-service writes what its Cassandra
+	// walk resolved. They do not coordinate — every write on both sides is guarded by
+	// the PreviewAsOf watermark, so the newer one wins whichever lands second.
+	// history-service is the only reader.
+	PreviewMeta *PreviewMeta `json:"-" bson:"previewMeta,omitempty"`
+	// PreviewCiphertext seals Content and Attachments under the site preview DEK,
+	// so Mongo access alone never yields message bodies.
+	PreviewCiphertext []byte `json:"-" bson:"previewCiphertext,omitempty"`
+	// PreviewNonce is the AES-GCM nonce for PreviewCiphertext.
+	PreviewNonce []byte `json:"-" bson:"previewNonce,omitempty"`
+	// PreviewKeyEpoch is the DEK epoch that produced the ciphertext. A reader on
+	// another epoch treats the preview as absent, so none needs a retired DEK.
+	PreviewKeyEpoch int `json:"-" bson:"previewKeyEpoch,omitempty"`
+	// PreviewForMsgID is the freshness key: the newest message id the walk
+	// OBSERVED in Cassandra, not PreviewMeta.MessageID. The preview is current
+	// iff it equals LastMsgID.
+	PreviewForMsgID string `json:"-" bson:"previewForMsgId,omitempty"`
+	// PreviewAsOf is the write-ordering watermark (epoch ms). Plaintext because
+	// the guarded update pipeline compares it server-side.
+	PreviewAsOf       int64      `json:"-" bson:"previewAsOf,omitempty"`
 	LastMentionAllAt  *time.Time `json:"lastMentionAllAt,omitempty" bson:"lastMentionAllAt,omitempty"`
 	MinUserLastSeenAt *time.Time `json:"minUserLastSeenAt,omitempty" bson:"minUserLastSeenAt,omitempty"`
 	CreatedAt         time.Time  `json:"createdAt" bson:"createdAt"`
