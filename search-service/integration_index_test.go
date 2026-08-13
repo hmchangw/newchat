@@ -6,11 +6,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/hmchangw/chat/pkg/testutil"
 )
 
 // EnsureIndexes must not conflict with the canonical UNIQUE users.account_1 index
