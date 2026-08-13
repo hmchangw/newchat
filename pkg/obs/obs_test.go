@@ -434,23 +434,42 @@ func TestContextWithPublicIdentity_MasterOffZeroesSpanAttributes(t *testing.T) {
 	}
 }
 
+// TestContextWithPublicIdentity_FullySuppliedIdentityReplacesForgedValues covers
+// the case where the route carries every managed value: sanitization must not
+// depend on some key being unsupplied, and no forged value may survive as the
+// one that happens to be read downstream.
+func TestContextWithPublicIdentity_FullySuppliedIdentityReplacesForgedValues(t *testing.T) {
+	testEnv(t, "public-identity-full-svc")
+	// Only baggage is asserted, so every exporting pillar stays off — shutdown
+	// then has nothing to flush and its error is worth asserting on.
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+
+	_, shutdown, err := Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, shutdown(context.Background())) })
+
+	forged, err := baggage.New(
+		mustBaggageMember(t, o11y.UserNameKey, "forged-user"),
+		mustBaggageMember(t, RoomIDKey, "forged-room"),
+		mustBaggageMember(t, SiteIDKey, "forged-site"),
+	)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), forged)
+
+	bag := baggage.FromContext(ContextWithPublicIdentity(ctx, "alice", "room-42", "site-a"))
+	assert.Equal(t, "alice", bag.Member(o11y.UserNameKey).Value())
+	assert.Equal(t, "room-42", bag.Member(RoomIDKey).Value())
+	assert.Equal(t, "site-a", bag.Member(SiteIDKey).Value())
+}
+
 func mustBaggageMember(t *testing.T, key, value string) baggage.Member {
 	t.Helper()
 	member, err := baggage.NewMember(key, value)
 	require.NoError(t, err)
 	return member
-}
-
-// TestUnsuppliedManagedKeys guards the drift the public-ingress optimization
-// introduces: it clears only the keys no trusted value will overwrite, so a
-// managed key this helper forgets would stay caller-controlled.
-func TestUnsuppliedManagedKeys(t *testing.T) {
-	assert.ElementsMatch(t, ManagedBaggageKeys(), unsuppliedManagedKeys("", "", ""),
-		"with no trusted values every managed key must be cleared")
-	assert.Empty(t, unsuppliedManagedKeys("alice", "room-42", "site-a"),
-		"a fully supplied identity leaves nothing to pre-clear")
-	assert.Equal(t, []string{SiteIDKey}, unsuppliedManagedKeys("alice", "room-42", ""))
-	assert.Equal(t, []string{o11y.UserNameKey, RoomIDKey}, unsuppliedManagedKeys("", "", "site-a"))
 }
 
 // TestManagedBaggageKeys_MatchesMaterializedKeys guards the single source of

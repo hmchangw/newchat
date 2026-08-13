@@ -279,34 +279,18 @@ func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) co
 // entry span's attributes, which the SDK's OnStart processor materialized from
 // the forged values before any handler ran.
 func ContextWithPublicIdentity(ctx context.Context, account, roomID, siteID string) context.Context {
-	if !contextAttributesEnabled.Load() {
-		// Emission is off — NATS tracing can still be forced on by
-		// OTEL_NATS_TRACING_ENABLED or the flag relay, so the caller's values can
-		// reach an observability-enabled downstream service. Nothing here will
-		// overwrite them, so every managed key has to go.
-		return withoutBaggageAttributes(ctx, managedBaggageKeys...)
-	}
-	// ContextWithIdentity drops each key it has a trusted value for, so only the
-	// unsupplied ones need clearing here.
-	ctx = withoutBaggageAttributes(ctx, unsuppliedManagedKeys(account, roomID, siteID)...)
+	// Sanitize unconditionally, before reading any toggle. Emission being off
+	// does not make the caller's values safe: NATS tracing can be forced on by
+	// OTEL_NATS_TRACING_ENABLED or the flag relay, carrying them to a service
+	// that does emit. Clearing here rather than leaving it to the trusted-value
+	// path also keeps this boundary's guarantee independent of what
+	// ContextWithIdentity decides — one decision, taken at ingress.
+	//
+	// This costs no more than clearing a subset would: the pass is batched, and
+	// the trusted-value path's own clear then finds nothing left to remove and
+	// skips its rebuild.
+	ctx = withoutBaggageAttributes(ctx, managedBaggageKeys...)
 	return ContextWithIdentity(ctx, account, roomID, siteID)
-}
-
-// unsuppliedManagedKeys returns the managed keys this boundary has no trusted
-// value for. TestUnsuppliedManagedKeys pins it against ManagedBaggageKeys so a
-// key added to one is not forgotten here.
-func unsuppliedManagedKeys(account, roomID, siteID string) []string {
-	keys := make([]string, 0, len(managedBaggageKeys))
-	if account == "" {
-		keys = append(keys, o11y.UserNameKey)
-	}
-	if roomID == "" {
-		keys = append(keys, RoomIDKey)
-	}
-	if siteID == "" {
-		keys = append(keys, SiteIDKey)
-	}
-	return keys
 }
 
 // contextWithBaggageAttributes sets each non-empty attribute as baggage and
