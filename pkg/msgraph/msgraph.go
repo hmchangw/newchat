@@ -189,6 +189,12 @@ type Option func(*graphClient)
 // removing internal W3C baggage before any Microsoft identity or Graph egress.
 // Keeping this at request construction protects every client surface even when
 // a caller supplies an instrumented HTTP transport through WithHTTPClient.
+//
+// body is handed to the stdlib untouched and is never read, logged, or attached
+// to a span here. That matters because the token callers pass a form carrying
+// client_secret — and, on the ROPC path in presence.go, username and password.
+// Nothing in this package may log a request body; .semgrep/msgraph-secrets.yml
+// enforces it.
 func newExternalRequestWithContext(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
 	return http.NewRequestWithContext(baggage.ContextWithoutBaggage(ctx), method, url, body)
 }
