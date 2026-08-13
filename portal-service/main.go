@@ -104,7 +104,7 @@ func run() error {
 		return fmt.Errorf("parse mongo read preference %q: %w", cfg.MongoReadPreference, err)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref), mongoutil.WithLazyConnect())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}

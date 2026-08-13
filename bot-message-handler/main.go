@@ -65,7 +65,8 @@ func run() error {
 		return fmt.Errorf("bootstrap streams: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
