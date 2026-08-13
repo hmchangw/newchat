@@ -51,12 +51,6 @@ type l2Store struct {
 	now     func() time.Time
 }
 
-// refreshAfterFor derives the re-validation window from the entry TTL. It must
-// exceed the L1 TTL in front of this tier, or every L1 miss would also pay a
-// refresh and the L2 would stop absorbing load. Same derivation as the other
-// read-through tiers (pkg/subauthcache, pkg/atrest).
-func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
-
 // NewL2Store wraps store with a Valkey read-through tier. A nil client (or a
 // non-positive ttl) returns store unchanged, so callers can wire it
 // unconditionally in deployments with no Valkey.
@@ -101,13 +95,7 @@ func Bust(ctx context.Context, client valkeyutil.Client, userID, account string)
 	if account != "" {
 		keys = append(keys, accountKey(account))
 	}
-	if len(keys) == 0 {
-		return
-	}
-	if err := client.Del(ctx, keys...); err != nil {
-		slog.WarnContext(ctx, "user L2 bust failed (TTL will reconcile)",
-			"user_id", userID, "error", err)
-	}
+	valkeyutil.BustKeys(ctx, client, "user", keys...)
 }
 
 func (l *l2Store) FindUserByID(ctx context.Context, id string) (*model.User, error) {
@@ -143,7 +131,7 @@ func (l *l2Store) resolve(ctx context.Context, key string, load func(context.Con
 // currently down, so the deadline is re-armed and the cached user is served.
 // A cold (uncached) lookup still fails, since a user cannot be invented.
 func (l *l2Store) serveHit(ctx context.Context, key string, entry *cachedUser, load func(context.Context) (*model.User, error)) (*model.User, error) {
-	if l.now().Sub(time.UnixMilli(entry.CachedAt)) < refreshAfterFor(l.ttl) {
+	if valkeyutil.Fresh(entry.CachedAt, l.now(), l.ttl) {
 		return &entry.User, nil
 	}
 	u, err := load(ctx)
@@ -283,10 +271,7 @@ func (l *l2Store) write(ctx context.Context, u *model.User) {
 // slide re-arms the entry's deadline with EXPIRE rather than re-writing it, so
 // an entry busted or expired since the read is not resurrected.
 func (l *l2Store) slide(ctx context.Context, key string) {
-	if _, err := l.client.Expire(ctx, key, l.ttl); err != nil {
-		slog.WarnContext(ctx, "user L2 TTL slide failed (entry keeps its current deadline)",
-			"key", key, "error", err)
-	}
+	valkeyutil.SlideTTL(ctx, l.client, key, l.ttl, "user")
 }
 
 // Resilient builds the full user-lookup stack: Mongo fenced by breaker, behind

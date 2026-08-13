@@ -51,11 +51,6 @@ func newLookupWithClock(cache Cache, load Loader, ttl time.Duration, now func() 
 	return &Lookup{cache: cache, load: load, ttl: ttl, now: now}
 }
 
-// refreshAfterFor derives the re-validation window from the entry TTL. Same
-// derivation as the other read-through tiers (pkg/subauthcache, pkg/atrest,
-// pkg/userstore).
-func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
-
 // GetMembers returns the member list, populating Valkey on a loader round-trip.
 // Callers must not mutate the slice.
 func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error) {
@@ -109,7 +104,7 @@ func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error
 // is down, so the deadline is re-armed and the cached list is served. Without
 // it the entry simply expires mid-outage and fan-out starts failing.
 func (c *Lookup) serveHit(ctx context.Context, roomID string, entry Entry) ([]Member, error) {
-	if c.now().Sub(time.UnixMilli(entry.CachedAt)) < refreshAfterFor(c.ttl) {
+	if valkeyutil.Fresh(entry.CachedAt, c.now(), c.ttl) {
 		return entry.Members, nil
 	}
 	// Collapse concurrent revalidations of the same room. Unlike the other

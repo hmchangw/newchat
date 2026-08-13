@@ -37,13 +37,10 @@ import (
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
-// Recorder records the outcome of a cache lookup. cachemetrics.Recorder
-// satisfies it; tests substitute a spy.
-type Recorder interface {
-	Hit(ctx context.Context)
-	Miss(ctx context.Context)
-	Error(ctx context.Context)
-}
+// Recorder records the outcome of an L2 cache lookup. An alias of
+// valkeyutil.CacheRecorder: every tier in this repo records against one
+// interface, and cachemetrics.Recorder satisfies it.
+type Recorder = valkeyutil.CacheRecorder
 
 // Loader resolves a session by its hashed token from the source of truth.
 type Loader func(ctx context.Context, hash string) (*session.Session, error)
@@ -70,11 +67,6 @@ type Cache struct {
 	now     func() time.Time
 }
 
-// refreshAfterFor derives the re-validation window from the entry TTL. Same
-// derivation as the other read-through tiers (pkg/subauthcache, pkg/atrest,
-// pkg/userstore, pkg/roomsubcache, pkg/roommetacache).
-func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
-
 // New returns a Cache over load. A nil client (or a non-positive ttl) makes
 // every lookup go straight to load, so callers can wire it unconditionally in
 // deployments with no Valkey.
@@ -98,12 +90,10 @@ func (c *Cache) enabled() bool { return c.client != nil && c.ttl > 0 }
 // token stops working immediately rather than at the TTL; until they do,
 // revocation is reconciled by re-validation while MongoDB is healthy.
 func Bust(ctx context.Context, client valkeyutil.Client, hash string) {
-	if client == nil || hash == "" {
+	if hash == "" {
 		return
 	}
-	if err := client.Del(ctx, Key(hash)); err != nil {
-		slog.WarnContext(ctx, "session L2 bust failed (TTL will reconcile)", "error", err)
-	}
+	valkeyutil.BustKeys(ctx, client, "session", Key(hash))
 }
 
 // FindByHash resolves a session for an already-hashed token.
@@ -138,7 +128,7 @@ func (c *Cache) FindByHash(ctx context.Context, hash string) (*session.Session, 
 //     an entry busted since the read stays busted.
 //   - Success: rewrite with a fresh stamp, picking up any change.
 func (c *Cache) serveHit(ctx context.Context, hash string, entry *cachedSession) (*session.Session, error) {
-	if c.now().Sub(time.UnixMilli(entry.CachedAt)) < refreshAfterFor(c.ttl) {
+	if valkeyutil.Fresh(entry.CachedAt, c.now(), c.ttl) {
 		return &entry.Session, nil
 	}
 	s, err := c.load(ctx, hash)
@@ -177,7 +167,5 @@ func (c *Cache) write(ctx context.Context, hash string, s *session.Session) {
 
 // slide re-arms the entry's deadline without rewriting it.
 func (c *Cache) slide(ctx context.Context, hash string) {
-	if _, err := c.client.Expire(ctx, Key(hash), c.ttl); err != nil {
-		slog.WarnContext(ctx, "session L2 TTL slide failed (entry keeps its current deadline)", "error", err)
-	}
+	valkeyutil.SlideTTL(ctx, c.client, Key(hash), c.ttl, "session")
 }

@@ -124,10 +124,10 @@ func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
 // pastRefresh and withinRefresh are stated relative to the tier's OWN refresh
 // window for a 1h TTL rather than hardcoding a fraction, so a change to
-// refreshAfterFor moves every refresh test with it.
+// valkeyutil.RefreshAfter moves every refresh test with it.
 var (
-	pastRefresh   = refreshAfterFor(time.Hour) + time.Minute
-	withinRefresh = refreshAfterFor(time.Hour) - time.Minute
+	pastRefresh   = valkeyutil.RefreshAfter(time.Hour) + time.Minute
+	withinRefresh = valkeyutil.RefreshAfter(time.Hour) - time.Minute
 )
 
 func newClockedTier(c valkeyutil.Client, ttl time.Duration, clock *fakeClock, loader Loader) *Tier {

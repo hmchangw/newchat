@@ -11,13 +11,10 @@ import (
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
-// Recorder records the outcome of an L2 cache lookup. cachemetrics.Recorder
-// satisfies it; tests substitute a spy.
-type Recorder interface {
-	Hit(ctx context.Context)
-	Miss(ctx context.Context)
-	Error(ctx context.Context)
-}
+// Recorder records the outcome of an L2 cache lookup. An alias of
+// valkeyutil.CacheRecorder: every tier in this repo records against one
+// interface, and cachemetrics.Recorder satisfies it.
+type Recorder = valkeyutil.CacheRecorder
 
 // MetaKey is the L2 (Valkey) key for a room's cached Meta. The {roomID}
 // hash tag colocates it in the same cluster slot as the room's encryption
@@ -86,11 +83,6 @@ type cachedMeta struct {
 	CachedAt int64 `json:"cachedAt"`
 }
 
-// refreshAfterFor derives the re-validation window from the entry TTL. Same
-// derivation as the other read-through tiers (pkg/subauthcache, pkg/atrest,
-// pkg/userstore, pkg/roomsubcache).
-func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
-
 func readThroughAt(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder, now time.Time, opts ...ReadThroughOption) (Meta, error) {
 	o := readThroughOpts{fetch: FetchFromMongo}
 	for _, opt := range opts {
@@ -103,7 +95,7 @@ func readThroughAt(ctx context.Context, client valkeyutil.Client, rooms *mongo.C
 
 	if entry, found := readL2(ctx, client, roomID, rec); found {
 		// Fresh: serve as a pure read.
-		if now.Sub(time.UnixMilli(entry.CachedAt)) < refreshAfterFor(ttl) {
+		if valkeyutil.Fresh(entry.CachedAt, now, ttl) {
 			return entry.Meta, nil
 		}
 		// Stale: re-validate. On failure keep serving and re-arm the deadline —
@@ -139,10 +131,7 @@ func writeL2(ctx context.Context, client valkeyutil.Client, roomID string, meta 
 
 // slideL2 re-arms the entry's deadline without rewriting it.
 func slideL2(ctx context.Context, client valkeyutil.Client, roomID string, ttl time.Duration) {
-	if _, err := client.Expire(ctx, MetaKey(roomID), ttl); err != nil {
-		slog.WarnContext(ctx, "room meta L2 TTL slide failed (entry keeps its current deadline)",
-			"room_id", roomID, "error", err)
-	}
+	valkeyutil.SlideTTL(ctx, client, MetaKey(roomID), ttl, "room meta")
 }
 
 // fetchGuarded runs FetchFromMongo, inside guard when one was supplied. A nil
@@ -168,11 +157,5 @@ func fetchGuarded(ctx context.Context, o *readThroughOpts, rooms *mongo.Collecti
 // Fail-open: a nil client is a no-op and any Valkey error logs at warn and is
 // swallowed — the configured L2 TTL reconciles a missed bust.
 func BustMeta(ctx context.Context, client valkeyutil.Client, roomID string) {
-	if client == nil {
-		return
-	}
-	if err := client.Del(ctx, MetaKey(roomID)); err != nil {
-		slog.WarnContext(ctx, "room meta L2 invalidate failed (TTL will reconcile)",
-			"room_id", roomID, "error", err)
-	}
+	valkeyutil.BustKeys(ctx, client, "room meta", MetaKey(roomID))
 }

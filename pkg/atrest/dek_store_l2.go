@@ -11,21 +11,10 @@ import (
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
-// L2Recorder records L2 (Valkey) hit/miss/error outcomes. cachemetrics.Recorder
-// satisfies it; tests substitute a spy.
-type L2Recorder interface {
-	Hit(ctx context.Context)
-	Miss(ctx context.Context)
-	Error(ctx context.Context)
-}
-
-// noopL2Recorder is the fallback when a nil recorder is supplied, so the
-// exported constructor can't produce a nil-panicking store.
-type noopL2Recorder struct{}
-
-func (noopL2Recorder) Hit(context.Context)   {}
-func (noopL2Recorder) Miss(context.Context)  {}
-func (noopL2Recorder) Error(context.Context) {}
+// L2Recorder records L2 (Valkey) hit/miss/error outcomes. An alias of
+// valkeyutil.CacheRecorder: every tier in this repo records against one
+// interface, and cachemetrics.Recorder satisfies it.
+type L2Recorder = valkeyutil.CacheRecorder
 
 // DEKKey is the L2 key for a room's wrapped DEK. The {roomID} hash-tag
 // colocates it in the room's cluster slot, matching house convention.
@@ -99,19 +88,14 @@ type l2DEKStore struct {
 // stalling; it must not be nil.
 func NewL2DEKStore(inner DEKStore, client valkeyutil.Client, ttl time.Duration, breaker *circuitbreaker.Breaker, rec L2Recorder) DEKStore {
 	if rec == nil {
-		rec = noopL2Recorder{}
+		rec = valkeyutil.NoopRecorder{}
 	}
 	return &l2DEKStore{
-		inner: inner, client: client, ttl: ttl, refreshAfter: refreshAfterFor(ttl),
+		inner: inner, client: client, ttl: ttl, refreshAfter: valkeyutil.RefreshAfter(ttl),
 		breaker: breaker, metrics: rec,
 		now: time.Now,
 	}
 }
-
-// refreshAfterFor derives the reconciliation window from the entry TTL. Three
-// quarters leaves room for at least one refresh before an entry expires while
-// staying above the in-process DEK cache TTL it must outrun (see refreshAfter).
-func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
 
 func (s *l2DEKStore) l2Enabled() bool { return s.client != nil && s.ttl > 0 }
 
@@ -228,10 +212,7 @@ func (s *l2DEKStore) readL2(ctx context.Context, roomID string) (cachedDEK, bool
 // Best-effort: a failure is logged and swallowed — the value was already served,
 // and the next successful refresh repopulates with a fresh deadline.
 func (s *l2DEKStore) slideL2(ctx context.Context, roomID string) {
-	if _, err := s.client.Expire(ctx, DEKKey(roomID), s.ttl); err != nil {
-		slog.WarnContext(ctx, "dek L2 TTL slide failed (entry keeps its current deadline)",
-			"room_id", roomID, "error", err)
-	}
+	valkeyutil.SlideTTL(ctx, s.client, DEKKey(roomID), s.ttl, "dek")
 }
 
 // writeL2 stores the entry with a full TTL. Best-effort: a failure is logged and
@@ -251,10 +232,7 @@ func (s *l2DEKStore) invalidate(ctx context.Context, roomID string) {
 	if !s.l2Enabled() {
 		return
 	}
-	if err := s.client.Del(ctx, DEKKey(roomID)); err != nil {
-		slog.WarnContext(ctx, "dek L2 invalidate failed (TTL will reconcile)",
-			"room_id", roomID, "error", err)
-	}
+	valkeyutil.BustKeys(ctx, s.client, "dek", DEKKey(roomID))
 }
 
 // DefaultL2Recorder is the shared metrics recorder for the DEK L2 tier, so

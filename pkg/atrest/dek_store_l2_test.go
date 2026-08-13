@@ -168,11 +168,11 @@ func healthyBreaker() *circuitbreaker.Breaker { return circuitbreaker.New(5, tim
 
 // pastRefresh and withinRefresh are stated relative to the store's OWN refresh
 // window for a 1h TTL rather than hardcoding a fraction of it, so a change to
-// refreshAfterFor moves every refresh test with it instead of silently making
+// valkeyutil.RefreshAfter moves every refresh test with it instead of silently making
 // them assert the wrong side of the boundary.
 var (
-	pastRefresh   = refreshAfterFor(time.Hour) + time.Minute
-	withinRefresh = refreshAfterFor(time.Hour) - time.Minute
+	pastRefresh   = valkeyutil.RefreshAfter(time.Hour) + time.Minute
+	withinRefresh = valkeyutil.RefreshAfter(time.Hour) - time.Minute
 )
 
 func seedRow(roomID string) RoomDataKey {
@@ -194,9 +194,9 @@ func TestRefreshAfter_OutrunsTheInProcessDEKCache(t *testing.T) {
 		l2TTL = 90 * time.Minute // ATREST_DEK_L2_TTL default
 		l1TTL = time.Hour        // ATREST_DEK_CACHE_TTL default (Config.DEKCacheTTL)
 	)
-	assert.Greater(t, refreshAfterFor(l2TTL), l1TTL,
+	assert.Greater(t, valkeyutil.RefreshAfter(l2TTL), l1TTL,
 		"refresh window must exceed the L1 DEK cache TTL, or every L1 miss pays a refresh")
-	assert.Less(t, refreshAfterFor(l2TTL), l2TTL,
+	assert.Less(t, valkeyutil.RefreshAfter(l2TTL), l2TTL,
 		"an entry must still get a refresh opportunity before its TTL expires")
 }
 

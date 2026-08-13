@@ -49,21 +49,10 @@ type cachedAuth struct {
 	CachedAt int64 `json:"cachedAt"`
 }
 
-// Recorder records L2 hit/miss/error outcomes. cachemetrics.Recorder satisfies it.
-type Recorder interface {
-	Hit(ctx context.Context)
-	Miss(ctx context.Context)
-	Error(ctx context.Context)
-}
-
-// noopRecorder is the fallback used when a nil Recorder reaches ReadThrough, so
-// the exported API can't nil-panic. Production callers pass cachemetrics.For(...)
-// and never hit this path.
-type noopRecorder struct{}
-
-func (noopRecorder) Hit(context.Context)   {}
-func (noopRecorder) Miss(context.Context)  {}
-func (noopRecorder) Error(context.Context) {}
+// Recorder records the outcome of an L2 cache lookup. An alias of
+// valkeyutil.CacheRecorder: every tier in this repo records against one
+// interface, and cachemetrics.Recorder satisfies it.
+type Recorder = valkeyutil.CacheRecorder
 
 // Loader fetches a fresh SubAuth from the source of truth. It returns
 // (auth, subscribed, err): subscribed=false is a confirmed non-subscriber (not
@@ -105,12 +94,6 @@ func fromSubscription(sub *model.Subscription) SubAuth {
 	return a
 }
 
-// bustTimeout bounds every invalidation call so a hung Valkey can never stall
-// the write path that triggered it. It lives here rather than at the write
-// sites because the budget is a cache-tier policy, not a per-service choice —
-// four services previously declared their own identical copy of it.
-const bustTimeout = 2 * time.Second
-
 // BustSub best-effort deletes a (roomID, account) subscription's L2 entry.
 // Called from write sites (room-worker, room-service, inbox-worker) after an
 // authoritative Mongo write that would make a cached positive SubAuth wrong —
@@ -139,12 +122,7 @@ func BustSubs(ctx context.Context, client valkeyutil.Client, roomID string, acco
 	for i, account := range accounts {
 		keys[i] = SubKey(roomID, account)
 	}
-	bustCtx, cancel := context.WithTimeout(ctx, bustTimeout)
-	defer cancel()
-	if err := client.Del(bustCtx, keys...); err != nil {
-		slog.WarnContext(ctx, "subauth L2 invalidate failed (TTL will reconcile)",
-			"room_id", roomID, "count", len(accounts), "error", err)
-	}
+	valkeyutil.BustKeys(ctx, client, "subauth", keys...)
 }
 
 // readL2 attempts the L2 read. An entry with no user ID is not usable: this
@@ -209,19 +187,14 @@ func NewTier(client valkeyutil.Client, subscriptions *mongo.Collection, ttl time
 // a Mongo collection, for callers that already own the fetch (and for tests).
 func NewTierWithLoader(client valkeyutil.Client, ttl time.Duration, rec Recorder, loader Loader) *Tier {
 	if rec == nil {
-		rec = noopRecorder{}
+		rec = valkeyutil.NoopRecorder{}
 	}
 	return &Tier{
 		client: client, ttl: ttl, metrics: rec, loader: loader,
-		refreshAfter: refreshAfterFor(ttl),
+		refreshAfter: valkeyutil.RefreshAfter(ttl),
 		now:          time.Now,
 	}
 }
-
-// refreshAfterFor derives the reconciliation window from the entry TTL. Three
-// quarters leaves room for a refresh before an entry expires while staying well
-// above the L1 TTL it must outrun.
-func refreshAfterFor(ttl time.Duration) time.Duration { return ttl / 4 * 3 }
 
 // l2Enabled reports whether the L2 tier is in play. A non-positive ttl fully
 // bypasses it: Valkey treats ttl==0 as "store forever", so honoring a config
@@ -303,8 +276,5 @@ func (t *Tier) writeL2(ctx context.Context, roomID, account string, auth SubAuth
 // deleted, restoring revoked access for a full TTL. EXPIRE on an absent key is
 // a no-op, so a lost race simply leaves it deleted.
 func (t *Tier) slideL2TTL(ctx context.Context, roomID, account string) {
-	if _, err := t.client.Expire(ctx, SubKey(roomID, account), t.ttl); err != nil {
-		slog.WarnContext(ctx, "subauth L2 TTL slide failed (entry keeps its current deadline)",
-			"room_id", roomID, "error", err)
-	}
+	valkeyutil.SlideTTL(ctx, t.client, SubKey(roomID, account), t.ttl, "subauth")
 }

@@ -34,13 +34,10 @@ import (
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
-// Recorder records the outcome of a cache lookup. cachemetrics.Recorder
-// satisfies it; tests substitute a spy.
-type Recorder interface {
-	Hit(ctx context.Context)
-	Miss(ctx context.Context)
-	Error(ctx context.Context)
-}
+// Recorder records the outcome of an L2 cache lookup. An alias of
+// valkeyutil.CacheRecorder: every tier in this repo records against one
+// interface, and cachemetrics.Recorder satisfies it.
+type Recorder = valkeyutil.CacheRecorder
 
 // DefaultMaxValueBytes caps the size of a cached blob accepted by Get.
 // Sized to comfortably accommodate ~250k members at ~64B/member; serves
