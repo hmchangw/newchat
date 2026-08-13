@@ -146,7 +146,7 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		func(context.Context) error { cc.Stop(); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
-		func(context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, targetClient); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, source); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },

@@ -106,7 +106,7 @@ func run() error {
 	slog.Info("bot-room-service running", "site", cfg.SiteID, "peers", peers)
 	shutdown.Wait(ctx, 25*time.Second,
 		func(dctx context.Context) error { return router.Shutdown(dctx) },
-		func(_ context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(dctx context.Context) error { mongoutil.Disconnect(dctx, mc); return nil },
 		func(dctx context.Context) error { return healthStop(dctx) },
 		func(dctx context.Context) error { return obsShutdown(dctx) },

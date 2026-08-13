@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
@@ -127,4 +128,14 @@ func TestConnect_PresentCredsFilePassesPrecheck(t *testing.T) {
 	_, err := natsutil.Connect(context.Background(), "nats://127.0.0.1:1", path,
 		noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.False(t, errors.Is(err, os.ErrNotExist), "precheck should pass when file exists, got: %v", err)
+}
+
+func TestConnect_SetsDrainTimeout(t *testing.T) {
+	conn, err := natsutil.Connect(context.Background(), startTestServer(t), "",
+		noop.NewTracerProvider(), propagation.TraceContext{}, false)
+	require.NoError(t, err)
+	t.Cleanup(conn.NatsConn().Close)
+
+	require.Equal(t, 10*time.Second, conn.NatsConn().Opts.DrainTimeout,
+		"DrainTimeout must leave headroom in the shared 25s shutdown budget, not the 30s library default")
 }

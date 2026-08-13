@@ -124,7 +124,7 @@ func run() error {
 			func(ctx context.Context) error {
 				slog.Info("shutting down botplatform-service")
 				err := srv.Shutdown(ctx)
-				if drainErr := nc.Drain(); drainErr != nil {
+				if drainErr := natsutil.Drain(ctx, nc); drainErr != nil {
 					slog.Warn("nats drain failed", "error", drainErr)
 				}
 				valkeyutil.Disconnect(valkey)

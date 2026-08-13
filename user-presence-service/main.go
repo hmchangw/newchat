@@ -160,7 +160,7 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(ctx context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(_ context.Context) error { return store.Close() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },

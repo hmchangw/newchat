@@ -94,7 +94,7 @@ func main() {
 		func(context.Context) error { conn.beginShutdown(); return nil },
 		func(ctx context.Context) error { return conn.awaitWatchers(ctx) },
 		func(ctx context.Context) error { return healthStop(ctx) },
-		func(context.Context) error { return conn.nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, conn.nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, conn.client); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
@@ -231,7 +231,11 @@ func (c *connector) Close() {
 	if err := c.awaitWatchers(wctx); err != nil {
 		slog.Warn("watcher drain incomplete", "error", err)
 	}
-	_ = c.nc.Drain()
+	dctx, dcancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer dcancel()
+	if err := natsutil.Drain(dctx, c.nc); err != nil {
+		slog.Warn("nats drain incomplete", "error", err)
+	}
 	mongoutil.Disconnect(context.Background(), c.client)
 }
 

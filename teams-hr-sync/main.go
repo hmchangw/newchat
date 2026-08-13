@@ -136,7 +136,15 @@ func runStreamMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, 
 	if err != nil {
 		return runStats{}, fmt.Errorf("connect nats: %w", err)
 	}
-	defer nc.Close()
+	defer func() {
+		// ctx is already cancelled on SIGTERM by the time this defer runs, so
+		// the drain deadline must not be derived from it.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel()
+		if err := natsutil.Drain(dctx, nc); err != nil {
+			slog.Error("nats drain", "error", err)
+		}
+	}()
 	js, err := jetstream.New(nc.NatsConn())
 	if err != nil {
 		return runStats{}, fmt.Errorf("init jetstream: %w", err)

@@ -272,7 +272,7 @@ func main() {
 			flushCancel()
 			return nil
 		},
-		func(ctx context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 	}
 	if keyStore != nil {
 		hooks = append(hooks, func(ctx context.Context) error { return keyStore.Close() })

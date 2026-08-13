@@ -303,7 +303,7 @@ func main() {
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(ctx context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error {
 			if closer, ok := keyStore.(interface{ Close() error }); ok {
 				return closer.Close()

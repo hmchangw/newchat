@@ -102,20 +102,30 @@ func run() error {
 		WriteTimeout: 30 * time.Second,
 	}
 
-	go shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(_ context.Context) error { return nc.Drain() },
-		func(ctx context.Context) error {
-			slog.Info("shutting down media-service")
-			return srv.Shutdown(ctx)
-		},
-		// obsShutdown LAST so all prior teardown telemetry is exported.
-		func(ctx context.Context) error { return obsShutdown(ctx) },
-	)
+	srvErr := make(chan error, 1)
+	go func() {
+		slog.Info("media-service listening", "port", cfg.Port, "site", cfg.SiteID)
+		srvErr <- srv.ListenAndServe()
+	}()
 
-	slog.Info("media-service listening", "port", cfg.Port, "site", cfg.SiteID)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		shutdown.Wait(ctx, 25*time.Second,
+			func(ctx context.Context) error { return router.Shutdown(ctx) },
+			func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+			func(ctx context.Context) error {
+				slog.Info("shutting down media-service")
+				return srv.Shutdown(ctx)
+			},
+			// obsShutdown LAST so all prior teardown telemetry is exported.
+			func(ctx context.Context) error { return obsShutdown(ctx) },
+		)
+	}()
+
+	if err := <-srvErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("listen and serve: %w", err)
 	}
+	<-shutdownDone
 	return nil
 }
