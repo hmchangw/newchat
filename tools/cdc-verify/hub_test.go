@@ -29,12 +29,14 @@ func TestHub_Broadcast_DeliversToClient(t *testing.T) {
 	assert.Contains(t, string(b), `"kind":"stats"`)
 }
 
-// A client whose channel is full must not block the broadcast: the frame is
-// dropped via the select default, exercising broadcast's non-blocking path.
-func TestHub_Broadcast_DropsWhenClientFull(t *testing.T) {
+// A client whose channel is full must not block the broadcast — and must not
+// silently lose frames either: the hub disconnects it (closed channel), so the
+// SSE handler returns and the browser reconnects with a full state refetch.
+func TestHub_Broadcast_DisconnectsSlowClient(t *testing.T) {
 	h := newHub()
+	slow := make(chan []byte) // unbuffered, no reader → always full
 	h.mu.Lock()
-	h.clients["slow"] = make(chan []byte) // unbuffered, no reader → always full
+	h.clients["slow"] = slow
 	h.mu.Unlock()
 
 	done := make(chan struct{})
@@ -43,7 +45,16 @@ func TestHub_Broadcast_DropsWhenClientFull(t *testing.T) {
 		close(done)
 	}()
 	<-done // returns only if broadcast didn't block on the full channel
-	assert.Equal(t, 1, h.clientCount())
+	assert.Equal(t, 0, h.clientCount(), "the slow client is removed")
+	_, open := <-slow
+	assert.False(t, open, "the slow client's channel is closed so its handler returns")
+
+	// A healthy client registered afterwards still receives frames.
+	_, ch := h.register()
+	h.broadcastResult(CheckResult{ID: "r2"})
+	b, open := <-ch
+	require.True(t, open)
+	assert.Contains(t, string(b), `"r2"`)
 }
 
 // A payload that cannot be JSON-marshaled hits the error branch and returns

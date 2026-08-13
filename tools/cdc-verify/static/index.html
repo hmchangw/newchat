@@ -386,6 +386,7 @@
 
   var TERMINAL = { matched: true, failed: true, skipped: true, superseded: true };
   var FEED_CAP = 100;
+  var FAILURES_CAP = 1000; // client-side retention; matches the server's FAILED_CAP default
   var PAIR_CAP = 50;
 
   // pairKey(source, alias) -> {pair, rows: Map<id, r>, order: [ids newest first]}
@@ -779,6 +780,8 @@
     return tr;
   }
 
+  // Full rebuild — initial state application only; SSE updates go through
+  // upsertFailureRow so one event never re-renders the whole table.
   function renderFailures() {
     var tbody = document.querySelector('#failures tbody');
     tbody.replaceChildren();
@@ -791,6 +794,16 @@
       if (!r) return;
       tbody.appendChild(buildFailureRow(r));
     });
+  }
+
+  function upsertFailureRow(r, isNew) {
+    var tbody = document.querySelector('#failures tbody');
+    var existing = tbody.querySelector('tr[data-id="' + r.id + '"]');
+    if (existing) { existing.replaceWith(buildFailureRow(r)); return; }
+    if (!isNew) return; // update to a row already evicted from the table
+    if (failuresOrder.length === 1) tbody.replaceChildren(); // drop the 'No failures.' placeholder
+    tbody.prepend(buildFailureRow(r));
+    while (tbody.children.length > FAILURES_CAP) tbody.removeChild(tbody.lastChild);
   }
 
   // ── state application ──
@@ -840,11 +853,14 @@
     if (r.state === 'failed') {
       var knownF = failuresMap.has(r.id);
       failuresMap.set(r.id, r);
-      if (!knownF) failuresOrder.unshift(r.id);
-      renderFailures();
+      if (!knownF) {
+        failuresOrder.unshift(r.id);
+        while (failuresOrder.length > FAILURES_CAP) failuresMap.delete(failuresOrder.pop());
+      }
+      upsertFailureRow(r, !knownF);
     } else if (failuresMap.has(r.id)) {
       failuresMap.set(r.id, r);
-      renderFailures();
+      upsertFailureRow(r, false);
     }
 
     tallyIfNew(r);
@@ -1113,16 +1129,26 @@
     openInspect(inspectParam.slice(0, sep), inspectParam.slice(sep + 1));
   }
 
-  fetch('/api/state')
-    .then(function (resp) { return resp.json(); })
-    .then(applyInitialState)
-    .catch(function (err) {
-      var errBanner = document.getElementById('error-banner');
-      errBanner.hidden = false;
-      errBanner.textContent = 'Failed to load state: ' + err;
-    });
+  function loadState() {
+    fetch('/api/state')
+      .then(function (resp) { return resp.json(); })
+      .then(applyInitialState)
+      .catch(function (err) {
+        var errBanner = document.getElementById('error-banner');
+        errBanner.hidden = false;
+        errBanner.textContent = 'Failed to load state: ' + err;
+      });
+  }
+  loadState();
 
   var es = new EventSource('/api/events');
+  var esFirstOpen = true;
+  // A reconnect (network blip, or the hub dropped us as a slow client) means
+  // frames were missed — refetch full state instead of trusting the tail.
+  es.onopen = function () {
+    if (esFirstOpen) { esFirstOpen = false; return; }
+    loadState();
+  };
   es.onmessage = function (msg) {
     var ev;
     try { ev = JSON.parse(msg.data); } catch (e) { return; }

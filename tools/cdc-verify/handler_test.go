@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -177,11 +178,13 @@ func TestHub_RegisterUnregisterAndDrop(t *testing.T) {
 	require.NoError(t, json.Unmarshal(frame, &ev))
 	assert.Equal(t, "stats", ev.Kind)
 
-	// fill the buffer; further broadcasts must not block
+	// Fill the buffer past capacity: the hub disconnects the unread client
+	// rather than blocking or silently dropping frames.
 	for i := 0; i < 100; i++ {
 		h.broadcastStats(StreamStats{Msgs: uint64(i)})
 	}
-	h.unregister(id)
+	assert.Equal(t, 0, h.clientCount())
+	h.unregister(id) // handler's deferred unregister is a harmless no-op
 	assert.Equal(t, 0, h.clientCount())
 }
 
@@ -190,6 +193,9 @@ type fakeInspector struct{}
 func (fakeInspector) Inspect(_ context.Context, collection, docID string) (InspectResult, error) {
 	if collection == "unmapped_coll" {
 		return InspectResult{}, fmt.Errorf("%w: %q", errUnmapped, collection)
+	}
+	if collection == "boom_coll" {
+		return InspectResult{}, fmt.Errorf("dial mongodb://internal-host-9:27017: refused")
 	}
 	return InspectResult{
 		Collection: collection,
@@ -233,6 +239,20 @@ func TestAPIInspect_UnmappedIs404(t *testing.T) {
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+// A store failure returns a generic 500 body: the raw error can carry internal
+// URIs/hosts that must never reach the browser.
+func TestAPIInspect_InternalErrorBodyIsGeneric(t *testing.T) {
+	srv, _ := testServer(t)
+	resp, err := http.Get(srv.URL + "/api/inspect?collection=boom_coll&doc=x")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "internal-host-9")
+	assert.Contains(t, string(body), "inspect failed")
 }
 
 func TestAPIMapping(t *testing.T) {
