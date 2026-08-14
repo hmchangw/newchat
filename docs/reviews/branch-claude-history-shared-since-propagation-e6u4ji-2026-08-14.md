@@ -117,3 +117,24 @@ Table-driven structure, descriptive subtest names, testify require/assert usage,
 **Race usage:** all runs went through Makefile targets (`-race` applied).
 
 **Verdict:** Strong test work — genuine TDD sequencing (plan documents red-phase evidence per task), correct mock/integration split, thorough error/edge coverage including the `&0` invariant and cross-site federation. Only the medium finding warrants a change before merge.
+
+## Bug & security
+
+`make sast`: **PASS** (all three gates green). gosec PASS, govulncheck PASS (0 vulnerabilities in called code; 1 imported-package + 4 module-level vulns exist but are not called — pre-existing, non-blocking), semgrep PASS (0 findings, 98 rules). Note: semgrep was not installed in this review environment and `make sast` initially exited 2 on that tooling gap alone; after installing semgrep 1.163.0, `make sast-semgrep` ran clean.
+
+### Findings
+
+- **low — malformed-event fallback grants unrestricted history despite an available cap** — room-worker/handler.go:1146-1151. In `historySharedSincePtr`, mode `"none"` with `timestamp <= 0` logs and returns nil (unrestricted) even when `inherited` is non-nil. A malformed/legacy canonical event from a capped requester with `history.mode:"none"` would grant full history — strictly worse than falling back to the inherited cap. Only reachable via malformed events (room-service always stamps `Timestamp`), so defense-in-depth: prefer `return inherited` over nil on that branch.
+- **low — rolling-deploy escalation window; deploy room-worker first** — pkg/model/member.go:75 + room-worker/handler.go:1140. An old room-worker binary unmarshals the new `historySharedSince` field into nothing (unknown JSON field ignored), so a new room-service stamping the cap has no effect until room-worker is upgraded — the escalation the branch fixes persists during the window. Degrades gracefully (no crash, no misparse), but the deploy order should be room-worker → room-service and noted in the PR.
+- **low (pre-existing surface the branch now documents) — `history.mode` is unvalidated free text** — room-worker/handler.go:1141, room-service/handler.go:979. Any value except the exact string `"none"` (case-sensitive: `"None"`, `"nonee"`, garbage) is silently treated as share-all — the permissive default for a typo'd restrictive intent. The `!= HistoryModeNone` shape predates this branch, and the docs now correctly state empty→all, but consider rejecting unknown modes at the room-service boundary (`BadRequest`) rather than widening trust in unvalidated input.
+- **nitpick — forged-value + capped-requester combination untested** — room-service/handler_test.go:980. The client-forged case is only paired with an uncapped requester. The unconditional `req.HistorySharedSince = nil` reset makes the combined case provably equivalent, but a table row (forged value + capped sub → requester's cap, not the forged value) would pin the ordering against future refactors.
+- **nitpick — pre-existing doc/code mismatch on admin bypass** — docs/client-api.md:1239 (unchanged context) claims platform admins bypass the member check on Add Members, but room-service/handler.go:859-865 hard-fails any account without a subscription (`errNotRoomMember`). Not introduced or touched by this branch; flagging so the doc claim gets verified separately.
+
+### Explicitly verified clean
+
+- **Client smuggling of `historySharedSince` is blocked**: unconditional server-side reset before the conditional stamp (room-service/handler.go:978-983), field documented as server-set, covered by the forged-value test and the `omitempty` round-trip test.
+- **No TOCTOU of consequence**: the cap is read from the requester's subscription in the same handler invocation that gates membership; HSS is immutable post-join, and redelivery is deterministic because the value rides the canonical event.
+- **Non-positive/zero-time guards on both sides** — the "never emit `&0`" event invariant holds.
+- **Propagation is complete**: cap lands on created subscriptions, the local `MemberAddEvent`, and the federated OUTBOX copy, each pinned by tests including the cross-site case.
+- **Projection fix** (room-service/store_mongo.go) closes the silent-no-op path and is drift-guarded by the integration test.
+- No injection, secret leakage, swallowed errors, or race-prone constructs introduced by the diff.
