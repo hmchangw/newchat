@@ -64,6 +64,8 @@ type failureObserverReport struct {
 type failureConsumerReport struct {
 	Stream          string `json:"stream"`
 	Durable         string `json:"durable"`
+	Up              bool   `json:"up"`
+	SampleErrors    uint64 `json:"sampleErrors"`
 	BaselinePending uint64 `json:"baselinePending"`
 	PeakPending     uint64 `json:"peakPending"`
 	FinalPending    uint64 `json:"finalPending"`
@@ -296,6 +298,7 @@ func buildSoakFailureEvidenceReport(
 	ledger failureLedgerSnapshot,
 	soak *soakCollectorSnapshot,
 	recipientHealth failureObserverHealthSnapshot,
+	consumers []ConsumerStat,
 	sidecars []failureSidecarReference,
 	endedAt time.Time,
 ) failureEvidenceReport {
@@ -329,7 +332,8 @@ func buildSoakFailureEvidenceReport(
 	}
 	if soak != nil {
 		stats := soak.Actions[soakRPCSend]
-		lane.Offered = stats.Attempted
+		lane.Offered = stats.Attempted + soak.Actions[soakRPCThreadReply].Attempted +
+			soak.WarmupActions[soakRPCSend] + soak.WarmupActions[soakRPCThreadReply]
 		lane.Latency = failureLatencyReport{
 			P50: stats.Latency.P50.String(), P95: stats.Latency.P95.String(),
 			P99: stats.Latency.P99.String(), Max: stats.Latency.Max.String(),
@@ -360,10 +364,24 @@ func buildSoakFailureEvidenceReport(
 		report.Observers = append(report.Observers, observerReport)
 	}
 	report.ObserverHealth = []failureObserverHealthSnapshot{recipientHealth}
+	for _, consumer := range consumers {
+		report.Consumers = append(report.Consumers, failureConsumerReport{
+			Stream: consumer.Stream, Durable: consumer.Durable,
+			Up:              consumer.HasSample && consumer.SampleErrors == 0,
+			SampleErrors:    consumer.SampleErrors,
+			BaselinePending: consumer.BaselinePending,
+			PeakPending:     consumer.PeakPending,
+			FinalPending:    consumer.FinalPending,
+			RecoveryPending: consumer.FinalPending,
+		})
+	}
 
 	gates := []failureGate{
 		{ID: "01_manifest", Verdict: failureVerdictPass},
-		{ID: "02_topology", Verdict: failureVerdictPass},
+		{
+			ID: "02_topology", Verdict: failureVerdictInconclusive,
+			Reason: "runtime NATS topology proof is unavailable",
+		},
 	}
 	hasBaseline := false
 	for index := range report.Timeline {
@@ -391,6 +409,11 @@ func buildSoakFailureEvidenceReport(
 			Start: run.StartedAt.UTC(), End: endedAt.UTC(), Up: false,
 			Reason: ledger.InvalidReason,
 		})
+	case ledger.Recovered > 0:
+		gates = append(gates, failureGate{
+			ID: "04_ledger", Verdict: failureVerdictInconclusive,
+			Reason: fmt.Sprintf("%d operations were recovered after a process interruption", ledger.Recovered),
+		})
 	case ledger.Active > 0:
 		gates = append(gates, failureGate{
 			ID: "04_ledger", Verdict: failureVerdictInconclusive,
@@ -398,6 +421,35 @@ func buildSoakFailureEvidenceReport(
 		})
 	default:
 		gates = append(gates, failureGate{ID: "04_ledger", Verdict: failureVerdictPass})
+	}
+	if lane.Offered == lane.Eligible {
+		gates = append(gates, failureGate{ID: "04_accounting", Verdict: failureVerdictPass})
+	} else {
+		gates = append(gates, failureGate{
+			ID: "04_accounting", Verdict: failureVerdictInconclusive,
+			Reason: fmt.Sprintf("offered operations do not match terminal accounting: offered=%d eligible=%d", lane.Offered, lane.Eligible),
+		})
+	}
+	requiredConsumers := map[string]bool{"message-worker": false, "broadcast-worker": false}
+	consumerHealthy := true
+	for _, consumer := range consumers {
+		if _, required := requiredConsumers[consumer.Durable]; required {
+			requiredConsumers[consumer.Durable] = true
+			if !consumer.HasSample || consumer.SampleErrors > 0 {
+				consumerHealthy = false
+			}
+		}
+	}
+	for _, present := range requiredConsumers {
+		consumerHealthy = consumerHealthy && present
+	}
+	if consumerHealthy {
+		gates = append(gates, failureGate{ID: "05_consumer_health", Verdict: failureVerdictPass})
+	} else {
+		gates = append(gates, failureGate{
+			ID: "05_consumer_health", Verdict: failureVerdictInconclusive,
+			Reason: "required consumer samples are missing or failed",
+		})
 	}
 	if failureHealthSnapshotCovers(recipientHealth, run.StartedAt, endedAt) {
 		gates = append(gates, failureGate{ID: "05_observer_health", Verdict: failureVerdictPass})
@@ -435,7 +487,7 @@ func buildSoakFailureEvidenceReport(
 	})
 	for _, sidecar := range sidecars {
 		switch sidecar.Path {
-		case "recipient-duplicate.json", "recipient-unexpected.json":
+		case "recipient-duplicate.json", "recipient-unexpected.json", "recipient-mismatch.json":
 			if sidecar.Count > 0 {
 				gates = append(gates, failureGate{
 					ID:      "06_recipient_anomaly_" + sidecar.Path,
@@ -459,7 +511,7 @@ func buildSoakFailureEvidenceReport(
 }
 
 func finalizeFailureRecipientSidecars(directory string) ([]failureSidecarReference, error) {
-	kinds := []string{"missing", "unexpected", "duplicate", "unverified", "untracked"}
+	kinds := []string{"missing", "unexpected", "duplicate", "mismatch", "unverified", "untracked"}
 	references := make([]failureSidecarReference, 0, len(kinds))
 	for _, kind := range kinds {
 		rawPath := filepath.Join(directory, ".recipient-"+kind+".raw.jsonl")

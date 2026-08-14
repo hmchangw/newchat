@@ -37,6 +37,21 @@ func TestFailureLedger_AbandonFinalizesWithoutDataLoss(t *testing.T) {
 	assert.Zero(t, expired)
 }
 
+func TestFailureLedger_ActivatedPublishCannotBecomeNotSent(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	operation := testFailureOperation("message-1", now)
+	operation.LifecycleState = failureOperationJournaled
+	require.NoError(t, ledger.Start(operation))
+	require.NoError(t, ledger.Activate(operation.ID, now))
+
+	err = ledger.Abandon(operation.ID, failureResultNotSent, now)
+
+	assert.ErrorContains(t, err, "publish was attempted")
+	assert.Equal(t, 1, ledger.Snapshot().Active)
+}
+
 func TestFailureLedger_AbandonRejectsUnknownOperationAndResult(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{
@@ -199,6 +214,7 @@ func TestFailureLedger_UnverifiedObservationDoesNotReportDataLoss(t *testing.T) 
 func TestFailureOperationResult_Precedence(t *testing.T) {
 	tests := []struct {
 		name         string
+		lifecycle    failureOperationLifecycle
 		observations map[failureObserver]failureObservation
 		want         failureResult
 	}{
@@ -211,12 +227,31 @@ func TestFailureOperationResult_Precedence(t *testing.T) {
 			want: failureResultGood,
 		},
 		{
-			name: "confirmed loss outranks everything",
+			name:      "accepted missing effect outranks everything",
+			lifecycle: failureOperationActive,
+			observations: map[failureObserver]failureObservation{
+				failureObserverAdmission: failureObservationGood,
+				failureObserverHistory:   failureObservationMissingAfterDeadline,
+			},
+			want: failureResultMissingAfterDeadline,
+		},
+		{
+			name:      "rejected admission prevents missing claim",
+			lifecycle: failureOperationActive,
 			observations: map[failureObserver]failureObservation{
 				failureObserverAdmission: failureObservationBad,
 				failureObserverHistory:   failureObservationMissingAfterDeadline,
 			},
-			want: failureResultMissingAfterDeadline,
+			want: failureResultBad,
+		},
+		{
+			name:      "ambiguous admission prevents missing claim",
+			lifecycle: failureOperationActive,
+			observations: map[failureObserver]failureObservation{
+				failureObserverAdmission: failureObservationUnverified,
+				failureObserverHistory:   failureObservationMissingAfterDeadline,
+			},
+			want: failureResultUnverified,
 		},
 		{
 			name: "bad outranks unverified",
@@ -246,9 +281,34 @@ func TestFailureOperationResult_Precedence(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			assert.Equal(t, test.want, failureOperationResult(&failureOperation{
-				Observations: test.observations,
+				LifecycleState: test.lifecycle,
+				Observations:   test.observations,
 			}))
 		})
+	}
+}
+
+func TestFailureOperationResult_MissingWithoutAcceptedPublishIsUnverified(t *testing.T) {
+	operation := testFailureOperation("message-1", time.Now().UTC())
+	operation.LifecycleState = failureOperationJournaled
+	operation.Observations = map[failureObserver]failureObservation{
+		failureObserverAdmission: failureObservationUnverified,
+		failureObserverHistory:   failureObservationMissingAfterDeadline,
+	}
+
+	assert.Equal(t, failureResultUnverified, failureOperationResult(operation))
+}
+
+func TestFailureOperationResult_JournaledMissingDoesNotHideBadEvidence(t *testing.T) {
+	operation := testFailureOperation("message-1", time.Now().UTC())
+	operation.LifecycleState = failureOperationJournaled
+	operation.Observations = map[failureObserver]failureObservation{
+		failureObserverAdmission: failureObservationBad,
+		failureObserverHistory:   failureObservationMissingAfterDeadline,
+	}
+
+	for range 100 {
+		assert.Equal(t, failureResultBad, failureOperationResult(operation))
 	}
 }
 

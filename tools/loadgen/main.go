@@ -650,7 +650,11 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 
 	samplerCtx, cancelSamplers := context.WithCancel(ctx)
 	defer cancelSamplers()
-	sampler := NewConsumerSampler(js, stream.Rooms(cfg.SiteID).Name, "room-worker", metrics, time.Second)
+	sampler, err := NewConsumerSampler(js, stream.Rooms(cfg.SiteID).Name, "room-worker", metrics, time.Second)
+	if err != nil {
+		slog.Error("configure consumer sampler", "error", err)
+		return 1
+	}
 	var samplerWG sync.WaitGroup
 	samplerWG.Add(1)
 	go func() {
@@ -1126,9 +1130,14 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 	canonical := stream.MessagesCanonical(cfg.SiteID)
 	samplerCtx, cancelSamplers := context.WithCancel(ctx)
 	defer cancelSamplers()
-	samplers := []*ConsumerSampler{
-		NewConsumerSampler(js, canonical.Name, "message-worker", metrics, 1*time.Second),
-		NewConsumerSampler(js, canonical.Name, "broadcast-worker", metrics, 1*time.Second),
+	samplers := make([]*ConsumerSampler, 0, 2)
+	for _, durable := range []string{"message-worker", "broadcast-worker"} {
+		sampler, samplerErr := NewConsumerSampler(js, canonical.Name, durable, metrics, time.Second)
+		if samplerErr != nil {
+			slog.Error("configure consumer sampler", "durable", durable, "error", samplerErr)
+			return 1
+		}
+		samplers = append(samplers, sampler)
 	}
 	var samplerWG sync.WaitGroup
 	for _, s := range samplers {
@@ -1454,7 +1463,11 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 	defer cancelSamplers()
 	var samplerWG sync.WaitGroup
 	for _, d := range botRoomGatedDurables {
-		s := NewConsumerSampler(js, canonical.Name, d, metrics, time.Second)
+		s, samplerErr := NewConsumerSampler(js, canonical.Name, d, metrics, time.Second)
+		if samplerErr != nil {
+			slog.Error("configure consumer sampler", "durable", d, "error", samplerErr)
+			return 1
+		}
 		samplerWG.Add(1)
 		go func(s *ConsumerSampler) {
 			defer samplerWG.Done()

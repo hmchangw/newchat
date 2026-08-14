@@ -158,10 +158,14 @@ func connectWithCredsHealth(
 	credsFile,
 	pool string,
 	metrics *Metrics,
+	observers ...*failureObserverHealth,
 ) (*nats.Conn, error) {
 	health := newLoadgenNATSHealth(pool, metrics, nil)
 	if health == nil {
 		return nil, fmt.Errorf("unknown loadgen NATS pool %q", pool)
+	}
+	if len(observers) > 0 {
+		health.observer = observers[0]
 	}
 	opts := []nats.Option{
 		nats.Name(name),

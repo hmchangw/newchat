@@ -111,10 +111,27 @@ func (h *failureObserverHealth) Snapshot(end time.Time) failureObserverHealthSna
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	intervals := append([]failureHealthInterval(nil), h.intervals...)
+	end = end.UTC()
+	rawIntervals := append([]failureHealthInterval(nil), h.intervals...)
 	if end.After(h.changedAt) || end.Equal(h.changedAt) {
-		intervals = append(intervals, failureHealthInterval{Start: h.changedAt, End: end.UTC(), Up: h.up, Reason: h.reason})
+		rawIntervals = append(rawIntervals, failureHealthInterval{Start: h.changedAt, End: end, Up: h.up, Reason: h.reason})
+	}
+	intervals := make([]failureHealthInterval, 0, len(rawIntervals))
+	upAtEnd := h.up
+	for _, interval := range rawIntervals {
+		if !end.Before(interval.Start) && !end.After(interval.End) {
+			upAtEnd = interval.Up
+		}
+		if !interval.Start.Before(end) {
+			continue
+		}
+		if interval.End.After(end) {
+			interval.End = end
+		}
+		if interval.End.After(interval.Start) {
+			intervals = append(intervals, interval)
+		}
 	}
 	slices.SortFunc(intervals, func(a, b failureHealthInterval) int { return a.Start.Compare(b.Start) })
-	return failureObserverHealthSnapshot{Observer: h.observer, Up: h.up, LastSuccess: h.lastSuccess, Intervals: intervals}
+	return failureObserverHealthSnapshot{Observer: h.observer, Up: upAtEnd, LastSuccess: h.lastSuccess, Intervals: intervals}
 }

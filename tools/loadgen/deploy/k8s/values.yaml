@@ -64,6 +64,7 @@ failureEvidence:
   allowCombinedFaults: false
   allowDeliveryDuplicates: false
   recipientObserverQueue: 8192
+  recipientObserverConnections: 32
 
 seed:
   randomSeed: 42

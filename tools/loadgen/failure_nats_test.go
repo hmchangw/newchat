@@ -53,6 +53,39 @@ func TestLoadgenNATSHealth_ClosedInvalidatesConnectionState(t *testing.T) {
 	))
 }
 
+func TestLoadgenNATSHealth_AggregatesEveryConnectionInPool(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	metrics := NewMetrics()
+	first := newLoadgenNATSHealth("recipient_observer", metrics, func() time.Time { return now })
+	second := newLoadgenNATSHealth("recipient_observer", metrics, func() time.Time { return now })
+	first.connected()
+	second.connected()
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.NATSConnected.WithLabelValues("recipient_observer"),
+	))
+
+	first.disconnected(errors.New("connection reset"))
+	second.reconnected("nats://still-connected")
+	assert.Equal(t, float64(0), testutil.ToFloat64(
+		metrics.NATSConnected.WithLabelValues("recipient_observer"),
+	), "one healthy connection must not hide another connection outage")
+	now = now.Add(3 * time.Second)
+	first.updateCurrentOutage()
+	assert.Equal(t, float64(3), testutil.ToFloat64(
+		metrics.NATSCurrentOutage.WithLabelValues("recipient_observer"),
+	))
+
+	first.reconnected("nats://recovered")
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.NATSConnected.WithLabelValues("recipient_observer"),
+	))
+	second.closed()
+	first.reconnected("nats://duplicate")
+	assert.Equal(t, float64(0), testutil.ToFloat64(
+		metrics.NATSConnected.WithLabelValues("recipient_observer"),
+	), "a permanently closed connection keeps the logical pool down")
+}
+
 func TestLoadgenNATSHealth_InitialConnectedDoesNotOverwriteCallbackState(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -25,6 +26,13 @@ const (
 type failureOperationType string
 
 const failureOperationMessageCreate failureOperationType = "message_create"
+
+type failureOperationLifecycle string
+
+const (
+	failureOperationJournaled failureOperationLifecycle = "journaled"
+	failureOperationActive    failureOperationLifecycle = "active"
+)
 
 type failureEffect string
 
@@ -89,7 +97,7 @@ var failureInvalidationReasonRegistry = map[string]struct{}{
 	"capacity": {}, "wal": {}, "accounting_invariant": {}, "observer_queue": {},
 	"observer_malformed": {}, "recipient_recovery": {}, "recipient_observer": {},
 	"timeline": {}, "other": {},
-	"sidecar": {},
+	"sidecar": {}, "consumer_sample": {},
 }
 
 var failureOperationScenarioRegistry = map[string]struct{}{
@@ -102,23 +110,24 @@ var failureOperationLaneRegistry = map[string]struct{}{
 }
 
 type failureOperation struct {
-	SchemaVersion int                                    `json:"schemaVersion,omitempty"`
-	ID            string                                 `json:"operationId"`
-	CorrelationID string                                 `json:"correlationId,omitempty"`
-	RunID         string                                 `json:"runId,omitempty"`
-	Scenario      string                                 `json:"scenario"`
-	Lane          string                                 `json:"lane"`
-	OperationType failureOperationType                   `json:"operationType,omitempty"`
-	StartedAt     time.Time                              `json:"startedAt"`
-	VerifyAfter   time.Time                              `json:"verifyAfter"`
-	Deadline      time.Time                              `json:"deadline"`
-	Targets       map[string]string                      `json:"targets,omitempty"`
-	Effects       []failureExpectedEffect                `json:"expectedEffects,omitempty"`
-	Expected      []failureObserver                      `json:"expected,omitempty"`
-	Attributes    map[string]string                      `json:"attributes,omitempty"`
-	Observations  map[failureObserver]failureObservation `json:"observations,omitempty"`
-	FinalResult   failureResult                          `json:"finalResult,omitempty"`
-	EvidenceRefs  []string                               `json:"evidenceRefs,omitempty"`
+	SchemaVersion  int                                    `json:"schemaVersion,omitempty"`
+	ID             string                                 `json:"operationId"`
+	CorrelationID  string                                 `json:"correlationId,omitempty"`
+	RunID          string                                 `json:"runId,omitempty"`
+	Scenario       string                                 `json:"scenario"`
+	Lane           string                                 `json:"lane"`
+	OperationType  failureOperationType                   `json:"operationType,omitempty"`
+	StartedAt      time.Time                              `json:"startedAt"`
+	VerifyAfter    time.Time                              `json:"verifyAfter"`
+	Deadline       time.Time                              `json:"deadline"`
+	Targets        map[string]string                      `json:"targets,omitempty"`
+	Effects        []failureExpectedEffect                `json:"expectedEffects,omitempty"`
+	Expected       []failureObserver                      `json:"expected,omitempty"`
+	Attributes     map[string]string                      `json:"attributes,omitempty"`
+	Observations   map[failureObserver]failureObservation `json:"observations,omitempty"`
+	FinalResult    failureResult                          `json:"finalResult,omitempty"`
+	EvidenceRefs   []string                               `json:"evidenceRefs,omitempty"`
+	LifecycleState failureOperationLifecycle              `json:"lifecycleState,omitempty"`
 
 	nextVerifyAt time.Time
 	claimed      bool
@@ -173,6 +182,7 @@ func (o *failureOperation) UnmarshalJSON(data []byte) error {
 
 const (
 	failureLedgerEventStarted    = "started"
+	failureLedgerEventActivated  = "activated"
 	failureLedgerEventObserved   = "observed"
 	failureLedgerEventFinalized  = "finalized"
 	failureLedgerEventCheckpoint = "checkpoint"
@@ -355,6 +365,33 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 	return nil
 }
 
+func (l *failureLedger) Activate(operationID string, at time.Time) error {
+	if at.IsZero() {
+		at = l.now()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.ensureOpen(); err != nil {
+		return err
+	}
+	operation := l.active[operationID]
+	if operation == nil {
+		return fmt.Errorf("activate failure operation %q: %w", operationID, errFailureOperationNotActive)
+	}
+	if operation.LifecycleState == failureOperationActive || operation.LifecycleState == "" {
+		return nil
+	}
+	event := failureLedgerEvent{
+		Type: failureLedgerEventActivated, OperationID: operationID, At: at.UTC(),
+	}
+	if err := l.appendLocked(&event); err != nil {
+		l.invalidateLocked("wal")
+		return fmt.Errorf("persist activated failure operation %q: %w", operationID, err)
+	}
+	operation.LifecycleState = failureOperationActive
+	return nil
+}
+
 // Abandon terminates an active operation with an explicit result. It exists for
 // outcomes that no observer can report, most importantly a send whose intent was
 // journaled before a publish that never left the process: without this the
@@ -378,6 +415,9 @@ func (l *failureLedger) Abandon(
 	operation := l.active[operationID]
 	if operation == nil {
 		return fmt.Errorf("abandon failure operation %q: %w", operationID, errFailureOperationNotActive)
+	}
+	if result == failureResultNotSent && operation.LifecycleState == failureOperationActive {
+		return fmt.Errorf("abandon failure operation %q as not_sent: publish was attempted", operationID)
 	}
 	if err := l.finalizeLocked(operation, result, at); err != nil {
 		return err
@@ -725,10 +765,18 @@ func (l *failureLedger) compactLocked(at time.Time) error {
 		operation := l.active[operationID]
 		started := cloneFailureOperation(operation)
 		started.Observations = nil
+		if started.LifecycleState == failureOperationActive {
+			started.LifecycleState = failureOperationJournaled
+		}
 		events = append(events, failureLedgerEvent{
 			Type: failureLedgerEventStarted, Operation: started,
 			At: operation.StartedAt.UTC(),
 		})
+		if operation.LifecycleState == failureOperationActive {
+			events = append(events, failureLedgerEvent{
+				Type: failureLedgerEventActivated, OperationID: operation.ID, At: at.UTC(),
+			})
+		}
 		for _, observer := range operation.Expected {
 			observation, exists := operation.Observations[observer]
 			if !exists {
@@ -814,6 +862,22 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 			operation.nextVerifyAt = operation.VerifyAfter
 			operation.claimed = false
 			l.active[operation.ID] = operation
+		case failureLedgerEventActivated:
+			if _, skipped := dropped[event.OperationID]; skipped {
+				continue
+			}
+			operation := l.active[event.OperationID]
+			if operation == nil {
+				return fmt.Errorf(
+					"replay failure ledger event %d: operation %q is not active",
+					index,
+					event.OperationID,
+				)
+			}
+			if operation.LifecycleState == failureOperationActive {
+				return fmt.Errorf("replay failure ledger event %d: operation %q is already activated", index, event.OperationID)
+			}
+			operation.LifecycleState = failureOperationActive
 		case failureLedgerEventObserved:
 			if _, skipped := dropped[event.OperationID]; skipped {
 				continue
@@ -950,6 +1014,11 @@ func validateFailureOperation(operation *failureOperation) error {
 		return fmt.Errorf("failure operation %q has unsupported schema version %d", operation.ID, operation.SchemaVersion)
 	}
 	if operation.SchemaVersion == 2 {
+		if operation.LifecycleState != "" &&
+			operation.LifecycleState != failureOperationJournaled &&
+			operation.LifecycleState != failureOperationActive {
+			return fmt.Errorf("failure operation %q has invalid lifecycle state %q", operation.ID, operation.LifecycleState)
+		}
 		if operation.RunID == "" || operation.OperationType != failureOperationMessageCreate || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
 			return fmt.Errorf("version 2 failure operation %q requires run, type, targets, and effects", operation.ID)
 		}
@@ -1033,15 +1102,17 @@ func validFailureResult(result failureResult) bool {
 // answer", which outranks success.
 func failureOperationResult(operation *failureOperation) failureResult {
 	result := failureResultGood
+	admissionAccepted := operation.Observations[failureObserverAdmission] == failureObservationGood
 	for observer, observation := range operation.Observations {
 		switch observation {
 		case failureObservationGood:
 		case failureObservationMissingAfterDeadline:
-			// A missing admission reply is an availability ambiguity, not proof
-			// that a successfully persisted message was lost. Only a healthy
-			// history read that confirms absence can make the current vertical
-			// slice's data-loss claim.
-			if observer == failureObserverAdmission {
+			// Missing downstream evidence is a correctness failure only after
+			// admission authoritatively accepted an active publish. Otherwise the
+			// absence is ambiguous and must not hide stronger bad evidence.
+			if observer == failureObserverAdmission ||
+				operation.LifecycleState == failureOperationJournaled ||
+				!admissionAccepted {
 				if result == failureResultGood {
 					result = failureResultUnverified
 				}
@@ -1090,11 +1161,12 @@ func cloneFailureOperation(operation *failureOperation) *failureOperation {
 }
 
 type fileFailureWAL struct {
-	mu     sync.Mutex
-	path   string
-	file   *os.File
-	size   int64
-	legacy bool
+	mu            sync.Mutex
+	path          string
+	file          *os.File
+	size          int64
+	legacy        bool
+	syncDirectory func(string) error
 }
 
 type failureWALHeader struct {
@@ -1128,7 +1200,9 @@ func openFailureWAL(path string) (*fileFailureWAL, error) {
 		_ = file.Close()
 		return nil, fmt.Errorf("stat failure WAL %q: %w", path, err)
 	}
-	return &fileFailureWAL{path: path, file: file, size: info.Size()}, nil
+	return &fileFailureWAL{
+		path: path, file: file, size: info.Size(), syncDirectory: syncFailureWALDirectory,
+	}, nil
 }
 
 func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
@@ -1180,8 +1254,19 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 		if err := json.Unmarshal(encoded, &event); err != nil {
 			return nil, fmt.Errorf("decode failure WAL line %d: %w", line, err)
 		}
-		if event.SchemaVersion != 0 && event.SchemaVersion != failureWALSchemaVersion {
-			return nil, fmt.Errorf("decode failure WAL line %d: unsupported record version %d", line, event.SchemaVersion)
+		switch {
+		case headerSeen && event.SchemaVersion != failureWALSchemaVersion:
+			return nil, fmt.Errorf(
+				"decode failure WAL line %d: versioned WAL requires record version %d",
+				line,
+				failureWALSchemaVersion,
+			)
+		case !headerSeen && event.SchemaVersion != 0:
+			return nil, fmt.Errorf(
+				"decode failure WAL line %d: record version %d requires a versioned header",
+				line,
+				event.SchemaVersion,
+			)
 		}
 		events = append(events, event)
 		durableBytes += int64(len(encoded))
@@ -1352,6 +1437,9 @@ func (w *fileFailureWAL) Compact(events []failureLedgerEvent) error {
 		}
 		return w.reopenAfterCompactFailure(fmt.Errorf("install compacted failure WAL: %w", err))
 	}
+	if err := w.syncDirectory(filepath.Dir(w.path)); err != nil {
+		return w.reopenAfterCompactFailure(fmt.Errorf("sync installed failure WAL directory: %w", err))
+	}
 	file, err := os.OpenFile(w.path, os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("reopen compacted failure WAL: %w", err)
@@ -1361,6 +1449,26 @@ func (w *fileFailureWAL) Compact(events []failureLedgerEvent) error {
 	w.legacy = false
 	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove failure WAL backup: %w", err)
+	}
+	if err := w.syncDirectory(filepath.Dir(w.path)); err != nil {
+		return fmt.Errorf("sync failure WAL directory: %w", err)
+	}
+	return nil
+}
+
+func syncFailureWALDirectory(directory string) error {
+	if runtime.GOOS == "windows" {
+		// Windows does not support fsync on directory handles. The retained
+		// production PVC runs on Linux, where the sync below makes rename durable.
+		return nil
+	}
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		return fmt.Errorf("open directory: %w", err)
+	}
+	defer directoryFile.Close()
+	if err := directoryFile.Sync(); err != nil {
+		return fmt.Errorf("sync directory: %w", err)
 	}
 	return nil
 }

@@ -15,10 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 const (
@@ -262,17 +264,7 @@ func newSoakRuntimeSelector(
 	for i := range topology.Rooms {
 		roomTypes[topology.Rooms[i].ID] = topology.Rooms[i].Type
 	}
-	recipients := make(map[string][]string, len(topology.Rooms))
-	for i := range topology.Subscriptions {
-		subscription := &topology.Subscriptions[i]
-		if subscription.IsSubscribed && subscription.User.Account != "" {
-			recipients[subscription.RoomID] = append(recipients[subscription.RoomID], subscription.User.Account)
-		}
-	}
-	for roomID := range recipients {
-		slices.Sort(recipients[roomID])
-		recipients[roomID] = slices.Compact(recipients[roomID])
-	}
+	recipients := soakRecipientSets(topology)
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
 		if !isActiveSoakSubscription(subscription, active) ||
@@ -295,6 +287,25 @@ func newSoakRuntimeSelector(
 		}
 	}
 	return selector, nil
+}
+
+func soakRecipientSets(topology *soakTopology) map[string][]string {
+	if topology == nil {
+		return nil
+	}
+	recipients := make(map[string][]string, len(topology.Rooms))
+	for i := range topology.Subscriptions {
+		subscription := &topology.Subscriptions[i]
+		if !subscription.IsSubscribed || subscription.User.IsBot || subscription.User.Account == "" {
+			continue
+		}
+		recipients[subscription.RoomID] = append(recipients[subscription.RoomID], subscription.User.Account)
+	}
+	for roomID := range recipients {
+		slices.Sort(recipients[roomID])
+		recipients[roomID] = slices.Compact(recipients[roomID])
+	}
+	return recipients
 }
 
 func (s *soakRuntimeSelector) nextRoom() string {
@@ -452,6 +463,49 @@ func runSoakWorkload(
 			slog.Error("close Cassandra soak failure ledger", "error", err)
 		}
 	}()
+	consumerSamplerCtx, stopConsumerSamplers := context.WithCancel(context.Background())
+	var consumerSamplerWG sync.WaitGroup
+	consumerSamplers := make([]*ConsumerSampler, 0, 2)
+	js, jetStreamErr := jetstream.New(nc.NatsConn())
+	if jetStreamErr != nil {
+		ledger.Invalidate("consumer_sample")
+		slog.Error("initialize JetStream consumer sampling", "error", jetStreamErr)
+	} else {
+		canonicalStream := stream.MessagesCanonical(cfg.SiteID).Name
+		for _, durable := range []string{"message-worker", "broadcast-worker"} {
+			sampler, samplerErr := NewConsumerSampler(
+				js,
+				canonicalStream,
+				durable,
+				metrics,
+				time.Second,
+				withConsumerSamplerInvalidation(func(string) { ledger.Invalidate("consumer_sample") }),
+			)
+			if samplerErr != nil {
+				ledger.Invalidate("consumer_sample")
+				slog.Error("configure soak consumer sampler", "durable", durable, "error", samplerErr)
+				continue
+			}
+			consumerSamplers = append(consumerSamplers, sampler)
+			consumerSamplerWG.Add(1)
+			go func() {
+				defer consumerSamplerWG.Done()
+				sampler.Run(consumerSamplerCtx)
+			}()
+		}
+	}
+	var consumerShutdownOnce sync.Once
+	consumerStats := make([]ConsumerStat, 0, len(consumerSamplers))
+	shutdownConsumerSamplers := func() {
+		consumerShutdownOnce.Do(func() {
+			stopConsumerSamplers()
+			consumerSamplerWG.Wait()
+			for _, sampler := range consumerSamplers {
+				consumerStats = append(consumerStats, sampler.Snapshot())
+			}
+		})
+	}
+	defer shutdownConsumerSamplers()
 	recipientOptions := make([]failureRecipientObserverOption, 0, 1)
 	if evidenceRun != nil {
 		recipientOptions = append(
@@ -471,43 +525,51 @@ func runSoakWorkload(
 		ledger.Invalidate("recipient_recovery")
 		slog.Error("recover recipient observer expectations", "error", err)
 	}
-	recipientCtx, stopRecipientObserver := context.WithCancel(ctx)
+	recipientCtx, stopRecipientObserver := context.WithCancel(context.Background())
 	recipientObserver.Run(recipientCtx)
 	var recipientSubscriptions *failureRecipientSubscriptions
-	recipientConnection, recipientConnectErr := dialNATSPoolWithMetrics(
-		cfg.NatsURL,
-		cfg.NatsCredsFile,
-		"recipient_observer",
-		metrics,
-		recipientObserver.health,
+	recipientSource := newPooledNATSFailureRecipientSource(
+		cfg.Soak.RecipientObserverConnections,
+		func(_ int) (failureRecipientConnection, error) {
+			connection, connectErr := connectWithCredsHealth(
+				cfg.NatsURL,
+				"loadgen-recipient-observer",
+				cfg.NatsCredsFile,
+				"recipient_observer",
+				metrics,
+				recipientObserver.health,
+			)
+			if connectErr != nil {
+				return nil, connectErr
+			}
+			return &natsFailureRecipientConnection{nc: connection}, nil
+		},
 	)
-	if recipientConnectErr != nil {
+	recipientSubscriptions, err = startFailureRecipientSubscriptions(
+		recipientSource,
+		&topology,
+		recipientObserver,
+	)
+	if err != nil {
 		ledger.Invalidate("recipient_observer")
-		slog.Error("connect recipient observer NATS pool", "error", recipientConnectErr)
-	} else {
-		recipientSubscriptions, err = startFailureRecipientSubscriptions(
-			&natsFailureRecipientSource{nc: recipientConnection.NatsConn()},
-			&topology,
-			recipientObserver,
-		)
-		if err != nil {
-			ledger.Invalidate("recipient_observer")
-			slog.Error("start recipient observer subscriptions", "error", err)
-		}
+		slog.Error("start recipient observer subscriptions", "error", err)
+	}
+	var recipientShutdownOnce sync.Once
+	var recipientShutdownErr error
+	shutdownRecipientObserver := func() error {
+		recipientShutdownOnce.Do(func() {
+			recipientShutdownErr = shutdownFailureRecipientObserver(
+				recipientSubscriptions,
+				stopRecipientObserver,
+				recipientObserver,
+			)
+		})
+		return recipientShutdownErr
 	}
 	defer func() {
-		if recipientSubscriptions != nil {
-			if err := recipientSubscriptions.Close(); err != nil {
-				slog.Error("close recipient observer subscriptions", "error", err)
-			}
+		if err := shutdownRecipientObserver(); err != nil {
+			slog.Error("shutdown recipient observer", "error", err)
 		}
-		if recipientConnection != nil {
-			if err := recipientConnection.Drain(); err != nil {
-				slog.Error("drain recipient observer NATS pool", "error", err)
-			}
-		}
-		stopRecipientObserver()
-		recipientObserver.Wait()
 	}()
 	failureTracker := newSoakFailureTracker(
 		ledger,
@@ -711,19 +773,9 @@ func runSoakWorkload(
 				Action: action, Outcome: soakOutcomeFailed, At: now(),
 				ErrorClass: classifySoakRPCError(publishErr),
 			})
-			// The publish never left the process, so no downstream side effect
-			// is expected and no reply can arrive. Closing the operation keeps
-			// it out of the data-loss bucket that an unresolved history observer
-			// would land in; dropping the pending entry keeps the failed send
-			// from being counted again at its reply deadline.
-			if pending != nil {
-				sender.Discard(pending.RequestID)
-				if pending.Tracked {
-					if err := failureTracker.AbandonUnsent(pending); err != nil {
-						slog.Error("abandon unsent Cassandra soak send", "error", err)
-					}
-				}
-			}
+			// The NATS call was attempted, so its outcome is ambiguous even when
+			// the client returned an error. Keep the operation active for admission
+			// timeout and downstream reconciliation instead of claiming not_sent.
 			return nil
 		},
 		Read: func(actionCtx context.Context, _ bool) error {
@@ -793,6 +845,12 @@ func runSoakWorkload(
 		func() { metrics.SoakSaturation.WithLabelValues("global").Inc() },
 	)
 	result, runErr := workload.Run(ctx)
+	evaluationEndedAt := now().UTC()
+	shutdownConsumerSamplers()
+	if err := shutdownRecipientObserver(); err != nil {
+		ledger.Invalidate("recipient_observer")
+		slog.Error("shutdown recipient observer before evidence report", "error", err)
+	}
 	snapshot := collector.Snapshot(now())
 	report := BuildSoakReport(&snapshot, soakTargetRates(&cfg.Soak))
 	if err := PrintSoakReport(os.Stdout, &report); err != nil {
@@ -812,9 +870,10 @@ func runSoakWorkload(
 			evidenceRun,
 			ledger.Snapshot(),
 			&snapshot,
-			recipientObserver.health.Snapshot(now().UTC()),
+			recipientObserver.health.Snapshot(evaluationEndedAt),
+			consumerStats,
 			sidecars,
-			now().UTC(),
+			evaluationEndedAt,
 		)
 		if err := writeFailureEvidenceArtifacts(evidenceRun.ReportDir, &evidenceReport); err != nil {
 			slog.Error("write formal failure evidence report", "error", err)

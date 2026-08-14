@@ -135,7 +135,9 @@ func TestSoakFailureReconciler_AcceptedAndPersistedIsGood(t *testing.T) {
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	_, err = ledger.Observe("message-1", failureObserverRecipient, failureObservationGood, now)
 	require.NoError(t, err)
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
@@ -161,7 +163,9 @@ func TestSoakFailureReconciler_FinalizesRecipientAtDeadlineWithoutRepeatingHisto
 	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(ledger, 0, 10*time.Second, func() time.Time { return now })
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	_, err = ledger.Observe("message-1", failureObserverAdmission, failureObservationGood, now)
 	require.NoError(t, err)
 	_, err = ledger.Observe("message-1", failureObserverHistory, failureObservationGood, now)
@@ -193,7 +197,9 @@ func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	_, err = ledger.Observe("message-1", failureObserverRecipient, failureObservationGood, now)
 	require.NoError(t, err)
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
@@ -210,7 +216,35 @@ func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t
 	ran, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
-	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultBad])
+	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultUnverified])
+}
+
+func TestSoakFailureTracker_ActivatesDurableIntent(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	journal := &memoryFailureJournal{}
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1, Journal: journal})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+
+	require.NoError(t, tracker.Activate(pending))
+
+	operation, ok := ledger.Active(pending.MessageID)
+	require.True(t, ok)
+	assert.Equal(t, failureOperationActive, operation.LifecycleState)
+	require.Len(t, journal.events, 2)
+	assert.Equal(t, failureLedgerEventActivated, journal.events[1].Type)
+}
+
+func TestSoakFailureTracker_ActivateRejectsInvalidInputs(t *testing.T) {
+	assert.Error(t, (*soakFailureTracker)(nil).Activate(nil))
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, time.Now)
+	assert.Error(t, tracker.Activate(nil))
+	assert.Error(t, tracker.Activate(&soakPendingSend{}))
+	assert.Error(t, tracker.Activate(&soakPendingSend{MessageID: "unknown"}))
 }
 
 func TestSoakFailureReconciler_RetriesMissingUntilDeadline(t *testing.T) {
@@ -220,7 +254,9 @@ func TestSoakFailureReconciler_RetriesMissingUntilDeadline(t *testing.T) {
 	tracker := newSoakFailureTracker(
 		ledger, 0, 10*time.Second, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	_, err = ledger.Observe("message-1", failureObserverRecipient, failureObservationGood, now)
 	require.NoError(t, err)
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
@@ -259,7 +295,9 @@ func TestSoakFailureReconciler_RPCFailureReleasesClaim(t *testing.T) {
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	_, err = ledger.Observe("message-1", failureObserverRecipient, failureObservationGood, now)
 	require.NoError(t, err)
 	verifier := &fakeSoakFailureVerifier{err: errors.New("NATS unavailable")}
@@ -284,7 +322,9 @@ func TestSoakFailureReconciler_MismatchRetriesUntilDeadlineThenFails(t *testing.
 	tracker := newSoakFailureTracker(
 		ledger, 0, 10*time.Second, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	_, err = ledger.Observe("message-1", failureObserverRecipient, failureObservationGood, now)
 	require.NoError(t, err)
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{

@@ -44,7 +44,7 @@ func TestFailureLedger_FinalizesOnlyAfterEveryObservation(t *testing.T) {
 	assert.Equal(t, uint64(1), snapshot.Results[failureResultGood])
 }
 
-func TestFailureLedger_BadObservationDoesNotHideMissingSideEffect(t *testing.T) {
+func TestFailureLedger_RejectedAdmissionDoesNotBecomeMissingSideEffect(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{
 		Capacity: 1,
@@ -67,7 +67,7 @@ func TestFailureLedger_BadObservationDoesNotHideMissingSideEffect(t *testing.T) 
 	require.Equal(t, 1, finalized)
 	assert.Equal(
 		t, uint64(1),
-		ledger.Snapshot().Results[failureResultMissingAfterDeadline],
+		ledger.Snapshot().Results[failureResultBad],
 	)
 }
 

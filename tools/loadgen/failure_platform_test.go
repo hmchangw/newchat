@@ -76,6 +76,34 @@ func TestFailureLedger_Version2ReplayAndUnknownVersion(t *testing.T) {
 	require.NoError(t, badWAL.Close())
 }
 
+func TestFailureWAL_RejectsMixedVersionFraming(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{
+			name: "versioned header with legacy record",
+			contents: "{\"recordType\":\"header\",\"schemaVersion\":2}\n" +
+				"{\"type\":\"checkpoint\",\"at\":\"2026-08-12T01:02:03Z\"}\n",
+		},
+		{
+			name:     "versioned record without header",
+			contents: "{\"schemaVersion\":2,\"type\":\"checkpoint\",\"at\":\"2026-08-12T01:02:03Z\"}\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mixed.wal")
+			require.NoError(t, os.WriteFile(path, []byte(tc.contents), 0o600))
+			wal, err := openFailureWAL(path)
+			require.NoError(t, err)
+			_, err = wal.Replay()
+			assert.ErrorContains(t, err, "version")
+			require.NoError(t, wal.Close())
+		})
+	}
+}
+
 func TestFailureLedger_CompactionRestoresTerminalCounters(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "run.wal")
@@ -98,6 +126,22 @@ func TestFailureLedger_CompactionRestoresTerminalCounters(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, recovered.Close()) })
 	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultGood])
+}
+
+func TestFailureWAL_CompactionSyncsContainingDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.wal")
+	wal, err := openFailureWAL(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, wal.Close()) })
+	var synced []string
+	wal.syncDirectory = func(directory string) error {
+		synced = append(synced, directory)
+		return nil
+	}
+
+	require.NoError(t, wal.Compact(nil))
+
+	assert.Equal(t, []string{filepath.Dir(path), filepath.Dir(path)}, synced)
 }
 
 func TestFailureLedger_ReplayRejectsDuplicateStartedOperation(t *testing.T) {
@@ -201,6 +245,20 @@ func TestFailureObserverHealth_TracksIntervals(t *testing.T) {
 	require.Len(t, snapshot.Intervals, 4)
 	assert.False(t, snapshot.Intervals[0].Up)
 	assert.Equal(t, 4*time.Second, snapshot.Intervals[1].End.Sub(snapshot.Intervals[1].Start))
+}
+
+func TestFailureObserverHealth_SnapshotClipsAtEvaluationEnd(t *testing.T) {
+	start := time.Date(2026, 8, 12, 1, 0, 0, 0, time.UTC)
+	health := newFailureObserverHealth(failureObserverRecipient, start)
+	health.Set(true, start, "connected")
+	endedAt := start.Add(10 * time.Second)
+	health.Set(false, endedAt.Add(time.Second), "shutdown")
+
+	snapshot := health.Snapshot(endedAt)
+
+	assert.True(t, snapshot.Up)
+	require.Len(t, snapshot.Intervals, 1)
+	assert.Equal(t, endedAt, snapshot.Intervals[0].End)
 }
 
 func TestFailureRecipientObserver_ExactPartialUnexpectedAndDuplicate(t *testing.T) {
@@ -363,6 +421,36 @@ func TestFailureRecipientObserver_SubscriptionsAreAttributedAndFlushedBeforeHeal
 	}, got)
 }
 
+func TestFailureRecipientObserver_UsesBoundedRecipientConnectionPool(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	connections := make(map[int]*fakeFailureRecipientConnection)
+	source := newPooledNATSFailureRecipientSource(2, func(index int) (failureRecipientConnection, error) {
+		connection := &fakeFailureRecipientConnection{}
+		connections[index] = connection
+		return connection, nil
+	})
+	observer := newFailureRecipientObserver(nil, NewMetrics(), 8, func() time.Time { return now })
+	topology := &soakTopology{
+		Rooms: []model.Room{{ID: "channel-1", Type: model.RoomTypeChannel}},
+		Subscriptions: []model.Subscription{
+			{RoomID: "channel-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
+			{RoomID: "channel-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "bob"}},
+			{RoomID: "channel-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "carol"}},
+		},
+	}
+
+	subscriptions, err := startFailureRecipientSubscriptions(source, topology, observer)
+	require.NoError(t, err)
+	require.Len(t, connections, 2)
+	assert.NotSame(t, connections[0], connections[1])
+	assert.True(t, connections[0].flushed)
+	assert.True(t, connections[1].flushed)
+
+	require.NoError(t, subscriptions.Close())
+	assert.True(t, connections[0].drained)
+	assert.True(t, connections[1].drained)
+}
+
 func TestFailureRecipientObserver_RejectsSubscriptionAndMalformedEvidence(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
@@ -396,10 +484,167 @@ func TestFailureRecipientObserver_RejectsSubscriptionAndMalformedEvidence(t *tes
 	assert.Error(t, observer.appendRawEvidence("future", "message", "alice"))
 }
 
+func TestFailureRecipientObserver_IgnoresUnrelatedRoomEvents(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	observer := newFailureRecipientObserver(ledger, NewMetrics(), 2, func() time.Time { return now })
+	payload, err := json.Marshal(model.RoomEvent{
+		Type: model.RoomEventMessageEdited, RoomID: "room-1", LastMsgID: "message-1",
+	})
+	require.NoError(t, err)
+
+	observer.process(recipientDelivery{recipient: "alice", payload: payload})
+
+	assert.Empty(t, ledger.Snapshot().InvalidReason)
+}
+
+func TestFailureRecipientObserver_RejectsWrongRoomAndEventType(t *testing.T) {
+	tests := []struct {
+		name  string
+		event model.RoomEvent
+	}{
+		{
+			name: "wrong room",
+			event: model.RoomEvent{
+				Type: model.RoomEventNewMessage, RoomID: "room-2", LastMsgID: "message-1",
+			},
+		},
+		{
+			name: "wrong event type",
+			event: model.RoomEvent{
+				Type: model.RoomEventNewThreadMessage, RoomID: "room-1", LastMsgID: "message-1",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+			ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+			require.NoError(t, err)
+			observer := newFailureRecipientObserver(ledger, NewMetrics(), 2, func() time.Time { return now })
+			observer.health.Set(true, now, "subscribed")
+			tracker := newSoakFailureTracker(
+				ledger, 0, time.Minute, func() time.Time { return now },
+				withSoakFailureRecipientObserver(observer),
+			)
+			pending := testSoakFailurePending(now)
+			pending.Target.Recipients = []string{"alice"}
+			require.NoError(t, tracker.Start(pending))
+			payload, err := json.Marshal(tc.event)
+			require.NoError(t, err)
+
+			observer.process(recipientDelivery{recipient: "alice", payload: payload})
+			result := observer.Finalize("message-1", now, now)
+
+			assert.Equal(t, failureObservationBad, result.Observation)
+			assert.Equal(t, []string{"alice"}, result.Mismatches)
+		})
+	}
+}
+
+func TestFailureRecipientObserver_ReplaysDurableMismatchAfterRestart(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	directory := t.TempDir()
+	first := newFailureRecipientObserver(
+		nil,
+		NewMetrics(),
+		2,
+		func() time.Time { return now },
+		withFailureRecipientEvidenceDir(directory),
+	)
+	require.NoError(t, first.ExpectEvent(
+		"message-1",
+		[]string{"alice"},
+		"room-1",
+		model.RoomEventNewMessage,
+	))
+	payload, err := json.Marshal(model.RoomEvent{
+		Type: model.RoomEventNewMessage, RoomID: "room-2", LastMsgID: "message-1",
+	})
+	require.NoError(t, err)
+	first.process(recipientDelivery{recipient: "alice", payload: payload})
+
+	restarted := newFailureRecipientObserver(
+		nil,
+		NewMetrics(),
+		2,
+		func() time.Time { return now },
+		withFailureRecipientEvidenceDir(directory),
+	)
+	require.NoError(t, restarted.Recover([]failureOperation{{
+		ID:       "message-1",
+		Expected: []failureObserver{failureObserverRecipient},
+		Targets:  map[string]string{"roomId": "room-1"},
+		Attributes: map[string]string{
+			"expected_recipients":      "alice",
+			"expected_recipient_event": string(model.RoomEventNewMessage),
+		},
+	}}))
+	restarted.health.Set(true, now, "subscribed")
+
+	result := restarted.Finalize("message-1", now, now)
+	assert.Equal(t, failureObservationBad, result.Observation)
+	assert.Equal(t, []string{"alice"}, result.Mismatches)
+}
+
+func TestFailureRecipientObserver_DrainProcessesQueuedEvidence(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	observer := newFailureRecipientObserver(nil, NewMetrics(), 2, func() time.Time { return now })
+	require.NoError(t, observer.Expect("message-1", []string{"alice"}))
+	payload, err := json.Marshal(model.RoomEvent{
+		Type: model.RoomEventNewMessage, RoomID: "room-1", LastMsgID: "message-1",
+	})
+	require.NoError(t, err)
+	require.True(t, observer.Enqueue("alice", payload))
+
+	observer.Drain()
+
+	assert.True(t, observer.evidence.Complete("message-1"))
+}
+
+func TestFailureRecipientObserver_ShutdownStopsIngressBeforeDrainingQueue(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	var sequence []string
+	connection := &fakeFailureRecipientConnection{onDrain: func() { sequence = append(sequence, "ingress") }}
+	source := newPooledNATSFailureRecipientSource(1, func(int) (failureRecipientConnection, error) {
+		return connection, nil
+	})
+	observer := newFailureRecipientObserver(nil, NewMetrics(), 2, func() time.Time { return now })
+	require.NoError(t, observer.Expect("message-1", []string{"alice"}))
+	payload, err := json.Marshal(model.RoomEvent{
+		Type: model.RoomEventNewMessage, RoomID: "room-1", LastMsgID: "message-1",
+	})
+	require.NoError(t, err)
+	require.True(t, observer.Enqueue("alice", payload))
+	_, err = source.Subscribe("room", "alice", func(*nats.Msg) {})
+	require.NoError(t, err)
+	subscriptions := &failureRecipientSubscriptions{source: source}
+
+	err = shutdownFailureRecipientObserver(subscriptions, func() {
+		sequence = append(sequence, "observer")
+	}, observer)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ingress", "observer"}, sequence)
+	assert.True(t, observer.evidence.Complete("message-1"))
+}
+
+func TestSoakRuntimeSelector_RecipientSetsExcludeBots(t *testing.T) {
+	topology := &soakTopology{Subscriptions: []model.Subscription{
+		{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
+		{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "bot", IsBot: true}},
+		{RoomID: "room-1", IsSubscribed: false, User: model.SubscriptionUser{Account: "departed"}},
+	}}
+
+	assert.Equal(t, map[string][]string{"room-1": {"alice"}}, soakRecipientSets(topology))
+}
+
 func TestFailureRecipientObserver_RecoversPendingExpectation(t *testing.T) {
 	observer := newFailureRecipientObserver(nil, nil, 1, time.Now)
 	operations := []failureOperation{{
 		ID: "pending", Expected: []failureObserver{failureObserverRecipient},
+		Targets:    map[string]string{"roomId": "legacy-room"},
 		Attributes: map[string]string{"expected_recipients": "alice\nbob"},
 	}}
 	require.NoError(t, observer.Recover(operations))
@@ -431,6 +676,32 @@ func (s *fakeFailureRecipientSource) Flush() error {
 type fakeFailureRecipientSubscription struct{}
 
 func (fakeFailureRecipientSubscription) Unsubscribe() error { return nil }
+
+type fakeFailureRecipientConnection struct {
+	flushed bool
+	drained bool
+	onDrain func()
+}
+
+func (*fakeFailureRecipientConnection) Subscribe(
+	_ string,
+	_ nats.MsgHandler,
+) (failureRecipientSubscription, error) {
+	return fakeFailureRecipientSubscription{}, nil
+}
+
+func (c *fakeFailureRecipientConnection) Flush() error {
+	c.flushed = true
+	return nil
+}
+
+func (c *fakeFailureRecipientConnection) Drain() error {
+	c.drained = true
+	if c.onDrain != nil {
+		c.onDrain()
+	}
+	return nil
+}
 
 func TestFailureVerdict_PrecedenceAndAllReasons(t *testing.T) {
 	result := evaluateFailureVerdict([]failureGate{

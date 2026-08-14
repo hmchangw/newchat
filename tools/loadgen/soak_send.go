@@ -92,6 +92,7 @@ type soakSendReplyResult struct {
 
 type soakSendLifecycle interface {
 	Start(*soakPendingSend) error
+	Activate(*soakPendingSend) error
 }
 
 type soakSenderOption func(*soakSender)
@@ -230,17 +231,24 @@ func (s *soakSender) Publish(
 		s.rejectPending(pending)
 		return nil, err
 	}
+	tracked := false
 	if s.lifecycle != nil {
 		if err := s.lifecycle.Start(cloneSoakPendingSend(pending)); err != nil {
 			s.reportLifecycleError(fmt.Errorf("persist soak send intent: %w", err))
 		} else {
 			s.markPendingTracked(pending.RequestID)
+			tracked = true
 		}
 	}
 
 	published := s.clonePending(pending.RequestID)
 	if published == nil {
 		published = cloneSoakPendingSend(pending)
+	}
+	if tracked {
+		if err := s.lifecycle.Activate(cloneSoakPendingSend(published)); err != nil {
+			s.reportLifecycleError(fmt.Errorf("persist soak send activation: %w", err))
+		}
 	}
 	if err := s.publisher.Publish(ctx, pending.Subject, pending.Payload); err != nil {
 		return published, fmt.Errorf("publish soak send: %w", err)

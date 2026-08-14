@@ -321,6 +321,16 @@ func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 			want:   "SOAK_RECIPIENT_OBSERVER_QUEUE",
 		},
 		{
+			name:   "zero recipient observer connections",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverConnections = 0 },
+			want:   "SOAK_RECIPIENT_OBSERVER_CONNECTIONS",
+		},
+		{
+			name:   "too many recipient observer connections",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverConnections = 257 },
+			want:   "SOAK_RECIPIENT_OBSERVER_CONNECTIONS",
+		},
+		{
 			name: "formal manifest without retained ledger directory",
 			mutate: func(cfg *soakConfig) {
 				cfg.FailureManifestPath = "manifest.json"

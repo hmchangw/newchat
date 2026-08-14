@@ -23,10 +23,11 @@ const (
 )
 
 type soakRecordingPublisher struct {
-	mu       sync.Mutex
-	subjects []string
-	payloads [][]byte
-	errors   []error
+	mu        sync.Mutex
+	subjects  []string
+	payloads  [][]byte
+	errors    []error
+	onPublish func()
 }
 
 func (p *soakRecordingPublisher) Publish(
@@ -38,6 +39,9 @@ func (p *soakRecordingPublisher) Publish(
 	defer p.mu.Unlock()
 	p.subjects = append(p.subjects, subject)
 	p.payloads = append(p.payloads, append([]byte(nil), data...))
+	if p.onPublish != nil {
+		p.onPublish()
+	}
 	if len(p.errors) == 0 {
 		return nil
 	}
@@ -512,8 +516,9 @@ func TestSoakSender_UnmatchedReplyDoesNotTouchCatalog(t *testing.T) {
 
 func TestSoakSender_PersistsLifecycleBeforePublishing(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
-	publisher := &soakRecordingPublisher{}
-	lifecycle := &recordingSoakSendLifecycle{}
+	var sequence []string
+	publisher := &soakRecordingPublisher{onPublish: func() { sequence = append(sequence, "publish") }}
+	lifecycle := &recordingSoakSendLifecycle{sequence: &sequence}
 	sender := newSoakSender(soakSendConfig{
 		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
 	}, newSoakCatalog(8, 100, 0, clock), publisher, clock,
@@ -528,7 +533,10 @@ func TestSoakSender_PersistsLifecycleBeforePublishing(t *testing.T) {
 	}, "hello")
 	require.NoError(t, err)
 	require.Len(t, lifecycle.started, 1)
+	require.Len(t, lifecycle.activated, 1)
 	assert.Equal(t, pending.MessageID, lifecycle.started[0].MessageID)
+	assert.Equal(t, pending.MessageID, lifecycle.activated[0].MessageID)
+	assert.Equal(t, []string{"start", "activate", "publish"}, sequence)
 	assert.True(t, pending.Tracked)
 	subjects, _ := publisher.snapshot()
 	assert.Len(t, subjects, 1)
@@ -608,12 +616,25 @@ type fakeSoakResponseSource struct {
 }
 
 type recordingSoakSendLifecycle struct {
-	started []*soakPendingSend
-	err     error
+	started   []*soakPendingSend
+	activated []*soakPendingSend
+	sequence  *[]string
+	err       error
 }
 
 func (l *recordingSoakSendLifecycle) Start(pending *soakPendingSend) error {
 	l.started = append(l.started, cloneSoakPendingSend(pending))
+	if l.sequence != nil {
+		*l.sequence = append(*l.sequence, "start")
+	}
+	return l.err
+}
+
+func (l *recordingSoakSendLifecycle) Activate(pending *soakPendingSend) error {
+	l.activated = append(l.activated, cloneSoakPendingSend(pending))
+	if l.sequence != nil {
+		*l.sequence = append(*l.sequence, "activate")
+	}
 	return l.err
 }
 

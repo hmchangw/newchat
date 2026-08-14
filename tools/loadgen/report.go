@@ -38,14 +38,17 @@ func ComputePercentiles(samples []time.Duration) Percentiles {
 
 // ConsumerStat captures the min/peak/final snapshot of a single durable.
 type ConsumerStat struct {
-	Stream         string
-	Durable        string
-	MinPending     uint64
-	PeakPending    uint64
-	FinalPending   uint64
-	PeakAckPending uint64
+	Stream          string
+	Durable         string
+	BaselinePending uint64
+	MinPending      uint64
+	PeakPending     uint64
+	FinalPending    uint64
+	PeakAckPending  uint64
 	// Redelivered is the final (at-shutdown) value of NumRedelivered, not a cumulative total.
-	Redelivered uint64
+	Redelivered  uint64
+	HasSample    bool
+	SampleErrors uint64
 }
 
 // Summary is the full end-of-run report.

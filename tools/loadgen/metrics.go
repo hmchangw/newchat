@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -10,6 +11,8 @@ import (
 
 // Metrics holds the Prometheus collectors used across loadgen components.
 type Metrics struct {
+	natsHealthMu        sync.Mutex
+	natsPoolHealth      map[string]*loadgenNATSPoolState
 	Registry            *prometheus.Registry
 	Published           *prometheus.CounterVec
 	PublishErrors       *prometheus.CounterVec
@@ -74,7 +77,8 @@ func NewMetrics() *Metrics {
 		0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000,
 	}
 	m := &Metrics{
-		Registry: r,
+		natsPoolHealth: make(map[string]*loadgenNATSPoolState),
+		Registry:       r,
 		Published: prometheus.NewCounterVec(
 			prometheus.CounterOpts{Name: "loadgen_published_total", Help: "Messages published by preset and phase (warmup|measured)."},
 			[]string{"preset", "phase"},

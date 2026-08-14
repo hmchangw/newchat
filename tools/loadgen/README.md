@@ -283,6 +283,7 @@ Run A environment variables:
 | `SOAK_RECONCILE_RETRY_INTERVAL` | `1s` | Earliest retry after a missing or transient history read-back. |
 | `SOAK_RECONCILE_READ_SHARE` | `0.5` | Maximum fraction of the read lane reconciliation may claim, so the mixed read workload keeps running during a fault. |
 | `SOAK_RECIPIENT_OBSERVER_QUEUE` | `8192` | Bounded recipient-event queue; overflow invalidates the affected evidence interval without blocking sends. |
+| `SOAK_RECIPIENT_OBSERVER_CONNECTIONS` | `32` | Bounded NATS connection pool for account-attributed recipient subscriptions. |
 | `SOAK_FAILURE_MANIFEST_PATH` | empty | Enables a formal campaign from a schema-v1 manifest; loadgen installs an immutable retained copy before traffic. |
 | `SOAK_FAILURE_TIMELINE_PATH` | empty | Authoritative local schema-v1 fault-event JSONL path under `SOAK_LEDGER_DIR`. |
 | `SOAK_FAILURE_REPORT_DIR` | empty | Retained output directory for deterministic report, summary, and exact-ID sidecars; defaults to `SOAK_LEDGER_DIR`. |

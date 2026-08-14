@@ -23,9 +23,6 @@ func TestFailureEvidence_AcceptedRecipientHistoryRestartPass(t *testing.T) {
 	publisher, err := nats.Connect(natsURL)
 	require.NoError(t, err)
 	t.Cleanup(publisher.Close)
-	observerConnection, err := nats.Connect(natsURL)
-	require.NoError(t, err)
-	t.Cleanup(observerConnection.Close)
 
 	now := time.Now().UTC()
 	evidenceDirectory := t.TempDir()
@@ -48,8 +45,16 @@ func TestFailureEvidence_AcceptedRecipientHistoryRestartPass(t *testing.T) {
 			{RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true, User: model.SubscriptionUser{Account: "bob"}},
 		},
 	}
+	recipientSource := newPooledNATSFailureRecipientSource(2, func(int) (failureRecipientConnection, error) {
+		connection, connectErr := nats.Connect(natsURL)
+		if connectErr != nil {
+			return nil, connectErr
+		}
+		return &natsFailureRecipientConnection{nc: connection}, nil
+	})
+	t.Cleanup(func() { _ = recipientSource.Close() })
 	subscriptions, err := startFailureRecipientSubscriptions(
-		&natsFailureRecipientSource{nc: observerConnection},
+		recipientSource,
 		topology,
 		recipientObserver,
 	)
@@ -62,14 +67,16 @@ func TestFailureEvidence_AcceptedRecipientHistoryRestartPass(t *testing.T) {
 		withSoakFailureRunID("run-1"),
 		withSoakFailureRecipientObserver(recipientObserver),
 	)
-	require.NoError(t, tracker.Start(&soakPendingSend{
+	pending := &soakPendingSend{
 		MessageID: "message-1", RequestID: "request-1", PublishedAt: now,
 		Target: soakSendTarget{
 			Account: "alice", RoomID: "room-1", RoomType: model.RoomTypeChannel,
 			Recipients: []string{"alice", "bob"},
 		},
 		Content: "content hash only in WAL",
-	}))
+	}
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
 		Status: soakSendReplyAccepted, MessageID: "message-1",
 	}))
@@ -83,9 +90,7 @@ func TestFailureEvidence_AcceptedRecipientHistoryRestartPass(t *testing.T) {
 		return recipientObserver.evidence.Complete("message-1")
 	}, 5*time.Second, 10*time.Millisecond)
 
-	require.NoError(t, subscriptions.Close())
-	stopObserver()
-	recipientObserver.Wait()
+	require.NoError(t, shutdownFailureRecipientObserver(subscriptions, stopObserver, recipientObserver))
 	now = now.Add(time.Minute)
 	require.NoError(t, ledger.Close())
 

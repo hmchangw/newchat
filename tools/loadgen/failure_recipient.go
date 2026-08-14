@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"slices"
@@ -28,37 +29,167 @@ type failureRecipientSource interface {
 	Flush() error
 }
 
-type natsFailureRecipientSource struct {
+type failureRecipientConnection interface {
+	Subscribe(string, nats.MsgHandler) (failureRecipientSubscription, error)
+	Flush() error
+	Drain() error
+}
+
+type natsFailureRecipientConnection struct {
 	nc *nats.Conn
+}
+
+func (c *natsFailureRecipientConnection) Subscribe(
+	subjectName string,
+	handler nats.MsgHandler,
+) (failureRecipientSubscription, error) {
+	return c.nc.Subscribe(subjectName, handler)
+}
+
+func (c *natsFailureRecipientConnection) Flush() error { return c.nc.Flush() }
+func (c *natsFailureRecipientConnection) Drain() error { return c.nc.Drain() }
+
+type natsFailureRecipientSource struct {
+	mu          sync.Mutex
+	poolSize    int
+	connect     func(int) (failureRecipientConnection, error)
+	connections map[int]failureRecipientConnection
+}
+
+func newPooledNATSFailureRecipientSource(
+	poolSize int,
+	connect func(int) (failureRecipientConnection, error),
+) *natsFailureRecipientSource {
+	return &natsFailureRecipientSource{
+		poolSize: poolSize, connect: connect, connections: make(map[int]failureRecipientConnection),
+	}
 }
 
 func (s *natsFailureRecipientSource) Subscribe(
 	subjectName string,
-	_ string,
+	recipient string,
 	handler nats.MsgHandler,
 ) (failureRecipientSubscription, error) {
-	return s.nc.Subscribe(subjectName, handler)
+	if s == nil || s.connect == nil || s.poolSize <= 0 || recipient == "" {
+		return nil, fmt.Errorf("recipient connection source is not configured")
+	}
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(recipient))
+	connectionIndex := int(hasher.Sum32() % uint32(s.poolSize))
+	s.mu.Lock()
+	connection := s.connections[connectionIndex]
+	if connection == nil {
+		var err error
+		connection, err = s.connect(connectionIndex)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("connect recipient observer: %w", err)
+		}
+		if connection == nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("connect recipient observer: connector returned nil connection")
+		}
+		s.connections[connectionIndex] = connection
+	}
+	s.mu.Unlock()
+	return connection.Subscribe(subjectName, handler)
 }
 
 func (s *natsFailureRecipientSource) Flush() error {
-	return s.nc.Flush()
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	indexes := make([]int, 0, len(s.connections))
+	for index := range s.connections {
+		indexes = append(indexes, index)
+	}
+	slices.Sort(indexes)
+	connections := make([]failureRecipientConnection, 0, len(indexes))
+	for _, index := range indexes {
+		connections = append(connections, s.connections[index])
+	}
+	s.mu.Unlock()
+	for _, connection := range connections {
+		if err := connection.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *natsFailureRecipientSource) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	indexes := make([]int, 0, len(s.connections))
+	for index := range s.connections {
+		indexes = append(indexes, index)
+	}
+	slices.Sort(indexes)
+	connections := make([]failureRecipientConnection, 0, len(indexes))
+	for _, index := range indexes {
+		connections = append(connections, s.connections[index])
+	}
+	clear(s.connections)
+	s.mu.Unlock()
+	var errs []error
+	for _, connection := range connections {
+		if err := connection.Drain(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 type failureRecipientSubscriptions struct {
 	subscriptions []failureRecipientSubscription
+	source        failureRecipientSource
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 func (s *failureRecipientSubscriptions) Close() error {
 	if s == nil {
 		return nil
 	}
-	var errs []error
-	for _, subscription := range s.subscriptions {
-		if err := subscription.Unsubscribe(); err != nil {
-			errs = append(errs, err)
+	s.closeOnce.Do(func() {
+		if closer, ok := s.source.(interface{ Close() error }); ok {
+			s.closeErr = closer.Close()
+			return
 		}
+		var errs []error
+		for _, subscription := range s.subscriptions {
+			if err := subscription.Unsubscribe(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		s.closeErr = errors.Join(errs...)
+	})
+	return s.closeErr
+}
+
+func shutdownFailureRecipientObserver(
+	subscriptions *failureRecipientSubscriptions,
+	stop func(),
+	observer *failureRecipientObserver,
+) error {
+	var closeErr error
+	if subscriptions != nil {
+		closeErr = subscriptions.Close()
 	}
-	return errors.Join(errs...)
+	if stop != nil {
+		stop()
+	}
+	if observer != nil {
+		observer.Wait()
+		observer.Drain()
+	}
+	if closeErr != nil {
+		return fmt.Errorf("drain recipient observer ingress: %w", closeErr)
+	}
+	return nil
 }
 
 func startFailureRecipientSubscriptions(
@@ -108,7 +239,7 @@ func startFailureRecipientSubscriptions(
 		}
 		return stringsCompare(a.recipient, b.recipient)
 	})
-	result := &failureRecipientSubscriptions{}
+	result := &failureRecipientSubscriptions{source: source}
 	for _, target := range targets {
 		recipient := target.recipient
 		subscription, err := source.Subscribe(target.subject, recipient, func(message *nats.Msg) {
@@ -150,11 +281,15 @@ type recipientEvidenceResult struct {
 	Missing     []string           `json:"missing,omitempty"`
 	Unexpected  []string           `json:"unexpected,omitempty"`
 	Duplicates  []string           `json:"duplicates,omitempty"`
+	Mismatches  []string           `json:"mismatches,omitempty"`
 }
 
 type recipientExpectation struct {
-	expected map[string]struct{}
-	observed map[string]int
+	expected   map[string]struct{}
+	observed   map[string]int
+	mismatches map[string]struct{}
+	roomID     string
+	eventType  model.RoomEventType
 }
 
 type recipientEvidence struct {
@@ -163,13 +298,33 @@ type recipientEvidence struct {
 	operations      map[string]*recipientExpectation
 }
 
+type recipientEvidenceDisposition string
+
+const (
+	recipientEvidenceUntracked recipientEvidenceDisposition = "untracked"
+	recipientEvidenceObserved  recipientEvidenceDisposition = "observed"
+	recipientEvidenceMismatch  recipientEvidenceDisposition = "mismatch"
+)
+
 func newRecipientEvidence(allowDuplicates bool) *recipientEvidence {
 	return &recipientEvidence{allowDuplicates: allowDuplicates, operations: make(map[string]*recipientExpectation)}
 }
 
 func (r *recipientEvidence) Expect(operationID string, recipients []string) error {
+	return r.ExpectEvent(operationID, recipients, "", "")
+}
+
+func (r *recipientEvidence) ExpectEvent(
+	operationID string,
+	recipients []string,
+	roomID string,
+	eventType model.RoomEventType,
+) error {
 	if r == nil || operationID == "" || len(recipients) == 0 {
 		return fmt.Errorf("recipient expectation requires operation and recipients")
+	}
+	if (roomID == "") != (eventType == "") {
+		return fmt.Errorf("recipient expectation room and event type must be provided together")
 	}
 	expected := make(map[string]struct{}, len(recipients))
 	for _, recipient := range recipients {
@@ -186,7 +341,10 @@ func (r *recipientEvidence) Expect(operationID string, recipients []string) erro
 	if _, exists := r.operations[operationID]; exists {
 		return fmt.Errorf("recipient expectation %q already exists", operationID)
 	}
-	r.operations[operationID] = &recipientExpectation{expected: expected, observed: make(map[string]int)}
+	r.operations[operationID] = &recipientExpectation{
+		expected: expected, observed: make(map[string]int), mismatches: make(map[string]struct{}),
+		roomID: roomID, eventType: eventType,
+	}
 	return nil
 }
 
@@ -201,6 +359,64 @@ func (r *recipientEvidence) Observe(operationID, recipient string) bool {
 		return false
 	}
 	expectation.observed[recipient]++
+	return true
+}
+
+func (r *recipientEvidence) ObserveEvent(
+	operationID,
+	recipient,
+	roomID string,
+	eventType model.RoomEventType,
+) bool {
+	disposition, err := r.observeEventDurably(operationID, recipient, roomID, eventType, nil)
+	return err == nil && disposition != recipientEvidenceUntracked
+}
+
+func (r *recipientEvidence) observeEventDurably(
+	operationID,
+	recipient,
+	roomID string,
+	eventType model.RoomEventType,
+	persist func(recipientEvidenceDisposition) error,
+) (recipientEvidenceDisposition, error) {
+	if r == nil {
+		return recipientEvidenceUntracked, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	expectation := r.operations[operationID]
+	if expectation == nil {
+		return recipientEvidenceUntracked, nil
+	}
+	disposition := recipientEvidenceObserved
+	if expectation.roomID != "" &&
+		(expectation.roomID != roomID || expectation.eventType != eventType) {
+		disposition = recipientEvidenceMismatch
+	}
+	if persist != nil {
+		if err := persist(disposition); err != nil {
+			return disposition, err
+		}
+	}
+	if disposition == recipientEvidenceMismatch {
+		expectation.mismatches[recipient] = struct{}{}
+		return disposition, nil
+	}
+	expectation.observed[recipient]++
+	return disposition, nil
+}
+
+func (r *recipientEvidence) ObserveMismatch(operationID, recipient string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	expectation := r.operations[operationID]
+	if expectation == nil {
+		return false
+	}
+	expectation.mismatches[recipient] = struct{}{}
 	return true
 }
 
@@ -230,7 +446,7 @@ func (r *recipientEvidence) Complete(operationID string) bool {
 			return false
 		}
 	}
-	return true
+	return len(expectation.mismatches) == 0
 }
 
 func (r *recipientEvidence) Finalize(operationID string, observerHealthy bool) recipientEvidenceResult {
@@ -254,13 +470,17 @@ func (r *recipientEvidence) Finalize(operationID string, observerHealthy bool) r
 			result.Duplicates = append(result.Duplicates, recipient)
 		}
 	}
+	for recipient := range expectation.mismatches {
+		result.Mismatches = append(result.Mismatches, recipient)
+	}
 	slices.Sort(result.Missing)
 	slices.Sort(result.Unexpected)
 	slices.Sort(result.Duplicates)
+	slices.Sort(result.Mismatches)
 	switch {
 	case !observerHealthy:
 		result.Observation = failureObservationUnverified
-	case len(result.Unexpected) > 0 || (!r.allowDuplicates && len(result.Duplicates) > 0):
+	case len(result.Mismatches) > 0 || len(result.Unexpected) > 0 || (!r.allowDuplicates && len(result.Duplicates) > 0):
 		result.Observation = failureObservationBad
 	case len(result.Missing) > 0:
 		result.Observation = failureObservationMissingAfterDeadline
@@ -334,6 +554,18 @@ func (o *failureRecipientObserver) Expect(operationID string, recipients []strin
 	return o.evidence.Expect(operationID, recipients)
 }
 
+func (o *failureRecipientObserver) ExpectEvent(
+	operationID string,
+	recipients []string,
+	roomID string,
+	eventType model.RoomEventType,
+) error {
+	if o == nil {
+		return fmt.Errorf("recipient observer is required")
+	}
+	return o.evidence.ExpectEvent(operationID, recipients, roomID, eventType)
+}
+
 func (o *failureRecipientObserver) Recover(operations []failureOperation) error {
 	if o == nil {
 		return fmt.Errorf("recipient observer is required")
@@ -349,7 +581,16 @@ func (o *failureRecipientObserver) Recover(operations []failureOperation) error 
 		recipients := strings.FieldsFunc(operation.Attributes["expected_recipients"], func(r rune) bool {
 			return r == '\n'
 		})
-		if err := o.Expect(operation.ID, recipients); err != nil {
+		eventType := model.RoomEventType(operation.Attributes["expected_recipient_event"])
+		var err error
+		if eventType == "" {
+			// Operations written before target-aware recipient correlation retain
+			// their original message-ID and recipient-set replay semantics.
+			err = o.Expect(operation.ID, recipients)
+		} else {
+			err = o.ExpectEvent(operation.ID, recipients, operation.Targets["roomId"], eventType)
+		}
+		if err != nil {
 			return fmt.Errorf("recover recipient expectation %q: %w", operation.ID, err)
 		}
 	}
@@ -360,25 +601,35 @@ func (o *failureRecipientObserver) replayObservedEvidence() error {
 	if o.evidenceDir == "" {
 		return nil
 	}
-	path := filepath.Join(o.evidenceDir, ".recipient-observed.raw.jsonl")
-	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("open observed recipient evidence: %w", err)
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		var evidence failureRecipientRawEvidence
-		if err := json.Unmarshal(scanner.Bytes(), &evidence); err != nil {
-			return fmt.Errorf("decode observed recipient evidence: %w", err)
+	for _, kind := range []recipientEvidenceDisposition{recipientEvidenceObserved, recipientEvidenceMismatch} {
+		path := filepath.Join(o.evidenceDir, ".recipient-"+string(kind)+".raw.jsonl")
+		file, err := os.Open(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
 		}
-		o.evidence.Observe(evidence.OperationID, evidence.Recipient)
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan observed recipient evidence: %w", err)
+		if err != nil {
+			return fmt.Errorf("open %s recipient evidence: %w", kind, err)
+		}
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			var evidence failureRecipientRawEvidence
+			if err := json.Unmarshal(scanner.Bytes(), &evidence); err != nil {
+				_ = file.Close()
+				return fmt.Errorf("decode %s recipient evidence: %w", kind, err)
+			}
+			if kind == recipientEvidenceMismatch {
+				o.evidence.ObserveMismatch(evidence.OperationID, evidence.Recipient)
+			} else {
+				o.evidence.Observe(evidence.OperationID, evidence.Recipient)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("scan %s recipient evidence: %w", kind, err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close %s recipient evidence: %w", kind, err)
+		}
 	}
 	return nil
 }
@@ -433,26 +684,69 @@ func (o *failureRecipientObserver) Wait() {
 	}
 }
 
+func (o *failureRecipientObserver) Drain() {
+	if o == nil {
+		return
+	}
+	for {
+		select {
+		case delivery := <-o.queue:
+			o.process(delivery)
+		default:
+			if o.metrics != nil {
+				o.metrics.FailureObserverQueueDepth.WithLabelValues(string(failureObserverRecipient)).Set(0)
+			}
+			return
+		}
+	}
+}
+
 func (o *failureRecipientObserver) process(delivery recipientDelivery) {
 	var event model.RoomEvent
-	if err := json.Unmarshal(delivery.payload, &event); err != nil || event.LastMsgID == "" || (event.Type != model.RoomEventNewMessage && event.Type != model.RoomEventNewThreadMessage) {
+	if err := json.Unmarshal(delivery.payload, &event); err != nil {
 		if o.metrics != nil {
 			o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(failureObservationBad)).Inc()
 		}
-		o.ledger.Invalidate("observer_malformed")
-		return
-	}
-	if !o.evidence.Observe(event.LastMsgID, delivery.recipient) {
-		if err := o.appendRawEvidence("untracked", event.LastMsgID, delivery.recipient); err != nil {
-			o.ledger.Invalidate("sidecar")
+		if o.ledger != nil {
+			o.ledger.Invalidate("observer_malformed")
 		}
 		return
 	}
-	if err := o.appendRawEvidence("observed", event.LastMsgID, delivery.recipient); err != nil {
+	if event.Type != model.RoomEventNewMessage && event.Type != model.RoomEventNewThreadMessage {
+		return
+	}
+	if event.LastMsgID == "" || event.RoomID == "" {
+		if o.metrics != nil {
+			o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(failureObservationBad)).Inc()
+		}
+		if o.ledger != nil {
+			o.ledger.Invalidate("observer_malformed")
+		}
+		return
+	}
+	disposition, evidenceErr := o.evidence.observeEventDurably(
+		event.LastMsgID,
+		delivery.recipient,
+		event.RoomID,
+		event.Type,
+		func(kind recipientEvidenceDisposition) error {
+			return o.appendRawEvidence(string(kind), event.LastMsgID, delivery.recipient)
+		},
+	)
+	if evidenceErr != nil {
 		o.health.Set(false, o.now().UTC(), "sidecar_failure")
 		if o.ledger != nil {
 			o.ledger.Invalidate("sidecar")
 		}
+		return
+	}
+	if disposition == recipientEvidenceUntracked {
+		if err := o.appendRawEvidence("untracked", event.LastMsgID, delivery.recipient); err != nil {
+			if o.ledger != nil {
+				o.ledger.Invalidate("sidecar")
+			}
+		}
+		return
 	}
 }
 
@@ -484,6 +778,7 @@ func (o *failureRecipientObserver) persistResult(
 		{kind: "missing", recipients: result.Missing},
 		{kind: "unexpected", recipients: result.Unexpected},
 		{kind: "duplicate", recipients: result.Duplicates},
+		{kind: "mismatch", recipients: result.Mismatches},
 	} {
 		for _, recipient := range item.recipients {
 			if err := o.appendRawEvidence(item.kind, operationID, recipient); err != nil {
@@ -504,7 +799,7 @@ func (o *failureRecipientObserver) appendRawEvidence(kind, operationID, recipien
 		return nil
 	}
 	if _, known := map[string]struct{}{
-		"missing": {}, "unexpected": {}, "duplicate": {}, "unverified": {}, "untracked": {}, "observed": {},
+		"missing": {}, "unexpected": {}, "duplicate": {}, "mismatch": {}, "unverified": {}, "untracked": {}, "observed": {},
 	}[kind]; !known {
 		return fmt.Errorf("unknown recipient evidence kind %q", kind)
 	}

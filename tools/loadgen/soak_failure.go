@@ -12,15 +12,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
 const (
-	soakFailureScenario               = "cassandra_soak"
-	soakFailureLaneMessageSend        = "message_send"
-	soakFailureAttributeRoomID        = "room_id"
-	soakFailureAttributeAccount       = "account"
-	soakFailureAttributeContentSHA256 = "content_sha256"
+	soakFailureScenario                = "cassandra_soak"
+	soakFailureLaneMessageSend         = "message_send"
+	soakFailureAttributeRoomID         = "room_id"
+	soakFailureAttributeAccount        = "account"
+	soakFailureAttributeContentSHA256  = "content_sha256"
+	soakFailureAttributeRecipientEvent = "expected_recipient_event"
 )
 
 func openSoakFailureLedger(
@@ -137,8 +139,17 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 	}
 	slices.Sort(recipients)
 	recipientHash := sha256.Sum256([]byte(strings.Join(recipients, "\n")))
+	recipientEvent := model.RoomEventNewMessage
+	if pending.Kind == soakSendThreadReply {
+		recipientEvent = model.RoomEventNewThreadMessage
+	}
 	if t.recipient != nil {
-		if err := t.recipient.Expect(pending.MessageID, recipients); err != nil {
+		if err := t.recipient.ExpectEvent(
+			pending.MessageID,
+			recipients,
+			pending.Target.RoomID,
+			recipientEvent,
+		); err != nil {
 			return fmt.Errorf("register soak recipient expectation: %w", err)
 		}
 	}
@@ -146,21 +157,36 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 		SchemaVersion: 2, ID: pending.MessageID, CorrelationID: pending.RequestID,
 		RunID: t.runID, OperationType: failureOperationMessageCreate,
 		Scenario: t.scenario, Lane: soakFailureLaneMessageSend,
-		StartedAt: startedAt, VerifyAfter: startedAt.Add(t.persistGrace),
+		LifecycleState: failureOperationJournaled,
+		StartedAt:      startedAt, VerifyAfter: startedAt.Add(t.persistGrace),
 		Deadline: startedAt.Add(t.deadline),
 		Targets:  map[string]string{"messageId": pending.MessageID, "roomId": pending.Target.RoomID},
 		Effects:  messageCreateExpectedEffects(len(recipients), hex.EncodeToString(recipientHash[:])),
 		Attributes: map[string]string{
-			soakFailureAttributeRoomID:        pending.Target.RoomID,
-			soakFailureAttributeAccount:       pending.Target.Account,
-			soakFailureAttributeContentSHA256: hex.EncodeToString(contentHash[:]),
-			"expected_recipients":             strings.Join(recipients, "\n"),
+			soakFailureAttributeRoomID:         pending.Target.RoomID,
+			soakFailureAttributeAccount:        pending.Target.Account,
+			soakFailureAttributeContentSHA256:  hex.EncodeToString(contentHash[:]),
+			soakFailureAttributeRecipientEvent: string(recipientEvent),
+			"expected_recipients":              strings.Join(recipients, "\n"),
 		},
 	}); err != nil {
 		if t.recipient != nil {
 			t.recipient.evidence.Forget(pending.MessageID)
 		}
 		return fmt.Errorf("start soak failure operation: %w", err)
+	}
+	return nil
+}
+
+func (t *soakFailureTracker) Activate(pending *soakPendingSend) error {
+	if t == nil || t.ledger == nil {
+		return fmt.Errorf("soak failure ledger is required")
+	}
+	if pending == nil || pending.MessageID == "" {
+		return fmt.Errorf("soak pending send with message ID is required")
+	}
+	if err := t.ledger.Activate(pending.MessageID, t.now().UTC()); err != nil {
+		return fmt.Errorf("activate soak failure operation: %w", err)
 	}
 	return nil
 }
@@ -204,6 +230,8 @@ func (t *soakFailureTracker) ObserveReply(result *soakSendReplyResult) error {
 	observation := failureObservationBad
 	if result.Status == soakSendReplyAccepted {
 		observation = failureObservationGood
+	} else if result.ErrorClass == soakErrorTimeout || transientSoakError(result.ErrorClass) {
+		observation = failureObservationUnverified
 	}
 	_, err := t.ledger.Observe(
 		result.MessageID,
