@@ -191,7 +191,10 @@ func main() {
 	slog.Info("mongo secondary-read preference configured", "readPreference", readPref.Mode().String())
 
 	store := NewMongoStore(db, WithReadPreference(readPref))
-	mongoutil.EnsureIndexesBestEffort(ctx, "room-service store", store.EnsureIndexes)
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("room-service store", store.EnsureIndexes)); err != nil {
+		slog.Error("ensure store indexes failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Read receipts resolve the target message through history-service (which
 	// owns message history) over NATS, so room-service has no direct Cassandra

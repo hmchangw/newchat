@@ -213,7 +213,10 @@ func main() {
 	cache := newValkeyCache(valkey)
 	mongoStore := newMongoStore(mongoDB)
 
-	mongoutil.EnsureIndexesBestEffort(ctx, "search-service store", mongoStore.ensureIndexes)
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("search-service store", mongoStore.ensureIndexes)); err != nil {
+		slog.Error("ensure mongo indexes failed", "error", err)
+		os.Exit(1)
+	}
 	handler := newHandler(store, mongoStore, usersClient, cache, &handlerConfig{
 		SiteID:                  cfg.SiteID,
 		DocCounts:               cfg.Search.DocCounts,

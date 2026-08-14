@@ -155,8 +155,13 @@ func main() {
 	userStore := userstore.NewMongoStore(db.Collection("users"))
 	appRepo := mongorepo.NewAppRepo(db)
 
-	mongoutil.EnsureIndexesBestEffort(ctx, "history-service thread_rooms", threadRoomRepo.EnsureIndexes)
-	mongoutil.EnsureIndexesBestEffort(ctx, "history-service thread_subscriptions", threadSubRepo.EnsureIndexes)
+	if err := mongoutil.EnsureIndexes(ctx,
+		mongoutil.Step("history-service thread_rooms", threadRoomRepo.EnsureIndexes),
+		mongoutil.Step("history-service thread_subscriptions", threadSubRepo.EnsureIndexes),
+	); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Front the per-request Mongo reads with process-local LRU+TTL caches.
 	var subSource service.SubscriptionRepository = subRepo

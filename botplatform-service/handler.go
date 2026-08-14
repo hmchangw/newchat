@@ -52,12 +52,11 @@ func newHandler(s BotplatformStore, cfg *config) *handler {
 	}
 }
 
+// HandleHealth serves liveness. Per docs/health-probes.md it never probes a
+// dependency: a MongoDB outage must not restart the pod, and since the service
+// now boots lazily against MongoDB, a probe that failed on it would crash-loop
+// the pod through exactly the outage lazy connect exists to survive.
 func (h *handler) HandleHealth(c *gin.Context) {
-	if err := h.store.Ping(c.Request.Context()); err != nil {
-		slog.WarnContext(c.Request.Context(), "healthz ping failed", "error", err)
-		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "down"})
-		return
-	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 

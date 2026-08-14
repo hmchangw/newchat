@@ -399,18 +399,20 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 // userId is site-local, so keying on it would let federated upserts miss
 // existing documents and collide on this unique index.
 func (s *mongoInboxStore) ensureIndexes(ctx context.Context) error {
-	// Best-effort: drop the legacy (threadRoomId, userId) unique index so the
-	// (threadRoomId, userAccount) index can be created without a key conflict.
-	// Mirrors message-worker's threadStoreMongo.EnsureIndexes; the index may not
-	// exist (fresh deploy / test container), so ignore all errors.
-	_ = s.threadSubCol.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-
+	// Create before dropping: a failed create (MongoDB down) is no longer fatal,
+	// so dropping first would leave the collection with neither the legacy nor
+	// the replacement unique index while the service keeps serving.
 	if _, err := s.threadSubCol.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
 		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
 	}
+
+	// Best-effort: retire the legacy (threadRoomId, userId) unique index. Mirrors
+	// message-worker's threadStoreMongo.EnsureIndexes; the index may not exist
+	// (fresh deploy / test container), so ignore all errors.
+	_ = s.threadSubCol.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
 	return nil
 }
 
@@ -626,7 +628,10 @@ func main() {
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	mongoutil.EnsureIndexesBestEffort(ctx, "inbox-worker thread_subscriptions", store.ensureIndexes)
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("inbox-worker thread_subscriptions", store.ensureIndexes)); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
+		os.Exit(1)
+	}
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {

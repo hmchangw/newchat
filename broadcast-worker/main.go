@@ -132,7 +132,10 @@ func main() {
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL)
-	mongoutil.EnsureIndexesBestEffort(ctx, "broadcast-worker store", store.EnsureIndexes)
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("broadcast-worker store", store.EnsureIndexes)); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
+		os.Exit(1)
+	}
 	cachedStore, err := newCachedMetaStore(store, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
 		slog.Error("init room meta cache failed", "error", err)

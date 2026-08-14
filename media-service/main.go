@@ -60,7 +60,9 @@ func run() error {
 	store := newMongoStore(mongoClient.Database(cfg.MongoDB))
 	defer mongoutil.Disconnect(ctx, mongoClient)
 
-	if err := store.EnsureEmojiIndexes(ctx); err != nil {
+	if err := mongoutil.EnsureIndexes(ctx,
+		mongoutil.Step("media-service emoji", store.EnsureEmojiIndexes),
+	); err != nil {
 		return fmt.Errorf("ensure emoji indexes: %w", err)
 	}
 

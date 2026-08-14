@@ -44,17 +44,20 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 		return fmt.Errorf("ensure thread_rooms parentMessageId index: %w", err)
 	}
 
-	// Best-effort: drop the legacy (threadRoomId, userId) unique index so the new
-	// (threadRoomId, userAccount) index can be created without a key conflict.
-	// The collection or index may not exist (fresh deploy / test container) — ignore all errors.
-	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-
+	// Create before dropping: a failed create (MongoDB down) is no longer fatal,
+	// so dropping first would leave the collection with neither the legacy nor
+	// the replacement unique index while the service keeps serving.
 	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
 		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
 	}
+
+	// Best-effort: retire the legacy (threadRoomId, userId) unique index, which
+	// keys on a site-local id and so rejects valid federated upserts. The
+	// collection or index may not exist (fresh deploy / test container) — ignore all errors.
+	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
 
 	return nil
 }

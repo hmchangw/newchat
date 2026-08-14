@@ -146,7 +146,10 @@ func main() {
 
 	store := NewCassandraStore(cassSession, bucketSizer, cipher)
 	threadStore := newThreadStoreMongo(db)
-	mongoutil.EnsureIndexesBestEffort(ctx, "message-worker thread_rooms", threadStore.EnsureIndexes)
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("message-worker thread_rooms", threadStore.EnsureIndexes)); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
+		os.Exit(1)
+	}
 	handler := NewHandler(store, us, threadStore, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
 		// verbose-tracing intent ride onto downstream badge/inbox events.

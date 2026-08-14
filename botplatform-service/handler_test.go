@@ -89,22 +89,14 @@ func post(t *testing.T, r http.Handler, path string, body any) *httptest.Respons
 	return w
 }
 
+// TestHandleHealth pins liveness as dependency-free: a MongoDB outage must not
+// restart the pod, so /healthz answers 200 without touching the store.
 func TestHandleHealth(t *testing.T) {
-	r, st, _ := newTestRouter(t)
-	st.EXPECT().Ping(gomock.Any()).Return(nil)
+	r, _, _ := newTestRouter(t)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestHandleHealth_MongoDown(t *testing.T) {
-	r, st, _ := newTestRouter(t)
-	st.EXPECT().Ping(gomock.Any()).Return(errors.New("mongo down"))
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 }
 
 func TestHandleLogin_Bot_HappyPath(t *testing.T) {

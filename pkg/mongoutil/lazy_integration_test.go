@@ -31,6 +31,21 @@ type outageProxy struct {
 	listener net.Listener
 	wg       sync.WaitGroup
 	conns    []net.Conn
+	closed   bool
+}
+
+// track registers a socket for teardown, or closes it immediately and reports
+// false if Close already ran — otherwise a connection accepted during teardown
+// is never closed and its io.Copy pins Close's wg.Wait forever.
+func (p *outageProxy) track(c net.Conn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		_ = c.Close()
+		return false
+	}
+	p.conns = append(p.conns, c)
+	return true
 }
 
 // newOutageProxy reserves a local address without serving on it.
@@ -69,9 +84,9 @@ func (p *outageProxy) Restore(t *testing.T) {
 			if err != nil {
 				return // listener closed
 			}
-			p.mu.Lock()
-			p.conns = append(p.conns, conn)
-			p.mu.Unlock()
+			if !p.track(conn) {
+				return // teardown started
+			}
 			p.wg.Add(1)
 			go func() {
 				defer p.wg.Done()
@@ -87,9 +102,10 @@ func (p *outageProxy) forward(client net.Conn) {
 		_ = client.Close()
 		return
 	}
-	p.mu.Lock()
-	p.conns = append(p.conns, upstream)
-	p.mu.Unlock()
+	if !p.track(upstream) {
+		_ = client.Close()
+		return
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -102,6 +118,7 @@ func (p *outageProxy) forward(client net.Conn) {
 
 func (p *outageProxy) Close() {
 	p.mu.Lock()
+	p.closed = true
 	if p.listener != nil {
 		_ = p.listener.Close()
 		p.listener = nil

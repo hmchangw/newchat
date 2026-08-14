@@ -37,10 +37,11 @@ func TestStartup_ReachesServingStateWithMongoUnreachable(t *testing.T) {
 	)
 	require.NotNil(t, store, "store must be constructible with MongoDB unreachable")
 
-	// Gate 2: the index step must warn and continue, not exit.
-	require.NotPanics(t, func() {
-		mongoutil.EnsureIndexesBestEffort(ctx, "broadcast-worker store", store.EnsureIndexes)
-	}, "failed index creation must not stop startup")
+	// Gate 2: an unreachable MongoDB is transient, so the index step must warn
+	// and report success, not hand the caller a reason to exit.
+	require.NoError(t,
+		mongoutil.EnsureIndexes(ctx, mongoutil.Step("broadcast-worker store", store.EnsureIndexes)),
+		"failed index creation must not stop startup")
 
 	// Serving state: the store answers requests with an error rather than
 	// hanging, so the consumer loop can Nak and retry instead of wedging.

@@ -93,11 +93,16 @@ func main() {
 	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	ssoTokenRepo := mongorepo.NewSSOTokenRepo(db)
-	mongoutil.EnsureIndexesBestEffort(ctx, "user-service subscriptions", subRepo.EnsureIndexes)
-	mongoutil.EnsureIndexesBestEffort(ctx, "user-service users", userRepo.EnsureIndexes)
-	mongoutil.EnsureIndexesBestEffort(ctx, "user-service apps", appRepo.EnsureIndexes)
-	mongoutil.EnsureIndexesBestEffort(ctx, "user-service thread_subscriptions", threadSubRepo.EnsureIndexes)
-	mongoutil.EnsureIndexesBestEffort(ctx, "user-service sso_tokens", ssoTokenRepo.EnsureIndexes)
+	if err := mongoutil.EnsureIndexes(ctx,
+		mongoutil.Step("user-service subscriptions", subRepo.EnsureIndexes),
+		mongoutil.Step("user-service users", userRepo.EnsureIndexes),
+		mongoutil.Step("user-service apps", appRepo.EnsureIndexes),
+		mongoutil.Step("user-service thread_subscriptions", threadSubRepo.EnsureIndexes),
+		mongoutil.Step("user-service sso_tokens", ssoTokenRepo.EnsureIndexes),
+	); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
+		os.Exit(1)
+	}
 
 	tokenValidator, tokenRefresher, err := oidcValidator(ctx, &cfg)
 	if err != nil {

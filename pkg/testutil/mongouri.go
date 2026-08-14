@@ -7,8 +7,12 @@ import (
 )
 
 // ReserveAddr returns a 127.0.0.1 address with nothing listening on it: bind an
-// ephemeral port, read it back, then release it. Nothing stops the OS handing
-// the port to another process, so callers must use it promptly.
+// ephemeral port, read it back, then release it.
+//
+// The reservation is advisory — once released, nothing stops the OS handing the
+// port to another process. A caller that only needs "connection refused" is
+// safe either way; one that later binds the address itself (see outageProxy)
+// must tolerate the bind failing and retry.
 func ReserveAddr(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")

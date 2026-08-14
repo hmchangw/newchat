@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 // captureSlog swaps the default logger for one writing JSON into a buffer and
@@ -48,27 +50,30 @@ func warnLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 	return warn
 }
 
-func TestEnsureIndexesBestEffort_SuccessIsQuiet(t *testing.T) {
+func TestEnsureIndexes_SuccessIsQuiet(t *testing.T) {
 	buf := captureSlog(t)
 	called := false
 
-	EnsureIndexesBestEffort(context.Background(), "test-store", func(context.Context) error {
+	err := EnsureIndexes(context.Background(), Step("test-store", func(context.Context) error {
 		called = true
 		return nil
-	})
+	}))
 
+	require.NoError(t, err)
 	assert.True(t, called, "the index step must actually run")
 	assert.Nil(t, warnLine(t, buf), "success must not warn")
 }
 
-func TestEnsureIndexesBestEffort_FailureWarnsAndContinues(t *testing.T) {
+// TestEnsureIndexes_TransientFailureWarnsAndContinues is the case the helper
+// exists for: MongoDB unreachable must not stop a service booting.
+func TestEnsureIndexes_TransientFailureWarnsAndContinues(t *testing.T) {
 	buf := captureSlog(t)
 
-	// Must not panic and must not exit — returning normally is the contract.
-	EnsureIndexesBestEffort(context.Background(), "user-service subscriptions", func(context.Context) error {
+	err := EnsureIndexes(context.Background(), Step("user-service subscriptions", func(context.Context) error {
 		return errors.New("connection refused")
-	})
+	}))
 
+	require.NoError(t, err, "a transient failure must not be reported to the caller")
 	warn := warnLine(t, buf)
 	require.NotNil(t, warn, "failure must log at WARN, got %v", decodeLogLines(t, buf))
 	assert.Equal(t, "user-service subscriptions", warn["indexes"],
@@ -76,73 +81,142 @@ func TestEnsureIndexesBestEffort_FailureWarnsAndContinues(t *testing.T) {
 	assert.Contains(t, warn["error"], "connection refused")
 }
 
-func TestEnsureIndexesBestEffort_PassesContextThrough(t *testing.T) {
-	captureSlog(t)
-	type ctxKey struct{}
-	ctx := context.WithValue(context.Background(), ctxKey{}, "v")
+// TestEnsureIndexes_PermanentFailureIsReturned pins the fail-fast half: no
+// restart clears an index conflict or pre-existing duplicates, and the stores
+// raising them carry operator remediation text worth surfacing.
+func TestEnsureIndexes_PermanentFailureIsReturned(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"duplicate key blocks a unique index", mongo.WriteException{
+			WriteErrors: []mongo.WriteError{{Code: 11000, Message: "E11000 duplicate key error"}},
+		}},
+		{"index options conflict", mongo.CommandError{Code: 85, Name: "IndexOptionsConflict"}},
+		{"index key specs conflict", mongo.CommandError{Code: 86, Name: "IndexKeySpecsConflict"}},
+	}
 
-	var got any
-	EnsureIndexesBestEffort(ctx, "test-store", func(c context.Context) error {
-		got = c.Value(ctxKey{})
-		return nil
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureSlog(t)
 
-	assert.Equal(t, "v", got, "the caller's context must reach the index step")
+			err := EnsureIndexes(context.Background(), Step("user-service users", func(context.Context) error {
+				return tc.err
+			}))
+
+			require.Error(t, err, "a permanent failure must reach the caller so it can exit")
+			assert.Contains(t, err.Error(), "user-service users", "the failing step must be identifiable")
+			assert.Nil(t, warnLine(t, buf), "a permanent failure is returned, not downgraded to a warning")
+		})
+	}
 }
 
-func TestEnsureIndexesBestEffort_NilStepIsNoOp(t *testing.T) {
+// TestEnsureIndexes_RunsStepsConcurrently guards the property that keeps boot
+// time flat: a service with several stores must not pay the timeout once per
+// store while MongoDB is unreachable.
+func TestEnsureIndexes_RunsStepsConcurrently(t *testing.T) {
+	captureSlog(t)
+	const steps = 4
+
+	var mu sync.Mutex
+	var peak, active int
+	var wg sync.WaitGroup
+	wg.Add(steps)
+
+	all := make([]IndexStep, 0, steps)
+	for i := range steps {
+		all = append(all, Step("store", func(context.Context) error {
+			mu.Lock()
+			active++
+			if active > peak {
+				peak = active
+			}
+			mu.Unlock()
+			wg.Done()
+			wg.Wait() // every step must be in flight before any returns
+			mu.Lock()
+			active--
+			mu.Unlock()
+			return nil
+		}))
+		_ = i
+	}
+
+	require.NoError(t, EnsureIndexes(context.Background(), all...))
+	assert.Equal(t, steps, peak, "all steps must run concurrently")
+}
+
+func TestEnsureIndexes_NilStepIsSkipped(t *testing.T) {
 	buf := captureSlog(t)
 	assert.NotPanics(t, func() {
-		EnsureIndexesBestEffort(context.Background(), "test-store", nil)
+		require.NoError(t, EnsureIndexes(context.Background(), Step("test-store", nil)))
 	})
 	assert.Nil(t, warnLine(t, buf), "a nil step is not a failure")
 }
 
-// TestEnsureIndexesBestEffort_BoundsTheStep pins the timeout the helper owns:
-// during an outage each step must give up well before the driver's 30s
-// server-selection timeout, or a service with several stores spends minutes
-// booting.
-func TestEnsureIndexesBestEffort_BoundsTheStep(t *testing.T) {
+func TestEnsureIndexes_NoStepsIsNoOp(t *testing.T) {
+	captureSlog(t)
+	require.NoError(t, EnsureIndexes(context.Background()))
+}
+
+// TestEnsureIndexes_BoundsTheSteps pins the timeout the helper owns: during an
+// outage it must give up on its own, since most callers pass a startup context
+// with no deadline.
+func TestEnsureIndexes_BoundsTheSteps(t *testing.T) {
 	captureSlog(t)
 
 	var deadline time.Time
 	var ok bool
-	EnsureIndexesBestEffort(context.Background(), "test-store", func(c context.Context) error {
+	require.NoError(t, EnsureIndexes(context.Background(), Step("test-store", func(c context.Context) error {
 		deadline, ok = c.Deadline()
 		return nil
-	})
+	})))
 
-	require.True(t, ok, "the step must run under a deadline even when the caller sets none")
+	require.True(t, ok, "the steps must run under a deadline even when the caller sets none")
 	assert.LessOrEqual(t, time.Until(deadline), EnsureIndexesTimeout)
 }
 
-// TestEnsureIndexesBestEffort_KeepsShorterCallerDeadline checks the helper
-// bounds without loosening: a caller that wants a tighter budget keeps it.
-func TestEnsureIndexesBestEffort_KeepsShorterCallerDeadline(t *testing.T) {
+// TestEnsureIndexes_KeepsShorterCallerDeadline checks the helper bounds without
+// loosening: a caller that wants a tighter budget keeps it.
+func TestEnsureIndexes_KeepsShorterCallerDeadline(t *testing.T) {
 	captureSlog(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
 	var remaining time.Duration
-	EnsureIndexesBestEffort(ctx, "test-store", func(c context.Context) error {
+	require.NoError(t, EnsureIndexes(ctx, Step("test-store", func(c context.Context) error {
 		d, _ := c.Deadline()
 		remaining = time.Until(d)
 		return nil
-	})
+	})))
 
 	assert.LessOrEqual(t, remaining, 50*time.Millisecond, "the helper must not extend a tighter caller deadline")
 }
 
-// TestEnsureIndexesBestEffort_CancelledContextStillWarns covers the outage
-// shape where the caller's startup context is already done.
-func TestEnsureIndexesBestEffort_CancelledContextStillWarns(t *testing.T) {
+func TestEnsureIndexes_PassesContextThrough(t *testing.T) {
+	captureSlog(t)
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "v")
+
+	var got any
+	require.NoError(t, EnsureIndexes(ctx, Step("test-store", func(c context.Context) error {
+		got = c.Value(ctxKey{})
+		return nil
+	})))
+
+	assert.Equal(t, "v", got, "the caller's context must reach the index step")
+}
+
+// TestEnsureIndexes_CancelledContextIsTransient covers the outage shape where
+// the caller's startup context is already done: still a warning, not a
+// fail-fast, since a restart can clear it.
+func TestEnsureIndexes_CancelledContextIsTransient(t *testing.T) {
 	buf := captureSlog(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	EnsureIndexesBestEffort(ctx, "test-store", func(c context.Context) error {
-		return c.Err()
-	})
+	err := EnsureIndexes(ctx, Step("test-store", func(c context.Context) error { return c.Err() }))
 
+	require.NoError(t, err)
 	assert.NotNil(t, warnLine(t, buf), "a cancelled-context failure must still warn")
 }
