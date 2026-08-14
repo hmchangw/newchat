@@ -81,6 +81,7 @@ export type {
   Message,
   HistoryMessage,
   Participant,
+  PreviewMessage,
   QuotedParentMessage,
   MemberEntry,
   Reader,

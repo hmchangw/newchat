@@ -58,6 +58,18 @@ interface RoomBufferState {
  *  returned page of exactly this size means older messages may follow. */
 const HISTORY_PAGE_SIZE = 50
 
+/** One room's stored sidebar preview. Flattened and name-resolved at write
+ *  time so the render layer never branches on whether it came from a wire
+ *  PreviewMessage or a live Message. */
+interface RoomPreview {
+  /** The previewed message's id — guards the delete-clears rule in the
+   *  reducer's ROOM_PREVIEW_UPDATED case. */
+  messageId: string
+  senderName: string
+  /** Single-line, flattened, capped at PREVIEW_MAX_LENGTH. */
+  text: string
+}
+
 /** Sidebar summary — derived from `model.Room` + the user's
  *  Subscription. Only the fields the sidebar / chat header read. */
 interface RoomSummary {
@@ -75,6 +87,10 @@ interface RoomSummary {
    *  for DM rooms whose subscription carried it. Plain channels stay
    *  undefined here. */
   hrInfo?: SubscriptionHRInfo
+  /** Joined in by useSidebarSections from state.previews. Undefined when the
+   *  room has no preview — the row still renders at full height with a blank
+   *  snippet line. */
+  preview?: RoomPreview
 }
 
 /** Top-level state shape returned by `roomEventsReducer`. */
@@ -96,6 +112,11 @@ interface RoomEventsState {
    *  so consumers reading the map for either channel or DM rooms see
    *  hrInfo as optional without narrowing. */
   subscriptions: Record<string, DMSubscription>
+  /** Keyed by roomId. Absent key = no preview to show. Deliberately NOT a
+   *  field on RoomSummary: summaries are rebuilt from `Room` records, which
+   *  mirror pkg/model.Room — and the backend hangs previewMessage off
+   *  SubscriptionRoom instead, so a summary field would break the mirror. */
+  previews: Record<string, RoomPreview>
   /** Chatlist section-definition overlay (names, order, sortMode). Seeded by
    *  CHATLIST_LOADED, replaced by CHATLIST_UPDATED (LWW). Membership rides the
    *  subscriptions; this is O(sections). */
@@ -530,4 +551,4 @@ export function useSubscription(roomId: string | null | undefined): DMSubscripti
   return roomId ? state.subscriptions[roomId] : undefined
 }
 
-export type { RoomEventsState, RoomSummary, RoomBufferState, RoomEventsContextValue }
+export type { RoomEventsState, RoomSummary, RoomPreview, RoomBufferState, RoomEventsContextValue }
