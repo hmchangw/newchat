@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const maxBorrowedSoakUsers = 20000
+const (
+	maxBorrowedSoakUsers             = 20000
+	maxFailureRecipientObserverQueue = 65536
+)
 
 const (
 	soakRunModeDuration   = "duration"
@@ -192,14 +195,17 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 		cfg.ReconcileReadShare <= 0 || cfg.ReconcileReadShare > 1 {
 		return fmt.Errorf("SOAK_RECONCILE_READ_SHARE must be greater than zero and at most 1")
 	}
-	if cfg.RecipientObserverQueue <= 0 {
-		return fmt.Errorf("SOAK_RECIPIENT_OBSERVER_QUEUE must be greater than zero")
+	if cfg.RecipientObserverQueue <= 0 || cfg.RecipientObserverQueue > maxFailureRecipientObserverQueue {
+		return fmt.Errorf("SOAK_RECIPIENT_OBSERVER_QUEUE must be between 1 and %d", maxFailureRecipientObserverQueue)
 	}
 	if cfg.RecipientObserverConnections <= 0 || cfg.RecipientObserverConnections > 256 {
 		return fmt.Errorf("SOAK_RECIPIENT_OBSERVER_CONNECTIONS must be between 1 and 256")
 	}
 	if cfg.FailureManifestPath != "" && cfg.LedgerDir == "" {
 		return fmt.Errorf("SOAK_LEDGER_DIR is required with SOAK_FAILURE_MANIFEST_PATH")
+	}
+	if cfg.FailureManifestPath == "" && (cfg.FailureTimelinePath != "" || cfg.FailureReportDir != "") {
+		return fmt.Errorf("SOAK_FAILURE_MANIFEST_PATH is required with failure timeline or report paths")
 	}
 
 	if cfg.MaxUsers <= 0 || cfg.MaxUsers > maxBorrowedSoakUsers {

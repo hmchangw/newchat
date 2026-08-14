@@ -185,7 +185,7 @@ func connectWithCredsHealth(
 	}
 	connection, err := nats.Connect(url, opts...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("connect NATS pool %s: %w", pool, err)
 	}
 	health.connected()
 	return connection, nil

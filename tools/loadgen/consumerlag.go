@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -59,7 +60,7 @@ func NewConsumerSampler(
 		return nil, fmt.Errorf("unsupported consumer durable %q", durable)
 	}
 	if interval <= 0 {
-		return nil, fmt.Errorf("consumer sample interval must be greater than zero")
+		return nil, errors.New("consumer sample interval must be greater than zero")
 	}
 	sampler := &ConsumerSampler{js: js, stream: stream, durable: durable, metrics: m, interval: interval}
 	for _, option := range options {

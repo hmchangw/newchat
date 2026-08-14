@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -790,11 +791,15 @@ func groupSubsByUser(subs []model.Subscription) map[string][]string {
 // prodEnvFactory wires the real NATS pools and pollers.
 type prodEnvFactory struct {
 	baseCfg *config // existing top-level loadgen config: NatsURL, etc.
+	metrics *Metrics
 }
 
 //nolint:gocritic // cfg passed by value to satisfy envFactory interface
 func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
-	metrics := NewMetrics()
+	metrics := f.metrics
+	if metrics == nil {
+		metrics = NewMetrics()
+	}
 	col := NewCollector(metrics, cfg.Preset)
 	direct := newDirectPool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile, col)
 	var mux *multiplexPool
@@ -951,7 +956,28 @@ func runDaily(ctx context.Context, baseCfg *config, args []string) int {
 		slog.Error("daily pre-flight", "error", err)
 		return 2
 	}
-	results, err := runDailyForTest(ctx, cfg, &prodEnvFactory{baseCfg: baseCfg})
+	metrics := NewMetrics()
+	metricsAddr := baseCfg.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = ":9099"
+	}
+	metricsServer := &http.Server{
+		Addr: metricsAddr, Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Warn("daily metrics server stopped", "error", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("shutdown daily metrics server", "error", err)
+		}
+		metrics.StopNATSHealth()
+	}()
+	results, err := runDailyForTest(ctx, cfg, &prodEnvFactory{baseCfg: baseCfg, metrics: metrics})
 	if err != nil {
 		slog.Error("daily run", "error", err)
 		return 1

@@ -17,7 +17,10 @@ import (
 
 const failureManifestSchemaVersion = 1
 
-var failureRunIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var (
+	failureRunIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	failureGitSHAPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+)
 
 type failureTopology struct {
 	NATSServers                int    `json:"natsServers"`
@@ -108,13 +111,16 @@ func validateFailureManifest(manifest *failureManifest) error {
 	if strings.TrimSpace(manifest.GitSHA) == "" || strings.TrimSpace(manifest.Environment) == "" || strings.TrimSpace(manifest.TrafficProfile) == "" {
 		return fmt.Errorf("failure manifest requires git SHA, environment, and traffic profile")
 	}
+	if !failureGitSHAPattern.MatchString(manifest.GitSHA) {
+		return fmt.Errorf("failure manifest git SHA must be 7 to 64 hexadecimal characters")
+	}
 	if _, ok := failureEnvironmentRegistry[manifest.Environment]; !ok {
 		return fmt.Errorf("unsupported failure environment %q", manifest.Environment)
 	}
 	if _, ok := failureTrafficProfileRegistry[manifest.TrafficProfile]; !ok {
 		return fmt.Errorf("unsupported failure traffic profile %q", manifest.TrafficProfile)
 	}
-	if manifest.CreatedAt.IsZero() || manifest.CreatedAt.Location() != time.UTC {
+	if manifest.CreatedAt.IsZero() || !failureTimestampHasZeroOffset(manifest.CreatedAt) {
 		return fmt.Errorf("failure manifest createdAt must be UTC RFC3339")
 	}
 	if len(manifest.RequiredObservers) == 0 || len(manifest.RequiredMetricContracts) == 0 {
@@ -142,8 +148,18 @@ func validateFailureManifest(manifest *failureManifest) error {
 				return fmt.Errorf("nats core campaign requires observer %q", required)
 			}
 		}
+		for _, required := range []string{"nats-core-v1", "loadgen-health-v1"} {
+			if !slices.Contains(manifest.RequiredMetricContracts, required) {
+				return fmt.Errorf("nats core campaign requires metric contract %q", required)
+			}
+		}
 	}
 	return nil
+}
+
+func failureTimestampHasZeroOffset(value time.Time) bool {
+	_, offset := value.Zone()
+	return offset == 0
 }
 
 func createFailureManifest(directory string, manifest *failureManifest) (string, string, error) {

@@ -47,12 +47,8 @@ type presencePool struct {
 
 // newPresencePool dials pubN publisher conns and obsN observer conns, and
 // subscribes every observer conn to chat.user.presence.state.*.
-func newPresencePool(url, credsFile string, pubN, obsN int, c *presenceCollector, metricSets ...*Metrics) (*presencePool, error) {
+func newPresencePool(url, credsFile string, pubN, obsN int, c *presenceCollector, metrics *Metrics) (*presencePool, error) {
 	p := &presencePool{collector: c}
-	var metrics *Metrics
-	if len(metricSets) > 0 {
-		metrics = metricSets[0]
-	}
 	for i := 0; i < pubN; i++ {
 		nc, err := connectWithCredsHealth(url, fmt.Sprintf("loadgen-presence-pub-%d", i), credsFile, "presence_publish", metrics)
 		if err != nil {

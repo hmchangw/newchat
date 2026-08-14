@@ -582,6 +582,7 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 	}
 
 	metrics := NewMetrics()
+	defer metrics.StopNATSHealth()
 	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "members", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
@@ -815,6 +816,7 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	}
 
 	metrics := NewMetrics()
+	defer metrics.StopNATSHealth()
 	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "members", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
@@ -915,22 +917,8 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	cancelShut()
 	_ = nc.Drain()
 
-	finals := map[string]int{}
+	finals := gen.FinalSizes()
 	mfs, _ := metrics.Registry.Gather()
-	for _, mf := range mfs {
-		if mf.GetName() != "loadgen_member_room_size" {
-			continue
-		}
-		for _, mt := range mf.GetMetric() {
-			var rid string
-			for _, l := range mt.GetLabel() {
-				if l.GetName() == "room_id" {
-					rid = l.GetValue()
-				}
-			}
-			finals[rid] = int(mt.GetGauge().GetValue())
-		}
-	}
 	pubErrs := int(gatheredCounterValue(mfs, "loadgen_member_publish_errors_total", "reason", "publish"))
 	timeouts := int(gatheredCounterValue(mfs, "loadgen_member_publish_errors_total", "reason", "timeout"))
 
@@ -1034,6 +1022,7 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 	}
 
 	metrics := NewMetrics()
+	defer metrics.StopNATSHealth()
 	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "general", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
@@ -1411,6 +1400,7 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 	_, layout := BuildBotRoomFixtures(&p, *seed, cfg.SiteID)
 
 	metrics := NewMetrics()
+	defer metrics.StopNATSHealth()
 	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "general", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)

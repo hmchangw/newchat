@@ -99,11 +99,12 @@ func PrintSummary(w io.Writer, s *Summary) error {
 	if len(s.Consumers) > 0 {
 		fmt.Fprintf(w, "consumer lag (%s)\n", s.Consumers[0].Stream)
 		tw2 := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw2, "durable\tmin_pending\tpeak_pending\tfinal_pending\tpeak_ack_pending\tredelivered")
+		fmt.Fprintln(tw2, "durable\thas_sample\tsample_errors\tbaseline_pending\tmin_pending\tpeak_pending\tfinal_pending\tpeak_ack_pending\tredelivered")
 		for i := range s.Consumers {
 			c := &s.Consumers[i]
-			fmt.Fprintf(tw2, "%s\t%d\t%d\t%d\t%d\t%d\n",
-				c.Durable, c.MinPending, c.PeakPending, c.FinalPending, c.PeakAckPending, c.Redelivered)
+			fmt.Fprintf(tw2, "%s\t%t\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+				c.Durable, c.HasSample, c.SampleErrors, c.BaselinePending,
+				c.MinPending, c.PeakPending, c.FinalPending, c.PeakAckPending, c.Redelivered)
 		}
 		if err := tw2.Flush(); err != nil {
 			return fmt.Errorf("flush consumer table: %w", err)

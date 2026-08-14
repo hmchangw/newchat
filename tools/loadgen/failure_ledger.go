@@ -330,10 +330,10 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 }
 
 func (l *failureLedger) Start(operation *failureOperation) error {
-	if err := validateFailureOperation(operation); err != nil {
+	tracked := cloneFailureOperation(operation)
+	if err := validateFailureOperation(tracked); err != nil {
 		return fmt.Errorf("start failure operation: %w", err)
 	}
-	tracked := cloneFailureOperation(operation)
 	tracked.Observations = make(map[failureObserver]failureObservation)
 	tracked.nextVerifyAt = tracked.VerifyAfter
 
@@ -378,8 +378,11 @@ func (l *failureLedger) Activate(operationID string, at time.Time) error {
 	if operation == nil {
 		return fmt.Errorf("activate failure operation %q: %w", operationID, errFailureOperationNotActive)
 	}
-	if operation.LifecycleState == failureOperationActive || operation.LifecycleState == "" {
+	if operation.LifecycleState == failureOperationActive {
 		return nil
+	}
+	if operation.LifecycleState != failureOperationJournaled {
+		return fmt.Errorf("activate failure operation %q: invalid lifecycle state %q", operationID, operation.LifecycleState)
 	}
 	event := failureLedgerEvent{
 		Type: failureLedgerEventActivated, OperationID: operationID, At: at.UTC(),
@@ -431,6 +434,9 @@ func (l *failureLedger) Observe(
 	observation failureObservation,
 	at time.Time,
 ) (bool, error) {
+	if at.IsZero() {
+		at = l.now()
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.ensureOpen(); err != nil {
@@ -1014,15 +1020,14 @@ func validateFailureOperation(operation *failureOperation) error {
 		return fmt.Errorf("failure operation %q has unsupported schema version %d", operation.ID, operation.SchemaVersion)
 	}
 	if operation.SchemaVersion == 2 {
-		if operation.LifecycleState != "" &&
-			operation.LifecycleState != failureOperationJournaled &&
+		if operation.LifecycleState != failureOperationJournaled &&
 			operation.LifecycleState != failureOperationActive {
 			return fmt.Errorf("failure operation %q has invalid lifecycle state %q", operation.ID, operation.LifecycleState)
 		}
 		if operation.RunID == "" || operation.OperationType != failureOperationMessageCreate || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
 			return fmt.Errorf("version 2 failure operation %q requires run, type, targets, and effects", operation.ID)
 		}
-		operation.Expected = operation.Expected[:0]
+		operation.Expected = make([]failureObserver, 0, len(operation.Effects))
 		seenEffects := make(map[string]struct{}, len(operation.Effects))
 		for _, effect := range operation.Effects {
 			definition, known := failureObserverRegistry[effect.Observer]

@@ -73,7 +73,7 @@ func validateFailureTimeline(manifest *failureManifest, input []failureFaultEven
 	var previous uint64
 	for index := range events {
 		event := &events[index]
-		if event.SchemaVersion != 1 || event.RunID != manifest.RunID || event.ScenarioID != manifest.ScenarioID || event.Sequence == 0 || event.At.IsZero() || event.At.Location() != time.UTC || event.Actor == "" {
+		if event.SchemaVersion != 1 || event.RunID != manifest.RunID || event.ScenarioID != manifest.ScenarioID || event.Sequence == 0 || event.At.IsZero() || !failureTimestampHasZeroOffset(event.At) || event.Actor == "" {
 			return nil, fmt.Errorf("invalid failure event at index %d", index)
 		}
 		if _, ok := failureEventRegistry[event.Type]; !ok {

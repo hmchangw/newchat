@@ -235,9 +235,9 @@ func startFailureRecipientSubscriptions(
 	}
 	slices.SortFunc(targets, func(a, b target) int {
 		if a.subject != b.subject {
-			return stringsCompare(a.subject, b.subject)
+			return strings.Compare(a.subject, b.subject)
 		}
-		return stringsCompare(a.recipient, b.recipient)
+		return strings.Compare(a.recipient, b.recipient)
 	})
 	result := &failureRecipientSubscriptions{source: source}
 	for _, target := range targets {
@@ -263,17 +263,6 @@ func startFailureRecipientSubscriptions(
 		observer.metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(1)
 	}
 	return result, nil
-}
-
-func stringsCompare(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	default:
-		return 0
-	}
 }
 
 type recipientEvidenceResult struct {
@@ -495,15 +484,16 @@ type recipientDelivery struct {
 }
 
 type failureRecipientObserver struct {
-	ledger      *failureLedger
-	metrics     *Metrics
-	evidence    *recipientEvidence
-	health      *failureObserverHealth
-	queue       chan recipientDelivery
-	now         func() time.Time
-	wg          sync.WaitGroup
-	sidecarMu   sync.Mutex
-	evidenceDir string
+	ledger        *failureLedger
+	metrics       *Metrics
+	evidence      *recipientEvidence
+	health        *failureObserverHealth
+	queue         chan recipientDelivery
+	now           func() time.Time
+	wg            sync.WaitGroup
+	sidecarMu     sync.Mutex
+	evidenceDir   string
+	syncDirectory func(string) error
 }
 
 type failureRecipientObserverOption func(*failureRecipientObserver)
@@ -516,6 +506,10 @@ func withFailureRecipientDuplicatePolicy(allow bool) failureRecipientObserverOpt
 	return func(observer *failureRecipientObserver) {
 		observer.evidence.allowDuplicates = allow
 	}
+}
+
+func withFailureRecipientDirectorySync(syncDirectory func(string) error) failureRecipientObserverOption {
+	return func(observer *failureRecipientObserver) { observer.syncDirectory = syncDirectory }
 }
 
 func newFailureRecipientObserver(
@@ -536,6 +530,7 @@ func newFailureRecipientObserver(
 		ledger: ledger, metrics: metrics, evidence: newRecipientEvidence(false),
 		health: newFailureObserverHealth(failureObserverRecipient, startedAt),
 		queue:  make(chan recipientDelivery, capacity), now: now,
+		syncDirectory: syncFailureDirectory,
 	}
 	for _, option := range options {
 		option(observer)
@@ -809,6 +804,12 @@ func (o *failureRecipientObserver) appendRawEvidence(kind, operationID, recipien
 		return fmt.Errorf("create recipient evidence directory: %w", err)
 	}
 	path := filepath.Join(o.evidenceDir, ".recipient-"+kind+".raw.jsonl")
+	created := false
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		created = true
+	} else if err != nil {
+		return fmt.Errorf("stat recipient evidence journal: %w", err)
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open recipient evidence journal: %w", err)
@@ -829,6 +830,11 @@ func (o *failureRecipientObserver) appendRawEvidence(kind, operationID, recipien
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close recipient evidence: %w", err)
+	}
+	if created && o.syncDirectory != nil {
+		if err := o.syncDirectory(o.evidenceDir); err != nil {
+			return fmt.Errorf("sync recipient evidence directory: %w", err)
+		}
 	}
 	return nil
 }

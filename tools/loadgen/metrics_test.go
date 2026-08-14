@@ -122,7 +122,7 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 	metrics.FailureObserverUp.WithLabelValues("recipient_broadcast").Set(1)
 	metrics.FailureObserverEvents.WithLabelValues("recipient_broadcast", "good").Inc()
 	metrics.FailureObserverQueueDepth.WithLabelValues("recipient_broadcast").Set(0)
-	metrics.ConsumerSampleErrors.WithLabelValues("MESSAGES_CANONICAL_site-local", "broadcast-worker", "lookup").Inc()
+	metrics.ConsumerSampleErrors.WithLabelValues("MESSAGES-CANONICAL-site-local", "broadcast-worker", "lookup").Inc()
 	metrics.RunInfo.WithLabelValues("staging", "F02", "nats-core-message-v1").Set(1)
 
 	mfs, err := metrics.Registry.Gather()

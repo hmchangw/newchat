@@ -457,6 +457,9 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 			}
 			return true, nil
 		}
+		if err := r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval)); err != nil {
+			return true, fmt.Errorf("release malformed failure operation %q: %w", operation.ID, err)
+		}
 		return true, fmt.Errorf("failure operation %q was queued without an unresolved observer", operation.ID)
 	}
 	result, verifyErr := r.verifier.Verify(ctx, &operation)

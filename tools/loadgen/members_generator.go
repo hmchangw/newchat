@@ -320,6 +320,8 @@ type CapacityMembersGenerator struct {
 	presetLabel string
 	injectLabel string
 	shapeLabel  string
+	finalMu     sync.Mutex
+	finalSizes  map[string]int
 }
 
 // NewCapacityMembersGenerator creates a new capacity-mode generator.
@@ -329,7 +331,19 @@ func NewCapacityMembersGenerator(cfg *CapacityMembersConfig) *CapacityMembersGen
 		presetLabel: cfg.Preset.Name,
 		injectLabel: string(cfg.Inject),
 		shapeLabel:  string(cfg.Shape),
+		finalSizes:  make(map[string]int, len(cfg.Fixtures.Rooms)),
 	}
+}
+
+// FinalSizes returns the last confirmed membership size for each room.
+func (g *CapacityMembersGenerator) FinalSizes() map[string]int {
+	g.finalMu.Lock()
+	defer g.finalMu.Unlock()
+	result := make(map[string]int, len(g.finalSizes))
+	for roomID, size := range g.finalSizes {
+		result[roomID] = size
+	}
+	return result
 }
 
 // Run runs each room until TargetSize or pool exhaustion. Returns nil when
@@ -370,6 +384,11 @@ func (g *CapacityMembersGenerator) Run(ctx context.Context) error {
 
 func (g *CapacityMembersGenerator) runRoom(ctx context.Context, room *model.Room, ack <-chan struct{}) {
 	size := g.cfg.Preset.BaselineSize
+	defer func() {
+		g.finalMu.Lock()
+		g.finalSizes[room.ID] = size
+		g.finalMu.Unlock()
+	}()
 	pool := append([]string(nil), g.cfg.Pools[room.ID]...)
 	owner := g.cfg.Owners[room.ID]
 

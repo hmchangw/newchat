@@ -18,7 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
-func TestFailureEvidence_AcceptedRecipientHistoryRestartPass(t *testing.T) {
+func TestFailureEvidence_AcceptedRecipientHistoryRestartReport(t *testing.T) {
 	natsURL := testutil.NATS(t)
 	publisher, err := nats.Connect(natsURL)
 	require.NoError(t, err)
@@ -34,6 +34,7 @@ func TestFailureEvidence_AcceptedRecipientHistoryRestartPass(t *testing.T) {
 	})
 	require.NoError(t, err)
 	metrics := NewMetrics()
+	t.Cleanup(metrics.StopNATSHealth)
 	recipientObserver := newFailureRecipientObserver(
 		ledger, metrics, 8, func() time.Time { return now },
 		withFailureRecipientEvidenceDir(evidenceDirectory),
@@ -122,11 +123,34 @@ func TestFailureEvidence_AcceptedRecipientHistoryRestartPass(t *testing.T) {
 	assert.True(t, ran)
 	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultGood])
 
-	verdict := evaluateFailureVerdict([]failureGate{
-		{ID: "manifest", Verdict: failureVerdictPass},
-		{ID: "admission", Verdict: failureVerdictPass},
-		{ID: "recipient", Verdict: failureVerdictPass},
-		{ID: "history", Verdict: failureVerdictPass},
-	})
-	assert.Equal(t, failureVerdictPass, verdict.Verdict)
+	manifest := validFailureManifest()
+	run := &soakFailureEvidenceRun{
+		Manifest: &manifest, ManifestDigest: "manifest-digest", StartedAt: pending.PublishedAt,
+		Timeline: &failureTimeline{events: []failureFaultEvent{{
+			SchemaVersion: 1, RunID: manifest.RunID, ScenarioID: manifest.ScenarioID,
+			Sequence: 1, Type: failureEventBaselineStarted, At: pending.PublishedAt, Actor: "integration-test",
+		}}},
+	}
+	report := buildSoakFailureEvidenceReport(
+		run,
+		recovered.Snapshot(),
+		&soakCollectorSnapshot{Actions: map[soakRPCAction]soakActionStats{
+			soakRPCSend: {Attempted: 1},
+		}},
+		&failureObserverHealthSnapshot{
+			Observer: failureObserverRecipient, Up: true, LastSuccess: now,
+			Intervals: []failureHealthInterval{{Start: pending.PublishedAt, End: now, Up: true}},
+		},
+		[]ConsumerStat{
+			{Durable: "message-worker", HasSample: true},
+			{Durable: "broadcast-worker", HasSample: true},
+		},
+		nil,
+		now,
+	)
+
+	assert.Equal(t, failureVerdictPass, gateByID(t, report.Gates, "06_correctness").Verdict)
+	assert.Equal(t, failureVerdictInconclusive, gateByID(t, report.Gates, "04_ledger").Verdict)
+	assert.Equal(t, failureVerdictInconclusive, gateByID(t, report.Gates, "07_external_contracts").Verdict)
+	assert.Equal(t, failureVerdictInconclusive, report.Verdict)
 }

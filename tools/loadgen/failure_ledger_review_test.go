@@ -52,6 +52,66 @@ func TestFailureLedger_ActivatedPublishCannotBecomeNotSent(t *testing.T) {
 	assert.Equal(t, 1, ledger.Snapshot().Active)
 }
 
+func TestFailureLedger_StartRejectsVersionTwoWithoutLifecycleState(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	operation := testFailureOperation("message-v2", now)
+	operation.SchemaVersion = 2
+	operation.RunID = "run-1"
+	operation.OperationType = failureOperationMessageCreate
+	operation.Targets = map[string]string{"messageId": operation.ID}
+	operation.Effects = messageCreateExpectedEffects(1, "hash")
+	operation.Expected = nil
+
+	err = ledger.Start(operation)
+
+	assert.ErrorContains(t, err, "lifecycle state")
+}
+
+func TestFailureLedger_StartDoesNotMutateCallerExpectedObservers(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	operation := testFailureOperation("message-v2", now)
+	operation.SchemaVersion = 2
+	operation.RunID = "run-1"
+	operation.OperationType = failureOperationMessageCreate
+	operation.LifecycleState = failureOperationJournaled
+	operation.Targets = map[string]string{"messageId": operation.ID}
+	operation.Effects = messageCreateExpectedEffects(1, "hash")
+	operation.Expected = []failureObserver{"caller-owned"}
+
+	require.NoError(t, ledger.Start(operation))
+
+	assert.Equal(t, []failureObserver{"caller-owned"}, operation.Expected)
+}
+
+func TestFailureLedger_AccountingInvariantNormalizesZeroTimestamp(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "run.wal")
+	wal, err := openFailureWAL(path)
+	require.NoError(t, err)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1, Journal: wal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(testFailureOperation("not-sent", now)))
+	require.NoError(t, ledger.Abandon("not-sent", failureResultNotSent, now))
+
+	_, err = ledger.Observe("not-sent", failureObserverHistory, failureObservationGood, time.Time{})
+	assert.ErrorContains(t, err, "accounting invariant")
+	require.NoError(t, ledger.Close())
+
+	reopened, err := openFailureWAL(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	events, err := reopened.Replay()
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, now, events[len(events)-1].At)
+}
+
 func TestFailureLedger_AbandonRejectsUnknownOperationAndResult(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{

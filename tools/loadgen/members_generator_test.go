@@ -175,6 +175,7 @@ func TestCapacityMembersGenerator_StopsAtTargetSize(t *testing.T) {
 	pub.mu.Lock()
 	defer pub.mu.Unlock()
 	assert.Equal(t, 3, len(pub.calls), "stopped after 3 adds (size 1 + 2*3 = 7)")
+	assert.Equal(t, map[string]int{"r1": 7}, gen.FinalSizes())
 }
 
 var _ = fmt.Sprintf // ensure fmt is used if any subtests need formatting later

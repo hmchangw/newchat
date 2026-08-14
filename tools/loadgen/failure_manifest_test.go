@@ -51,7 +51,7 @@ func TestFailureManifest_EnsureRetainedCopySupportsRestartAndRejectsMutation(t *
 	assert.Equal(t, firstDigest, secondDigest)
 
 	mutated := manifest
-	mutated.GitSHA = "different"
+	mutated.GitSHA = "201a074c3fe06f298a5667ae8081a075428d4584"
 	_, _, err = ensureFailureManifest(directory, &mutated)
 	assert.ErrorContains(t, err, "does not match retained manifest")
 }
@@ -220,6 +220,7 @@ func TestFailureManifest_RejectsUnsafeAndUnknownValues(t *testing.T) {
 		"unknown environment":     func(m *failureManifest) { m.Environment = "tenant-123" },
 		"unknown traffic profile": func(m *failureManifest) { m.TrafficProfile = "dynamic" },
 		"missing identity":        func(m *failureManifest) { m.GitSHA = "" },
+		"malformed git SHA":       func(m *failureManifest) { m.GitSHA = "not-a-sha" },
 		"missing observers":       func(m *failureManifest) { m.RequiredObservers = nil },
 		"duplicate observer":      func(m *failureManifest) { m.RequiredObservers = append(m.RequiredObservers, failureObserverAdmission) },
 		"duplicate contract": func(m *failureManifest) {
@@ -227,6 +228,9 @@ func TestFailureManifest_RejectsUnsafeAndUnknownValues(t *testing.T) {
 		},
 		"missing recipient": func(m *failureManifest) {
 			m.RequiredObservers = []failureObserver{failureObserverAdmission, failureObserverHistory}
+		},
+		"missing metric contract": func(m *failureManifest) {
+			m.RequiredMetricContracts = []string{"nats-core-v1"}
 		},
 	}
 	for name, mutate := range tests {
@@ -242,6 +246,13 @@ func TestFailureManifest_RejectsUnsafeAndUnknownValues(t *testing.T) {
 	require.NoError(t, err)
 	_, err = parseFailureManifest(append(encoded, []byte(` {}`)...))
 	assert.Error(t, err)
+}
+
+func TestFailureManifest_AcceptsExplicitZeroOffsetTimestamp(t *testing.T) {
+	manifest := validFailureManifest()
+	manifest.CreatedAt = time.Date(2026, 8, 12, 12, 0, 0, 0, time.FixedZone("UTC+00", 0))
+
+	assert.NoError(t, validateFailureManifest(&manifest))
 }
 
 func TestFaultTimeline_OrderingDuplicatesAndOverlap(t *testing.T) {

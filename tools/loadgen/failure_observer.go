@@ -9,6 +9,8 @@ import (
 
 const failureObserverRecipient failureObserver = "recipient_broadcast"
 
+const failureObserverHealthIntervalLimit = 4096
+
 type failureObserverMode string
 
 const (
@@ -52,20 +54,24 @@ type failureHealthInterval struct {
 }
 
 type failureObserverHealthSnapshot struct {
-	Observer    failureObserver         `json:"observer"`
-	Up          bool                    `json:"up"`
-	LastSuccess time.Time               `json:"lastSuccess,omitempty"`
-	Intervals   []failureHealthInterval `json:"intervals"`
+	Observer             failureObserver         `json:"observer"`
+	Up                   bool                    `json:"up"`
+	LastSuccess          time.Time               `json:"lastSuccess,omitempty"`
+	HistoryTruncated     bool                    `json:"historyTruncated,omitempty"`
+	HistoryAvailableFrom time.Time               `json:"historyAvailableFrom,omitempty"`
+	Intervals            []failureHealthInterval `json:"intervals"`
 }
 
 type failureObserverHealth struct {
-	mu          sync.Mutex
-	observer    failureObserver
-	up          bool
-	changedAt   time.Time
-	reason      string
-	lastSuccess time.Time
-	intervals   []failureHealthInterval
+	mu                   sync.Mutex
+	observer             failureObserver
+	up                   bool
+	changedAt            time.Time
+	reason               string
+	lastSuccess          time.Time
+	intervals            []failureHealthInterval
+	historyTruncated     bool
+	historyAvailableFrom time.Time
 }
 
 func newFailureObserverHealth(observer failureObserver, startedAt time.Time) *failureObserverHealth {
@@ -89,6 +95,13 @@ func (h *failureObserverHealth) Set(up bool, at time.Time, reason string) {
 		return
 	}
 	h.intervals = append(h.intervals, failureHealthInterval{Start: h.changedAt, End: at, Up: h.up, Reason: h.reason})
+	if len(h.intervals) > failureObserverHealthIntervalLimit {
+		removed := h.intervals[0]
+		copy(h.intervals, h.intervals[1:])
+		h.intervals = h.intervals[:failureObserverHealthIntervalLimit]
+		h.historyTruncated = true
+		h.historyAvailableFrom = removed.End
+	}
 	h.up, h.changedAt, h.reason = up, at, reason
 	if up {
 		h.lastSuccess = at
@@ -97,6 +110,9 @@ func (h *failureObserverHealth) Set(up bool, at time.Time, reason string) {
 
 func (h *failureObserverHealth) HealthyThroughout(start, end time.Time) bool {
 	snapshot := h.Snapshot(end)
+	if snapshot.HistoryTruncated && start.Before(snapshot.HistoryAvailableFrom) {
+		return false
+	}
 	for _, interval := range snapshot.Intervals {
 		if interval.End.After(start) && interval.Start.Before(end) && !interval.Up {
 			return false
@@ -116,6 +132,14 @@ func (h *failureObserverHealth) Snapshot(end time.Time) failureObserverHealthSna
 	if end.After(h.changedAt) || end.Equal(h.changedAt) {
 		rawIntervals = append(rawIntervals, failureHealthInterval{Start: h.changedAt, End: end, Up: h.up, Reason: h.reason})
 	}
+	historyTruncated := h.historyTruncated
+	historyAvailableFrom := h.historyAvailableFrom
+	if len(rawIntervals) > failureObserverHealthIntervalLimit {
+		removed := rawIntervals[:len(rawIntervals)-failureObserverHealthIntervalLimit]
+		rawIntervals = rawIntervals[len(rawIntervals)-failureObserverHealthIntervalLimit:]
+		historyTruncated = true
+		historyAvailableFrom = removed[len(removed)-1].End
+	}
 	intervals := make([]failureHealthInterval, 0, len(rawIntervals))
 	upAtEnd := h.up
 	for _, interval := range rawIntervals {
@@ -133,5 +157,9 @@ func (h *failureObserverHealth) Snapshot(end time.Time) failureObserverHealthSna
 		}
 	}
 	slices.SortFunc(intervals, func(a, b failureHealthInterval) int { return a.Start.Compare(b.Start) })
-	return failureObserverHealthSnapshot{Observer: h.observer, Up: upAtEnd, LastSuccess: h.lastSuccess, Intervals: intervals}
+	return failureObserverHealthSnapshot{
+		Observer: h.observer, Up: upAtEnd, LastSuccess: h.lastSuccess,
+		HistoryTruncated: historyTruncated, HistoryAvailableFrom: historyAvailableFrom,
+		Intervals: intervals,
+	}
 }

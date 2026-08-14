@@ -49,6 +49,7 @@ func TestFailureLedger_Version2ReplayAndUnknownVersion(t *testing.T) {
 	require.NoError(t, err)
 	op := testFailureOperation("message-v2", now)
 	op.SchemaVersion = 2
+	op.LifecycleState = failureOperationJournaled
 	op.RunID = "nats-core-1"
 	op.OperationType = failureOperationMessageCreate
 	op.Targets = map[string]string{"messageId": op.ID}
@@ -198,6 +199,7 @@ func TestFailureOperation_RejectsInvalidVersion2Contracts(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	valid := testFailureOperation("message", now)
 	valid.SchemaVersion = 2
+	valid.LifecycleState = failureOperationJournaled
 	valid.RunID = "run"
 	valid.OperationType = failureOperationMessageCreate
 	valid.Targets = map[string]string{"messageId": "message"}
@@ -339,6 +341,7 @@ func TestFailureRecipientObserver_ProcessesExactSet(t *testing.T) {
 	require.NoError(t, err)
 	op := testFailureOperation("message-1", now)
 	op.SchemaVersion, op.RunID, op.OperationType = 2, "run-1", failureOperationMessageCreate
+	op.LifecycleState = failureOperationJournaled
 	op.Targets = map[string]string{"messageId": "message-1"}
 	op.Attributes = map[string]string{"expected_recipients": "alice\nbob"}
 	op.Effects, op.Expected = messageCreateExpectedEffects(2, "hash"), nil
@@ -482,6 +485,27 @@ func TestFailureRecipientObserver_RejectsSubscriptionAndMalformedEvidence(t *tes
 	observer.process(recipientDelivery{recipient: "alice", payload: []byte(`not-json`)})
 	assert.Equal(t, "observer_malformed", ledger.Snapshot().InvalidReason)
 	assert.Error(t, observer.appendRawEvidence("future", "message", "alice"))
+}
+
+func TestFailureRecipientObserver_SyncsDirectoryWhenCreatingRawJournal(t *testing.T) {
+	directory := t.TempDir()
+	var synced []string
+	observer := newFailureRecipientObserver(
+		nil,
+		NewMetrics(),
+		1,
+		time.Now,
+		withFailureRecipientEvidenceDir(directory),
+		withFailureRecipientDirectorySync(func(path string) error {
+			synced = append(synced, path)
+			return nil
+		}),
+	)
+
+	require.NoError(t, observer.appendRawEvidence("missing", "message-1", "alice"))
+	require.NoError(t, observer.appendRawEvidence("missing", "message-2", "bob"))
+
+	assert.Equal(t, []string{directory}, synced)
 }
 
 func TestFailureRecipientObserver_IgnoresUnrelatedRoomEvents(t *testing.T) {
@@ -631,13 +655,16 @@ func TestFailureRecipientObserver_ShutdownStopsIngressBeforeDrainingQueue(t *tes
 }
 
 func TestSoakRuntimeSelector_RecipientSetsExcludeBots(t *testing.T) {
-	topology := &soakTopology{Subscriptions: []model.Subscription{
-		{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
-		{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "bot", IsBot: true}},
-		{RoomID: "room-1", IsSubscribed: false, User: model.SubscriptionUser{Account: "departed"}},
-	}}
+	topology := &soakTopology{
+		ActiveUsers: []model.User{{ID: "u-alice", Account: "alice"}},
+		Subscriptions: []model.Subscription{
+			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
+			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "borrowed-subscriber"}},
+			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "bot", IsBot: true}},
+			{RoomID: "room-1", IsSubscribed: false, User: model.SubscriptionUser{Account: "departed"}},
+		}}
 
-	assert.Equal(t, map[string][]string{"room-1": {"alice"}}, soakRecipientSets(topology))
+	assert.Equal(t, map[string][]string{"room-1": {"alice", "borrowed-subscriber"}}, soakRecipientSets(topology))
 }
 
 func TestFailureRecipientObserver_RecoversPendingExpectation(t *testing.T) {

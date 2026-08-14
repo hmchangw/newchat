@@ -111,6 +111,17 @@ func TestValidateSoakConfig_RequiresRunID(t *testing.T) {
 	assert.Contains(t, err.Error(), "SOAK_RUN_ID")
 }
 
+func TestValidateSoakConfig_RejectsUnsafeRunIDs(t *testing.T) {
+	for _, runID := range []string{"../escape", "folder/run", `folder\\run`, ".", "..", " leading", "trailing "} {
+		t.Run(runID, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			cfg.RunID = runID
+
+			assert.ErrorContains(t, validateSoakConfig(&cfg, "chat"), "SOAK_RUN_ID")
+		})
+	}
+}
+
 func TestValidateSoakTeardownConfig_IgnoresUnrelatedWorkloadSettings(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.SendRate = -1
@@ -321,6 +332,11 @@ func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 			want:   "SOAK_RECIPIENT_OBSERVER_QUEUE",
 		},
 		{
+			name:   "unbounded recipient observer queue",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverQueue = maxFailureRecipientObserverQueue + 1 },
+			want:   "SOAK_RECIPIENT_OBSERVER_QUEUE",
+		},
+		{
 			name:   "zero recipient observer connections",
 			mutate: func(cfg *soakConfig) { cfg.RecipientObserverConnections = 0 },
 			want:   "SOAK_RECIPIENT_OBSERVER_CONNECTIONS",
@@ -337,6 +353,20 @@ func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 				cfg.LedgerDir = ""
 			},
 			want: "SOAK_LEDGER_DIR",
+		},
+		{
+			name: "timeline without formal manifest",
+			mutate: func(cfg *soakConfig) {
+				cfg.FailureTimelinePath = "timeline.jsonl"
+			},
+			want: "SOAK_FAILURE_MANIFEST_PATH",
+		},
+		{
+			name: "report directory without formal manifest",
+			mutate: func(cfg *soakConfig) {
+				cfg.FailureReportDir = "report"
+			},
+			want: "SOAK_FAILURE_MANIFEST_PATH",
 		},
 	}
 	for _, tt := range tests {

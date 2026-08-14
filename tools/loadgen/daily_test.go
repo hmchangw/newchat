@@ -289,11 +289,17 @@ func TestSnapshotPresenceStats_NilWhenPoolInitFailed(t *testing.T) {
 }
 
 func TestProdEnvFactory_PresenceDisabledLeavesNil(t *testing.T) {
-	f := &prodEnvFactory{baseCfg: &config{NatsURL: "nats://127.0.0.1:14222", SiteID: "site-test"}}
+	metrics := NewMetrics()
+	t.Cleanup(metrics.StopNATSHealth)
+	f := &prodEnvFactory{
+		baseCfg: &config{NatsURL: "nats://127.0.0.1:14222", SiteID: "site-test"},
+		metrics: metrics,
+	}
 	users := []*userState{{ID: "u0", Account: "user-0"}}
 	cfg := dailyConfig{Preset: "daily-heavy", MultiplexPoolSize: 0} // Presence false
 	env := f.Build(cfg, users)
 	assert.Nil(t, env.presencePool)
 	assert.Nil(t, env.presenceCollector)
 	assert.Nil(t, users[0].presence)
+	assert.Same(t, metrics, env.collector.m)
 }

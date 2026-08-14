@@ -12,7 +12,7 @@
 
 {{/* Run-scoped immutable failure manifest name. */}}
 {{- define "cassandra-soak.failureManifestName" -}}
-{{- printf "%s-failure-%s" (include "cassandra-soak.fullname" .) (sha256sum .Values.runId | trunc 8) | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-failure-%s" (include "cassandra-soak.fullname" . | trunc 46 | trimSuffix "-") (sha256sum .Values.runId | trunc 8) -}}
 {{- end -}}
 
 {{- define "cassandra-soak.labels" -}}

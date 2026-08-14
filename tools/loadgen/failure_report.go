@@ -62,15 +62,15 @@ type failureObserverReport struct {
 }
 
 type failureConsumerReport struct {
-	Stream          string `json:"stream"`
-	Durable         string `json:"durable"`
-	Up              bool   `json:"up"`
-	SampleErrors    uint64 `json:"sampleErrors"`
-	BaselinePending uint64 `json:"baselinePending"`
-	PeakPending     uint64 `json:"peakPending"`
-	FinalPending    uint64 `json:"finalPending"`
-	RecoveryPending uint64 `json:"recoveryPending"`
-	OldestAge       string `json:"oldestAge,omitempty"`
+	Stream          string  `json:"stream"`
+	Durable         string  `json:"durable"`
+	Up              bool    `json:"up"`
+	SampleErrors    uint64  `json:"sampleErrors"`
+	BaselinePending uint64  `json:"baselinePending"`
+	PeakPending     uint64  `json:"peakPending"`
+	FinalPending    uint64  `json:"finalPending"`
+	RecoveryPending *uint64 `json:"recoveryPending,omitempty"`
+	OldestAge       string  `json:"oldestAge,omitempty"`
 }
 
 type failureSidecarReference struct {
@@ -104,6 +104,25 @@ type failureEvidenceReport struct {
 
 //nolint:gocritic // The value copy lets canonical sorting avoid mutating the caller's report.
 func marshalFailureEvidenceReport(report failureEvidenceReport) ([]byte, error) {
+	report.Reasons = append([]string(nil), report.Reasons...)
+	report.TopologyChanges = append([]string(nil), report.TopologyChanges...)
+	report.Gates = append([]failureGate(nil), report.Gates...)
+	report.Timeline = append([]failureFaultEvent(nil), report.Timeline...)
+	report.Lanes = append([]failureLaneReport(nil), report.Lanes...)
+	report.Observers = append([]failureObserverReport(nil), report.Observers...)
+	for index := range report.Observers {
+		report.Observers[index].Health = append([]failureHealthInterval(nil), report.Observers[index].Health...)
+	}
+	report.ObserverHealth = append([]failureObserverHealthSnapshot(nil), report.ObserverHealth...)
+	for index := range report.ObserverHealth {
+		report.ObserverHealth[index].Intervals = append(
+			[]failureHealthInterval(nil), report.ObserverHealth[index].Intervals...,
+		)
+	}
+	report.Consumers = append([]failureConsumerReport(nil), report.Consumers...)
+	report.Sidecars = append([]failureSidecarReference(nil), report.Sidecars...)
+	report.EvidenceDigests = append([]failureEvidenceDigest(nil), report.EvidenceDigests...)
+	report.InvalidIntervals = append([]failureHealthInterval(nil), report.InvalidIntervals...)
 	for index := range report.Lanes {
 		lane := &report.Lanes[index]
 		if lane.Eligible != lane.Terminals.Total() {
@@ -118,7 +137,7 @@ func marshalFailureEvidenceReport(report failureEvidenceReport) ([]byte, error) 
 	}
 	slices.Sort(report.Reasons)
 	slices.Sort(report.TopologyChanges)
-	slices.SortFunc(report.Gates, func(a, b failureGate) int { return stringsCompare(a.ID, b.ID) })
+	slices.SortFunc(report.Gates, func(a, b failureGate) int { return strings.Compare(a.ID, b.ID) })
 	slices.SortFunc(report.Timeline, func(a, b failureFaultEvent) int {
 		if a.Sequence < b.Sequence {
 			return -1
@@ -130,12 +149,12 @@ func marshalFailureEvidenceReport(report failureEvidenceReport) ([]byte, error) 
 	})
 	slices.SortFunc(report.Lanes, func(a, b failureLaneReport) int {
 		if a.Scenario != b.Scenario {
-			return stringsCompare(a.Scenario, b.Scenario)
+			return strings.Compare(a.Scenario, b.Scenario)
 		}
-		return stringsCompare(a.Lane, b.Lane)
+		return strings.Compare(a.Lane, b.Lane)
 	})
 	slices.SortFunc(report.Observers, func(a, b failureObserverReport) int {
-		return stringsCompare(string(a.Observer), string(b.Observer))
+		return strings.Compare(string(a.Observer), string(b.Observer))
 	})
 	for i := range report.Observers {
 		slices.SortFunc(report.Observers[i].Health, func(a, b failureHealthInterval) int {
@@ -143,19 +162,24 @@ func marshalFailureEvidenceReport(report failureEvidenceReport) ([]byte, error) 
 		})
 	}
 	slices.SortFunc(report.ObserverHealth, func(a, b failureObserverHealthSnapshot) int {
-		return stringsCompare(string(a.Observer), string(b.Observer))
+		return strings.Compare(string(a.Observer), string(b.Observer))
 	})
+	for index := range report.ObserverHealth {
+		slices.SortFunc(report.ObserverHealth[index].Intervals, func(a, b failureHealthInterval) int {
+			return a.Start.Compare(b.Start)
+		})
+	}
 	slices.SortFunc(report.Consumers, func(a, b failureConsumerReport) int {
 		if a.Stream != b.Stream {
-			return stringsCompare(a.Stream, b.Stream)
+			return strings.Compare(a.Stream, b.Stream)
 		}
-		return stringsCompare(a.Durable, b.Durable)
+		return strings.Compare(a.Durable, b.Durable)
 	})
 	slices.SortFunc(report.Sidecars, func(a, b failureSidecarReference) int {
-		return stringsCompare(a.Path, b.Path)
+		return strings.Compare(a.Path, b.Path)
 	})
 	slices.SortFunc(report.EvidenceDigests, func(a, b failureEvidenceDigest) int {
-		return stringsCompare(a.Path, b.Path)
+		return strings.Compare(a.Path, b.Path)
 	})
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
@@ -297,7 +321,7 @@ func buildSoakFailureEvidenceReport(
 	run *soakFailureEvidenceRun,
 	ledger failureLedgerSnapshot,
 	soak *soakCollectorSnapshot,
-	recipientHealth failureObserverHealthSnapshot,
+	recipientHealth *failureObserverHealthSnapshot,
 	consumers []ConsumerStat,
 	sidecars []failureSidecarReference,
 	endedAt time.Time,
@@ -311,6 +335,10 @@ func buildSoakFailureEvidenceReport(
 		result := evaluateFailureVerdict(report.Gates)
 		report.Verdict, report.Reasons = result.Verdict, result.Reasons
 		return report
+	}
+	health := failureObserverHealthSnapshot{}
+	if recipientHealth != nil {
+		health = *recipientHealth
 	}
 	report.ManifestDigest = run.ManifestDigest
 	report.Sidecars = append([]failureSidecarReference(nil), sidecars...)
@@ -355,15 +383,15 @@ func buildSoakFailureEvidenceReport(
 			},
 		}
 		if observer == failureObserverRecipient {
-			observerReport.Health = append([]failureHealthInterval(nil), recipientHealth.Intervals...)
-			if !recipientHealth.LastSuccess.IsZero() {
-				lastSuccess := recipientHealth.LastSuccess.UTC()
+			observerReport.Health = append([]failureHealthInterval(nil), health.Intervals...)
+			if !health.LastSuccess.IsZero() {
+				lastSuccess := health.LastSuccess.UTC()
 				observerReport.LastValid = &lastSuccess
 			}
 		}
 		report.Observers = append(report.Observers, observerReport)
 	}
-	report.ObserverHealth = []failureObserverHealthSnapshot{recipientHealth}
+	report.ObserverHealth = []failureObserverHealthSnapshot{health}
 	for _, consumer := range consumers {
 		report.Consumers = append(report.Consumers, failureConsumerReport{
 			Stream: consumer.Stream, Durable: consumer.Durable,
@@ -372,7 +400,6 @@ func buildSoakFailureEvidenceReport(
 			BaselinePending: consumer.BaselinePending,
 			PeakPending:     consumer.PeakPending,
 			FinalPending:    consumer.FinalPending,
-			RecoveryPending: consumer.FinalPending,
 		})
 	}
 
@@ -451,7 +478,7 @@ func buildSoakFailureEvidenceReport(
 			Reason: "required consumer samples are missing or failed",
 		})
 	}
-	if failureHealthSnapshotCovers(recipientHealth, run.StartedAt, endedAt) {
+	if failureHealthSnapshotCovers(&health, run.StartedAt, endedAt) {
 		gates = append(gates, failureGate{ID: "05_observer_health", Verdict: failureVerdictPass})
 	} else {
 		gates = append(gates, failureGate{
@@ -552,7 +579,13 @@ func finalizeFailureRecipientSidecars(directory string) ([]failureSidecarReferen
 	return references, nil
 }
 
-func failureHealthSnapshotCovers(snapshot failureObserverHealthSnapshot, start, end time.Time) bool {
+func failureHealthSnapshotCovers(snapshot *failureObserverHealthSnapshot, start, end time.Time) bool {
+	if snapshot == nil {
+		return false
+	}
+	if snapshot.HistoryTruncated && start.Before(snapshot.HistoryAvailableFrom) {
+		return false
+	}
 	if len(snapshot.Intervals) == 0 {
 		return false
 	}

@@ -64,6 +64,36 @@ func TestFailureEvidenceReport_RejectsAccountingMismatch(t *testing.T) {
 	assert.ErrorContains(t, err, "eligible operation accounting")
 }
 
+func TestFailureEvidenceReport_MarshalDoesNotMutateCallerSlices(t *testing.T) {
+	late := time.Date(2026, 8, 12, 2, 0, 0, 0, time.UTC)
+	early := late.Add(-time.Hour)
+	report := failureEvidenceReport{
+		SchemaVersion: 1,
+		Reasons:       []string{"z-reason", "a-reason"},
+		Observers: []failureObserverReport{{
+			Observer: failureObserverRecipient,
+			Health: []failureHealthInterval{
+				{Start: late, End: late.Add(time.Minute), Up: true},
+				{Start: early, End: early.Add(time.Minute), Up: true},
+			},
+		}},
+		ObserverHealth: []failureObserverHealthSnapshot{{
+			Observer: failureObserverRecipient,
+			Intervals: []failureHealthInterval{
+				{Start: late, End: late.Add(time.Minute), Up: true},
+				{Start: early, End: early.Add(time.Minute), Up: true},
+			},
+		}},
+	}
+
+	_, err := marshalFailureEvidenceReport(report)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"z-reason", "a-reason"}, report.Reasons)
+	assert.Equal(t, late, report.Observers[0].Health[0].Start)
+	assert.Equal(t, late, report.ObserverHealth[0].Intervals[0].Start)
+}
+
 func TestFailureEvidenceReport_BuildsEveryVerdictGateAndRetainsSidecars(t *testing.T) {
 	start := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	manifest := validFailureManifest()
@@ -132,14 +162,14 @@ func TestFailureEvidenceReport_BuildsEveryVerdictGateAndRetainsSidecars(t *testi
 				tc.mutate(&testRun)
 			}
 			report := buildSoakFailureEvidenceReport(
-				&testRun, tc.ledger, soak, tc.health, consumers, tc.sidecars, start.Add(time.Minute),
+				&testRun, tc.ledger, soak, &tc.health, consumers, tc.sidecars, start.Add(time.Minute),
 			)
 			assert.Equal(t, tc.want, report.Verdict)
 			assert.Contains(t, gateIDs(report.Gates), tc.wantGate)
 		})
 	}
 
-	nilRun := buildSoakFailureEvidenceReport(nil, failureLedgerSnapshot{}, nil, failureObserverHealthSnapshot{}, nil, nil, start)
+	nilRun := buildSoakFailureEvidenceReport(nil, failureLedgerSnapshot{}, nil, nil, nil, nil, start)
 	assert.Equal(t, failureVerdictInconclusive, nilRun.Verdict)
 }
 
@@ -177,7 +207,7 @@ func TestFailureEvidenceReport_ConsumerAndAccountingEvidence(t *testing.T) {
 		run,
 		failureLedgerSnapshot{Results: map[failureResult]uint64{failureResultGood: 2}},
 		soak,
-		health,
+		&health,
 		consumers,
 		nil,
 		start.Add(time.Minute),
@@ -189,11 +219,36 @@ func TestFailureEvidenceReport_ConsumerAndAccountingEvidence(t *testing.T) {
 	assert.Equal(t, uint64(2), messageConsumer.BaselinePending)
 	assert.Equal(t, uint64(5), messageConsumer.PeakPending)
 	assert.Equal(t, uint64(1), messageConsumer.FinalPending)
+	assert.Nil(t, messageConsumer.RecoveryPending)
 	assert.Contains(t, gateIDs(report.Gates), "04_accounting")
 	assert.Contains(t, gateIDs(report.Gates), "05_consumer_health")
 	assert.Equal(t, failureVerdictInconclusive, gateByID(t, report.Gates, "04_accounting").Verdict)
 	assert.Equal(t, failureVerdictPass, gateByID(t, report.Gates, "05_consumer_health").Verdict)
 	assert.Equal(t, failureVerdictInconclusive, gateByID(t, report.Gates, "02_topology").Verdict)
+}
+
+func TestFailureEvidenceReport_MissingRecipientDuringBlindIntervalIsNotHardFail(t *testing.T) {
+	start := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	manifest := validFailureManifest()
+	run := &soakFailureEvidenceRun{
+		Manifest: &manifest, ManifestDigest: "digest", Timeline: &failureTimeline{}, StartedAt: start,
+	}
+	report := buildSoakFailureEvidenceReport(
+		run,
+		failureLedgerSnapshot{Results: map[failureResult]uint64{failureResultUnverified: 1}},
+		&soakCollectorSnapshot{Actions: map[soakRPCAction]soakActionStats{soakRPCSend: {Attempted: 1}}},
+		&failureObserverHealthSnapshot{Observer: failureObserverRecipient},
+		nil,
+		[]failureSidecarReference{
+			{Path: "recipient-missing.json", Count: 1},
+			{Path: "recipient-unverified.json", Count: 1},
+		},
+		start.Add(time.Minute),
+	)
+
+	for _, gate := range report.Gates {
+		assert.NotEqual(t, failureVerdictFail, gate.Verdict, "missing raw evidence is not authoritative during an observer blind interval")
+	}
 }
 
 func TestFailureEvidenceReport_AccountingIncludesWarmupSends(t *testing.T) {
@@ -230,7 +285,7 @@ func TestFailureEvidenceReport_AccountingIncludesWarmupSends(t *testing.T) {
 		run,
 		failureLedgerSnapshot{Results: map[failureResult]uint64{failureResultGood: 6}},
 		soak,
-		health,
+		&health,
 		consumers,
 		nil,
 		start.Add(time.Minute),
@@ -258,7 +313,7 @@ func TestFailureEvidenceReport_RecoveredOperationsInvalidatePerformanceInterval(
 		&soakCollectorSnapshot{Actions: map[soakRPCAction]soakActionStats{
 			soakRPCSend: {Attempted: 1},
 		}},
-		failureObserverHealthSnapshot{},
+		nil,
 		nil,
 		nil,
 		start.Add(time.Minute),

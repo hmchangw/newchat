@@ -294,6 +294,9 @@ func soakRecipientSets(topology *soakTopology) map[string][]string {
 		return nil
 	}
 	recipients := make(map[string][]string, len(topology.Rooms))
+	// ActiveUsers bounds sender selection only. Broadcast evidence must retain
+	// every subscribed human account, including borrowed non-senders that the
+	// production broadcast worker is still required to reach.
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
 		if !subscription.IsSubscribed || subscription.User.IsBot || subscription.User.Account == "" {
@@ -394,6 +397,7 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
+	defer metrics.StopNATSHealth()
 	var evidenceRun *soakFailureEvidenceRun
 	if cfg.Soak.FailureManifestPath != "" {
 		evidenceRun, err = openSoakFailureEvidence(&cfg.Soak, metrics, time.Now().UTC())
@@ -571,17 +575,21 @@ func runSoakWorkload(
 			slog.Error("shutdown recipient observer", "error", err)
 		}
 	}()
+	trackerOptions := []soakFailureTrackerOption{
+		withSoakFailureMetrics(metrics),
+		withSoakFailureRunID(cfg.Soak.RunID),
+		withSoakFailureRecipientObserver(recipientObserver),
+	}
+	if evidenceRun != nil {
+		trackerOptions = append(trackerOptions, withSoakFailureScenario(evidenceRun.Manifest.ScenarioID))
+	}
 	failureTracker := newSoakFailureTracker(
 		ledger,
 		cfg.Soak.PersistGrace,
 		cfg.Soak.ReconcileDeadline,
 		now,
-		withSoakFailureMetrics(metrics), withSoakFailureRunID(cfg.Soak.RunID),
-		withSoakFailureRecipientObserver(recipientObserver),
+		trackerOptions...,
 	)
-	if evidenceRun != nil {
-		withSoakFailureScenario(evidenceRun.Manifest.ScenarioID)(failureTracker)
-	}
 	catalog := newSoakCatalog(
 		cfg.Soak.RecentPerRoom,
 		cfg.Soak.RecentTotal,
@@ -866,11 +874,12 @@ func runSoakWorkload(
 			ledger.Invalidate("sidecar")
 			slog.Error("finalize recipient evidence sidecars", "error", sidecarErr)
 		}
+		recipientHealth := recipientObserver.health.Snapshot(evaluationEndedAt)
 		evidenceReport := buildSoakFailureEvidenceReport(
 			evidenceRun,
 			ledger.Snapshot(),
 			&snapshot,
-			recipientObserver.health.Snapshot(evaluationEndedAt),
+			&recipientHealth,
 			consumerStats,
 			sidecars,
 			evaluationEndedAt,
