@@ -1651,8 +1651,7 @@ func TestAddMembersRequestJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"historySharedSince":1700000000000`)
 	var dst model.AddMembersRequest
-	require.NoError(t, json.Unmarshal(data, &dst))
-	assert.Equal(t, req, dst)
+	roundTrip(t, &req, &dst)
 
 	// nil cap must be omitted from the wire, not serialized as null/0.
 	req.HistorySharedSince = nil
@@ -1668,7 +1667,7 @@ func TestHistoryModeConstants(t *testing.T) {
 
 // SharesAll is the single share-all predicate used by both room-service (cap
 // stamping) and room-worker (cap application) — the two sides must agree.
-func TestHistoryConfigSharesAll(t *testing.T) {
+func TestHistoryConfig_SharesAll(t *testing.T) {
 	cases := []struct {
 		name string
 		mode model.HistoryMode

@@ -1073,10 +1073,11 @@ func TestHandler_AddMembers_HistorySharedSinceInheritance(t *testing.T) {
 		{"capped requester, mode all → inherit", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, &requesterHSS, ptrInt64(1700000000000)},
 		{"capped requester, empty mode → inherit", model.HistoryConfig{}, nil, &requesterHSS, ptrInt64(1700000000000)},
 		{"uncapped requester, mode all → nil", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, nil, nil},
-		{"capped requester, mode none → nil (worker floors at accept ts)", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, &requesterHSS, nil},
+		{"capped requester, mode none → cap forwarded (clock-skew guard: worker floors at max(accept ts, cap))", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, &requesterHSS, ptrInt64(1700000000000)},
 		{"client-forged value overwritten", model.HistoryConfig{Mode: model.HistoryModeAll}, &clientForged, nil, nil},
 		{"forged value + capped requester → requester's cap wins", model.HistoryConfig{Mode: model.HistoryModeAll}, &clientForged, &requesterHSS, ptrInt64(1700000000000)},
-		{"forged value + capped requester, mode none → nil", model.HistoryConfig{Mode: model.HistoryModeNone}, &clientForged, &requesterHSS, nil},
+		{"forged value + capped requester, mode none → requester's cap wins", model.HistoryConfig{Mode: model.HistoryModeNone}, &clientForged, &requesterHSS, ptrInt64(1700000000000)},
+		{"uncapped requester, mode none → nil", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, nil, nil},
 		{"zero-time requester HSS not inherited", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, &time.Time{}, nil},
 	}
 

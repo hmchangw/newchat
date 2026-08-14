@@ -2466,7 +2466,8 @@ func TestHistorySharedSincePtr_InheritedCap(t *testing.T) {
 		want      *int64
 	}{
 		{"mode none uses timestamp", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, ts, &ts},
-		{"mode none ignores inherited cap", model.HistoryConfig{Mode: model.HistoryModeNone}, &capMs, ts, &ts},
+		{"mode none with older inherited cap floors at accept ts", model.HistoryConfig{Mode: model.HistoryModeNone}, &capMs, ts, &ts},
+		{"mode none floors at inherited cap under clock skew", model.HistoryConfig{Mode: model.HistoryModeNone}, &ts, capMs, &ts},
 		{"mode none missing timestamp emits nil", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, 0, nil},
 		{"mode none missing timestamp falls back to inherited cap", model.HistoryConfig{Mode: model.HistoryModeNone}, &capMs, 0, &capMs},
 		{"mode all without cap emits nil", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, ts, nil},

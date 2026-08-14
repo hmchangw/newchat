@@ -501,3 +501,31 @@ git commit -m "docs(client-api): document historySharedSince inheritance on shar
   no gap is expected. If the Makefile lacks a coverage target, note it and rely
   on the per-task test evidence.
 - [ ] **Step 6:** No commit — report results.
+
+---
+
+## Amendments (2026-08-14, post-review — PR #277)
+
+The steps above are the executed plan and are kept as written. Code review
+(multi-expert + CodeRabbit) amended the design after execution; the shipped
+implementation differs from the Step 3 snippet as follows:
+
+1. **Clock-skew guard on `mode: "none"`** (CodeRabbit, security-major): the
+   accept timestamp alone could predate the requester's own boundary when
+   stamped by a skewed clock, leaking the skew window's history. room-service
+   now stamps the requester's cap for **every** mode (the `SharesAll`
+   condition was removed from the stamp site), and room-worker's
+   `historySharedSincePtr` floors mode-`"none"` members at the **later** of
+   the accept timestamp and the inherited cap. Regression tests: room-worker
+   "mode none floors at inherited cap under clock skew"; room-service
+   "capped requester, mode none → cap forwarded".
+2. **Fail-closed malformed-event fallback**: mode `"none"` with a
+   missing/non-positive timestamp falls back to the inherited cap when one is
+   present (previously nil = unrestricted), nil only when no cap exists.
+3. **`history.mode` validation**: room-service rejects unrecognized modes
+   with `badRequest` (`history.mode must be "none" or "all"`) instead of
+   treating them as share-all; documented in `docs/client-api.md` + views.
+4. **Rollout order (required)**: deploy **room-worker before room-service** —
+   an old worker ignores the new wire field, so the escalation window closes
+   only once the worker is upgraded. See the design spec's
+   "Rollout / mixed versions" section.

@@ -975,15 +975,16 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	req.Timestamp = time.Now().UTC().UnixMilli()
 
 	// History-cap inheritance: a requester whose own history is capped must not
-	// grant new members more than they can see. On the share-all branch, stamp
-	// the requester's cap onto the canonical event (room-worker applies it to
-	// every materialized subscription and the member_added events). Mode "none"
-	// needs no cap — the worker floors those members at the accept timestamp,
-	// which is always ≥ the requester's cap. Reset first: the field is
-	// server-set and client input must never pass through.
+	// grant new members more than they can see. Stamp the requester's cap onto
+	// the canonical event for every mode: share-all adds inherit it directly,
+	// and mode "none" uses it as a clock-skew guard (the worker floors those
+	// members at the accept timestamp or this cap, whichever is later — the
+	// accept timestamp alone could predate the requester's boundary when
+	// stamped by a skewed clock). Reset first: the field is server-set and
+	// client input must never pass through.
 	req.HistorySharedSince = nil
 	var inheritedCap int64
-	if req.History.SharesAll() && sub.HistorySharedSince != nil && !sub.HistorySharedSince.IsZero() {
+	if sub.HistorySharedSince != nil && !sub.HistorySharedSince.IsZero() {
 		if ms := sub.HistorySharedSince.UnixMilli(); ms > 0 {
 			req.HistorySharedSince = &ms
 			inheritedCap = ms

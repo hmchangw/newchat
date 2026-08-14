@@ -133,10 +133,12 @@ func messageDedupSeed(ctx context.Context, handler, roomID, payloadSeed string) 
 }
 
 // historySharedSincePtr resolves the HSS for members added by this request.
-// mode "none" floors new members at the accept timestamp. Any other mode is
-// share-all, but capped by the inherited value (the requester's own HSS,
-// stamped by room-service) so a restricted adder can never grant more history
-// than they can see. A malformed event (mode "none" with no accept timestamp)
+// mode "none" floors new members at the accept timestamp or the inherited
+// value (the requester's own HSS, stamped by room-service), whichever is
+// later — the accept timestamp alone could predate the requester's boundary
+// when stamped by a skewed clock. Any other mode is share-all, capped by the
+// inherited value, so a restricted adder can never grant more history than
+// they can see. A malformed event (mode "none" with no accept timestamp)
 // falls back to the inherited cap rather than unrestricted history.
 // Non-positive values are never emitted (see model.InboxMemberEvent
 // invariant: nil, never &0).
@@ -156,6 +158,9 @@ func historySharedSincePtr(ctx context.Context, history model.HistoryConfig, inh
 			return inherited
 		}
 		return nil
+	}
+	if inheritedCap && *inherited > timestamp {
+		return inherited
 	}
 	return &timestamp
 }

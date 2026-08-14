@@ -932,7 +932,7 @@ message pipeline as a `new_message` room event; a pure org→individual upgrade 
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
-| `historySharedSince` | number | Optional. Epoch ms (UTC); the new members' history boundary — present when their history is restricted (add with `history.mode: "none"`, or a share-all add by a requester whose own history is capped, in which case this is the requester's inherited boundary). Absent = unrestricted. |
+| `historySharedSince` | number | Optional. Epoch ms (UTC); the new members' history boundary — present when their history is restricted (add with `history.mode: "none"` — the add time or the requester's own boundary, whichever is later — or a share-all add by a requester whose own history is capped, in which case this is the requester's inherited boundary). Absent = unrestricted. |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 
 ---

@@ -28,8 +28,11 @@ never be granted history older than their adder can see.
 
 - Adder unrestricted (HSS nil) + `mode: "all"` → new member HSS `nil` (unchanged).
 - Adder restricted (HSS = T) + `mode: "all"` → new member HSS = **T** (new).
-- Any adder + `mode: "none"` → new member HSS = accept timestamp (unchanged —
-  "now" is always ≥ the adder's HSS, so no escalation on this branch).
+- Any adder + `mode: "none"` → new member HSS = the accept timestamp or the
+  adder's HSS, **whichever is later** (amended post-review: the accept
+  timestamp alone could predate the adder's boundary when stamped by a skewed
+  clock, which would leak the skew window's history — so the cap is stamped
+  for every mode and the worker takes the max).
 
 The rule is transitive by construction: if B inherited HSS = T from A, anyone B
 adds with share-all inherits T likewise. It applies uniformly to every account
@@ -49,6 +52,15 @@ the requester's subscription there. Costs an extra Mongo read per add, and adds
 a failure mode (requester left the room between accept and processing). HSS
 never changes after join, so the accept-time read is not racy.
 
+### Rollout / mixed versions
+
+Deploy **room-worker before room-service**. An old room-worker ignores the new
+wire field (unknown JSON key, degrades gracefully to today's behavior), so a
+new room-service stamping the cap has no effect until the worker is upgraded —
+the escalation this design closes persists during a service-first window.
+Worker-first is safe in the other direction: a new worker sees nil from an old
+room-service and behaves exactly as today.
+
 ### Changes
 
 1. **`pkg/model/member.go` — `AddMembersRequest`** gains
@@ -61,9 +73,11 @@ never changes after join, so the accept-time read is not racy.
 2. **room-service `handler.go` `addMembers`** — after the room-type guard,
    compute:
    - `req.HistorySharedSince = nil` (unconditional reset of client input)
-   - if `req.History.Mode != model.HistoryModeNone` and the requester's
-     subscription has a non-nil, non-zero `HistorySharedSince`:
-     `req.HistorySharedSince = ptr(sub.HistorySharedSince.UnixMilli())`
+   - if the requester's subscription has a non-nil, non-zero, positive
+     `HistorySharedSince`: `req.HistorySharedSince =
+     ptr(sub.HistorySharedSince.UnixMilli())` — stamped for **every** mode
+     (amended post-review): share-all inherits it directly; mode `"none"`
+     uses it as the clock-skew floor.
 
 3. **room-service `store_mongo.go`** — add `historySharedSince` to
    `subscriptionReadProjection` (it is not currently projected, so the
@@ -73,8 +87,10 @@ never changes after join, so the accept-time read is not racy.
 4. **room-worker `handler.go` `historySharedSincePtr`** — honor the inherited
    cap on the share-all branch. New shape (signature takes the request or an
    extra param; exact form is an implementation detail):
-   - `mode == "none"` → `&req.Timestamp` (existing, incl. the ≤0 log-and-nil
-     guard)
+   - `mode == "none"` → the later of `&req.Timestamp` and the inherited cap
+     (clock-skew guard, amended post-review); a missing/non-positive
+     timestamp fails **closed** to the inherited cap when one is present
+     (logged), nil only when no cap is available
    - otherwise → `req.HistorySharedSince` if non-nil and > 0, else `nil`
    Both call sites in `processAddMembers` (per-sub resolution and the
    `MemberAddEvent` value) go through this helper, so local subscriptions,
