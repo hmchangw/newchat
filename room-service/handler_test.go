@@ -1075,6 +1075,8 @@ func TestHandler_AddMembers_HistorySharedSinceInheritance(t *testing.T) {
 		{"uncapped requester, mode all → nil", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, nil, nil},
 		{"capped requester, mode none → nil (worker floors at accept ts)", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, &requesterHSS, nil},
 		{"client-forged value overwritten", model.HistoryConfig{Mode: model.HistoryModeAll}, &clientForged, nil, nil},
+		{"forged value + capped requester → requester's cap wins", model.HistoryConfig{Mode: model.HistoryModeAll}, &clientForged, &requesterHSS, ptrInt64(1700000000000)},
+		{"forged value + capped requester, mode none → nil", model.HistoryConfig{Mode: model.HistoryModeNone}, &clientForged, &requesterHSS, nil},
 		{"zero-time requester HSS not inherited", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, &time.Time{}, nil},
 	}
 
@@ -1114,6 +1116,32 @@ func TestHandler_AddMembers_HistorySharedSinceInheritance(t *testing.T) {
 			}
 		})
 	}
+}
+
+// history.mode is a visibility control where an unknown string must not fall
+// through to the permissive share-all default — the boundary rejects it.
+func TestHandler_AddMembers_InvalidHistoryModeRejected(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", Roles: []model.Role{model.RoleOwner},
+	}, nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Name: "general", Type: model.RoomTypeChannel,
+	}, nil)
+
+	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 10,
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
+			t.Fatal("publishToStream must not be called for an invalid history.mode")
+			return nil
+		},
+	}
+	req := model.AddMembersRequest{Users: []string{"bob"}, History: model.HistoryConfig{Mode: "nonee"}}
+
+	_, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "history.mode")
 }
 
 func TestHandler_AddMembers_RestrictedOwnerAllowed(t *testing.T) {
