@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -714,4 +715,67 @@ func TestParseSiteURLs(t *testing.T) {
 			assert.Error(t, err)
 		})
 	}
+}
+
+// ----- SP3 failover routing override --------------------------------------
+
+// fakeTargeter is a failoverTargeter stub returning a fixed target.
+type fakeTargeter struct{ target ServingTarget }
+
+func (f fakeTargeter) ServingTarget(_ context.Context, _ string) ServingTarget { return f.target }
+
+// testSitesWithBackup extends testSites with a reserved backup entry.
+var testSitesWithBackup = map[string]siteURL{
+	"site-a":     {BaseURL: "https://site-a.example.com", NATSURL: "wss://nats-3.site-a.example.com"},
+	"site-b":     {BaseURL: "https://site-b.example.com", NATSURL: "wss://nats.site-b.example.com"},
+	"site-local": {BaseURL: "http://localhost:3000", NATSURL: "ws://localhost:9222"},
+	"_backup":    {BaseURL: "https://backup.example.com", NATSURL: "wss://nats.backup.example.com"},
+}
+
+func newFailoverHandler(cache *directoryCache, target ServingTarget) *PortalHandler {
+	return NewPortalHandler(cache, false, "site-local", "ws://localhost:9222", testSitesWithBackup, testSettings,
+		WithFailoverReader(fakeTargeter{target: target}), WithBackupSiteID("_backup"))
+}
+
+func TestHandleUserInfo_FailoverRoutesToBackup(t *testing.T) {
+	h := newFailoverHandler(cacheWith(alice), ServingBackup)
+	w := getUserInfo(t, setupRouter(t, h), "alice")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp userInfoResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "https://backup.example.com", resp.BaseURL, "baseUrl swaps to backup")
+	assert.Equal(t, "wss://nats.backup.example.com", resp.NATSURL, "natsUrl swaps to backup")
+	assert.Equal(t, "site-a", resp.SiteID, "siteId MUST stay the home site")
+	assert.Equal(t, "E001", resp.EmployeeID, "identity fields unchanged")
+}
+
+func TestHandleUserInfo_HealthyRoutesHome(t *testing.T) {
+	h := newFailoverHandler(cacheWith(alice), ServingHome)
+	w := getUserInfo(t, setupRouter(t, h), "alice")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp userInfoResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "https://site-a.example.com", resp.BaseURL)
+	assert.Equal(t, "site-a", resp.SiteID)
+}
+
+func TestHandleUserInfo_BackupMissingFromRegistryIsInternal(t *testing.T) {
+	// servingTarget=backup but no backup entry configured => loud 500.
+	h := NewPortalHandler(cacheWith(alice), false, "site-local", "ws://localhost:9222", testSites, testSettings,
+		WithFailoverReader(fakeTargeter{target: ServingBackup}), WithBackupSiteID("_backup"))
+	w := getUserInfo(t, setupRouter(t, h), "alice")
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestHandleUserInfo_NoFailoverConfiguredRoutesHome(t *testing.T) {
+	// newTestHandler sets no failover reader; the override must no-op to home.
+	h := newTestHandler(cacheWith(alice), false)
+	w := getUserInfo(t, setupRouter(t, h), "alice")
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp userInfoResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "https://site-a.example.com", resp.BaseURL)
+	assert.Equal(t, "site-a", resp.SiteID)
 }

@@ -65,6 +65,12 @@ type config struct {
 	// FailoverInternalAddr is the listen address for the internal-only control
 	// surface — kept off the public browser-facing server.
 	FailoverInternalAddr string `env:"FAILOVER_INTERNAL_ADDR" envDefault:":8090"`
+	// FailoverStateTTL bounds how long portal caches a site's serving target
+	// before re-reading it (routing freshness vs. Mongo load).
+	FailoverStateTTL time.Duration `env:"FAILOVER_STATE_TTL" envDefault:"5s"`
+	// BackupSiteID is the reserved PORTAL_SITE_URLS id served for a failed-over
+	// site. Empty in single-site/dev deployments (no failover occurs there).
+	BackupSiteID string `env:"PORTAL_BACKUP_SITE_ID" envDefault:""`
 
 	// BotLoginEnabled gates portal's bot-role password login. Flip to false
 	// once the dedicated bot-devs client (which talks to botplatform directly)
@@ -126,10 +132,16 @@ func run() error {
 
 	slog.Info("directory config", "sites", len(sites), "refreshInterval", cfg.CacheRefreshInterval.String())
 
+	// The failover store backs both the always-on routing reader (SP3) and the
+	// optional operator control surface (SP4), so it is built unconditionally.
+	failoverStore := newMongoFailoverStore(mongoClient.Database(cfg.MongoDB))
+	failoverReader := newFailoverReader(failoverStore, cfg.FailoverStateTTL)
+
 	rc := restyutil.New(cfg.BotplatformURL, restyutil.WithTimeout(5*time.Second))
 	handler := NewPortalHandler(cache, cfg.DevMode,
 		cfg.DevFallbackSiteID, cfg.DevFallbackNatsURL, sites, settings,
-		WithRestyClient(rc), WithDirectoryStore(store))
+		WithRestyClient(rc), WithDirectoryStore(store),
+		WithFailoverReader(failoverReader), WithBackupSiteID(cfg.BackupSiteID))
 	if cfg.DevMode {
 		slog.Info("dev mode enabled — unknown accounts fall back to the dev site")
 	}
@@ -150,7 +162,6 @@ func run() error {
 	// listener so no privileged write shares the public discovery server.
 	var internalSrv *http.Server
 	if cfg.FailoverOpsToken != "" {
-		failoverStore := newMongoFailoverStore(mongoClient.Database(cfg.MongoDB))
 		failoverHandler := NewFailoverHandler(failoverStore)
 
 		ir := gin.New()
