@@ -1,0 +1,53 @@
+.permissions-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: var(--space-xl);
+  height: 100%;
+  overflow-y: auto;
+}
+
+.permissions-page-not-authorized {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.permissions-page-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.permissions-filter-input,
+.permissions-filter-select {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-input);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.permissions-filter-input {
+  flex: 1;
+  max-width: 240px;
+}
+
+.permissions-filter-input:focus,
+.permissions-filter-select:focus {
+  outline: none;
+  background: var(--bg-surface);
+  border-color: var(--accent);
+}
+
+.permissions-page-total {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+/* Direct child of the page's flex column — don't let it stretch the full width. */
+.permissions-page .status-badge {
+  align-self: flex-start;
+}

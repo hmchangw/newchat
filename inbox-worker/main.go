@@ -217,6 +217,32 @@ func (s *mongoInboxStore) UpdateUserSettings(ctx context.Context, account string
 	return nil
 }
 
+// ApplyUserPermissions applies state to every listed account under the per-key watermark
+// guard. $lte, not $lt: two writes can share a millisecond, and the apply is an
+// idempotent whole-state replace, so a same-ms tie resolves to last-delivered. No
+// upsert — a missing user doc is a silent no-op; MatchedCount < len(accounts) is normal.
+func (s *mongoInboxStore) ApplyUserPermissions(ctx context.Context, permission model.PermissionKey, accounts []string, state model.PermissionState) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	field, ok := model.PermissionFieldName(permission)
+	if !ok {
+		return fmt.Errorf("apply user permissions: unknown permission %q", permission)
+	}
+	path := "permissions." + field
+	filter := bson.M{
+		"account": bson.M{"$in": accounts},
+		"$or": bson.A{
+			bson.M{path + ".updatedAt": bson.M{"$exists": false}},
+			bson.M{path + ".updatedAt": bson.M{"$lte": state.UpdatedAt}},
+		},
+	}
+	if _, err := s.userCol.UpdateMany(ctx, filter, bson.M{"$set": bson.M{path: state}}); err != nil {
+		return fmt.Errorf("update user permissions: %w", err)
+	}
+	return nil
+}
+
 // UpdateUserChatlist replaces the local users doc's chatlist sub-document with the origin
 // site's full post-update state — whole-object, so a removed section is removed here too.
 // A missing user (no doc on this site) is a silent no-op. updatedAt is unix-millis

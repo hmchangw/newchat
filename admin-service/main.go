@@ -41,6 +41,12 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
+	// Logged after obs.Init so it lands in the JSON handler like every other line.
+	if len(remoteSites(cfg.AllSiteIDs, cfg.SiteID)) == 0 {
+		slog.Warn("no remote peers in ALL_SITE_IDS — cross-site permission fanout is disabled; permission changes stay local to this site",
+			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
+	}
+
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
 		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
@@ -62,7 +68,19 @@ func run() error {
 		return fmt.Errorf("connect nats: %w", err)
 	}
 
-	h := newHandler(st, sessStore, cfg, nc)
+	js, err := nc.JetStream()
+	if err != nil {
+		return fmt.Errorf("jetstream: %w", err)
+	}
+	// PublishMsg (not Publish) so X-Request-ID from ctx rides onto the outgoing
+	// message — same shape as user-service/publisher.
+	publishInbox := func(ctx context.Context, subj string, data []byte) error {
+		if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+			return fmt.Errorf("publish inbox event: %w", err)
+		}
+		return nil
+	}
+	h := newHandler(st, sessStore, cfg, nc, publishInbox)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

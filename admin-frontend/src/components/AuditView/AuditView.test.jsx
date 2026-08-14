@@ -140,6 +140,21 @@ describe('AuditView', () => {
     expect(logout).not.toHaveBeenCalled()
   })
 
+  // Pins usePagedAdminList's deliberate setData(null)-on-error: a failed fetch clears the
+  // rows it was replacing, so the console never shows stale rows next to an error banner.
+  it('clears already-rendered rows when a later fetch fails, alongside the error banner', async () => {
+    listAudit.mockResolvedValue({ entries: [ENTRY_1, ENTRY_2], total: 50 })
+    render(<AuditView />)
+    expect(await screen.findByText('user.create')).toBeInTheDocument()
+
+    listAudit.mockRejectedValueOnce(new AsyncJobError('boom', { code: 'internal' }))
+    fireEvent.click(screen.getByRole('button', { name: /next/i }))
+
+    expect(await screen.findByText(/boom/i)).toBeInTheDocument()
+    expect(screen.queryByText('user.create')).not.toBeInTheDocument()
+    expect(screen.getByText(/no audit entries found/i)).toBeInTheDocument()
+  })
+
   it('logs the admin out instead of showing a banner on invalid_token', async () => {
     listAudit.mockRejectedValue(
       new AsyncJobError('expired', { code: 'unauthenticated', reason: 'invalid_token' }),

@@ -106,6 +106,13 @@ type stubInboxStore struct {
 	settingsUpdates       []userSettingsUpdate
 	chatlistUpdates       []userChatlistUpdate
 	sectionMoves          []sectionMove
+	permissionsApplies    []permissionsApply
+}
+
+type permissionsApply struct {
+	permission model.PermissionKey
+	accounts   []string
+	state      model.PermissionState
 }
 
 type userChatlistUpdate struct {
@@ -473,6 +480,21 @@ func (s *stubInboxStore) getSettingsUpdates() []userSettingsUpdate {
 	defer s.mu.Unlock()
 	cp := make([]userSettingsUpdate, len(s.settingsUpdates))
 	copy(cp, s.settingsUpdates)
+	return cp
+}
+
+func (s *stubInboxStore) ApplyUserPermissions(_ context.Context, permission model.PermissionKey, accounts []string, state model.PermissionState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.permissionsApplies = append(s.permissionsApplies, permissionsApply{permission: permission, accounts: accounts, state: state})
+	return nil
+}
+
+func (s *stubInboxStore) getPermissionsApplies() []permissionsApply {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]permissionsApply, len(s.permissionsApplies))
+	copy(cp, s.permissionsApplies)
 	return cp
 }
 
@@ -2121,6 +2143,76 @@ func TestHandler_UserSettingsUpdated_MalformedPayload(t *testing.T) {
 
 	require.Error(t, h.HandleEvent(context.Background(), evt))
 	assert.Empty(t, store.getSettingsUpdates())
+}
+
+func TestHandler_UserPermissionsUpdated(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	effectiveFrom := time.UnixMilli(1000).UTC()
+	expiresAt := time.UnixMilli(9000).UTC()
+	state := model.PermissionState{
+		Granted:       true,
+		EffectiveFrom: &effectiveFrom,
+		ExpiresAt:     &expiresAt,
+		UpdatedAt:     time.UnixMilli(5000).UTC(),
+	}
+	payload, err := json.Marshal(model.UserPermissionsUpdated{
+		Permission: model.PermissionExternalImageView,
+		Accounts:   []string{"alice", "bob"},
+		State:      state,
+		Timestamp:  12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserPermissionsUpdated, Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	applies := store.getPermissionsApplies()
+	require.Len(t, applies, 1)
+	assert.Equal(t, model.PermissionExternalImageView, applies[0].permission)
+	assert.Equal(t, []string{"alice", "bob"}, applies[0].accounts)
+	assert.Equal(t, state, applies[0].state)
+}
+
+func TestHandler_UserPermissionsUpdated_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	evt, err := json.Marshal(model.InboxEvent{
+		Type:    model.InboxUserPermissionsUpdated,
+		Payload: []byte("not-json"),
+	})
+	require.NoError(t, err)
+
+	require.Error(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getPermissionsApplies())
+}
+
+// TestHandler_UserPermissionsUpdated_UnknownPermissionKey covers a permission key this
+// site doesn't recognize yet (a newer site fanned out a key before this one upgraded).
+// Retrying can never succeed, so the handler must Ack (nil), not Nak-loop forever.
+func TestHandler_UserPermissionsUpdated_UnknownPermissionKey(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.UserPermissionsUpdated{
+		Permission: model.PermissionKey("future.unknown.key"),
+		Accounts:   []string{"alice"},
+		State:      model.PermissionState{Granted: true, UpdatedAt: time.UnixMilli(5000).UTC()},
+		Timestamp:  12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserPermissionsUpdated, Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getPermissionsApplies())
 }
 
 // A bot-DM member_added at the target MUST upsert a subscription only, never a rooms doc

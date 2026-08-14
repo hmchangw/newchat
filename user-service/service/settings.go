@@ -19,9 +19,10 @@ import (
 // letter/digit subtags, leading subtag letters-only. No whitelist by design.
 var translateTagRe = regexp.MustCompile(`^[A-Za-z]+(-[A-Za-z0-9]+)*$`)
 
-// GetSettings returns exactly the stored settings sub-document; {} when never
-// set — the server never injects defaults (absent = client-defined default).
-func (s *UserService) GetSettings(c *natsrouter.Context) (*model.UserSettings, error) {
+// GetSettings returns exactly the stored settings sub-document — {} when never set, the
+// server never injects defaults (absent = client-defined default) — plus the evaluated
+// admin-managed permissions: every known key, always present; no snapshot means false.
+func (s *UserService) GetSettings(c *natsrouter.Context) (*models.SettingsGetResponse, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
 	u, err := s.users.GetUserSettings(c, account)
@@ -31,10 +32,14 @@ func (s *UserService) GetSettings(c *natsrouter.Context) (*model.UserSettings, e
 	if u == nil {
 		return nil, errcode.NotFound("user not found")
 	}
-	if u.Settings == nil {
-		return &model.UserSettings{}, nil
+	var settings model.UserSettings
+	if u.Settings != nil {
+		settings = *u.Settings
 	}
-	return u.Settings, nil
+	return &models.SettingsGetResponse{
+		UserSettings: settings,
+		Permissions:  u.Permissions.Evaluated(time.Now().UTC()),
+	}, nil
 }
 
 // SetSettings partially updates the caller's settings — only the fields sent

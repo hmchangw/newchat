@@ -101,11 +101,12 @@ func (r *UserRepo) GetHRInfoByAccounts(ctx context.Context, accounts []string) (
 	return out, nil
 }
 
-// GetUserSettings returns the user's stored settings sub-document (Settings is
-// nil when never set); (nil, nil) when no active user matched.
+// GetUserSettings returns the user's stored settings and admin-managed permission
+// snapshot in one read (Settings is nil when never written, Permissions is nil until
+// an admin writes one); (nil, nil) when no active user matched.
 func (r *UserRepo) GetUserSettings(ctx context.Context, account string) (*model.User, error) {
 	return r.users.FindOne(ctx, activeUserFilter(account),
-		mongoutil.WithProjection(bson.M{"_id": 0, "settings": 1}),
+		mongoutil.WithProjection(bson.M{"_id": 0, "settings": 1, "permissions": 1}),
 	)
 }
 

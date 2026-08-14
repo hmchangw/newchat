@@ -120,7 +120,7 @@ func TestSetRoomOnDuty_MapsOnDutyToBothFlags(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 
 			rpc := &fakeRoomRPC{reply: okReply(t)}
-			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 			w := doOnDuty(h, "r1", tc.body)
 
@@ -156,7 +156,7 @@ func TestSetRoomOnDuty_OwnerRequiredWhenTurningOn(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 
 			rpc := &fakeRoomRPC{reply: okReply(t)}
-			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 			w := doOnDuty(h, "r1", tc.body)
 
@@ -173,7 +173,7 @@ func TestSetRoomOnDuty_TrimsOwnerAccount(t *testing.T) {
 	m := NewMockAdminStore(ctrl)
 
 	rpc := &fakeRoomRPC{reply: okReply(t)}
-	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 	w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"  alice  "}`)
 
@@ -199,7 +199,7 @@ func TestSetRoomOnDuty_InvalidBody(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 
 			rpc := &fakeRoomRPC{reply: okReply(t)}
-			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 			w := doOnDuty(h, "r1", tc.body)
 
@@ -246,7 +246,7 @@ func TestSetRoomOnDuty_DownstreamErrorsPassThrough(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 
 			rpc := &fakeRoomRPC{reply: errReply(tc.remote)}
-			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 			w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
 
@@ -278,7 +278,7 @@ func TestSetRoomOnDuty_TransportErrorIsUnavailable(t *testing.T) {
 			m := NewMockAdminStore(ctrl)
 
 			rpc := &fakeRoomRPC{err: tc.err}
-			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 			w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
 
@@ -294,7 +294,7 @@ func TestSetRoomOnDuty_OtherTransportErrorIsInternal(t *testing.T) {
 	m := NewMockAdminStore(ctrl)
 
 	rpc := &fakeRoomRPC{err: fmt.Errorf("connection refused")}
-	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 	w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
 
@@ -320,7 +320,7 @@ func TestSetRoomOnDuty_UnrecognizedReplyIsInternal(t *testing.T) {
 			m := NewMockAdminStore(ctrl) // strict mock: proves the handler does no store I/O
 
 			rpc := &fakeRoomRPC{reply: &nats.Msg{Data: tc.data}}
-			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+			h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 			w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
 
@@ -334,7 +334,7 @@ func TestSetRoomOnDuty_NilClientIsUnavailable(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	m := NewMockAdminStore(ctrl)
 
-	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), nil)
+	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), nil, nil)
 
 	w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
 
@@ -347,7 +347,7 @@ func TestSetRoomOnDuty_PropagatesRequestID(t *testing.T) {
 	m := NewMockAdminStore(ctrl)
 
 	rpc := &fakeRoomRPC{reply: okReply(t)}
-	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 	const reqID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
 	r := gin.New()
@@ -376,7 +376,7 @@ func TestSetRoomOnDuty_UnknownRemoteCodeIsInternal(t *testing.T) {
 	m := NewMockAdminStore(ctrl)
 
 	rpc := &fakeRoomRPC{reply: &nats.Msg{Data: []byte(`{"code":"teapot","error":"i am a teapot"}`)}}
-	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc)
+	h := newHandler(m, emptySessionStore(), onDutyTestCfg(), rpc, nil)
 
 	w := doOnDuty(h, "r1", `{"onDuty":true,"ownerAccount":"alice"}`)
 
