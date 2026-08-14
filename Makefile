@@ -241,6 +241,11 @@ fed-deps-up:
 	  echo "Single-site deps are running. Run 'make deps-down' first — the two stacks share host ports."; exit 1; \
 	} || true
 	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(FED_NATS_LOCAL) ] || [ ! -f $(FED_ENV_LOCAL) ]; then \
+	  if [ -f $(ENV_FILE) ]; then \
+	    cp $(ENV_FILE) $(ENV_FILE).bak; \
+	    echo "WARNING: $(ENV_FILE) already exists and is about to be regenerated with new NATS keys."; \
+	    echo "         Previous copy saved to $(ENV_FILE).bak — re-apply any local edits (e.g. DEV_MODE=false) after setup."; \
+	  fi; \
 	  echo "First-time setup: generating NATS confs + env files..."; \
 	  ./docker-local/setup.sh; \
 	fi
@@ -305,7 +310,7 @@ fed-logs:
 # databases so either portal can resolve any account; room-owned and
 # subscriber-owned rows are routed to their home site. See the seeding section
 # of docker-local/README.md.
-fed-seed:
+fed-seed: require-fed-deps
 	MONGO_DB=chat go run ./tools/seed-sample-data --site site-local --mongo-db chat
 	MONGO_DB=chat_remote VALKEY_ADDRS=localhost:6479 \
 	  go run ./tools/seed-sample-data --site site-remote --mongo-db chat_remote

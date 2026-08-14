@@ -472,6 +472,34 @@ func TestScopeToSite(t *testing.T) {
 	}
 }
 
+func TestValidateSite(t *testing.T) {
+	tests := []struct {
+		name    string
+		site    string
+		wantErr bool
+	}{
+		{name: "empty is unfiltered and valid", site: "", wantErr: false},
+		{name: "site-local is valid", site: "site-local", wantErr: false},
+		{name: "site-remote is valid", site: "site-remote", wantErr: false},
+		{name: "unrecognised value is rejected", site: "site-typo", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSite(tt.site)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "site-typo")
+				assert.Contains(t, err.Error(), siteLocal)
+				assert.Contains(t, err.Error(), siteRemote)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestResolveTarget(t *testing.T) {
 	tests := []struct {
 		name     string

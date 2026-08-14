@@ -98,6 +98,11 @@ func main() {
 	mongoDB := flag.String("mongo-db", "", "target database, overriding MONGO_DB")
 	flag.Parse()
 
+	if err := validateSite(*site); err != nil {
+		slog.Error("seed failed", "error", err)
+		os.Exit(1)
+	}
+
 	if *dryRun {
 		slog.Info("seed dry-run summary", "site", siteLabel(*site), "plan", dryRunSummary(*site))
 		return

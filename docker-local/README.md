@@ -228,6 +228,9 @@ at before you create anything by hand.
   Per-site encryption isolation is not testable in this environment.
 - **Shared Keycloak** is not site-scoped and `DEV_MODE=true` bypasses OIDC
   anyway.
+- **Shared avatar bucket.** `media-service` hardcodes `MINIO_BUCKET=avatars`
+  (not derived from `SITE_ID`, unlike upload-service's `chat-${SITE_ID}`), so
+  both sites read and write the same MinIO bucket for avatars.
 - **Two browser origins** (`:3000` and `:3100`) rather than two tabs on one
   origin, so the two logged-in sessions do not contend over localStorage.
 - **~8GB RAM.** Release valves are `fed-up-lean` and skipping the o11y stack.

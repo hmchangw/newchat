@@ -334,7 +334,8 @@ write_fed_env site-remote chat-site-remote chat_remote chat_remote "$SCRIPT_DIR/
   "UPLOAD_SERVICE_HOST_PORT=8186" \
   "TCARD_SERVICE_HOST_PORT=8187" \
   "SEARCH_SERVICE_HOST_PORT=19190" \
-  "PORTAL_URL=http://localhost:8185"
+  "PORTAL_URL=http://localhost:8185" \
+  "CHAT_BASE_URL=http://localhost:3100"
 
 echo "Wrote $SCRIPT_DIR/.env.site-local"
 echo "Wrote $SCRIPT_DIR/.env.site-remote"

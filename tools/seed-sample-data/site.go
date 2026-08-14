@@ -1,6 +1,10 @@
 package main
 
-import "github.com/hmchangw/chat/pkg/model"
+import (
+	"fmt"
+
+	"github.com/hmchangw/chat/pkg/model"
+)
 
 // Site routing: which site's database each seeded row belongs in.
 //
@@ -92,6 +96,19 @@ func scopeToSite[T any](items []T, site string, homeSite func(T) string) []T {
 		return items
 	}
 	return filterBySite(items, site, homeSite)
+}
+
+// validateSite rejects any --site value other than the empty string
+// (unfiltered, the single-site default) or one of the two known sites. An
+// unrecognised value must fail fast, before any database connection or
+// write, rather than silently scoping every collection to zero rows.
+func validateSite(site string) error {
+	switch site {
+	case "", siteLocal, siteRemote:
+		return nil
+	default:
+		return fmt.Errorf("invalid --site %q: accepted values are \"\" (unfiltered), %q, %q", site, siteLocal, siteRemote)
+	}
 }
 
 // resolveTarget picks the database and site to seed. The --mongo-db flag
