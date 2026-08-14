@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // messageKindLabel and persistResult are closed enums so a typo is a compile
@@ -41,8 +42,14 @@ type persistenceMetrics struct {
 }
 
 func newPersistenceMetrics(meter metric.Meter) *persistenceMetrics {
-	counter, _ := meter.Int64Counter("message_worker_persistence_total",
+	noopMeter := noop.NewMeterProvider().Meter("message-worker")
+	counter, err := meter.Int64Counter("message_worker_persistence_total",
 		metric.WithDescription("Cassandra message persistence attempts by bounded message kind and result."))
+	if err != nil {
+		// Telemetry must never block startup: fall back to a no-op instrument so
+		// the service runs blind on this metric rather than not at all.
+		counter, _ = noopMeter.Int64Counter("message_worker_persistence_total")
+	}
 	m := &persistenceMetrics{
 		outcomes: counter,
 		opts:     make(map[persistKey]metric.MeasurementOption, len(allMessageKinds)*len(allPersistResults)),

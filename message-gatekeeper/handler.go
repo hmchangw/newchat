@@ -120,7 +120,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		// when account or requestId is unusable. Ack — malformed is not retryable.
 		h.sendReply(ctx, accountFromSubject(msg.Subject()), &req, errnats.Marshal(ctx, errcode.BadRequest("invalid message subject")))
 		if err := msg.Ack(); err != nil {
-			slog.Error("failed to ack message", "error", err)
+			slog.ErrorContext(ctx, "failed to ack message", "error", err, "request_id", req.RequestID)
 		}
 		return
 	}
@@ -138,7 +138,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		debugFlowRejected(ctx, req.RequestID, "unmarshal")
 		h.sendReply(ctx, account, &req, errnats.Marshal(ctx, bad))
 		if err := msg.Ack(); err != nil {
-			slog.Error("failed to ack message", "error", err)
+			slog.ErrorContext(ctx, "failed to ack message", "error", err, "request_id", req.RequestID)
 		}
 		return
 	}
@@ -167,7 +167,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 			debugFlowRejected(ctx, req.RequestID, string(ee.Code))
 			h.sendReply(ctx, account, &req, errnats.Marshal(ctx, err))
 			if err := msg.Ack(); err != nil {
-				slog.Error("failed to ack message", "error", err)
+				slog.ErrorContext(ctx, "failed to ack message", "error", err, "request_id", req.RequestID)
 			}
 		} else {
 			final := natsmetrics.IsFinalDeliveryFromContext(ctx)
@@ -187,7 +187,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 			slog.Log(ctx, logctx.LevelFlow, "gatekeeper nak", "phase", "nak", "request_id", req.RequestID)
 			slog.ErrorContext(ctx, "process message failed (infra)", "error", err, "account", account, "room_id", roomID)
 			if err := msg.Nak(); err != nil {
-				slog.Error("failed to nack message", "error", err)
+				slog.ErrorContext(ctx, "failed to nack message", "error", err, "request_id", req.RequestID)
 			}
 		}
 		return
@@ -197,7 +197,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	h.metrics.Record(ctx, resultAccepted, reasonNone)
 
 	if err := msg.Ack(); err != nil {
-		slog.Error("failed to ack message", "err", err)
+		slog.ErrorContext(ctx, "failed to ack message", "error", err, "request_id", req.RequestID)
 	}
 }
 

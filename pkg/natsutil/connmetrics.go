@@ -2,10 +2,8 @@ package natsutil
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 
-	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -17,8 +15,11 @@ import (
 // Without it a broker outage and a wedged consumer loop look identical: the
 // JetStream consumer-loop gauge can stay at one while the client is detached,
 // and a Core NATS publish keeps returning nil because nats.go buffers across a
-// disconnect. The events counter is the only place a reconnect-buffer overflow
-// — the one condition that means client-side message loss — becomes queryable.
+// disconnect. Reconnect-buffer overflow — the one condition that means
+// client-side message loss — is not reported here: nats.go returns
+// ErrReconnectBufExceeded synchronously from Publish and never routes it
+// through ErrorHandler, so it is counted at the publish boundary instead, as
+// chat.nats.publish.attempts{outcome="buffer_full"}.
 //
 // service_name and site are not labels here: they come from the OTel resource
 // that pkg/obs installs, which is also how nats_slow_consumer_events_total is
@@ -34,7 +35,6 @@ type connMetrics struct {
 	disconnectedOpt metric.MeasurementOption
 	reconnectedOpt  metric.MeasurementOption
 	closedOpt       metric.MeasurementOption
-	bufferFullOpt   metric.MeasurementOption
 	asyncErrorOpt   metric.MeasurementOption
 }
 
@@ -65,7 +65,6 @@ func newConnMetrics(meter metric.Meter) *connMetrics {
 		disconnectedOpt: event("disconnected"),
 		reconnectedOpt:  event("reconnected"),
 		closedOpt:       event("closed"),
-		bufferFullOpt:   event("buffer_full"),
 		asyncErrorOpt:   event("async_error"),
 	}
 }
@@ -102,18 +101,15 @@ func (c *connMetrics) Closed(ctx context.Context) {
 	c.markDown(ctx, c.closedOpt)
 }
 
-// AsyncError classifies the connection-level async errors that matter to a
-// failure campaign. A reconnect-buffer overflow is client-side loss and gets
-// its own event; slow consumers keep their existing dedicated counter.
-func (c *connMetrics) AsyncError(ctx context.Context, err error) {
+// AsyncError counts the connection-level async errors nats.go reports through
+// ErrorHandler. The error text is never a label: it is unbounded, and slow
+// consumers — the one async error worth separating — already have their own
+// dedicated counter.
+func (c *connMetrics) AsyncError(ctx context.Context, _ error) {
 	if c == nil {
 		return
 	}
-	opt := c.asyncErrorOpt
-	if errors.Is(err, nats.ErrReconnectBufExceeded) {
-		opt = c.bufferFullOpt
-	}
-	c.events.Add(ctx, 1, opt)
+	c.events.Add(ctx, 1, c.asyncErrorOpt)
 }
 
 func (c *connMetrics) markUp(ctx context.Context, opt metric.MeasurementOption) {

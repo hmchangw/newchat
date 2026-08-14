@@ -319,7 +319,12 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	wg.Add(1)
 	go func() {
+		// The loop itself is counted so shutdown, which stops the iterator and
+		// then waits on wg, cannot pass through while a message Next already
+		// returned is still on its way to a worker.
+		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {

@@ -16,6 +16,19 @@ type Iterator interface {
 type ClassifyEvent func(jetstream.Msg) EventType
 type ProcessMessage func(context.Context, *Message)
 
+// Start registers the consumer loop with wg and then runs Consume in its own
+// goroutine. Registering before returning is the point: shutdown stops the
+// iterator and then waits on wg, so a loop counted only once it dispatches a
+// message lets that wait pass through while a message Next already returned is
+// still on its way to a worker.
+func Start(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		Consume(ctx, iter, consumer, maxWorkers, maxDeliver, wg, classify, process)
+	}()
+}
+
 // Consume runs the existing bounded concurrent pull pattern. Callers mark the
 // loop started only after iterator creation succeeds; Consume marks it stopped
 // before returning from a terminal Next failure.
@@ -24,6 +37,12 @@ type ProcessMessage func(context.Context, *Message)
 // classifier that parses the payload would otherwise serialize the whole
 // consumer behind one message at a time.
 func Consume(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) {
+	// A zero maxWorkers would make sem unbuffered and park the dispatch send
+	// forever — the loop stops consuming with no error and no terminal metric,
+	// while the loop-up gauge still reads 1. A negative one panics in make.
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
 	sem := make(chan struct{}, maxWorkers)
 	for {
 		msgCtx, msg, err := iter.Next()

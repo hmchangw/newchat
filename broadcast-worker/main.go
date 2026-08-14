@@ -247,7 +247,7 @@ func main() {
 	consumerMetrics.LoopStarted(ctx)
 
 	var wg sync.WaitGroup
-	go natsmetrics.Consume(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		guardedProcessor(broadcastProcessor(handler)))
 

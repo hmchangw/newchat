@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // notifyKind and notifyResult are closed enums so a typo is a compile error
@@ -41,8 +42,14 @@ type notificationMetrics struct {
 }
 
 func newNotificationMetrics(meter metric.Meter) *notificationMetrics {
-	counter, _ := meter.Int64Counter("notification_worker_outcomes_total",
+	noopMeter := noop.NewMeterProvider().Meter("notification-worker")
+	counter, err := meter.Int64Counter("notification_worker_outcomes_total",
 		metric.WithDescription("Notification processing outcomes by bounded kind and result."))
+	if err != nil {
+		// Telemetry must never block startup: fall back to a no-op instrument so
+		// the service runs blind on this metric rather than not at all.
+		counter, _ = noopMeter.Int64Counter("notification_worker_outcomes_total")
+	}
 	m := &notificationMetrics{
 		outcomes: counter,
 		opts:     make(map[notifyKey]metric.MeasurementOption, len(allNotifyKinds)*len(allNotifyResults)),

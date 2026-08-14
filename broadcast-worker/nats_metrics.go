@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
@@ -59,10 +60,19 @@ type broadcastMetrics struct {
 }
 
 func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
-	fanout, _ := meter.Int64Histogram("broadcast_worker_fanout_recipients",
+	noopMeter := noop.NewMeterProvider().Meter("broadcast-worker")
+	fanout, err := meter.Int64Histogram("broadcast_worker_fanout_recipients",
 		metric.WithDescription("Intended fan-out recipients by bounded room and event kind."))
-	deliveries, _ := meter.Int64Counter("broadcast_worker_recipient_deliveries_total",
+	if err != nil {
+		// Telemetry must never block startup: fall back to a no-op instrument so
+		// the service runs blind on this metric rather than not at all.
+		fanout, _ = noopMeter.Int64Histogram("broadcast_worker_fanout_recipients")
+	}
+	deliveries, err := meter.Int64Counter("broadcast_worker_recipient_deliveries_total",
 		metric.WithDescription("Actual Core NATS recipient publish attempts by result."))
+	if err != nil {
+		deliveries, _ = noopMeter.Int64Counter("broadcast_worker_recipient_deliveries_total")
+	}
 	m := &broadcastMetrics{
 		fanout:       fanout,
 		deliveries:   deliveries,

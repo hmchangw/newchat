@@ -98,8 +98,9 @@ func TestConnMetrics_EventLabelsAreBounded(t *testing.T) {
 	m.Disconnected(context.Background(), errors.New("some dynamic error text"))
 	m.Reconnected(context.Background())
 	m.Closed(context.Background())
-	// A reconnect-buffer overflow is the one async error that means client-side
-	// message loss, so it gets its own bounded event value.
+	// Every async error collapses to one bounded value. A reconnect-buffer
+	// overflow never arrives here — nats.go returns it synchronously from
+	// Publish — so it must not have an event value of its own to imply it does.
 	m.AsyncError(context.Background(), nats.ErrReconnectBufExceeded)
 	m.AsyncError(context.Background(), errors.New("unclassified async failure"))
 
@@ -108,8 +109,7 @@ func TestConnMetrics_EventLabelsAreBounded(t *testing.T) {
 		"disconnected": 1,
 		"reconnected":  1,
 		"closed":       1,
-		"buffer_full":  1,
-		"async_error":  1,
+		"async_error":  2,
 	}, eventCounts(t, reader))
 }
 

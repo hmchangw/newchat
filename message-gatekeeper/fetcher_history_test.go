@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/trace/noop"
 
 	o11ynats "github.com/flywindy/o11y/nats"
@@ -69,10 +71,12 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		fetcher := newHistoryParentFetcher(nc, baseURL, natsmetrics.Publisher{})
+		pub, requests := requestMetricFor(t)
+		fetcher := newHistoryParentFetcher(nc, baseURL, pub)
 		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
 		require.NoError(t, err)
 		require.NotNil(t, got)
+		assert.Equal(t, int64(1), requests("success"), "a served history request must be counted as success")
 		assert.Equal(t, messageID, got.MessageID)
 		assert.Equal(t, roomID, got.RoomID)
 		assert.Equal(t, "a reply inside thread T", got.Msg)
@@ -119,10 +123,13 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		fetcher := newHistoryParentFetcher(nc, baseURL, natsmetrics.Publisher{})
+		pub, requests := requestMetricFor(t)
+		fetcher := newHistoryParentFetcher(nc, baseURL, pub)
 		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)
+		assert.Equal(t, int64(1), requests("success"),
+			"a replied-to request is a transport success even when the payload is an error envelope")
 		assert.Contains(t, err.Error(), "message not found")
 	})
 
@@ -130,9 +137,46 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		nc := startTestNATS(t)
 		// Intentionally no subscriber: nc.Request must fail with "no responders".
 
-		fetcher := newHistoryParentFetcher(nc, baseURL, natsmetrics.Publisher{})
+		pub, requests := requestMetricFor(t)
+		fetcher := newHistoryParentFetcher(nc, baseURL, pub)
 		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)
+		assert.Equal(t, int64(1), requests("no_responders"), "an unanswered history request must be counted as no_responders")
 	})
+}
+
+// requestMetricFor builds a Publisher backed by a manual reader so a test can
+// assert the history request outcome the fetcher records. Injecting a zero
+// natsmetrics.Publisher makes Request a no-op, which proves nothing.
+func requestMetricFor(t *testing.T) (natsmetrics.Publisher, func(outcome string) int64) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	pub := natsmetrics.NewFromProvider(mp).Publisher("message-gatekeeper", "s1")
+	return pub, func(outcome string) int64 {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(context.Background(), &rm))
+		var total int64
+		for _, scope := range rm.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				if m.Name != "chat.nats.requests" {
+					continue
+				}
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				require.True(t, ok, "chat.nats.requests must be a counter")
+				for _, dp := range sum.DataPoints {
+					got := map[string]string{}
+					for _, kv := range dp.Attributes.ToSlice() {
+						got[string(kv.Key)] = kv.Value.AsString()
+					}
+					if got["operation"] == string(natsmetrics.OperationHistoryGetMessage) && got["outcome"] == outcome {
+						total += dp.Value
+					}
+				}
+			}
+		}
+		return total
+	}
 }

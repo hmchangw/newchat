@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // gatekeeperResult and gatekeeperReasonCode are closed enums so a typo is a
@@ -49,8 +50,14 @@ type gatekeeperKey struct {
 }
 
 func newGatekeeperMetrics(meter metric.Meter) *gatekeeperMetrics {
-	counter, _ := meter.Int64Counter("message_gatekeeper_messages_total",
+	noopMeter := noop.NewMeterProvider().Meter("message-gatekeeper")
+	counter, err := meter.Int64Counter("message_gatekeeper_messages_total",
 		metric.WithDescription("Gatekeeper business outcomes by bounded result and reason."))
+	if err != nil {
+		// Telemetry must never block startup: fall back to a no-op instrument so
+		// the service runs blind on this metric rather than not at all.
+		counter, _ = noopMeter.Int64Counter("message_gatekeeper_messages_total")
+	}
 	m := &gatekeeperMetrics{
 		messages: counter,
 		opts:     make(map[gatekeeperKey]metric.MeasurementOption, len(allGatekeeperResults)*len(allGatekeeperReasons)),

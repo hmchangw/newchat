@@ -608,6 +608,7 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 	msg := evt.Message
 	// Log-and-drop on malformed payloads: NAK would loop forever on a publisher contract violation.
 	if evt.ReactionDelta == nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		slog.ErrorContext(ctx, "reacted event missing ReactionDelta; dropping",
 			"messageID", msg.ID,
 			"roomID", msg.RoomID,
@@ -617,6 +618,7 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 		return nil
 	}
 	if msg.UpdatedAt == nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		slog.ErrorContext(ctx, "reacted event missing UpdatedAt; dropping",
 			"messageID", msg.ID,
 			"roomID", msg.RoomID,
