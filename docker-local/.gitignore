@@ -2,3 +2,7 @@
 .env
 nats.conf
 backend.creds
+nats-site-local.conf
+nats-site-remote.conf
+.env.site-local
+.env.site-remote
