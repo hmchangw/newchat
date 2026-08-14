@@ -120,3 +120,39 @@ func TestFilterBySite_EverySubscriptionLandsAtExactlyOneSite(t *testing.T) {
 	assert.Len(t, append(local, remote...), len(all),
 		"no subscription is dropped or duplicated across the two sites")
 }
+
+func TestResolveTarget(t *testing.T) {
+	tests := []struct {
+		name     string
+		envDB    string
+		flagDB   string
+		flagSite string
+		wantDB   string
+		wantSite string
+	}{
+		{
+			name:   "defaults match the single-site stack",
+			envDB:  "chat",
+			wantDB: "chat", wantSite: "site-local",
+		},
+		{
+			name:  "flag overrides the env database",
+			envDB: "chat", flagDB: "chat_remote", flagSite: "site-remote",
+			wantDB: "chat_remote", wantSite: "site-remote",
+		},
+		{
+			name:  "empty flag falls back to env",
+			envDB: "chat_custom", flagDB: "", flagSite: "site-local",
+			wantDB: "chat_custom", wantSite: "site-local",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, site := resolveTarget(tt.envDB, tt.flagDB, tt.flagSite)
+
+			assert.Equal(t, tt.wantDB, db)
+			assert.Equal(t, tt.wantSite, site)
+		})
+	}
+}

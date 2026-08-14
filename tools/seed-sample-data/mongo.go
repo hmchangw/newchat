@@ -106,8 +106,12 @@ type mongoCounts struct {
 	ThreadSubscriptions int64
 }
 
-// upsertAll writes every Mongo collection idempotently via BulkUpsertByID.
-func upsertAll(ctx context.Context, db *mongo.Database) (mongoCounts, error) {
+// upsertAll writes every Mongo collection idempotently via BulkUpsertByID,
+// filtered to the rows that belong in site's database. users and hr_employee
+// are the exception: the full directory goes into every site's database so
+// either portal can resolve any account and tell a client where its home
+// site is — this mirrors what HR replication does in production.
+func upsertAll(ctx context.Context, db *mongo.Database, site string) (mongoCounts, error) {
 	var c mongoCounts
 
 	users := mongoutil.NewCollection[model.User](db.Collection("users"))
@@ -124,42 +128,42 @@ func upsertAll(ctx context.Context, db *mongo.Database) (mongoCounts, error) {
 	c.HREmployees = hrCount
 
 	rooms := mongoutil.NewCollection[model.Room](db.Collection("rooms"))
-	res, err = rooms.BulkUpsertByID(ctx, BuildRoomsWithLastMsg(), func(r model.Room) string { return r.ID })
+	res, err = rooms.BulkUpsertByID(ctx, filterBySite(BuildRoomsWithLastMsg(), site, roomHomeSite), func(r model.Room) string { return r.ID })
 	if err != nil {
 		return c, fmt.Errorf("seed rooms: %w", err)
 	}
 	c.Rooms = touched(res)
 
 	subs := mongoutil.NewCollection[model.Subscription](db.Collection("subscriptions"))
-	res, err = subs.BulkUpsertByID(ctx, BuildSubscriptions(), func(s model.Subscription) string { return s.ID })
+	res, err = subs.BulkUpsertByID(ctx, filterBySite(BuildSubscriptions(), site, subscriptionHomeSite), func(s model.Subscription) string { return s.ID })
 	if err != nil {
 		return c, fmt.Errorf("seed subscriptions: %w", err)
 	}
 	c.Subscriptions = touched(res)
 
 	members := mongoutil.NewCollection[model.RoomMember](db.Collection("room_members"))
-	res, err = members.BulkUpsertByID(ctx, BuildRoomMembers(), func(m model.RoomMember) string { return m.ID })
+	res, err = members.BulkUpsertByID(ctx, filterBySite(BuildRoomMembers(), site, memberHomeSite), func(m model.RoomMember) string { return m.ID })
 	if err != nil {
 		return c, fmt.Errorf("seed room_members: %w", err)
 	}
 	c.RoomMembers = touched(res)
 
 	msgs := mongoutil.NewCollection[model.Message](db.Collection("messages"))
-	res, err = msgs.BulkUpsertByID(ctx, BuildMessages(), func(m model.Message) string { return m.ID })
+	res, err = msgs.BulkUpsertByID(ctx, filterBySite(BuildMessages(), site, messageHomeSite), func(m model.Message) string { return m.ID })
 	if err != nil {
 		return c, fmt.Errorf("seed messages: %w", err)
 	}
 	c.Messages = touched(res)
 
 	trs := mongoutil.NewCollection[model.ThreadRoom](db.Collection("thread_rooms"))
-	res, err = trs.BulkUpsertByID(ctx, BuildThreadRooms(), func(t model.ThreadRoom) string { return t.ID })
+	res, err = trs.BulkUpsertByID(ctx, filterBySite(BuildThreadRooms(), site, threadRoomHomeSite), func(t model.ThreadRoom) string { return t.ID })
 	if err != nil {
 		return c, fmt.Errorf("seed thread_rooms: %w", err)
 	}
 	c.ThreadRooms = touched(res)
 
 	tsubs := mongoutil.NewCollection[model.ThreadSubscription](db.Collection("thread_subscriptions"))
-	res, err = tsubs.BulkUpsertByID(ctx, BuildThreadSubscriptions(), func(t model.ThreadSubscription) string { return t.ID })
+	res, err = tsubs.BulkUpsertByID(ctx, filterBySite(BuildThreadSubscriptions(), site, threadSubscriptionHomeSite), func(t model.ThreadSubscription) string { return t.ID })
 	if err != nil {
 		return c, fmt.Errorf("seed thread_subscriptions: %w", err)
 	}

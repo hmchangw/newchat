@@ -54,20 +54,46 @@ func roomSiteByID() map[string]string {
 // Home-site accessors, one per fixture type, so call sites read as intent
 // rather than as an inline closure. Each rebuilds roomSiteByID/userSiteByAccount
 // per call; with a handful of seeded rooms that is not worth caching.
-func roomHomeSite(r model.Room) string              { return r.SiteID }
-func messageHomeSite(m model.Message) string        { return roomSiteByID()[m.RoomID] }
-func memberHomeSite(m model.RoomMember) string      { return roomSiteByID()[m.RoomID] }
-func threadRoomHomeSite(tr model.ThreadRoom) string { return roomSiteByID()[tr.RoomID] }
-func roomKeyHomeSite(e RoomKeyEntry) string         { return roomSiteByID()[e.RoomID] }
+//
+//nolint:gocritic // hugeParam: params are passed by value to match filterBySite's func(T) string shape
+func roomHomeSite(r model.Room) string { return r.SiteID }
 
+//nolint:gocritic // hugeParam: params are passed by value to match filterBySite's func(T) string shape
+func messageHomeSite(m model.Message) string { return roomSiteByID()[m.RoomID] }
+
+//nolint:gocritic // hugeParam: params are passed by value to match filterBySite's func(T) string shape
+func memberHomeSite(m model.RoomMember) string { return roomSiteByID()[m.RoomID] }
+
+//nolint:gocritic // hugeParam: params are passed by value to match filterBySite's func(T) string shape
+func threadRoomHomeSite(tr model.ThreadRoom) string { return roomSiteByID()[tr.RoomID] }
+
+func roomKeyHomeSite(e RoomKeyEntry) string { return roomSiteByID()[e.RoomID] }
+
+//nolint:gocritic // hugeParam: params are passed by value to match filterBySite's func(T) string shape
 func subscriptionHomeSite(s model.Subscription) string {
 	return userSiteByAccount()[s.User.Account]
 }
 
+//nolint:gocritic // hugeParam: params are passed by value to match filterBySite's func(T) string shape
 func threadSubscriptionHomeSite(ts model.ThreadSubscription) string {
 	return userSiteByAccount()[ts.UserAccount]
 }
 
 func restrictedCacheHomeSite(e RestrictedCacheEntry) string {
 	return userSiteByAccount()[e.Account]
+}
+
+// resolveTarget picks the database and site to seed. The --mongo-db flag
+// overrides MONGO_DB when non-empty; an empty --site defaults to site-local so
+// a plain `make seed` behaves exactly as it did before two-site support.
+func resolveTarget(envDB, flagDB, flagSite string) (db, site string) {
+	db = envDB
+	if flagDB != "" {
+		db = flagDB
+	}
+	site = flagSite
+	if site == "" {
+		site = "site-local"
+	}
+	return db, site
 }
