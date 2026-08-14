@@ -26,11 +26,11 @@ chat.user.{account}.room.{roomID}.{siteID}.msg.send
 
 | Env Var              | Default                    | Description                     |
 |----------------------|----------------------------|---------------------------------|
-| `NATS_URL`           | `nats://localhost:4222`    | NATS server URL                 |
-| `SITE_ID`            | `site-local`               | Site identifier                 |
-| `MONGO_URI`          | `mongodb://localhost:27017` | MongoDB connection string       |
+| `NATS_URL`           | required                   | NATS server URL                 |
+| `SITE_ID`            | required                   | Site identifier                 |
+| `MONGO_URI`          | required                   | MongoDB connection string       |
 | `MONGO_DB`           | `chat`                     | MongoDB database name           |
-| `CASSANDRA_HOSTS`    | `localhost`                | Comma-separated Cassandra hosts |
+| `CASSANDRA_HOSTS`    | required                   | Comma-separated Cassandra hosts |
 | `CASSANDRA_KEYSPACE` | `chat`                     | Cassandra keyspace              |
 | `MAX_WORKERS`        | `100`                      | Max concurrent message handlers |
 

@@ -36,7 +36,7 @@ type config struct {
 	NatsURL            string                  `env:"NATS_URL,required"`
 	NatsCredsFile      string                  `env:"NATS_CREDS_FILE"      envDefault:""`
 	SiteID             string                  `env:"SITE_ID,required"`
-	CassandraHosts     string                  `env:"CASSANDRA_HOSTS"      envDefault:"localhost"`
+	CassandraHosts     string                  `env:"CASSANDRA_HOSTS,required,notEmpty"`
 	CassandraKeyspace  string                  `env:"CASSANDRA_KEYSPACE"   envDefault:"chat"`
 	CassandraUsername  string                  `env:"CASSANDRA_USERNAME"   envDefault:""`
 	CassandraPassword  string                  `env:"CASSANDRA_PASSWORD"   envDefault:""`
