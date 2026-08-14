@@ -132,9 +132,17 @@ func messageDedupSeed(ctx context.Context, handler, roomID, payloadSeed string) 
 	return payloadSeed
 }
 
-// historySharedSincePtr returns nil for unrestricted history; req.Timestamp under HistoryModeNone.
-func historySharedSincePtr(history model.HistoryConfig, timestamp int64, roomID string) *int64 {
+// historySharedSincePtr resolves the HSS for members added by this request.
+// mode "none" floors new members at the accept timestamp. Any other mode is
+// share-all, but capped by the inherited value (the requester's own HSS,
+// stamped by room-service) so a restricted adder can never grant more history
+// than they can see. Non-positive values are never emitted (see
+// model.RoomMemberEvent invariant: nil, never &0).
+func historySharedSincePtr(history model.HistoryConfig, inherited *int64, timestamp int64, roomID string) *int64 {
 	if history.Mode != model.HistoryModeNone {
+		if inherited != nil && *inherited > 0 {
+			return inherited
+		}
 		return nil
 	}
 	if timestamp <= 0 {
@@ -970,7 +978,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		// Resolve once via the shared helper so the local sub, the per-user
 		// SubscriptionUpdateEvent fan-out, and the cross-site MemberAddEvent
 		// all carry the same HistorySharedSince value.
-		if ms := historySharedSincePtr(req.History, req.Timestamp, req.RoomID); ms != nil {
+		if ms := historySharedSincePtr(req.History, req.HistorySharedSince, req.Timestamp, req.RoomID); ms != nil {
 			t := time.UnixMilli(*ms).UTC()
 			sub.HistorySharedSince = &t
 		}
@@ -1151,7 +1159,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			newOrgs++
 		}
 	}
-	historySharedSince := historySharedSincePtr(req.History, req.Timestamp, req.RoomID)
+	historySharedSince := historySharedSincePtr(req.History, req.HistorySharedSince, req.Timestamp, req.RoomID)
 	if len(actualAccounts) > 0 || len(needIRM) > 0 || newOrgs > 0 {
 		memberAddEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,

@@ -2448,6 +2448,91 @@ func TestProcessAddMembers_PopulatesSubName(t *testing.T) {
 	assert.Equal(t, model.RoomTypeChannel, capturedSubs[0].RoomType)
 }
 
+// historySharedSincePtr: the share-all branch must honor an inherited cap
+// (requester's own HSS, stamped by room-service); mode none keeps flooring at
+// the accept timestamp and ignores the cap (now >= any cap).
+func TestHistorySharedSincePtr_InheritedCap(t *testing.T) {
+	ts := int64(1740000000000)
+	capMs := int64(1700000000000)
+	nonPositive := int64(0)
+	cases := []struct {
+		name      string
+		history   model.HistoryConfig
+		inherited *int64
+		timestamp int64
+		want      *int64
+	}{
+		{"mode none uses timestamp", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, ts, &ts},
+		{"mode none ignores inherited cap", model.HistoryConfig{Mode: model.HistoryModeNone}, &capMs, ts, &ts},
+		{"mode none missing timestamp emits nil", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, 0, nil},
+		{"mode all without cap emits nil", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, ts, nil},
+		{"mode all inherits cap", model.HistoryConfig{Mode: model.HistoryModeAll}, &capMs, ts, &capMs},
+		{"empty mode inherits cap", model.HistoryConfig{}, &capMs, ts, &capMs},
+		{"non-positive cap emits nil", model.HistoryConfig{Mode: model.HistoryModeAll}, &nonPositive, ts, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := historySharedSincePtr(tc.history, tc.inherited, tc.timestamp, "r1")
+			if tc.want == nil {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, *tc.want, *got)
+		})
+	}
+}
+
+// End-to-end through processAddMembers: an inherited cap on a share-all add
+// must land on the created subscription and on the MemberAddEvent.
+func TestProcessAddMembers_InheritedCapPropagates(t *testing.T) {
+	h, mockStore, published := newAddMembersTestHandler(t)
+	ctx := natsutil.WithRequestID(context.Background(), "0193abcd-0193-7abc-89ab-0193abcd0004")
+
+	const inheritedMs = int64(1700000000000)
+
+	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-A",
+	}, nil)
+	mockStore.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").
+		Return([]AddMemberCandidate{{Account: "bob"}}, nil)
+	mockStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return([]model.User{
+		{ID: "u_bob", Account: "bob", SiteID: "site-A", EngName: "X", ChineseName: "X"},
+	}, nil)
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
+		ID: "u_alice", Account: "alice", SiteID: "site-A", EngName: "Alice", ChineseName: "愛麗絲",
+	}, nil)
+	var capturedSubs []*model.Subscription
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, subs []*model.Subscription) error {
+			capturedSubs = subs
+			return nil
+		})
+	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
+	expectGetRoom(mockStore, "r1", "eng")
+	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+
+	hss := inheritedMs
+	body, err := json.Marshal(model.AddMembersRequest{
+		RoomID: "r1", Users: []string{"bob"},
+		RequesterID: "u_alice", RequesterAccount: "alice",
+		Timestamp:          1740000000000,
+		History:            model.HistoryConfig{Mode: model.HistoryModeAll},
+		HistorySharedSince: &hss,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.processAddMembers(ctx, body))
+
+	require.Len(t, capturedSubs, 1)
+	require.NotNil(t, capturedSubs[0].HistorySharedSince,
+		"share-all add by a capped requester must cap the new subscription")
+	assert.Equal(t, time.UnixMilli(inheritedMs).UTC(), *capturedSubs[0].HistorySharedSince)
+
+	evt, _ := findMemberAddEvent(t, published(), "r1")
+	require.NotNil(t, evt.HistorySharedSince, "MemberAddEvent must carry the inherited cap")
+	assert.Equal(t, inheritedMs, *evt.HistorySharedSince)
+}
+
 // Task 14b: HistoryModeNone — sub.HistorySharedSince falls back to acceptedAt (req.Timestamp).
 func TestProcessAddMembers_HistoryNone_NoTimestamp(t *testing.T) {
 	h, mockStore, _ := newAddMembersTestHandler(t)
