@@ -65,15 +65,19 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 		nats.ReconnectWait(defaultReconnectWait),
 		nats.DrainTimeout(defaultDrainTimeout),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			connEvents.Disconnected(ctx, err)
 			log.Warn("nats disconnected", "error", err)
 		}),
 		nats.ReconnectHandler(func(c *nats.Conn) {
+			connEvents.Reconnected(ctx)
 			log.Info("nats reconnected", "url", c.ConnectedUrl())
 		}),
 		nats.ClosedHandler(func(_ *nats.Conn) {
+			connEvents.Closed(ctx)
 			log.Warn("nats connection closed")
 		}),
 		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			connEvents.AsyncError(ctx, err)
 			if errors.Is(err, nats.ErrSlowConsumer) {
 				logSlowConsumer(log, sub)
 				return
@@ -99,5 +103,8 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 	if err != nil {
 		return nil, fmt.Errorf("connect nats: %w", err)
 	}
+	// The library fires no callback for the first successful connect, so the
+	// gauge would stay at zero until the first disconnect without this.
+	connEvents.Connected(ctx)
 	return conn, nil
 }

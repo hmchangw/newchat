@@ -158,10 +158,10 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		}
 		newTcount, err := h.store.SaveThreadMessage(ctx, &evt.Message, sender, evt.SiteID, threadRoomID)
 		if err != nil {
-			h.metrics.Record(ctx, "thread_reply", "error")
+			h.metrics.Record(ctx, kindThreadReply, persistError)
 			return fmt.Errorf("save thread message: %w", err)
 		}
-		h.metrics.Record(ctx, "thread_reply", "success")
+		h.metrics.Record(ctx, kindThreadReply, persistSuccess)
 		debugFlowPersisted(ctx, evt.Message.ID, true)
 		// Suppress the live tcount badge for migrated replies: the source already delivered it, and the
 		// badge carries no migration header so broadcast-worker would re-notify. The count is persisted above.
@@ -172,27 +172,27 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		}
 	} else {
 		if err := h.store.SaveMessage(ctx, &evt.Message, sender, evt.SiteID); err != nil {
-			h.metrics.Record(ctx, messageKind(&evt.Message), "error")
+			h.metrics.Record(ctx, messageKind(&evt.Message), persistError)
 			return fmt.Errorf("save message: %w", err)
 		}
-		h.metrics.Record(ctx, messageKind(&evt.Message), "success")
+		h.metrics.Record(ctx, messageKind(&evt.Message), persistSuccess)
 		debugFlowPersisted(ctx, evt.Message.ID, false)
 	}
 
 	return nil
 }
 
-func messageKind(msg *model.Message) string {
+func messageKind(msg *model.Message) messageKindLabel {
 	if msg.ThreadParentMessageID != "" {
-		return "thread_reply"
+		return kindThreadReply
 	}
 	if model.IsSystemMessageType(msg.Type) {
-		return "system"
+		return kindSystem
 	}
 	if msg.Type == "" || msg.Type == model.MessageTypeImportant {
-		return "user"
+		return kindUser
 	}
-	return "unknown"
+	return kindUnknown
 }
 
 // reprojectUnverifiedQuote corrects an untrusted quoted-parent snapshot before the

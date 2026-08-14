@@ -177,7 +177,7 @@ func TestTrackedMessageDispositionAndRedelivery(t *testing.T) {
 			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			tracked := c.Track(context.Background(), tt.msg, EventCreated, 5)
 			_ = tt.dispose(tracked)
-			tracked.FinishPending(context.Background()) // must not double count
+			tracked.Finish(context.Background()) // must not double count
 
 			rm := collect(t, reader)
 			points := metricPoints[int64](t, rm, "chat.nats.consumer.messages")
@@ -210,7 +210,7 @@ func TestTrackedMessageContextAndCancellation(t *testing.T) {
 	MarkTerminalFromContext(context.Background(), TerminalPublishExhausted)
 	MarkTerminalFromContext(ctx, TerminalReason("dynamic reason"))
 	tracked.MarkHandlerPanic()
-	tracked.FinishCancelled(ctx)
+	tracked.Finish(ctx)
 
 	rm := collect(t, reader)
 	terminal := metricPoints[int64](t, rm, "chat.nats.terminal.failures")

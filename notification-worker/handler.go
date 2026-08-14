@@ -46,7 +46,8 @@ type HandlerDeps struct {
 	Emitter            Emitter
 	RoomMeta           RoomMetaGetter // nil → title falls back to sender.Account
 	LargeRoomThreshold int
-	RecipientBatchSize int // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
+	RecipientBatchSize int                  // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
+	Metrics            *notificationMetrics // nil → built on the global meter
 }
 
 // Handler runs the per-message fan-out pipeline: exclusion filters, hook veto, EligibleForPush
@@ -74,16 +75,19 @@ func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one
 	if deps.Settings == nil {
 		deps.Settings = noopUserSettings{}
 	}
-	return &Handler{deps: deps, metrics: newNotificationMetrics(otel.Meter("notification-worker"))}
+	if deps.Metrics == nil {
+		deps.Metrics = newNotificationMetrics(otel.Meter("notification-worker"))
+	}
+	return &Handler{deps: deps, metrics: deps.Metrics}
 }
 
 func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error) {
-	outcome := "suppressed"
+	outcome := notifySuppressed
 	defer func() {
-		if retErr != nil && outcome == "suppressed" {
-			outcome = "failed"
+		if retErr != nil && outcome == notifySuppressed {
+			outcome = notifyFailed
 		}
-		h.metrics.Record(ctx, "push", outcome)
+		h.metrics.Record(ctx, notifyKindPush, outcome)
 	}()
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
@@ -266,7 +270,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 		evt.ID = fmt.Sprintf("%s-b%d", msg.ID, batchIdx)
 		evt.Accounts = batchAccounts
 		if err := h.deps.Emitter.Emit(ctx, evt); err != nil {
-			outcome = "publish_failed"
+			outcome = notifyPublishFailed
 			slog.Error("emit push batch failed", "error", err, "batch", batchIdx,
 				"recipients", len(batchAccounts), "messageId", msg.ID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
@@ -276,7 +280,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	if len(emitErrs) > 0 {
 		return fmt.Errorf("emit push batches for message %s: %w", msg.ID, errors.Join(emitErrs...))
 	}
-	outcome = "sent"
+	outcome = notifySent
 	return nil
 }
 

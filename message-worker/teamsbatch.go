@@ -129,13 +129,13 @@ func (h *teamsBatchHandler) migrateOne(ctx context.Context, raw json.RawMessage)
 	cass := &cassParticipant{ID: sender.UserID, EngName: sender.EngName, CompanyName: sender.ChineseName, Account: sender.Account}
 
 	if err := h.store.SaveMessage(ctx, &msg, cass, h.siteID); err != nil {
-		h.metrics.Record(ctx, "teams_migration", "error")
+		h.metrics.Record(ctx, kindTeamsMigration, persistError)
 		// A persist failure is infra: surface it so the batch Naks and replays.
 		slog.ErrorContext(ctx, "teams batch: save message failed", "teamsMsgId", head.ID, "error", err)
 		res.Status, res.Error = model.TeamsBatchError, "save message failed"
 		return res, err
 	}
-	h.metrics.Record(ctx, "teams_migration", "success")
+	h.metrics.Record(ctx, kindTeamsMigration, persistSuccess)
 	res.Status = model.TeamsBatchPersisted
 	return res, nil
 }

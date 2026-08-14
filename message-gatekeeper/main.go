@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -84,7 +83,7 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
-	sharedMetrics := natsmetrics.New(sdk.MeterProvider().Meter("chat.nats"))
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
 	publishMetrics := sharedMetrics.Publisher("message-gatekeeper", cfg.SiteID)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
@@ -156,7 +155,7 @@ func main() {
 		}
 		return nil
 	}
-	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL)
+	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL, publishMetrics)
 	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL)
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
@@ -186,13 +185,8 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	go natsmetrics.Consume(iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
-		func(msg jetstream.Msg) natsmetrics.EventType {
-			if strings.HasSuffix(msg.Subject(), ".msg.send") {
-				return natsmetrics.EventSend
-			}
-			return natsmetrics.EventUnknown
-		},
+	go natsmetrics.Consume(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		func(msgCtx context.Context, msg *natsmetrics.Message) {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())

@@ -91,7 +91,7 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
-	sharedMetrics := natsmetrics.New(sdk.MeterProvider().Meter("chat.nats"))
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
 	publishMetrics := sharedMetrics.Publisher("message-worker", cfg.SiteID)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
@@ -233,18 +233,14 @@ func main() {
 				consumerMetrics.LoopFailed(context.Background(), err)
 				return
 			}
-			eventType := natsmetrics.EventCreated
-			if msg.Subject() == teamsBatchSubj {
-				eventType = natsmetrics.EventTeamsBatch
-			}
 			sem <- struct{}{}
 			wg.Add(1)
-			go func(msgCtx context.Context, msg jetstream.Msg, eventType natsmetrics.EventType) {
-				tracked := consumerMetrics.Track(msgCtx, msg, eventType, consumerCfg.MaxDeliver)
+			go func(msgCtx context.Context, msg jetstream.Msg) {
+				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
 				msg = tracked
 				msgCtx = tracked.Context(msgCtx)
 				defer func() {
-					tracked.FinishPending(msgCtx)
+					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
 				}()
@@ -264,7 +260,7 @@ func main() {
 					logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 					handler.HandleJetStreamMsg(handlerCtx, msg)
 				})
-			}(msgCtx, msg, eventType)
+			}(msgCtx, msg)
 		}
 	}()
 

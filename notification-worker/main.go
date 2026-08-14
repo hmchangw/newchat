@@ -141,7 +141,7 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
-	sharedMetrics := natsmetrics.New(sdk.MeterProvider().Meter("chat.nats"))
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
 	publishMetrics := sharedMetrics.Publisher("notification-worker", cfg.SiteID)
 	domainMetrics := newNotificationMetrics(sdk.MeterProvider().Meter("notification-worker"))
 
@@ -233,6 +233,7 @@ func main() {
 			cfg.SiteID,
 			cfg.PresenceBatchSize,
 			cfg.PresenceRPCTimeout,
+			publishMetrics,
 		)
 	}
 
@@ -244,7 +245,7 @@ func main() {
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
-		Parent:             newHistoryParentFetcher(nc),
+		Parent:             newHistoryParentFetcher(nc, publishMetrics),
 		Presence:           presence,
 		Settings:           settings,
 		Hook:               noopVetoer{},
@@ -252,8 +253,8 @@ func main() {
 		RoomMeta:           roomMetaCache,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
+		Metrics:            domainMetrics,
 	})
-	handler.metrics = domainMetrics
 
 	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
 	invalCtx, invalCancel := context.WithCancel(ctx)
@@ -328,11 +329,11 @@ func main() {
 			sem <- struct{}{}
 			wg.Add(1)
 			go func(msgCtx context.Context, msg jetstream.Msg) {
-				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventCreated, consumerCfg.MaxDeliver)
+				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
 				msg = tracked
 				msgCtx = tracked.Context(msgCtx)
 				defer func() {
-					tracked.FinishPending(msgCtx)
+					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
 				}()
@@ -347,7 +348,7 @@ func main() {
 						if err := msg.Ack(); err != nil {
 							slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
 						}
-						domainMetrics.Record(handlerCtx, "push", "suppressed")
+						domainMetrics.Record(handlerCtx, notifyKindPush, notifySuppressed)
 						return
 					}
 					// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.

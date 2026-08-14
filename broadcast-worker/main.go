@@ -106,7 +106,7 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
-	sharedMetrics := natsmetrics.New(sdk.MeterProvider().Meter("chat.nats"))
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
 	publishMetrics := sharedMetrics.Publisher("broadcast-worker", cfg.SiteID)
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
@@ -222,7 +222,7 @@ func main() {
 		slog.Info("room-key cache enabled", "size", cfg.RoomKeyCacheSize, "ttl", cfg.RoomKeyCacheTTL)
 	}
 
-	parentFetcher := newHistoryParentFetcher(nc)
+	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
 	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode)
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
@@ -247,12 +247,9 @@ func main() {
 	consumerMetrics.LoopStarted(ctx)
 
 	var wg sync.WaitGroup
-	processor := broadcastProcessor(handler)
-	go natsmetrics.Consume(iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
-		classifyBroadcastDelivery,
-		func(msgCtx context.Context, msg *natsmetrics.Message) {
-			jobguard.Run(msg, func() { processor(msgCtx, msg) })
-		})
+	go natsmetrics.Consume(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		guardedProcessor(broadcastProcessor(handler)))
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -322,12 +319,6 @@ func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte
 // messageProcessor handles one consumed message, performing its own Ack/Nak.
 type messageProcessor func(msgCtx context.Context, msg jetstream.Msg)
 
-// messageIterator is the slice of o11y/nats MessagesContext that consumeLoop drives —
-// an interface so the loop is testable against a real embedded JetStream consumer.
-type messageIterator interface {
-	Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error)
-}
-
 // broadcastProcessor builds the per-message processing closure: stamp the request ID, run
 // the handler, then settle via jsretry (short first retry; malformed events Ack-drop).
 func broadcastProcessor(handler *Handler) messageProcessor {
@@ -352,27 +343,13 @@ func broadcastProcessor(handler *Handler) messageProcessor {
 	}
 }
 
-// consumeLoop drains iter under a maxWorkers-bounded semaphore, tracking in-flight handlers on wg
-// so shutdown can wait; jobguard.Run recovers handler panics to avoid an un-acked crash-loop on JetStream redelivery.
-func consumeLoop(iter messageIterator, process messageProcessor, maxWorkers int, wg *sync.WaitGroup) {
-	sem := make(chan struct{}, maxWorkers)
-	for {
-		msgCtx, msg, err := iter.Next()
-		if err != nil {
-			return
-		}
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() {
-				<-sem
-				wg.Done()
-			}()
-			jobguard.Run(msg, func() { process(msgCtx, msg) })
-			if tracked, ok := msg.(interface{ FinishPending(context.Context) }); ok {
-				tracked.FinishPending(msgCtx)
-			}
-		}()
+// guardedProcessor adapts a messageProcessor to natsmetrics.Consume, keeping
+// jobguard's panic recovery in the composition so a handler panic Acks instead
+// of crash-looping on JetStream redelivery. The integration test drives this
+// exact composition rather than a parallel copy of the loop.
+func guardedProcessor(process messageProcessor) natsmetrics.ProcessMessage {
+	return func(msgCtx context.Context, msg *natsmetrics.Message) {
+		jobguard.Run(msg, func() { process(msgCtx, msg) })
 	}
 }
 

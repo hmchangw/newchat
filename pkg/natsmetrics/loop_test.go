@@ -36,7 +36,7 @@ func TestConsume_TerminalNextFailureStopsLoop(t *testing.T) {
 	c.LoopStarted(context.Background())
 	var wg sync.WaitGroup
 
-	Consume(failingIterator{err: errors.New("iterator failed")}, c, 1, 5, &wg, nil, func(context.Context, *Message) {})
+	Consume(context.Background(), failingIterator{err: errors.New("iterator failed")}, c, 1, 5, &wg, nil, func(context.Context, *Message) {})
 
 	rm := collect(t, reader)
 	points := metricPoints[int64](t, rm, "chat.nats.consumer.loop.up")
@@ -52,7 +52,7 @@ func TestConsume_TracksAndDisposesMessage(t *testing.T) {
 	iter := &oneMessageIterator{msg: msg}
 	var wg sync.WaitGroup
 
-	Consume(iter, c, 1, 5, &wg, func(jetstream.Msg) EventType { return EventCreated }, func(ctx context.Context, tracked *Message) {
+	Consume(context.Background(), iter, c, 1, 5, &wg, func(jetstream.Msg) EventType { return EventCreated }, func(ctx context.Context, tracked *Message) {
 		assert.False(t, IsFinalDeliveryFromContext(ctx))
 		require.NoError(t, tracked.Ack())
 	})

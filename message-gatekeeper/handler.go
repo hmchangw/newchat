@@ -35,17 +35,9 @@ const maxContentBytes = 20 * 1024 // 20 KB
 // message-worker re-projects the real snapshot before the durable write.
 const quotedParentUnavailablePlaceholder = "Content temporarily unavailable"
 
+// errCanonicalPublish tags a canonical-publish failure so the settle path can
+// tell it apart from any other infra failure without matching on error text.
 var errCanonicalPublish = errors.New("canonical publish failed")
-
-type canonicalPublishError struct{ cause error }
-
-func (e *canonicalPublishError) Error() string {
-	return fmt.Sprintf("canonical publish failed: publish to MESSAGES-CANONICAL: %v", e.cause)
-}
-
-func (e *canonicalPublishError) Unwrap() error { return e.cause }
-
-func (e *canonicalPublishError) Is(target error) bool { return target == errCanonicalPublish }
 
 // replyFunc is the function signature for publishing a reply to a NATS subject.
 type replyFunc func(ctx context.Context, msg *nats.Msg) error
@@ -121,7 +113,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		// rather than let a forged value ride the reply and this span.
 		ctx = obs.ContextWithPublicIdentity(ctx, "", "", "")
 		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
-		h.metrics.Record(ctx, "rejected", "invalid_subject")
+		h.metrics.Record(ctx, resultRejected, reasonInvalidSubject)
 		slog.Warn("invalid subject", "subject", msg.Subject())
 		debugFlowRejected(ctx, req.RequestID, "invalid_subject")
 		// Best-effort error reply so the client doesn't hang; sendReply no-ops
@@ -139,7 +131,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 
 	if parseErr != nil {
 		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
-		h.metrics.Record(ctx, "rejected", "invalid_payload")
+		h.metrics.Record(ctx, resultRejected, reasonInvalidPayload)
 		// Do not WithCause(parseErr) — JSON parse error strings embed the
 		// offending substring from an unauthenticated entry-point (see doc.go).
 		bad := errcode.BadRequest("unmarshal send message request")
@@ -166,28 +158,29 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		// validation branch must NOT also log here. Infra branch owns its log.
 		var ee *errcode.Error
 		if errors.As(err, &ee) {
-			if ee.Code == errcode.CodeBadRequest {
-				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
-			} else {
-				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
-			}
-			h.metrics.Record(ctx, "rejected", gatekeeperReason(ee))
+			// A validation or policy rejection is an ordinary client error, not
+			// undeliverable work: the sender receives an error reply and the
+			// rejection is already counted by message_gatekeeper_messages_total.
+			// Recording it as a terminal failure would make the campaign's
+			// terminal-delivery signal non-zero at baseline and hide real loss.
+			h.metrics.Record(ctx, resultRejected, gatekeeperReason(ee))
 			debugFlowRejected(ctx, req.RequestID, string(ee.Code))
 			h.sendReply(ctx, account, &req, errnats.Marshal(ctx, err))
 			if err := msg.Ack(); err != nil {
 				slog.Error("failed to ack message", "error", err)
 			}
 		} else {
-			result := "retry"
-			if natsmetrics.IsFinalDeliveryFromContext(ctx) {
-				result = "failed"
+			final := natsmetrics.IsFinalDeliveryFromContext(ctx)
+			result := resultRetry
+			if final {
+				result = resultFailed
 			}
-			reason := "dependency"
+			reason := reasonDependency
 			if errors.Is(err, errCanonicalPublish) {
-				reason = "canonical_publish"
+				reason = reasonCanonicalPublish
 			}
 			h.metrics.Record(ctx, result, reason)
-			if errors.Is(err, errCanonicalPublish) && natsmetrics.IsFinalDeliveryFromContext(ctx) {
+			if errors.Is(err, errCanonicalPublish) && final {
 				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
 			}
 			// flow terminal for the infra path; the Error line below carries the cause.
@@ -201,25 +194,25 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	h.sendReply(ctx, account, &req, replyData)
-	h.metrics.Record(ctx, "accepted", "none")
+	h.metrics.Record(ctx, resultAccepted, reasonNone)
 
 	if err := msg.Ack(); err != nil {
 		slog.Error("failed to ack message", "err", err)
 	}
 }
 
-func gatekeeperReason(err *errcode.Error) string {
+func gatekeeperReason(err *errcode.Error) gatekeeperReasonCode {
 	switch err.Reason {
 	case errcode.MessageNotSubscribed:
-		return "not_subscribed"
+		return reasonNotSubscribed
 	case errcode.MessageLargeRoomPostRestricted:
-		return "room_restricted"
+		return reasonRoomRestricted
 	default:
 	}
 	if err.Code == errcode.CodeBadRequest {
-		return "invalid_payload"
+		return reasonInvalidPayload
 	}
-	return "unknown"
+	return reasonUnknown
 }
 
 // debugFlowReceived emits the flow-rung "received" breadcrumb at the gatekeeper
@@ -461,7 +454,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	canonicalSubj := subject.MsgCanonicalCreated(siteID)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
-		return nil, &canonicalPublishError{cause: err}
+		return nil, fmt.Errorf("publish to MESSAGES-CANONICAL: %w", errors.Join(errCanonicalPublish, err))
 	}
 	// flow: the message cleared the gate and was handed off to MESSAGES-CANONICAL.
 	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",

@@ -98,7 +98,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
 	ctx = obs.ContextWithIdentity(ctx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
-	ctx = withBroadcastMetricLabels(ctx, "unknown", string(evt.Event))
+	ctx = withBroadcastMetricLabels(ctx, roomUnknown, natsmetrics.EventType(evt.Event))
 
 	switch evt.Event {
 	case model.EventCreated:
@@ -700,6 +700,10 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 
 	switch room.Type {
 	case model.RoomTypeChannel:
+		// Record the intended audience here too: publishChannelEvent does it for
+		// new messages, and a mutation with no fanout sample would leave the
+		// channel lane blank for edit/delete/pin/react during a campaign.
+		h.metrics.Fanout(ctx, roomChannel, labels.eventType, room.UserCount)
 		return h.publishRoomEvent(ctx, room.ID, room.CrossSite, room.CrossSiteAt, payload, fmt.Sprintf("%s event (message %s)", roomEvtType, messageID))
 
 	case model.RoomTypeDM, model.RoomTypeBotDM:
@@ -853,7 +857,7 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.M
 	slog.Log(ctx, logctx.LevelFlow, "broadcast fan-out", "phase", "fanout",
 		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", meta.ID,
 		"type", string(meta.Type), "delivery", "room-stream", "audience", meta.UserCount)
-	h.metrics.Fanout(ctx, "channel", broadcastLabels(ctx).eventType, meta.UserCount)
+	h.metrics.Fanout(ctx, roomChannel, broadcastLabels(ctx).eventType, meta.UserCount)
 	return h.publishRoomEvent(ctx, meta.ID, meta.CrossSite, meta.CrossSiteAt, payload, "channel event")
 }
 
@@ -861,7 +865,7 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.M
 // sanctioned path enforced by .semgrep room-subject-publish-must-route (never inline a subject).
 func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string) error {
 	labels := broadcastLabels(ctx)
-	ctx = withBroadcastMetricLabels(ctx, "channel", labels.eventType)
+	ctx = withBroadcastMetricLabels(ctx, roomChannel, labels.eventType)
 	now := time.Now().UTC()
 	var pubErr error
 	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
@@ -998,8 +1002,8 @@ func buildClientMessage(msg *model.Message, userMap map[string]model.User) *mode
 // accounts that already received the event on the first attempt.
 func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string, payload []byte, parentMsgID string) error {
 	labels := broadcastLabels(ctx)
-	ctx = withBroadcastMetricLabels(ctx, "thread", labels.eventType)
-	h.metrics.Fanout(ctx, "thread", labels.eventType, len(accounts))
+	ctx = withBroadcastMetricLabels(ctx, roomThread, labels.eventType)
+	h.metrics.Fanout(ctx, roomThread, labels.eventType, len(accounts))
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -1033,16 +1037,16 @@ func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string
 	return nil
 }
 
-func roomKind(roomType model.RoomType) string {
+func roomKind(roomType model.RoomType) roomKindLabel {
 	switch roomType {
 	case model.RoomTypeChannel:
-		return "channel"
+		return roomChannel
 	case model.RoomTypeDM:
-		return "dm"
+		return roomDM
 	case model.RoomTypeBotDM:
-		return "bot_dm"
+		return roomBotDM
 	default:
-		return "unknown"
+		return roomUnknown
 	}
 }
 
