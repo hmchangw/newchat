@@ -967,6 +967,20 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	req.RequesterID = sub.User.ID
 	req.RequesterAccount = sub.User.Account
 	req.Timestamp = time.Now().UTC().UnixMilli()
+
+	// History-cap inheritance: a requester whose own history is capped must not
+	// grant new members more than they can see. On the share-all branch, stamp
+	// the requester's cap onto the canonical event (room-worker applies it to
+	// every materialized subscription and the member_added events). Mode "none"
+	// needs no cap — the worker floors those members at the accept timestamp,
+	// which is always ≥ the requester's cap. Reset first: the field is
+	// server-set and client input must never pass through.
+	req.HistorySharedSince = nil
+	if req.History.Mode != model.HistoryModeNone && sub.HistorySharedSince != nil && !sub.HistorySharedSince.IsZero() {
+		if ms := sub.HistorySharedSince.UnixMilli(); ms > 0 {
+			req.HistorySharedSince = &ms
+		}
+	}
 	normalized, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal add-members request: %w", err)

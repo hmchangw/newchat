@@ -34,6 +34,10 @@ func ptrBool(b bool) *bool { return &b }
 // (e.g. model.Subscription.SectionId) in test literals.
 func strPtr(s string) *string { return &s }
 
+// ptrInt64 returns a pointer to v, for constructing *int64 fields
+// (e.g. model.AddMembersRequest.HistorySharedSince) in test literals.
+func ptrInt64(v int64) *int64 { return &v }
+
 // expectAllAccountsExist registers a FindExistingAccounts expectation that
 // echoes its input back — i.e. "every account being asked about exists".
 // Used by every add-member / create-channel happy-path test that doesn't
@@ -1049,6 +1053,67 @@ func TestHandler_AddMembers_CapacityShortCircuit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "accepted", resp.Status)
 	assert.True(t, published, "add must be published when the short-circuit accepts")
+}
+
+// A requester whose own history is capped must not grant more via share-all:
+// the published canonical request carries the requester's cap. Mode "none"
+// keeps flooring at the accept timestamp (no cap on the wire), and any
+// client-supplied historySharedSince is overwritten server-side.
+func TestHandler_AddMembers_HistorySharedSinceInheritance(t *testing.T) {
+	requesterHSS := time.UnixMilli(1700000000000).UTC()
+	clientForged := int64(1)
+
+	cases := []struct {
+		name       string
+		reqHistory model.HistoryConfig
+		reqHSS     *int64
+		subHSS     *time.Time
+		wantHSS    *int64
+	}{
+		{"capped requester, mode all → inherit", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, &requesterHSS, ptrInt64(1700000000000)},
+		{"capped requester, empty mode → inherit", model.HistoryConfig{}, nil, &requesterHSS, ptrInt64(1700000000000)},
+		{"uncapped requester, mode all → nil", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, nil, nil},
+		{"capped requester, mode none → nil (worker floors at accept ts)", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, &requesterHSS, nil},
+		{"client-forged value overwritten", model.HistoryConfig{Mode: model.HistoryModeAll}, &clientForged, nil, nil},
+		{"zero-time requester HSS not inherited", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, &time.Time{}, nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl)
+
+			store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+				User:               model.SubscriptionUser{ID: "u1", Account: "alice"},
+				Roles:              []model.Role{model.RoleMember},
+				HistorySharedSince: tc.subHSS,
+			}, nil)
+			store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
+				ID: "r1", Name: "general", Type: model.RoomTypeChannel, UserCount: 3,
+			}, nil)
+			expectAllAccountsExist(store)
+
+			var publishedReq model.AddMembersRequest
+			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000,
+				publishToStream: func(_ context.Context, _ string, data []byte, _ string) error {
+					require.NoError(t, json.Unmarshal(data, &publishedReq))
+					return nil
+				},
+			}
+			req := model.AddMembersRequest{Users: []string{"bob"}, History: tc.reqHistory, HistorySharedSince: tc.reqHSS}
+
+			resp, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
+			require.NoError(t, err)
+			assert.Equal(t, "accepted", resp.Status)
+
+			if tc.wantHSS == nil {
+				assert.Nil(t, publishedReq.HistorySharedSince)
+			} else {
+				require.NotNil(t, publishedReq.HistorySharedSince)
+				assert.Equal(t, *tc.wantHSS, *publishedReq.HistorySharedSince)
+			}
+		})
+	}
 }
 
 func TestHandler_AddMembers_RestrictedOwnerAllowed(t *testing.T) {
