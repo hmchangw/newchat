@@ -33,6 +33,9 @@ type config struct {
 	OIDCIssuerURL string   `env:"OIDC_ISSUER_URL"`
 	OIDCAudiences []string `env:"OIDC_AUDIENCES" envSeparator:","`
 	TLSSkipVerify bool     `env:"TLS_SKIP_VERIFY"           envDefault:"false"`
+	// Set when the realm is fronted by several ingress hostnames, so a token's `iss`
+	// follows the host that minted it. Requires those hosts to serve the same realm keys.
+	OIDCSkipIssuerCheck bool `env:"OIDC_SKIP_ISSUER_CHECK"    envDefault:"false"`
 
 	// BotplatformURL is the LOCAL site's botplatform-service URL. When set,
 	// auth-service exposes the session-token branch of POST /auth: a client
@@ -91,16 +94,23 @@ func run() error {
 			return fmt.Errorf("OIDC_ISSUER_URL and OIDC_AUDIENCES are required when DEV_MODE is false")
 		}
 
+		if cfg.OIDCSkipIssuerCheck {
+			slog.Warn("OIDC issuer check is OFF — tokens are accepted from any hostname serving this realm's keys",
+				"issuer", cfg.OIDCIssuerURL)
+		}
+
 		// Initialize OIDC validator — connects to issuer and fetches JWKS keys.
 		oidcValidator, err := pkgoidc.NewValidator(ctx, pkgoidc.Config{
-			IssuerURL:     cfg.OIDCIssuerURL,
-			Audiences:     cfg.OIDCAudiences,
-			TLSSkipVerify: cfg.TLSSkipVerify,
+			IssuerURL:       cfg.OIDCIssuerURL,
+			Audiences:       cfg.OIDCAudiences,
+			TLSSkipVerify:   cfg.TLSSkipVerify,
+			SkipIssuerCheck: cfg.OIDCSkipIssuerCheck,
 		})
 		if err != nil {
 			return fmt.Errorf("create oidc validator: %w", err)
 		}
-		slog.Info("oidc validator initialized", "issuer", cfg.OIDCIssuerURL)
+		slog.Info("oidc validator initialized", "issuer", cfg.OIDCIssuerURL,
+			"skip_issuer_check", cfg.OIDCSkipIssuerCheck)
 		handler = NewAuthHandler(oidcValidator, signingKP, cfg.AuthAccountPubKey, cfg.NATSJWTExpiry, false, opts...)
 	}
 

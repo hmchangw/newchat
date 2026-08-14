@@ -45,10 +45,13 @@ type Config struct {
 	OIDCIssuerURL string `env:"OIDC_ISSUER_URL" envDefault:""`
 	// OIDCAudiences must include the access-token `aud` — refresh re-verifies the minted
 	// access token against this allow-list, so a missing aud fails every refresh.
-	OIDCAudiences    []string      `env:"OIDC_AUDIENCES"     envDefault:"" envSeparator:","`
-	TLSSkipVerify    bool          `env:"OIDC_TLS_SKIP_VERIFY" envDefault:"false"`
-	OIDCClientID     string        `env:"OIDC_CLIENT_ID"     envDefault:""`
-	SSORefreshWindow time.Duration `env:"SSO_REFRESH_WINDOW" envDefault:"1h"`
+	OIDCAudiences []string `env:"OIDC_AUDIENCES"     envDefault:"" envSeparator:","`
+	TLSSkipVerify bool     `env:"OIDC_TLS_SKIP_VERIFY" envDefault:"false"`
+	// Set when the realm is fronted by several ingress hostnames, so a token's `iss`
+	// follows the host that minted it. Requires those hosts to serve the same realm keys.
+	OIDCSkipIssuerCheck bool          `env:"OIDC_SKIP_ISSUER_CHECK" envDefault:"false"`
+	OIDCClientID        string        `env:"OIDC_CLIENT_ID"     envDefault:""`
+	SSORefreshWindow    time.Duration `env:"SSO_REFRESH_WINDOW" envDefault:"1h"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string      `env:"ADMIN_ACCT_PREFIX"      envDefault:"p_admin"`
 	Mongo           MongoConfig `envPrefix:"MONGO_"`

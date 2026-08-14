@@ -305,3 +305,56 @@ func TestRefresh_TransportErrorIsNotRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrRefreshRejected)
 }
+
+// A site's ingress hostname aliases the same realm, so `iss` differs from the
+// discovery URL while the signing keys do not.
+const aliasIssuer = "https://keycloak.alias.example.com/auth/realms/abc"
+
+func TestValidate_AliasedIssuer_RejectedByDefault(t *testing.T) {
+	f := newFakeIssuer(t)
+	v := newTestValidator(t, f, Config{})
+
+	_, err := v.Validate(context.Background(), f.Mint(map[string]any{"iss": aliasIssuer}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "different provider")
+}
+
+func TestValidate_AliasedIssuer_AcceptedWhenSkipEnabled(t *testing.T) {
+	f := newFakeIssuer(t)
+	v := newTestValidator(t, f, Config{SkipIssuerCheck: true})
+
+	claims, err := v.Validate(context.Background(), f.Mint(map[string]any{"iss": aliasIssuer}))
+	require.NoError(t, err)
+	assert.Equal(t, "alice", claims.Account())
+	assert.Equal(t, aliasIssuer, claims.Issuer, "the unmatched issuer is still surfaced for logging")
+}
+
+// The signature check is what keeps SkipIssuerCheck safe: a token from a
+// different realm carries different keys and is rejected regardless.
+func TestValidate_SkipIssuerCheck_StillRejectsForeignKey(t *testing.T) {
+	f := newFakeIssuer(t)
+	other := newFakeIssuer(t)
+	v := newTestValidator(t, f, Config{SkipIssuerCheck: true})
+
+	_, err := v.Validate(context.Background(), other.Mint(map[string]any{"iss": f.URL()}))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "different provider", "must fail on the signature, not the issuer string")
+}
+
+func TestValidate_SkipIssuerCheck_StillEnforcesAudience(t *testing.T) {
+	f := newFakeIssuer(t)
+	v := newTestValidator(t, f, Config{SkipIssuerCheck: true})
+
+	_, err := v.Validate(context.Background(), f.Mint(map[string]any{"iss": aliasIssuer, "aud": "other-app"}))
+	assert.ErrorIs(t, err, ErrAudienceNotAllowed)
+}
+
+func TestValidate_FillsIssuer(t *testing.T) {
+	f := newFakeIssuer(t)
+	v := newTestValidator(t, f, Config{})
+
+	claims, err := v.Validate(context.Background(), f.Mint(nil))
+	require.NoError(t, err)
+	assert.Equal(t, f.URL(), claims.Issuer)
+	assert.NotContains(t, claims.Extra, "iss", "iss is promoted to a typed field, not left in Extra")
+}

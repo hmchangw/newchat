@@ -20,6 +20,7 @@ services:
       - MAX_SUBSCRIPTION_LIMIT=${MAX_SUBSCRIPTION_LIMIT:-1000}
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
+      - OIDC_SKIP_ISSUER_CHECK=${OIDC_SKIP_ISSUER_CHECK:-false}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-nats-chat}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro

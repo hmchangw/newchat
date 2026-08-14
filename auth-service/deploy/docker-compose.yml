@@ -20,6 +20,7 @@ services:
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
       - TLS_SKIP_VERIFY=${TLS_SKIP_VERIFY:-false}
+      - OIDC_SKIP_ISSUER_CHECK=${OIDC_SKIP_ISSUER_CHECK:-false}
     networks:
       - chat-local
 

@@ -20,15 +20,21 @@ func oidcValidator(ctx context.Context, cfg *config.Config) (service.TokenValida
 	if cfg.TLSSkipVerify {
 		slog.Warn("OIDC issuer TLS verification is OFF (dev only)")
 	}
+	if cfg.OIDCSkipIssuerCheck {
+		slog.Warn("OIDC issuer check is OFF — tokens are accepted from any hostname serving this realm's keys",
+			"issuer", cfg.OIDCIssuerURL)
+	}
 	v, err := pkgoidc.NewValidator(ctx, pkgoidc.Config{
-		IssuerURL:     cfg.OIDCIssuerURL,
-		Audiences:     cfg.OIDCAudiences,
-		TLSSkipVerify: cfg.TLSSkipVerify,
-		ClientID:      cfg.OIDCClientID,
+		IssuerURL:       cfg.OIDCIssuerURL,
+		Audiences:       cfg.OIDCAudiences,
+		TLSSkipVerify:   cfg.TLSSkipVerify,
+		ClientID:        cfg.OIDCClientID,
+		SkipIssuerCheck: cfg.OIDCSkipIssuerCheck,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("init oidc validator: %w", err)
 	}
-	slog.Info("sso enabled", "issuer", cfg.OIDCIssuerURL, "audiences", cfg.OIDCAudiences)
+	slog.Info("sso enabled", "issuer", cfg.OIDCIssuerURL, "audiences", cfg.OIDCAudiences,
+		"skip_issuer_check", cfg.OIDCSkipIssuerCheck)
 	return v, v, nil
 }

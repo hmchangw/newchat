@@ -27,6 +27,9 @@ type Claims struct {
 	DeptName          string
 	// Expiry is the verified token's exp claim (zero when unset).
 	Expiry time.Time
+	// Issuer is the token's iss claim. Surfaced for logging: under
+	// Config.SkipIssuerCheck it is the only record of which hostname minted the token.
+	Issuer string
 	Extra  map[string]interface{}
 }
 
@@ -48,6 +51,13 @@ type Config struct {
 	// A token is accepted when any of its `aud` claim entries appears here.
 	Audiences     []string
 	TLSSkipVerify bool
+	// SkipIssuerCheck accepts a token whose `iss` differs from IssuerURL — for a realm
+	// fronted by several ingress hostnames, where `iss` follows the host that minted the
+	// token. Safe ONLY while every such hostname serves the same realm keys: the JWKS
+	// fetched from IssuerURL stays the trust anchor, so a token from a different realm
+	// still fails the signature check. Never enable it against a multi-tenant issuer
+	// (Azure `common`, or realms sharing a keyset) — there `iss` is the only tenant boundary.
+	SkipIssuerCheck bool
 	// ClientID is the OAuth client used by Refresh (public client, no secret); validators that never call Refresh may omit it.
 	ClientID string
 }
@@ -90,7 +100,19 @@ func NewValidator(ctx context.Context, cfg Config) (*Validator, error) {
 	}
 
 	// SkipClientIDCheck: we enforce a multi-audience allow-list ourselves below.
-	oidcConfig := &oidc.Config{SkipClientIDCheck: true}
+	// SkipIssuerCheck: one realm behind several ingress hostnames mints `iss` per host; the JWKS stays the trust anchor.
+	oidcConfig := &oidc.Config{
+		SkipClientIDCheck: true,
+		SkipIssuerCheck:   cfg.SkipIssuerCheck,
+
+		// go-oidc's remaining knobs, unused here — listed so adopting one later is a
+		// one-line change instead of a hunt through the library:
+		// ClientID: "x",                     // single expected aud; our Audiences allow-list supersedes it
+		// SupportedSigningAlgs: []string{},  // pin accepted algs; defaults to the provider's advertised set
+		// SkipExpiryCheck: true,             // accept expired tokens; would break ErrTokenExpired and the refresh window
+		// Now: func() time.Time { … },       // clock source for exp/nbf; inject to test skew
+		// InsecureSkipSignatureCheck: true,  // accepts ANY token — never enable, it is the check the others rely on
+	}
 
 	// Retain the token_endpoint via provider.Claims, not provider.Endpoint() (the latter would make golang.org/x/oauth2 a direct dependency).
 	var meta struct {
@@ -165,6 +187,7 @@ func (v *Validator) Validate(ctx context.Context, rawToken string) (Claims, erro
 		DeptID:            str("deptid"),
 		DeptName:          str("deptname"),
 		Expiry:            idToken.Expiry,
+		Issuer:            idToken.Issuer,
 	}
 	for _, key := range []string{
 		"sub", "email", "name", "preferred_username",
