@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -43,7 +42,7 @@ func (c *cachedMemberLookup) GetMembers(ctx context.Context, roomID string) ([]r
 	if got, err := c.cache.Get(ctx, roomID); err == nil {
 		return got, nil
 	} else if !errors.Is(err, valkeyutil.ErrCacheMiss) {
-		slog.Warn("roomsubcache get failed, falling back to mongo", "error", err, "roomId", roomID)
+		valkeyutil.LogDegraded(ctx, "roomsubcache get failed, falling back to mongo", err, "roomId", roomID)
 	}
 
 	// Miss path: singleflight collapses concurrent Mongo loads on the same room.
@@ -51,15 +50,22 @@ func (c *cachedMemberLookup) GetMembers(ctx context.Context, roomID string) ([]r
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), memberFetchTimeout)
 		defer cancel()
 		// Re-check inside the flight in case a sibling caller already populated.
-		if got, err := c.cache.Get(fetchCtx, roomID); err == nil {
+		got, getErr := c.cache.Get(fetchCtx, roomID)
+		if getErr == nil {
 			return got, nil
 		}
 		loaded, lerr := c.load(fetchCtx, roomID)
 		if lerr != nil {
 			return nil, fmt.Errorf("load members for room %s: %w", roomID, lerr)
 		}
+		// Don't marshal a member list Valkey is known to be refusing. With the
+		// breaker open the Set is rejected in microseconds, so the JSON encode of a
+		// large room would be pure waste — once per message, for the whole outage.
+		if valkeyutil.IsUnavailable(getErr) {
+			return loaded, nil
+		}
 		if setErr := c.cache.Set(fetchCtx, roomID, loaded, c.ttl); setErr != nil {
-			slog.Warn("roomsubcache set failed", "error", setErr, "roomId", roomID)
+			valkeyutil.LogDegraded(fetchCtx, "roomsubcache set failed", setErr, "roomId", roomID)
 		}
 		return loaded, nil
 	})
@@ -77,6 +83,6 @@ func (c *cachedMemberLookup) GetMembers(ctx context.Context, roomID string) ([]r
 // Invalidate drops the room from Valkey on membership change.
 func (c *cachedMemberLookup) Invalidate(ctx context.Context, roomID string) {
 	if err := c.cache.Invalidate(ctx, roomID); err != nil {
-		slog.Warn("roomsubcache invalidate failed", "error", err, "roomId", roomID)
+		valkeyutil.LogDegraded(ctx, "roomsubcache invalidate failed", err, "roomId", roomID)
 	}
 }

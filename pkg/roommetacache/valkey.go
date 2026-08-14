@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -43,8 +42,7 @@ func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Re
 		return Meta{}, false
 	}
 	rec.Error(ctx)
-	slog.WarnContext(ctx, "room meta L2 read failed, falling back to mongo",
-		"room_id", roomID, "error", err)
+	valkeyutil.LogDegraded(ctx, "room meta L2 read failed, falling back to mongo", err, "room_id", roomID)
 	return Meta{}, false
 }
 
@@ -71,8 +69,7 @@ func ReadThrough(ctx context.Context, client valkeyutil.Client, rooms *mongo.Col
 		return Meta{}, fmt.Errorf("l2 read-through: %w", err)
 	}
 	if err := valkeyutil.SetJSONWithTTL(ctx, client, MetaKey(roomID), meta, ttl); err != nil {
-		slog.WarnContext(ctx, "room meta L2 populate failed (TTL will reconcile)",
-			"room_id", roomID, "error", err)
+		valkeyutil.LogDegraded(ctx, "room meta L2 populate failed (TTL will reconcile)", err, "room_id", roomID)
 	}
 	return meta, nil
 }
@@ -86,7 +83,6 @@ func BustMeta(ctx context.Context, client valkeyutil.Client, roomID string) {
 		return
 	}
 	if err := client.Del(ctx, MetaKey(roomID)); err != nil {
-		slog.WarnContext(ctx, "room meta L2 invalidate failed (TTL will reconcile)",
-			"room_id", roomID, "error", err)
+		valkeyutil.LogDegraded(ctx, "room meta L2 invalidate failed (TTL will reconcile)", err, "room_id", roomID)
 	}
 }

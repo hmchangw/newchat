@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // defaultUsersLimit is the page size forwarded to the HR endpoint when the
@@ -257,7 +258,7 @@ func (h *handler) searchOrgs(c *natsrouter.Context, req model.SearchOrgsRequest)
 func (h *handler) loadRestricted(ctx context.Context, account string) (map[string]int64, error) {
 	cached, hit, cerr := h.cache.GetRestricted(ctx, account)
 	if cerr != nil {
-		slog.Warn("valkey read failed; falling through to ES", "account", account, "error", cerr)
+		valkeyutil.LogDegraded(ctx, "valkey read failed; falling through to ES", cerr, "account", account)
 	}
 	if hit {
 		return cached, nil
@@ -287,7 +288,7 @@ func (h *handler) loadRestricted(ctx context.Context, account string) (map[strin
 	// without new signal.
 	if cerr == nil {
 		if err := h.cache.SetRestricted(ctx, account, restricted, h.cfg.RestrictedRoomsCacheTTL); err != nil {
-			slog.Warn("valkey set failed; continuing without cache", "account", account, "error", err)
+			valkeyutil.LogDegraded(ctx, "valkey set failed; continuing without cache", err, "account", account)
 		}
 	}
 	return restricted, nil

@@ -148,15 +148,47 @@ func TestCachedMemberLookup_InvalidateClearsValkey(t *testing.T) {
 	assert.Equal(t, loader.out, got, "after Invalidate the next read must reload")
 }
 
-type erroringCache struct{ err error }
+type erroringCache struct {
+	err  error
+	sets atomic.Int32
+}
 
 func (e *erroringCache) Get(context.Context, string) ([]roomsubcache.Member, error) {
 	return nil, e.err
 }
 func (e *erroringCache) Set(context.Context, string, []roomsubcache.Member, time.Duration) error {
+	e.sets.Add(1)
 	return nil
 }
 func (e *erroringCache) Invalidate(context.Context, string) error { return nil }
+
+// With the circuit open, Set is rejected in microseconds — so populating the
+// cache would serialize the whole member list to JSON only to throw it away,
+// once per message for the duration of the outage. A live failure still tries,
+// since that one may well succeed.
+func TestCachedMemberLookup_SkipsPopulateWhileCircuitOpen(t *testing.T) {
+	tests := []struct {
+		name     string
+		getErr   error
+		wantSets int32
+	}{
+		{"circuit open skips the populate", valkeyutil.ErrUnavailable, 0},
+		{"live failure still attempts the populate", errors.New("i/o timeout"), 1},
+		{"plain miss populates as usual", valkeyutil.ErrCacheMiss, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := &erroringCache{err: tc.getErr}
+			loader := &fakeLoader{out: []roomsubcache.Member{{ID: "u1", Account: "alice"}}}
+			lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+
+			got, err := lookup.GetMembers(context.Background(), "r1")
+			require.NoError(t, err, "the Mongo fallback must still serve the request")
+			assert.Equal(t, loader.out, got)
+			assert.Equal(t, tc.wantSets, cache.sets.Load())
+		})
+	}
+}
 
 func TestCachedMemberLookup_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
 	cache := newFakeCache()
