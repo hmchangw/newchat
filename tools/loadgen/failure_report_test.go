@@ -83,8 +83,8 @@ func TestFailureEvidenceReport_BuildsEveryVerdictGateAndRetainsSidecars(t *testi
 		soakRPCSend: {Attempted: 2, Latency: soakLatencySummary{P50: time.Millisecond, P95: 2 * time.Millisecond, P99: 5 * time.Millisecond, Max: 7 * time.Millisecond}},
 	}}
 	consumers := []ConsumerStat{
-		{Stream: "MESSAGES_CANONICAL_site-local", Durable: "message-worker", BaselinePending: 1, PeakPending: 3, FinalPending: 0, HasSample: true},
-		{Stream: "MESSAGES_CANONICAL_site-local", Durable: "broadcast-worker", BaselinePending: 0, PeakPending: 2, FinalPending: 0, HasSample: true},
+		{Stream: "MESSAGES-CANONICAL-site-local", Durable: "message-worker", BaselinePending: 1, PeakPending: 3, FinalPending: 0, HasSample: true},
+		{Stream: "MESSAGES-CANONICAL-site-local", Durable: "broadcast-worker", BaselinePending: 0, PeakPending: 2, FinalPending: 0, HasSample: true},
 	}
 
 	tests := []struct {
@@ -164,11 +164,11 @@ func TestFailureEvidenceReport_ConsumerAndAccountingEvidence(t *testing.T) {
 	}
 	consumers := []ConsumerStat{
 		{
-			Stream: "MESSAGES_CANONICAL_site-local", Durable: "message-worker",
+			Stream: "MESSAGES-CANONICAL-site-local", Durable: "message-worker",
 			BaselinePending: 2, PeakPending: 5, FinalPending: 1, HasSample: true,
 		},
 		{
-			Stream: "MESSAGES_CANONICAL_site-local", Durable: "broadcast-worker",
+			Stream: "MESSAGES-CANONICAL-site-local", Durable: "broadcast-worker",
 			HasSample: true,
 		},
 	}

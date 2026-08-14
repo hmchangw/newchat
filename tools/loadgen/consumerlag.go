@@ -69,7 +69,7 @@ func NewConsumerSampler(
 }
 
 func validConsumerStream(name string) bool {
-	for _, prefix := range []string{"MESSAGES_CANONICAL_", "ROOMS_"} {
+	for _, prefix := range []string{"MESSAGES-CANONICAL-", "ROOMS-"} {
 		if site, found := strings.CutPrefix(name, prefix); found {
 			return failureRunIDPattern.MatchString(site)
 		}
