@@ -279,8 +279,14 @@ go run ./tools/seed-sample-data --site site-local  --mongo-db chat
 go run ./tools/seed-sample-data --site site-remote --mongo-db chat_remote
 ```
 
-Both default to today's values (`site-local`, `chat`), so plain `make seed` is
-unchanged. What each pass writes:
+Both default to leaving today's behaviour alone, so plain `make seed` is
+unchanged: `--site` defaults to empty, which means *unfiltered* — every fixture
+is written — and `--mongo-db` falls back to `MONGO_DB`. (This design originally
+specified a `site-local` default for `--site`; it was changed during
+implementation, on the human partner's ruling that a bare `make seed` must
+behave exactly as it does today, since defaulting to `site-local` would have
+silently dropped the site-remote fixtures from the single-site dataset.) What
+each pass writes:
 
 - **Directory into both DBs.** All 11 users plus their `hr_employee` rows go
   into `chat` *and* `chat_remote`. Each portal must resolve every account in

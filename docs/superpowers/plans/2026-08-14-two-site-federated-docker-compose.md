@@ -966,34 +966,40 @@ Expected: FAIL — `undefined: resolveTarget`.
 
 Add to `tools/seed-sample-data/site.go`:
 
+> Corrected after implementation: this step originally defaulted an empty
+> `--site` to `site-local`. The human partner ruled mid-implementation that "make
+> seed without any parameter behaves exactly as it does today", and a `site-local`
+> default does not — it filters the site-remote fixtures out of the single-site
+> dataset. The shipped default is empty, meaning unfiltered; both the code and the
+> flag default below are the shipped version.
+
 ```go
 // resolveTarget picks the database and site to seed. The --mongo-db flag
-// overrides MONGO_DB when non-empty; an empty --site defaults to site-local so
-// a plain `make seed` behaves exactly as it did before two-site support.
+// overrides MONGO_DB when non-empty. An empty --site is passed through
+// unchanged: it means unfiltered, single-site seeding — a plain `make seed`
+// behaves exactly as it did before per-site routing existed. Explicit
+// per-site seeding (e.g. `make fed-seed`) always passes --site itself.
 func resolveTarget(envDB, flagDB, flagSite string) (db, site string) {
 	db = envDB
 	if flagDB != "" {
 		db = flagDB
 	}
-	site = flagSite
-	if site == "" {
-		site = "site-local"
-	}
-	return db, site
+	return db, flagSite
 }
 ```
 
 In `tools/seed-sample-data/main.go`, update the doc comment's flag list and `main`:
 
 ```go
-//	--site      home site to seed (default site-local)
+//	--site      home site to scope seeding to: site-local or site-remote
+//	            (default: unfiltered, seeds every fixture — the single-site path)
 //	--mongo-db  target database, overriding MONGO_DB
 ```
 
 ```go
 	reset := flag.Bool("reset", false, "delete seed records before re-populating")
 	dryRun := flag.Bool("dry-run", false, "print the plan and exit without writing")
-	site := flag.String("site", "site-local", "home site to seed: site-local or site-remote")
+	site := flag.String("site", "", "home site to scope seeding to: site-local or site-remote (default: unfiltered, single-site seeding)")
 	mongoDB := flag.String("mongo-db", "", "target database, overriding MONGO_DB")
 	flag.Parse()
 
@@ -1248,14 +1254,19 @@ make fed-logs             # streaming logs across both sites
 
 Add `### Seeding one site vs both` under the two-site section. It must state all of:
 
+> Two corrections after implementation, so this block matches what shipped: the
+> `--site` default is empty/unfiltered rather than `site-local` (see Step 8), and
+> the closing sentence originally claimed `make seed-reset` accepts `--site` —
+> it does not, since the make targets forward no arguments.
+
 ```markdown
-`make seed` is unchanged: it seeds the single-site stack, which is now the
-explicit `--site site-local --mongo-db chat` case. Two new flags exist and both
-default to today's behaviour:
+`make seed` is unchanged: `--site` defaults to empty, and empty means
+**unfiltered** — every fixture is written, exactly as before this work. Passing
+`--site` explicitly is what opts into per-site filtering:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--site` | `site-local` | Which site's rows to write |
+| `--site` | empty (all sites, unfiltered) | Which site's rows to write; `site-local` or `site-remote` filters to that site |
 | `--mongo-db` | unset (falls back to `MONGO_DB`) | Target database |
 
 `make fed-seed` runs the seeder twice:
@@ -1284,9 +1295,11 @@ rows within their own database (`user-service/mongorepo/subscriptions.go:35`).
 Routing these by the room's site instead puts ivan's rows in the wrong database
 and renders an empty chat list for him — with no error anywhere.
 
-`make seed-reset` and `--dry-run` both accept `--site`; the dry-run plan prints
-the site it is planning for and the filtered per-collection counts, so
-`--dry-run --site site-remote` is the quickest check that routing is sane.
+The make targets forward no arguments and `make` itself rejects `--site`, so
+per-site variations run the binary directly:
+`go run ./tools/seed-sample-data --dry-run --site site-remote`. The dry-run plan
+prints the site it is planning for and the filtered per-collection counts, so
+that is the quickest check that routing is sane.
 
 Three seeded rooms span both sites and carry `crossSite: true` — `r-general`
 and `r-eng` (site-local, with ivan) and `r-remote-announce` (site-remote, with
