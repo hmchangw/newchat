@@ -1733,3 +1733,143 @@ describe('roomEventsReducer: older-message pagination', () => {
     expect(next.roomState.a.bufferMode).toBe(BUFFER_MODE.HISTORICAL)
   })
 })
+
+describe('roomEventsReducer previews', () => {
+  function emptyBuffer() {
+    return {
+      messages: [], hasLoadedHistory: false, historyError: null, unreadCount: 0,
+      hasMention: false, mentionAll: false, lastMsgAt: null, lastMsgId: null,
+      bufferMode: 'live', pendingLiveMessages: [], focusMessageId: null,
+      hasMoreOlder: true, loadingOlder: false,
+    }
+  }
+
+  const wirePreview = (over = {}) => ({
+    messageId: 'm1',
+    sender: { account: 'alice', displayName: 'Alice Chen' },
+    content: 'hello **there**',
+    createdAt: '2026-08-14T10:00:00Z',
+    ...over,
+  })
+
+  it('starts empty', () => {
+    expect(initialState.previews).toEqual({})
+  })
+
+  it('BUCKETS_LOADED seeds a preview from sub.room.previewMessage', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview() } } },
+    })
+    expect(next.previews.r1).toEqual({ messageId: 'm1', senderName: 'Alice Chen', text: 'hello there' })
+  })
+
+  it('BUCKETS_LOADED leaves a room without a previewMessage absent from the map', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: {} } },
+    })
+    expect(next.previews.r1).toBeUndefined()
+  })
+
+  it('MESSAGE_RECEIVED overwrites the preview for a room with no message buffer', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        roomId: 'r1',
+        message: { id: 'm2', content: 'newest', userDisplayName: 'Bob Lin', createdAt: '2026-08-14T11:00:00Z' },
+      },
+    })
+    expect(next.previews.r1).toEqual({ messageId: 'm2', senderName: 'Bob Lin', text: 'newest' })
+  })
+
+  it('MESSAGE_RECEIVED uses the attachment fallback when the body is empty', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        roomId: 'r1',
+        message: {
+          id: 'm3', content: '', userDisplayName: 'Bob Lin',
+          createdAt: '2026-08-14T11:00:00Z', attachments: [{ imageUrl: '/a.png' }],
+        },
+      },
+    })
+    expect(next.previews.r1.text).toBe('Photo')
+  })
+
+  it('MESSAGE_RECEIVED ignores a thread reply', () => {
+    const seeded = { ...initialState, previews: { r1: { messageId: 'm1', senderName: 'A', text: 'first' } } }
+    const next = roomEventsReducer(seeded, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        roomId: 'r1',
+        message: { id: 'm9', content: 'reply', threadParentMessageId: 'm1', createdAt: '2026-08-14T12:00:00Z' },
+      },
+    })
+    expect(next.previews.r1.messageId).toBe('m1')
+  })
+
+  it('MESSAGE_SENT_LOCAL previews the local send optimistically', () => {
+    const next = roomEventsReducer(initialState, {
+      type: 'MESSAGE_SENT_LOCAL',
+      roomId: 'r1',
+      message: { id: 'm4', content: 'typed by me', userDisplayName: 'Me', createdAt: '2026-08-14T13:00:00Z', _local: true },
+    })
+    expect(next.previews.r1).toEqual({ messageId: 'm4', senderName: 'Me', text: 'typed by me' })
+  })
+
+  it('MESSAGE_EDITED_LOCAL rewrites the preview only when the edited message is the one on display', () => {
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm5', senderName: 'Me', text: 'before' } },
+      roomState: { r1: { ...emptyBuffer(), messages: [{ id: 'm5', content: 'before' }] } },
+    }
+    const hit = roomEventsReducer(seeded, {
+      type: 'MESSAGE_EDITED_LOCAL', roomId: 'r1', messageId: 'm5',
+      content: 'after', editedAt: '2026-08-14T14:00:00Z',
+    })
+    expect(hit.previews.r1.text).toBe('after')
+
+    const miss = roomEventsReducer(seeded, {
+      type: 'MESSAGE_EDITED_LOCAL', roomId: 'r1', messageId: 'm5-other',
+      content: 'irrelevant', editedAt: '2026-08-14T14:00:00Z',
+    })
+    expect(miss.previews.r1.text).toBe('before')
+  })
+
+  it('MESSAGE_DELETED_LOCAL leaves the preview alone', () => {
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm6', senderName: 'Me', text: 'doomed' } },
+      roomState: { r1: { ...emptyBuffer(), messages: [{ id: 'm6', content: 'doomed' }] } },
+    }
+    const next = roomEventsReducer(seeded, { type: 'MESSAGE_DELETED_LOCAL', roomId: 'r1', messageId: 'm6' })
+    expect(next.previews.r1.text).toBe('doomed')
+  })
+
+  it('SUBSCRIPTION_UPSERTED never seeds a preview', () => {
+    // Its `added` payload embeds a `room` object, which makes it look like a
+    // seeding source — but docs/client-api.md specifies previewMessage is
+    // always omitted there. Regression guard against wiring it up.
+    const next = roomEventsReducer(initialState, {
+      type: 'SUBSCRIPTION_UPSERTED',
+      subscription: { roomId: 'r1', roomType: 'channel', siteId: 'site-A', name: 'General', room: {} },
+    })
+    expect(next.previews).toEqual({})
+  })
+
+  it('ROOM_REMOVED drops the room preview', () => {
+    const seeded = { ...initialState, previews: { r1: { messageId: 'm7', senderName: 'A', text: 'x' } } }
+    const next = roomEventsReducer(seeded, { type: 'ROOM_REMOVED', roomId: 'r1' })
+    expect(next.previews.r1).toBeUndefined()
+  })
+
+  it('RESET clears every preview', () => {
+    const seeded = { ...initialState, previews: { r1: { messageId: 'm8', senderName: 'A', text: 'x' } } }
+    expect(roomEventsReducer(seeded, { type: 'RESET' }).previews).toEqual({})
+  })
+})

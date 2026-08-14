@@ -1,5 +1,7 @@
 import { appendBounded, mergeById, MAX_CACHED } from '@/lib/messageBuffer'
 import { defaultChatlistState, sortByLastMsgDesc } from '@/lib/chatlist'
+import { previewSnippet, previewText } from '@/lib/previewText'
+import { participantDisplayName, messageSenderName } from '@/lib/participantName'
 
 export { MAX_CACHED }
 
@@ -85,6 +87,16 @@ export const initialState = {
    */
   subscriptions: {},
   /**
+   * Per-roomId sidebar preview: the room's most recent eligible message,
+   * flattened to a single line at write time. An absent key means there is
+   * nothing to show — the row still renders at full height with a blank
+   * snippet line (the row's height is a CSS property, not a consequence of
+   * this map).
+   *
+   * Shape: { [roomId]: { messageId, senderName, text } }
+   */
+  previews: {},
+  /**
    * The per-user chatlist section-definition overlay (ChatlistState) — the
    * section names, display order, and sortMode. Membership is NOT here; it
    * rides each subscription's sectionId/sectionOrder. Seeded by
@@ -114,6 +126,29 @@ function toSummary(room) {
     unreadCount: 0,
     hasMention: false,
     mentionAll: false,
+  }
+}
+
+// Build a stored preview from a live message. Returns null when there is
+// nothing to store, so callers leave the map untouched rather than writing an
+// empty sentinel.
+function previewFromMessage(msg) {
+  if (!msg || !msg.id) return null
+  return {
+    messageId: msg.id,
+    senderName: messageSenderName(msg),
+    text: previewSnippet(msg.content, msg.mentions, msg.attachments),
+  }
+}
+
+// Build a stored preview from a wire PreviewMessage (subscription.list rows
+// and the refreshed preview on edit/delete events).
+function previewFromWire(previewMessage) {
+  if (!previewMessage || !previewMessage.messageId) return null
+  return {
+    messageId: previewMessage.messageId,
+    senderName: participantDisplayName(previewMessage.sender),
+    text: previewSnippet(previewMessage.content, previewMessage.mentions, previewMessage.attachments),
   }
 }
 
@@ -252,6 +287,11 @@ export function roomEventsReducer(state, action) {
         const { [action.roomId]: _drop, ...restSubs } = subscriptions
         subscriptions = restSubs
       }
+      let previews = state.previews
+      if (previews[action.roomId]) {
+        const { [action.roomId]: _dropPreview, ...restPreviews } = previews
+        previews = restPreviews
+      }
       return {
         ...state,
         summaries,
@@ -260,6 +300,7 @@ export function roomEventsReducer(state, action) {
         appIds,
         channelDmIds,
         subscriptions,
+        previews,
       }
     }
     case 'BUCKETS_LOADED': {
@@ -283,6 +324,14 @@ export function roomEventsReducer(state, action) {
           subs[s.id] ? mergeSubscriptionIntoSummary(s, subs[s.id]) : s
         )
       }
+      // Seed from the room metadata user-service embeds on each list row.
+      // Starts from the existing map so the partial-update path (no rooms
+      // supplied) doesn't wipe previews already in hand.
+      const previews = { ...state.previews }
+      for (const [roomId, sub] of Object.entries(subs)) {
+        const preview = previewFromWire(sub?.room?.previewMessage)
+        if (preview) previews[roomId] = preview
+      }
       return {
         ...state,
         summaries,
@@ -290,6 +339,7 @@ export function roomEventsReducer(state, action) {
         appIds: new Set(action.appIds),
         channelDmIds: new Set(action.channelDmIds),
         subscriptions: subs,
+        previews,
       }
     }
     case 'SUBSCRIPTION_UPSERTED': {
@@ -419,6 +469,13 @@ export function roomEventsReducer(state, action) {
         }
       }
       const roomId = evt.roomId
+      // Thread replies returned above, so anything reaching here belongs in
+      // the room timeline and is a preview candidate. Computed once and
+      // applied at every return point below.
+      const nextPreview = previewFromMessage(msg)
+      const previews = nextPreview
+        ? { ...state.previews, [roomId]: nextPreview }
+        : state.previews
       const prev = state.roomState[roomId] ?? emptyRoomState()
       const isActive = state.activeRoomId === roomId
       if (prev.bufferMode === BUFFER_MODE.HISTORICAL) {
@@ -462,6 +519,7 @@ export function roomEventsReducer(state, action) {
           summaries,
           roomState: { ...state.roomState, [roomId]: nextRoomState },
           msgRecvSeq: state.msgRecvSeq + 1,
+          previews,
         }
       }
       // Replace optimistic createdAt (client clock) with server's — keeping
@@ -480,6 +538,7 @@ export function roomEventsReducer(state, action) {
         return {
           ...state,
           roomState: { ...state.roomState, [roomId]: { ...prev, messages: mergedMessages } },
+          previews,
         }
       }
       const messages = appendBounded(prev.messages, msg)
@@ -513,6 +572,7 @@ export function roomEventsReducer(state, action) {
         summaries,
         roomState: { ...state.roomState, [roomId]: nextRoomState },
         msgRecvSeq: state.msgRecvSeq + 1,
+        previews,
       }
     }
     case 'HISTORY_LOADED': {
@@ -718,9 +778,17 @@ export function roomEventsReducer(state, action) {
       const prev = state.roomState[roomId] ?? emptyRoomState()
       if (prev.messages.some((m) => m.id === msg.id)) return state
       const messages = appendBounded(prev.messages, msg)
+      // A thread reply doesn't appear in the room timeline, so it isn't the
+      // room's preview either — matching the server, which omits
+      // previewMessage for hidden thread replies.
+      const nextPreview = msg.threadParentMessageId ? null : previewFromMessage(msg)
+      const previews = nextPreview
+        ? { ...state.previews, [roomId]: nextPreview }
+        : state.previews
       return {
         ...state,
         roomState: { ...state.roomState, [roomId]: { ...prev, messages } },
+        previews,
       }
     }
     case 'MESSAGE_EDITED_LOCAL': {
@@ -730,9 +798,19 @@ export function roomEventsReducer(state, action) {
       if (idx < 0) return state
       const updatedMsg = { ...prev.messages[idx], content: action.content, editedAt: action.editedAt }
       const messages = [...prev.messages.slice(0, idx), updatedMsg, ...prev.messages.slice(idx + 1)]
+      // Only the message currently on display affects the preview. The
+      // action carries no mentions, so mention tokens flatten literally
+      // here; the server's message_edited event follows with the
+      // authoritative preview a moment later.
+      const cur = state.previews[action.roomId]
+      const previews =
+        cur && cur.messageId === action.messageId
+          ? { ...state.previews, [action.roomId]: { ...cur, text: previewText(action.content) } }
+          : state.previews
       return {
         ...state,
         roomState: { ...state.roomState, [action.roomId]: { ...prev, messages } },
+        previews,
       }
     }
     case 'MESSAGE_DELETED_LOCAL': {
@@ -742,6 +820,9 @@ export function roomEventsReducer(state, action) {
       if (idx < 0) return state
       const updatedMsg = { ...prev.messages[idx], deleted: true }
       const messages = [...prev.messages.slice(0, idx), updatedMsg, ...prev.messages.slice(idx + 1)]
+      // Preview deliberately untouched: the client can't reproduce the
+      // server's walk-back to an earlier eligible message. The authoritative
+      // message_deleted event corrects it.
       return {
         ...state,
         roomState: { ...state.roomState, [action.roomId]: { ...prev, messages } },
