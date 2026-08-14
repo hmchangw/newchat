@@ -25,6 +25,8 @@ include:
   - ../push-notification-service/deploy/user/docker-compose.yml
   - ../push-notification-service/deploy/bot/docker-compose.yml
   - ../room-service/deploy/docker-compose.yml
+  - ../room-state-worker/deploy/user/docker-compose.yml
+  - ../room-state-worker/deploy/bot/docker-compose.yml
   - ../room-worker/deploy/docker-compose.yml
   - ../search-service/deploy/docker-compose.yml
   - ../search-sync-worker/deploy/docker-compose.yml
@@ -66,6 +68,8 @@ services:
   push-notification-service: *local-o11y
   bot-push-notification-service: *local-o11y
   room-service: *local-o11y
+  room-state-worker: *local-o11y
+  bot-room-state-worker: *local-o11y
   room-worker: *local-o11y
   search-service: *local-o11y
   search-sync-worker: *local-o11y
