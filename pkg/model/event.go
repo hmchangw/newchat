@@ -167,6 +167,7 @@ const (
 	InboxRoomRestricted              InboxEventType = "room_restricted"
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
 	InboxUserSettingsUpdated         InboxEventType = "user_settings_updated"
+	InboxUserPermissionsUpdated      InboxEventType = "user_permissions_updated"
 	InboxUserChatlistUpdated         InboxEventType = "user_chatlist_updated"
 	InboxSubscriptionSectionMoved    InboxEventType = "subscription_section_moved"
 )
@@ -177,6 +178,17 @@ type UserSettingsUpdated struct {
 	Account   string       `json:"account"   bson:"account"`
 	Settings  UserSettings `json:"settings"  bson:"settings"`
 	Timestamp int64        `json:"timestamp" bson:"timestamp"`
+}
+
+// UserPermissionsUpdated is the cross-site inbox event admin-service publishes after a
+// permission grant/revoke batch. One event carries one chunk of the batch: every account
+// in Accounts receives the same State. Receivers apply it under the per-key watermark
+// guard (State.UpdatedAt), so duplicated or reordered delivery is safe.
+type UserPermissionsUpdated struct {
+	Permission PermissionKey   `json:"permission" bson:"permission"`
+	Accounts   []string        `json:"accounts"   bson:"accounts"` // ≤ fanoutChunkSize per event
+	State      PermissionState `json:"state"      bson:"state"`
+	Timestamp  int64           `json:"timestamp"  bson:"timestamp"`
 }
 
 // SubscriptionReadEvent is InboxEvent.Payload for "subscription_read": sent room-home→user-home

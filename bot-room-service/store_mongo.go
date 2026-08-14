@@ -27,6 +27,28 @@ func newStoreMongo(db *mongo.Database) *storeMongo {
 	}
 }
 
+// EnsureIndexes creates the indexes backing this service's subscription reads and
+// writes, and must be invoked once at startup. The rooms and users access here
+// (including the room-key store) is entirely _id-keyed, so neither needs one.
+func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
+	// Mirrors room-service's declaration — same keys AND same unique option, or
+	// whichever service starts second hits IndexOptionsConflict on the shared collection.
+	if _, err := s.subs.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		return fmt.Errorf("ensure subscriptions (roomId,u.account) unique index: %w", err)
+	}
+	// Upsert and delete identify a subscription by u._id — the remove RPC carries
+	// user ids, not accounts — which the unique index above cannot serve.
+	if _, err := s.subs.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "u._id", Value: 1}},
+	}); err != nil {
+		return fmt.Errorf("ensure subscriptions (roomId,u._id) index: %w", err)
+	}
+	return nil
+}
+
 func (s *storeMongo) InsertRoom(ctx context.Context, room *Room) error {
 	doc := bson.M{
 		"_id":       room.ID,
@@ -92,6 +114,13 @@ func (s *storeMongo) UpsertSubscription(ctx context.Context, sub *Subscription) 
 	}
 	res, err := s.subs.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
 	if err != nil {
+		// The filter keys on u._id while the unique constraint keys on u.account, so a
+		// concurrent add for the same account races the index instead of matching the
+		// existing row. The account is subscribed either way — report it as an existing
+		// membership rather than failing the caller's add.
+		if mongo.IsDuplicateKeyError(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("upsert subscription (%s,%s): %w", sub.RoomID, sub.UserID, err)
 	}
 	return res.UpsertedCount > 0, nil

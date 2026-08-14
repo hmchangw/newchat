@@ -27,6 +27,9 @@ type Config struct {
 	// RoomRPCTimeout must stay below the HTTP server's WriteTimeout, or net/http
 	// closes the connection before the handler can answer.
 	RoomRPCTimeout time.Duration `env:"ROOM_RPC_TIMEOUT" envDefault:"5s"`
+	// AllSiteIDs lists every site in the federation (including this one); empty means
+	// no cross-site fanout — correct for single-site dev.
+	AllSiteIDs []string `env:"ALL_SITE_IDS" envSeparator:"," envDefault:""`
 }
 
 func loadConfig() (Config, error) {

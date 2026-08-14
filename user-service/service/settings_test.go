@@ -31,7 +31,17 @@ func TestGetSettings_NeverSetReturnsEmptyObject(t *testing.T) {
 	require.NoError(t, err)
 	data, err := json.Marshal(resp)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{}`, string(data), "never-set settings must serialize as {} — no injected defaults")
+	assert.JSONEq(t, `{"permissions":{"external.image.view":false}}`, string(data),
+		"never-set settings must serialize as {} — no injected defaults; permissions is always present")
+}
+
+// A nil user is the repo's "no active user" signal; a matched user with nothing
+// stored has nil sub-documents and must NOT read as not-found.
+func TestGetSettings_NotFound(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+	users.EXPECT().GetUserSettings(gomock.Any(), "ghost").Return(nil, nil)
+	_, err := svc.GetSettings(ctx("ghost", "site-a"))
+	requireCode(t, err, errcode.CodeNotFound)
 }
 
 func TestGetSettings_ReturnsStoredSubDocument(t *testing.T) {
@@ -40,14 +50,41 @@ func TestGetSettings_ReturnsStoredSubDocument(t *testing.T) {
 	users.EXPECT().GetUserSettings(gomock.Any(), "alice").Return(&model.User{Settings: stored}, nil)
 	resp, err := svc.GetSettings(ctx("alice", "site-a"))
 	require.NoError(t, err)
-	assert.Equal(t, stored, resp)
+	assert.Equal(t, *stored, resp.UserSettings)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"fullWidth":true,"translateMessageInto":"en-US","permissions":{"external.image.view":false}}`,
+		string(data), "stored settings stay inlined at the top level, unchanged beside the new key")
 }
 
-func TestGetSettings_NotFound(t *testing.T) {
-	svc, _, users, _, _, _, _ := newSvc(t)
-	users.EXPECT().GetUserSettings(gomock.Any(), "ghost").Return(nil, nil)
-	_, err := svc.GetSettings(ctx("ghost", "site-a"))
-	requireCode(t, err, errcode.CodeNotFound)
+// Windows are evaluated at read time, so a snapshot flips without any cron.
+func TestGetSettings_EvaluatesPermissionsAtReadTime(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := func(granted bool, from, until time.Time) *model.UserPermissions {
+		return &model.UserPermissions{ExternalImageView: &model.PermissionState{
+			Granted: granted, EffectiveFrom: &from, ExpiresAt: &until, UpdatedAt: now,
+		}}
+	}
+	tests := []struct {
+		name  string
+		perms *model.UserPermissions
+		want  bool
+	}{
+		{"no snapshot", nil, false},
+		{"granted in window", snapshot(true, now.Add(-time.Hour), now.Add(time.Hour)), true},
+		{"expired", snapshot(true, now.Add(-2*time.Hour), now.Add(-time.Hour)), false},
+		{"not yet effective", snapshot(true, now.Add(time.Hour), now.Add(2*time.Hour)), false},
+		{"revoked", snapshot(false, now.Add(-time.Hour), now.Add(time.Hour)), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _, users, _, _, _, _ := newSvc(t)
+			users.EXPECT().GetUserSettings(gomock.Any(), "alice").Return(&model.User{Permissions: tt.perms}, nil)
+			resp, err := svc.GetSettings(ctx("alice", "site-a"))
+			require.NoError(t, err)
+			assert.Equal(t, map[model.PermissionKey]bool{model.PermissionExternalImageView: tt.want}, resp.Permissions)
+		})
+	}
 }
 
 func TestGetSettings_StoreError(t *testing.T) {
