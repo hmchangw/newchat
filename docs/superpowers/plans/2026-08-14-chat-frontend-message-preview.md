@@ -92,7 +92,13 @@ describe('previewText', () => {
   })
 
   it('flattens nested emphasis', () => {
-    expect(previewText('**bold with *inner italic* inside**')).toBe('bold with inner italic inside')
+    expect(previewText('**bold with _inner italic_ inside**')).toBe('bold with inner italic inside')
+  })
+
+  it('leaves the outer markers literal when emphasis nests with the same marker', () => {
+    // The tokenizer's strong pattern forbids `*` inside its captured group, so
+    // `**a *b* c**` never matches as strong — the outer asterisks stay literal.
+    expect(previewText('**bold with *inner italic* inside**')).toBe('**bold with inner italic inside**')
   })
 
   it('drops inline code backticks', () => {
@@ -271,7 +277,7 @@ function flattenNode(node) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npm test -- src/lib/previewText.test.js`
-Expected: PASS, 21 tests.
+Expected: PASS, 22 tests.
 
 If the unterminated-fence case fails, do **not** change the expectation — check that `parseMessageContent` emitted the backticks as plain text. The tokenizer's `FENCE_RE` requires a closing fence, so an unterminated one stays literal.
 
