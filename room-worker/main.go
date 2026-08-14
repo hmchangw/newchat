@@ -148,9 +148,10 @@ func main() {
 
 	var metaValkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		metaValkey, err = valkeyutil.ConnectClusterLazy(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk),
 			valkeyutil.WithRequireParentSpan(true),
+			valkeyutil.WithBreakerName("room-worker"),
 		)
 		if err != nil {
 			slog.Error("valkey connect (room-meta L2 invalidation) failed", "error", err)

@@ -115,7 +115,12 @@ func run(reset bool) error {
 	// writeSideStores provisions their keys.
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), 5*time.Minute)
 
-	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword)
+	// One-shot CLI: fail fast on an unreachable Valkey (ConnectCluster, not the
+	// Lazy variant that long-running services need), and no circuit breaker — a
+	// bulk seed has no fallback path, so short-circuiting mid-run would abort the
+	// seed with a confusing error instead of surfacing the real Valkey failure.
+	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkeyutil.WithoutCircuitBreaker())
 	if err != nil {
 		return fmt.Errorf("valkey client connect: %w", err)
 	}

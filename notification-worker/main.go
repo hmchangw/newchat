@@ -162,9 +162,10 @@ func main() {
 	// preference. The other collections here tolerate replica lag and keep it.
 	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 
-	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+	valkeyClient, err := valkeyutil.ConnectClusterLazy(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 		valkeyutil.WithObservability(sdk),
 		valkeyutil.WithRequireParentSpan(true),
+		valkeyutil.WithBreakerName("notification-worker"),
 	)
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
