@@ -83,17 +83,26 @@ func restrictedCacheHomeSite(e RestrictedCacheEntry) string {
 	return userSiteByAccount()[e.Account]
 }
 
+// scopeToSite returns items unchanged when site is empty — that is the
+// single-site seeding path, which writes every fixture into one database
+// exactly as it did before per-site routing existed. A non-empty site
+// filters to that site's rows.
+func scopeToSite[T any](items []T, site string, homeSite func(T) string) []T {
+	if site == "" {
+		return items
+	}
+	return filterBySite(items, site, homeSite)
+}
+
 // resolveTarget picks the database and site to seed. The --mongo-db flag
-// overrides MONGO_DB when non-empty; an empty --site defaults to site-local so
-// a plain `make seed` behaves exactly as it did before two-site support.
+// overrides MONGO_DB when non-empty. An empty --site is passed through
+// unchanged: it means unfiltered, single-site seeding — a plain `make seed`
+// behaves exactly as it did before per-site routing existed. Explicit
+// per-site seeding (e.g. `make fed-seed`) always passes --site itself.
 func resolveTarget(envDB, flagDB, flagSite string) (db, site string) {
 	db = envDB
 	if flagDB != "" {
 		db = flagDB
 	}
-	site = flagSite
-	if site == "" {
-		site = "site-local"
-	}
-	return db, site
+	return db, flagSite
 }

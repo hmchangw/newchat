@@ -121,6 +121,41 @@ func TestFilterBySite_EverySubscriptionLandsAtExactlyOneSite(t *testing.T) {
 		"no subscription is dropped or duplicated across the two sites")
 }
 
+func TestScopeToSite(t *testing.T) {
+	type row struct {
+		id   string
+		site string
+	}
+	homeSite := func(r row) string { return r.site }
+	rows := []row{
+		{id: "a", site: "site-local"},
+		{id: "b", site: "site-remote"},
+		{id: "c", site: "site-local"},
+	}
+
+	tests := []struct {
+		name    string
+		site    string
+		wantIDs []string
+	}{
+		{name: "empty site returns everything unfiltered", site: "", wantIDs: []string{"a", "b", "c"}},
+		{name: "a real site filters to that site's rows", site: "site-local", wantIDs: []string{"a", "c"}},
+		{name: "an unknown site returns nothing", site: "site-nope", wantIDs: []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scopeToSite(rows, tt.site, homeSite)
+
+			gotIDs := make([]string, 0, len(got))
+			for _, r := range got {
+				gotIDs = append(gotIDs, r.id)
+			}
+			assert.Equal(t, tt.wantIDs, gotIDs)
+		})
+	}
+}
+
 func TestResolveTarget(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -133,7 +168,7 @@ func TestResolveTarget(t *testing.T) {
 		{
 			name:   "defaults match the single-site stack",
 			envDB:  "chat",
-			wantDB: "chat", wantSite: "site-local",
+			wantDB: "chat", wantSite: "",
 		},
 		{
 			name:  "flag overrides the env database",

@@ -30,6 +30,25 @@ func TestParseConfig_OverridesFromEnv(t *testing.T) {
 	assert.Equal(t, "s3cret", cfg.ValkeyPassword)
 }
 
+func TestDryRunSummary_EmptySiteIsUnfilteredSingleSitePlan(t *testing.T) {
+	got := dryRunSummary("")
+	for _, want := range []string{
+		"site all",
+		"users 11",
+		"hr_employee 10",
+		"rooms 6",
+		"subscriptions 23",
+		"room_members 19",
+		"messages 23",
+		"thread_rooms 1",
+		"thread_subscriptions 2",
+		"mongo:roomKeys 6",
+		"valkey:restrictedCache 4",
+	} {
+		assert.Contains(t, got, want, "dry-run summary missing %q", want)
+	}
+}
+
 func TestDryRunSummary_HasAllRowCounts(t *testing.T) {
 	got := dryRunSummary("site-local")
 	for _, want := range []string{
