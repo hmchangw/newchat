@@ -42,27 +42,6 @@
   white-space: nowrap;
 }
 
-.audit-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.audit-table th {
-  text-align: left;
-  padding: var(--space-sm) var(--space-md);
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-  font-weight: var(--font-medium);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.audit-table td {
-  padding: var(--space-sm) var(--space-md);
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: var(--text-sm);
-  color: var(--text-primary);
-}
-
 .audit-table-status {
   color: var(--text-muted);
   font-size: var(--text-sm);

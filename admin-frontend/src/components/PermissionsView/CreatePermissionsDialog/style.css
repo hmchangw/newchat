@@ -1,0 +1,91 @@
+.permissions-form-subtitle {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  margin: calc(-1 * var(--space-sm)) 0 0;
+}
+
+.permissions-mode-group {
+  display: flex;
+  gap: var(--space-lg);
+}
+
+.permissions-mode-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-top: 0;
+  font-weight: var(--font-medium);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.permissions-mode-option input {
+  accent-color: var(--accent);
+}
+
+.permissions-reason-textarea,
+.permissions-paste-textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.permissions-subjects-count,
+.permissions-reason-count {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.permissions-date-row {
+  display: flex;
+  gap: var(--space-lg);
+}
+
+.permissions-date-field {
+  flex: 1;
+}
+
+.permissions-date-field label {
+  display: block;
+}
+
+.permissions-result {
+  margin-top: 0;
+}
+
+.permissions-duplicates {
+  margin-top: var(--space-xs);
+}
+
+.permissions-duplicates summary {
+  cursor: pointer;
+}
+
+.permissions-metadata-accounts {
+  margin-top: var(--space-xs);
+}
+
+.permissions-strip-offenders {
+  margin-top: var(--space-sm);
+}
+
+/* Partial failure: the write landed, only the fan-out to some sites did not. */
+.permissions-sync-warning {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--status-error-bg);
+  color: var(--status-error);
+  border: 1px solid var(--status-error);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.permissions-sync-warning button {
+  margin-top: var(--space-sm);
+}
+
+.permissions-sync-ok {
+  margin-top: var(--space-sm);
+  color: var(--status-success);
+  font-size: var(--text-sm);
+}

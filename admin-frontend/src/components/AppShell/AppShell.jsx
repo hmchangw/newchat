@@ -3,12 +3,14 @@ import { useAuth } from '@/context/AuthContext'
 import LazyFallback from '@/components/shared/LazyFallback'
 import './style.css'
 
-const UsersPage = lazy(() => import('@/components/UsersConsole'))
-const AuditView = lazy(() => import('@/components/AuditView'))
-
 const SECTIONS = [
-  { key: 'users', label: 'Users' },
-  { key: 'audit', label: 'Audit' },
+  { key: 'users', label: 'Users', Component: lazy(() => import('@/components/UsersConsole')) },
+  { key: 'audit', label: 'Audit', Component: lazy(() => import('@/components/AuditView')) },
+  {
+    key: 'permissions',
+    label: 'Permissions',
+    Component: lazy(() => import('@/components/PermissionsView')),
+  },
 ]
 
 // Top-level authed layout: nav to switch Users/Audit, header with signed-in account + logout.
@@ -20,16 +22,7 @@ export default function AppShell() {
     logout()
   }
 
-  const renderSection = () => {
-    if (section === 'users') return <UsersPage />
-    return <AuditView />
-  }
-
-  const content = (
-    <Suspense fallback={<LazyFallback variant="inline" />}>
-      {renderSection()}
-    </Suspense>
-  )
+  const { Component } = SECTIONS.find((s) => s.key === section) ?? SECTIONS[0]
 
   return (
     <div className="app-shell">
@@ -55,7 +48,11 @@ export default function AppShell() {
         </div>
       </nav>
 
-      <main className="app-shell-main">{content}</main>
+      <main className="app-shell-main">
+        <Suspense fallback={<LazyFallback variant="inline" />}>
+          <Component />
+        </Suspense>
+      </main>
     </div>
   )
 }

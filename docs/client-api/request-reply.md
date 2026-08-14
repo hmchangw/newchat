@@ -269,6 +269,9 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `GET /v1/admin/audit` | synchronous HTTP | List the audit log (§9.9). |
 | `POST /v1/admin/rooms/:roomId/onduty` | synchronous HTTP | Toggle a channel's on-duty state: maps the boolean onto `restricted` + `externalAccess` via room-service's restrict RPC, with `ownerAccount` required when turning on. Emits a `room_restricted` room event; no system message, so nothing is displayed (§9.12). |
 | `POST /v1/password/change` | synchronous HTTP | Logged-in admin's self-service password change (§9.11). |
+| `POST /v1/admin/permissions` | synchronous HTTP | Grant or revoke a permission for one or more subject accounts; appends to the permission ledger, materializes the new state on each subject's user doc, and fans it out to every other site (unacknowledged destinations come back as `syncFailures`), with one slim audit entry per subject (§9.13). |
+| `GET /v1/admin/permissions` | synchronous HTTP | List the permission ledger newest-first — company-wide by default, with optional independent `subjectAccount` and `permission` query filters; `currentlyGranted` (read from the materialized state) is included only when both filters are set (§9.14). |
+| `POST /v1/admin/permissions/resync` | synchronous HTTP | Re-deliver the current materialized permission state for the given accounts to every other site; writes nothing, idempotent (§9.15). |
 
 **Emits:** None directly — HTTP-only. `POST /v1/admin/rooms/:roomId/onduty` makes room-service publish [`room_restricted`](events.md#room_restricted-roomrestrictedroomevent) on `chat.room.{roomID}.event`.
 
@@ -1598,8 +1601,9 @@ internally but is not delivered to clients.)
 
 **Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
 
-Returns the caller's stored settings **exactly as stored** — `{}` when never set.
-The server never injects defaults; **absent = the client applies its own default**.
+Returns the caller's stored settings **exactly as stored**, plus the evaluated
+admin-managed `permissions`. The server never injects settings defaults;
+**absent = the client applies its own default**.
 
 #### Request body
 
@@ -1607,7 +1611,8 @@ None (empty payload).
 
 #### Success response
 
-The stored settings object. All ten fields optional, present only when explicitly set:
+The stored settings object plus `permissions`. All ten settings fields optional,
+present only when explicitly set; `permissions` always present:
 
 | Field | Type |
 |---|---|
@@ -1621,8 +1626,9 @@ The stored settings object. All ten fields optional, present only when explicitl
 | `showNotificationsInCall` | boolean |
 | `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
 | `priorityContacts` | string[] (raw accounts, read-only here — written only by `settings.priorityContacts.add`/`.remove`) |
+| `permissions` | map<permission key, boolean> (evaluated admin-managed permissions; every known key always present; read-only — `settings.set` cannot touch it) |
 
-`{ "fullWidth": true, "translateMessageInto": "en-US" }`
+`{ "fullWidth": true, "translateMessageInto": "en-US", "permissions": { "external.image.view": true } }`
 
 #### Errors
 
@@ -1641,8 +1647,9 @@ fields keep their stored value (or stay absent). At least one field required.
 
 #### Request body
 
-Any non-empty subset of the nine settings fields (same table as
-[settings.get](#settingsget)). `translateMessageInto` must be a language-tag
+Any non-empty subset of the nine writable settings fields (same table as
+[settings.get](#settingsget), minus the read-only `priorityContacts` and
+`permissions`). `translateMessageInto` must be a language-tag
 shape — hyphen-separated letter/digit subtags, leading subtag letters-only
 (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`) — or `""` to explicitly turn
 translation off; no value whitelist.
@@ -1651,7 +1658,8 @@ translation off; no value whitelist.
 
 #### Success response
 
-The **full post-update settings** (same shape as [settings.get](#settingsget)).
+The **full post-update settings** (the same ten settings fields as
+[settings.get](#settingsget), without `permissions`).
 
 #### Errors
 

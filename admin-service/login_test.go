@@ -25,7 +25,7 @@ import (
 func loginRouter(t *testing.T, adminStore AdminStore, sessions session.Store, cfg Config) *gin.Engine { //nolint:gocritic // hugeParam: Config is a test-local value, cheap to copy per call
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	h := newHandler(adminStore, sessions, cfg, nil)
+	h := newHandler(adminStore, sessions, cfg, nil, nil)
 	r.POST("/v1/login", h.handleLogin)
 	return r
 }
@@ -373,7 +373,7 @@ func TestHandleLogin_TimingConsistent(t *testing.T) {
 func changePasswordRouter(t *testing.T, adminStore AdminStore, sessions session.Store, cfg Config) *gin.Engine { //nolint:gocritic // hugeParam: Config is a test-local value, cheap to copy per call
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	h := newHandler(adminStore, sessions, cfg, nil)
+	h := newHandler(adminStore, sessions, cfg, nil, nil)
 	r.POST("/v1/password/change", requireAdmin(sessions, cfg.SiteID), h.handleChangePassword)
 	return r
 }

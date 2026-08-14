@@ -1,0 +1,12 @@
+/* Chrome comes from the shared .data-table base; only the reason column needs more. */
+.permissions-table td {
+  /* A 1000-rune reason can be one unbroken token (no spaces) — let it wrap
+     instead of blowing out the table width. */
+  overflow-wrap: anywhere;
+}
+
+.permissions-table-status {
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--text-muted);
+}

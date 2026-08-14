@@ -23,6 +23,17 @@ const REASON_COPY: Record<string, string> = {
   not_admin: 'You need admin access to do that.',
   invalid_token: 'That link has expired or is invalid — request a new one.',
   account_exists: 'An account with that email already exists.',
+  unknown_permission: "That permission isn't recognized.",
+  invalid_subject_count: 'Enter at least one account.',
+  // "1000" mirrors pkg/model.MaxReasonRunes.
+  invalid_reason: 'Enter a reason, up to 1000 characters.',
+  missing_permission_fields: 'Applicant and approver are both required.',
+  invalid_permission_window:
+    "Check the dates — the start date must be on or before the expiry date, and the expiry date can't be in the past.",
+  unexpected_permission_window:
+    "Revoking a permission doesn't use the date fields — leave them blank.",
+  inactive_subject: "Some accounts are deactivated and can't be granted this permission.",
+  unknown_accounts: 'Some accounts do not exist on this site.',
 }
 
 /** User-facing message for an `AsyncJobError`; prefers reason-keyed copy (stable machine codes) over `err.message`. */

@@ -69,6 +69,13 @@ describe('formatAsyncJobError', () => {
     expect(msg).not.toBe('token invalid')
   })
 
+  it('returns friendly copy for unknown_accounts', () => {
+    const err = new AsyncJobError('unknown accounts: zzz', { reason: 'unknown_accounts' })
+    const msg = formatAsyncJobError(err)
+    expect(msg).not.toBe('')
+    expect(msg).not.toBe('unknown accounts: zzz')
+  })
+
   it('falls back to err.message for an unknown reason', () => {
     const err = new AsyncJobError('something odd happened', { reason: 'not_in_catalog' })
     expect(formatAsyncJobError(err)).toBe('something odd happened')

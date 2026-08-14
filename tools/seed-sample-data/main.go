@@ -26,7 +26,7 @@ import (
 )
 
 type config struct {
-	MongoURI       string   `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoURI       string   `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017/?directConnection=true"`
 	MongoDB        string   `env:"MONGO_DB"        envDefault:"chat"`
 	MongoUsername  string   `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword  string   `env:"MONGO_PASSWORD"  envDefault:""`

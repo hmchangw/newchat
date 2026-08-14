@@ -4750,7 +4750,7 @@ Same shape as `status.getByName`:
 **Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Returns the calling user's stored settings sub-document — **exactly as stored**. The server never injects defaults: a field the user never set is absent from the reply, and **absent means the client applies its own default** (cross-client default consistency is client-owned by design). A user who never set anything gets `{}`.
+Returns the calling user's stored settings sub-document — **exactly as stored** — plus the evaluated admin-managed `permissions`. The server never injects settings defaults: a field the user never set is absent from the reply, and **absent means the client applies its own default** (cross-client default consistency is client-owned by design). A user who never set anything gets `{ "permissions": … }` and nothing else.
 
 ##### Request body
 
@@ -4758,7 +4758,7 @@ None (empty payload).
 
 ##### Success response
 
-The stored settings object. All ten fields are optional and appear only when the user has explicitly set them:
+The stored settings object plus `permissions`. All ten settings fields are optional and appear only when the user has explicitly set them; `permissions` is always present:
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -4772,6 +4772,7 @@ The stored settings object. All ten fields are optional and appear only when the
 | `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce bypasses this — see `alwaysAllowPriorityNotifications`. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
 | `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
 | `priorityContacts` | string[] | Read-only here — raw contact accounts (not enriched), stored order. Written only by [`settings.priorityContacts.add`](#settingsprioritycontactsadd) / [`settings.priorityContacts.remove`](#settingsprioritycontactsremove), never by `settings.set`. |
+| `permissions` | map<permission key, boolean> | Evaluated admin-managed permissions; every known key is always present (`false` when never granted, expired, not yet effective, or revoked). Admin-written, read-only here — `settings.set` cannot touch it. No client event is emitted when an admin changes a permission: call `settings.get` again (e.g. on reconnect) to pick one up. |
 
 ```json
 {
@@ -4779,14 +4780,15 @@ The stored settings object. All ten fields are optional and appear only when the
   "themePreference": "dark",
   "translateMessageInto": "en-US",
   "messagePreviewEnabled": true,
-  "priorityContacts": ["alice", "helper.bot"]
+  "priorityContacts": ["alice", "helper.bot"],
+  "permissions": { "external.image.view": true }
 }
 ```
 
 Never-set user:
 
 ```json
-{}
+{ "permissions": { "external.image.view": false } }
 ```
 
 ##### Error response
@@ -4827,7 +4829,7 @@ Any non-empty subset of the nine settings fields (same types as [`settings.get`]
 
 ##### Success response
 
-The **full post-update settings** (same shape as [`settings.get`](#settingsget)) — sent fields updated, previously stored fields retained:
+The **full post-update settings** (the same ten settings fields as [`settings.get`](#settingsget), without `permissions`) — sent fields updated, previously stored fields retained:
 
 ```json
 {
@@ -4856,7 +4858,7 @@ The payload carries the **full post-update settings** (replace, don't merge):
 | Field | Type | Notes |
 |-------|------|-------|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | The full post-update settings — same ten optional fields as [`settings.get`](#settingsget). |
+| `settings` | UserSettings | The full post-update settings — the same ten optional settings fields as [`settings.get`](#settingsget), without `permissions`. |
 
 ```json
 {
@@ -6727,10 +6729,19 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
 | `no_responders` | unavailable | any request/reply RPC whose upstream subject had no subscriber (`natsutil.RequestFailure`) — the upstream service is down, not yet started, or not routed to this site. Retry. |
 | `upstream_timeout` | unavailable | any request/reply RPC delivered to the upstream but not answered within the caller's timeout (`natsutil.RequestFailure`). Retry. |
+| `invalid_token` | unauthenticated | admin-service (every `Authorization: Bearer` route — §9.11 and all `/v1/admin/…`; token missing, unknown, or session not found), botplatform-service (session token failed validation, §7) |
 | `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
 | `invalid_credentials` | unauthenticated | admin-service `POST /v1/login` (§9.10) (unknown account, wrong password, not admin, or deactivated — uniform response) |
 | `old_password_mismatch` | unauthenticated | admin-service `POST /v1/password/change` (§9.11) (`oldPassword` does not match) |
+| `unknown_permission` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13), `GET /v1/admin/permissions` (§9.14), `POST /v1/admin/permissions/resync` (§9.15) (permission key not recognized) |
+| `invalid_subject_count` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`subjectAccounts` empty), `POST /v1/admin/permissions/resync` (§9.15) (`accounts` empty) |
+| `invalid_reason` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`reason` over 1000 runes) |
+| `missing_permission_fields` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`granted` omitted, or `applicantAccount`/`approverAccount` empty) |
+| `invalid_permission_window` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (grant only: malformed date, `effectiveFrom` after `expiresAt`, or `expiresAt` not in the future) |
+| `unexpected_permission_window` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (revoke only: `effectiveFrom`/`expiresAt` present with a non-null value; an explicit `null` counts as absent) |
+| `inactive_subject` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (a subject account is deactivated) |
+| `unknown_accounts` | not_found | admin-service `POST /v1/admin/permissions` (§9.13) (a subject, applicant, or approver account does not exist; the lookup is company-wide, not filtered by site) |
 | `emoji_shortcode_reserved` | bad_request | media-service `PUT /api/v1/emoji/…` (shortcode collides with a built-in standard emoji) |
 | `emoji_delete_disabled` | forbidden | media-service `emoji.delete` (kill-switch `EMOJI_DELETE_ENABLED=false`, the default) |
 
@@ -7385,7 +7396,7 @@ Returns audit entries for the admin's site, newest-first, with optional filterin
 |---|---|---|
 | `targetAccount` | string | Optional. Filter by the affected user's account. |
 | `actor` | string | Optional. Filter by actor account. |
-| `action` | string | Optional. Filter by action string (e.g. `user.create`, `session.revoke_all`). |
+| `action` | string | Optional. Filter by action string (e.g. `user.create`, `session.revoke_all`, `permission.grant`, `permission.revoke`). |
 | `page` | integer | Page number, 1-based. Defaults to `1`. |
 | `limit` | integer | Page size. Defaults to `20`. |
 
@@ -7573,6 +7584,272 @@ For a room with members homed on other sites, room-service still fans the state 
 
 `None.`
 
+### 9.13 Create / revoke permission grants
+
+**Endpoint:** `POST /v1/admin/permissions`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Records a new row in the append-only `permission_grants` ledger for one or more subject accounts — either a grant (`granted: true`) or a revocation (`granted: false`) of the same permission key in one call. Unlike its siblings this is not a `/users/:account/...`-shaped endpoint, because `subjectAccounts` is a batch. The same write also materializes the new state on each subject's user document — that snapshot, not the ledger, is what [`settings.get`](#settingsget) and `currentlyGranted` (§9.14) read; the ledger is audit history and is never rewritten. One `admin_audit` entry (`action`: `permission.grant` or `permission.revoke`, `targetAccount`: the subject, `details`: `{"permission": "<permission key>"}`) is written per subject alongside the ledger rows.
+
+After the write commits, the new state is fanned out to every other site so their copies converge. Large batches are split into chunks internally; that is transparent to callers — chunking never shows up in the request or the response, and only whole destinations appear in `syncFailures`.
+
+Dates are plain `YYYY-MM-DD` strings, interpreted under a fixed UTC+8 rule — never the caller's timezone, never the server's local timezone. There is no `timezone` field, and there never will be one for this endpoint.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `permission` | string | yes | Permission key. The only key defined today is `external.image.view`. |
+| `subjectAccounts` | string[] | yes | Accounts to grant or revoke for — non-empty, no fixed cap. Duplicates are silently deduplicated (first occurrence kept) and reported back in `duplicatesIgnored` — never rejected outright. |
+| `granted` | boolean | yes | `true` records a grant, `false` records a revocation. Required — a body that omits `granted`, or sends an explicit `granted: null`, is rejected with `400 missing_permission_fields`, not silently treated as `false`/revoke. |
+| `effectiveFrom` | string | no | Grant only — `YYYY-MM-DD`. Omitted means "effective immediately" (the write instant). Backdating is allowed. **Must be omitted when `granted` is `false`** — a revocation has no validity window. A JSON `null` is treated as absent (equivalent to omitting the field). |
+| `expiresAt` | string | when `granted` is `true` | Grant only — `YYYY-MM-DD`, the last valid day (inclusive). Stored internally as the exclusive-end instant, UTC+8 midnight the *following* day. A value equal to today is valid (the grant expires tonight); any earlier date is rejected. **Must be omitted when `granted` is `false`** — there are no permanent grants and no dated revocations. A JSON `null` is treated as absent (equivalent to omitting the field). |
+| `applicantAccount` | string | yes | Account of the person who requested the change (offline approval). Must exist; may be inactive. |
+| `approverAccount` | string | yes | Account of the person who approved the change (offline approval). Must exist; may be inactive. |
+| `reason` | string | no | Free text, ≤1000 runes (`utf8.RuneCountInString`) when present. Omitted or empty is accepted and stored as `""`. Retained permanently — this is an append-only ledger, not a mutable note. |
+
+Grant:
+
+```json
+{
+  "permission": "external.image.view",
+  "subjectAccounts": ["alice", "bob"],
+  "granted": true,
+  "effectiveFrom": "2026-09-01",
+  "expiresAt": "2026-12-31",
+  "applicantAccount": "carol",
+  "approverAccount": "dave",
+  "reason": "On-call staff must review production line photos from outside the fab."
+}
+```
+
+Revoke — `effectiveFrom`/`expiresAt` omitted (an explicit `null` is equivalent):
+
+```json
+{
+  "permission": "external.image.view",
+  "subjectAccounts": ["alice"],
+  "granted": false,
+  "applicantAccount": "carol",
+  "approverAccount": "dave",
+  "reason": "Project ended."
+}
+```
+
+#### Success response
+
+`HTTP 201`
+
+| Field | Type | Notes |
+|---|---|---|
+| `created` | integer | Number of ledger rows written — the deduplicated subject count. |
+| `duplicatesIgnored` | string[] | Subject accounts dropped as duplicates of an earlier entry in the same request. `[]`, never `null`, when there were none. |
+| `syncFailures` | string[] | Remote site IDs whose cross-site publish was not acknowledged. Omitted (not `[]`) when every destination landed. Still `201` when present — the ledger rows and this site's state were written; the listed sites may keep serving the previous decision until healed by [§9.15 resync](#915-resync-permission-fanout). |
+
+```json
+{
+  "created": 2,
+  "duplicatesIgnored": [],
+  "syncFailures": ["site-b"]
+}
+```
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | Body is not valid JSON. |
+| 400 | `bad_request` | `unknown_permission` | `permission` is not a recognized key. |
+| 400 | `bad_request` | `invalid_subject_count` | `subjectAccounts` is empty. |
+| 400 | `bad_request` | `invalid_reason` | `reason` exceeds 1000 runes. |
+| 400 | `bad_request` | `missing_permission_fields` | `granted` is omitted, or `applicantAccount`/`approverAccount` is empty. |
+| 400 | `bad_request` | `invalid_permission_window` | Grant only. `effectiveFrom`/`expiresAt` not `YYYY-MM-DD`, `effectiveFrom` after `expiresAt`, or `expiresAt`'s derived instant is not in the future (today is valid; yesterday or earlier is not). |
+| 400 | `bad_request` | `unexpected_permission_window` | Revoke only. `effectiveFrom` or `expiresAt` present with a non-null value; an explicit `null` counts as absent and is accepted. |
+| 404 | `not_found` | `unknown_accounts` | A subject, applicant, or approver account does not exist. Accounts are looked up company-wide — the lookup does not filter by `siteId`, so a subject may be homed at any site. Message names the offending accounts; `metadata.accounts` carries the same comma-joined list for programmatic display. |
+| 400 | `bad_request` | `inactive_subject` | A subject account exists but is deactivated. `applicantAccount`/`approverAccount` are exempt — a departed staff member may still be recorded as applicant or approver. Message names the offending accounts; `metadata.accounts` carries the same comma-joined list. |
+| 401 | `unauthenticated` | `invalid_token` | Token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | The batch insert is transactional — on failure, no ledger row was written and no audit entry exists. |
+
+```bash
+# Grant
+curl -X POST https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permission": "external.image.view",
+    "subjectAccounts": ["alice", "bob"],
+    "granted": true,
+    "effectiveFrom": "2026-09-01",
+    "expiresAt": "2026-12-31",
+    "applicantAccount": "carol",
+    "approverAccount": "dave",
+    "reason": "On-call staff must review production line photos from outside the fab."
+  }'
+```
+
+```bash
+# Revoke
+curl -X POST https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permission": "external.image.view",
+    "subjectAccounts": ["alice"],
+    "granted": false,
+    "applicantAccount": "carol",
+    "approverAccount": "dave",
+    "reason": "Project ended."
+  }'
+```
+
+### 9.14 List permission grants
+
+**Endpoint:** `GET /v1/admin/permissions`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Returns the permission ledger, newest-first, plus the current computed decision when the filters narrow to a single subject and permission. Backs both the terminal workflow (confirm state before writing, confirm again after) and the console's lookup pane. Company-wide — the ledger browse does not filter by `siteId`, so rows for subjects homed at any site are returned.
+
+#### Query parameters
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `subjectAccount` | string | Optional. Filter to one subject account. Omitted lists every subject. |
+| `permission` | string | Optional. Filter to one permission key. Omitted lists every permission. An unrecognized key returns `400 unknown_permission`. |
+| `page` | integer | Page number, 1-based. Defaults to `1`. |
+| `limit` | integer | Page size. Defaults to `20`, max `100`. |
+
+`subjectAccount` and `permission` combine independently, four ways: neither given returns every row; `subjectAccount` alone returns one subject's full ledger; `permission` alone returns one permission key across every subject; both given narrows to one subject's ledger for one permission. `currentlyGranted` (below) is included only in the both-given case.
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `currentlyGranted` | boolean | Present only when BOTH `subjectAccount` and `permission` were supplied — a single decision is meaningless without both. The current decision, evaluated at read time from the subject's materialized user-document state — the same evaluation path as [`settings.get`](#settingsget), so the two can never disagree. Not derived from the ledger rows below (those are audit history). Deliberately not named `granted`, which is a per-row field meaning "what this record did", not "current state". |
+| `entries` | [PermissionGrantView](#permissiongrantview)[] | The ledger, newest-first (`recordedAt` desc, `_id` desc tie-break). |
+| `total` | integer | Total matching rows across all pages. |
+
+```json
+{
+  "currentlyGranted": false,
+  "entries": [
+    {
+      "id": "0199f2c3a4b5c6d90199f2c3a4b5c6d9",
+      "permission": "external.image.view",
+      "subjectAccount": "alice",
+      "granted": false,
+      "applicantAccount": "carol",
+      "approverAccount": "dave",
+      "reason": "Project ended.",
+      "recordedBy": "p_admin_wang",
+      "recordedAt": "2026-10-15T02:03:04Z"
+    },
+    {
+      "id": "0199f2c3a4b5c6d70199f2c3a4b5c6d7",
+      "permission": "external.image.view",
+      "subjectAccount": "alice",
+      "granted": true,
+      "effectiveFrom": "2026-09-01",
+      "expiresAt": "2026-12-31",
+      "applicantAccount": "carol",
+      "approverAccount": "dave",
+      "reason": "On-call staff must review production line photos from outside the fab.",
+      "recordedBy": "p_admin_wang",
+      "recordedAt": "2026-09-01T01:00:00Z"
+    }
+  ],
+  "total": 2
+}
+```
+
+Note what this example demonstrates: the revoke row (newest, listed first) omits
+`effectiveFrom`/`expiresAt` entirely, and `currentlyGranted` reads
+`false` because the revoke is what the subject's materialized state now holds.
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `unknown_permission` | `permission` is not a recognized key. |
+| 401 | `unauthenticated` | `invalid_token` | Token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+```bash
+# Lookup
+curl -G https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "subjectAccount=alice" \
+  --data-urlencode "permission=external.image.view"
+```
+
+### 9.15 Resync permission fanout
+
+**Endpoint:** `POST /v1/admin/permissions/resync`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Re-delivers the **current** materialized state for the given accounts to every other site — the remediation for a `syncFailures` entry returned by §9.13. Re-delivery only: it reads each account's stored state and republishes it, and **writes nothing** — no ledger row, no `admin_audit` entry, no user-document update. Safe to call repeatedly: each delivered state carries its original write timestamp, and a destination ignores anything older than what it already holds — so a replay either rewrites the identical value or is discarded, and can never undo a newer decision.
+
+No existence or active check is performed — this endpoint syncs state, it does not validate people. An account with no stored state for the requested permission (unknown account, or never granted this permission) is silently skipped: nothing is published for it and it is not reported as an error.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `permission` | string | yes | Permission key to resync. The only key defined today is `external.image.view`. |
+| `accounts` | string[] | yes | Accounts to resync — non-empty, no fixed cap. Duplicates are silently deduplicated (first occurrence kept) and not reported. |
+
+```json
+{
+  "permission": "external.image.view",
+  "accounts": ["alice", "bob"]
+}
+```
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `syncFailures` | string[] | Remote site IDs whose republish was not acknowledged, deduplicated. Omitted (not `[]`) when every destination landed — the usual case; call again to retry. |
+
+Everything landed:
+
+```json
+{}
+```
+
+One destination still unreachable:
+
+```json
+{ "syncFailures": ["site-b"] }
+```
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | Body is not valid JSON. |
+| 400 | `bad_request` | `unknown_permission` | `permission` is not a recognized key. |
+| 400 | `bad_request` | `invalid_subject_count` | `accounts` is empty. |
+| 401 | `unauthenticated` | `invalid_token` | Token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | Failed to read the stored state; nothing was published. Cause is logged server-side only. |
+
+```bash
+# Resync the two accounts a failed grant left out of sync
+curl -X POST https://admin.example.com/v1/admin/permissions/resync \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permission": "external.image.view",
+    "accounts": ["alice", "bob"]
+  }'
+```
+
 ### UserView
 
 Projected user record returned by all admin user endpoints. The `services` / bcrypt field is never included.
@@ -7616,12 +7893,28 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `id` | string | Audit entry ID. |
 | `actorUserId` | string | Internal user ID of the admin who performed the action. |
 | `actorAccount` | string | Account of the admin. |
-| `action` | string | Action string, e.g. `user.create`, `user.update`, `user.password.set`, `session.revoke_all`, `session.revoke`. |
+| `action` | string | Action string, e.g. `user.create`, `user.update`, `user.password.set`, `session.revoke_all`, `session.revoke`, `permission.grant`, `permission.revoke`. |
 | `targetUserId` | string | Internal ID of the affected user. Omitted when not applicable. |
 | `targetAccount` | string | Account of the affected user. Omitted when not applicable. |
 | `details` | map<string, string> | Non-secret context for the action (e.g. `{"account":"bob"}`). Omitted when empty. Never contains passwords, hashes, or tokens. |
 | `siteId` | string | Site the action was performed on. |
 | `timestamp` | integer | Epoch ms (UTC) when the action occurred. |
+
+### PermissionGrantView
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Ledger row ID (32-char UUIDv7 hex). |
+| `permission` | string | Permission key this row applies to. |
+| `subjectAccount` | string | The account this row grants or revokes the permission for. |
+| `granted` | boolean | What this row did — `true` for a grant, `false` for a revocation. Historical rows are never rewritten; this is not "does the subject currently hold the permission" (see `currentlyGranted`, §9.14). |
+| `effectiveFrom` | string | `YYYY-MM-DD`, decoded back from the stored instant at UTC+8. Omitted on revoke rows (no validity window). |
+| `expiresAt` | string | `YYYY-MM-DD`, the inclusive last valid day (decoded from the stored exclusive-end instant at UTC+8, minus one day). Omitted on revoke rows. |
+| `applicantAccount` | string | Who requested the change. |
+| `approverAccount` | string | Who approved the change. |
+| `reason` | string | Free-text justification, as submitted. |
+| `recordedBy` | string | The admin account that recorded this row (from the session token). |
+| `recordedAt` | string | RFC 3339. Server clock at write time (when the decision was recorded). Independent of the validity window — a grant can be back- or future-dated via `effectiveFrom`/`expiresAt`. |
 
 ---
 

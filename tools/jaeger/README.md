@@ -17,7 +17,7 @@ Jaeger UI: http://localhost:16686
 2. Run any service locally:
    ```bash
    # Example: broadcast-worker
-   NATS_URL=nats://localhost:4222 MONGO_URI=mongodb://localhost:27017 SITE_ID=site-local go run ./broadcast-worker/
+   NATS_URL=nats://localhost:4222 MONGO_URI=mongodb://localhost:27017/?directConnection=true SITE_ID=site-local go run ./broadcast-worker/
    ```
 3. Exercise the service (send messages, trigger events, etc.).
 4. Open http://localhost:16686, select the service name from the **Service** dropdown, and click **Find Traces**.
