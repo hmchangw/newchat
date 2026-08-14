@@ -204,10 +204,23 @@ as long as it's the room's latest.
 
 ### `lib/` sender-name helper
 
-`MessageRow`'s private `senderName(msg)` has the only display-name resolution
-rule in the codebase. Its `Participant` branch moves to `lib/` so the preview
-path and the message row resolve names by one rule rather than two. `MessageRow`
+`MessageRow`'s private `senderName(msg)` moves to `lib/` so the preview path and
+the message row resolve names by one rule rather than two. `MessageRow`
 delegates to it; its top-level `userDisplayName` preference is unchanged.
+
+It is not the codebase's only such rule — `QuotedBlock.senderLabel`, and the
+optimistic quote targets built in `ChatPage` and `ThreadRightBar`, each resolve
+names their own way and none consult `displayName`. Those are out of scope here
+and are left alone: they operate on quote snapshots, not on a `Participant`.
+
+The extracted helper prefers `participant.displayName`, which the inline version
+never consulted. That branch is **unreachable from `MessageRow`** — nothing
+populates a message's nested `sender.displayName`: `broadcast-worker`'s
+`buildClientMessage` sets only account/engName/chineseName, and across
+history-service the field is assigned in exactly one place,
+`rooms.go:216`'s `toPreviewMessage`. The branch exists for
+`PreviewMessage.sender`, the one shape that carries it, where it delivers a
+bot's app name.
 
 ### Attachment fallback
 

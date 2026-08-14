@@ -292,7 +292,9 @@ git commit -m "feat(chat-frontend): add previewText flattener for sidebar snippe
 
 ### Task 2: Display-name resolution (`lib/participantName.js`)
 
-The only display-name rule in the codebase is private to `MessageRow`. The preview writers need the same rule for two different shapes, so it moves to `lib/` with both consumers on one implementation.
+`MessageRow` keeps its display-name rule private. The preview writers need the same rule for two different shapes, so it moves to `lib/` with both consumers on one implementation.
+
+Other name-resolution sites exist (`QuotedBlock.senderLabel`, and the optimistic quote targets in `ChatPage` and `ThreadRightBar`) and are deliberately left alone — they resolve quote snapshots, not `Participant` objects.
 
 **Files:**
 - Create: `src/lib/participantName.js`
