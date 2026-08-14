@@ -2533,6 +2533,71 @@ func TestProcessAddMembers_InheritedCapPropagates(t *testing.T) {
 	assert.Equal(t, inheritedMs, *evt.HistorySharedSince)
 }
 
+// End-to-end through processAddMembers: an inherited cap on a share-all add
+// must also land on the federated (cross-site) MemberAddEvent relayed via
+// OUTBOX to the new member's home site — the sibling of
+// TestProcessAddMembers_InheritedCapPropagates, which only covers the
+// same-site copy.
+func TestProcessAddMembers_InheritedCapPropagates_CrossSite(t *testing.T) {
+	h, mockStore, published := newAddMembersTestHandler(t)
+	ctx := natsutil.WithRequestID(context.Background(), "0193abcd-0193-7abc-89ab-0193abcd0005")
+
+	const inheritedMs = int64(1700000000000)
+
+	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-A", CrossSite: ptrBool(false),
+	}, nil)
+	mockStore.EXPECT().ListAddMemberCandidates(gomock.Any(), gomock.Any(), gomock.Any(), "r1").
+		Return([]AddMemberCandidate{{Account: "charlie", SiteID: "site-b"}}, nil)
+	mockStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"charlie"}).Return([]model.User{
+		{ID: "u_charlie", Account: "charlie", SiteID: "site-b", EngName: "Charlie", ChineseName: "查"},
+	}, nil)
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{
+		ID: "u_alice", Account: "alice", SiteID: "site-A", EngName: "Alice", ChineseName: "愛麗絲",
+	}, nil)
+	var capturedSubs []*model.Subscription
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, subs []*model.Subscription) error {
+			capturedSubs = subs
+			return nil
+		})
+	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
+	expectGetRoom(mockStore, "r1", "eng")
+	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	mockStore.EXPECT().SetRoomCrossSite(gomock.Any(), "r1").Return(nil)
+
+	hss := inheritedMs
+	body, err := json.Marshal(model.AddMembersRequest{
+		RoomID: "r1", Users: []string{"charlie"},
+		RequesterID: "u_alice", RequesterAccount: "alice",
+		Timestamp:          1740000000000,
+		History:            model.HistoryConfig{Mode: model.HistoryModeAll},
+		HistorySharedSince: &hss,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.processAddMembers(ctx, body))
+
+	require.Len(t, capturedSubs, 1)
+	require.NotNil(t, capturedSubs[0].HistorySharedSince,
+		"share-all add by a capped requester must cap the federated member's subscription")
+	assert.Equal(t, time.UnixMilli(inheritedMs).UTC(), *capturedSubs[0].HistorySharedSince)
+
+	var foundOutbox bool
+	for _, p := range published() {
+		if !strings.HasPrefix(p.subj, "chat.outbox.") {
+			continue
+		}
+		foundOutbox = true
+		_, inboxEvt := unwrapOutbox(t, p.data)
+		var change model.MemberAddEvent
+		require.NoError(t, json.Unmarshal(inboxEvt.Payload, &change))
+		require.NotNil(t, change.HistorySharedSince,
+			"federated MemberAddEvent must carry the inherited cap")
+		assert.Equal(t, inheritedMs, *change.HistorySharedSince)
+	}
+	assert.True(t, foundOutbox, "expected a batched outbox relay publish for site-b")
+}
+
 // Task 14b: HistoryModeNone — sub.HistorySharedSince falls back to acceptedAt (req.Timestamp).
 func TestProcessAddMembers_HistoryNone_NoTimestamp(t *testing.T) {
 	h, mockStore, _ := newAddMembersTestHandler(t)
