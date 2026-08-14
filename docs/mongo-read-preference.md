@@ -58,7 +58,7 @@ All reads go to a secondary except the pinned handles.
 
 broadcast-worker is read-only against MongoDB — its room/subscription MongoDB
 writes (`rooms.lastMsgAt`/`lastMsgId`, subscription `lastSeenAt`, `hasMention`)
-moved to `room-state-worker`. The reads above are unaffected by that split.
+moved to `unread-worker`. The reads above are unaffected by that split.
 
 The DEK store and roomkeystore pins matter because those keys are written by
 *other* services and read here to decrypt / encrypt; a lagging secondary could
@@ -101,7 +101,7 @@ and adds parallel secondary-bound handles used only by the uniformly-safe reads.
 
 ## 4. Write-only services
 
-`room-state-worker` derives its writes purely from the canonical event — it never
+`unread-worker` derives its writes purely from the canonical event — it never
 reads MongoDB to decide anything — so it deliberately has no `MONGO_READ_PREFERENCE`
 config field at all, not even pinned to `primary`. Its writes (via `BulkWrite`) always
 target the primary regardless; there is no read path for a preference to apply to.

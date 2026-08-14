@@ -7,7 +7,7 @@ import (
 
 //go:generate mockgen -destination=mock_store_test.go -package=main . Store
 
-// Store is the room-state write surface. Every method issues a single unordered
+// Store is the unread-state write surface. Every method issues a single unordered
 // BulkWrite and is safe to replay out of order — the flush path retries whole
 // batches, so any write may be applied more than once and after a newer one.
 type Store interface {

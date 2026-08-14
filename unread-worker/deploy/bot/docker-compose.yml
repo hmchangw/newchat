@@ -1,17 +1,17 @@
-name: room-state-worker
+name: bot-unread-worker
 
 services:
-  room-state-worker:
+  bot-unread-worker:
     build:
       context: ../../..
-      dockerfile: room-state-worker/deploy/user/Dockerfile
+      dockerfile: unread-worker/deploy/bot/Dockerfile
     environment:
-      - OTEL_SERVICE_NAME=room-state-worker
+      - OTEL_SERVICE_NAME=bot-unread-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
-      - MODE=user
+      - MODE=bot
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}

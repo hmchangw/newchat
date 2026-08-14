@@ -16,9 +16,9 @@ func TestBuildConsumerConfig_UnlimitedDeliverAndDeliverNew(t *testing.T) {
 		MaxDeliver:    5,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
-	}, "room-state-worker", "chat.msg.canonical.site-a.>")
+	}, "unread-worker", "chat.msg.canonical.site-a.>")
 
-	assert.Equal(t, "room-state-worker", cc.Durable)
+	assert.Equal(t, "unread-worker", cc.Durable)
 	assert.Equal(t, "chat.msg.canonical.site-a.>", cc.FilterSubject)
 	assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 	// Durable retry: a MongoDB outage must not exhaust MaxDeliver and silently
@@ -32,6 +32,6 @@ func TestBuildConsumerConfig_UnlimitedDeliverAndDeliverNew(t *testing.T) {
 }
 
 func TestBuildConsumerConfig_BotModePrefixesDurable(t *testing.T) {
-	assert.Equal(t, "bot-room-state-worker", stream.PipelineBot.ConsumerName("room-state-worker"))
-	assert.Equal(t, "room-state-worker", stream.PipelineUser.ConsumerName("room-state-worker"))
+	assert.Equal(t, "bot-unread-worker", stream.PipelineBot.ConsumerName("unread-worker"))
+	assert.Equal(t, "unread-worker", stream.PipelineUser.ConsumerName("unread-worker"))
 }

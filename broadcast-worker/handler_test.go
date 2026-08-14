@@ -2448,7 +2448,7 @@ func TestHandleThreadCreated_DMRoom_WithMention(t *testing.T) {
 
 	msgTime := time.Date(2026, 4, 1, 11, 0, 0, 0, time.UTC)
 
-	// DM thread-reply mention badges are owned by room-state-worker
+	// DM thread-reply mention badges are owned by unread-worker
 	// (markThreadMentions on the thread_subscriptions row); broadcast-worker
 	// performs no subscription writes at all — its Store interface has none —
 	// so a mentioned DM thread reply still just fans out to both members.

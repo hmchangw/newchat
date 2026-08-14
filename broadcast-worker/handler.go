@@ -244,7 +244,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
-		// room-state-worker (not broadcast-worker) owns the room-level mention badge
+		// unread-worker (not broadcast-worker) owns the room-level mention badge
 		// derived from MESSAGES-CANONICAL, and correctly skips it here: TShow=false
 		// replies are invisible in the main channel, so a badge would appear with no
 		// visible message to explain it.

@@ -142,7 +142,7 @@ func (f *flusher) write(ctx context.Context, b *batch) flushOutcome {
 func (f *flusher) settle(ctx context.Context, b *batch, out flushOutcome) {
 	if out.err != nil {
 		if _, ok := errcode.IsPermanent(out.err); ok {
-			slog.ErrorContext(ctx, "room-state flush dropped poison batch",
+			slog.ErrorContext(ctx, "unread-state flush dropped poison batch",
 				"error", out.err,
 				"mongo_stage_codes", out.stageCodes,
 				"rooms", len(b.rooms),
@@ -150,7 +150,7 @@ func (f *flusher) settle(ctx context.Context, b *batch, out flushOutcome) {
 				"mentions", len(b.mentions),
 				"held", len(b.held))
 		} else {
-			slog.ErrorContext(ctx, "room-state flush failed, retrying",
+			slog.ErrorContext(ctx, "unread-state flush failed, retrying",
 				"error", out.err,
 				"rooms", len(b.rooms),
 				"last_seen", len(b.lastSeen),
@@ -211,7 +211,7 @@ func classifyFlushErr(err error) error {
 			return err
 		}
 	}
-	return errcode.Permanent(errcode.Internal("mongo rejected room-state bulk write", errcode.WithCause(err)))
+	return errcode.Permanent(errcode.Internal("mongo rejected unread-state bulk write", errcode.WithCause(err)))
 }
 
 // Run drives the flush ticker until ctx is cancelled, then performs one final
@@ -231,11 +231,11 @@ func (f *flusher) Run(ctx context.Context, interval, finalTimeout time.Duration)
 		select {
 		case <-ctx.Done():
 			finalCtx, cancel := context.WithTimeout(context.Background(), finalTimeout)
-			jobguard.Guard("room-state flush", func() { f.Flush(finalCtx) })
+			jobguard.Guard("unread-state flush", func() { f.Flush(finalCtx) })
 			cancel()
 			return
 		case <-t.C:
-			jobguard.Guard("room-state flush", func() { f.Flush(ctx) })
+			jobguard.Guard("unread-state flush", func() { f.Flush(ctx) })
 		}
 	}
 }

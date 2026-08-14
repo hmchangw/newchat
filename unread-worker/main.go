@@ -102,7 +102,7 @@ func main() {
 	}
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name,
-		buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("room-state-worker"), wiring.CanonicalWildcard))
+		buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("unread-worker"), wiring.CanonicalWildcard))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -112,7 +112,7 @@ func main() {
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	flushDone := make(chan struct{})
 	go func() { f.Run(flushCtx, cfg.FlushInterval, 5*time.Second); close(flushDone) }()
-	slog.Info("room-state flusher started", "flush_interval", cfg.FlushInterval)
+	slog.Info("unread-state flusher started", "flush_interval", cfg.FlushInterval)
 
 	// PullMaxMessages is bounded by MaxAckPending anyway; a modest buffer keeps
 	// the single consume goroutine fed without over-fetching during an outage.
@@ -134,7 +134,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("room-state-worker started", "site", cfg.SiteID, "mode", string(cfg.Mode))
+	slog.Info("unread-worker started", "site", cfg.SiteID, "mode", string(cfg.Mode))
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(_ context.Context) error { iter.Stop(); return nil },

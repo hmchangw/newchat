@@ -5,7 +5,7 @@ trigger:
       - develop
   paths:
     include:
-      - room-state-worker/
+      - unread-worker/
       - pkg/
 
 pr:
@@ -14,12 +14,13 @@ pr:
       - main
   paths:
     include:
-      - room-state-worker/
+      - unread-worker/
       - pkg/
 
 variables:
   GO_VERSION: '1.25.13'
-  SERVICE_NAME: room-state-worker
+  SERVICE_NAME: unread-worker
+  IMAGE_NAME: bot-unread-worker
   REGISTRY: '$(containerRegistry)'
 
 stages:
@@ -59,11 +60,11 @@ stages:
           - task: Docker@2
             inputs:
               containerRegistry: '$(containerRegistry)'
-              repository: 'chat/$(SERVICE_NAME)'
+              repository: 'chat/$(IMAGE_NAME)'
               command: 'buildAndPush'
-              Dockerfile: '$(SERVICE_NAME)/deploy/user/Dockerfile'
+              Dockerfile: '$(SERVICE_NAME)/deploy/bot/Dockerfile'
               buildContext: '.'
               tags: |
                 $(Build.BuildId)
                 latest
-            displayName: 'Build & push $(SERVICE_NAME)'
+            displayName: 'Build & push $(IMAGE_NAME)'
