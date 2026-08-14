@@ -52,23 +52,24 @@ func eventCounts(t *testing.T, reader sdkmetric.Reader) map[string]int64 {
 // the broker was fine" during a complete-outage campaign.
 func TestConnMetrics_GaugeTracksOutage(t *testing.T) {
 	m, reader := newTestConnMetrics(t)
+	conn := m.Connection()
 
-	m.Connected(context.Background())
+	conn.Connected(context.Background())
 	points := connPoints(t, reader, "chat.nats.client.connected")
 	require.Len(t, points, 1)
 	assert.Equal(t, int64(1), points[0].Value)
 
-	m.Disconnected(context.Background(), errors.New("broker unreachable"))
+	conn.Disconnected(context.Background(), errors.New("broker unreachable"))
 	points = connPoints(t, reader, "chat.nats.client.connected")
 	require.Len(t, points, 1)
 	assert.Equal(t, int64(0), points[0].Value)
 
-	m.Reconnected(context.Background())
+	conn.Reconnected(context.Background())
 	points = connPoints(t, reader, "chat.nats.client.connected")
 	require.Len(t, points, 1)
 	assert.Equal(t, int64(1), points[0].Value)
 
-	m.Closed(context.Background())
+	conn.Closed(context.Background())
 	points = connPoints(t, reader, "chat.nats.client.connected")
 	require.Len(t, points, 1)
 	assert.Equal(t, int64(0), points[0].Value)
@@ -79,11 +80,12 @@ func TestConnMetrics_GaugeTracksOutage(t *testing.T) {
 // stays a raw transition count, so it is not deduplicated.
 func TestConnMetrics_GaugeIsIdempotentButEventsAreRaw(t *testing.T) {
 	m, reader := newTestConnMetrics(t)
+	conn := m.Connection()
 
-	m.Connected(context.Background())
-	m.Connected(context.Background())
-	m.Disconnected(context.Background(), nil)
-	m.Disconnected(context.Background(), nil)
+	conn.Connected(context.Background())
+	conn.Connected(context.Background())
+	conn.Disconnected(context.Background(), nil)
+	conn.Disconnected(context.Background(), nil)
 
 	points := connPoints(t, reader, "chat.nats.client.connected")
 	require.Len(t, points, 1)
@@ -91,18 +93,41 @@ func TestConnMetrics_GaugeIsIdempotentButEventsAreRaw(t *testing.T) {
 	assert.Equal(t, map[string]int64{"connected": 2, "disconnected": 2}, eventCounts(t, reader))
 }
 
+func TestConnMetrics_ConnectionsTrackIndependently(t *testing.T) {
+	m, reader := newTestConnMetrics(t)
+	first := m.Connection()
+	second := m.Connection()
+
+	first.Connected(context.Background())
+	second.Connected(context.Background())
+	points := connPoints(t, reader, "chat.nats.client.connected")
+	require.Len(t, points, 1)
+	assert.Equal(t, int64(2), points[0].Value)
+
+	first.Disconnected(context.Background(), errors.New("first broker unavailable"))
+	points = connPoints(t, reader, "chat.nats.client.connected")
+	require.Len(t, points, 1)
+	assert.Equal(t, int64(1), points[0].Value)
+
+	second.Closed(context.Background())
+	points = connPoints(t, reader, "chat.nats.client.connected")
+	require.Len(t, points, 1)
+	assert.Equal(t, int64(0), points[0].Value)
+}
+
 func TestConnMetrics_EventLabelsAreBounded(t *testing.T) {
 	m, reader := newTestConnMetrics(t)
+	conn := m.Connection()
 
-	m.Connected(context.Background())
-	m.Disconnected(context.Background(), errors.New("some dynamic error text"))
-	m.Reconnected(context.Background())
-	m.Closed(context.Background())
+	conn.Connected(context.Background())
+	conn.Disconnected(context.Background(), errors.New("some dynamic error text"))
+	conn.Reconnected(context.Background())
+	conn.Closed(context.Background())
 	// Every async error collapses to one bounded value. A reconnect-buffer
 	// overflow never arrives here — nats.go returns it synchronously from
 	// Publish — so it must not have an event value of its own to imply it does.
-	m.AsyncError(context.Background(), nats.ErrReconnectBufExceeded)
-	m.AsyncError(context.Background(), errors.New("unclassified async failure"))
+	conn.AsyncError(context.Background(), nats.ErrReconnectBufExceeded)
+	conn.AsyncError(context.Background(), errors.New("unclassified async failure"))
 
 	assert.Equal(t, map[string]int64{
 		"connected":    1,
@@ -114,7 +139,7 @@ func TestConnMetrics_EventLabelsAreBounded(t *testing.T) {
 }
 
 func TestConnMetrics_NilReceiverIsSafe(t *testing.T) {
-	var m *connMetrics
+	var m *connMetricState
 	m.Connected(context.Background())
 	m.Disconnected(context.Background(), nil)
 	m.Reconnected(context.Background())

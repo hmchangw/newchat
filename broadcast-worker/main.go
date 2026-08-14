@@ -108,6 +108,7 @@ func main() {
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
 	publishMetrics := sharedMetrics.Publisher("broadcast-worker", cfg.SiteID)
+	domainMetrics := newBroadcastMetrics(sdk.MeterProvider().Meter("broadcast-worker"))
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
 	if err != nil {
@@ -166,7 +167,7 @@ func main() {
 		keyStore = roomkeystore.NewMongoStore(roomsPrimary, cfg.RoomKeyGracePeriod)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -223,7 +224,7 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode)
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode, withBroadcastMetrics(domainMetrics))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.

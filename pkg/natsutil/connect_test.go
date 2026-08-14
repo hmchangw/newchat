@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -138,4 +140,49 @@ func TestConnect_SetsDrainTimeout(t *testing.T) {
 
 	require.Equal(t, 10*time.Second, conn.NatsConn().Opts.DrainTimeout,
 		"DrainTimeout must leave headroom in the shared 25s shutdown budget, not the 30s library default")
+}
+
+func TestConnectWithMetrics_TracksConnectionsIndependently(t *testing.T) {
+	serverURL := startTestServer(t)
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	first, err := natsutil.ConnectWithMetrics(context.Background(), serverURL, "",
+		noop.NewTracerProvider(), propagation.TraceContext{}, false, meterProvider)
+	require.NoError(t, err)
+	t.Cleanup(first.NatsConn().Close)
+	second, err := natsutil.ConnectWithMetrics(context.Background(), serverURL, "",
+		noop.NewTracerProvider(), propagation.TraceContext{}, false, meterProvider)
+	require.NoError(t, err)
+	t.Cleanup(second.NatsConn().Close)
+
+	require.Equal(t, int64(2), connectedMetricValue(t, reader))
+	first.NatsConn().Opts.DisconnectedErrCB(first.NatsConn(), errors.New("broker unavailable"))
+	require.Equal(t, int64(1), connectedMetricValue(t, reader))
+	second.NatsConn().Opts.ClosedCB(second.NatsConn())
+	require.Equal(t, int64(0), connectedMetricValue(t, reader))
+}
+
+func TestConnectWithMetrics_NilProviderDoesNotBlockConnection(t *testing.T) {
+	conn, err := natsutil.ConnectWithMetrics(context.Background(), startTestServer(t), "",
+		noop.NewTracerProvider(), propagation.TraceContext{}, false, nil)
+	require.NoError(t, err)
+	t.Cleanup(conn.NatsConn().Close)
+}
+
+func connectedMetricValue(t *testing.T, reader sdkmetric.Reader) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, scope := range rm.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != "chat.nats.client.connected" {
+				continue
+			}
+			points := metric.Data.(metricdata.Sum[int64]).DataPoints
+			require.Len(t, points, 1)
+			return points[0].Value
+		}
+	}
+	t.Fatal("chat.nats.client.connected metric not found")
+	return 0
 }

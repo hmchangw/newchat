@@ -10,6 +10,7 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -51,6 +52,21 @@ const (
 // can override it in either direction. With no higher-precedence source, false
 // selects the direct path without tracing or propagation overhead.
 func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, opts ...nats.Option) (*o11ynats.Conn, error) {
+	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, nil, opts...)
+}
+
+// ConnectWithMetrics opens a NATS connection and records its bounded lifecycle
+// metrics. It is intentionally opt-in so a focused failure campaign does not
+// expand instrumentation to every natsutil caller.
+func ConnectWithMetrics(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, meterProvider metric.MeterProvider, opts ...nats.Option) (*o11ynats.Conn, error) {
+	var metrics *connMetrics
+	if meterProvider != nil {
+		metrics = newConnMetrics(meterProvider.Meter(connMetricsScope))
+	}
+	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, metrics, opts...)
+}
+
+func connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, metrics *connMetrics, opts ...nats.Option) (*o11ynats.Conn, error) {
 	if credsFile != "" {
 		if _, err := os.Stat(credsFile); err != nil {
 			return nil, fmt.Errorf("nats creds file %q: %w", credsFile, err)
@@ -59,25 +75,26 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 
 	name := os.Getenv("HOSTNAME")
 	log := slog.With("component", "nats", "name", name)
+	connState := metrics.Connection()
 	baseOpts := []nats.Option{
 		nats.Name(name),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(defaultReconnectWait),
 		nats.DrainTimeout(defaultDrainTimeout),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			connEvents.Disconnected(ctx, err)
+			connState.Disconnected(ctx, err)
 			log.Warn("nats disconnected", "error", err)
 		}),
 		nats.ReconnectHandler(func(c *nats.Conn) {
-			connEvents.Reconnected(ctx)
+			connState.Reconnected(ctx)
 			log.Info("nats reconnected", "url", c.ConnectedUrl())
 		}),
 		nats.ClosedHandler(func(_ *nats.Conn) {
-			connEvents.Closed(ctx)
+			connState.Closed(ctx)
 			log.Warn("nats connection closed")
 		}),
 		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
-			connEvents.AsyncError(ctx, err)
+			connState.AsyncError(ctx, err)
 			if errors.Is(err, nats.ErrSlowConsumer) {
 				logSlowConsumer(log, sub)
 				return
@@ -105,6 +122,6 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 	}
 	// The library fires no callback for the first successful connect, so the
 	// gauge would stay at zero until the first disconnect without this.
-	connEvents.Connected(ctx)
+	connState.Connected(ctx)
 	return conn, nil
 }

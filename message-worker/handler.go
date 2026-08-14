@@ -40,14 +40,31 @@ type Handler struct {
 	metrics     *persistenceMetrics
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadStore, siteID string, publish PublishFunc) *Handler {
+type messageWorkerHandlerOption func(*messageWorkerHandlerOptions)
+
+type messageWorkerHandlerOptions struct {
+	metrics *persistenceMetrics
+}
+
+func withPersistenceMetrics(metrics *persistenceMetrics) messageWorkerHandlerOption {
+	return func(opts *messageWorkerHandlerOptions) { opts.metrics = metrics }
+}
+
+func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadStore, siteID string, publish PublishFunc, options ...messageWorkerHandlerOption) *Handler {
+	var opts messageWorkerHandlerOptions
+	for _, option := range options {
+		option(&opts)
+	}
+	if opts.metrics == nil {
+		opts.metrics = newPersistenceMetrics(otel.Meter("message-worker"))
+	}
 	return &Handler{
 		store:       store,
 		userStore:   userStore,
 		threadStore: threadStore,
 		siteID:      siteID,
 		publish:     publish,
-		metrics:     newPersistenceMetrics(otel.Meter("message-worker")),
+		metrics:     opts.metrics,
 	}
 }
 

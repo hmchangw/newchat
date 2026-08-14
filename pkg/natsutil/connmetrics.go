@@ -4,11 +4,12 @@ import (
 	"context"
 	"sync/atomic"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 )
+
+const connMetricsScope = "github.com/hmchangw/chat/pkg/natsutil"
 
 // connMetrics reports the client's own view of its broker connection.
 //
@@ -27,7 +28,6 @@ import (
 type connMetrics struct {
 	connected metric.Int64UpDownCounter
 	events    metric.Int64Counter
-	up        atomic.Bool
 
 	// gaugeOpt carries no attributes: the gauge is one series per process.
 	gaugeOpt        metric.MeasurementOption
@@ -38,14 +38,18 @@ type connMetrics struct {
 	asyncErrorOpt   metric.MeasurementOption
 }
 
-var connEvents *connMetrics
-
-func init() { connEvents = newConnMetrics(otel.Meter("nats")) }
+// connMetricState owns one connection's lifecycle state. Multiple instrumented
+// connections share the same OTel instruments but transition independently, so
+// the up/down counter reports the number of live connections in the process.
+type connMetricState struct {
+	metrics *connMetrics
+	up      atomic.Bool
+}
 
 func newConnMetrics(meter metric.Meter) *connMetrics {
 	noopMeter := noop.NewMeterProvider().Meter("nats")
 	connected, err := meter.Int64UpDownCounter("chat.nats.client.connected",
-		metric.WithDescription("Whether this process currently has a live NATS broker connection."))
+		metric.WithDescription("Number of live NATS broker connections in this process."))
 	if err != nil {
 		connected, _ = noopMeter.Int64UpDownCounter("chat.nats.client.connected")
 	}
@@ -69,65 +73,72 @@ func newConnMetrics(meter metric.Meter) *connMetrics {
 	}
 }
 
-// Connected records the first successful connect. Later reconnects go through
-// Reconnected so the two are distinguishable in the events counter.
-func (c *connMetrics) Connected(ctx context.Context) {
+func (c *connMetrics) Connection() *connMetricState {
 	if c == nil {
-		return
+		return nil
 	}
-	c.markUp(ctx, c.connectedOpt)
+	return &connMetricState{metrics: c}
 }
 
-func (c *connMetrics) Reconnected(ctx context.Context) {
+// Connected records the first successful connect. Later reconnects go through
+// Reconnected so the two are distinguishable in the events counter.
+func (c *connMetricState) Connected(ctx context.Context) {
 	if c == nil {
 		return
 	}
-	c.markUp(ctx, c.reconnectedOpt)
+	c.markUp(ctx, c.metrics.connectedOpt)
+}
+
+func (c *connMetricState) Reconnected(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	c.markUp(ctx, c.metrics.reconnectedOpt)
 }
 
 // Disconnected takes err only to keep the nats.DisconnectErrHandler signature
 // honest at the call site; the text is never a label.
-func (c *connMetrics) Disconnected(ctx context.Context, _ error) {
+func (c *connMetricState) Disconnected(ctx context.Context, _ error) {
 	if c == nil {
 		return
 	}
-	c.markDown(ctx, c.disconnectedOpt)
+	c.markDown(ctx, c.metrics.disconnectedOpt)
 }
 
-func (c *connMetrics) Closed(ctx context.Context) {
+func (c *connMetricState) Closed(ctx context.Context) {
 	if c == nil {
 		return
 	}
-	c.markDown(ctx, c.closedOpt)
+	c.markDown(ctx, c.metrics.closedOpt)
 }
 
 // AsyncError counts the connection-level async errors nats.go reports through
 // ErrorHandler. The error text is never a label: it is unbounded, and slow
 // consumers — the one async error worth separating — already have their own
 // dedicated counter.
-func (c *connMetrics) AsyncError(ctx context.Context, _ error) {
+func (c *connMetricState) AsyncError(ctx context.Context, _ error) {
 	if c == nil {
 		return
 	}
-	c.events.Add(ctx, 1, c.asyncErrorOpt)
+	c.metrics.events.Add(ctx, 1, c.metrics.asyncErrorOpt)
 }
 
-func (c *connMetrics) markUp(ctx context.Context, opt metric.MeasurementOption) {
+func (c *connMetricState) markUp(ctx context.Context, opt metric.MeasurementOption) {
 	if c == nil {
 		return
 	}
-	c.events.Add(ctx, 1, opt)
+	c.metrics.events.Add(ctx, 1, opt)
 	if c.up.CompareAndSwap(false, true) {
-		c.connected.Add(ctx, 1, c.gaugeOpt)
+		c.metrics.connected.Add(ctx, 1, c.metrics.gaugeOpt)
 	}
 }
 
-func (c *connMetrics) markDown(ctx context.Context, opt metric.MeasurementOption) {
+func (c *connMetricState) markDown(ctx context.Context, opt metric.MeasurementOption) {
 	if c == nil {
 		return
 	}
-	c.events.Add(ctx, 1, opt)
+	c.metrics.events.Add(ctx, 1, opt)
 	if c.up.CompareAndSwap(true, false) {
-		c.connected.Add(ctx, -1, c.gaugeOpt)
+		c.metrics.connected.Add(ctx, -1, c.metrics.gaugeOpt)
 	}
 }

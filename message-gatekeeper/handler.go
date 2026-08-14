@@ -70,10 +70,27 @@ type Handler struct {
 	metrics     *gatekeeperMetrics
 }
 
+type gatekeeperHandlerOption func(*gatekeeperHandlerOptions)
+
+type gatekeeperHandlerOptions struct {
+	metrics *gatekeeperMetrics
+}
+
+func withGatekeeperMetrics(metrics *gatekeeperMetrics) gatekeeperHandlerOption {
+	return func(opts *gatekeeperHandlerOptions) { opts.metrics = metrics }
+}
+
 // NewHandler constructs a new Handler with the given dependencies.
 // users may be nil; when nil, sender display-name resolution is skipped and
 // downstream consumers fall back to UserAccount.
-func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyFunc, siteID string, parentFetcher ParentMessageFetcher, largeRoomThreshold, maxAttachments, maxAttachmentBytes int, chatBaseURL string) *Handler {
+func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyFunc, siteID string, parentFetcher ParentMessageFetcher, largeRoomThreshold, maxAttachments, maxAttachmentBytes int, chatBaseURL string, options ...gatekeeperHandlerOption) *Handler {
+	var opts gatekeeperHandlerOptions
+	for _, option := range options {
+		option(&opts)
+	}
+	if opts.metrics == nil {
+		opts.metrics = newGatekeeperMetrics(otel.Meter("message-gatekeeper"))
+	}
 	return &Handler{
 		store:              store,
 		users:              users,
@@ -85,7 +102,7 @@ func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyF
 		maxAttachments:     maxAttachments,
 		maxAttachmentBytes: maxAttachmentBytes,
 		chatBaseURL:        chatBaseURL,
-		metrics:            newGatekeeperMetrics(otel.Meter("message-gatekeeper")),
+		metrics:            opts.metrics,
 	}
 }
 

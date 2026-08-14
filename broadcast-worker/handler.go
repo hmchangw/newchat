@@ -73,18 +73,34 @@ type Handler struct {
 	metrics       *broadcastMetrics
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode) *Handler {
-	metrics := newBroadcastMetrics(otel.Meter("broadcast-worker"))
+type handlerOption func(*handlerOptions)
+
+type handlerOptions struct {
+	metrics *broadcastMetrics
+}
+
+func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
+	return func(opts *handlerOptions) { opts.metrics = metrics }
+}
+
+func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
+	var opts handlerOptions
+	for _, option := range options {
+		option(&opts)
+	}
+	if opts.metrics == nil {
+		opts.metrics = newBroadcastMetrics(otel.Meter("broadcast-worker"))
+	}
 	return &Handler{
 		store:         store,
 		userStore:     userStore,
-		pub:           &broadcastMetricPublisher{next: pub, metrics: metrics},
+		pub:           &broadcastMetricPublisher{next: pub, metrics: opts.metrics},
 		keyStore:      keyStore,
 		parentFetcher: parentFetcher,
 		encrypt:       encrypt,
 		encoder:       roomcrypto.NewEncoder(),
 		routeMode:     routeMode,
-		metrics:       metrics,
+		metrics:       opts.metrics,
 	}
 }
 

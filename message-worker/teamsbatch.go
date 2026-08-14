@@ -35,15 +35,21 @@ type teamsBatchHandler struct {
 	metrics  *persistenceMetrics
 }
 
-func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string, publishUsers func(ctx context.Context, users []model.IUserWithChange) error) *teamsBatchHandler {
+func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string, publishUsers func(ctx context.Context, users []model.IUserWithChange) error, injectedMetrics ...*persistenceMetrics) *teamsBatchHandler {
 	cache, _ := lru.New[string, resolvedSender](teamsSenderCacheSize) // errors only on size<=0
 	resolver := newSenderResolver(hrStore, siteID, cache, publishUsers)
+	var metrics *persistenceMetrics
+	if len(injectedMetrics) > 0 && injectedMetrics[0] != nil {
+		metrics = injectedMetrics[0]
+	} else {
+		metrics = newPersistenceMetrics(otel.Meter("message-worker"))
+	}
 	return &teamsBatchHandler{
 		store:    store,
 		siteID:   siteID,
 		resolver: resolver,
 		tr:       NewDefaultTransformer(resolver),
-		metrics:  newPersistenceMetrics(otel.Meter("message-worker")),
+		metrics:  metrics,
 	}
 }
 

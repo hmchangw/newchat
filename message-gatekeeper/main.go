@@ -85,8 +85,9 @@ func main() {
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
 	publishMetrics := sharedMetrics.Publisher("message-gatekeeper", cfg.SiteID)
+	domainMetrics := newGatekeeperMetrics(sdk.MeterProvider().Meter("message-gatekeeper"))
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -156,7 +157,7 @@ func main() {
 		return nil
 	}
 	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL, publishMetrics)
-	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL)
+	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL, withGatekeeperMetrics(domainMetrics))
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)

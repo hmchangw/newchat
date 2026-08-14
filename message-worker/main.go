@@ -93,8 +93,9 @@ func main() {
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
 	publishMetrics := sharedMetrics.Publisher("message-worker", cfg.SiteID)
+	domainMetrics := newPersistenceMetrics(sdk.MeterProvider().Meter("message-worker"))
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -170,7 +171,7 @@ func main() {
 			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
 		}
 		return nil
-	})
+	}, withPersistenceMetrics(domainMetrics))
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -223,7 +224,7 @@ func main() {
 				return fmt.Errorf("publish user identity fanout: %w", err)
 			}
 			return nil
-		})
+		}, domainMetrics)
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
 
 	wg.Add(1)

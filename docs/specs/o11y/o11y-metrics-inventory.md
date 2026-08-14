@@ -133,9 +133,11 @@ missing beyond shared cache/key counters.
 
 ### 2.1 Shared application NATS metrics (2026-08-14)
 
-The SDK emits no NATS client metrics (§1), so these are owned by this repo and
-are emitted by every service that wires the shared helpers. Names are OTel
-instrument names; Prometheus renders them with `_` separators and adds
+The SDK emits no NATS client metrics (§1), so these are owned by this repo.
+The shared consumer/publisher helpers are adopted by the four first-campaign
+services. Connection lifecycle metrics are opt-in through
+`natsutil.ConnectWithMetrics` and use the same four-service scope. Names are
+OTel instrument names; Prometheus renders them with `_` separators and adds
 `_total` / unit suffixes.
 
 Consumer and publisher families share a base of `service_name` + `site`; the
@@ -152,15 +154,16 @@ Consumer and publisher families share a base of `service_name` + `site`; the
 | `chat.nats.publish.retries` | counter | `pkg/natsmetrics` | destination_kind, operation |
 | `chat.nats.requests` | counter | `pkg/natsmetrics` | operation, outcome |
 | `chat.nats.request.duration` | histogram (s) | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.client.connected` | up-down counter | `pkg/natsutil` | none — one series per process |
+| `chat.nats.client.connected` | up-down counter | `pkg/natsutil` | none — one series per process; value is the live connection count |
 | `chat.nats.client.connection.events` | counter | `pkg/natsutil` | event |
 | `nats_slow_consumer_events_total` | counter | `pkg/natsutil` | subject, queue |
 
 The two `chat.nats.client.*` families are the exception: they carry no
-`service_name` or `site` at all, because they are emitted from the connection
-helper, which sits below the layer that knows the site. They are scoped by the
-OTel resource instead, so join them through `target_info` rather than expecting
-inline labels. `nats_slow_consumer_events_total` is scoped the same way.
+`service_name` or `site` at all, because they are emitted from the opt-in
+connection helper, which sits below the layer that knows the site. They are
+scoped by the OTel resource instead, so join them through `target_info` rather
+than expecting inline labels. `nats_slow_consumer_events_total` is scoped the
+same way.
 
 Reconnect-buffer overflow is **not** a connection event: nats.go returns
 `ErrReconnectBufExceeded` synchronously from `publish()` and never routes it
