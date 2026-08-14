@@ -150,19 +150,31 @@ func dmRoom(accountA, accountB string) model.Room {
 	}
 }
 
-// BuildRooms returns the seed room set: 3 local channels, 2 local DMs, 1 remote channel.
+// BuildRooms returns the seed room set: 3 local channels, 2 local DMs, 1 remote
+// channel. r-general, r-eng and r-remote-announce each have members homed at
+// both sites, so they carry CrossSite=true — that flag routes their events onto
+// the global chat.room.{id} lane, the one that crosses the NATS gateway.
 func BuildRooms() []model.Room {
+	general := channelRoom("r-general", "general", siteLocal, false,
+		[]string{"alice", "bob", "carol", "dave", "eve", "frank", "grace", "heidi", "ivan"})
+	general.CrossSite = ptrBool(true)
+
+	eng := channelRoom("r-eng", "engineering", siteLocal, true,
+		[]string{"alice", "bob", "carol", "ivan"})
+	eng.CrossSite = ptrBool(true)
+
+	remoteAnnounce := channelRoom("r-remote-announce", "remote-announce", siteRemote, false,
+		[]string{"ivan", "judy", "alice"})
+	remoteAnnounce.CrossSite = ptrBool(true)
+
 	return []model.Room{
-		channelRoom("r-general", "general", siteLocal, false,
-			[]string{"alice", "bob", "carol", "dave", "eve", "frank", "grace", "heidi", "ivan"}),
-		channelRoom("r-eng", "engineering", siteLocal, true,
-			[]string{"alice", "bob", "carol", "ivan"}),
+		general,
+		eng,
 		channelRoom("r-design", "design", siteLocal, false,
 			[]string{"frank", "grace", "dave"}),
 		dmRoom("alice", "bob"),
 		dmRoom("carol", "eve"),
-		channelRoom("r-remote-announce", "remote-announce", siteRemote, false,
-			[]string{"ivan", "judy", "alice"}),
+		remoteAnnounce,
 	}
 }
 
@@ -308,6 +320,8 @@ func itoa(i int) string {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+func ptrBool(b bool) *bool { return &b }
 
 // BuildRoomsWithLastMsg returns BuildRooms() but with each room's
 // LastMsgAt/LastMsgID populated from the latest message in that room.
