@@ -159,12 +159,19 @@ describe('RoomList: message preview', () => {
     expect(screen.getByText('hey are we still on')).toBeInTheDocument()
   })
 
+  it('omits the sender prefix in a botDM row', () => {
+    setup([section('chats', [summary('r1', { type: 'botDM', preview })])])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    expect(screen.queryByText('Alice Chen:')).not.toBeInTheDocument()
+    expect(screen.getByText('hey are we still on')).toBeInTheDocument()
+  })
+
   it('renders the snippet line empty when the room has no preview', () => {
     setup([section('chats', [summary('r1')])])
     const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     const line = container.querySelector('.room-preview')
     expect(line).toBeInTheDocument()   // reserved, so the row height is stable
-    expect(line).toHaveTextContent('')
+    expect(line.textContent).toBe('')
   })
 
   it('renders the attachment label a preview carries as its text', () => {

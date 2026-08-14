@@ -47,7 +47,7 @@ function RoomItem({ room, isSelected, onSelectRoom, onDragStartRoom, onDropOnRoo
             depend on whether this line has content, or the sidebar reflows
             as previews arrive during bootstrap. */}
         <div className="room-preview">
-          {room.preview && room.type !== 'dm' && (
+          {room.preview && room.type !== 'dm' && room.type !== 'botDM' && (
             <span className="room-preview-sender">{room.preview.senderName}: </span>
           )}
           {room.preview?.text}
