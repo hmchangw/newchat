@@ -122,6 +122,11 @@ alongside from SP1 onward.
   dependencies are real.
 
 ### SP6 — Ops / IaC / platform  *(cross-cutting runbook, not a TDD plan)*
+- **Runbook drafted:** `plans/2026-08-12-sp6-ops-runbook.md` — consolidates every
+  ops requirement with a per-item readiness tag (READY now / GATED on SP1-SP2 /
+  external INFRA), and documents the operator-facing surface of the shipped SP4
+  control plane (failover/failback procedures, `FAILOVER_OPS_TOKEN`, the internal
+  listener) and the World-1 backup `auth-service` config.
 - Backup deployment (HA multi-AZ); backup as supercluster gateway peer; leaf-node
   `chat.local.>` deny on the backup's leaf; canonical restore-log `MaxAge` sizing
   (spec §6.5); backup `auth-service` deploy with the **shared** account creds
