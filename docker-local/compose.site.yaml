@@ -1,0 +1,12 @@
+# Repoints the `chat-local` network key at a per-site network so the same 24
+# service compose files can run twice, once per site, without editing any of
+# them. The key stays `chat-local` (every included file references it by that
+# name); `name:` selects the real Docker network.
+#
+# Used as an overlay: -f compose.services.yaml -f compose.site.yaml
+# Defaults to chat-local so a stray invocation without CHAT_NETWORK set behaves
+# like the single-site stack rather than creating a surprise network.
+networks:
+  chat-local:
+    name: ${CHAT_NETWORK:-chat-local}
+    external: true
