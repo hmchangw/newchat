@@ -9,7 +9,7 @@ come from **dedicated exporters** (infra, not the app SDK). Companion to
 > against the Docker Compose o11y stack (`docker-local/compose.o11y.yaml` ->
 > Prometheus `:9090`). The instrument list was re-derived from source on
 > 2026-08-14 — every OTel and client_golang instrument in the repository is
-> accounted for in §2, §2.1, and §2.2 — but that pass was static, not a rescrape.
+> accounted for in §2 through §2.3 — but that pass was static, not a rescrape.
 
 > Storage note (2026-08-11): the authoritative, code-reverified MongoDB and
 > Cassandra metric set, direct-client coverage, exporter gaps, and shared
@@ -182,13 +182,30 @@ filled in here because they were not re-verified against a running stack.
 `teams-room-creation`, `teams-room-inspector`, `teams-room-verify`,
 `teams-user-sync`, `translation-service`.
 
-One exception owns a metric: **`bot-message-worker`** exposes
-`bot_msg_worker_permanent_error_total`, but it is registered through
-`prometheus/client_golang` (`promauto`), not the OTel meter. It is therefore
-**not** on the SDK `:2112` endpoint with everything else in this document, and
-it carries none of the resource attributes the other families are joined by.
-This is the only non-OTel application metric in the repository; converting it to
-the shared meter would put it on the same endpoint and label scheme.
+### 2.3 Metrics registered outside the OTel meter (2026-08-14)
+
+Seven application metrics are registered through `prometheus/client_golang`
+(`promauto`) rather than the OTel meter. They are therefore **not** on the SDK
+`:2112` endpoint that the rest of this document describes, and they carry none
+of the resource attributes (`service_name`, `site`) the OTel families are joined
+by — so they cannot be correlated with anything else here without knowing which
+endpoint exposes them.
+
+| Metric | Owner | Labels |
+|---|---|---|
+| `bot_msg_worker_permanent_error_total` | `bot-message-worker` | — |
+| `atrest_dek_cache_hits_total` | `pkg/atrest` | — |
+| `atrest_dek_cache_misses_total` | `pkg/atrest` | — |
+| `atrest_dek_creations_total` | `pkg/atrest` | — |
+| `atrest_kek_wrap_total` | `pkg/atrest` | result |
+| `atrest_kek_unwrap_total` | `pkg/atrest` | result |
+| `atrest_kek_renewal_failures_total` | `pkg/atrest` | — |
+
+`atrest_kek_renewal_failures_total` is documented in its own Help text as a hard
+alert (a sustained non-zero rate means the service cannot obtain a Vault token
+and encryption will fail once the current one expires). An alert on a series
+that is not on the standard endpoint is a trap worth closing: these belong on
+the shared meter, which is tracked as gap 6.
 
 **Observation:** shared cache/room-key counters are already present on some
 hot-path services, but they do not answer the core product questions (accepted
@@ -313,9 +330,10 @@ these exporters there (and to prod IaC) to cover Layer C.
    server health; lower urgency than NATS. *Infra.*
 5. **Histogram buckets.** SDK HTTP/DB histograms use `DefaultLatencyBuckets`
    (`WithHistogramBuckets` can override); confirm they match dashboard needs.
-6. **Move `bot-message-worker` onto the OTel meter.** It is the one application
-   metric registered through `prometheus/client_golang`, so it is off the
-   `:2112` endpoint and outside the shared label scheme (§2.2).
+6. **Move the seven `promauto` metrics onto the OTel meter** (`pkg/atrest` and
+   `bot-message-worker`, §2.3). They are off the `:2112` endpoint and outside
+   the shared label scheme, and one of them (`atrest_kek_renewal_failures_total`)
+   is meant to be a hard alert.
 
 Tracked as follow-ups in `docs/specs/o11y/o11y-followups.md`.
 
