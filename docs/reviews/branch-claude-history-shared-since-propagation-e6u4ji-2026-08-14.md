@@ -93,3 +93,27 @@ Overall: clean, idiomatic, well-tested. The security rule (no history escalation
 - Negative/zero-ms guards on both sides (`ms > 0` in handler, `*inherited > 0` in worker) keep the `hss<=0` sentinel sound; zero-`time.Time` case tested.
 - Test quality: table-driven with descriptive names, `t.Run` subtests, independent state, cross-site OUTBOX propagation covered (`room-worker/handler_test.go:1306`), and the projection drift-guard integration test (`room-service/integration_test.go:1079`) closes the trap where unit tests pass while production silently no-ops.
 - Docs: canonical + both derived views updated with identical wording; server-set field note updated. §5 workflow rule satisfied.
+
+## Test-automation
+
+**Verification performed:** `make test SERVICE=room-service`, `make test SERVICE=room-worker` (both green, `-race` via Makefile), targeted `-race -count=1` runs of every new test (all pass). Working tree clean before and after. `room-service/store.go` is untouched — only the `subscriptionReadProjection` var in `room-service/store_mongo.go` changed, no interface method changed, so no `make generate` was required and no staleness check applied.
+
+**TDD compliance — clean.** Every new behavior in the diff has a corresponding new test in the same diff:
+
+- `AddMembersRequest.HistorySharedSince` (pkg/model/member.go) → extended `TestAddMembersRequestJSON` incl. set round-trip, wire presence, and `omitempty`-on-nil (`pkg/model/model_test.go:1640`).
+- `historySharedSincePtr` new 4-arg signature (room-worker/handler.go:140) → `TestHistorySharedSincePtr_InheritedCap`, 7-case table (`room-worker/handler_test.go:2451`), plus two `processAddMembers` end-to-end tests covering subscription + local `MemberAddEvent` and the federated OUTBOX copy.
+- room-service stamping logic (handler.go:964-975) → `TestHandler_AddMembers_HistorySharedSinceInheritance`, 6-case table capturing the published payload via injected `publishToStream` (`room-service/handler_test.go:965`) — correctly follows the CLAUDE.md "inject the publish function" rule; no real NATS.
+- Projection change → integration drift-guard test extended (`room-service/integration_test.go:1047,1079`). Excellent mock-vs-integration judgment: the plan explicitly identified that unit tests (mocked store) would pass even if the projection silently stripped the field, and closed that blind spot with the testcontainers-backed guard.
+
+Table-driven structure, descriptive subtest names, testify require/assert usage, and `package main` placement all conform to Section 4.
+
+### Findings
+
+- **medium — forged client `historySharedSince` untested on the mode-`none` branch.** `room-service/handler_test.go:980` — the "client-forged value overwritten" case uses mode `all` + uncapped requester; the mode-`none` case (line 979) uses `reqHSS: nil`. The implementation's unconditional reset (`req.HistorySharedSince = nil` at handler.go:969) is correct today, but a refactor that moves the reset inside the `!= HistoryModeNone` branch would leak a client-forged cap through on `mode: "none"` adds and no test would fail. Add one case: `{mode none, reqHSS: &clientForged, wantHSS: nil}` — one line in the existing table.
+- **low — no room-worker e2e test for a cap arriving with `mode: "none"`.** `TestHistorySharedSincePtr_InheritedCap` covers "mode none ignores inherited cap" at the helper level (handler_test.go:2462), which is adequate; the two `processAddMembers` e2e tests both use mode `all`, so the none-branch's use of the new 4-arg call sites is exercised only via pre-existing tests. Acceptable.
+- **nitpick — negative cap untested.** The helper table tests `&0` ("non-positive cap emits nil", handler_test.go:2467) but not a negative value; the `> 0` guard covers both, so this is cosmetic.
+- **nitpick — BSON round-trip not asserted for the new field.** `TestAddMembersRequestJSON` checks JSON only, matching the file's existing pattern for this struct; consistent with precedent, no action required unless this struct is ever persisted.
+
+**Race usage:** all runs went through Makefile targets (`-race` applied).
+
+**Verdict:** Strong test work — genuine TDD sequencing (plan documents red-phase evidence per task), correct mock/integration split, thorough error/edge coverage including the `&0` invariant and cross-site federation. Only the medium finding warrants a change before merge.
