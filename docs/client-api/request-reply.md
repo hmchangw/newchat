@@ -372,7 +372,7 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant (a bot whose home site differs from the room's is allowed — cross-site bot membership); bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get `subscription.update` (with the room key inline under `subscription.room`) on their encoded per-user subject (dots→underscores). The `p_admin` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
 | `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
-| `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
+| `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. `"all"` is capped by the **requester's own** `historySharedSince`: when the adder's history is restricted, the new members inherit the adder's boundary instead of unrestricted history (members can never see more history than whoever added them). `"none"` restricts new members to messages from the add time onward. |
 
 #### Success response
 
