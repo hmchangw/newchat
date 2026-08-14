@@ -35,7 +35,7 @@ LOADGEN_LOCAL_VALUES := $(LOADGEN_CHART)/values-local.yaml
 # Go 1.25. Tracks the repo-wide Go (go.mod / ci.yml); Go fetches the
 # pinned toolchain on demand.
 GOBIN_DIR             := $(shell go env GOPATH)/bin
-TOOLS_GO_TOOLCHAIN    := go1.25.12
+TOOLS_GO_TOOLCHAIN    := go1.25.13
 GOLANGCI_LINT_VERSION := v2.11.4
 GOSEC_VERSION         := v2.26.1
 GOVULNCHECK_VERSION   := v1.3.0

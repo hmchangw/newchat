@@ -298,7 +298,7 @@ docker run --rm --network chat-local \
   -v "$PWD:/src" -w /src \
   -e MONGO_URI=mongodb://mongodb:27017 \
   -e VALKEY_ADDRS=valkey:6379 \
-  golang:1.25.12 make seed
+  golang:1.25.13 make seed
 ```
 
 Create the cluster, build the exact loadgen image, and load it into kind:
