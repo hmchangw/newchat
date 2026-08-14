@@ -144,14 +144,14 @@ describe('RoomList: message preview', () => {
   const preview = { messageId: 'm1', senderName: 'Alice Chen', text: 'hey are we still on' }
 
   it('renders the sender prefix and snippet in a channel row', () => {
-    useSidebarSections.mockReturnValue([section('chats', [summary('r1', { preview })])])
+    setup([section('chats', [summary('r1', { preview })])])
     render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     expect(screen.getByText('Alice Chen:')).toBeInTheDocument()
     expect(screen.getByText('hey are we still on')).toBeInTheDocument()
   })
 
   it('omits the sender prefix in a DM row', () => {
-    useSidebarSections.mockReturnValue([
+    setup([
       section('chats', [summary('r1', { type: 'dm', preview })]),
     ])
     render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
@@ -160,7 +160,7 @@ describe('RoomList: message preview', () => {
   })
 
   it('renders the snippet line empty when the room has no preview', () => {
-    useSidebarSections.mockReturnValue([section('chats', [summary('r1')])])
+    setup([section('chats', [summary('r1')])])
     const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     const line = container.querySelector('.room-preview')
     expect(line).toBeInTheDocument()   // reserved, so the row height is stable
@@ -168,7 +168,7 @@ describe('RoomList: message preview', () => {
   })
 
   it('renders the attachment label a preview carries as its text', () => {
-    useSidebarSections.mockReturnValue([
+    setup([
       section('chats', [summary('r1', { preview: { ...preview, text: 'Photo' } })]),
     ])
     render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
