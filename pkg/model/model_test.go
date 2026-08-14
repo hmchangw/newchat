@@ -1638,18 +1638,27 @@ func TestMessage_TypeAndSysMsgDataJSON(t *testing.T) {
 }
 
 func TestAddMembersRequestJSON(t *testing.T) {
+	hss := int64(1700000000000)
 	req := model.AddMembersRequest{
-		RoomID:   "r1",
-		Users:    []string{"alice", "bob"},
-		Orgs:     []string{"engineering"},
-		Channels: []model.ChannelRef{{RoomID: "general", SiteID: "site-a"}},
-		History:  model.HistoryConfig{Mode: model.HistoryModeAll},
+		RoomID:             "r1",
+		Users:              []string{"alice", "bob"},
+		Orgs:               []string{"engineering"},
+		Channels:           []model.ChannelRef{{RoomID: "general", SiteID: "site-a"}},
+		History:            model.HistoryConfig{Mode: model.HistoryModeAll},
+		HistorySharedSince: &hss,
 	}
 	data, err := json.Marshal(req)
 	require.NoError(t, err)
+	assert.Contains(t, string(data), `"historySharedSince":1700000000000`)
 	var dst model.AddMembersRequest
 	require.NoError(t, json.Unmarshal(data, &dst))
 	assert.Equal(t, req, dst)
+
+	// nil cap must be omitted from the wire, not serialized as null/0.
+	req.HistorySharedSince = nil
+	data, err = json.Marshal(req)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "historySharedSince")
 }
 
 func TestHistoryModeConstants(t *testing.T) {

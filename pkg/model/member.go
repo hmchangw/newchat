@@ -29,14 +29,19 @@ type ChannelRef struct {
 
 // AddMembersRequest is the event published by room-service when a user requests to add members to a room.
 type AddMembersRequest struct {
-	RoomID           string        `json:"roomId"           bson:"roomId"`
-	Users            []string      `json:"users"            bson:"users"`
-	Orgs             []string      `json:"orgs"             bson:"orgs"`
-	Channels         []ChannelRef  `json:"channels"         bson:"channels"`
-	History          HistoryConfig `json:"history"          bson:"history"`
-	RequesterID      string        `json:"requesterId"      bson:"requesterId"`
-	RequesterAccount string        `json:"requesterAccount" bson:"requesterAccount"`
-	Timestamp        int64         `json:"timestamp"        bson:"timestamp"`
+	RoomID   string        `json:"roomId"           bson:"roomId"`
+	Users    []string      `json:"users"            bson:"users"`
+	Orgs     []string      `json:"orgs"             bson:"orgs"`
+	Channels []ChannelRef  `json:"channels"         bson:"channels"`
+	History  HistoryConfig `json:"history"          bson:"history"`
+	// HistorySharedSince is the inherited history cap (epoch ms UTC), server-set
+	// by room-service: on a share-all add it carries the requester's own
+	// historySharedSince so new members can never see more history than their
+	// adder. nil = no cap. Client-supplied values are always overwritten.
+	HistorySharedSince *int64 `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
+	RequesterID        string `json:"requesterId"      bson:"requesterId"`
+	RequesterAccount   string `json:"requesterAccount" bson:"requesterAccount"`
+	Timestamp          int64  `json:"timestamp"        bson:"timestamp"`
 }
 
 type RoomMember struct {
