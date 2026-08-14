@@ -72,3 +72,24 @@
 ### (f) Client-API doc rule
 
 - **Compliant.** room-worker's own entry point is a JetStream consumer (not `chat.user.…`), but the branch changes the client-observable `member.add` semantics and `member_added.historySharedSince` meaning, and the full diff updates all three docs in the same PR: `docs/client-api.md` (history.mode + historySharedSince rows, server-set field list), plus both derived views `docs/client-api/events.md` and `docs/client-api/request-reply.md`. No critical finding.
+
+## Go expert
+
+Overall: clean, idiomatic, well-tested. The security rule (no history escalation via share-all) is implemented in the right place (accept-time in room-service, applied in room-worker), the rollout is order-safe in both deploy directions (old worker drops the unknown JSON field; new worker treats nil as old behavior), and the "never emit `&0`" invariant is preserved on both branches. No findings above medium.
+
+### Findings
+
+1. **medium — duplicated share-all predicate, drift risk.** `room-service/handler.go:906` (`req.History.Mode != model.HistoryModeNone && …`) and `room-worker/handler.go:141` (`history.Mode != model.HistoryModeNone`) independently encode "anything not `none` is share-all" (including empty/unknown modes). If the default or an added mode ever changes, the stamp site and the apply site can disagree — the exact class of bug the first commit's doc fix (`"none" (default)` was wrong) shows already happened once in prose. Suggest a single method on the model, e.g. `func (h HistoryConfig) SharesAll() bool { return h.Mode != HistoryModeNone }`, used by both sites.
+2. **medium — no validation of `history.mode`; unknown values silently grant share-all.** Pre-existing, but this PR documents the contract (`"none"` or `"all"`, docs/client-api.md) while the code accepts any string and treats e.g. a typo'd `"nonee"` as `"all"` — the permissive direction for a history-visibility control. A `BadRequest` on unrecognized modes in `room-service/handler.go` `addMembers` would close it; at minimum worth a tracked follow-up.
+3. **low — `slog.Error` without context in `historySharedSincePtr`** (`room-worker/handler.go:1148`). The function was rewritten (new signature, new doc comment) but kept plain `slog.Error`, dropping request-ID correlation that CLAUDE.md §3 requires. Since both call sites have `ctx` in scope, threading it and using `slog.ErrorContext` is a two-line change while touching this function.
+4. **nitpick — comment references a non-existent type.** `room-worker/handler.go:140` says "see model.RoomMemberEvent invariant: nil, never &0" — no such type exists; the invariant is documented on `model.InboxMemberEvent` (`pkg/model/event.go:125`). Same wrong name appears in the committed plan doc.
+5. **nitpick — 640 lines of plan/spec committed to the branch** (`docs/superpowers/plans/2026-08-14-addmember-hss-inheritance.md`, `docs/superpowers/specs/…-design.md`). CLAUDE.md only mandates deleting `docs/reviews/`, so this is allowed, but the plan embeds session-specific commit trailers and step-by-step agent instructions — working notes rather than durable docs. Consider whether they belong in the PR.
+
+### Verified clean
+
+- Struct tags: new field `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"` — camelCase, `omitempty` correct for the nil-means-unset contract; wire-omission pinned by test (`pkg/model/model_test.go:867-871`).
+- Error handling: no new error paths; existing `fmt.Errorf("…: %w", err)` wrapping untouched and compliant; no logging-and-returning. `errcode` tiering unaffected (no new client-facing errors).
+- Server-set overwrite (`req.HistorySharedSince = nil` before conditional stamp, `room-service/handler.go:905`) is unconditional and covered by the "client-forged value overwritten" table case (`room-service/handler_test.go:980`).
+- Negative/zero-ms guards on both sides (`ms > 0` in handler, `*inherited > 0` in worker) keep the `hss<=0` sentinel sound; zero-`time.Time` case tested.
+- Test quality: table-driven with descriptive names, `t.Run` subtests, independent state, cross-site OUTBOX propagation covered (`room-worker/handler_test.go:1306`), and the projection drift-guard integration test (`room-service/integration_test.go:1079`) closes the trap where unit tests pass while production silently no-ops.
+- Docs: canonical + both derived views updated with identical wording; server-set field note updated. §5 workflow rule satisfied.
