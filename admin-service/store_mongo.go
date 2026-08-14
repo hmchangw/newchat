@@ -39,6 +39,18 @@ func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
 		return fmt.Errorf("create users account index: %w", err)
 	}
 
+	// Backs SearchUsers, whose only non-regex predicate is siteId: no other service
+	// declares a siteId-prefixed index on the shared users collection, so without
+	// this both the count and the paged find scan every user document. account
+	// trails so the unfiltered count is answered from the index alone (a q-filtered
+	// one still fetches, since engName/chineseName aren't in the key).
+	_, err = s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "account", Value: 1}},
+	})
+	if err != nil {
+		return fmt.Errorf("create users siteId_account index: %w", err)
+	}
+
 	_, err = s.adminAudit.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "timestamp", Value: -1}},
 	})

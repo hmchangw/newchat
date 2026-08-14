@@ -577,8 +577,23 @@ func TestIntegration_Audit(t *testing.T) {
 }
 
 // -------------------------------------------------------------------------
-// EnsureIndexes idempotent
+// EnsureIndexes
 // -------------------------------------------------------------------------
+
+func TestIntegration_EnsureIndexes_Keys(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	require.NoError(t, st.EnsureIndexes(context.Background()))
+
+	userKeys := testutil.IndexSpecs(t, db.Collection("users"))
+	require.Contains(t, userKeys, "account:1")
+	assert.True(t, userKeys["account:1"], "(account) must stay unique — shared with botplatform/user-service")
+	require.Contains(t, userKeys, "siteId:1,account:1")
+
+	auditKeys := testutil.IndexSpecs(t, db.Collection("admin_audit"))
+	require.Contains(t, auditKeys, "siteId:1,timestamp:-1")
+	require.Contains(t, auditKeys, "siteId:1,targetAccount:1,timestamp:-1")
+}
 
 func TestIntegration_EnsureIndexes_Idempotent(t *testing.T) {
 	db := testutil.MongoDBReplicaSet(t, "adminsvc")
