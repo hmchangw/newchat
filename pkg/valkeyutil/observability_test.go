@@ -44,5 +44,32 @@ func TestNewConnectConfig_NilOptionIgnored(t *testing.T) {
 func TestInstrumentCluster_NoObservability_NoError(t *testing.T) {
 	// With no observability configured, instrumentCluster is a no-op and must
 	// not touch the (here nil) client.
-	assert.NoError(t, instrumentCluster(nil, newConnectConfig()))
+	cfg := newConnectConfig()
+	assert.NoError(t, instrumentCluster(nil, &cfg))
+}
+
+func TestWithProfile_OverridesDefault(t *testing.T) {
+	cfg := newConnectConfig(WithProfile(StoreProfile))
+	assert.Equal(t, StoreProfile, cfg.profile)
+}
+
+func TestNewConnectConfig_DefaultsToCacheProfile(t *testing.T) {
+	cfg := newConnectConfig()
+	assert.Equal(t, CacheProfile, cfg.profile)
+}
+
+func TestWithoutCircuitBreaker(t *testing.T) {
+	cfg := newConnectConfig(WithoutCircuitBreaker())
+	assert.False(t, cfg.breaker)
+}
+
+func TestNewConnectConfig_BreakerOnByDefault(t *testing.T) {
+	cfg := newConnectConfig()
+	assert.True(t, cfg.breaker)
+	assert.Equal(t, "valkey", cfg.breakerName)
+}
+
+func TestWithBreakerName(t *testing.T) {
+	cfg := newConnectConfig(WithBreakerName("presence"))
+	assert.Equal(t, "presence", cfg.breakerName)
 }

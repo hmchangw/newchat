@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -231,4 +232,107 @@ func TestConnectCluster_ErrorPath(t *testing.T) {
 	_, err := valkeyutil.ConnectCluster(context.Background(), []string{"127.0.0.1:1"}, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "valkey cluster connect")
+}
+
+// blackholeListener accepts TCP connections and never responds. This is the
+// failure mode that matters: a Valkey that refuses connections fails fast on
+// its own, but one that silently drops packets stalls every call until a
+// timeout fires. Connection-refused testing never catches it.
+func blackholeListener(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			// Hold the connection open and never write. Closed by t.Cleanup.
+			t.Cleanup(func() { _ = conn.Close() })
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+	return ln.Addr().String()
+}
+
+func TestConnectCluster_BoundedLatencyAgainstBlackhole(t *testing.T) {
+	addr := blackholeListener(t)
+
+	start := time.Now()
+	_, err := valkeyutil.ConnectCluster(context.Background(), []string{addr}, "")
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "connect against a blackhole must fail, not hang")
+	// 2s is chosen to discriminate, not just to be generous: it is below the old
+	// go-redis default ReadTimeout (3s) and below ConnectCluster's own 5s ping
+	// ceiling, so this assertion would FAIL against the unfixed defaults instead
+	// of being masked by that ceiling. Measured actual is ~0.17s, so 2s still
+	// leaves ~10x margin against CI jitter.
+	assert.Less(t, elapsed, 2*time.Second, "connect must be bounded by dial/read timeouts")
+}
+
+func TestConnectClusterLazy_ReturnsUsableClientWhenUnreachable(t *testing.T) {
+	addr := blackholeListener(t)
+
+	client, err := valkeyutil.ConnectClusterLazy(context.Background(), []string{addr}, "")
+	require.NoError(t, err, "lazy connect must not fail on an unreachable Valkey")
+	require.NotNil(t, client)
+	t.Cleanup(func() { _ = client.Close() })
+
+	// The client is usable; the call itself errors rather than panicking.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, getErr := client.Get(ctx, "some-key")
+	assert.Error(t, getErr)
+}
+
+func TestConnectClusterLazy_BoundedFirstCall(t *testing.T) {
+	addr := blackholeListener(t)
+	client, err := valkeyutil.ConnectClusterLazy(context.Background(), []string{addr}, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	start := time.Now()
+	_, _ = client.Get(context.Background(), "k")
+	elapsed := time.Since(start)
+	t.Logf("first Get against blackhole took %s", elapsed)
+	// The brief's own suggested 5s ceiling matches ConnectClusterLazy's PING
+	// bound and would pass even against an unbounded stall, so it proves
+	// nothing. CacheProfile bounds a single Get to ReadTimeout(150ms) +
+	// MaxRetries(1)*ReadTimeout ~= 300ms plus one-time cluster-slots discovery
+	// against the same blackhole; 2s (same threshold as the ConnectCluster
+	// blackhole test above, and still below go-redis's old 3s default
+	// ReadTimeout) discriminates a genuinely bounded first call from an
+	// unbounded one while leaving ample margin over the measured ~0.2-0.3s.
+	assert.Less(t, elapsed, 2*time.Second, "CacheProfile must bound the first call")
+}
+
+// NewClusterClient exists so raw-client consumers (Lua scripting, sorted sets)
+// stop re-implementing construction and silently losing instrumentation. Like
+// ConnectClusterLazy, an unreachable cluster is a logged probe, not an error.
+func TestNewClusterClient_UnreachableIsNotAnError(t *testing.T) {
+	c, err := valkeyutil.NewClusterClient(context.Background(),
+		[]string{"127.0.0.1:1"}, "", valkeyutil.WithProfile(valkeyutil.StoreProfile))
+	require.NoError(t, err, "unreachability must never fail construction")
+	require.NotNil(t, c)
+	t.Cleanup(func() { _ = c.Close() })
+
+	opts := c.Options()
+	assert.Equal(t, valkeyutil.StoreProfile.ReadTimeout, opts.ReadTimeout)
+	assert.Equal(t, valkeyutil.StoreProfile.WriteTimeout, opts.WriteTimeout)
+	assert.Equal(t, valkeyutil.StoreProfile.MaxRetries, opts.MaxRetries)
+	assert.True(t, opts.ContextTimeoutEnabled, "caller deadlines must bound socket reads")
+}
+
+func TestNewClusterClient_DefaultsToCacheProfile(t *testing.T) {
+	c, err := valkeyutil.NewClusterClient(context.Background(), []string{"127.0.0.1:1"}, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	assert.Equal(t, valkeyutil.CacheProfile.ReadTimeout, c.Options().ReadTimeout)
 }
