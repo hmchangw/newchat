@@ -1369,29 +1369,29 @@ The visible deliverable, and a pure component change — `RoomList.test.jsx` alr
 
 - [ ] **Step 1: Write the failing render tests**
 
-Append to `src/components/MainApp/Sidebar/RoomList/RoomList.test.jsx`, inside the outermost `describe`. The file already has `summary(id, overrides)` and `section(key, rooms, over)` helpers — use them.
+Append to `src/components/MainApp/Sidebar/RoomList/RoomList.test.jsx`, inside the outermost `describe`. The file already has `summary(id, overrides)`, `section(key, rooms, over)`, and `setup(sections)` helpers — use them.
+
+**Use `setup(...)`, never `useSidebarSections.mockReturnValue(...)` directly.** `setup` primes all four mocked hooks; priming only `useSidebarSections` leaves the other three returning `undefined`, and `RoomList` crashes destructuring `useChatlistActions()`. Such a test still passes in a full-file run — `vi.clearAllMocks()` clears call history but not implementations, so a previous test's `setup()` leaks through — and fails the moment it runs alone. That is exactly the order-dependence `CLAUDE.md` forbids.
 
 ```js
   const preview = { messageId: 'm1', senderName: 'Alice Chen', text: 'hey are we still on' }
 
   it('renders the sender prefix and snippet in a channel row', () => {
-    useSidebarSections.mockReturnValue([section('chats', [summary('r1', { preview })])])
+    setup([section('chats', [summary('r1', { preview })])])
     render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     expect(screen.getByText('Alice Chen:')).toBeInTheDocument()
     expect(screen.getByText('hey are we still on')).toBeInTheDocument()
   })
 
   it('omits the sender prefix in a DM row', () => {
-    useSidebarSections.mockReturnValue([
-      section('chats', [summary('r1', { type: 'dm', preview })]),
-    ])
+    setup([section('chats', [summary('r1', { type: 'dm', preview })])])
     render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     expect(screen.queryByText('Alice Chen:')).not.toBeInTheDocument()
     expect(screen.getByText('hey are we still on')).toBeInTheDocument()
   })
 
   it('renders the snippet line empty when the room has no preview', () => {
-    useSidebarSections.mockReturnValue([section('chats', [summary('r1')])])
+    setup([section('chats', [summary('r1')])])
     const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     const line = container.querySelector('.room-preview')
     expect(line).toBeInTheDocument()   // reserved, so the row height is stable
@@ -1399,9 +1399,7 @@ Append to `src/components/MainApp/Sidebar/RoomList/RoomList.test.jsx`, inside th
   })
 
   it('renders the attachment label a preview carries as its text', () => {
-    useSidebarSections.mockReturnValue([
-      section('chats', [summary('r1', { preview: { ...preview, text: 'Photo' } })]),
-    ])
+    setup([section('chats', [summary('r1', { preview: { ...preview, text: 'Photo' } })])])
     render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     expect(screen.getByText('Photo')).toBeInTheDocument()
   })
