@@ -296,9 +296,10 @@ fed-ui-down:
 fed-logs:
 	docker compose -p chat-site-local --env-file $(FED_ENV_LOCAL) \
 	  -f $(SERVICES_COMPOSE) -f $(SITE_OVERRIDE) logs -f & \
+	pid=$$!; \
 	docker compose -p chat-site-remote --env-file $(FED_ENV_REMOTE) \
 	  -f $(SERVICES_COMPOSE) -f $(SITE_OVERRIDE) logs -f; \
-	kill %1 2>/dev/null || true
+	kill $$pid 2>/dev/null || true
 
 # Seed both sites. The directory (users + hr_employee) goes into both
 # databases so either portal can resolve any account; room-owned and
