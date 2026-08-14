@@ -34,12 +34,25 @@ function RoomItem({ room, isSelected, onSelectRoom, onDragStartRoom, onDropOnRoo
       }}
     >
       <span className="room-drag-handle" aria-hidden="true">⋮⋮</span>
-      <span className="room-name">
-        {roomPrefix(room.type)}{roomDisplayName(room)}
-      </span>
-      {mentionBadge(room)}
-      <span className="room-meta">{room.userCount}</span>
-      {unread && <span className="room-badge-unread">{room.unreadCount}</span>}
+      <div className="room-item-body">
+        <div className="room-item-title">
+          <span className="room-name">
+            {roomPrefix(room.type)}{roomDisplayName(room)}
+          </span>
+          {mentionBadge(room)}
+          <span className="room-meta">{room.userCount}</span>
+          {unread && <span className="room-badge-unread">{room.unreadCount}</span>}
+        </div>
+        {/* Always rendered, even with no preview — the row's height must not
+            depend on whether this line has content, or the sidebar reflows
+            as previews arrive during bootstrap. */}
+        <div className="room-preview">
+          {room.preview && room.type !== 'dm' && (
+            <span className="room-preview-sender">{room.preview.senderName}: </span>
+          )}
+          {room.preview?.text}
+        </div>
+      </div>
     </div>
   )
 }
