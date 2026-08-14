@@ -107,6 +107,17 @@ describe('MessageRow', () => {
     fireEvent.click(screen.getByRole('button', { name: /quote/i }))
     expect(onReply).toHaveBeenCalledWith(msg)
   })
+
+  it('renders the nested sender displayName when userDisplayName is absent', () => {
+    const botMsg = {
+      id: 'm-bot',
+      content: 'deploy finished',
+      createdAt: '2026-05-13T10:42:00Z',
+      sender: { account: 'bot', displayName: 'Deploy Bot' },
+    }
+    render(<MessageRow message={botMsg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />)
+    expect(screen.getByText('Deploy Bot')).toBeInTheDocument()
+  })
 })
 
 describe('MessageRow — historySharedSince quote gate', () => {
