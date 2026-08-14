@@ -35,10 +35,18 @@ type config struct {
 	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
 	// No MONGO_READ_PREFERENCE: this service only writes, and writes always go
 	// to the primary.
-	FlushInterval time.Duration `env:"FLUSH_INTERVAL" envDefault:"250ms"`
-	HealthAddr    string        `env:"HEALTH_ADDR"    envDefault:":8081"`
-	MetricsAddr   string        `env:"METRICS_ADDR"   envDefault:":9090"`
-	PProfEnabled  bool          `env:"PPROF_ENABLED"  envDefault:"false"`
+	//
+	// MongoSelectTimeout bounds server selection, matching every other online
+	// service. A stopped MongoDB does not error, it goes quiet, and the driver
+	// waits 30s by default — long enough for a flush to outlive the 25s
+	// shutdown budget and be SIGKILLed mid-batch. Bounding it turns the stall
+	// into the NakWithDelay this worker is built around, so back-pressure
+	// engages promptly instead of a flush goroutine parking on a dead socket.
+	MongoSelectTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	FlushInterval      time.Duration `env:"FLUSH_INTERVAL" envDefault:"250ms"`
+	HealthAddr         string        `env:"HEALTH_ADDR"    envDefault:":8081"`
+	MetricsAddr        string        `env:"METRICS_ADDR"   envDefault:":9090"`
+	PProfEnabled       bool          `env:"PPROF_ENABLED"  envDefault:"false"`
 	// Mode selects the canonical stream/subject wiring via pkg/stream.Resolve.
 	Mode      stream.Pipeline         `env:"MODE,required"`
 	Consumer  stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -66,7 +74,8 @@ func main() {
 	}
 
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk))
+		mongoutil.WithObservability(sdk),
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)

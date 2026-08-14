@@ -3,8 +3,10 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/stream"
@@ -43,4 +45,17 @@ func TestConfig_Mode(t *testing.T) {
 			require.Equal(t, tc.want, cfg.Mode)
 		})
 	}
+}
+
+// Every online service bounds server selection: a stopped MongoDB goes quiet
+// rather than erroring, and the driver's 30s default outlives this worker's
+// shutdown budget. Guard the default so a future edit cannot silently restore it.
+func TestConfig_BoundsMongoServerSelection(t *testing.T) {
+	t.Setenv("MODE", "user")
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, 2*time.Second, cfg.MongoSelectTimeout,
+		"an unbounded selection timeout parks the flush loop instead of NAKing")
+	assert.Less(t, cfg.MongoSelectTimeout, 25*time.Second,
+		"must stay under the graceful-shutdown budget")
 }
