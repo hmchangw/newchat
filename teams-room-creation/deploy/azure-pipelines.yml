@@ -18,7 +18,7 @@ pr:
       - pkg/
 
 variables:
-  GO_VERSION: '1.25.12'
+  GO_VERSION: '1.25.13'
   SERVICE_DIR: teams-room-creation
   IMAGE_NAME: teams-room-creation
   REGISTRY: '$(containerRegistry)'
