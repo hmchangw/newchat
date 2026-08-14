@@ -229,6 +229,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		cassutil.HealthCheck(cassSession),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)

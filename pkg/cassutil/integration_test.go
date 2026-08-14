@@ -108,6 +108,20 @@ func TestConnect_WithObservability_CassandraMetricsIncludeTable(t *testing.T) {
 		"Cassandra attempt metric must carry the addressed table")
 }
 
+func TestHealthCheck_ReadyWhileSessionIsLive(t *testing.T) {
+	keyspace, _, host := testutil.CassandraKeyspace(t, "cassutil_health")
+
+	session, err := Connect(Config{Hosts: host, Keyspace: keyspace})
+	require.NoError(t, err)
+
+	check := HealthCheck(session)
+	assert.Equal(t, "cassandra", check.Name)
+	require.NoError(t, check.Probe(context.Background()), "a live session must report ready")
+
+	Close(session)
+	assert.Error(t, check.Probe(context.Background()), "a closed session must report not ready")
+}
+
 func metricHasStringAttribute(metrics metricdata.ResourceMetrics, metricName, key, want string) bool {
 	for _, scope := range metrics.ScopeMetrics {
 		for _, m := range scope.Metrics {

@@ -169,6 +169,7 @@ func run() error {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		cassutil.HealthCheck(cassSess),
 	)
 	if err != nil {
 		return fmt.Errorf("health server: %w", err)
