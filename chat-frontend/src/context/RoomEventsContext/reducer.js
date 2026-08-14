@@ -141,6 +141,14 @@ function previewFromMessage(msg) {
   }
 }
 
+// Two stored previews are interchangeable when all three rendered fields match.
+// Used to keep the previews reference stable on a same-content write (e.g. the
+// server echo of a message this client already stored optimistically) — a fresh
+// object would invalidate useSidebarSections' memo for every room in the sidebar.
+function samePreview(a, b) {
+  return !!a && !!b && a.messageId === b.messageId && a.senderName === b.senderName && a.text === b.text
+}
+
 // Build a stored preview from a wire PreviewMessage (subscription.list rows
 // and the refreshed preview on edit/delete events).
 function previewFromWire(previewMessage) {
@@ -473,9 +481,10 @@ export function roomEventsReducer(state, action) {
       // the room timeline and is a preview candidate. Computed once and
       // applied at every return point below.
       const nextPreview = previewFromMessage(msg)
-      const previews = nextPreview
-        ? { ...state.previews, [roomId]: nextPreview }
-        : state.previews
+      const previews =
+        !nextPreview || samePreview(state.previews[roomId], nextPreview)
+          ? state.previews
+          : { ...state.previews, [roomId]: nextPreview }
       const prev = state.roomState[roomId] ?? emptyRoomState()
       const isActive = state.activeRoomId === roomId
       if (prev.bufferMode === BUFFER_MODE.HISTORICAL) {
@@ -782,9 +791,10 @@ export function roomEventsReducer(state, action) {
       // room's preview either — matching the server, which omits
       // previewMessage for hidden thread replies.
       const nextPreview = msg.threadParentMessageId ? null : previewFromMessage(msg)
-      const previews = nextPreview
-        ? { ...state.previews, [roomId]: nextPreview }
-        : state.previews
+      const previews =
+        !nextPreview || samePreview(state.previews[roomId], nextPreview)
+          ? state.previews
+          : { ...state.previews, [roomId]: nextPreview }
       return {
         ...state,
         roomState: { ...state.roomState, [roomId]: { ...prev, messages } },

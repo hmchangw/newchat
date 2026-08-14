@@ -1801,8 +1801,37 @@ describe('roomEventsReducer previews', () => {
     expect(next.previews.r1.text).toBe('Photo')
   })
 
+  it('MESSAGE_RECEIVED keeps the previews reference stable on a content-identical write', () => {
+    // Mirrors the server echoing back a message this client already stored
+    // optimistically (the existingIdx >= 0 branch): the incoming message
+    // renders to the exact same stored preview already in state, so the
+    // previews map must not be reallocated — a fresh object here would
+    // invalidate useSidebarSections' memo for every room in the sidebar.
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm2', senderName: 'Bob Lin', text: 'newest' } },
+    }
+    const next = roomEventsReducer(seeded, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        roomId: 'r1',
+        message: { id: 'm2', content: 'newest', userDisplayName: 'Bob Lin', createdAt: '2026-08-14T11:00:00Z' },
+      },
+    })
+    expect(next.previews).toBe(seeded.previews)
+  })
+
   it('MESSAGE_RECEIVED ignores a thread reply', () => {
-    const seeded = { ...initialState, previews: { r1: { messageId: 'm1', senderName: 'A', text: 'first' } } }
+    // Seed roomState.r1 with the parent message present so the dispatch
+    // actually reaches the thread-reply path (state.roomState[roomId] must
+    // exist and contain the parent, or the reducer returns early at the
+    // `!tPrev` / `parentIdx < 0` guards before ever reaching the preview
+    // computation this test means to exercise).
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm1', senderName: 'A', text: 'first' } },
+      roomState: { r1: { ...emptyBuffer(), messages: [{ id: 'm1', content: 'first' }] } },
+    }
     const next = roomEventsReducer(seeded, {
       type: 'MESSAGE_RECEIVED',
       event: {
@@ -1811,6 +1840,10 @@ describe('roomEventsReducer previews', () => {
       },
     })
     expect(next.previews.r1.messageId).toBe('m1')
+    // Proves the thread-reply path actually ran (not short-circuited by a
+    // missing parent): the reducer bumps the parent's tcount by 1 on a
+    // successfully-matched, non-duplicate thread reply.
+    expect(next.roomState.r1.messages.find((m) => m.id === 'm1').tcount).toBe(1)
   })
 
   it('MESSAGE_SENT_LOCAL previews the local send optimistically', () => {
@@ -1857,7 +1890,10 @@ describe('roomEventsReducer previews', () => {
     // always omitted there. Regression guard against wiring it up.
     const next = roomEventsReducer(initialState, {
       type: 'SUBSCRIPTION_UPSERTED',
-      subscription: { roomId: 'r1', roomType: 'channel', siteId: 'site-A', name: 'General', room: {} },
+      subscription: {
+        roomId: 'r1', roomType: 'channel', siteId: 'site-A', name: 'General',
+        room: { previewMessage: wirePreview() },
+      },
     })
     expect(next.previews).toEqual({})
   })
