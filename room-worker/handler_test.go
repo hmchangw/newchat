@@ -2450,11 +2450,14 @@ func TestProcessAddMembers_PopulatesSubName(t *testing.T) {
 
 // historySharedSincePtr: the share-all branch must honor an inherited cap
 // (requester's own HSS, stamped by room-service); mode none keeps flooring at
-// the accept timestamp and ignores the cap (now >= any cap).
+// the accept timestamp and ignores the cap (now >= any cap). A malformed
+// event (mode none, no accept timestamp) falls back to the inherited cap
+// rather than unrestricted history.
 func TestHistorySharedSincePtr_InheritedCap(t *testing.T) {
 	ts := int64(1740000000000)
 	capMs := int64(1700000000000)
 	nonPositive := int64(0)
+	negative := int64(-1)
 	cases := []struct {
 		name      string
 		history   model.HistoryConfig
@@ -2465,14 +2468,16 @@ func TestHistorySharedSincePtr_InheritedCap(t *testing.T) {
 		{"mode none uses timestamp", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, ts, &ts},
 		{"mode none ignores inherited cap", model.HistoryConfig{Mode: model.HistoryModeNone}, &capMs, ts, &ts},
 		{"mode none missing timestamp emits nil", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, 0, nil},
+		{"mode none missing timestamp falls back to inherited cap", model.HistoryConfig{Mode: model.HistoryModeNone}, &capMs, 0, &capMs},
 		{"mode all without cap emits nil", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, ts, nil},
 		{"mode all inherits cap", model.HistoryConfig{Mode: model.HistoryModeAll}, &capMs, ts, &capMs},
 		{"empty mode inherits cap", model.HistoryConfig{}, &capMs, ts, &capMs},
 		{"non-positive cap emits nil", model.HistoryConfig{Mode: model.HistoryModeAll}, &nonPositive, ts, nil},
+		{"negative cap emits nil", model.HistoryConfig{Mode: model.HistoryModeAll}, &negative, ts, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := historySharedSincePtr(tc.history, tc.inherited, tc.timestamp, "r1")
+			got := historySharedSincePtr(context.Background(), tc.history, tc.inherited, tc.timestamp, "r1")
 			if tc.want == nil {
 				assert.Nil(t, got)
 				return
