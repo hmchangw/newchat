@@ -20,6 +20,12 @@ type HistoryConfig struct {
 	Mode HistoryMode `json:"mode" bson:"mode"`
 }
 
+// SharesAll reports whether this config grants new members pre-join history:
+// every mode except "none", including empty (= default "all"). Single source
+// of the share-all predicate so room-service's cap stamping and room-worker's
+// cap application can never drift.
+func (h HistoryConfig) SharesAll() bool { return h.Mode != HistoryModeNone }
+
 // ChannelRef identifies a source channel by room + its home site. Used by add-member
 // to expand cross-site source channels via the remote site's member.list endpoint.
 type ChannelRef struct {

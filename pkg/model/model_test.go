@@ -1666,6 +1666,26 @@ func TestHistoryModeConstants(t *testing.T) {
 	assert.Equal(t, model.HistoryMode("all"), model.HistoryModeAll)
 }
 
+// SharesAll is the single share-all predicate used by both room-service (cap
+// stamping) and room-worker (cap application) — the two sides must agree.
+func TestHistoryConfigSharesAll(t *testing.T) {
+	cases := []struct {
+		name string
+		mode model.HistoryMode
+		want bool
+	}{
+		{"none does not share", model.HistoryModeNone, false},
+		{"all shares", model.HistoryModeAll, true},
+		{"empty defaults to share-all", model.HistoryMode(""), true},
+		{"unknown mode shares (rejected upstream at the RPC boundary)", model.HistoryMode("nonee"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, model.HistoryConfig{Mode: tc.mode}.SharesAll())
+		})
+	}
+}
+
 func TestRoomMemberJSON(t *testing.T) {
 	rm := model.RoomMember{
 		ID:     "rm1",
