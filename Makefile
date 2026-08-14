@@ -1,6 +1,7 @@
 .PHONY: lint fmt tidy test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
-        o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
+        o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep \
+        fed-deps-up fed-deps-down require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs fed-seed
 
 DEPS_COMPOSE     := docker-local/compose.deps.yaml
 SERVICES_COMPOSE := docker-local/compose.services.yaml
@@ -19,6 +20,25 @@ KUBE_DRY_RUN     ?= false
 LOADGEN_CHART    := tools/loadgen/deploy/k8s
 LOADGEN_VALUES   := $(LOADGEN_CHART)/values-validation.yaml
 LOADGEN_LOCAL_VALUES := $(LOADGEN_CHART)/values-local.yaml
+
+FED_DEPS_COMPOSE := docker-local/compose.fed-deps.yaml
+SITE_OVERRIDE    := docker-local/compose.site.yaml
+FED_ENV_LOCAL    := docker-local/.env.site-local
+FED_ENV_REMOTE   := docker-local/.env.site-remote
+FED_NATS_LOCAL   := docker-local/nats-site-local.conf
+FED_NATS_REMOTE  := docker-local/nats-site-remote.conf
+FED_NATS_CONTAINER := chat-fed-nats-site-local
+
+# Services site-remote starts. Empty = every service. Set to trim the remote
+# peer; see the tier table in docker-local/README.md for what each drop costs.
+FED_REMOTE_SERVICES ?=
+
+# Tier 1: the minimum that keeps federation and a logged-in browser working.
+# Dropping inbox-worker kills federation at the destination; dropping
+# message-gatekeeper means ivan cannot send at all.
+FED_TIER1 := inbox-worker outbox-worker room-service room-worker \
+             message-gatekeeper message-worker broadcast-worker user-service \
+             history-service auth-service portal-service traefik
 
 # --- SAST / dev tooling ------------------------------------------------------
 # Pinned tool versions. Keep GOLANGCI_LINT_VERSION in sync with
@@ -209,6 +229,85 @@ ui-up: require-deps
 
 ui-down:
 	docker compose $(COMPOSE_ENV) -f $(UI_COMPOSE) down
+
+# --- Federated two-site local dev ---------------------------------------------
+# A second site so cross-site federation can be QA'd in a browser: alice on
+# site-local (:3000), ivan on site-remote (:3100). See docker-local/README.md.
+#
+# Cannot run alongside the single-site stack — both publish the same host ports
+# for the shared datastores.
+fed-deps-up:
+	@docker container inspect -f '{{.State.Running}}' $(NATS_CONTAINER) 2>/dev/null | grep -q true && { \
+	  echo "Single-site deps are running. Run 'make deps-down' first — the two stacks share host ports."; exit 1; \
+	} || true
+	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(FED_NATS_LOCAL) ] || [ ! -f $(FED_ENV_LOCAL) ]; then \
+	  echo "First-time setup: generating NATS confs + env files..."; \
+	  ./docker-local/setup.sh; \
+	fi
+	docker compose -f $(FED_DEPS_COMPOSE) up -d --wait
+	KEYSPACE=chat docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm cassandra-init
+	KEYSPACE=chat_remote docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm cassandra-init
+	docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm vault-init
+
+fed-deps-down:
+	docker compose -f $(FED_DEPS_COMPOSE) down
+
+# Guard: federated deps must be running and the per-site files present.
+require-fed-deps:
+	@docker container inspect -f '{{.State.Running}}' $(FED_NATS_CONTAINER) 2>/dev/null | grep -q true || { \
+	  echo "Federated deps are not running. Run 'make fed-deps-up' first."; exit 1; \
+	}
+	@test -f $(FED_ENV_LOCAL) && test -f $(FED_ENV_REMOTE) || { \
+	  echo "Missing per-site env files. Run './docker-local/setup.sh'."; exit 1; \
+	}
+
+# Both sites. Detached, because two Compose projects cannot both hold the
+# foreground — use `make fed-logs` for the streaming view `make up` gives you.
+fed-up: require-fed-deps
+	docker compose -p chat-site-local --env-file $(FED_ENV_LOCAL) \
+	  -f $(SERVICES_COMPOSE) -f $(SITE_OVERRIDE) up -d --build
+	docker compose -p chat-site-remote --env-file $(FED_ENV_REMOTE) \
+	  -f $(SERVICES_COMPOSE) -f $(SITE_OVERRIDE) up -d --build $(FED_REMOTE_SERVICES)
+
+# fed-up with the remote peer trimmed to Tier 1.
+fed-up-lean:
+	$(MAKE) --no-print-directory fed-up FED_REMOTE_SERVICES="$(FED_TIER1)"
+
+fed-down:
+	docker compose -p chat-site-remote --env-file $(FED_ENV_REMOTE) \
+	  -f $(SERVICES_COMPOSE) -f $(SITE_OVERRIDE) down
+	docker compose -p chat-site-local --env-file $(FED_ENV_LOCAL) \
+	  -f $(SERVICES_COMPOSE) -f $(SITE_OVERRIDE) down
+
+# chat-frontend :3000/:3100, admin-frontend :3001/:3101.
+fed-ui-up: require-fed-deps
+	docker compose -p chat-site-local-ui --env-file $(FED_ENV_LOCAL) \
+	  -f $(UI_COMPOSE) -f $(SITE_OVERRIDE) up -d --build
+	docker compose -p chat-site-remote-ui --env-file $(FED_ENV_REMOTE) \
+	  -f $(UI_COMPOSE) -f $(SITE_OVERRIDE) up -d --build
+
+fed-ui-down:
+	docker compose -p chat-site-remote-ui --env-file $(FED_ENV_REMOTE) \
+	  -f $(UI_COMPOSE) -f $(SITE_OVERRIDE) down
+	docker compose -p chat-site-local-ui --env-file $(FED_ENV_LOCAL) \
+	  -f $(UI_COMPOSE) -f $(SITE_OVERRIDE) down
+
+# Streaming logs across both site projects.
+fed-logs:
+	docker compose -p chat-site-local --env-file $(FED_ENV_LOCAL) \
+	  -f $(SERVICES_COMPOSE) -f $(SITE_OVERRIDE) logs -f & \
+	docker compose -p chat-site-remote --env-file $(FED_ENV_REMOTE) \
+	  -f $(SERVICES_COMPOSE) -f $(SITE_OVERRIDE) logs -f; \
+	kill %1 2>/dev/null || true
+
+# Seed both sites. The directory (users + hr_employee) goes into both
+# databases so either portal can resolve any account; room-owned and
+# subscriber-owned rows are routed to their home site. See the seeding section
+# of docker-local/README.md.
+fed-seed:
+	MONGO_DB=chat go run ./tools/seed-sample-data --site site-local --mongo-db chat
+	MONGO_DB=chat_remote VALKEY_ADDRS=localhost:6479 \
+	  go run ./tools/seed-sample-data --site site-remote --mongo-db chat_remote
 
 # --- Local observability targets ----------------------------------------------
 # Two opt-in stacks, safe to run together: o11y-up receives what services export
