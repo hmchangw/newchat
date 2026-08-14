@@ -86,6 +86,18 @@ function EventsProbe({ roomId }) {
   )
 }
 
+function PreviewProbe() {
+  const sections = useSidebarSections()
+  const rooms = sections.flatMap((s) => s.rooms)
+  return (
+    <div data-testid="previews">
+      {rooms
+        .map((r) => `${r.id}=${r.preview ? `${r.preview.senderName}|${r.preview.text}` : ''}`)
+        .join(';')}
+    </div>
+  )
+}
+
 describe('RoomEventsProvider', () => {
   beforeEach(() => vi.clearAllMocks())
 
@@ -208,6 +220,138 @@ describe('RoomEventsProvider', () => {
       expect(captured[i]).toBe(captured[0])
     }
     await waitFor(() => expect(nats.request).toHaveBeenCalled())
+  })
+
+  describe('sidebar previews', () => {
+    // A channel room whose subscription.list row carries a seeded preview.
+    const seededSub = () => ({
+      ...roomToSub({ id: 'g1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 3 }),
+      room: {
+        userCount: 3,
+        lastMsgAt: '2026-08-14T10:00:00Z',
+        previewMessage: {
+          messageId: 'm1',
+          sender: { account: 'alice', displayName: 'Alice Chen' },
+          content: 'original body',
+          createdAt: '2026-08-14T10:00:00Z',
+        },
+      },
+    })
+
+    function setup() {
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+          return Promise.resolve({ subscriptions: [seededSub()] })
+        return Promise.resolve({ subscriptions: [] })
+      })
+      const handlers = new Map()
+      const subscribe = vi.fn().mockImplementation((subject, cb) => {
+        handlers.set(subject, cb)
+        return { unsubscribe: vi.fn() }
+      })
+      return { nats: mockNats({ request, subscribe }), handlers, subscribe }
+    }
+
+    it('seeds the sidebar preview from subscription.list', async () => {
+      const { nats, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() =>
+        expect(screen.getByTestId('previews').textContent).toBe('g1=Alice Chen|original body')
+      )
+    })
+
+    it('refreshes the preview from a message_edited event', async () => {
+      const { nats, handlers, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+
+      act(() => {
+        handlers.get('chat.room.g1.event')({
+          type: 'message_edited',
+          roomId: 'g1',
+          messageId: 'm1',
+          newContent: 'edited body',
+          editedAt: '2026-08-14T15:00:00Z',
+          previewMessage: {
+            messageId: 'm1',
+            sender: { account: 'alice', displayName: 'Alice Chen' },
+            content: 'edited body',
+            createdAt: '2026-08-14T15:00:00Z',
+          },
+        })
+      })
+      await waitFor(() =>
+        expect(screen.getByTestId('previews').textContent).toBe('g1=Alice Chen|edited body')
+      )
+    })
+
+    it('refreshes the preview for an encrypted edit carrying no plaintext body', async () => {
+      const { nats, handlers, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+
+      // No `newContent` — the mutation itself is dropped, but the sidebar
+      // snippet must still refresh from the plaintext previewMessage.
+      act(() => {
+        handlers.get('chat.room.g1.event')({
+          type: 'message_edited',
+          roomId: 'g1',
+          messageId: 'm1',
+          encryptedNewContent: { version: 1, nonce: 'n', ciphertext: 'c' },
+          editedAt: '2026-08-14T15:00:00Z',
+          previewMessage: {
+            messageId: 'm1',
+            sender: { account: 'alice', displayName: 'Alice Chen' },
+            content: 'server-side plaintext',
+            createdAt: '2026-08-14T15:00:00Z',
+          },
+        })
+      })
+      await waitFor(() =>
+        expect(screen.getByTestId('previews').textContent).toBe('g1=Alice Chen|server-side plaintext')
+      )
+    })
+
+    it('clears the preview when the displayed message is deleted and none follows', async () => {
+      const { nats, handlers, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+
+      act(() => {
+        handlers.get('chat.room.g1.event')({
+          type: 'message_deleted',
+          roomId: 'g1',
+          messageId: 'm1',
+          deletedBy: 'alice',
+          deletedAt: '2026-08-14T16:00:00Z',
+        })
+      })
+      await waitFor(() => expect(screen.getByTestId('previews').textContent).toBe('g1='))
+    })
+
+    it('keeps the preview when a different message is deleted', async () => {
+      const { nats, handlers, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+
+      act(() => {
+        handlers.get('chat.room.g1.event')({
+          type: 'message_deleted',
+          roomId: 'g1',
+          messageId: 'm-someone-else',
+          deletedBy: 'alice',
+          deletedAt: '2026-08-14T16:00:00Z',
+        })
+      })
+      // Give any dispatch a chance to land before asserting nothing changed.
+      await act(async () => { await Promise.resolve() })
+      expect(screen.getByTestId('previews').textContent).toBe('g1=Alice Chen|original body')
+    })
   })
 })
 

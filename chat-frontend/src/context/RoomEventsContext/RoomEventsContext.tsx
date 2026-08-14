@@ -473,20 +473,22 @@ export interface SidebarSection {
  */
 export function useSidebarSections(): SidebarSection[] {
   const { state } = useRoomEventsInternal()
-  const { summaries, subscriptions, chatlist } = state
+  const { summaries, subscriptions, chatlist, previews } = state
   return useMemo(() => {
     const enrich = (room: RoomSummary): RoomSummary => {
       const sub = subscriptions[room.id]
-      if (!sub) return room
+      const preview = previews[room.id]
+      if (!sub && !preview) return room
       return {
         ...room,
-        subscriptionName: sub.name ?? room.subscriptionName,
-        hrInfo: sub.hrInfo ?? room.hrInfo,
+        subscriptionName: sub?.name ?? room.subscriptionName,
+        hrInfo: sub?.hrInfo ?? room.hrInfo,
+        preview,
       }
     }
     const sections = deriveSidebarSections(summaries, subscriptions, chatlist) as SidebarSection[]
     return sections.map((s) => ({ ...s, rooms: s.rooms.map(enrich) }))
-  }, [summaries, subscriptions, chatlist])
+  }, [summaries, subscriptions, chatlist, previews])
 }
 
 /** Raw overlay section order (the full list the backend stores — built-ins +

@@ -198,6 +198,18 @@ export function useRoomSubscriptions(
     const handleMutationEvent = (evt) => {
       if (evt?.type === 'message_edited' && evt.messageId) {
         const { messageId, newContent, editedAt } = evt
+        // Preview first, and unconditionally: the sidebar snippet must update
+        // even when the edit itself can't be applied — an encrypted body
+        // returns below, and MESSAGE_EDITED bails for a room with no buffer.
+        // The server omits previewMessage for hidden thread-reply edits, so
+        // no client-side thread guard is needed here.
+        if (evt.previewMessage) {
+          safeDispatch({
+            type: 'ROOM_PREVIEW_UPDATED',
+            roomId: evt.roomId,
+            previewMessage: evt.previewMessage,
+          })
+        }
         // Drop edits without a plaintext body. Encrypted channel rooms emit
         // `encryptedNewContent` instead; blanking the existing content to ''
         // would silently wipe the message until decryption is implemented.
@@ -216,6 +228,15 @@ export function useRoomSubscriptions(
       }
       if (evt?.type === 'message_deleted' && evt.messageId) {
         const { messageId } = evt
+        // deletedMessageId lets the reducer clear the preview only when the
+        // deleted message is the one on display; an absent previewMessage
+        // means nothing eligible is left in the room.
+        safeDispatch({
+          type: 'ROOM_PREVIEW_UPDATED',
+          roomId: evt.roomId,
+          previewMessage: evt.previewMessage,
+          deletedMessageId: messageId,
+        })
         safeDispatch({ type: 'MESSAGE_DELETED', roomId: evt.roomId, messageId })
         fanThreadMutation({ kind: 'deleted', messageId })
         return true
