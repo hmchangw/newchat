@@ -58,11 +58,24 @@ func main() {
 	}
 }
 
+// validateConfig rejects values that would otherwise fail long after startup:
+// msgbucket.Sizer divides by the window, so a non-positive MESSAGE_BUCKET_HOURS
+// panics on the first message instead of failing the boot.
+func validateConfig(cfg *config) error {
+	if cfg.MessageBucketHours < 1 {
+		return fmt.Errorf("MESSAGE_BUCKET_HOURS must be >= 1, got %d", cfg.MessageBucketHours)
+	}
+	return nil
+}
+
 func run() error {
 	ctx := context.Background()
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	if err := validateConfig(&cfg); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
 	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
