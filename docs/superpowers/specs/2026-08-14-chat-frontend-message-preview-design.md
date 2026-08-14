@@ -56,7 +56,7 @@ that nor changes it.
 |---|---|
 | Surface | Sidebar `RoomList` last-message snippet |
 | Row shape | Two lines: name + badges, then `Alice: <snippet>` |
-| Sender prefix | Omitted in DM rooms |
+| Sender prefix | Omitted in DM rooms — both `dm` and `botDM`, whose row title already is the counterpart's name. `discussion` is multi-party and keeps the prefix. |
 | Timestamp | None |
 | Mention / unread indicators on the preview line | None |
 | Attachment-only messages | `'Photo'` / `'Audio'` / `'Video'` / title-or-`'File'` |

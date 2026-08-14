@@ -1395,7 +1395,9 @@ Append to `src/components/MainApp/Sidebar/RoomList/RoomList.test.jsx`, inside th
     const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
     const line = container.querySelector('.room-preview')
     expect(line).toBeInTheDocument()   // reserved, so the row height is stable
-    expect(line).toHaveTextContent('')
+    // toBe, not toHaveTextContent: the latter is a substring check that every
+    // string satisfies, so it would assert nothing.
+    expect(line.textContent).toBe('')
   })
 
   it('renders the attachment label a preview carries as its text', () => {
@@ -1440,7 +1442,7 @@ In `src/components/MainApp/Sidebar/RoomList/RoomList.jsx`, replace the `RoomItem
             depend on whether this line has content, or the sidebar reflows
             as previews arrive during bootstrap. */}
         <div className="room-preview">
-          {room.preview && room.type !== 'dm' && (
+          {room.preview && room.type !== 'dm' && room.type !== 'botDM' && (
             <span className="room-preview-sender">{room.preview.senderName}: </span>
           )}
           {room.preview?.text}
