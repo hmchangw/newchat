@@ -7,7 +7,9 @@ come from **dedicated exporters** (infra, not the app SDK). Companion to
 
 > Status: inventory / design. Live values were verified locally on 2026-07-12
 > against the Docker Compose o11y stack (`docker-local/compose.o11y.yaml` ->
-> Prometheus `:9090`).
+> Prometheus `:9090`). The instrument list was re-derived from source on
+> 2026-08-14 — every OTel and client_golang instrument in the repository is
+> accounted for in §2, §2.1, and §2.2 — but that pass was static, not a rescrape.
 
 > Storage note (2026-08-11): the authoritative, code-reverified MongoDB and
 > Cassandra metric set, direct-client coverage, exporter gaps, and shared
@@ -91,9 +93,9 @@ Enabled wherever the matching `WithObservability` / middleware is wired.
 
 **Two notable auto-gaps (spans only, NO metrics):**
 - **NATS/JetStream client** (`otelnats`) — emits *spans*, but **no client
-  metrics** (no per-subject publish/consume counters or latency histograms from
-  the SDK). For a message platform this is a real gap; today the only NATS
-  numbers come from tracing.
+  metrics** from the SDK itself. This is still true of the instrumentation
+  layer; the gap is now covered at the application layer instead, by the shared
+  `chat.nats.*` families in §2.1. Do not expect SDK-auto NATS series.
 - **Elasticsearch client** (`searchengine`) — emits *spans* (ES `_search`/`_bulk`
   latency is visible in traces) but **no metrics** instrument.
 
@@ -114,10 +116,10 @@ missing beyond shared cache/key counters.
 | portal-service | ✅ | ✅ | — | — | — | — | — | account-lookup outcomes |
 | upload-service | ✅ | ✅ | — | — | — | — | — | upload count/bytes, MinIO put/get outcomes |
 | media-service | ✅ | ✅ | — | — | spans | — | — | avatar/emoji upload count/bytes, MinIO put/get outcomes |
-| message-gatekeeper | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | **validated / rejected counter** (by reason), canonical published |
-| message-worker | — | ✅ | — | ✅ | spans | — | shared `cache_*_total` | rows written, thread-sub upserts |
-| broadcast-worker | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | **fan-out size** histogram, deliveries, E2E-key hits |
-| notification-worker | — | ✅ | ✅ | — | spans | — | shared `cache_*_total` | notifications/pushes sent, suppressed |
+| message-gatekeeper | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`message_gatekeeper_messages_total`** | — |
+| message-worker | — | ✅ | — | ✅ | spans + `chat_nats_*` | — | shared `cache_*_total`, **`message_worker_persistence_total`** | thread-sub upserts |
+| broadcast-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`broadcast_worker_fanout_recipients`**, **`broadcast_worker_recipient_deliveries_total`** | E2E-key hits |
+| notification-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`notification_worker_outcomes_total`** | — |
 | outbox-worker | — | — | — | — | spans | — | — | forwarded/dropped/retried events by destination and type |
 | search-sync-worker | — | — | — | — | spans (Fetch) | spans | — | bulk actions/flush, index vs delete, ES failures |
 | search-service | — | ✅ | ✅ | — | spans | spans | **`search_service_requests_total`, `search_service_request_duration_seconds`, `search_service_es_duration_seconds`** | (well covered after request traffic) |
@@ -128,6 +130,65 @@ missing beyond shared cache/key counters.
 | user-presence-service | — | ✅ | ✅? | — | spans | — | — | presence queries, cache hit rate |
 | history-service | — | ✅ | — | ✅ | spans | — | shared `cache_*_total` | history reads, bucket-walk depth |
 | data-migration/oplog-* | — | ✅ | — | — | spans | — | **rich counters** (`oplog_*_events_processed_total`, `_naks_total`, `_terms_total`, `_skipped_total`, `_exhausted_total`, …) | (good exemplar — copy this pattern) |
+
+### 2.1 Shared application NATS metrics (2026-08-14)
+
+The SDK emits no NATS client metrics (§1), so these are owned by this repo and
+are emitted by every service that wires the shared helpers. Names are OTel
+instrument names; Prometheus renders them with `_` separators and adds
+`_total` / unit suffixes.
+
+Consumer and publisher families share a base of `service_name` + `site`; the
+"labels" column lists what each adds on top.
+
+| Instrument | Type | Owner | Labels beyond the base |
+|---|---|---|---|
+| `chat.nats.consumer.loop.up` | up-down counter | `pkg/natsmetrics` | stream, consumer |
+| `chat.nats.consumer.messages` | counter | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
+| `chat.nats.consumer.redeliveries` | counter | `pkg/natsmetrics` | stream, consumer, event_type |
+| `chat.nats.consumer.processing.duration` | histogram (s) | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
+| `chat.nats.terminal.failures` | counter | `pkg/natsmetrics` | stream, consumer, event_type, reason |
+| `chat.nats.publish.attempts` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
+| `chat.nats.publish.retries` | counter | `pkg/natsmetrics` | destination_kind, operation |
+| `chat.nats.requests` | counter | `pkg/natsmetrics` | operation, outcome |
+| `chat.nats.request.duration` | histogram (s) | `pkg/natsmetrics` | operation, outcome |
+| `chat.nats.client.connected` | up-down counter | `pkg/natsutil` | none — one series per process |
+| `chat.nats.client.connection.events` | counter | `pkg/natsutil` | event |
+| `nats_slow_consumer_events_total` | counter | `pkg/natsutil` | subject, queue |
+
+The two `chat.nats.client.*` families are the exception: they carry no
+`service_name` or `site` at all, because they are emitted from the connection
+helper, which sits below the layer that knows the site. They are scoped by the
+OTel resource instead, so join them through `target_info` rather than expecting
+inline labels. `nats_slow_consumer_events_total` is scoped the same way.
+
+Reconnect-buffer overflow is **not** a connection event: nats.go returns
+`ErrReconnectBufExceeded` synchronously from `publish()` and never routes it
+through `ErrorHandler`, so it is counted as
+`chat_nats_publish_attempts_total{outcome="buffer_full"}`. The full semantics,
+label enums, and the alerts these drive are specified in the NATS failure
+metrics contract under `docs/load-testing/failure-testing/`.
+
+### 2.2 Services not previously inventoried (2026-08-14)
+
+The Layer B table above predates these services. Verified from source: none of
+them own application metric instruments, so they expose Layer A only (Go
+runtime, plus whichever clients they wire). Their dependency columns are not
+filled in here because they were not re-verified against a running stack.
+
+`bot-message-handler`, `bot-room-service`, `client-update-service`,
+`hr-sync-worker`, `push-notification-service`, `tcard-service`,
+`teams-chat-member-sync`, `teams-chat-sync`, `teams-hr-sync`,
+`teams-room-creation`, `teams-room-inspector`, `teams-room-verify`,
+`teams-user-sync`, `translation-service`.
+
+One exception owns a metric: **`bot-message-worker`** exposes
+`bot_msg_worker_permanent_error_total`, but it is registered through
+`prometheus/client_golang` (`promauto`), not the OTel meter. It is therefore
+**not** on the SDK `:2112` endpoint with everything else in this document, and
+it carries none of the resource attributes the other families are joined by.
+This is the only non-OTel application metric in the repository; converting it to
+the shared meter would put it on the same endpoint and label scheme.
 
 **Observation:** shared cache/room-key counters are already present on some
 hot-path services, but they do not answer the core product questions (accepted
@@ -196,7 +257,7 @@ PromQL evidence:
 | `sum by (service_name, cache, tier) (cache_misses_total)` | cache miss counters present for `message-worker`, `notification-worker`, `history-service`, `room-worker`, `broadcast-worker`, and `message-gatekeeper` |
 | `cache_errors_total` | empty in this run; expected when no cache errors occurred |
 | `search_service_*` | empty in this Prometheus window because no search request traffic was generated after Prometheus was recreated |
-| NATS/JetStream client metric queries | empty; expected, because NATS currently emits spans but no SDK client metrics |
+| NATS/JetStream client metric queries | empty; expected at the time, because NATS emitted spans but no SDK client metrics. Superseded by §2.1: the repository now emits application-side `chat.nats.*` families. |
 
 Sample cache counter values observed in this run:
 
@@ -240,17 +301,21 @@ these exporters there (and to prod IaC) to cover Layer C.
 1. **NATS/JetStream exporter (Layer C).** Highest value — consumer lag is
    invisible today. Deploy `prometheus-nats-exporter` (or scrape NATS `:8222`),
    add to `docker-local/compose.o11y.yaml` + prod. *Infra, not app code.*
-2. **Hot-path domain counters (Layer B).** Add `sdk.Meter()` instruments to
-   gatekeeper (validated/rejected by reason), broadcast (fan-out size),
-   notification (sent/suppressed), search-sync (bulk outcomes). Copy the
-   data-migration counter pattern. *App code — one small `metrics.go` per service.*
-3. **Confirm/So-what on NATS & ES client metrics (Layer A gap).** otelnats/
-   searchengine emit spans but no metrics; decide whether app-side NATS/ES
-   latency histograms are worth adding (or rely on traces + the exporters).
+2. **Hot-path domain counters (Layer B).** *Mostly done (2026-08-14).*
+   Gatekeeper, message-worker, broadcast, and notification now own domain
+   counters (§2 table). Still open: **search-sync bulk outcomes**, and
+   broadcast's E2E-key hits.
+3. **ES client metrics (Layer A gap).** The NATS half of this item is closed —
+   see §2.1 for the application-side families that replaced it. `searchengine`
+   still emits spans but no metrics; decide whether app-side ES latency
+   histograms are worth adding or whether traces plus the exporter suffice.
 4. **DB/Redis/Cassandra/ES server exporters (Layer C).** Standard exporters for
    server health; lower urgency than NATS. *Infra.*
 5. **Histogram buckets.** SDK HTTP/DB histograms use `DefaultLatencyBuckets`
    (`WithHistogramBuckets` can override); confirm they match dashboard needs.
+6. **Move `bot-message-worker` onto the OTel meter.** It is the one application
+   metric registered through `prometheus/client_golang`, so it is off the
+   `:2112` endpoint and outside the shared label scheme (§2.2).
 
 Tracked as follow-ups in `docs/specs/o11y/o11y-followups.md`.
 
