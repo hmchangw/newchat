@@ -1,7 +1,8 @@
 .PHONY: lint fmt tidy test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
         o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep \
-        fed-deps-up fed-deps-down require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs fed-seed
+        fed-deps-up fed-deps-down require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs \
+        fed-seed fed-seed-reset fed-o11y-up fed-o11y-down
 
 DEPS_COMPOSE     := docker-local/compose.deps.yaml
 SERVICES_COMPOSE := docker-local/compose.services.yaml
@@ -28,6 +29,13 @@ FED_ENV_REMOTE   := docker-local/.env.site-remote
 FED_NATS_LOCAL   := docker-local/nats-site-local.conf
 FED_NATS_REMOTE  := docker-local/nats-site-remote.conf
 FED_NATS_CONTAINER := chat-fed-nats-site-local
+FED_O11Y_COMPOSE := docker-local/compose.fed-o11y.yaml
+# Every artifact setup.sh generates for the federated stack. Guards check all
+# four together: a bind mount whose source file is missing makes Docker
+# materialise a directory in its place, so a partial check lets one absent conf
+# turn into a crash-looping NATS and a later setup.sh failing with
+# "Is a directory".
+FED_GENERATED    := $(FED_NATS_LOCAL) $(FED_NATS_REMOTE) $(FED_ENV_LOCAL) $(FED_ENV_REMOTE)
 
 # Services site-remote starts. Empty = every service. Set to trim the remote
 # peer; see the tier table in docker-local/README.md for what each drop costs.
@@ -240,7 +248,12 @@ fed-deps-up:
 	@docker container inspect -f '{{.State.Running}}' $(NATS_CONTAINER) 2>/dev/null | grep -q true && { \
 	  echo "Single-site deps are running. Run 'make deps-down' first — the two stacks share host ports."; exit 1; \
 	} || true
-	@if [ ! -f $(NATS_CREDS) ] || [ ! -f $(FED_NATS_LOCAL) ] || [ ! -f $(FED_ENV_LOCAL) ]; then \
+	@missing=""; \
+	for f in $(NATS_CREDS) $(FED_GENERATED); do \
+	  [ -f "$$f" ] || missing="$$missing $$f"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	  echo "Missing generated file(s):$$missing"; \
 	  if [ -f $(ENV_FILE) ]; then \
 	    cp $(ENV_FILE) $(ENV_FILE).bak; \
 	    echo "WARNING: $(ENV_FILE) already exists and is about to be regenerated with new NATS keys."; \
@@ -257,14 +270,20 @@ fed-deps-up:
 fed-deps-down:
 	docker compose -f $(FED_DEPS_COMPOSE) down
 
-# Guard: federated deps must be running and the per-site files present.
+# Guard: federated deps must be running and every generated file present —
+# same four artifacts fed-deps-up checks, plus the shared backend.creds every
+# service bind-mounts (require-deps checks it for the single-site stack).
 require-fed-deps:
 	@docker container inspect -f '{{.State.Running}}' $(FED_NATS_CONTAINER) 2>/dev/null | grep -q true || { \
 	  echo "Federated deps are not running. Run 'make fed-deps-up' first."; exit 1; \
 	}
-	@test -f $(FED_ENV_LOCAL) && test -f $(FED_ENV_REMOTE) || { \
-	  echo "Missing per-site env files. Run './docker-local/setup.sh'."; exit 1; \
-	}
+	@missing=""; \
+	for f in $(NATS_CREDS) $(FED_GENERATED); do \
+	  [ -f "$$f" ] || missing="$$missing $$f"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	  echo "Missing generated file(s):$$missing. Run './docker-local/setup.sh'."; exit 1; \
+	fi
 
 # Both sites. Detached, because two Compose projects cannot both hold the
 # foreground — use `make fed-logs` for the streaming view `make up` gives you.
@@ -315,6 +334,13 @@ fed-seed: require-fed-deps
 	MONGO_DB=chat_remote VALKEY_ADDRS=localhost:6479 \
 	  go run ./tools/seed-sample-data --site site-remote --mongo-db chat_remote
 
+# fed-seed with --reset: deletes each site's seed records by stable ID before
+# re-populating that site (never DROP DATABASE), so hand-added dev data lives.
+fed-seed-reset: require-fed-deps
+	MONGO_DB=chat go run ./tools/seed-sample-data --site site-local --mongo-db chat --reset
+	MONGO_DB=chat_remote VALKEY_ADDRS=localhost:6479 \
+	  go run ./tools/seed-sample-data --site site-remote --mongo-db chat_remote --reset
+
 # --- Local observability targets ----------------------------------------------
 # Two opt-in stacks, safe to run together: o11y-up receives what services export
 # under O11Y_ENABLED (:3003); obs-up is cAdvisor + NATS metrics (:3002).
@@ -326,6 +352,19 @@ o11y-up:
 
 o11y-down:
 	docker compose -f $(O11Y_COMPOSE) down
+
+# The same o11y stack against the federated deps: compose.fed-o11y.yaml
+# repoints the inherited chat-local key at chat-site-local and puts the
+# collector + Prometheus on both site networks. Guards on chat-site-local the
+# way o11y-up guards on chat-local.
+fed-o11y-up:
+	@docker network inspect chat-site-local >/dev/null 2>&1 || { \
+	  echo "chat-site-local network missing. Run 'make fed-deps-up' first."; exit 1; \
+	}
+	docker compose -f $(O11Y_COMPOSE) -f $(FED_O11Y_COMPOSE) up -d
+
+fed-o11y-down:
+	docker compose -f $(O11Y_COMPOSE) -f $(FED_O11Y_COMPOSE) down
 
 # Start cAdvisor + Prometheus + Grafana. Requires `make deps-up` first so the
 # chat-local network exists. Dashboard at http://localhost:3002.

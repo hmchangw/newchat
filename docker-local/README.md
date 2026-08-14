@@ -51,11 +51,15 @@ make fed-seed             # seed both sites' databases
 make fed-up               # both sites' services (detached)
 make fed-ui-up            # chat-frontend :3000 and :3100
 make fed-logs             # streaming logs across both sites
+make fed-o11y-up          # optional: traces/metrics/logs from both sites
 ```
 
-`make fed-deps-up` runs `setup.sh` itself if the per-site NATS confs or env
-files are missing, same as `make deps-up` does for the single-site ones.
-Bring it down with `make fed-deps-down`, `make fed-down` and `make fed-ui-down`.
+`make fed-deps-up` runs `setup.sh` itself if any of the five generated files is
+missing — `backend.creds`, both per-site NATS confs, both per-site env files —
+so a half-generated tree is regenerated rather than half-used. (`make deps-up`
+does the same for the single-site `nats.conf`/`backend.creds`/`.env`.) Bring it
+down with `make fed-deps-down`, `make fed-down`, `make fed-ui-down` and
+`make fed-o11y-down`.
 
 Three Docker networks replace the single `chat-local`:
 
@@ -73,8 +77,13 @@ Three Docker networks replace the single `chat-local`:
    │ chat-frontend :3000   │   │ chat-frontend :3100    │
    └───────────┬───────────┘   └───────────┬────────────┘
                └──── mongodb, cassandra, elasticsearch,
-                     minio, keycloak, vault, otel-collector
+                     minio, keycloak, vault
                      (one container each, joined to BOTH networks)
+
+          plus, only when `make fed-o11y-up` is running:
+               └──── otel-collector, prometheus
+                     (joined to BOTH networks; tempo, loki and grafana
+                      sit on chat-site-local alone)
 ```
 
 Each NATS container joins its site network under the alias `nats`, so every
@@ -208,14 +217,74 @@ cross-site rows within their own database
 site instead puts ivan's rows in the wrong database and renders an empty chat
 list for him — with no error anywhere.
 
-`make seed-reset` and `--dry-run` both accept `--site`; the dry-run plan
-prints the site it is planning for and the filtered per-collection counts, so
-`--dry-run --site site-remote` is the quickest check that routing is sane.
+`make fed-seed-reset` is `fed-seed` with `--reset` on both passes: it deletes
+each site's seed records by stable ID from that site's database before
+re-populating it, and never drops a database, so hand-added dev data survives.
+
+The make targets pass fixed flags — `make` itself rejects `--site` as an
+unknown flag, so per-site variations are run with `go run` directly:
+
+```sh
+# what a site-remote pass would write, without writing it
+go run ./tools/seed-sample-data --dry-run --site site-remote
+# reset + reseed one site only
+MONGO_DB=chat_remote VALKEY_ADDRS=localhost:6479 \
+  go run ./tools/seed-sample-data --site site-remote --mongo-db chat_remote --reset
+```
+
+The dry-run plan prints the site it is planning for and the filtered
+per-collection counts, so `--dry-run --site site-remote` is the quickest check
+that routing is sane. (`make seed-dry-run` is the unfiltered equivalent, and
+reports `site all`.)
 
 Three seeded rooms span both sites and carry `crossSite: true` —
 `r-general` and `r-eng` (site-local, with ivan) and `r-remote-announce`
 (site-remote, with alice). They exist so there is federated content to look
 at before you create anything by hand.
+
+### Observability across both sites
+
+Every service in both site projects renders `O11Y_ENABLED=true` and
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`, so that name has to
+resolve on both site networks or half the stack exports into a void. `make
+o11y-up` cannot supply it — `compose.o11y.yaml` joins the external network
+literally named `chat-local`, which the federated deps stack never creates.
+`compose.fed-o11y.yaml` is the overlay that fixes both:
+
+```sh
+make fed-o11y-up      # after make fed-deps-up
+make fed-o11y-down
+```
+
+It repoints the inherited `chat-local` network key at the real
+`chat-site-local` network (same trick as `compose.site.yaml`), keeps both site
+networks `external` since `compose.fed-deps.yaml` owns them, and attaches
+exactly two components to both networks:
+
+| Component | Networks | Why |
+|---|---|---|
+| otel-collector | both | every service on either site resolves `otel-collector` by name to push OTLP traces and logs |
+| prometheus | both | it scrapes each service container's `:2112` **directly** over Docker SD, so it needs a route to container IPs on both networks |
+| tempo, loki, grafana | chat-site-local only | tempo and loki are written to by the collector; grafana reads tempo/loki/prometheus. None of them touches a service container |
+
+Prometheus also needs different relabel rules, because the federated stack
+renames both things `o11y/prometheus.yaml` filters on: the network
+(`chat-local` → `chat-site-local`/`chat-site-remote`) and the Compose project
+(`chat-local-services` → `chat-site-local`/`chat-site-remote`). The overlay
+mounts `o11y/prometheus.fed.yaml` in its place, which keeps the same scrape
+strategy, widens both filters, and adds a `site` label derived from the project
+name so `room-service` from the two sites is distinguishable in a query.
+
+Spans are separated the same way on the trace side: `setup.sh` writes
+`OTEL_RESOURCE_ATTRIBUTES=site.id=<site>` into each per-site env file, so both
+sites' spans land in the one Tempo with a `site.id` resource attribute. One
+Grafana (`:3003`), one Tempo, one Prometheus, one Loki serve both sites.
+
+chat-frontend traces from the browser too (`OTEL_ENABLED` defaults to true) and
+posts straight to the host-published `http://localhost:4318/v1/traces`, so the
+collector's CORS allowlist in `o11y/otel-collector.yaml` names both UI origins,
+`:3000` and `:3100` — without the second one site-remote's browser spans are
+rejected before they reach the collector.
 
 ### Known divergences from production
 
@@ -233,7 +302,40 @@ at before you create anything by hand.
   both sites read and write the same MinIO bucket for avatars.
 - **Two browser origins** (`:3000` and `:3100`) rather than two tabs on one
   origin, so the two logged-in sessions do not contend over localStorage.
+- **Shared o11y backend.** One collector, Tempo, Prometheus, Loki and Grafana
+  serve both sites; `site.id` on spans and the `site` label on metrics are what
+  separate them, not separate backends.
+- **A 2-peer JetStream meta-group — EXPECTED BUT UNVERIFIED.** Each site is a
+  single-server cluster (`cluster { name: <site>, port: 6222 }`, no routes) and
+  the two are joined by gateways, so the supercluster's meta-group spans both
+  servers: a 2-peer Raft group with quorum 2 of 2 and no failure tolerance.
+  Expected symptom: restarting one NATS container wedges JetStream at **both**
+  sites, with the survivor's `/healthz` unhealthy until its peer is back.
+  Recovery is to bring both back — `make fed-deps-down && make fed-deps-up`.
+  Not reproduced: nobody has run this stack on a Docker host yet, so treat it
+  as a prediction from the topology, not an observed failure. Confirm it during
+  the verification pass below before acting on it; the fix would be a third
+  server purely for quorum, which is not worth the `setup.sh` complexity for a
+  dev stack unless the symptom is real.
 - **~8GB RAM.** Release valves are `fed-up-lean` and skipping the o11y stack.
+
+### Verifying the two-site stack
+
+Not yet run end to end — the branch was built without a Docker host. Whoever
+brings it up first should check, and correct this README where reality differs:
+
+1. `make fed-deps-up` from a clean tree generates all five files, and both NATS
+   containers report healthy on `:8222`/`:8322`.
+2. `make fed-seed` writes both databases; `make fed-seed-reset` re-runs cleanly.
+3. alice (`:3000`) and ivan (`:3100`) log in, and a message in `r-general`
+   reaches the other site live.
+4. `make fed-o11y-up`, then in Grafana (`:3003`): one trace carrying spans with
+   both `site.id` values, and Prometheus targets up for containers from both
+   `chat-site-local` and `chat-site-remote`.
+5. **The meta-group question above.** `docker restart chat-fed-nats-site-remote`
+   and watch whether site-**local** JetStream keeps working (publish a message
+   as alice) or wedges until the remote server returns. Whichever happens,
+   replace the "EXPECTED BUT UNVERIFIED" entry with what was observed.
 
 ## Logging in
 
@@ -302,10 +404,10 @@ the `local` column, since both sites run at once.
 | 3000 | 3100 | chat-frontend | Same port `npm run dev` binds — run the container **or** Vite, not both |
 | 3001 | 3101 | admin-frontend | |
 | 3002 | | Grafana (obs) | localhost-only |
-| 3003 | | Grafana (o11y) | |
-| 3200 | | Tempo | |
+| 3003 | shared | Grafana (o11y) | one instance for both sites under `fed-o11y-up` |
+| 3200 | shared | Tempo | |
 | 4222 | 4322 | NATS client | |
-| 4318 | | OTLP/HTTP collector | |
+| 4318 | shared | OTLP/HTTP collector | on both site networks under `fed-o11y-up` |
 | 5601 | | Kibana | `debug` profile, off by default |
 | 6379 | 6479 | Valkey | single-node cluster mode |
 | 7777 | 7877 | **Traefik `/api/v1` gateway** | This is `baseUrl`; portal hands it to every client |
@@ -321,16 +423,17 @@ the `local` column, since both sites run at once.
 | 8222 | 8322 | NATS monitoring | |
 | 9000/9001 | shared | MinIO API / console | minioadmin/minioadmin |
 | 9042 | shared | Cassandra | |
-| 9090 | | Prometheus (o11y) | |
+| 9090 | shared | Prometheus (o11y) | on both site networks under `fed-o11y-up` |
 | 9091 | | Prometheus (obs) | localhost-only |
 | 9200 | shared | Elasticsearch | |
 | 9222 | 9322 | NATS WebSocket | what browsers connect to |
 | 19090 | 19190 | search-service health | container listens on 9090 |
 | 27017 | shared | MongoDB | |
 
-"shared" rows are the datastores `compose.fed-deps.yaml` pulls in with
-`extends:` at their single-site ports unchanged — this is exactly why the
-federated and single-site dep stacks can't run at the same time. The NATS
+"shared" rows are one container serving both sites at its single-site port:
+the datastores `compose.fed-deps.yaml` pulls in with `extends:`, and the o11y
+components `compose.fed-o11y.yaml` overlays. The datastore half is exactly why
+the federated and single-site dep stacks can't run at the same time. The NATS
 cluster port (`:6222`) and gateway port (`:7222`) stay container-internal on
 `chat-federation`; nothing is published to the host for those.
 
