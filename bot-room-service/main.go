@@ -73,6 +73,12 @@ func run() error {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 	store := newStoreMongo(mc.Database(cfg.MongoDB))
+	// Bounded timeout so a hung createIndexes surfaces at startup.
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer ensureCancel()
+	if err := store.EnsureIndexes(ensureCtx); err != nil {
+		return fmt.Errorf("ensure store indexes: %w", err)
+	}
 
 	if cfg.RoomKeyGracePeriod <= 0 {
 		return fmt.Errorf("ROOM_KEY_GRACE_PERIOD must be a positive duration, got %s", cfg.RoomKeyGracePeriod)
