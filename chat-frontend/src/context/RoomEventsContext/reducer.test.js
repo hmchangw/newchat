@@ -1908,4 +1908,63 @@ describe('roomEventsReducer previews', () => {
     const seeded = { ...initialState, previews: { r1: { messageId: 'm8', senderName: 'A', text: 'x' } } }
     expect(roomEventsReducer(seeded, { type: 'RESET' }).previews).toEqual({})
   })
+
+  describe('ROOM_PREVIEW_UPDATED', () => {
+    const seeded = () => ({
+      ...initialState,
+      previews: { r1: { messageId: 'm1', senderName: 'Alice Chen', text: 'old body' } },
+    })
+
+    it('overwrites from the event previewMessage', () => {
+      const next = roomEventsReducer(seeded(), {
+        type: 'ROOM_PREVIEW_UPDATED',
+        roomId: 'r1',
+        previewMessage: {
+          messageId: 'm2',
+          sender: { account: 'bob', displayName: 'Bob Lin' },
+          content: 'edited body',
+          createdAt: '2026-08-14T15:00:00Z',
+        },
+      })
+      expect(next.previews.r1).toEqual({ messageId: 'm2', senderName: 'Bob Lin', text: 'edited body' })
+    })
+
+    it('updates a room that has no message buffer', () => {
+      const next = roomEventsReducer(initialState, {
+        type: 'ROOM_PREVIEW_UPDATED',
+        roomId: 'r-unopened',
+        previewMessage: {
+          messageId: 'm3',
+          sender: { account: 'bob', displayName: 'Bob Lin' },
+          content: 'from a room I never opened',
+          createdAt: '2026-08-14T15:00:00Z',
+        },
+      })
+      expect(next.previews['r-unopened'].text).toBe('from a room I never opened')
+    })
+
+    it('clears when the deleted message is the one on display and no preview follows', () => {
+      const next = roomEventsReducer(seeded(), {
+        type: 'ROOM_PREVIEW_UPDATED', roomId: 'r1', deletedMessageId: 'm1',
+      })
+      expect(next.previews.r1).toBeUndefined()
+    })
+
+    it('does NOT clear when the deleted message is a different one', () => {
+      const next = roomEventsReducer(seeded(), {
+        type: 'ROOM_PREVIEW_UPDATED', roomId: 'r1', deletedMessageId: 'm-other',
+      })
+      expect(next.previews.r1.text).toBe('old body')
+    })
+
+    it('leaves the preview alone when neither a previewMessage nor a deletedMessageId is given', () => {
+      const next = roomEventsReducer(seeded(), { type: 'ROOM_PREVIEW_UPDATED', roomId: 'r1' })
+      expect(next.previews.r1.text).toBe('old body')
+    })
+
+    it('ignores an action with no roomId', () => {
+      const state = seeded()
+      expect(roomEventsReducer(state, { type: 'ROOM_PREVIEW_UPDATED' })).toBe(state)
+    })
+  })
 })

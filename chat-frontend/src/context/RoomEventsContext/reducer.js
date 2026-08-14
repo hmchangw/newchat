@@ -882,6 +882,24 @@ export function roomEventsReducer(state, action) {
         },
       }
     }
+    case 'ROOM_PREVIEW_UPDATED': {
+      // The room's refreshed preview after an edit or delete, computed
+      // server-side. Its own action rather than a field on MESSAGE_EDITED /
+      // MESSAGE_DELETED because both of those bail when the room has no
+      // message buffer — which is the normal case for a sidebar row.
+      const { roomId, previewMessage, deletedMessageId } = action
+      if (!roomId) return state
+      const next = previewFromWire(previewMessage)
+      if (next) return { ...state, previews: { ...state.previews, [roomId]: next } }
+      // No preview on the event. For a delete that means nothing eligible is
+      // left — but only when the deleted message is the one on display. Any
+      // other id is contradictory input (the server would have echoed the
+      // unchanged preview), so leave what's there.
+      const cur = state.previews[roomId]
+      if (!deletedMessageId || !cur || cur.messageId !== deletedMessageId) return state
+      const { [roomId]: _cleared, ...rest } = state.previews
+      return { ...state, previews: rest }
+    }
     case 'MESSAGE_REACTED': {
       // Live `message_reacted` toggle. Mirrors MESSAGE_EDITED's dual-buffer
       // patch so a reaction arriving while in historical mode isn't lost when
