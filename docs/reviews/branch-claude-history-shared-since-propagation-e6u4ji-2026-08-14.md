@@ -43,3 +43,32 @@
 
 - **Satisfied.** `addMembers` is registered on `subject.MemberAddPattern` (handler.go:119, a `chat.user.{account}.…` subject), and the request struct in `pkg/model/member.go` changed — the same branch diff updates `docs/client-api.md` and both derived views `docs/client-api/events.md` and `docs/client-api/request-reply.md`, including the server-set-field note and the `member_added.historySharedSince` semantics.
 - **nitpick** — branch commits `docs/superpowers/plans/` + `specs/` working documents; CLAUDE.md Section 5 only mandates deleting `docs/reviews/`, and the plans directory is an established convention (2026-03 plans exist), so acceptable.
+
+## Service: room-worker
+
+### (a) Diff correctness
+
+- **low** — The new doc comment on `historySharedSincePtr` (room-worker/handler.go:139-140) cites "model.RoomMemberEvent invariant" — no such type exists. The nil-never-`&0` invariant actually lives on `model.InboxMemberEvent` (pkg/model/event.go:123-125); `subject.RoomMemberEvent` is a subject builder, so the reference misleads.
+- **nitpick** — handler.go:144 returns the caller's `inherited` pointer, aliasing `req.HistorySharedSince` into every published event struct. Read-only today so safe, but the mode-none branch returns a fresh `&timestamp` (handler.go:152); copying would be symmetric and future-proof.
+- Otherwise correct: the cap is resolved through the single existing helper and lands consistently at all three consumption sites — subscription build (handler.go:981-983), same-site `MemberAddEvent` (handler.go:1162, 1173), and the federated per-destination copy (handler.go:1281). The `> 0` guard honors the nil-never-`&0` invariant; mode-none correctly ignores the cap (accept timestamp ≥ any inherited cap by construction). Tests cover the truth table (`TestHistorySharedSincePtr_InheritedCap`) plus end-to-end same-site and cross-site propagation, including the OUTBOX-wrapped payload (`unwrapOutbox` assert on `chat.outbox.` publishes).
+
+### (b) Scope drift / refactor-readiness
+
+- **medium (pre-existing)** — handler.go is 2,546 lines carrying member add/remove, key rotation/fan-out, sys-msg composition, federation, DM create, rename, and Teams reconcile — past the point where a split (e.g. membership vs. key lifecycle) would pay off. The diff itself adds ~12 production lines and does not worsen this; noted for the backlog, not this PR.
+
+### (c) Abstraction changes
+
+- No new types or helpers in this service — the diff threads one parameter through the existing `historySharedSincePtr` resolver, which is exactly the right altitude: the "resolve once, use at three sites" comment (handler.go:978-980) stays true. The one new model field (`AddMembersRequest.HistorySharedSince`, pkg/model/member.go:33-41) is well-documented (server-set, nil semantics). No premature abstraction.
+
+### (d) Design coherence
+
+- Fits the service's job cleanly: policy (whose cap, overwrite client input) stays in room-service; room-worker mechanically materializes the canonical event onto subscriptions and events. The trust boundary is sound — only room-service publishes to ROOMS, and its handler resets the field before stamping. No findings.
+
+### (e) Project-pattern adherence
+
+- No violations. No new subjects/streams/IDs; cross-site propagation rides the existing durable OUTBOX path (`h.federate` → `outbox.Publish`, handler.go:1287) rather than direct INBOX publish; consumer pattern untouched (high-throughput `cons.Messages()`+semaphore, main.go:247-281, matches convention). New field carries `json`+`bson` camelCase tags with `omitempty`, and the wire-omission test (pkg/model/model_test.go:1654-1658) pins the nil-not-null contract. Tests are table-driven with named subtests. `AddMembersRequest` already carries `Timestamp`; no new event struct was introduced.
+- **nitpick** — `TestProcessAddMembers_InheritedCapPropagates_CrossSite` duplicates ~35 lines of mock setup from its same-site sibling (handler_test.go:234-345); a shared arrange helper would trim it. Acceptable as-is.
+
+### (f) Client-API doc rule
+
+- **Compliant.** room-worker's own entry point is a JetStream consumer (not `chat.user.…`), but the branch changes the client-observable `member.add` semantics and `member_added.historySharedSince` meaning, and the full diff updates all three docs in the same PR: `docs/client-api.md` (history.mode + historySharedSince rows, server-set field list), plus both derived views `docs/client-api/events.md` and `docs/client-api/request-reply.md`. No critical finding.
