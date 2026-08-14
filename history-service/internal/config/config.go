@@ -13,7 +13,7 @@ import (
 
 // CassandraConfig holds Cassandra connection settings (env prefix: CASSANDRA_).
 type CassandraConfig struct {
-	Hosts    string `env:"HOSTS"    required:"true"`
+	Hosts    string `env:"HOSTS,required,notEmpty"`
 	Keyspace string `env:"KEYSPACE" envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
@@ -23,7 +23,7 @@ type CassandraConfig struct {
 
 // MongoConfig holds MongoDB connection settings (env prefix: MONGO_).
 type MongoConfig struct {
-	URI      string `env:"URI"      required:"true"`
+	URI      string `env:"URI,required,notEmpty"`
 	DB       string `env:"DB"       envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
@@ -44,7 +44,7 @@ type MongoConfig struct {
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
 type NATSConfig struct {
-	URL       string `env:"URL" required:"true"`
+	URL       string `env:"URL,required,notEmpty"`
 	CredsFile string `env:"CREDS_FILE" envDefault:""`
 }
 

@@ -183,6 +183,47 @@ func TestLoad_DefaultsReadPreferenceToSecondaryPreferred(t *testing.T) {
 	assert.Equal(t, "secondaryPreferred", cfg.Mongo.ReadPreference)
 }
 
+// connectionEnv is every env var the service cannot boot without.
+func connectionEnv() map[string]string {
+	return map[string]string{
+		"CASSANDRA_HOSTS": "localhost",
+		"MONGO_URI":       "mongodb://localhost:27017",
+		"NATS_URL":        "nats://localhost:4222",
+	}
+}
+
+// The `required` option must sit inside the env tag; a standalone
+// `required:"true"` struct tag is silently ignored by caarlos0/env, which lets
+// a pod boot with no Cassandra hosts and a NATS URL that falls back to the
+// driver's localhost default.
+func TestLoad_RejectsMissingConnectionEnv(t *testing.T) {
+	for missing := range connectionEnv() {
+		t.Run("unset "+missing, func(t *testing.T) {
+			for key, value := range connectionEnv() {
+				if key != missing {
+					t.Setenv(key, value)
+				}
+			}
+			unsetEnv(t, missing)
+
+			_, err := Load()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), missing)
+		})
+
+		t.Run("empty "+missing, func(t *testing.T) {
+			for key, value := range connectionEnv() {
+				t.Setenv(key, value)
+			}
+			t.Setenv(missing, "")
+
+			_, err := Load()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), missing)
+		})
+	}
+}
+
 // unsetEnv removes key for the duration of the test and restores its prior
 // presence/value on cleanup, so a default-value test can't be perturbed by an
 // externally set variable.
