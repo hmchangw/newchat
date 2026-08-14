@@ -130,7 +130,9 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		assert.Nil(t, got)
 		assert.Equal(t, int64(1), requests("success"),
 			"a replied-to request is a transport success even when the payload is an error envelope")
-		assert.Contains(t, err.Error(), "message not found")
+		var ec *errcode.Error
+		require.ErrorAs(t, err, &ec, "the history error envelope must survive as a typed errcode")
+		assert.Equal(t, errcode.CodeNotFound, ec.Code)
 	})
 
 	t.Run("no responder — returns error", func(t *testing.T) {
@@ -158,7 +160,9 @@ func requestMetricFor(t *testing.T) (natsmetrics.Publisher, func(outcome string)
 		t.Helper()
 		var rm metricdata.ResourceMetrics
 		require.NoError(t, reader.Collect(context.Background(), &rm))
-		var total int64
+		// operationTotal guards the assertion itself: summing only the requested
+		// outcome would still pass if one request were recorded under two.
+		var total, operationTotal int64
 		for _, scope := range rm.ScopeMetrics {
 			for _, m := range scope.Metrics {
 				if m.Name != "chat.nats.requests" {
@@ -171,12 +175,17 @@ func requestMetricFor(t *testing.T) (natsmetrics.Publisher, func(outcome string)
 					for _, kv := range dp.Attributes.ToSlice() {
 						got[string(kv.Key)] = kv.Value.AsString()
 					}
-					if got["operation"] == string(natsmetrics.OperationHistoryGetMessage) && got["outcome"] == outcome {
+					if got["operation"] != string(natsmetrics.OperationHistoryGetMessage) {
+						continue
+					}
+					operationTotal += dp.Value
+					if got["outcome"] == outcome {
 						total += dp.Value
 					}
 				}
 			}
 		}
+		require.Equal(t, int64(1), operationTotal, "one history request must record exactly one outcome")
 		return total
 	}
 }
