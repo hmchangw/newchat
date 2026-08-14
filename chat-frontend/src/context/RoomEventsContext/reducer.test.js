@@ -1966,5 +1966,28 @@ describe('roomEventsReducer previews', () => {
       const state = seeded()
       expect(roomEventsReducer(state, { type: 'ROOM_PREVIEW_UPDATED' })).toBe(state)
     })
+
+    it('leaves state untouched when a delete arrives for a room with no stored preview', () => {
+      // The `!cur` guard must short-circuit before cur.messageId is read. Nothing
+      // else in the suite covers deletedMessageId present + no stored entry, and
+      // this branch is the clear rule's core guarantee.
+      const state = { ...initialState, previews: {} }
+      const next = roomEventsReducer(state, {
+        type: 'ROOM_PREVIEW_UPDATED', roomId: 'r-none', deletedMessageId: 'm1',
+      })
+      expect(next).toBe(state)
+    })
+
+    it('leaves other rooms untouched when a delete arrives for a room with no stored preview', () => {
+      const state = {
+        ...initialState,
+        previews: { 'r-other': { messageId: 'm1', senderName: 'Alice Chen', text: 'kept' } },
+      }
+      const next = roomEventsReducer(state, {
+        type: 'ROOM_PREVIEW_UPDATED', roomId: 'r-none', deletedMessageId: 'm1',
+      })
+      expect(next).toBe(state)
+      expect(next.previews['r-other'].text).toBe('kept')
+    })
   })
 })
