@@ -670,7 +670,18 @@ describe('roomEventsReducer previews', () => {
   })
 
   it('MESSAGE_RECEIVED ignores a thread reply', () => {
-    const seeded = { ...initialState, previews: { r1: { messageId: 'm1', senderName: 'A', text: 'first' } } }
+    // roomState MUST be seeded with the parent. Without it the dispatch exits at
+    // the thread block's `if (!tPrev) return state` guard and never reaches the
+    // path under test — the assertion would then hold even if the preview write
+    // were hoisted above the thread guard, i.e. it would not catch the regression
+    // it exists to catch. Assert on the parent too, proving the thread path ran.
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm1', senderName: 'A', text: 'first' } },
+      roomState: {
+        r1: { ...emptyBuffer(), messages: [{ id: 'm1', content: 'first', createdAt: '2026-08-14T11:00:00Z' }] },
+      },
+    }
     const next = roomEventsReducer(seeded, {
       type: 'MESSAGE_RECEIVED',
       event: {
@@ -679,6 +690,16 @@ describe('roomEventsReducer previews', () => {
       },
     })
     expect(next.previews.r1.messageId).toBe('m1')
+  })
+
+  it('MESSAGE_RECEIVED keeps the previews reference on a same-content echo', () => {
+    // The server echo of a message this client already stored optimistically must
+    // not allocate a new previews object — a fresh reference invalidates
+    // useSidebarSections' memo for every room in the sidebar.
+    const msg = { id: 'm2', content: 'newest', userDisplayName: 'Bob Lin', createdAt: '2026-08-14T11:00:00Z' }
+    const first = roomEventsReducer(initialState, { type: 'MESSAGE_RECEIVED', event: { roomId: 'r1', message: msg } })
+    const second = roomEventsReducer(first, { type: 'MESSAGE_RECEIVED', event: { roomId: 'r1', message: msg } })
+    expect(second.previews).toBe(first.previews)
   })
 
   it('MESSAGE_SENT_LOCAL previews the local send optimistically', () => {
@@ -725,7 +746,12 @@ describe('roomEventsReducer previews', () => {
     // always omitted there. Regression guard against wiring it up.
     const next = roomEventsReducer(initialState, {
       type: 'SUBSCRIPTION_UPSERTED',
-      subscription: { roomId: 'r1', roomType: 'channel', siteId: 'site-A', name: 'General', room: {} },
+      subscription: {
+        roomId: 'r1', roomType: 'channel', siteId: 'site-A', name: 'General',
+        // A previewMessage is deliberately present: the real wire never carries one
+        // here, so an empty `room` would make this guard vacuously true.
+        room: { previewMessage: wirePreview() },
+      },
     })
     expect(next.previews).toEqual({})
   })
@@ -800,6 +826,14 @@ function previewFromMessage(msg) {
   }
 }
 
+// Two stored previews are interchangeable when all three rendered fields match.
+// Used to keep the previews reference stable on a same-content write (e.g. the
+// server echo of a message this client already stored optimistically) — a fresh
+// object would invalidate useSidebarSections' memo for every room in the sidebar.
+function samePreview(a, b) {
+  return !!a && !!b && a.messageId === b.messageId && a.senderName === b.senderName && a.text === b.text
+}
+
 // Build a stored preview from a wire PreviewMessage (subscription.list rows
 // and the refreshed preview on edit/delete events).
 function previewFromWire(previewMessage) {
@@ -838,9 +872,10 @@ In the `MESSAGE_RECEIVED` case, immediately after the thread-reply block closes 
       // the room timeline and is a preview candidate. Computed once and
       // applied at every return point below.
       const nextPreview = previewFromMessage(msg)
-      const previews = nextPreview
-        ? { ...state.previews, [roomId]: nextPreview }
-        : state.previews
+      const previews =
+        !nextPreview || samePreview(state.previews[roomId], nextPreview)
+          ? state.previews
+          : { ...state.previews, [roomId]: nextPreview }
 ```
 
 Then add `previews,` to **all three** returned objects in this case: the historical-buffer-mode return, the `existingIdx >= 0` optimistic-echo return, and the final live-append return. Missing any one of them means previews silently stop updating in that mode.
@@ -854,9 +889,10 @@ In `MESSAGE_SENT_LOCAL`, after `const messages = appendBounded(prev.messages, ms
       // room's preview either — matching the server, which omits
       // previewMessage for hidden thread replies.
       const nextPreview = msg.threadParentMessageId ? null : previewFromMessage(msg)
-      const previews = nextPreview
-        ? { ...state.previews, [roomId]: nextPreview }
-        : state.previews
+      const previews =
+        !nextPreview || samePreview(state.previews[roomId], nextPreview)
+          ? state.previews
+          : { ...state.previews, [roomId]: nextPreview }
 ```
 
 and add `previews,` to its returned object.
