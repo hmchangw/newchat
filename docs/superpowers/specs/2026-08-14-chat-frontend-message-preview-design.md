@@ -111,7 +111,7 @@ history has been loaded, which at bootstrap is none of them.
 
 | Action | Source | Behavior |
 |---|---|---|
-| `BUCKETS_LOADED` | `sub.room.previewMessage` | Seed every room that has one; rooms without stay absent |
+| `BUCKETS_LOADED` | `sub.room.previewMessage` | Seed only rooms with **no** preview yet. A live message can land before `fetchSidebarBuckets` resolves (the DM subscription goes live first) and is newer than this snapshot — overwriting it would show an older message in the sidebar than the room does. |
 | `MESSAGE_RECEIVED` | the incoming message | Overwrite. Applied at **both** return points — live and historical buffer modes |
 | `MESSAGE_SENT_LOCAL` | the optimistic message | Overwrite; the server echo later rewrites it identically |
 | `MESSAGE_EDITED_LOCAL` | the edited message | Overwrite **only** when the edited id equals the stored `messageId` |
@@ -121,8 +121,8 @@ history has been loaded, which at bootstrap is none of them.
 | `ROOM_REMOVED` | — | Delete the entry so leaving a room strands nothing |
 | `RESET` | — | Clear the whole map |
 
-Every writer that derives a preview from a message applies the hidden-thread-reply
-guard below — `MESSAGE_RECEIVED` and `MESSAGE_SENT_LOCAL` alike.
+Every writer that derives a preview from a message applies the thread-reply guard
+below — `MESSAGE_RECEIVED` and `MESSAGE_SENT_LOCAL` alike.
 
 `MESSAGE_DELETED_LOCAL` is intentionally inert: the client cannot reproduce the
 server's walk-back to an earlier eligible message, so it waits for the
@@ -243,10 +243,11 @@ A second line: `<span className="room-preview">` holding a muted sender `<span>`
 (`Alice: `, omitted when `room.type === 'dm'`) followed by the text. Both lines
 get `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`.
 
-Row height is fixed in CSS on `.room-item`, so the row is two lines tall whether
-or not the join found a preview. A room with no preview renders an empty snippet
-line — reserved space, blank content — and no row ever reflows as previews
-arrive. Colors and spacing come from `styles/tokens.css`; no hardcoded values.
+Height is reserved on `.room-preview` itself — `min-height: 1.4em` against a
+matching unitless `line-height: 1.4`, so an empty snippet line occupies exactly
+the same box as a populated one. The row is therefore two lines tall whether or
+not the join found a preview, and no row reflows as previews arrive. Colors and
+spacing come from `styles/tokens.css`; no hardcoded values.
 
 **State absence and render collapse are separate concerns and must stay
 separate.** A room with no preview is absent from the `previews` map — no
@@ -267,7 +268,7 @@ Both are prerequisites — the feature doesn't type-check without them:
 
 | Case | Behavior |
 |---|---|
-| Hidden thread reply (`threadParentMessageId` set, `tshow` not true) | Never touches the preview — matches the server, which omits `previewMessage` for exactly these |
+| Thread reply (any `threadParentMessageId`) | Never touches the preview. This is BROADER than the server's rule: the server excludes only *hidden* replies, and a `tshow: true` reply does get a `messages_by_room` row and can legitimately be a room's preview. Correct here only because this frontend has no `tshow` support — no thread reply reaches the room timeline. Revisit when `tshow` lands. |
 | Encrypted room, live message | No special handling; `decryptAndDispatch` resolves content upstream |
 | Encrypted room, undecryptable | Previews as `[encrypted message]`, matching the message list |
 | Failed optimistic send (`_status: 'failed'`) | Still previews, matching the message list |
