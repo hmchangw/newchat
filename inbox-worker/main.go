@@ -435,11 +435,11 @@ func (s *mongoInboxStore) ensureIndexes(ctx context.Context) error {
 		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
 	}
 
-	// Best-effort: retire the legacy (threadRoomId, userId) unique index. Mirrors
-	// message-worker's threadStoreMongo.EnsureIndexes; the index may not exist
-	// (fresh deploy / test container), so ignore all errors.
-	_ = s.threadSubCol.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-	return nil
+	// Retire the legacy (threadRoomId, userId) unique index. Mirrors
+	// message-worker's threadStoreMongo.EnsureIndexes: an absent collection or
+	// index (fresh deploy / test container) is the expected steady state, any
+	// other failure means the legacy index survived and must be reported.
+	return mongoutil.DropIndexIfExists(ctx, s.threadSubCol, "threadRoomId_1_userId_1")
 }
 
 // UpsertThreadSubscription inserts the subscription on first event for a

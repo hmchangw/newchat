@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"sync"
 	"testing"
 	"time"
 
@@ -118,32 +117,44 @@ func TestEnsureIndexes_RunsStepsConcurrently(t *testing.T) {
 	captureSlog(t)
 	const steps = 4
 
-	var mu sync.Mutex
-	var peak, active int
-	var wg sync.WaitGroup
-	wg.Add(steps)
-
+	// A step reports itself in flight, then parks until every sibling has done
+	// the same. Parking selects on the context too, so a serial implementation
+	// unblocks on the shared budget instead of wedging the test.
+	started := make(chan struct{}, steps)
+	release := make(chan struct{})
 	all := make([]IndexStep, 0, steps)
-	for i := range steps {
-		all = append(all, Step("store", func(context.Context) error {
-			mu.Lock()
-			active++
-			if active > peak {
-				peak = active
+	for range steps {
+		all = append(all, Step("store", func(c context.Context) error {
+			started <- struct{}{}
+			select {
+			case <-release:
+			case <-c.Done():
+				return c.Err()
 			}
-			mu.Unlock()
-			wg.Done()
-			wg.Wait() // every step must be in flight before any returns
-			mu.Lock()
-			active--
-			mu.Unlock()
 			return nil
 		}))
-		_ = i
 	}
 
-	require.NoError(t, EnsureIndexes(context.Background(), all...))
-	assert.Equal(t, steps, peak, "all steps must run concurrently")
+	done := make(chan error, 1)
+	go func() { done <- EnsureIndexes(context.Background(), all...) }()
+
+	// Serial steps only ever report one in flight, so this waits out its bound
+	// and fails rather than blocking until the test binary's own timeout.
+	inFlight := 0
+	deadline := time.After(5 * time.Second)
+	for inFlight < steps {
+		select {
+		case <-started:
+			inFlight++
+		case <-deadline:
+			close(release)
+			<-done
+			t.Fatalf("only %d of %d steps ran concurrently", inFlight, steps)
+		}
+	}
+
+	close(release)
+	require.NoError(t, <-done)
 }
 
 func TestEnsureIndexes_NilStepIsSkipped(t *testing.T) {

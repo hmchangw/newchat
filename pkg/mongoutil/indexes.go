@@ -75,6 +75,37 @@ func EnsureIndexes(ctx context.Context, steps ...IndexStep) error {
 	return g.Wait()
 }
 
+// MongoDB's two ways of saying there is nothing to drop: the collection was
+// never created, or the index is already gone.
+const (
+	codeNamespaceNotFound = 26
+	codeIndexNotFound     = 27
+)
+
+// DropIndexIfExists retires the named index from col, treating an absent
+// collection or an absent index as success — that is the steady state on every
+// boot after the first, and on a fresh deploy.
+//
+// Any other failure is returned. A drop that never reached MongoDB, or that it
+// refused, has left the index in place; swallowing it lets startup record a
+// completed retirement while a legacy unique index is still rejecting writes
+// the replacement index would accept.
+func DropIndexIfExists(ctx context.Context, col *mongo.Collection, name string) error {
+	if err := col.Indexes().DropOne(ctx, name); err != nil && !isIndexAbsentError(err) {
+		return fmt.Errorf("drop legacy index %q: %w", name, err)
+	}
+	return nil
+}
+
+// isIndexAbsentError reports whether a failed dropIndexes means there was
+// nothing to drop, as opposed to a drop that did not happen.
+func isIndexAbsentError(err error) bool {
+	if se := mongo.ServerError(nil); errors.As(err, &se) {
+		return se.HasErrorCode(codeNamespaceNotFound) || se.HasErrorCode(codeIndexNotFound)
+	}
+	return false
+}
+
 // isPermanentIndexError reports whether a failed createIndexes describes state
 // an operator must fix, rather than a MongoDB that is merely unreachable:
 // E11000 (existing duplicates block a unique index) and 85/86

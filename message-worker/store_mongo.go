@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 var (
@@ -54,12 +55,12 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
 	}
 
-	// Best-effort: retire the legacy (threadRoomId, userId) unique index, which
-	// keys on a site-local id and so rejects valid federated upserts. The
-	// collection or index may not exist (fresh deploy / test container) — ignore all errors.
-	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-
-	return nil
+	// Retire the legacy (threadRoomId, userId) unique index, which keys on a
+	// site-local id and so rejects valid federated upserts. An absent collection
+	// or index (fresh deploy / test container) is the expected steady state; a
+	// drop that failed for any other reason is reported, since the legacy index
+	// is then still rejecting those upserts.
+	return mongoutil.DropIndexIfExists(ctx, s.threadSubscriptions, "threadRoomId_1_userId_1")
 }
 
 func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
