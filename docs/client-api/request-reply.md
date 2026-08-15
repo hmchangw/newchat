@@ -386,7 +386,9 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant (a bot whose home site differs from the room's is allowed — cross-site bot membership); bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get `subscription.update` (with the room key inline under `subscription.room`) on their encoded per-user subject (dots→underscores). The `p_admin` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
 | `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
-| `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
+| `history.mode` | string | no | `"none"` or `"all"` — controls whether new members see history before they joined. **When omitted or empty, the server treats it as `"all"`** (share-all). `"all"` is capped by the **requester's own** `historySharedSince`: when the adder's history is restricted, the new members inherit the adder's boundary instead of unrestricted history (members can never see more history than whoever added them). `"none"` restricts new members to messages from the add time onward (never earlier than the adder's own boundary — the later of the two wins). Any other value is rejected with `history.mode must be "none" or "all"` (`bad_request`). |
+
+The `requesterId`, `requesterAccount`, `timestamp`, and `historySharedSince` fields on the Go `AddMembersRequest` are server-set — the client should omit them (any client-supplied `historySharedSince` is overwritten).
 
 #### Success response
 
@@ -395,7 +397,8 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 #### Errors
 
 Synchronous: requester not in room, room full, restricted + not owner, bot not
-available (no app record / disabled assistant), user/org not found.
+available (no app record / disabled assistant), user/org not found, unrecognized
+`history.mode` (`history.mode must be "none" or "all"`, `bad_request`).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }

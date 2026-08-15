@@ -881,6 +881,12 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		return nil, errRoomIDMismatch
 	}
 
+	// 4a. Reject unknown history modes (empty = default "all"): a typo like
+	// "nonee" must not silently grant share-all.
+	if req.History.Mode != "" && req.History.Mode != model.HistoryModeNone && req.History.Mode != model.HistoryModeAll {
+		return nil, errInvalidHistoryMode
+	}
+
 	// Explicitly listed ".bot" bots are admitted (create-channel still rejects
 	// them). Each must resolve to an enabled app assistant; a bot's home site may
 	// differ from the room's — cross-site bot membership is allowed. Deduped so a
@@ -967,6 +973,23 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	req.RequesterID = sub.User.ID
 	req.RequesterAccount = sub.User.Account
 	req.Timestamp = time.Now().UTC().UnixMilli()
+
+	// History-cap inheritance: a requester whose own history is capped must not
+	// grant new members more than they can see. Stamp the requester's cap onto
+	// the canonical event for every mode: share-all adds inherit it directly,
+	// and mode "none" uses it as a clock-skew guard (the worker floors those
+	// members at the accept timestamp or this cap, whichever is later — the
+	// accept timestamp alone could predate the requester's boundary when
+	// stamped by a skewed clock). Reset first: the field is server-set and
+	// client input must never pass through.
+	req.HistorySharedSince = nil
+	var inheritedCap int64
+	if sub.HistorySharedSince != nil && !sub.HistorySharedSince.IsZero() {
+		if ms := sub.HistorySharedSince.UnixMilli(); ms > 0 {
+			req.HistorySharedSince = &ms
+			inheritedCap = ms
+		}
+	}
 	normalized, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal add-members request: %w", err)
@@ -975,8 +998,11 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		return nil, fmt.Errorf("publish to stream: %w", err)
 	}
 	// flow: accepted and handed the member-add off to room-worker.
+	// history_shared_since is the inherited cap stamped above (0 = uncapped) —
+	// without it a capped share-all add is indistinguishable from an uncapped one.
 	slog.Log(ctx, logctx.LevelFlow, "room-service member.add handoff", "phase", "published",
-		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID, "new_count", newCount)
+		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID, "new_count", newCount,
+		"history_mode", string(req.History.Mode), "history_shared_since", inheritedCap)
 
 	// 10. Reply accepted
 	return &model.StatusReply{Status: "accepted"}, nil
