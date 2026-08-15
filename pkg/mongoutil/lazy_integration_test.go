@@ -4,11 +4,6 @@ package mongoutil
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"net"
-	"net/url"
-	"sync"
 	"testing"
 	"time"
 
@@ -19,140 +14,17 @@ import (
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
-// outageProxy models a MongoDB endpoint that is down and later comes back.
-// The address is reserved up front but nothing listens on it until Restore is
-// called, so the driver sees connection-refused — what a pod restarting into a
-// live outage actually sees — and then a healthy endpoint at the same address.
-type outageProxy struct {
-	addr   string
-	target string
-
-	mu       sync.Mutex
-	listener net.Listener
-	wg       sync.WaitGroup
-	conns    []net.Conn
-	closed   bool
-}
-
-// track registers a socket for teardown, or closes it immediately and reports
-// false if Close already ran — otherwise a connection accepted during teardown
-// is never closed and its io.Copy pins Close's wg.Wait forever.
-func (p *outageProxy) track(c net.Conn) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		_ = c.Close()
-		return false
-	}
-	p.conns = append(p.conns, c)
-	return true
-}
-
-// newOutageProxy reserves a local address without serving on it.
-func newOutageProxy(t *testing.T, target string) *outageProxy {
-	t.Helper()
-	p := &outageProxy{addr: testutil.ReserveAddr(t), target: target}
-	t.Cleanup(p.Close)
-	return p
-}
-
-// Restore starts forwarding the reserved address to the real MongoDB, i.e. the
-// outage ends. Binding the just-released port can race with the OS, so retry
-// briefly rather than flake.
-func (p *outageProxy) Restore(t *testing.T) {
-	t.Helper()
-	var l net.Listener
-	var err error
-	for range 50 {
-		l, err = net.Listen("tcp", p.addr)
-		if err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	require.NoError(t, err, "bind outage proxy at %s", p.addr)
-
-	p.mu.Lock()
-	p.listener = l
-	p.mu.Unlock()
-
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return // listener closed
-			}
-			if !p.track(conn) {
-				return // teardown started
-			}
-			p.wg.Add(1)
-			go func() {
-				defer p.wg.Done()
-				p.forward(conn)
-			}()
-		}
-	}()
-}
-
-func (p *outageProxy) forward(client net.Conn) {
-	upstream, err := net.DialTimeout("tcp", p.target, 5*time.Second)
-	if err != nil {
-		_ = client.Close()
-		return
-	}
-	if !p.track(upstream) {
-		_ = client.Close()
-		return
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(upstream, client) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(client, upstream) }()
-	wg.Wait()
-	_ = client.Close()
-	_ = upstream.Close()
-}
-
-func (p *outageProxy) Close() {
-	p.mu.Lock()
-	p.closed = true
-	if p.listener != nil {
-		_ = p.listener.Close()
-		p.listener = nil
-	}
-	for _, c := range p.conns {
-		_ = c.Close()
-	}
-	p.conns = nil
-	p.mu.Unlock()
-	p.wg.Wait()
-}
-
-// hostPort extracts host:port from a mongodb:// URI so the proxy can forward
-// to the shared test container.
-func hostPort(t *testing.T, uri string) string {
-	t.Helper()
-	u, err := url.Parse(uri)
-	require.NoError(t, err)
-	require.NotEmpty(t, u.Host, "parse host from %q", uri)
-	return u.Host
-}
-
 // TestConnect_LazyBootsDuringOutageThenRecovers is the scenario this option
 // exists for: a process starts while MongoDB is unreachable, serves (failing)
 // requests, and then works normally once MongoDB returns — all without a
 // restart. The default ping path cannot start at all here.
 func TestConnect_LazyBootsDuringOutageThenRecovers(t *testing.T) {
-	proxy := newOutageProxy(t, hostPort(t, testutil.MongoURI(t)))
-	uri := fmt.Sprintf("mongodb://%s/?directConnection=true", proxy.addr)
+	outage := testutil.NewMongoOutage(t, testutil.MongoURI(t))
 
 	// Boot during the outage: this is the step that currently kills every service.
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer bootCancel()
-	client, err := Connect(bootCtx, uri, "", "", WithLazyConnect())
+	client, err := Connect(bootCtx, outage.URI(), "", "", WithLazyConnect())
 	require.NoError(t, err, "lazy Connect must boot while MongoDB is unreachable")
 	t.Cleanup(func() { Disconnect(context.Background(), client) })
 
@@ -170,7 +42,7 @@ func TestConnect_LazyBootsDuringOutageThenRecovers(t *testing.T) {
 	assert.Less(t, time.Since(start), 5*time.Second, "must fail bounded, not hang")
 
 	// MongoDB comes back. The same client must recover with no restart.
-	proxy.Restore(t)
+	outage.Restore(t)
 
 	upCtx, upCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer upCancel()
