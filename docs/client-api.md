@@ -1399,6 +1399,8 @@ For a **botDM**, the human member's event carries `appInfo` instead (the bot's o
 
 The event carries no separate account list — member identities are in `members`. When new members actually join (or a new org is added), a `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event; a pure org→individual upgrade posts no such message.
 
+The cross-site INBOX copy of this event additionally carries `accounts` and `lastMsgAt` (the room's activity position, epoch ms). Both are server-internal federation fields, stripped from the client-facing copy documented above — clients never receive them.
+
 > [!NOTE]
 > **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
 

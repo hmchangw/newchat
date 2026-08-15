@@ -251,6 +251,11 @@ type MemberAddEvent struct {
 	RequesterAccount   string   `json:"requesterAccount,omitempty" bson:"requesterAccount,omitempty"`
 	JoinedAt           int64    `json:"joinedAt"           bson:"joinedAt"`
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
+	// LastMsgAt is the room's activity position (epoch millis), nil when the room
+	// has never had a message. Cross-site INBOX copies only — like Accounts, it is
+	// stripped from the room-scoped (frontend) copy. The destination holds no rooms
+	// doc for a remote room, so this is the only key it can order the room by.
+	LastMsgAt *int64 `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
 	// Members carries the member.list (enrich=true) display entries; org-expanded accounts ride Accounts only.
 	// Room-scoped event only — INBOX copies omit it (remote sites re-resolve display data).
 	Members []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`
