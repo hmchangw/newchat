@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,4 +205,78 @@ func TestSoakPacing_RecordsOneExclusiveOutcomePerIntendedEvent(t *testing.T) {
 	assert.Equal(t, float64(17), intended)
 	assert.Equal(t, intended, dispatched+underrun+laneSaturation+globalSaturation)
 	assert.Equal(t, float64(100), testutil.ToFloat64(metrics.SoakConfiguredRate.WithLabelValues("send")))
+}
+
+func TestSoakPacing_BlockingActionDoesNotReduceOfferedRate(t *testing.T) {
+	start := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	pacer := newRatePacer(100, start)
+	metrics := NewMetrics()
+	recorder := newSoakPacingMetrics(metrics)
+	ticks := make(chan time.Time, 4)
+	actionStarted := make(chan struct{})
+	releaseAction := make(chan struct{})
+	saturated := make(chan struct{}, 3)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var startedOnce sync.Once
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			cancel()
+			close(releaseAction)
+		})
+	}
+	t.Cleanup(stop)
+
+	go func() {
+		defer close(done)
+		pacedDispatchRateWithTicks(
+			ctx,
+			pacer,
+			ticks,
+			1,
+			func(count int) {
+				recorder.Record("send", soakPacingSchedulerUnderrun, count)
+			},
+			func() {
+				recorder.Record("send", soakPacingLaneSaturation, 1)
+				saturated <- struct{}{}
+			},
+			func(context.Context) {
+				recorder.Record("send", soakPacingDispatched, 1)
+				startedOnce.Do(func() { close(actionStarted) })
+				<-releaseAction
+			},
+		)
+	}()
+
+	ticks <- start.Add(pacer.interval)
+	select {
+	case <-actionStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "first paced action did not start")
+	}
+	for index := 2; index <= 4; index++ {
+		ticks <- start.Add(time.Duration(index) * pacer.interval)
+		select {
+		case <-saturated:
+		case <-time.After(time.Second):
+			require.FailNow(t, "blocking action reduced offered pacing", "tick=%d", index)
+		}
+	}
+	stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		require.FailNow(t, "paced dispatch did not terminate")
+	}
+
+	intended := testutil.ToFloat64(metrics.SoakIntended.WithLabelValues("send"))
+	dispatched := testutil.ToFloat64(metrics.SoakDispatched.WithLabelValues("send"))
+	underrun := testutil.ToFloat64(metrics.SoakSchedulerUnderrun.WithLabelValues("send"))
+	laneSaturation := testutil.ToFloat64(metrics.SoakLaneSaturation.WithLabelValues("send"))
+	assert.Equal(t, float64(4), intended)
+	assert.Equal(t, float64(1), dispatched)
+	assert.Equal(t, float64(3), laneSaturation)
+	assert.Equal(t, intended, dispatched+underrun+laneSaturation)
 }
