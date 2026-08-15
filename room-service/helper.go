@@ -31,7 +31,10 @@ var (
 	errCannotDemoteLast      = errcode.Conflict("cannot demote the last owner", errcode.WithReason(errcode.RoomCannotDemoteLastOwner))
 	errRoomTypeGuard         = errcode.BadRequest("role update is only allowed in channel rooms", errcode.WithReason(errcode.RoomNonChannelOperation))
 	errAddMembersChannelOnly = errcode.BadRequest("cannot add members to a non-channel room", errcode.WithReason(errcode.RoomNonChannelOperation))
-	errTargetNotMember       = errcode.BadRequest("target user is not a member of this room", errcode.WithReason(errcode.RoomTargetNotMember))
+	// History mode is a visibility control: an unknown value must be rejected,
+	// not silently fall through to the permissive share-all default.
+	errInvalidHistoryMode = errcode.BadRequest(`history.mode must be "none" or "all"`)
+	errTargetNotMember    = errcode.BadRequest("target user is not a member of this room", errcode.WithReason(errcode.RoomTargetNotMember))
 	// Shared sentinel for any membership-gated RPC (list-members,
 	// member.statuses, subscription.mentionable, message.read) and the
 	// add-member channel-source expansion.

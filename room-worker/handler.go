@@ -132,14 +132,35 @@ func messageDedupSeed(ctx context.Context, handler, roomID, payloadSeed string) 
 	return payloadSeed
 }
 
-// historySharedSincePtr returns nil for unrestricted history; req.Timestamp under HistoryModeNone.
-func historySharedSincePtr(history model.HistoryConfig, timestamp int64, roomID string) *int64 {
-	if history.Mode != model.HistoryModeNone {
+// historySharedSincePtr resolves the HSS for members added by this request.
+// mode "none" floors new members at the accept timestamp or the inherited
+// value (the requester's own HSS, stamped by room-service), whichever is
+// later — the accept timestamp alone could predate the requester's boundary
+// when stamped by a skewed clock. Any other mode is share-all, capped by the
+// inherited value, so a restricted adder can never grant more history than
+// they can see. A malformed event (mode "none" with no accept timestamp)
+// falls back to the inherited cap rather than unrestricted history.
+// Non-positive values are never emitted (see model.InboxMemberEvent
+// invariant: nil, never &0).
+func historySharedSincePtr(ctx context.Context, history model.HistoryConfig, inherited *int64, timestamp int64, roomID string) *int64 {
+	inheritedCap := inherited != nil && *inherited > 0
+	if history.SharesAll() {
+		if inheritedCap {
+			return inherited
+		}
 		return nil
 	}
 	if timestamp <= 0 {
-		slog.Error("restricted history with missing timestamp, emitting nil", "room_id", roomID, "mode", history.Mode)
+		slog.ErrorContext(ctx, "restricted history with missing accept timestamp",
+			"room_id", roomID, "mode", history.Mode,
+			"request_id", natsutil.RequestIDFromContext(ctx), "fallback_inherited", inheritedCap)
+		if inheritedCap {
+			return inherited
+		}
 		return nil
+	}
+	if inheritedCap && *inherited > timestamp {
+		return inherited
 	}
 	return &timestamp
 }
@@ -895,11 +916,26 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 	}
 
+	// Resolve the HSS once (loop-invariant) via the shared helper so the local
+	// subs, the per-user SubscriptionUpdateEvent fan-out, and the cross-site
+	// MemberAddEvent all carry the same value.
+	historySharedSince := historySharedSincePtr(ctx, req.History, req.HistorySharedSince, req.Timestamp, req.RoomID)
+	var historySharedSinceAt *time.Time
+	var historySharedSinceMs int64
+	if historySharedSince != nil {
+		historySharedSinceMs = *historySharedSince
+		t := time.UnixMilli(historySharedSinceMs).UTC()
+		historySharedSinceAt = &t
+	}
+
 	// debug: how the requested members resolved into actual writes.
+	// history_shared_since is the resolved boundary (0 = unrestricted) —
+	// without it a capped share-all add is indistinguishable from an uncapped one.
 	slog.DebugContext(ctx, "room-worker add members resolved",
 		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", req.RoomID,
 		"candidates", len(candidates), "need_sub", len(needSub), "need_irm", len(needIRM),
-		"write_individuals", writeIndividuals)
+		"write_individuals", writeIndividuals,
+		"history_mode", string(req.History.Mode), "history_shared_since", historySharedSinceMs)
 
 	// Nothing to write: no new subs, no individual upgrades, no org rows.
 	if len(needSub) == 0 && len(needIRM) == 0 && len(req.Orgs) == 0 {
@@ -967,13 +1003,9 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		// newSub stamps u.isBot from the account; room is the channel fetched by
 		// req.RoomID so RoomType/SiteID/Name/ID all match the prior inline build.
 		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt)
-		// Resolve once via the shared helper so the local sub, the per-user
-		// SubscriptionUpdateEvent fan-out, and the cross-site MemberAddEvent
-		// all carry the same HistorySharedSince value.
-		if ms := historySharedSincePtr(req.History, req.Timestamp, req.RoomID); ms != nil {
-			t := time.UnixMilli(*ms).UTC()
-			sub.HistorySharedSince = &t
-		}
+		// Pre-resolved above the candidate debug log; shared pointer is safe —
+		// nothing mutates through it after this point.
+		sub.HistorySharedSince = historySharedSinceAt
 		subs = append(subs, sub)
 		actualAccounts = append(actualAccounts, user.Account)
 	}
@@ -1151,7 +1183,6 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			newOrgs++
 		}
 	}
-	historySharedSince := historySharedSincePtr(req.History, req.Timestamp, req.RoomID)
 	if len(actualAccounts) > 0 || len(needIRM) > 0 || newOrgs > 0 {
 		memberAddEvt := model.MemberAddEvent{
 			Type:               model.InboxMemberAdded,
