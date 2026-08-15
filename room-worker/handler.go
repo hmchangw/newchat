@@ -32,6 +32,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/timeutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -1130,8 +1131,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	// subs are already committed, so failing here would let a redelivery
 	// (which recomputes needSub as empty) silently drop the events — degrade
 	// to the pre-add meta view instead and let subscription.list reconcile.
+	// Post-add view: the meta view unless the re-read succeeds. Also supplies the
+	// cross-site MemberAddEvent's activity position below — the meta view carries
+	// no lastMsgAt, so a failed re-read ships without one.
+	evtRoom := room
 	if len(subs) > 0 {
-		evtRoom := room
 		if freshRoom, err := h.store.GetRoom(ctx, req.RoomID); err == nil {
 			evtRoom = freshRoom
 		} else {
@@ -1271,6 +1275,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			RequesterAccount:   req.RequesterAccount,
 			JoinedAt:           req.Timestamp,
 			HistorySharedSince: historySharedSince,
+			LastMsgAt:          timeutil.TimeToMillis(evtRoom.LastMsgAt),
 			Timestamp:          now.UnixMilli(),
 		}
 		siteEvtData, _ := json.Marshal(siteEvt)
@@ -1830,7 +1835,9 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 			RequesterAccount:   requester.Account,
 			JoinedAt:           req.Timestamp,
 			HistorySharedSince: nil,
-			Timestamp:          now.UnixMilli(),
+			// Nil in practice: the room was just created and has no activity yet.
+			LastMsgAt: timeutil.TimeToMillis(room.LastMsgAt),
+			Timestamp: now.UnixMilli(),
 		}
 		memberData, _ := json.Marshal(memberEvt)
 		memberSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
@@ -2411,7 +2418,10 @@ func (h *Handler) publishSyncDMInbox(ctx context.Context, room *model.Room, requ
 		SiteID:           room.SiteID,
 		RequesterAccount: requester.Account,
 		JoinedAt:         joinedAt.UnixMilli(),
-		Timestamp:        now,
+		// Nil for a freshly created DM; set on the duplicate-key reconcile
+		// branch, where room is the existing doc re-read from Mongo.
+		LastMsgAt: timeutil.TimeToMillis(room.LastMsgAt),
+		Timestamp: now,
 	}
 	pData, err := json.Marshal(memberEvt)
 	if err != nil {

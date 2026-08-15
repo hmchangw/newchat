@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/timeutil"
 )
 
 // Rocket.Chat-legacy single-char rooms.t values.
@@ -147,7 +148,7 @@ func (h *handler) handleDMEnsure(c *natsrouter.Context, req BotDMEnsureRequest) 
 	} else {
 		// DM member_added carries roomType=botDM + RequesterAccount=bot so the target names the subscription after the counterparty; subscription-only, no rooms doc.
 		if err := h.federateMemberAdded(c, roomID, target.ID, target.Account, target.SiteID, createdAt,
-			model.RoomTypeBotDM, "", ident.Account); err != nil {
+			model.RoomTypeBotDM, "", ident.Account, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -238,7 +239,7 @@ func (h *handler) handleCreate(c *natsrouter.Context, req BotCreateRoomRequest) 
 		// Channel-shape event; RoomName names the subscription at the target.
 		if u.SiteID != "" && u.SiteID != h.siteID {
 			if err := h.federateMemberAdded(c, roomID, u.ID, u.Account, u.SiteID, createdAt,
-				model.RoomTypeChannel, req.Name, ident.Account); err != nil {
+				model.RoomTypeChannel, req.Name, ident.Account, nil); err != nil {
 				return nil, err
 			}
 		}
@@ -309,7 +310,7 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 		if u.SiteID != "" && u.SiteID != h.siteID {
 			roomType := roomTypeToModel(room.Type)
 			if err := h.federateMemberAdded(c, roomID, u.ID, u.Account, u.SiteID, created,
-				roomType, room.Name, ident.Account); err != nil {
+				roomType, room.Name, ident.Account, room.LastMsgAt); err != nil {
 				return nil, err
 			}
 		}
@@ -530,8 +531,9 @@ func (h *handler) loadRoomAndAssertOwner(ctx context.Context, roomID string, ide
 
 // federateMemberAdded relays member_added to a remote site's inbox-worker.
 // For DM/botDM the target names the subscription from RequesterAccount; for channels, from RoomName.
+// lastMsgAt is nil for a room with no messages yet (both creation paths).
 func (h *handler) federateMemberAdded(ctx context.Context, roomID, userID, account, destSiteID string, at time.Time,
-	roomType model.RoomType, roomName, requesterAccount string,
+	roomType model.RoomType, roomName, requesterAccount string, lastMsgAt *time.Time,
 ) error {
 	payload, err := json.Marshal(model.MemberAddEvent{
 		Type:             "member_added",
@@ -542,6 +544,7 @@ func (h *handler) federateMemberAdded(ctx context.Context, roomID, userID, accou
 		SiteID:           h.siteID,
 		Accounts:         []string{account},
 		JoinedAt:         at.UnixMilli(),
+		LastMsgAt:        timeutil.TimeToMillis(lastMsgAt),
 		Timestamp:        at.UnixMilli(),
 	})
 	if err != nil {

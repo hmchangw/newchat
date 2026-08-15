@@ -1341,7 +1341,12 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	}
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 
+	// GetRoomMeta is served from roommetacache.Meta, which has no LastMsgAt
+	// field — the real store can never return one here. Mirroring that exactly
+	// is the point: the activity position must come from the full-room read, so
+	// a regression that reads it off the meta view fails this test.
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
+	roomLastMsgAt := time.UnixMilli(1735689500000).UTC()
 	// bob is the direct add; carol joins via org expansion only (not in req.Users).
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string{"eng"}, []string{"bob"}, "r1").
 		Return([]AddMemberCandidate{{Account: "bob", SiteID: "site-a"}, {Account: "carol", SiteID: "site-b"}}, nil)
@@ -1360,7 +1365,7 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 		})
 	// Room already tracks individuals → no first-org backfill.
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(true, nil)
-	expectGetRoom(store, "r1", "eng")
+	expectGetRoom(store, "r1", "eng", roomLastMsgAt)
 	store.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, members []*model.RoomMember) error {
 			return nil
@@ -1431,6 +1436,13 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	var relayEvt model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(relayEnv.Payload, &relayEvt))
 	assert.Equal(t, []string{"carol"}, relayEvt.Accounts, "the cross-site lane keeps the destination-site accounts")
+
+	// The destination site holds no rooms doc for r1, so the cross-site copy
+	// carries the room's activity position to seed its chat-list ordering.
+	require.NotNil(t, relayEvt.LastMsgAt, "cross-site member_added carries the room's activity position")
+	assert.Equal(t, roomLastMsgAt.UnixMilli(), *relayEvt.LastMsgAt)
+	assert.Nil(t, evt.LastMsgAt, "stripped from the room-scoped (frontend) copy, like accounts")
+	assert.Nil(t, internalEvt.LastMsgAt, "the same-site INBOX lane has a local rooms doc and needs no seed")
 }
 
 func TestHandler_ProcessAddMembers_OrgWithNoUsersFallsBackToOrgID(t *testing.T) {
@@ -3490,9 +3502,14 @@ func TestProcessCreateRoom_Channel_NoRoomKeyEvent(t *testing.T) {
 
 // expectGetRoom stubs the fan-out room re-read tolerantly (0+ calls) so tests
 // not asserting on the event room view stay independent of the read.
-func expectGetRoom(s *MockSubscriptionStore, roomID, name string) {
-	s.EXPECT().GetRoom(gomock.Any(), roomID).
-		Return(&model.Room{ID: roomID, Name: name, Type: model.RoomTypeChannel, SiteID: "site-a"}, nil).AnyTimes()
+// expectGetRoom stubs the full-room re-read. An optional lastMsgAt sets the
+// room's activity position, which the cross-site MemberAddEvent carries.
+func expectGetRoom(s *MockSubscriptionStore, roomID, name string, lastMsgAt ...time.Time) {
+	room := &model.Room{ID: roomID, Name: name, Type: model.RoomTypeChannel, SiteID: "site-a"}
+	if len(lastMsgAt) > 0 {
+		room.LastMsgAt = &lastMsgAt[0]
+	}
+	s.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil).AnyTimes()
 }
 
 // assertNoRoomKeyPublished pins the no-separate-room.key invariant on the accounts' key subjects.
