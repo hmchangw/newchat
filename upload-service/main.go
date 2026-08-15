@@ -13,11 +13,13 @@ import (
 
 	o11ygin "github.com/flywindy/o11y/gin"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/drive"
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
+	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -58,6 +60,13 @@ type config struct {
 	OIDCIssuerURL string   `env:"OIDC_ISSUER_URL"`
 	OIDCAudiences []string `env:"OIDC_AUDIENCES" envSeparator:","`
 	TLSSkipVerify bool     `env:"TLS_SKIP_VERIFY" envDefault:"false"`
+
+	// BotplatformURL is the LOCAL site's botplatform-service, used to validate
+	// bot/admin session tokens. Required and non-empty.
+	BotplatformURL string `env:"BOTPLATFORM_URL,required,notEmpty"`
+	// BotEmailDomain, when set, gives session callers {account}@{domain} for Drive's
+	// attribution field. Empty (default) sends no email.
+	BotEmailDomain string `env:"BOT_EMAIL_DOMAIN" envDefault:""`
 
 	MinioEndpoint  string `env:"MINIO_ENDPOINT,required"`
 	MinioAccessKey string `env:"MINIO_ACCESS_KEY,required"`
@@ -144,7 +153,14 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	registerRoutes(r, handler, validator, cfg.DevMode)
+	botValidator := botauth.NewValidator(
+		restyutil.New("", restyutil.WithTimeout(5*time.Second), restyutil.WithMaxIdleConns(32)), cfg.BotplatformURL)
+	registerRoutes(r, handler, authDeps{
+		sso:            validator,
+		bot:            botValidator,
+		botEmailDomain: cfg.BotEmailDomain,
+		devMode:        cfg.DevMode,
+	})
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{

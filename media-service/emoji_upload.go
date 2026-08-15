@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -135,9 +136,11 @@ func (h *handler) HandleEmojiUpload(c *gin.Context) {
 		return
 	}
 	now := time.Now().UTC().UnixMilli()
-	uploader := c.Query("uploader") // v1: unauthenticated, audit-only (§7 client-api)
-	if len(uploader) > 64 {
-		uploader = uploader[:64]
+	// Audit fields come from the authenticated session, never from a
+	// client-supplied ?uploader= (which is now accepted and ignored).
+	uploader := ""
+	if p := sessionFromContext(c); p != nil {
+		uploader = truncateAudit(p.Account)
 	}
 	e := &model.CustomEmoji{
 		ID:          emojiDocID(siteID, shortcode),
@@ -167,4 +170,19 @@ func (h *handler) HandleEmojiUpload(c *gin.Context) {
 		Size:        e.Size,
 		UpdatedAt:   time.UnixMilli(e.UpdatedAt).UTC(),
 	})
+}
+
+// truncateAudit bounds an audit field at 64 bytes. Accounts have no length
+// limit, and cutting on a rune boundary avoids storing a broken UTF-8 tail.
+func truncateAudit(s string) string {
+	const max = 64
+	if len(s) <= max {
+		return s
+	}
+	for i := max; i > 0; i-- {
+		if utf8.ValidString(s[:i]) {
+			return s[:i]
+		}
+	}
+	return ""
 }

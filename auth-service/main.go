@@ -14,6 +14,7 @@ import (
 
 	o11ygin "github.com/flywindy/o11y/gin"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
@@ -77,7 +78,7 @@ func run() error {
 	if cfg.BotplatformURL != "" {
 		rc := restyutil.New("", restyutil.WithTimeout(5*time.Second))
 		opts = append(opts, WithBotplatformValidator(
-			newHTTPBotplatformValidator(rc, cfg.BotplatformURL)))
+			botauth.NewValidator(rc, cfg.BotplatformURL)))
 		slog.Info("session-token branch enabled", "botplatform_url", cfg.BotplatformURL)
 	}
 
