@@ -1640,11 +1640,11 @@ services:
       - MONGO_DB=${MONGO_DB:-chat}
       # Coalescing window. Held (un-acked) messages grow with this interval, so
       # CONSUMER_MAX_ACK_PENDING must exceed FLUSH_INTERVAL x peak message rate.
-      - FLUSH_INTERVAL=${ROOM_STATE_FLUSH_INTERVAL:-250ms}
+      - FLUSH_INTERVAL=${UNREAD_FLUSH_INTERVAL:-250ms}
       # AckWait must exceed the flush interval plus write latency, or a batch
       # still being written will redeliver underneath itself.
-      - CONSUMER_ACK_WAIT=${ROOM_STATE_ACK_WAIT:-30s}
-      - CONSUMER_MAX_ACK_PENDING=${ROOM_STATE_MAX_ACK_PENDING:-1000}
+      - CONSUMER_ACK_WAIT=${UNREAD_ACK_WAIT:-30s}
+      - CONSUMER_MAX_ACK_PENDING=${UNREAD_MAX_ACK_PENDING:-1000}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
       - DEBUG_LOG_RATE=${DEBUG_LOG_RATE:-50}
@@ -1774,7 +1774,7 @@ func TestMain(m *testing.M) { testutil.RunTests(m) }
 
 func setupStore(t *testing.T) (*mongoStore, *mongo.Database) {
 	t.Helper()
-	db := testutil.MongoDB(t, "room_state_worker_test")
+	db := testutil.MongoDB(t, "unread_worker_test")
 	return NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions")), db
 }
 

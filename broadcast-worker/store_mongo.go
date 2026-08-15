@@ -40,10 +40,6 @@ type mongoStore struct {
 	metaRec       roommetacache.Recorder
 	metaOpts      []roommetacache.ReadThroughOption
 	members       *roomsubcache.Lookup
-	// breaker fences the fail-open writes below: once Mongo is known to be down
-	// they return immediately instead of each paying a server-selection timeout
-	// on every message.
-	breaker *circuitbreaker.Breaker
 }
 
 func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, mongoBreaker *circuitbreaker.Breaker) *mongoStore {
@@ -64,7 +60,6 @@ func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valk
 		metaRec:       cachemetrics.For("roommeta", "l2"),
 		members: roomsubcache.NewLookup(subCache,
 			roomsubcache.GuardLoader(roomsubcache.NewMongoLoader(subCol), mongoBreaker), subTTL),
-		breaker: mongoBreaker,
 	}
 	if mongoBreaker != nil {
 		s.metaOpts = []roommetacache.ReadThroughOption{roommetacache.WithFetchGuard(mongoBreaker.Do)}

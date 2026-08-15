@@ -300,7 +300,6 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 	tests := []struct {
 		name            string
 		content         string
-		wantSetMentions bool
 		mentionedUsers  []string
 		aliceHasMention bool
 		bobHasMention   bool
@@ -308,14 +307,12 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 		{
 			name:            "no mentions",
 			content:         "hey bob",
-			wantSetMentions: false,
 			aliceHasMention: false,
 			bobHasMention:   false,
 		},
 		{
 			name:            "with mention",
 			content:         "hey @bob",
-			wantSetMentions: true,
 			mentionedUsers:  []string{"bob"},
 			aliceHasMention: false,
 			bobHasMention:   true,
@@ -344,7 +341,7 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 			store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil)
 
 			// Single user lookup: sender first, then mentioned accounts.
-			if tc.wantSetMentions {
+			if len(tc.mentionedUsers) > 0 {
 				wantAccounts := append([]string{"alice"}, tc.mentionedUsers...)
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), wantAccounts).
 					Return([]model.User{testUsers[0], testUsers[1]}, nil)

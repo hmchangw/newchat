@@ -20,7 +20,7 @@ func TestMain(m *testing.M) { testutil.RunTests(m) }
 
 func setupStore(t *testing.T) (*mongoStore, *mongo.Database) {
 	t.Helper()
-	db := testutil.MongoDB(t, "room_state_worker_test")
+	db := testutil.MongoDB(t, "unread_worker_test")
 	return NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions")), db
 }
 

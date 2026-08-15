@@ -54,7 +54,7 @@ type cachedDEK struct {
 // Two guarantees, both driven by the entry's own age (see serveHit):
 //
 //   - Freshness. An entry is re-resolved from Mongo once it is older than
-//     refreshAfter, so a stale value — including one left behind by an
+//     the refresh window, so a stale value — including one left behind by an
 //     invalidation whose Del was swallowed — is corrected within that window.
 //   - Outage survival. When that refresh fails, the entry's TTL is re-armed, so
 //     a room that keeps being read survives an outage of any length instead of
@@ -62,21 +62,17 @@ type cachedDEK struct {
 type l2DEKStore struct {
 	inner  DEKStore
 	client valkeyutil.Client
-	ttl    time.Duration
-	// refreshAfter is how long an entry may be served before the next read
-	// re-resolves it from the inner store. Derived from ttl, never configured
-	// independently: it is meaningful only relative to how long the entry lives.
-	//
-	// It MUST also exceed the cipher's in-process DEK cache TTL
+	// ttl also fixes the refresh window, via valkeyutil.RefreshAfter. That
+	// window MUST exceed the cipher's in-process DEK cache TTL
 	// (ATREST_DEK_CACHE_TTL), because that L1 sits in front and does not slide:
-	// this tier is consulted at most once per room per L1 TTL per pod. If
-	// refreshAfter were the shorter of the two, every single L2 hit would be
-	// older than it and the refresh would degenerate into a Mongo read plus a
-	// full SET on every L1 miss — which is precisely the load the L2 exists to
-	// absorb. refreshFraction keeps 90m/1h (the defaults) comfortably apart.
-	refreshAfter time.Duration
-	breaker      *circuitbreaker.Breaker
-	metrics      L2Recorder
+	// this tier is consulted at most once per room per L1 TTL per pod. Were the
+	// window the shorter of the two, every L2 hit would be older than it and the
+	// refresh would degenerate into a Mongo read plus a full SET on every L1
+	// miss — precisely the load the L2 exists to absorb. The 90m/1h defaults
+	// stay comfortably apart.
+	ttl     time.Duration
+	breaker *circuitbreaker.Breaker
+	metrics L2Recorder
 
 	now func() time.Time // overridden in tests
 }
@@ -91,7 +87,7 @@ func NewL2DEKStore(inner DEKStore, client valkeyutil.Client, ttl time.Duration, 
 		rec = valkeyutil.NoopRecorder{}
 	}
 	return &l2DEKStore{
-		inner: inner, client: client, ttl: ttl, refreshAfter: valkeyutil.RefreshAfter(ttl),
+		inner: inner, client: client, ttl: ttl,
 		breaker: breaker, metrics: rec,
 		now: time.Now,
 	}
@@ -121,7 +117,7 @@ func (s *l2DEKStore) Get(ctx context.Context, roomID string) (*RoomDataKey, erro
 
 // serveHit resolves an L2 hit, and is where both of the tier's guarantees live.
 //
-// An entry confirmed within refreshAfter is served as a pure read: no Mongo
+// An entry confirmed within the refresh window is served as a pure read: no Mongo
 // call, no write. That is the steady state, since the cipher's in-process cache
 // means most L2 hits are already minutes apart.
 //
@@ -129,7 +125,7 @@ func (s *l2DEKStore) Get(ctx context.Context, roomID string) (*RoomDataKey, erro
 // breaker ever observes Mongo's health on a hit-serving pod:
 //
 //   - Success replaces the entry and restamps CachedAt, so a missed
-//     invalidation self-heals within one refreshAfter.
+//     invalidation self-heals within one refresh window.
 //   - Failure (a Mongo error, or ErrOpen when the breaker has already given up)
 //     re-arms the TTL and leaves CachedAt alone, so the room stays alive and
 //     the next read retries. The breaker throttles those retries: while open it
@@ -137,7 +133,7 @@ func (s *l2DEKStore) Get(ctx context.Context, roomID string) (*RoomDataKey, erro
 //     once its cooldown elapses — which is how recovery is noticed on a pod
 //     whose reads are all L2 hits.
 func (s *l2DEKStore) serveHit(ctx context.Context, roomID string, entry cachedDEK) *RoomDataKey {
-	if s.now().Sub(time.UnixMilli(entry.CachedAt)) < s.refreshAfter {
+	if valkeyutil.Fresh(entry.CachedAt, s.now(), s.ttl) {
 		return &entry.Row
 	}
 

@@ -144,23 +144,20 @@ func readL2(ctx context.Context, client valkeyutil.Client, roomID, account strin
 // mechanism pkg/atrest uses for the room data key, so the two cache tiers
 // behave identically under an outage:
 //
-//   - Freshness. An entry older than refreshAfter is re-resolved, so a change
+//   - Freshness. An entry past its refresh window is re-resolved, so a change
 //     whose invalidation was swallowed is corrected within that window rather
 //     than living out the full TTL. For an authorization decision that is the
 //     difference between revoked access dying in minutes and dying in hours.
 //   - Outage survival. When that refresh fails, the deadline is re-armed, so a
 //     room that keeps being read stays reachable for an outage of any length.
 type Tier struct {
-	client  valkeyutil.Client
+	client valkeyutil.Client
+	// ttl also fixes the refresh window, via valkeyutil.RefreshAfter. That
+	// window must exceed the process-local L1 TTL in front of this tier (two
+	// minutes in both services), or every L1 miss would pay a refresh.
 	ttl     time.Duration
 	metrics Recorder
 	loader  Loader
-	// refreshAfter is how long an entry may be served before the next read
-	// re-resolves it. Derived from ttl, never configured independently: it is
-	// meaningful only relative to how long the entry lives, and it must exceed
-	// the process-local L1 TTL in front of this tier (two minutes in both
-	// services) or every L1 miss would pay a refresh.
-	refreshAfter time.Duration
 
 	now func() time.Time // overridden in tests
 }
@@ -191,8 +188,7 @@ func NewTierWithLoader(client valkeyutil.Client, ttl time.Duration, rec Recorder
 	}
 	return &Tier{
 		client: client, ttl: ttl, metrics: rec, loader: loader,
-		refreshAfter: valkeyutil.RefreshAfter(ttl),
-		now:          time.Now,
+		now: time.Now,
 	}
 }
 
@@ -227,7 +223,7 @@ func (t *Tier) Resolve(ctx context.Context, roomID, account string) (SubAuth, bo
 
 // serveHit resolves an L2 hit, and is where both of the tier's guarantees live.
 //
-// An entry confirmed within refreshAfter is served as a pure read. An older one
+// An entry confirmed within the refresh window is served as a pure read. An older one
 // is re-resolved, and the three outcomes differ in what they mean:
 //
 //   - Failure: the source of truth is unreachable. Re-arm the deadline and keep
@@ -237,7 +233,7 @@ func (t *Tier) Resolve(ctx context.Context, roomID, account string) (SubAuth, bo
 //   - Subscribed: rewrite with a fresh CachedAt, picking up any role or
 //     access-window change the missed invalidation left behind.
 func (t *Tier) serveHit(ctx context.Context, roomID, account string, entry cachedAuth) (SubAuth, bool, error) {
-	if t.now().Sub(time.UnixMilli(entry.CachedAt)) < t.refreshAfter {
+	if valkeyutil.Fresh(entry.CachedAt, t.now(), t.ttl) {
 		return entry.Auth, true, nil
 	}
 
