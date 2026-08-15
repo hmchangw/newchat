@@ -27,15 +27,45 @@ func setupMongo(t *testing.T) *mongo.Database {
 	return testutil.MongoDB(t, "inbox_worker_test")
 }
 
+// TestUpsertRemoteRoomActivity_MaxGuard_Integration pins the $max guard: the
+// write is idempotent and order-independent, so a duplicate or late event can
+// only ever advance lastMsgAt.
+func TestUpsertRemoteRoomActivity_MaxGuard_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := newGuardStore(db)
+
+	readBack := func(t *testing.T) model.RemoteRoom {
+		t.Helper()
+		var row model.RemoteRoom
+		require.NoError(t, db.Collection(remoteRoomsCollection).
+			FindOne(ctx, bson.M{"_id": "r-remote"}).Decode(&row))
+		row.LastMsgAt = row.LastMsgAt.UTC()
+		return row
+	}
+
+	base := time.UnixMilli(1740000000000).UTC()
+
+	// First touch upserts the row complete, including the immutable identity.
+	require.NoError(t, store.UpsertRemoteRoomActivity(ctx, "r-remote", "site-A", base))
+	assert.Equal(t, model.RemoteRoom{ID: "r-remote", SiteID: "site-A", LastMsgAt: base}, readBack(t))
+
+	// A newer event advances the position.
+	newer := base.Add(time.Minute)
+	require.NoError(t, store.UpsertRemoteRoomActivity(ctx, "r-remote", "site-A", newer))
+	assert.Equal(t, newer, readBack(t).LastMsgAt)
+
+	// A late or duplicate event carrying an older position is a silent no-op —
+	// this is what will make lossy, unordered delivery safe.
+	require.NoError(t, store.UpsertRemoteRoomActivity(ctx, "r-remote", "site-A", base))
+	assert.Equal(t, newer, readBack(t).LastMsgAt, "an older event must not regress the stored position")
+}
+
 func TestInboxWorker_MemberAdded_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	handler := NewHandler(store)
 
 	// Seed user for lookup
@@ -79,11 +109,7 @@ func TestInboxWorker_RoomSync_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	handler := NewHandler(store)
 
 	room := model.Room{ID: "r1", Name: "synced-room", Type: model.RoomTypeChannel, UserCount: 5}
@@ -110,11 +136,7 @@ func TestInboxWorker_RoleUpdated_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	handler := NewHandler(store)
 
 	_, err := db.Collection("subscriptions").InsertOne(ctx, model.Subscription{
@@ -166,11 +188,7 @@ func TestInboxWorker_RoleUpdated_Integration(t *testing.T) {
 func TestInboxWorker_BulkCreateSubscriptions_IdempotentUpsert(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 
 	originalSeenAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
 	original := &model.Subscription{
@@ -566,11 +584,7 @@ func mustInsertUser(t *testing.T, db *mongo.Database, u *model.User) {
 // newIntegrationHandler creates a Handler wired to the given database for integration tests.
 func newIntegrationHandler(t *testing.T, db *mongo.Database) *Handler {
 	t.Helper()
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	return NewHandler(store)
 }
 
@@ -1047,11 +1061,7 @@ func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 func TestIntegration_HandleRoomRenamed(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "inbox-worker-rename-handler")
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	h := NewHandler(store)
 
 	// Seed two subscription mirrors for room r1 with old name.
@@ -1095,11 +1105,7 @@ func TestIntegration_HandleRoomRenamed(t *testing.T) {
 func TestIntegration_HandleRoomVisibilityChanged(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "inbox-worker-visibility-handler")
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	h := NewHandler(store)
 
 	// Seed: alice=owner, bob=member, carol=member.
@@ -1264,10 +1270,11 @@ func TestInboxStore_ApplyThreadRead_MissingThreadSubscription_NoError(t *testing
 
 func newGuardStore(db *mongo.Database) *mongoInboxStore {
 	return &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
+		subCol:        db.Collection("subscriptions"),
+		roomCol:       db.Collection("rooms"),
+		userCol:       db.Collection("users"),
+		threadSubCol:  db.Collection("thread_subscriptions"),
+		remoteRoomCol: db.Collection(remoteRoomsCollection),
 	}
 }
 
@@ -1522,11 +1529,7 @@ func TestInboxWorker_UpdateUserStatus_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 
 	_, err := db.Collection("users").InsertOne(ctx, model.User{
 		ID: "u1", Account: "alice", SiteID: "site-b", StatusText: "old", StatusIsShow: true,
@@ -1579,11 +1582,7 @@ func TestInboxWorker_UpdateUserSettings_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 
 	t1 := time.UnixMilli(1000).UTC()
 	t2 := time.UnixMilli(2000).UTC()

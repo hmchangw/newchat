@@ -46,10 +46,42 @@ type config struct {
 
 // mongoInboxStore implements InboxStore using MongoDB.
 type mongoInboxStore struct {
-	subCol       *mongo.Collection
-	roomCol      *mongo.Collection
-	userCol      *mongo.Collection
-	threadSubCol *mongo.Collection
+	subCol        *mongo.Collection
+	roomCol       *mongo.Collection
+	userCol       *mongo.Collection
+	threadSubCol  *mongo.Collection
+	remoteRoomCol *mongo.Collection
+}
+
+// remoteRoomsCollection stores model.RemoteRoom. Deliberately NOT rooms: that
+// one is room-service's and its readers assume complete documents (members,
+// encKey, counts), which a federated peer cannot supply. Migration's room_sync
+// does replicate whole rooms here, so a migrated room can hold both and a
+// reader spanning the two must prefer rooms.
+const remoteRoomsCollection = "remote_rooms"
+
+// UpsertRemoteRoomActivity advances a remote room's position under $max, so
+// out-of-order delivery can never regress it. $setOnInsert carries the
+// immutable identity so a first touch creates the row complete.
+func (s *mongoInboxStore) UpsertRemoteRoomActivity(ctx context.Context, roomID, siteID string, lastMsgAt time.Time) error {
+	filter := bson.M{"_id": roomID}
+	update := bson.M{
+		"$max":         bson.M{"lastMsgAt": lastMsgAt},
+		"$setOnInsert": bson.M{"siteId": siteID},
+	}
+	opts := options.UpdateOne().SetUpsert(true)
+	if _, err := s.remoteRoomCol.UpdateOne(ctx, filter, update, opts); err != nil {
+		if !mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("upsert remote room activity %q: %w", roomID, err)
+		}
+		// Two concurrent first-touches. Unlike UpsertRoom, whose guard lives in
+		// the filter, this one filters on _id alone — so a duplicate says
+		// nothing about which value is newer. Retry; the row exists now.
+		if _, err := s.remoteRoomCol.UpdateOne(ctx, filter, update, opts); err != nil {
+			return fmt.Errorf("upsert remote room activity %q (retry after duplicate key): %w", roomID, err)
+		}
+	}
+	return nil
 }
 
 func (s *mongoInboxStore) CreateSubscription(ctx context.Context, sub *model.Subscription) error {
@@ -646,10 +678,11 @@ func main() {
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
+		subCol:        db.Collection("subscriptions"),
+		roomCol:       db.Collection("rooms"),
+		userCol:       db.Collection("users"),
+		threadSubCol:  db.Collection("thread_subscriptions"),
+		remoteRoomCol: db.Collection(remoteRoomsCollection),
 	}
 	if err := store.ensureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)

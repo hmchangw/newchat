@@ -45,6 +45,15 @@ type Room struct {
 // OriginTeams marks a room/subscription imported from the Teams migration.
 const OriginTeams = "teams"
 
+// RemoteRoom is the chat-list ordering position of a room owned by another
+// site, for which this site holds no Room document. Written by inbox-worker
+// under a $max guard on LastMsgAt.
+type RemoteRoom struct {
+	ID        string    `json:"id" bson:"_id"`
+	SiteID    string    `json:"siteId" bson:"siteId"`
+	LastMsgAt time.Time `json:"lastMsgAt" bson:"lastMsgAt"`
+}
+
 // RoomsInfoBatchRequest is the NATS request body for the batch room info RPC.
 type RoomsInfoBatchRequest struct {
 	RoomIDs []string `json:"roomIds"`

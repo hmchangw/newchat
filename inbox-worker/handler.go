@@ -23,6 +23,12 @@ type InboxStore interface {
 	// stored one is a silent no-op, so out-of-order federated delivery cannot
 	// regress room metadata.
 	UpsertRoom(ctx context.Context, room *model.Room) error
+	// UpsertRemoteRoomActivity records a remote room's ordering position under a
+	// $max guard, so a late or duplicate event is a no-op rather than a
+	// regression — what will let the activity-refresh publisher ride a lossy,
+	// unordered transport. Until it lands member_added is the only writer, so a
+	// dropped write is NOT self-healing.
+	UpsertRemoteRoomActivity(ctx context.Context, roomID, siteID string, lastMsgAt time.Time) error
 	// UpdateSubscriptionRoles applies roles guarded by rolesUpdatedAt (the source
 	// event's publish time): older/duplicate events are silent no-ops. A
 	// genuinely missing subscription still returns an error so the event is
@@ -225,6 +231,17 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 	// progress; redelivery re-upserts them idempotently (guarded by the unique index).
 	if len(missing) > 0 {
 		return fmt.Errorf("member_added references unknown users %v in room %s", missing, event.RoomID)
+	}
+
+	// After the missing-user return, so a room that gained no subscriber leaves
+	// no orphan row (nothing deletes them). Best-effort — the subscriptions above
+	// must not be re-run because an ordering row failed — but not self-healing
+	// yet, so alert on this log line.
+	if event.LastMsgAt != nil {
+		if err := h.store.UpsertRemoteRoomActivity(ctx, event.RoomID, event.SiteID, time.UnixMilli(*event.LastMsgAt).UTC()); err != nil {
+			slog.WarnContext(ctx, "seed remote room activity failed",
+				"room_id", event.RoomID, "site", event.SiteID, "error", err)
+		}
 	}
 
 	// No SubscriptionUpdateEvent is published here — room-worker already publishes
