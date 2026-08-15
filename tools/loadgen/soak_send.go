@@ -248,7 +248,7 @@ func (s *soakSender) Publish(
 		}
 	}
 
-	published := s.clonePending(pending.RequestID)
+	published := s.markPendingDispatched(pending.RequestID, s.clock.Now())
 	if published == nil {
 		published = cloneSoakPendingSend(pending)
 	}
@@ -448,13 +448,23 @@ func (s *soakSender) markPendingTracked(requestID string) {
 	}
 }
 
-func (s *soakSender) clonePending(requestID string) *soakPendingSend {
+// markPendingDispatched restarts the reply clock immediately before the publish
+// leaves the process. Journaling the send intent is durable and waits on a WAL
+// group commit, so measuring from the intent timestamp would report the load
+// generator's own flush delay as server latency. The ledger operation keeps the
+// earlier intent timestamp, which stays conservative for its verify deadline.
+func (s *soakSender) markPendingDispatched(
+	requestID string,
+	at time.Time,
+) *soakPendingSend {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
 	pending := s.pending[requestID]
 	if pending == nil {
 		return nil
 	}
+	pending.PublishedAt = at
+	pending.Deadline = at.Add(s.cfg.ReplyTimeout)
 	return cloneSoakPendingSend(pending)
 }
 

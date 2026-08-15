@@ -790,3 +790,42 @@ func TestSoakSender_DiscardDropsNeverPublishedSend(t *testing.T) {
 	sender.Discard("unknown-request")
 	assert.Zero(t, sender.Pending())
 }
+
+func TestSoakSender_ReplyLatencyExcludesIntentJournalDelay(t *testing.T) {
+	const journalDelay = 10 * time.Millisecond
+	const replyLatency = 3 * time.Millisecond
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	catalog := newSoakCatalog(8, 100, 10*time.Second, clock)
+	publisher := &soakRecordingPublisher{}
+	sender := newTestSoakSender(catalog, publisher, clock, 0)
+
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	gomock.InOrder(
+		lifecycle.EXPECT().Start(gomock.Any()).DoAndReturn(func(*soakPendingSend) error {
+			// The WAL group commit holds the intent until its batch is fsynced.
+			clock.Advance(journalDelay)
+			return nil
+		}),
+		lifecycle.EXPECT().Activate(gomock.Any()).Return(nil),
+	)
+	withSoakSendLifecycle(lifecycle, func(error) {})(sender)
+
+	published, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	assert.Equal(t, clock.Now(), published.PublishedAt,
+		"the reply clock starts when the publish leaves the process")
+
+	clock.Advance(replyLatency)
+	reply, err := json.Marshal(model.Message{
+		ID: soakTestMessageID, RoomID: "room-1", UserID: "u-1",
+		UserAccount: "alice", Content: "hello", CreatedAt: clock.Now(),
+	})
+	require.NoError(t, err)
+	result := sender.HandleReply(subject.UserResponse("alice", soakTestRequestID), reply)
+
+	require.Equal(t, soakSendReplyAccepted, result.Status)
+	assert.Equal(t, replyLatency, result.Latency,
+		"send latency must measure the reply, not the load generator's own intent journal wait")
+}
