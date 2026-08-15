@@ -287,3 +287,30 @@ func TestNATSMemberListClient_ContextCancellation(t *testing.T) {
 	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got %v", err)
 	assert.Contains(t, err.Error(), "member.list request to site-us")
 }
+
+// TestNATSMemberListClient_NotRoomMemberIsNotARequestFailure pins the metric
+// semantics for a business rejection. "You are not a member" is a complete,
+// well-formed answer from a healthy remote — the request/reply exchange
+// succeeded. Counting it as a failed request puts chat_nats_requests into the
+// transport-shaped other_error bucket at baseline and makes the family
+// unusable as a failure signal, which is the same rule GetMessageReadMeta
+// already follows for CodeNotFound.
+func TestNATSMemberListClient_NotRoomMemberIsNotARequestFailure(t *testing.T) {
+	nc := startInProcessNATS(t)
+	ch := model.ChannelRef{RoomID: "room-eng", SiteID: "site-us"}
+	requester := "alice"
+
+	sub, err := nc.Subscribe(subject.MemberList(requester, ch.RoomID, ch.SiteID), func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"code":"forbidden","reason":"not_room_member","error":"only room members can perform this action"}`))
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	recorder := NewMockrequestRecorder(gomock.NewController(t))
+	recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationMemberRead, gomock.Any(), gomock.Nil())
+	client := NewNATSMemberListClient(nc, 2*time.Second, withMemberListRequestRecorder(recorder))
+
+	_, err = client.ListMembers(context.Background(), requester, ch, 0)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errNotRoomMember))
+}

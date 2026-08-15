@@ -8,6 +8,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
 type invalidationTestMsg struct {
@@ -18,6 +22,12 @@ type invalidationTestMsg struct {
 }
 
 func (m *invalidationTestMsg) Data() []byte { return m.data }
+
+// Metadata is needed once a test tracks the message through natsmetrics; the
+// embedded nil jetstream.Msg would otherwise panic.
+func (m *invalidationTestMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{NumDelivered: 1}, nil
+}
 func (m *invalidationTestMsg) Ack() error {
 	m.acks++
 	return m.ackErr
@@ -69,4 +79,44 @@ func TestProcessInvalidationMessage(t *testing.T) {
 		require.Equal(t, 1, msg.acks)
 		assert.Equal(t, "room-c", <-queue)
 	})
+}
+
+// TestProcessInvalidationMessage_MalformedRecordsTerminal pins the evidence
+// rule: a payload that will never decode is Acked and permanently dropped, and
+// Message.Ack records OutcomeAck — a success. Without an explicit terminal mark
+// the drop is indistinguishable from normal processing in the metrics.
+func TestProcessInvalidationMessage_MalformedRecordsTerminal(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	consumer := natsmetrics.NewFromProvider(mp).Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "notification-worker", Site: "site-a",
+		Stream: "ROOMS-site-a", Consumer: "notification-worker-room-event-invalidate",
+	})
+	raw := &invalidationTestMsg{data: []byte("not-json")}
+	tracked := consumer.Track(context.Background(), raw, natsmetrics.EventUnknown, 5)
+
+	processInvalidationMessage(tracked.Context(context.Background()), tracked, make(chan string, 1))
+	tracked.Finish(context.Background())
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	var terminal int64
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "chat.nats.terminal.failures" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			for _, dp := range sum.DataPoints {
+				for _, kv := range dp.Attributes.ToSlice() {
+					if string(kv.Key) == "reason" && kv.Value.AsString() == "invalid_payload" {
+						terminal += dp.Value
+					}
+				}
+			}
+		}
+	}
+	assert.Equal(t, int64(1), terminal, "a permanently dropped malformed event must leave terminal evidence")
 }

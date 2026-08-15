@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -79,9 +80,19 @@ func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string
 	out := natsutil.NewMsg(reqCtx, subject.MemberList(requester, ch.RoomID, ch.SiteID), body)
 	started := time.Now()
 	defer func() {
-		if c.metrics != nil {
-			c.metrics.Request(ctx, natsmetrics.OperationMemberRead, time.Since(started), resultErr)
+		if c.metrics == nil {
+			return
 		}
+		// A remote "not a room member" is a complete answer from a healthy peer:
+		// the request/reply exchange worked. chat.nats.requests carries a
+		// transport-shaped outcome enum, so counting a business rejection there
+		// lands it in other_error and leaves the family non-zero at baseline.
+		// GetMessageReadMeta already excludes its CodeNotFound the same way.
+		outcome := resultErr
+		if errors.Is(outcome, errNotRoomMember) {
+			outcome = nil
+		}
+		c.metrics.Request(ctx, natsmetrics.OperationMemberRead, time.Since(started), outcome)
 	}()
 	reply, err := c.nc.RequestMsgWithContext(reqCtx, out)
 	if err != nil {
