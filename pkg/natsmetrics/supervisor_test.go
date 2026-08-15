@@ -178,6 +178,64 @@ func TestSupervisor_DeletedConsumerStopsWithoutRecreation(t *testing.T) {
 	assert.Empty(t, metricPoints[int64](t, rm, "chat.nats.consumer.recovery.attempts"))
 }
 
+func TestSupervisor_RecoveryMissingConsumerStopsWithoutCreation(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	consumer := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "site-a", Stream: "STREAM-site-a", Consumer: "durable"})
+	var (
+		initialCalls  atomic.Int64
+		recoveryCalls atomic.Int64
+		active        atomic.Int64
+		maxActive     atomic.Int64
+		duplicate     atomic.Bool
+	)
+	initialFactory := func(context.Context) (Iterator, error) {
+		initialCalls.Add(1)
+		return failingSupervisorIterator(&active, &maxActive, &duplicate, jetstream.ErrConnectionClosed), nil
+	}
+	recoveryFactory := func(context.Context) (Iterator, error) {
+		recoveryCalls.Add(1)
+		return nil, fmt.Errorf("lookup durable: %w", jetstream.ErrConsumerNotFound)
+	}
+
+	supervisor := NewSupervisor(SupervisorConfig{
+		MinBackoff: time.Millisecond,
+		MaxBackoff: time.Millisecond,
+		wait:       func(context.Context, time.Duration) error { return nil },
+	})
+	var wg sync.WaitGroup
+	require.NoError(t, supervisor.StartWithRecovery(context.Background(), initialFactory, recoveryFactory,
+		consumer, 1, 5, &wg, nil, func(context.Context, *Message) {}))
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		supervisor.Stop()
+		<-done
+		t.Fatal("supervisor retried after recovery found the durable missing")
+	}
+
+	assert.Equal(t, int64(1), initialCalls.Load(), "recovery must not call the create-or-update startup factory")
+	assert.Equal(t, int64(1), recoveryCalls.Load(), "a missing durable must stop recovery without retrying")
+	assert.Equal(t, int64(1), maxActive.Load())
+	assert.False(t, duplicate.Load())
+	assert.Zero(t, active.Load())
+
+	rm := collect(t, reader)
+	terminal := metricPoints[int64](t, rm, "chat.nats.terminal.failures")
+	require.Len(t, terminal, 2)
+	reasons := map[string]int64{}
+	for _, point := range terminal {
+		reasons[attrs(point)["reason"]] = point.Value
+	}
+	assert.Equal(t, map[string]int64{
+		string(TerminalStreamUnavailable): 1,
+		string(TerminalConsumerDeleted):   1,
+	}, reasons)
+	assert.Empty(t, metricPoints[int64](t, rm, "chat.nats.consumer.recovery.attempts"))
+}
+
 func TestSupervisor_StartReturnsInitialFactoryError(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	consumer := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "site-a", Stream: "STREAM-site-a", Consumer: "durable"})

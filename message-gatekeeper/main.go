@@ -173,7 +173,7 @@ func main() {
 	})
 	var wg sync.WaitGroup
 	supervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
-	iteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+	initialIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
 		cons, err := js.CreateOrUpdateConsumer(factoryCtx, messagesCfg.Name, consumerCfg)
 		if err != nil {
 			return nil, fmt.Errorf("create consumer: %w", err)
@@ -184,7 +184,19 @@ func main() {
 		}
 		return iter, nil
 	}
-	if err := supervisor.Start(ctx, iteratorFactory, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+	recoveryIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := js.Consumer(factoryCtx, messagesCfg.Name, consumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("lookup consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create recovery iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := supervisor.StartWithRecovery(ctx, initialIteratorFactory, recoveryIteratorFactory,
+		consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		func(msgCtx context.Context, msg *natsmetrics.Message) {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())

@@ -121,6 +121,7 @@ func TestConsumerLoopFailureUsesBoundedReason(t *testing.T) {
 		want TerminalReason
 	}{
 		{name: "consumer deleted", err: jetstream.ErrConsumerDeleted, want: TerminalConsumerDeleted},
+		{name: "consumer missing", err: jetstream.ErrConsumerNotFound, want: TerminalConsumerDeleted},
 		{name: "stream unavailable", err: jetstream.ErrNoStreamResponse, want: TerminalStreamUnavailable},
 		{name: "unexpected iterator failure", err: errors.New("dynamic error text"), want: TerminalInternal},
 	}

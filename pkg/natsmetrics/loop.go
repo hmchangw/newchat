@@ -113,9 +113,10 @@ type SupervisorConfig struct {
 	wait       waitBackoff
 }
 
-// IteratorFactory recreates both the durable consumer handle and its pull
-// iterator. Callers keep stream, durable, and pull settings closed over in the
-// factory so recovery cannot drift from startup configuration.
+// IteratorFactory creates a durable consumer handle and its pull iterator.
+// Startup factories may create or update the durable; recovery factories must
+// only look up the existing durable so recovery cannot silently replace a lost
+// server-side delivery cursor.
 type IteratorFactory func(context.Context) (Iterator, error)
 
 // Supervisor owns exactly one iterator at a time and recreates it after a
@@ -160,6 +161,14 @@ func NewSupervisor(cfg SupervisorConfig) *Supervisor {
 // process cannot create duplicate pull iterators for the same durable through
 // this supervisor.
 func (s *Supervisor) Start(ctx context.Context, factory IteratorFactory, consumer *Consumer, maxWorkers, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) error {
+	return s.StartWithRecovery(ctx, factory, factory, consumer, maxWorkers, maxDeliver, wg, classify, process)
+}
+
+// StartWithRecovery separates fail-fast startup creation from lookup-only
+// recovery. The recovery factory must never create a missing durable: after a
+// transport failure the iterator cannot reliably report that the durable was
+// concurrently deleted, and recreating it would replay or skip retained work.
+func (s *Supervisor) StartWithRecovery(ctx context.Context, initialFactory, recoveryFactory IteratorFactory, consumer *Consumer, maxWorkers, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return ErrSupervisorRunning
 	}
@@ -168,7 +177,7 @@ func (s *Supervisor) Start(ctx context.Context, factory IteratorFactory, consume
 	s.cancel = cancel
 	s.mu.Unlock()
 	consumer.LoopStopped(runCtx)
-	iter, err := factory(runCtx)
+	iter, err := initialFactory(runCtx)
 	if err != nil {
 		s.abortStart(cancel)
 		return fmt.Errorf("create initial consumer iterator: %w", err)
@@ -186,12 +195,12 @@ func (s *Supervisor) Start(ctx context.Context, factory IteratorFactory, consume
 	go func() {
 		defer wg.Done()
 		defer s.finish(runCtx, consumer)
-		s.run(runCtx, iter, factory, consumer, maxDeliver, wg, sem, classify, process)
+		s.run(runCtx, iter, recoveryFactory, consumer, maxDeliver, wg, sem, classify, process)
 	}()
 	return nil
 }
 
-func (s *Supervisor) run(ctx context.Context, iter Iterator, factory IteratorFactory, consumer *Consumer, maxDeliver int, wg *sync.WaitGroup, sem chan struct{}, classify ClassifyEvent, process ProcessMessage) {
+func (s *Supervisor) run(ctx context.Context, iter Iterator, recoveryFactory IteratorFactory, consumer *Consumer, maxDeliver int, wg *sync.WaitGroup, sem chan struct{}, classify ClassifyEvent, process ProcessMessage) {
 	backoff := s.minBackoff
 	recovered := false
 	for {
@@ -204,8 +213,8 @@ func (s *Supervisor) run(ctx context.Context, iter Iterator, factory IteratorFac
 		if ctx.Err() != nil {
 			return
 		}
-		if errors.Is(err, jetstream.ErrConsumerDeleted) {
-			slog.ErrorContext(ctx, "jetstream consumer deleted; automatic recreation disabled to preserve delivery position", "error", err)
+		if isMissingConsumer(err) {
+			slog.ErrorContext(ctx, "jetstream consumer missing or deleted; automatic recreation disabled to preserve delivery position", "error", err)
 			return
 		}
 		if received {
@@ -219,7 +228,7 @@ func (s *Supervisor) run(ctx context.Context, iter Iterator, factory IteratorFac
 			if err := s.wait(ctx, backoff); err != nil {
 				return
 			}
-			iter, err = factory(ctx)
+			iter, err = recoveryFactory(ctx)
 			if err == nil {
 				if !s.activate(ctx, iter) {
 					iter.Stop()
@@ -231,11 +240,20 @@ func (s *Supervisor) run(ctx context.Context, iter Iterator, factory IteratorFac
 			if ctx.Err() != nil {
 				return
 			}
+			if isMissingConsumer(err) {
+				consumer.Terminal(ctx, EventUnknown, TerminalConsumerDeleted)
+				slog.ErrorContext(ctx, "jetstream consumer missing during recovery; automatic creation disabled to preserve delivery position", "error", err)
+				return
+			}
 			consumer.RecoveryAttempt(ctx, RecoveryFailure)
 			backoff = nextBackoff(backoff, s.maxBackoff)
 			slog.WarnContext(ctx, "jetstream consumer recreation failed", "error", err, "retry_in", backoff)
 		}
 	}
+}
+
+func isMissingConsumer(err error) bool {
+	return errors.Is(err, jetstream.ErrConsumerDeleted) || errors.Is(err, jetstream.ErrConsumerNotFound)
 }
 
 func (s *Supervisor) abortStart(cancel context.CancelFunc) {

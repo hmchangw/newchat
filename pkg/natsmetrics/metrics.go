@@ -380,7 +380,7 @@ func (c *Consumer) LoopFailed(ctx context.Context, err error) {
 	}
 	reason := TerminalInternal
 	switch {
-	case errors.Is(err, jetstream.ErrConsumerDeleted):
+	case errors.Is(err, jetstream.ErrConsumerDeleted), errors.Is(err, jetstream.ErrConsumerNotFound):
 		reason = TerminalConsumerDeleted
 	case errors.Is(err, jetstream.ErrStreamNotFound), errors.Is(err, jetstream.ErrNoStreamResponse),
 		errors.Is(err, jetstream.ErrConnectionClosed), errors.Is(err, nats.ErrConnectionClosed),

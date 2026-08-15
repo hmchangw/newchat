@@ -276,7 +276,7 @@ func main() {
 		Stream: roomsCfg.Name, Consumer: invalConsumerCfg.Durable,
 	})
 	invalSupervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
-	invalFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+	initialInvalFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
 		cons, err := otelJS.CreateOrUpdateConsumer(factoryCtx, roomsCfg.Name, invalConsumerCfg)
 		if err != nil {
 			return nil, fmt.Errorf("create invalidation consumer: %w", err)
@@ -287,7 +287,19 @@ func main() {
 		}
 		return iter, nil
 	}
-	if err := invalSupervisor.Start(ctx, invalFactory, invalConsumerMetrics, 1, invalConsumerCfg.MaxDeliver, &wg,
+	recoveryInvalFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := otelJS.Consumer(factoryCtx, roomsCfg.Name, invalConsumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("lookup invalidation consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(64))
+		if err != nil {
+			return nil, fmt.Errorf("create recovery invalidation iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := invalSupervisor.StartWithRecovery(ctx, initialInvalFactory, recoveryInvalFactory,
+		invalConsumerMetrics, 1, invalConsumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType {
 			return natsmetrics.RoomEventTypeFromSubject(msg.Subject())
 		},
@@ -299,7 +311,7 @@ func main() {
 	}
 
 	supervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
-	iteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+	initialIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
 		cons, err := otelJS.CreateOrUpdateConsumer(factoryCtx, wiring.CanonicalStream.Name, consumerCfg)
 		if err != nil {
 			return nil, fmt.Errorf("create consumer: %w", err)
@@ -310,7 +322,19 @@ func main() {
 		}
 		return iter, nil
 	}
-	if err := supervisor.Start(ctx, iteratorFactory, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+	recoveryIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := otelJS.Consumer(factoryCtx, wiring.CanonicalStream.Name, consumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("lookup consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create recovery iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := supervisor.StartWithRecovery(ctx, initialIteratorFactory, recoveryIteratorFactory,
+		consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		func(msgCtx context.Context, msg *natsmetrics.Message) {
 			// jobguard recovers handler panics — this goroutine runs outside natsrouter's Recovery
