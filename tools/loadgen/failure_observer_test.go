@@ -24,3 +24,43 @@ func TestFailureObserverHealth_BoundsIntervalsWithoutClaimingTruncatedHistory(t 
 	require.False(t, snapshot.HistoryAvailableFrom.IsZero())
 	assert.False(t, failureHealthSnapshotCovers(&snapshot, start, end))
 }
+
+func TestFailureObserverHealthSnapshotCovers_RequiresContinuousHealthyHistory(t *testing.T) {
+	start := time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Minute)
+	tests := []struct {
+		name     string
+		snapshot *failureObserverHealthSnapshot
+		want     bool
+	}{
+		{name: "nil snapshot"},
+		{name: "empty history", snapshot: &failureObserverHealthSnapshot{}},
+		{
+			name: "continuous healthy history",
+			snapshot: &failureObserverHealthSnapshot{Intervals: []failureHealthInterval{
+				{Start: start.Add(-time.Minute), End: start.Add(time.Minute), Up: true},
+				{Start: start.Add(time.Minute), End: end.Add(time.Minute), Up: true},
+			}},
+			want: true,
+		},
+		{
+			name: "gap",
+			snapshot: &failureObserverHealthSnapshot{Intervals: []failureHealthInterval{
+				{Start: start, End: start.Add(30 * time.Second), Up: true},
+				{Start: start.Add(time.Minute), End: end, Up: true},
+			}},
+		},
+		{
+			name: "down interval",
+			snapshot: &failureObserverHealthSnapshot{Intervals: []failureHealthInterval{
+				{Start: start, End: start.Add(time.Minute), Up: true},
+				{Start: start.Add(time.Minute), End: end, Up: false},
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, failureHealthSnapshotCovers(test.snapshot, start, end))
+		})
+	}
+}

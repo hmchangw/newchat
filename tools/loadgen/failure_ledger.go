@@ -23,6 +23,27 @@ const (
 	failureObserverHistory   failureObserver = "cassandra_history"
 )
 
+const failureObserverContractSchemaVersion = 1
+
+type failureObserverContract struct {
+	SchemaVersion            int               `json:"schemaVersion"`
+	Scenario                 string            `json:"scenario"`
+	Observers                []failureObserver `json:"observers"`
+	RecipientObserverEnabled bool              `json:"recipientObserverEnabled"`
+}
+
+func newFailureObserverContract(recipientEnabled bool) failureObserverContract {
+	observers := []failureObserver{failureObserverAdmission, failureObserverHistory}
+	if recipientEnabled {
+		observers = append(observers, failureObserverRecipient)
+	}
+	return failureObserverContract{
+		SchemaVersion: failureObserverContractSchemaVersion,
+		Scenario:      soakFailureScenario, Observers: observers,
+		RecipientObserverEnabled: recipientEnabled,
+	}
+}
+
 type failureOperationType string
 
 const failureOperationMessageCreate failureOperationType = "message_create"
@@ -56,11 +77,25 @@ type failureExpectedEffect struct {
 }
 
 func messageCreateExpectedEffects(recipientCount int, recipientHash string) []failureExpectedEffect {
-	return []failureExpectedEffect{
+	return messageCreateExpectedEffectsForObservers(true, recipientCount, recipientHash)
+}
+
+func messageCreateExpectedEffectsForObservers(
+	recipientEnabled bool,
+	recipientCount int,
+	recipientHash string,
+) []failureExpectedEffect {
+	effects := []failureExpectedEffect{
 		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
 		{Effect: failureEffectMessagePersisted, Observer: failureObserverHistory, Required: true},
-		{Effect: failureEffectRecipientEvent, Observer: failureObserverRecipient, Required: true, Cardinality: &failureCardinality{Mode: "exact_set_hash", Count: recipientCount, SHA256: recipientHash}},
 	}
+	if recipientEnabled {
+		effects = append(effects, failureExpectedEffect{
+			Effect: failureEffectRecipientEvent, Observer: failureObserverRecipient, Required: true,
+			Cardinality: &failureCardinality{Mode: "exact_set_hash", Count: recipientCount, SHA256: recipientHash},
+		})
+	}
+	return effects
 }
 
 type failureObservation string
@@ -73,6 +108,30 @@ const (
 	failureObservationUnverified           failureObservation = "unverified"
 	failureObservationMissingAfterDeadline failureObservation = "missing_after_deadline"
 )
+
+type failureReason string
+
+const (
+	failureReasonNone                      failureReason = ""
+	failureReasonAdmissionRejected         failureReason = "admission_rejected"
+	failureReasonHistoryContentMismatch    failureReason = "history_content_mismatch"
+	failureReasonHistoryMissing            failureReason = "history_missing"
+	failureReasonRecipientDuplicate        failureReason = "recipient_duplicate"
+	failureReasonRecipientUnexpected       failureReason = "recipient_unexpected"
+	failureReasonRecipientIdentityMismatch failureReason = "recipient_identity_mismatch"
+	failureReasonRecipientMissing          failureReason = "recipient_missing"
+	failureReasonPublishLocalError         failureReason = "publish_local_error"
+)
+
+var failureReasonRegistry = map[failureReason]struct{}{
+	failureReasonNone: {}, failureReasonAdmissionRejected: {},
+	failureReasonHistoryContentMismatch: {}, failureReasonHistoryMissing: {},
+	failureReasonRecipientDuplicate: {}, failureReasonRecipientUnexpected: {},
+	failureReasonRecipientIdentityMismatch: {}, failureReasonRecipientMissing: {},
+	failureReasonPublishLocalError: {},
+}
+
+var errFailureObserverContractMismatch = errors.New("failure observer contract mismatch")
 
 type failureResult string
 
@@ -101,8 +160,7 @@ var failureInvalidationReasonRegistry = map[string]struct{}{
 }
 
 var failureOperationScenarioRegistry = map[string]struct{}{
-	"cassandra_soak": {}, "F01": {}, "F02": {}, "F03": {}, "F04": {},
-	"F07a": {}, "F07b": {},
+	soakFailureScenario: {},
 }
 
 var failureOperationLaneRegistry = map[string]struct{}{
@@ -110,24 +168,26 @@ var failureOperationLaneRegistry = map[string]struct{}{
 }
 
 type failureOperation struct {
-	SchemaVersion  int                                    `json:"schemaVersion,omitempty"`
-	ID             string                                 `json:"operationId"`
-	CorrelationID  string                                 `json:"correlationId,omitempty"`
-	RunID          string                                 `json:"runId,omitempty"`
-	Scenario       string                                 `json:"scenario"`
-	Lane           string                                 `json:"lane"`
-	OperationType  failureOperationType                   `json:"operationType,omitempty"`
-	StartedAt      time.Time                              `json:"startedAt"`
-	VerifyAfter    time.Time                              `json:"verifyAfter"`
-	Deadline       time.Time                              `json:"deadline"`
-	Targets        map[string]string                      `json:"targets,omitempty"`
-	Effects        []failureExpectedEffect                `json:"expectedEffects,omitempty"`
-	Expected       []failureObserver                      `json:"expected,omitempty"`
-	Attributes     map[string]string                      `json:"attributes,omitempty"`
-	Observations   map[failureObserver]failureObservation `json:"observations,omitempty"`
-	FinalResult    failureResult                          `json:"finalResult,omitempty"`
-	EvidenceRefs   []string                               `json:"evidenceRefs,omitempty"`
-	LifecycleState failureOperationLifecycle              `json:"lifecycleState,omitempty"`
+	SchemaVersion      int                                    `json:"schemaVersion,omitempty"`
+	ID                 string                                 `json:"operationId"`
+	CorrelationID      string                                 `json:"correlationId,omitempty"`
+	RunID              string                                 `json:"runId,omitempty"`
+	Scenario           string                                 `json:"scenario"`
+	Lane               string                                 `json:"lane"`
+	OperationType      failureOperationType                   `json:"operationType,omitempty"`
+	StartedAt          time.Time                              `json:"startedAt"`
+	VerifyAfter        time.Time                              `json:"verifyAfter"`
+	Deadline           time.Time                              `json:"deadline"`
+	Targets            map[string]string                      `json:"targets,omitempty"`
+	Effects            []failureExpectedEffect                `json:"expectedEffects,omitempty"`
+	Expected           []failureObserver                      `json:"expected,omitempty"`
+	Attributes         map[string]string                      `json:"attributes,omitempty"`
+	Observations       map[failureObserver]failureObservation `json:"observations,omitempty"`
+	ObservationReasons map[failureObserver]failureReason      `json:"observationReasons,omitempty"`
+	FinalResult        failureResult                          `json:"finalResult,omitempty"`
+	FinalReason        failureReason                          `json:"finalReason,omitempty"`
+	EvidenceRefs       []string                               `json:"evidenceRefs,omitempty"`
+	LifecycleState     failureOperationLifecycle              `json:"lifecycleState,omitempty"`
 
 	nextVerifyAt time.Time
 	claimed      bool
@@ -143,6 +203,7 @@ type failureLedgerEvent struct {
 	OperationID       string                                            `json:"operationId,omitempty"`
 	Observer          failureObserver                                   `json:"observer,omitempty"`
 	Observation       failureObservation                                `json:"observation,omitempty"`
+	Reason            failureReason                                     `json:"reason,omitempty"`
 	Result            failureResult                                     `json:"result,omitempty"`
 	Results           map[failureResult]uint64                          `json:"results,omitempty"`
 	ObservationCounts map[failureObserver]map[failureObservation]uint64 `json:"observationCounts,omitempty"`
@@ -198,11 +259,12 @@ type failureJournal interface {
 }
 
 type failureLedgerConfig struct {
-	Capacity     int
-	CompactEvery int
-	Journal      failureJournal
-	Now          func() time.Time
-	Recorder     failureLedgerRecorder
+	Capacity         int
+	CompactEvery     int
+	Journal          failureJournal
+	Now              func() time.Time
+	Recorder         failureLedgerRecorder
+	ObserverContract *failureObserverContract
 }
 
 type failureLedgerRecorder interface {
@@ -313,6 +375,21 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 	if err := ledger.replay(events); err != nil {
 		return nil, err
 	}
+	if cfg.ObserverContract != nil {
+		configurer, ok := cfg.Journal.(interface {
+			ConfigureObserverContract(failureObserverContract, []failureOperation) error
+		})
+		if !ok {
+			return nil, fmt.Errorf("failure journal does not support observer contracts")
+		}
+		active := make([]failureOperation, 0, len(ledger.active))
+		for _, operation := range ledger.active {
+			active = append(active, *cloneFailureOperation(operation))
+		}
+		if err := configurer.ConfigureObserverContract(*cfg.ObserverContract, active); err != nil {
+			return nil, fmt.Errorf("validate failure observer contract; start a new SOAK_RUN_ID: %w", err)
+		}
+	}
 	if upgrade, ok := cfg.Journal.(interface{ NeedsUpgrade() bool }); ok && upgrade.NeedsUpgrade() {
 		if err := ledger.compactLocked(cfg.Now().UTC()); err != nil {
 			return nil, fmt.Errorf("upgrade legacy failure ledger journal: %w", err)
@@ -335,6 +412,7 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 		return fmt.Errorf("start failure operation: %w", err)
 	}
 	tracked.Observations = make(map[failureObserver]failureObservation)
+	tracked.ObservationReasons = make(map[failureObserver]failureReason)
 	tracked.nextVerifyAt = tracked.VerifyAfter
 
 	l.mu.Lock()
@@ -404,8 +482,30 @@ func (l *failureLedger) Abandon(
 	result failureResult,
 	at time.Time,
 ) error {
+	reason := failureReasonNone
+	if result == failureResultNotSent {
+		reason = failureReasonPublishLocalError
+	}
+	return l.AbandonWithReason(operationID, result, reason, at)
+}
+
+func (l *failureLedger) AbandonWithReason(
+	operationID string,
+	result failureResult,
+	reason failureReason,
+	at time.Time,
+) error {
 	if !validFailureResult(result) {
 		return fmt.Errorf("invalid failure result %q", result)
+	}
+	if _, known := failureReasonRegistry[reason]; !known {
+		return fmt.Errorf("unsupported failure final reason %q", reason)
+	}
+	if result == failureResultBad && reason == failureReasonNone {
+		return fmt.Errorf("bad failure result requires a bounded reason")
+	}
+	if result == failureResultNotSent && reason != failureReasonPublishLocalError {
+		return fmt.Errorf("not_sent requires reason %q", failureReasonPublishLocalError)
 	}
 	if at.IsZero() {
 		at = l.now()
@@ -422,7 +522,7 @@ func (l *failureLedger) Abandon(
 	if result == failureResultNotSent && operation.LifecycleState == failureOperationActive {
 		return fmt.Errorf("abandon failure operation %q as not_sent: publish was attempted", operationID)
 	}
-	if err := l.finalizeLocked(operation, result, at); err != nil {
+	if err := l.finalizeLocked(operation, result, reason, at); err != nil {
 		return err
 	}
 	return nil
@@ -434,6 +534,34 @@ func (l *failureLedger) Observe(
 	observation failureObservation,
 	at time.Time,
 ) (bool, error) {
+	return l.ObserveWithReason(
+		operationID,
+		observer,
+		observation,
+		defaultFailureReason(observer, observation),
+		at,
+	)
+}
+
+func (l *failureLedger) ObserveWithReason(
+	operationID string,
+	observer failureObserver,
+	observation failureObservation,
+	reason failureReason,
+	at time.Time,
+) (bool, error) {
+	if _, known := failureReasonRegistry[reason]; !known {
+		return false, fmt.Errorf("unsupported failure observation reason %q", reason)
+	}
+	if (observation == failureObservationBad ||
+		observation == failureObservationMissingAfterDeadline) && reason == failureReasonNone {
+		return false, fmt.Errorf("failure observation %q requires a bounded reason", observation)
+	}
+	if observation != failureObservationBad &&
+		observation != failureObservationMissingAfterDeadline &&
+		reason != failureReasonNone {
+		return false, fmt.Errorf("failure observation %q cannot use negative reason %q", observation, reason)
+	}
 	if at.IsZero() {
 		at = l.now()
 	}
@@ -486,13 +614,14 @@ func (l *failureLedger) Observe(
 	}
 	event := failureLedgerEvent{
 		Type: failureLedgerEventObserved, OperationID: operationID,
-		Observer: observer, Observation: observation, At: at.UTC(),
+		Observer: observer, Observation: observation, Reason: reason, At: at.UTC(),
 	}
 	if err := l.appendLocked(&event); err != nil {
 		l.invalidateLocked("wal")
 		return false, fmt.Errorf("persist failure observation for %q: %w", operationID, err)
 	}
 	operation.Observations[observer] = observation
+	operation.ObservationReasons[observer] = reason
 	l.countObservationLocked(observer, observation)
 	operation.claimed = false
 	l.dequeueLocked(operation)
@@ -500,15 +629,42 @@ func (l *failureLedger) Observe(
 		l.recorder.ObservationRecorded(
 			cloneFailureOperation(operation), observer, observation,
 		)
+		if recorder, ok := l.recorder.(interface {
+			ObservationReasonRecorded(*failureOperation, failureObserver, failureObservation, failureReason)
+		}); ok {
+			recorder.ObservationReasonRecorded(
+				cloneFailureOperation(operation), observer, observation, reason,
+			)
+		}
 	}
 	if len(operation.Observations) != len(operation.Expected) {
 		l.enqueueLocked(operation)
 		return false, nil
 	}
-	if err := l.finalizeLocked(operation, failureOperationResult(operation), at); err != nil {
+	if err := l.finalizeLocked(operation, failureOperationResult(operation), failureReasonNone, at); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func defaultFailureReason(
+	observer failureObserver,
+	observation failureObservation,
+) failureReason {
+	switch {
+	case observer == failureObserverAdmission && observation == failureObservationBad:
+		return failureReasonAdmissionRejected
+	case observer == failureObserverHistory && observation == failureObservationBad:
+		return failureReasonHistoryContentMismatch
+	case observer == failureObserverHistory && observation == failureObservationMissingAfterDeadline:
+		return failureReasonHistoryMissing
+	case observer == failureObserverRecipient && observation == failureObservationBad:
+		return failureReasonRecipientIdentityMismatch
+	case observer == failureObserverRecipient && observation == failureObservationMissingAfterDeadline:
+		return failureReasonRecipientMissing
+	default:
+		return failureReasonNone
+	}
 }
 
 func (l *failureLedger) Expire(now time.Time) (int, error) {
@@ -537,7 +693,7 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 			}
 			event := failureLedgerEvent{
 				Type: failureLedgerEventObserved, OperationID: operation.ID,
-				Observer: observer, Observation: failureObservationMissingAfterDeadline,
+				Observer: observer, Observation: failureObservationUnverified,
 				At: now.UTC(),
 			}
 			if err := l.appendLocked(&event); err != nil {
@@ -546,17 +702,20 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 					"persist expired failure observation for %q: %w", operation.ID, err,
 				)
 			}
-			operation.Observations[observer] = failureObservationMissingAfterDeadline
+			operation.Observations[observer] = failureObservationUnverified
+			operation.ObservationReasons[observer] = failureReasonNone
+			l.countObservationLocked(observer, failureObservationUnverified)
 			if l.recorder != nil {
 				l.recorder.ObservationRecorded(
 					cloneFailureOperation(operation), observer,
-					failureObservationMissingAfterDeadline,
+					failureObservationUnverified,
 				)
 			}
 		}
 		if err := l.finalizeLocked(
 			operation,
 			failureOperationResult(operation),
+			failureReasonNone,
 			now,
 		); err != nil {
 			return finalized, err
@@ -720,11 +879,12 @@ func (l *failureLedger) Close() error {
 func (l *failureLedger) finalizeLocked(
 	operation *failureOperation,
 	result failureResult,
+	reason failureReason,
 	at time.Time,
 ) error {
 	event := failureLedgerEvent{
 		Type: failureLedgerEventFinalized, OperationID: operation.ID,
-		Result: result, At: at.UTC(),
+		Result: result, Reason: reason, At: at.UTC(),
 	}
 	if err := l.appendLocked(&event); err != nil {
 		l.invalidateLocked("wal")
@@ -732,6 +892,7 @@ func (l *failureLedger) finalizeLocked(
 	}
 	l.results[result]++
 	operation.FinalResult = result
+	operation.FinalReason = reason
 	if result == failureResultNotSent {
 		l.rememberNotSentLocked(operation.ID)
 	}
@@ -739,6 +900,11 @@ func (l *failureLedger) finalizeLocked(
 	delete(l.active, operation.ID)
 	if l.recorder != nil {
 		l.recorder.OperationFinalized(cloneFailureOperation(operation), result)
+		if recorder, ok := l.recorder.(interface {
+			FinalizationReasonRecorded(*failureOperation, failureResult, failureReason)
+		}); ok {
+			recorder.FinalizationReasonRecorded(cloneFailureOperation(operation), result, reason)
+		}
 	}
 	l.finalizedSinceCompact++
 	if l.journal != nil && l.finalizedSinceCompact >= l.compactEvery {
@@ -771,6 +937,7 @@ func (l *failureLedger) compactLocked(at time.Time) error {
 		operation := l.active[operationID]
 		started := cloneFailureOperation(operation)
 		started.Observations = nil
+		started.ObservationReasons = nil
 		if started.LifecycleState == failureOperationActive {
 			started.LifecycleState = failureOperationJournaled
 		}
@@ -790,7 +957,8 @@ func (l *failureLedger) compactLocked(at time.Time) error {
 			}
 			events = append(events, failureLedgerEvent{
 				Type: failureLedgerEventObserved, OperationID: operation.ID,
-				Observer: observer, Observation: observation, At: at.UTC(),
+				Observer: observer, Observation: observation,
+				Reason: operation.ObservationReasons[observer], At: at.UTC(),
 			})
 		}
 	}
@@ -903,6 +1071,13 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 				return fmt.Errorf("replay failure ledger event %d: observer %q already recorded as %q", index, event.Observer, existing)
 			}
 			operation.Observations[event.Observer] = event.Observation
+			if _, known := failureReasonRegistry[event.Reason]; !known {
+				return fmt.Errorf("replay failure ledger event %d: invalid observation reason %q", index, event.Reason)
+			}
+			if operation.ObservationReasons == nil {
+				operation.ObservationReasons = make(map[failureObserver]failureReason)
+			}
+			operation.ObservationReasons[event.Observer] = event.Reason
 			l.countObservationLocked(event.Observer, event.Observation)
 		case failureLedgerEventFinalized:
 			if _, skipped := dropped[event.OperationID]; skipped {
@@ -1101,7 +1276,7 @@ func validFailureResult(result failureResult) bool {
 	}
 }
 
-// failureOperationResult collapses an operation's observations into one verdict.
+// failureOperationResult collapses an operation's observations into one result.
 // Precedence runs from strongest evidence to weakest: a confirmed absence
 // outranks an ambiguous observation, which outranks "the observer could not
 // answer", which outranks success.
@@ -1162,21 +1337,27 @@ func cloneFailureOperation(operation *failureOperation) *failureOperation {
 	for observer, observation := range operation.Observations {
 		cloned.Observations[observer] = observation
 	}
+	cloned.ObservationReasons = make(map[failureObserver]failureReason, len(operation.ObservationReasons))
+	for observer, reason := range operation.ObservationReasons {
+		cloned.ObservationReasons[observer] = reason
+	}
 	return &cloned
 }
 
 type fileFailureWAL struct {
-	mu            sync.Mutex
-	path          string
-	file          *os.File
-	size          int64
-	legacy        bool
-	syncDirectory func(string) error
+	mu               sync.Mutex
+	path             string
+	file             *os.File
+	size             int64
+	legacy           bool
+	observerContract *failureObserverContract
+	syncDirectory    func(string) error
 }
 
 type failureWALHeader struct {
-	RecordType    string `json:"recordType"`
-	SchemaVersion int    `json:"schemaVersion"`
+	RecordType       string                   `json:"recordType"`
+	SchemaVersion    int                      `json:"schemaVersion"`
+	ObserverContract *failureObserverContract `json:"observerContract,omitempty"`
 }
 
 const failureWALSchemaVersion = 2
@@ -1228,6 +1409,7 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 	reader := bufio.NewReader(file)
 	line := 0
 	headerSeen := false
+	w.observerContract = nil
 	durableBytes := int64(0)
 	tornFinalRecord := false
 	for {
@@ -1250,6 +1432,7 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 			}
 			durableBytes += int64(len(encoded))
 			headerSeen = true
+			w.observerContract = cloneFailureObserverContract(header.ObserverContract)
 			continue
 		}
 		if line == 1 {
@@ -1312,6 +1495,111 @@ func (w *fileFailureWAL) NeedsUpgrade() bool {
 	return w.legacy
 }
 
+func (w *fileFailureWAL) ConfigureObserverContract(
+	contract failureObserverContract,
+	active []failureOperation,
+) error {
+	if err := validateFailureObserverContract(contract); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.observerContract != nil {
+		if !equalFailureObserverContract(*w.observerContract, contract) {
+			return fmt.Errorf("%w: stored observer contract differs from current configuration", errFailureObserverContractMismatch)
+		}
+		return nil
+	}
+	for index := range active {
+		if !failureOperationMatchesObserverContract(&active[index], contract) {
+			return fmt.Errorf(
+				"%w: pending operation %q is incompatible with the current observer contract",
+				errFailureObserverContractMismatch,
+				active[index].ID,
+			)
+		}
+	}
+	w.observerContract = cloneFailureObserverContract(&contract)
+	if w.size == 0 {
+		return w.writeHeaderLocked()
+	}
+	w.legacy = true
+	return nil
+}
+
+func validateFailureObserverContract(contract failureObserverContract) error {
+	if contract.SchemaVersion != failureObserverContractSchemaVersion {
+		return fmt.Errorf("unsupported observer contract schema version %d", contract.SchemaVersion)
+	}
+	if contract.Scenario != soakFailureScenario {
+		return fmt.Errorf("observer contract scenario must be %q", soakFailureScenario)
+	}
+	if err := validateRegisteredObservers(contract.Observers); err != nil {
+		return err
+	}
+	hasRecipient := slices.Contains(contract.Observers, failureObserverRecipient)
+	if hasRecipient != contract.RecipientObserverEnabled {
+		return fmt.Errorf("recipient observer enablement does not match configured observers")
+	}
+	return nil
+}
+
+func equalFailureObserverContract(left, right failureObserverContract) bool {
+	return left.SchemaVersion == right.SchemaVersion &&
+		left.Scenario == right.Scenario &&
+		left.RecipientObserverEnabled == right.RecipientObserverEnabled &&
+		slices.Equal(left.Observers, right.Observers)
+}
+
+func cloneFailureObserverContract(contract *failureObserverContract) *failureObserverContract {
+	if contract == nil {
+		return nil
+	}
+	cloned := *contract
+	cloned.Observers = append([]failureObserver(nil), contract.Observers...)
+	return &cloned
+}
+
+func failureOperationMatchesObserverContract(
+	operation *failureOperation,
+	contract failureObserverContract,
+) bool {
+	if operation == nil || operation.Scenario != contract.Scenario {
+		return false
+	}
+	expected := append([]failureObserver(nil), operation.Expected...)
+	slices.Sort(expected)
+	configured := append([]failureObserver(nil), contract.Observers...)
+	slices.Sort(configured)
+	return slices.Equal(expected, configured)
+}
+
+func (w *fileFailureWAL) writeHeaderLocked() error {
+	header, err := json.Marshal(failureWALHeader{
+		RecordType: "header", SchemaVersion: failureWALSchemaVersion,
+		ObserverContract: cloneFailureObserverContract(w.observerContract),
+	})
+	if err != nil {
+		return fmt.Errorf("encode failure WAL header: %w", err)
+	}
+	header = append(header, '\n')
+	written, err := w.file.Write(header)
+	if err != nil {
+		return fmt.Errorf("append failure WAL header: %w", err)
+	}
+	if written != len(header) {
+		return fmt.Errorf("append failure WAL header: wrote %d of %d bytes", written, len(header))
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync failure WAL header: %w", err)
+	}
+	if err := w.syncDirectory(filepath.Dir(w.path)); err != nil {
+		return fmt.Errorf("sync failure WAL header directory: %w", err)
+	}
+	w.size += int64(written)
+	return nil
+}
+
 func (w *fileFailureWAL) Append(event *failureLedgerEvent) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1319,19 +1607,9 @@ func (w *fileFailureWAL) Append(event *failureLedgerEvent) error {
 		return fmt.Errorf("failure WAL is closed")
 	}
 	if w.size == 0 {
-		header, err := json.Marshal(failureWALHeader{RecordType: "header", SchemaVersion: failureWALSchemaVersion})
-		if err != nil {
-			return fmt.Errorf("encode failure WAL header: %w", err)
+		if err := w.writeHeaderLocked(); err != nil {
+			return err
 		}
-		header = append(header, '\n')
-		written, err := w.file.Write(header)
-		if err != nil {
-			return fmt.Errorf("append failure WAL header: %w", err)
-		}
-		if written != len(header) {
-			return fmt.Errorf("append failure WAL header: wrote %d of %d bytes", written, len(header))
-		}
-		w.size += int64(written)
 	}
 	if event.SchemaVersion == 0 {
 		event.SchemaVersion = failureWALSchemaVersion
@@ -1378,7 +1656,10 @@ func (w *fileFailureWAL) Compact(events []failureLedgerEvent) error {
 		}
 	}()
 	var compactedSize int64
-	header, err := json.Marshal(failureWALHeader{RecordType: "header", SchemaVersion: failureWALSchemaVersion})
+	header, err := json.Marshal(failureWALHeader{
+		RecordType: "header", SchemaVersion: failureWALSchemaVersion,
+		ObserverContract: cloneFailureObserverContract(w.observerContract),
+	})
 	if err != nil {
 		return fmt.Errorf("encode compacted failure WAL header: %w", err)
 	}

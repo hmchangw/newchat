@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,6 +36,79 @@ func TestFailureLedger_AbandonFinalizesWithoutDataLoss(t *testing.T) {
 	expired, err := ledger.Expire(now.Add(time.Hour))
 	require.NoError(t, err)
 	assert.Zero(t, expired)
+}
+
+func TestFailureLedger_BoundedResultReasons(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	metrics := NewMetrics()
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 2, Recorder: newFailureLedgerPromRecorder(metrics),
+	})
+	require.NoError(t, err)
+	operation := reviewFailureOperation("rejected", now)
+	require.NoError(t, ledger.Start(operation))
+
+	_, err = ledger.ObserveWithReason(
+		operation.ID,
+		failureObserverAdmission,
+		failureObservationBad,
+		failureReasonAdmissionRejected,
+		now,
+	)
+	require.NoError(t, err)
+	_, err = ledger.ObserveWithReason(
+		operation.ID,
+		failureObserverHistory,
+		failureObservationGood,
+		failureReasonNone,
+		now,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureObservationReasons.WithLabelValues(
+			soakFailureScenario,
+			soakFailureLaneMessageSend,
+			string(failureObserverAdmission),
+			string(failureObservationBad),
+			string(failureReasonAdmissionRejected),
+		),
+	))
+
+	second := reviewFailureOperation("invalid-reason", now)
+	require.NoError(t, ledger.Start(second))
+	_, err = ledger.ObserveWithReason(
+		second.ID,
+		failureObserverAdmission,
+		failureObservationBad,
+		failureReason("raw broker error"),
+		now,
+	)
+	assert.Error(t, err)
+}
+
+func TestFailureLedger_NotSentRequiresBoundedLocalProofReason(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	metrics := NewMetrics()
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1, Recorder: newFailureLedgerPromRecorder(metrics),
+	})
+	require.NoError(t, err)
+	operation := reviewFailureOperation("local-failure", now)
+	require.NoError(t, ledger.Start(operation))
+
+	require.NoError(t, ledger.AbandonWithReason(
+		operation.ID,
+		failureResultNotSent,
+		failureReasonPublishLocalError,
+		now,
+	))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureNotSent.WithLabelValues(
+			soakFailureScenario,
+			soakFailureLaneMessageSend,
+			string(failureReasonPublishLocalError),
+		),
+	))
 }
 
 func TestFailureLedger_ActivatedPublishCannotBecomeNotSent(t *testing.T) {

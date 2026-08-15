@@ -53,11 +53,9 @@ data:
   SOAK_RECONCILE_DEADLINE: {{ .Values.ledger.reconcileDeadline | quote }}
   SOAK_RECONCILE_RETRY_INTERVAL: {{ .Values.ledger.reconcileRetryInterval | quote }}
   SOAK_RECONCILE_READ_SHARE: {{ .Values.ledger.reconcileReadShare | quote }}
-  SOAK_RECIPIENT_OBSERVER_QUEUE: {{ .Values.failureEvidence.recipientObserverQueue | quote }}
-  SOAK_RECIPIENT_OBSERVER_CONNECTIONS: {{ .Values.failureEvidence.recipientObserverConnections | quote }}
-  SOAK_FAILURE_MANIFEST_PATH: {{ ternary "/etc/loadgen/failure/manifest.json" "" .Values.failureEvidence.enabled | quote }}
-  SOAK_FAILURE_TIMELINE_PATH: {{ ternary (printf "%s/%s.fault-events.jsonl" .Values.ledger.mountPath .Values.runId) "" .Values.failureEvidence.enabled | quote }}
-  SOAK_FAILURE_REPORT_DIR: {{ ternary .Values.ledger.mountPath "" .Values.failureEvidence.enabled | quote }}
+  SOAK_RECIPIENT_OBSERVER_ENABLED: {{ .Values.recipientObserver.enabled | quote }}
+  SOAK_RECIPIENT_OBSERVER_QUEUE: {{ .Values.recipientObserver.queue | quote }}
+  SOAK_RECIPIENT_OBSERVER_CONNECTIONS: {{ .Values.recipientObserver.connections | quote }}
   SOAK_CASSANDRA_CLEANUP: {{ .Values.cassandra.cleanup | quote }}
   SOAK_CONFIRM_KEYSPACE: {{ .Values.cassandra.confirmKeyspace | quote }}
   SOAK_TEARDOWN_BATCH_ROOMS: {{ .Values.teardown.batchRooms | quote }}

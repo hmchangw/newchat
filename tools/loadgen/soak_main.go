@@ -398,19 +398,6 @@ func runSoakWorkload(
 
 	metrics := NewMetrics()
 	defer metrics.StopNATSHealth()
-	var evidenceRun *soakFailureEvidenceRun
-	if cfg.Soak.FailureManifestPath != "" {
-		evidenceRun, err = openSoakFailureEvidence(&cfg.Soak, metrics, time.Now().UTC())
-		if err != nil {
-			slog.Error("open formal failure evidence run", "error", err)
-			return 2
-		}
-		defer func() {
-			if err := evidenceRun.Close(); err != nil {
-				slog.Error("close failure evidence timeline", "error", err)
-			}
-		}()
-	}
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
 	if err != nil {
 		slog.Error("connect NATS for Cassandra soak", "error", err)
@@ -454,10 +441,13 @@ func runSoakWorkload(
 		collectorDuration,
 	)
 	recorders := newSoakCollectorRecorders(collector, now)
-	ledger, err := openSoakFailureLedger(&cfg.Soak, metrics, now)
+	ledger, degradedLedger, err := openSoakFailureObservationLedger(&cfg.Soak, metrics, now)
 	if err != nil {
 		slog.Error("open Cassandra soak failure ledger", "error", err)
-		return 1
+		return 2
+	}
+	if degradedLedger {
+		slog.Error("durable failure ledger unavailable; continuing with invalid in-memory observation")
 	}
 	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
 		metrics.FailureDropped.Add(float64(dropped))
@@ -469,7 +459,6 @@ func runSoakWorkload(
 	}()
 	consumerSamplerCtx, stopConsumerSamplers := context.WithCancel(context.Background())
 	var consumerSamplerWG sync.WaitGroup
-	consumerSamplers := make([]*ConsumerSampler, 0, 2)
 	js, jetStreamErr := jetstream.New(nc.NatsConn())
 	if jetStreamErr != nil {
 		ledger.Invalidate("consumer_sample")
@@ -490,7 +479,6 @@ func runSoakWorkload(
 				slog.Error("configure soak consumer sampler", "durable", durable, "error", samplerErr)
 				continue
 			}
-			consumerSamplers = append(consumerSamplers, sampler)
 			consumerSamplerWG.Add(1)
 			go func() {
 				defer consumerSamplerWG.Done()
@@ -499,89 +487,56 @@ func runSoakWorkload(
 		}
 	}
 	var consumerShutdownOnce sync.Once
-	consumerStats := make([]ConsumerStat, 0, len(consumerSamplers))
 	shutdownConsumerSamplers := func() {
 		consumerShutdownOnce.Do(func() {
 			stopConsumerSamplers()
 			consumerSamplerWG.Wait()
-			for _, sampler := range consumerSamplers {
-				consumerStats = append(consumerStats, sampler.Snapshot())
-			}
 		})
 	}
 	defer shutdownConsumerSamplers()
-	recipientOptions := make([]failureRecipientObserverOption, 0, 1)
-	if evidenceRun != nil {
-		recipientOptions = append(
-			recipientOptions,
-			withFailureRecipientEvidenceDir(evidenceRun.ReportDir),
-			withFailureRecipientDuplicatePolicy(evidenceRun.Manifest.FaultPolicy.AllowDeliveryDuplicate),
-		)
-	}
-	recipientObserver := newFailureRecipientObserver(
+	observationRuntime := newSoakFailureObservationRuntime(
+		cfg.Soak.RecipientObserverEnabled,
 		ledger,
 		metrics,
 		cfg.Soak.RecipientObserverQueue,
+		cfg.Soak.LedgerDir,
 		now,
-		recipientOptions...,
 	)
-	if err := recipientObserver.Recover(ledger.ActiveOperations()); err != nil {
-		ledger.Invalidate("recipient_recovery")
-		slog.Error("recover recipient observer expectations", "error", err)
-	}
-	recipientCtx, stopRecipientObserver := context.WithCancel(context.Background())
-	recipientObserver.Run(recipientCtx)
-	var recipientSubscriptions *failureRecipientSubscriptions
-	recipientSource := newPooledNATSFailureRecipientSource(
-		cfg.Soak.RecipientObserverConnections,
-		func(_ int) (failureRecipientConnection, error) {
-			connection, connectErr := connectWithCredsHealth(
-				cfg.NatsURL,
-				"loadgen-recipient-observer",
-				cfg.NatsCredsFile,
-				"recipient_observer",
-				metrics,
-				recipientObserver.health,
-			)
-			if connectErr != nil {
-				return nil, connectErr
-			}
-			return &natsFailureRecipientConnection{nc: connection}, nil
-		},
-	)
-	recipientSubscriptions, err = startFailureRecipientSubscriptions(
-		recipientSource,
-		&topology,
-		recipientObserver,
-	)
-	if err != nil {
-		ledger.Invalidate("recipient_observer")
-		slog.Error("start recipient observer subscriptions", "error", err)
-	}
-	var recipientShutdownOnce sync.Once
-	var recipientShutdownErr error
-	shutdownRecipientObserver := func() error {
-		recipientShutdownOnce.Do(func() {
-			recipientShutdownErr = shutdownFailureRecipientObserver(
-				recipientSubscriptions,
-				stopRecipientObserver,
-				recipientObserver,
-			)
-		})
-		return recipientShutdownErr
+	if cfg.Soak.RecipientObserverEnabled {
+		recipientObserver := observationRuntime.Recipient()
+		recipientSource := newPooledNATSFailureRecipientSource(
+			cfg.Soak.RecipientObserverConnections,
+			func(_ int) (failureRecipientConnection, error) {
+				connection, connectErr := connectWithCredsHealth(
+					cfg.NatsURL,
+					"loadgen-recipient-observer",
+					cfg.NatsCredsFile,
+					"recipient_observer",
+					metrics,
+					recipientObserver.health,
+				)
+				if connectErr != nil {
+					return nil, connectErr
+				}
+				return &natsFailureRecipientConnection{nc: connection}, nil
+			},
+		)
+		if err := observationRuntime.StartRecipient(recipientSource, &topology, ledger.ActiveOperations()); err != nil {
+			ledger.Invalidate("recipient_observer")
+			slog.Error("start recipient observer", "error", err)
+		}
 	}
 	defer func() {
-		if err := shutdownRecipientObserver(); err != nil {
+		if err := observationRuntime.Close(); err != nil {
 			slog.Error("shutdown recipient observer", "error", err)
 		}
 	}()
 	trackerOptions := []soakFailureTrackerOption{
 		withSoakFailureMetrics(metrics),
 		withSoakFailureRunID(cfg.Soak.RunID),
-		withSoakFailureRecipientObserver(recipientObserver),
 	}
-	if evidenceRun != nil {
-		trackerOptions = append(trackerOptions, withSoakFailureScenario(evidenceRun.Manifest.ScenarioID))
+	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
+		trackerOptions = append(trackerOptions, withSoakFailureRecipientObserver(recipientObserver))
 	}
 	failureTracker := newSoakFailureTracker(
 		ledger,
@@ -687,12 +642,16 @@ func runSoakWorkload(
 		recorders.verify,
 		now,
 	)
+	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 1)
+	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
+		reconcilerOptions = append(reconcilerOptions, withSoakFailureRecipientFinalizer(recipientObserver))
+	}
 	failureReconciler := newSoakFailureReconciler(
 		ledger,
 		failureVerifier,
 		cfg.Soak.ReconcileRetryInterval,
 		now,
-		withSoakFailureRecipientFinalizer(recipientObserver),
+		reconcilerOptions...,
 	)
 	reconcileGate := newSoakShareGate(cfg.Soak.ReconcileReadShare)
 	warmReader := newSoakReader(
@@ -850,44 +809,19 @@ func runSoakWorkload(
 		actions,
 		nil,
 		now,
-		func() { metrics.SoakSaturation.WithLabelValues("global").Inc() },
+		nil,
+		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
 	)
 	result, runErr := workload.Run(ctx)
-	evaluationEndedAt := now().UTC()
 	shutdownConsumerSamplers()
-	if err := shutdownRecipientObserver(); err != nil {
+	if err := observationRuntime.Close(); err != nil {
 		ledger.Invalidate("recipient_observer")
-		slog.Error("shutdown recipient observer before evidence report", "error", err)
+		slog.Error("shutdown recipient observer", "error", err)
 	}
 	snapshot := collector.Snapshot(now())
 	report := BuildSoakReport(&snapshot, soakTargetRates(&cfg.Soak))
 	if err := PrintSoakReport(os.Stdout, &report); err != nil {
 		slog.Error("print Cassandra soak report", "error", err)
-	}
-	if evidenceRun != nil {
-		if err := evidenceRun.Timeline.Refresh(); err != nil {
-			ledger.Invalidate("timeline")
-			slog.Error("refresh failure evidence timeline", "error", err)
-		}
-		sidecars, sidecarErr := finalizeFailureRecipientSidecars(evidenceRun.ReportDir)
-		if sidecarErr != nil {
-			ledger.Invalidate("sidecar")
-			slog.Error("finalize recipient evidence sidecars", "error", sidecarErr)
-		}
-		recipientHealth := recipientObserver.health.Snapshot(evaluationEndedAt)
-		evidenceReport := buildSoakFailureEvidenceReport(
-			evidenceRun,
-			ledger.Snapshot(),
-			&snapshot,
-			&recipientHealth,
-			consumerStats,
-			sidecars,
-			evaluationEndedAt,
-		)
-		if err := writeFailureEvidenceArtifacts(evidenceRun.ReportDir, &evidenceReport); err != nil {
-			slog.Error("write formal failure evidence report", "error", err)
-			return 1
-		}
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		slog.Error(

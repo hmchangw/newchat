@@ -123,7 +123,7 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 	metrics.FailureObserverEvents.WithLabelValues("recipient_broadcast", "good").Inc()
 	metrics.FailureObserverQueueDepth.WithLabelValues("recipient_broadcast").Set(0)
 	metrics.ConsumerSampleErrors.WithLabelValues("MESSAGES-CANONICAL-site-local", "broadcast-worker", "lookup").Inc()
-	metrics.RunInfo.WithLabelValues("staging", "F02", "nats-core-message-v1").Set(1)
+	metrics.RunInfo.WithLabelValues("staging", soakFailureScenario, "cassandra-soak-v1").Set(1)
 
 	mfs, err := metrics.Registry.Gather()
 	require.NoError(t, err)
@@ -147,4 +147,60 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 	} {
 		assert.True(t, names[name], name)
 	}
+}
+
+func TestMetrics_FailureObservationConfigurationAndPacingFamilies(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.FailureObserverConfigured.WithLabelValues(string(failureObserverAdmission)).Set(1)
+	metrics.FailureObserverConfigured.WithLabelValues(string(failureObserverRecipient)).Set(0)
+	metrics.FailureObserverEligible.WithLabelValues(
+		soakFailureScenario,
+		soakFailureLaneMessageSend,
+		string(failureObserverHistory),
+	).Inc()
+	metrics.SoakConfiguredRate.WithLabelValues("send").Set(100)
+	metrics.SoakIntended.WithLabelValues("send").Add(4)
+	metrics.SoakDispatched.WithLabelValues("send").Inc()
+	metrics.SoakSchedulerUnderrun.WithLabelValues("send").Inc()
+	metrics.SoakLaneSaturation.WithLabelValues("send").Inc()
+	metrics.SoakGlobalSaturation.WithLabelValues("send").Inc()
+
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+	names := make(map[string]struct{}, len(families))
+	for _, family := range families {
+		names[family.GetName()] = struct{}{}
+	}
+	for _, name := range []string{
+		"loadgen_failure_observer_configured",
+		"loadgen_failure_observer_eligible_total",
+		"loadgen_soak_configured_rate",
+		"loadgen_soak_intended_total",
+		"loadgen_soak_dispatched_total",
+		"loadgen_soak_scheduler_underrun_total",
+		"loadgen_soak_lane_saturation_total",
+		"loadgen_soak_global_saturation_total",
+	} {
+		assert.Contains(t, names, name)
+	}
+}
+
+func TestSoakPacing_RecordsOneExclusiveOutcomePerIntendedEvent(t *testing.T) {
+	metrics := NewMetrics()
+	recorder := newSoakPacingMetrics(metrics)
+	recorder.Configure("send", 100)
+	recorder.Record("send", soakPacingDispatched, 2)
+	recorder.Record("send", soakPacingSchedulerUnderrun, 3)
+	recorder.Record("send", soakPacingLaneSaturation, 5)
+	recorder.Record("send", soakPacingGlobalSaturation, 7)
+	recorder.Record("send", soakPacingOutcome("unknown"), 11)
+
+	intended := testutil.ToFloat64(metrics.SoakIntended.WithLabelValues("send"))
+	dispatched := testutil.ToFloat64(metrics.SoakDispatched.WithLabelValues("send"))
+	underrun := testutil.ToFloat64(metrics.SoakSchedulerUnderrun.WithLabelValues("send"))
+	laneSaturation := testutil.ToFloat64(metrics.SoakLaneSaturation.WithLabelValues("send"))
+	globalSaturation := testutil.ToFloat64(metrics.SoakGlobalSaturation.WithLabelValues("send"))
+	assert.Equal(t, float64(17), intended)
+	assert.Equal(t, intended, dispatched+underrun+laneSaturation+globalSaturation)
+	assert.Equal(t, float64(100), testutil.ToFloat64(metrics.SoakConfiguredRate.WithLabelValues("send")))
 }

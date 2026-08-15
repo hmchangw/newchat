@@ -46,22 +46,31 @@ type Metrics struct {
 	SoakRPCLatency            *prometheus.HistogramVec
 	SoakVerifications         *prometheus.CounterVec
 	SoakMutationTargetMissing prometheus.Counter
-	SoakSaturation            *prometheus.CounterVec
+	SoakConfiguredRate        *prometheus.GaugeVec
+	SoakIntended              *prometheus.CounterVec
+	SoakDispatched            *prometheus.CounterVec
+	SoakSchedulerUnderrun     *prometheus.CounterVec
+	SoakLaneSaturation        *prometheus.CounterVec
+	SoakGlobalSaturation      *prometheus.CounterVec
 
-	FailureOperations    *prometheus.CounterVec
-	FailureObservations  *prometheus.CounterVec
-	FailureInflight      *prometheus.GaugeVec
-	FailureRecovered     prometheus.Counter
-	FailureInvalidations *prometheus.CounterVec
-	FailureJournalBytes  prometheus.Gauge
-	FailureUntracked     *prometheus.CounterVec
-	FailureDropped       prometheus.Counter
+	FailureOperations         *prometheus.CounterVec
+	FailureObservations       *prometheus.CounterVec
+	FailureObservationReasons *prometheus.CounterVec
+	FailureInflight           *prometheus.GaugeVec
+	FailureRecovered          prometheus.Counter
+	FailureInvalidations      *prometheus.CounterVec
+	FailureJournalBytes       prometheus.Gauge
+	FailureUntracked          *prometheus.CounterVec
+	FailureDropped            prometheus.Counter
+	FailureNotSent            *prometheus.CounterVec
 
 	NATSConnected             *prometheus.GaugeVec
 	NATSConnectionEvents      *prometheus.CounterVec
 	NATSOutageDuration        *prometheus.HistogramVec
 	NATSCurrentOutage         *prometheus.GaugeVec
 	FailureObserverUp         *prometheus.GaugeVec
+	FailureObserverConfigured *prometheus.GaugeVec
+	FailureObserverEligible   *prometheus.CounterVec
 	FailureObserverEvents     *prometheus.CounterVec
 	FailureObserverQueueDepth *prometheus.GaugeVec
 	ConsumerSampleErrors      *prometheus.CounterVec
@@ -214,11 +223,28 @@ func NewMetrics() *Metrics {
 			Help: "Cassandra soak mutation targets still missing after the dedicated retry policy.",
 		},
 	)
-	m.SoakSaturation = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "loadgen_soak_saturation_total",
-			Help: "Cassandra soak operations skipped because the bounded in-flight budget was full.",
-		},
+	m.SoakConfiguredRate = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_soak_configured_rate", Help: "Configured open-loop target rate by bounded soak lane."},
+		[]string{"lane"},
+	)
+	m.SoakIntended = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_intended_total", Help: "Pacing events due by bounded soak lane."},
+		[]string{"lane"},
+	)
+	m.SoakDispatched = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_dispatched_total", Help: "Pacing events dispatched by bounded soak lane."},
+		[]string{"lane"},
+	)
+	m.SoakSchedulerUnderrun = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_scheduler_underrun_total", Help: "Pacing events skipped after scheduler delay by bounded soak lane."},
+		[]string{"lane"},
+	)
+	m.SoakLaneSaturation = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_lane_saturation_total", Help: "Pacing events skipped because the lane in-flight budget was full."},
+		[]string{"lane"},
+	)
+	m.SoakGlobalSaturation = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_global_saturation_total", Help: "Pacing events skipped because the global in-flight budget was full."},
 		[]string{"lane"},
 	)
 	m.FailureOperations = prometheus.NewCounterVec(
@@ -234,6 +260,13 @@ func NewMetrics() *Metrics {
 			Help: "Fault-observation results by bounded scenario, lane, observer, and result.",
 		},
 		[]string{"scenario", "lane", "observer", "result"},
+	)
+	m.FailureObservationReasons = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_observation_reasons_total",
+			Help: "Failure observations by bounded result reason.",
+		},
+		[]string{"scenario", "lane", "observer", "result", "reason"},
 	)
 	m.FailureInflight = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -274,6 +307,10 @@ func NewMetrics() *Metrics {
 			Help: "Recovered operations discarded at startup because the journal exceeded capacity.",
 		},
 	)
+	m.FailureNotSent = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_failure_not_sent_total", Help: "Proven local pre-publish failures by bounded reason."},
+		[]string{"scenario", "lane", "reason"},
+	)
 	m.NATSConnected = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "loadgen_nats_connected",
@@ -304,6 +341,14 @@ func NewMetrics() *Metrics {
 		prometheus.GaugeOpts{Name: "loadgen_failure_observer_up", Help: "Whether a required failure observer is healthy."},
 		[]string{"observer"},
 	)
+	m.FailureObserverConfigured = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_failure_observer_configured", Help: "Whether a bounded failure observer is configured for new operations."},
+		[]string{"observer"},
+	)
+	m.FailureObserverEligible = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_failure_observer_eligible_total", Help: "Operations eligible for a configured observer result."},
+		[]string{"scenario", "lane", "observer"},
+	)
 	m.FailureObserverEvents = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "loadgen_failure_observer_events_total", Help: "Normalized failure observer events."},
 		[]string{"observer", "result"},
@@ -317,7 +362,7 @@ func NewMetrics() *Metrics {
 		[]string{"stream", "durable", "reason"},
 	)
 	m.RunInfo = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{Name: "loadgen_run_info", Help: "Bounded failure-campaign run metadata without a run ID."},
+		prometheus.GaugeOpts{Name: "loadgen_run_info", Help: "Bounded loadgen runtime metadata without a run ID."},
 		[]string{"environment", "scenario", "traffic_profile"},
 	)
 	r.MustRegister(
@@ -332,12 +377,14 @@ func NewMetrics() *Metrics {
 		m.BotRoomE2ELatency, m.BotRoomReadLatency,
 		m.SoakOperations, m.SoakRetries, m.SoakErrors,
 		m.SoakRPCLatency, m.SoakVerifications,
-		m.SoakMutationTargetMissing, m.SoakSaturation,
-		m.FailureOperations, m.FailureObservations, m.FailureInflight,
+		m.SoakMutationTargetMissing, m.SoakConfiguredRate, m.SoakIntended,
+		m.SoakDispatched, m.SoakSchedulerUnderrun, m.SoakLaneSaturation, m.SoakGlobalSaturation,
+		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
-		m.FailureUntracked, m.FailureDropped,
+		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,
 		m.NATSConnected, m.NATSConnectionEvents, m.NATSOutageDuration, m.NATSCurrentOutage,
-		m.FailureObserverUp, m.FailureObserverEvents, m.FailureObserverQueueDepth,
+		m.FailureObserverUp, m.FailureObserverConfigured, m.FailureObserverEligible,
+		m.FailureObserverEvents, m.FailureObserverQueueDepth,
 		m.ConsumerSampleErrors, m.RunInfo,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),

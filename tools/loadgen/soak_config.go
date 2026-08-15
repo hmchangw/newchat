@@ -60,11 +60,9 @@ type soakConfig struct {
 	ReconcileDeadline            time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
 	ReconcileRetryInterval       time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
 	ReconcileReadShare           float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
+	RecipientObserverEnabled     bool          `env:"RECIPIENT_OBSERVER_ENABLED"        envDefault:"false"`
 	RecipientObserverQueue       int           `env:"RECIPIENT_OBSERVER_QUEUE"          envDefault:"8192"`
 	RecipientObserverConnections int           `env:"RECIPIENT_OBSERVER_CONNECTIONS"    envDefault:"32"`
-	FailureManifestPath          string        `env:"FAILURE_MANIFEST_PATH"             envDefault:""`
-	FailureTimelinePath          string        `env:"FAILURE_TIMELINE_PATH"             envDefault:""`
-	FailureReportDir             string        `env:"FAILURE_REPORT_DIR"                envDefault:""`
 	CassandraCleanup             string        `env:"CASSANDRA_CLEANUP"                envDefault:"none"`
 	ConfirmKeyspace              string        `env:"CONFIRM_KEYSPACE"                 envDefault:""`
 	TeardownBatchRooms           int           `env:"TEARDOWN_BATCH_ROOMS"              envDefault:"250"`
@@ -201,13 +199,6 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if cfg.RecipientObserverConnections <= 0 || cfg.RecipientObserverConnections > 256 {
 		return fmt.Errorf("SOAK_RECIPIENT_OBSERVER_CONNECTIONS must be between 1 and 256")
 	}
-	if cfg.FailureManifestPath != "" && cfg.LedgerDir == "" {
-		return fmt.Errorf("SOAK_LEDGER_DIR is required with SOAK_FAILURE_MANIFEST_PATH")
-	}
-	if cfg.FailureManifestPath == "" && (cfg.FailureTimelinePath != "" || cfg.FailureReportDir != "") {
-		return fmt.Errorf("SOAK_FAILURE_MANIFEST_PATH is required with failure timeline or report paths")
-	}
-
 	if cfg.MaxUsers <= 0 || cfg.MaxUsers > maxBorrowedSoakUsers {
 		return fmt.Errorf("SOAK_MAX_USERS must be between 1 and %d", maxBorrowedSoakUsers)
 	}

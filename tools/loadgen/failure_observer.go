@@ -163,3 +163,29 @@ func (h *failureObserverHealth) Snapshot(end time.Time) failureObserverHealthSna
 		Intervals: intervals,
 	}
 }
+
+func failureHealthSnapshotCovers(
+	snapshot *failureObserverHealthSnapshot,
+	start time.Time,
+	end time.Time,
+) bool {
+	if snapshot == nil || len(snapshot.Intervals) == 0 {
+		return false
+	}
+	if snapshot.HistoryTruncated && start.Before(snapshot.HistoryAvailableFrom) {
+		return false
+	}
+	coveredUntil := start
+	for _, interval := range snapshot.Intervals {
+		if !interval.End.After(start) || !interval.Start.Before(end) {
+			continue
+		}
+		if !interval.Up || interval.Start.After(coveredUntil) {
+			return false
+		}
+		if interval.End.After(coveredUntil) {
+			coveredUntil = interval.End
+		}
+	}
+	return !coveredUntil.Before(end)
+}

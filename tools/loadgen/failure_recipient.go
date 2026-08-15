@@ -530,7 +530,7 @@ func newFailureRecipientObserver(
 		ledger: ledger, metrics: metrics, evidence: newRecipientEvidence(false),
 		health: newFailureObserverHealth(failureObserverRecipient, startedAt),
 		queue:  make(chan recipientDelivery, capacity), now: now,
-		syncDirectory: syncFailureDirectory,
+		syncDirectory: syncFailureWALDirectory,
 	}
 	for _, option := range options {
 		option(observer)

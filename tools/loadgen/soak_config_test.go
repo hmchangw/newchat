@@ -290,6 +290,14 @@ func validSoakConfig(t *testing.T) soakConfig {
 	return cfg
 }
 
+func TestSoakConfig_RecipientObserverDefaultsDisabled(t *testing.T) {
+	cfg := mustDefaultSoakConfig(t)
+
+	assert.False(t, cfg.RecipientObserverEnabled)
+	assert.Equal(t, 8192, cfg.RecipientObserverQueue)
+	assert.Equal(t, 32, cfg.RecipientObserverConnections)
+}
+
 func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -345,28 +353,6 @@ func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 			name:   "too many recipient observer connections",
 			mutate: func(cfg *soakConfig) { cfg.RecipientObserverConnections = 257 },
 			want:   "SOAK_RECIPIENT_OBSERVER_CONNECTIONS",
-		},
-		{
-			name: "formal manifest without retained ledger directory",
-			mutate: func(cfg *soakConfig) {
-				cfg.FailureManifestPath = "manifest.json"
-				cfg.LedgerDir = ""
-			},
-			want: "SOAK_LEDGER_DIR",
-		},
-		{
-			name: "timeline without formal manifest",
-			mutate: func(cfg *soakConfig) {
-				cfg.FailureTimelinePath = "timeline.jsonl"
-			},
-			want: "SOAK_FAILURE_MANIFEST_PATH",
-		},
-		{
-			name: "report directory without formal manifest",
-			mutate: func(cfg *soakConfig) {
-				cfg.FailureReportDir = "report"
-			},
-			want: "SOAK_FAILURE_MANIFEST_PATH",
 		},
 	}
 	for _, tt := range tests {

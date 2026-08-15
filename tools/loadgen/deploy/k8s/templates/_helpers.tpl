@@ -10,11 +10,6 @@
 {{- printf "%s-%s" .Release.Name (include "cassandra-soak.runSlug" .) | trunc 52 | trimSuffix "-" -}}
 {{- end -}}
 
-{{/* Run-scoped immutable failure manifest name. */}}
-{{- define "cassandra-soak.failureManifestName" -}}
-{{- printf "%s-failure-%s" (include "cassandra-soak.fullname" . | trunc 46 | trimSuffix "-") (sha256sum .Values.runId | trunc 8) -}}
-{{- end -}}
-
 {{- define "cassandra-soak.labels" -}}
 app.kubernetes.io/name: {{ include "cassandra-soak.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
@@ -49,14 +44,8 @@ loadgen.newchat/run: {{ include "cassandra-soak.runSlug" . | quote }}
 {{- if ne .Values.soak.runMode "continuous" -}}
 {{- fail "soak.runMode must be continuous for the Deployment" -}}
 {{- end -}}
-{{- if and .Values.failureEvidence.enabled (not .Values.ledger.enabled) -}}
-{{- fail "ledger.enabled=true is required when failureEvidence.enabled=true" -}}
-{{- end -}}
-{{- if and .Values.failureEvidence.enabled (not .Values.failureEvidence.gitSha) -}}
-{{- fail "failureEvidence.gitSha is required when failureEvidence.enabled=true" -}}
-{{- end -}}
-{{- if and .Values.failureEvidence.enabled (not .Values.failureEvidence.createdAt) -}}
-{{- fail "failureEvidence.createdAt is required when failureEvidence.enabled=true" -}}
+{{- if and .Values.recipientObserver.enabled (not .Values.ledger.enabled) -}}
+{{- fail "ledger.enabled=true is required when recipientObserver.enabled=true" -}}
 {{- end -}}
 {{- $image := include "cassandra-soak.image" . -}}
 {{- end -}}

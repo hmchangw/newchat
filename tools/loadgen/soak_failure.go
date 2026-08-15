@@ -34,6 +34,7 @@ func openSoakFailureLedger(
 		return nil, fmt.Errorf("soak configuration is required")
 	}
 	var journal failureJournal
+	contract := newFailureObserverContract(cfg.RecipientObserverEnabled)
 	if cfg.LedgerDir != "" {
 		wal, err := openFailureWAL(filepath.Join(cfg.LedgerDir, cfg.RunID+".wal"))
 		if err != nil {
@@ -42,10 +43,11 @@ func openSoakFailureLedger(
 		journal = wal
 	}
 	ledger, err := newFailureLedger(failureLedgerConfig{
-		Capacity: cfg.LedgerCapacity,
-		Journal:  journal,
-		Now:      now,
-		Recorder: newFailureLedgerPromRecorder(metrics),
+		Capacity:         cfg.LedgerCapacity,
+		Journal:          journal,
+		Now:              now,
+		Recorder:         newFailureLedgerPromRecorder(metrics),
+		ObserverContract: &contract,
 	})
 	if err != nil {
 		if journal != nil {
@@ -53,7 +55,23 @@ func openSoakFailureLedger(
 		}
 		return nil, fmt.Errorf("open soak failure ledger: %w", err)
 	}
+	recordFailureObserverConfiguration(metrics, contract)
 	return ledger, nil
+}
+
+func recordFailureObserverConfiguration(metrics *Metrics, contract failureObserverContract) {
+	if metrics == nil {
+		return
+	}
+	for _, observer := range []failureObserver{
+		failureObserverAdmission, failureObserverHistory, failureObserverRecipient,
+	} {
+		configured := 0.0
+		if slices.Contains(contract.Observers, observer) {
+			configured = 1
+		}
+		metrics.FailureObserverConfigured.WithLabelValues(string(observer)).Set(configured)
+	}
 }
 
 const (
@@ -70,7 +88,6 @@ type soakFailureTracker struct {
 	metrics      *Metrics
 	runID        string
 	recipient    *failureRecipientObserver
-	scenario     string
 }
 
 type soakFailureTrackerOption func(*soakFailureTracker)
@@ -89,10 +106,6 @@ func withSoakFailureRecipientObserver(observer *failureRecipientObserver) soakFa
 	return func(tracker *soakFailureTracker) { tracker.recipient = observer }
 }
 
-func withSoakFailureScenario(scenario string) soakFailureTrackerOption {
-	return func(tracker *soakFailureTracker) { tracker.scenario = scenario }
-}
-
 func newSoakFailureTracker(
 	ledger *failureLedger,
 	persistGrace time.Duration,
@@ -106,7 +119,6 @@ func newSoakFailureTracker(
 	tracker := &soakFailureTracker{
 		ledger: ledger, persistGrace: max(0, persistGrace),
 		deadline: max(time.Second, deadline), now: now, runID: "legacy",
-		scenario: soakFailureScenario,
 	}
 	for _, option := range options {
 		option(tracker)
@@ -156,12 +168,16 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 	if err := t.ledger.Start(&failureOperation{
 		SchemaVersion: 2, ID: pending.MessageID, CorrelationID: pending.RequestID,
 		RunID: t.runID, OperationType: failureOperationMessageCreate,
-		Scenario: t.scenario, Lane: soakFailureLaneMessageSend,
+		Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
 		LifecycleState: failureOperationJournaled,
 		StartedAt:      startedAt, VerifyAfter: startedAt.Add(t.persistGrace),
 		Deadline: startedAt.Add(t.deadline),
 		Targets:  map[string]string{"messageId": pending.MessageID, "roomId": pending.Target.RoomID},
-		Effects:  messageCreateExpectedEffects(len(recipients), hex.EncodeToString(recipientHash[:])),
+		Effects: messageCreateExpectedEffectsForObservers(
+			t.recipient != nil,
+			len(recipients),
+			hex.EncodeToString(recipientHash[:]),
+		),
 		Attributes: map[string]string{
 			soakFailureAttributeRoomID:         pending.Target.RoomID,
 			soakFailureAttributeAccount:        pending.Target.Account,
@@ -424,17 +440,30 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		if _, recipientObserved := operation.Observations[failureObserverRecipient]; !recipientObserved &&
 			slices.Contains(operation.Expected, failureObserverRecipient) {
 			observation := failureObservationUnverified
+			reason := failureReasonNone
 			if r.recipient != nil {
-				observation = r.recipient.Finalize(
+				result := r.recipient.Finalize(
 					operation.ID,
 					operation.StartedAt,
 					operation.Deadline,
-				).Observation
+				)
+				observation = result.Observation
+				switch {
+				case len(result.Mismatches) > 0:
+					reason = failureReasonRecipientIdentityMismatch
+				case len(result.Unexpected) > 0:
+					reason = failureReasonRecipientUnexpected
+				case len(result.Duplicates) > 0 && observation == failureObservationBad:
+					reason = failureReasonRecipientDuplicate
+				case len(result.Missing) > 0:
+					reason = failureReasonRecipientMissing
+				}
 			}
-			if _, err := r.ledger.Observe(
+			if _, err := r.ledger.ObserveWithReason(
 				operation.ID,
 				failureObserverRecipient,
 				observation,
+				reason,
 				now,
 			); err != nil {
 				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
@@ -476,7 +505,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
-	// Past the deadline the verdict depends on what the verifier could actually
+	// Past the deadline the result depends on what the verifier could actually
 	// establish. An unreachable history service proves nothing, so it must not
 	// be recorded as a missing message: that would turn every dependency outage
 	// longer than the deadline into a data-loss report.

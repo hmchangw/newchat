@@ -729,29 +729,3 @@ func (c *fakeFailureRecipientConnection) Drain() error {
 	}
 	return nil
 }
-
-func TestFailureVerdict_PrecedenceAndAllReasons(t *testing.T) {
-	result := evaluateFailureVerdict([]failureGate{
-		{ID: "business_missing", Verdict: failureVerdictFail, Reason: "recipient missing"},
-		{ID: "observer_gap", Verdict: failureVerdictInconclusive, Reason: "observer disconnected"},
-	})
-	assert.Equal(t, failureVerdictInconclusive, result.Verdict)
-	assert.Equal(t, []string{"observer disconnected", "recipient missing"}, result.Reasons)
-}
-
-func TestFailureEvidenceReport_DeterministicJSON(t *testing.T) {
-	report := failureEvidenceReport{
-		SchemaVersion: 1, ManifestDigest: "abc", Verdict: failureVerdictPass,
-		Reasons: []string{"z", "a"},
-		Gates:   []failureGate{{ID: "z", Verdict: failureVerdictPass}, {ID: "a", Verdict: failureVerdictPass}},
-	}
-	first, err := marshalFailureEvidenceReport(report)
-	require.NoError(t, err)
-	second, err := marshalFailureEvidenceReport(report)
-	require.NoError(t, err)
-	assert.Equal(t, first, second)
-	var decoded failureEvidenceReport
-	require.NoError(t, json.Unmarshal(first, &decoded))
-	assert.Equal(t, []string{"a", "z"}, decoded.Reasons)
-	assert.Equal(t, "a", decoded.Gates[0].ID)
-}
