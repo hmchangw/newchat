@@ -41,7 +41,7 @@ type writeIntents struct {
 // deriveIntents maps a canonical event to its room-level writes. Pure by
 // construction: mention.Parse is a function of content alone, and the room id
 // is carried on the message — so no MongoDB read is needed to decide anything.
-func deriveIntents(evt *model.MessageEvent) writeIntents {
+func deriveIntents(evt *eventProjection) writeIntents {
 	msg := &evt.Message
 	if msg.RoomID == "" || msg.IsHiddenThreadReply() {
 		return writeIntents{}

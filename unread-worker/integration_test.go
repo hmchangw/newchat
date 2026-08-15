@@ -62,7 +62,7 @@ func readSub(t *testing.T, db *mongo.Database, roomID, account string) bson.M {
 }
 
 // flushOne runs one event end-to-end through the real flusher and store.
-func flushOne(t *testing.T, store Store, evt model.MessageEvent) *fakeMsg {
+func flushOne(t *testing.T, store Store, evt eventProjection) *fakeMsg {
 	t.Helper()
 	f := newFlusher(store)
 	m := &fakeMsg{}
@@ -78,9 +78,9 @@ func TestIntegration_CreatedMessageWritesRoomPointerSenderSeenAndMention(t *test
 	seedSubscription(t, db, "r1", "alice", nil)
 	seedSubscription(t, db, "r1", "bob", nil)
 
-	m := flushOne(t, store, model.MessageEvent{
+	m := flushOne(t, store, eventProjection{
 		Event: model.EventCreated,
-		Message: model.Message{
+		Message: messageProjection{
 			ID: "m1", RoomID: "r1", UserAccount: "alice",
 			Content: "hey @bob", CreatedAt: created,
 		},
@@ -112,9 +112,9 @@ func TestIntegration_SelfMentionDoesNotBadgeSender(t *testing.T) {
 	seedRoom(t, db, "r1")
 	seedSubscription(t, db, "r1", "alice", nil)
 
-	m := flushOne(t, store, model.MessageEvent{
+	m := flushOne(t, store, eventProjection{
 		Event: model.EventCreated,
-		Message: model.Message{
+		Message: messageProjection{
 			ID: "m1", RoomID: "r1", UserAccount: "alice",
 			Content: "@alice reminder", CreatedAt: created,
 		},
@@ -134,13 +134,13 @@ func TestIntegration_StaleReplayDoesNotRegressRoomPointer(t *testing.T) {
 	newer := older.Add(time.Minute)
 	seedRoom(t, db, "r1")
 
-	flushOne(t, store, model.MessageEvent{
+	flushOne(t, store, eventProjection{
 		Event:   model.EventCreated,
-		Message: model.Message{ID: "m2", RoomID: "r1", UserAccount: "alice", CreatedAt: newer},
+		Message: messageProjection{ID: "m2", RoomID: "r1", UserAccount: "alice", CreatedAt: newer},
 	})
-	flushOne(t, store, model.MessageEvent{
+	flushOne(t, store, eventProjection{
 		Event:   model.EventCreated,
-		Message: model.Message{ID: "m1", RoomID: "r1", UserAccount: "alice", CreatedAt: older},
+		Message: messageProjection{ID: "m1", RoomID: "r1", UserAccount: "alice", CreatedAt: older},
 	})
 
 	room := readRoom(t, db, "r1")
@@ -155,9 +155,9 @@ func TestIntegration_MentionSkippedWhenAccountAlreadyRead(t *testing.T) {
 	seedRoom(t, db, "r1")
 	seedSubscription(t, db, "r1", "bob", &readAfter)
 
-	flushOne(t, store, model.MessageEvent{
+	flushOne(t, store, eventProjection{
 		Event: model.EventCreated,
-		Message: model.Message{
+		Message: messageProjection{
 			ID: "m1", RoomID: "r1", UserAccount: "alice",
 			Content: "@bob", CreatedAt: created,
 		},
@@ -174,9 +174,9 @@ func TestIntegration_SenderLastSeenNeverRegresses(t *testing.T) {
 	seedRoom(t, db, "r1")
 	seedSubscription(t, db, "r1", "alice", &later)
 
-	flushOne(t, store, model.MessageEvent{
+	flushOne(t, store, eventProjection{
 		Event:   model.EventCreated,
-		Message: model.Message{ID: "m1", RoomID: "r1", UserAccount: "alice", CreatedAt: earlier},
+		Message: messageProjection{ID: "m1", RoomID: "r1", UserAccount: "alice", CreatedAt: earlier},
 	})
 
 	alice := readSub(t, db, "r1", "alice")
@@ -190,11 +190,11 @@ func TestIntegration_EditBadgesNewlyMentionedAccount(t *testing.T) {
 	seedRoom(t, db, "r1")
 	seedSubscription(t, db, "r1", "bob", nil)
 
-	flushOne(t, store, model.MessageEvent{
+	flushOne(t, store, eventProjection{
 		Event: model.EventUpdated,
-		Message: model.Message{
+		Message: messageProjection{
 			ID: "m1", RoomID: "r1", UserAccount: "alice",
-			Content: "now with @bob", CreatedAt: created, EditedAt: &edited, UpdatedAt: &edited,
+			Content: "now with @bob", CreatedAt: created, EditedAt: &edited,
 		},
 	})
 
@@ -214,9 +214,9 @@ func TestIntegration_AllEventsInOneBatchCoalesceToOneRoomWrite(t *testing.T) {
 	msgs := make([]*fakeMsg, 3)
 	for i := range msgs {
 		msgs[i] = &fakeMsg{}
-		f.add(deriveIntents(&model.MessageEvent{
+		f.add(deriveIntents(&eventProjection{
 			Event: model.EventCreated,
-			Message: model.Message{
+			Message: messageProjection{
 				ID: string(rune('a' + i)), RoomID: "r1", UserAccount: "alice",
 				CreatedAt: t1.Add(time.Duration(i) * time.Second),
 			},

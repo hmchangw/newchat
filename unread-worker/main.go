@@ -17,7 +17,6 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
-	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -197,7 +196,7 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup) {
 			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
 			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 
-			var evt model.MessageEvent
+			var evt eventProjection
 			if err := sonic.Unmarshal(msg.Data(), &evt); err != nil {
 				// Malformed payload — it will never parse on redelivery. Settle it
 				// immediately rather than holding it for a flush it can't join.

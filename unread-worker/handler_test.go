@@ -17,14 +17,14 @@ func TestDeriveIntents(t *testing.T) {
 
 	tests := []struct {
 		name string
-		evt  model.MessageEvent
+		evt  eventProjection
 		want writeIntents
 	}{
 		{
 			name: "created plain message updates room pointer and sender lastSeen",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventCreated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m1", RoomID: "r1", UserAccount: "alice",
 					Content: "hello", CreatedAt: created,
 				},
@@ -36,9 +36,9 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "created with mentions badges the mentioned accounts",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventCreated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m2", RoomID: "r1", UserAccount: "alice",
 					Content: "hi @bob and @carol", CreatedAt: created,
 				},
@@ -51,9 +51,9 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "created with @all sets lastMentionAllAt and no mention accounts",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventCreated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m3", RoomID: "r1", UserAccount: "alice",
 					Content: "@all standup", CreatedAt: created,
 				},
@@ -66,9 +66,9 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "hidden thread reply produces no writes",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventCreated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m4", RoomID: "r1", UserAccount: "alice",
 					Content: "@bob reply", CreatedAt: created,
 					ThreadParentMessageID: "p1", TShow: false,
@@ -78,9 +78,9 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "visible thread reply is treated as a room message",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventCreated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m5", RoomID: "r1", UserAccount: "alice",
 					Content: "reply", CreatedAt: created,
 					ThreadParentMessageID: "p1", TShow: true,
@@ -93,9 +93,9 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "updated badges mentions at editedAt and touches nothing else",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventUpdated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m6", RoomID: "r1", UserAccount: "alice",
 					Content: "now with @bob", CreatedAt: created, EditedAt: ptrTime(edited),
 				},
@@ -106,9 +106,9 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "updated without mentions produces no writes",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventUpdated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m7", RoomID: "r1", Content: "no mentions", EditedAt: ptrTime(edited),
 				},
 			},
@@ -116,9 +116,9 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "updated without editedAt produces no writes",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventUpdated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m8", RoomID: "r1", Content: "@bob", EditedAt: nil,
 				},
 			},
@@ -126,9 +126,9 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "hidden thread reply edit produces no writes",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event: model.EventUpdated,
-				Message: model.Message{
+				Message: messageProjection{
 					ID: "m9", RoomID: "r1", Content: "@bob", EditedAt: ptrTime(edited),
 					ThreadParentMessageID: "p1", TShow: false,
 				},
@@ -137,33 +137,33 @@ func TestDeriveIntents(t *testing.T) {
 		},
 		{
 			name: "deleted produces no writes",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event:   model.EventDeleted,
-				Message: model.Message{ID: "m10", RoomID: "r1", Content: "@bob"},
+				Message: messageProjection{ID: "m10", RoomID: "r1", Content: "@bob"},
 			},
 			want: writeIntents{},
 		},
 		{
 			name: "reacted produces no writes",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event:   model.EventReacted,
-				Message: model.Message{ID: "m11", RoomID: "r1"},
+				Message: messageProjection{ID: "m11", RoomID: "r1"},
 			},
 			want: writeIntents{},
 		},
 		{
 			name: "pinned produces no writes",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event:   model.EventPinned,
-				Message: model.Message{ID: "m12", RoomID: "r1"},
+				Message: messageProjection{ID: "m12", RoomID: "r1"},
 			},
 			want: writeIntents{},
 		},
 		{
 			name: "missing roomId produces no writes",
-			evt: model.MessageEvent{
+			evt: eventProjection{
 				Event:   model.EventCreated,
-				Message: model.Message{ID: "m13", RoomID: "", CreatedAt: created},
+				Message: messageProjection{ID: "m13", RoomID: "", CreatedAt: created},
 			},
 			want: writeIntents{},
 		},
