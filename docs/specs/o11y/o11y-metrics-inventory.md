@@ -141,7 +141,9 @@ OTel instrument names; Prometheus renders them with `_` separators and adds
 `_total` / unit suffixes.
 
 Consumer and publisher families share a base of `service_name` + `site`; the
-"labels" column lists what each adds on top.
+"labels" column lists what each adds on top. The three dual-deployment workers
+read `service_name` from `OTEL_SERVICE_NAME`, matching the OTel resource while
+keeping their instrumentation-scope names stable across deployments.
 
 | Instrument | Type | Owner | Labels beyond the base |
 |---|---|---|---|

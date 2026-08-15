@@ -38,6 +38,7 @@ type encryptionConfig struct {
 }
 
 type config struct {
+	ServiceName   string `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
@@ -107,7 +108,7 @@ func main() {
 		os.Exit(1)
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher("broadcast-worker", cfg.SiteID)
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
 	domainMetrics := newBroadcastMetrics(sdk.MeterProvider().Meter("broadcast-worker"))
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
@@ -188,7 +189,7 @@ func main() {
 
 	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("broadcast-worker"), wiring.CanonicalWildcard)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: "broadcast-worker", Site: cfg.SiteID,
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
