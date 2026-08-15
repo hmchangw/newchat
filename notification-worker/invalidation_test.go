@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -11,14 +12,15 @@ import (
 
 type invalidationTestMsg struct {
 	jetstream.Msg
-	data []byte
-	acks int
+	data   []byte
+	acks   int
+	ackErr error
 }
 
 func (m *invalidationTestMsg) Data() []byte { return m.data }
 func (m *invalidationTestMsg) Ack() error {
 	m.acks++
-	return nil
+	return m.ackErr
 }
 
 func TestProcessInvalidationMessage(t *testing.T) {
@@ -51,5 +53,20 @@ func TestProcessInvalidationMessage(t *testing.T) {
 
 		require.Equal(t, 1, msg.acks)
 		assert.Equal(t, "already-full", <-queue)
+	})
+
+	t.Run("acknowledgement failure is contained", func(t *testing.T) {
+		msg := &invalidationTestMsg{
+			data:   []byte(`{"type":"muted","roomId":"room-c","account":"alice","muted":true,"timestamp":3}`),
+			ackErr: errors.New("ack unavailable"),
+		}
+		queue := make(chan string, 1)
+
+		assert.NotPanics(t, func() {
+			processInvalidationMessage(context.Background(), msg, queue)
+		})
+
+		require.Equal(t, 1, msg.acks)
+		assert.Equal(t, "room-c", <-queue)
 	})
 }

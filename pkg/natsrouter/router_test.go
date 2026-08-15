@@ -87,34 +87,46 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 		require.NoError(t, err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
-	results := map[string]int64{}
-	var replyAttempts int64
-	for _, scope := range rm.ScopeMetrics {
-		for _, metric := range scope.Metrics {
-			sum, ok := metric.Data.(metricdata.Sum[int64])
-			if !ok {
-				continue
-			}
-			for _, point := range sum.DataPoints {
-				attrs := map[string]string{}
-				for _, kv := range point.Attributes.ToSlice() {
-					attrs[string(kv.Key)] = kv.Value.AsString()
+	wantResults := map[string]int64{"success": 1, "forbidden": 1, "bad_request": 1}
+	var (
+		results       map[string]int64
+		replyAttempts int64
+	)
+	require.Eventually(t, func() bool {
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			return false
+		}
+		results = map[string]int64{}
+		replyAttempts = 0
+		for _, scope := range rm.ScopeMetrics {
+			for _, metric := range scope.Metrics {
+				sum, ok := metric.Data.(metricdata.Sum[int64])
+				if !ok {
+					continue
 				}
-				switch metric.Name {
-				case "chat.nats.request.handled":
-					assert.Equal(t, "member_read", attrs["operation"])
-					results[attrs["result"]] += point.Value
-				case "chat.nats.publish.attempts":
-					if attrs["destination_kind"] == "client_response" && attrs["operation"] == "client_response" {
-						replyAttempts += point.Value
+				for _, point := range sum.DataPoints {
+					attrs := map[string]string{}
+					for _, kv := range point.Attributes.ToSlice() {
+						attrs[string(kv.Key)] = kv.Value.AsString()
+					}
+					switch metric.Name {
+					case "chat.nats.request.handled":
+						if attrs["operation"] != "member_read" {
+							return false
+						}
+						results[attrs["result"]] += point.Value
+					case "chat.nats.publish.attempts":
+						if attrs["destination_kind"] == "client_response" && attrs["operation"] == "client_response" {
+							replyAttempts += point.Value
+						}
 					}
 				}
 			}
 		}
-	}
-	assert.Equal(t, map[string]int64{"success": 1, "forbidden": 1, "bad_request": 1}, results)
+		return assert.ObjectsAreEqual(wantResults, results) && replyAttempts == 3
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, wantResults, results)
 	assert.Equal(t, int64(3), replyAttempts)
 }
 

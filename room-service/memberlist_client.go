@@ -60,7 +60,7 @@ func NewNATSMemberListClient(nc *nats.Conn, timeout time.Duration, opts ...membe
 }
 
 // ListMembers fetches members from a remote or same-site room via NATS request.
-func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string, ch model.ChannelRef, limit int) ([]model.RoomMember, error) {
+func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string, ch model.ChannelRef, limit int) (members []model.RoomMember, resultErr error) {
 	req := model.ListRoomMembersRequest{}
 	if limit > 0 {
 		req.Limit = &limit
@@ -78,10 +78,12 @@ func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string
 	// the remote member.list endpoint mints one (RequestID middleware) if absent.
 	out := natsutil.NewMsg(reqCtx, subject.MemberList(requester, ch.RoomID, ch.SiteID), body)
 	started := time.Now()
+	defer func() {
+		if c.metrics != nil {
+			c.metrics.Request(ctx, natsmetrics.OperationMemberRead, time.Since(started), resultErr)
+		}
+	}()
 	reply, err := c.nc.RequestMsgWithContext(reqCtx, out)
-	if c.metrics != nil {
-		c.metrics.Request(ctx, natsmetrics.OperationMemberRead, time.Since(started), err)
-	}
 	if err != nil {
 		return nil, fmt.Errorf("member.list request to %s: %w", ch.SiteID, err)
 	}

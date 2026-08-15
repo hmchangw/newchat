@@ -58,17 +58,19 @@ type getMessageByIDRequest struct {
 // errcode.Unavailable so read receipts fail soft instead of erroring hard.
 func (r *historyMessageReader) GetMessageReadMeta(
 	ctx context.Context, account, roomID, messageID string,
-) (MessageReadMeta, bool, error) {
+) (meta MessageReadMeta, found bool, resultErr error) {
 	reqBytes, err := json.Marshal(getMessageByIDRequest{MessageID: messageID})
 	if err != nil {
 		return MessageReadMeta{}, false, fmt.Errorf("marshal get-message request: %w", err)
 	}
 
 	started := time.Now()
+	defer func() {
+		if r.metrics != nil {
+			r.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), resultErr)
+		}
+	}()
 	msg, err := r.nc.Request(ctx, subject.MsgGet(account, roomID, r.siteID), reqBytes, historyRequestTimeout)
-	if r.metrics != nil {
-		r.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), err)
-	}
 	if err != nil {
 		return MessageReadMeta{}, false, errcode.Unavailable("read receipts are temporarily unavailable",
 			errcode.WithReason(errcode.RoomReadReceiptsUnavailable),

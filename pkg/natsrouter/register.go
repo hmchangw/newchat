@@ -94,13 +94,13 @@ func RegisterVoid[Req any](
 		var req Req
 		if err := json.Unmarshal(c.Msg.Data, &req); err != nil {
 			c.requestResult = natsmetrics.RequestBadRequest
-			slog.Error("invalid payload in void handler", "error", err, "subject", c.Msg.Subject)
+			slog.ErrorContext(c, "invalid payload in void handler", "error", err, "subject", c.Msg.Subject)
 			return
 		}
 
 		if err := fn(c, req); err != nil {
 			c.requestResult = requestResultFromError(err)
-			slog.Error("void handler error", "error", err, "subject", c.Msg.Subject)
+			slog.ErrorContext(c, "void handler error", "error", err, "subject", c.Msg.Subject)
 		}
 	})
 

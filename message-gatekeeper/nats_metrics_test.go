@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/mock/gomock"
@@ -133,4 +134,25 @@ func TestHandler_HandleJetStreamMsg_RecordsAcceptedAndRetryOutcomes(t *testing.T
 func TestGatekeeperMetrics_Record_NilReceiverIsSafe(t *testing.T) {
 	var metrics *gatekeeperMetrics
 	metrics.Record(context.Background(), resultAccepted, reasonNone)
+}
+
+func TestGuardedGatekeeperProcessor_AcksPanickingMessage(t *testing.T) {
+	ctx := context.Background()
+	consumer := natsmetrics.NewFromProvider(noop.NewMeterProvider()).Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "message-gatekeeper",
+		Site:        "site-a",
+		Stream:      "MESSAGES_site-a",
+		Consumer:    "message-gatekeeper",
+	})
+	raw := &fakeJSMsg{subject: "chat.user.alice.room.room-a.site-a.msg.send"}
+	msg := consumer.Track(ctx, raw, natsmetrics.EventSend, 5)
+	called := false
+
+	guardedGatekeeperProcessor(func(context.Context, *natsmetrics.Message) {
+		called = true
+		panic("simulated handler panic")
+	})(ctx, msg)
+
+	assert.True(t, called)
+	assert.True(t, raw.acked, "a deterministic poison message must be Acked after panic recovery")
 }

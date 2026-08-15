@@ -11,26 +11,13 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
-
-type recordedRequest struct {
-	operation natsmetrics.Operation
-	duration  time.Duration
-	err       error
-}
-
-type recordingRequests struct {
-	requests []recordedRequest
-}
-
-func (r *recordingRequests) Request(_ context.Context, operation natsmetrics.Operation, duration time.Duration, err error) {
-	r.requests = append(r.requests, recordedRequest{operation: operation, duration: duration, err: err})
-}
 
 func startInProcessNATS(t *testing.T) *nats.Conn {
 	t.Helper()
@@ -74,7 +61,11 @@ func TestNATSMemberListClient_HappyPath(t *testing.T) {
 
 func TestNATSMemberListClient_RecordsBoundedRequestResult(t *testing.T) {
 	nc := startInProcessNATS(t)
-	recorder := &recordingRequests{}
+	recorder := NewMockrequestRecorder(gomock.NewController(t))
+	recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationMemberRead, gomock.Any(), gomock.Nil()).
+		Do(func(_ context.Context, _ natsmetrics.Operation, duration time.Duration, _ error) {
+			assert.GreaterOrEqual(t, duration, time.Duration(0))
+		})
 	client := NewNATSMemberListClient(nc, 2*time.Second, withMemberListRequestRecorder(recorder))
 	ch := model.ChannelRef{RoomID: "room-eng", SiteID: "site-us"}
 
@@ -87,10 +78,37 @@ func TestNATSMemberListClient_RecordsBoundedRequestResult(t *testing.T) {
 
 	_, err = client.ListMembers(context.Background(), "alice", ch, 0)
 	require.NoError(t, err)
-	require.Len(t, recorder.requests, 1)
-	assert.Equal(t, natsmetrics.OperationMemberRead, recorder.requests[0].operation)
-	assert.GreaterOrEqual(t, recorder.requests[0].duration, time.Duration(0))
-	assert.NoError(t, recorder.requests[0].err)
+}
+
+func TestNATSMemberListClient_RecordsFinalRequestFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		response []byte
+	}{
+		{name: "remote errcode", response: []byte(`{"code":"not_found","error":"room not found"}`)},
+		{name: "invalid JSON", response: []byte(`{not json`)},
+		{name: "no responder"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nc := startInProcessNATS(t)
+			ch := model.ChannelRef{RoomID: "room-eng", SiteID: "site-us"}
+			if tt.response != nil {
+				sub, err := nc.Subscribe(subject.MemberList("alice", ch.RoomID, ch.SiteID), func(m *nats.Msg) {
+					_ = m.Respond(tt.response)
+				})
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = sub.Unsubscribe() })
+			}
+			recorder := NewMockrequestRecorder(gomock.NewController(t))
+			recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationMemberRead, gomock.Any(), gomock.Not(gomock.Nil()))
+			client := NewNATSMemberListClient(nc, 2*time.Second, withMemberListRequestRecorder(recorder))
+
+			_, err := client.ListMembers(context.Background(), "alice", ch, 0)
+
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestNATSMemberListClient_RemoteError(t *testing.T) {

@@ -98,9 +98,13 @@ func TestPublishLabelsFromSubject(t *testing.T) {
 		operation   Operation
 	}{
 		{name: "canonical message mutation", subj: subject.MsgCanonicalUpdated("site-a"), destination: DestinationCanonical, operation: OperationCanonicalPublish},
+		{name: "room create with member site", subj: subject.RoomCanonical("member", "create"), destination: DestinationRoomCanonical, operation: OperationRoomPublish},
+		{name: "room create with member prefix site", subj: subject.RoomCanonical("member_foo", "create"), destination: DestinationRoomCanonical, operation: OperationRoomPublish},
+		{name: "canonical member event", subj: subject.RoomCanonical("site-a", "member.add"), destination: DestinationRoomCanonical, operation: OperationMemberPublish},
 		{name: "outbox room event", subj: subject.Outbox("site-a", "site-b", "room_renamed"), destination: DestinationOutbox, operation: OperationOutboxPublish},
 		{name: "internal member feed", subj: subject.InboxInternal("site-a", "member_added"), destination: DestinationInbox, operation: OperationMemberPublish},
 		{name: "internal room feed", subj: subject.InboxInternal("site-a", "room_renamed"), destination: DestinationInbox, operation: OperationRoomPublish},
+		{name: "internal room feed with member prefix site", subj: subject.InboxInternal("member_foo", "room_renamed"), destination: DestinationInbox, operation: OperationRoomPublish},
 		{name: "room event", subj: subject.RoomEvent("room-a", true), destination: DestinationRoomEvent, operation: OperationRoomPublish},
 		{name: "member event", subj: subject.RoomMemberEvent("room-a", false), destination: DestinationMemberEvent, operation: OperationMemberPublish},
 		{name: "client room update", subj: subject.UserRoomUpdate("alice"), destination: DestinationRecipientEvent, operation: OperationRoomPublish},

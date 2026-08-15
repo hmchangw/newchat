@@ -179,14 +179,17 @@ through `ErrorHandler`, so it is counted as
 label enums, and the alerts these drive are specified in the NATS failure
 metrics contract under `docs/load-testing/failure-testing/`.
 
-All metric dimensions are closed enums. Request `result` is one of `success`,
-`bad_request`, `unauthenticated`, `forbidden`, `not_found`, `conflict`,
-`too_many_requests`, `unavailable`, or `internal`. Room/history request and
-publish operations are coarse bounded categories such as `room_read`,
-`room_mutation`, `member_read`, `member_mutation`, `history_read`,
-`history_mutation`, `room_publish`, `member_publish`, and `outbox_publish`.
-Unknown subject families normalize to `unknown`. Raw subjects, room IDs,
-account IDs, site IDs from subject tokens, and error strings are never labels.
+All subject- and error-derived metric dimensions are closed enums. Request
+`result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
+`not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
+Room/history request and publish operations are coarse bounded categories such
+as `room_read`, `room_mutation`, `member_read`, `member_mutation`,
+`history_read`, `history_mutation`, `room_publish`, `member_publish`, and
+`outbox_publish`. `service_name` and `site` are operator-provided deployment
+identity dimensions, not closed enums; deployment configuration must constrain
+them to the deployed service and site inventory. Unknown subject families
+normalize to `unknown`. Raw subjects, room IDs, account IDs, site IDs parsed
+from subject tokens, and error strings are never labels.
 
 The long-running pull consumers use a single-owner supervisor. Initial consumer
 and iterator creation is synchronous and fail-fast; only a loop that has
@@ -194,6 +197,8 @@ successfully started enters recovery. A recoverable terminal iterator error
 first sets `chat.nats.consumer.loop.up` to zero and records a bounded terminal
 failure, then looks up the existing durable and recreates only its iterator with
 capped exponential backoff. Recovery never creates a missing durable.
+Every production recovery factory calls `js.Consumer(stream, durable)` before
+`consumer.Messages(...)`; none calls `CreateOrUpdateConsumer` after startup.
 Consecutive iterator generations that fail before receiving a message increase
 that backoff; a successful delivery resets it. Each retryable failed or
 successful recreation increments `chat.nats.consumer.recovery.attempts`.

@@ -111,16 +111,23 @@ func PublishLabelsFromSubject(subj string) (DestinationKind, Operation) {
 	switch {
 	case strings.HasPrefix(subj, "chat.msg.canonical."):
 		return DestinationCanonical, OperationCanonicalPublish
-	case strings.HasPrefix(subj, "chat.room.canonical."), strings.HasPrefix(subj, "chat.teams.room.canonical."):
+	case strings.HasPrefix(subj, "chat.room.canonical."):
 		operation := OperationRoomPublish
-		if strings.Contains(subj, ".member.") || strings.Contains(subj, ".event.member.") {
+		if isMemberEventAt(strings.Split(subj, "."), 4) {
+			operation = OperationMemberPublish
+		}
+		return DestinationRoomCanonical, operation
+	case strings.HasPrefix(subj, "chat.teams.room.canonical."):
+		operation := OperationRoomPublish
+		if isMemberEventAt(strings.Split(subj, "."), 5) {
 			operation = OperationMemberPublish
 		}
 		return DestinationRoomCanonical, operation
 	case strings.HasPrefix(subj, "chat.outbox."):
 		return DestinationOutbox, OperationOutboxPublish
 	case strings.HasPrefix(subj, "chat.inbox."):
-		if strings.Contains(subj, ".member_") {
+		tokens := strings.Split(subj, ".")
+		if len(tokens) > 4 && strings.HasPrefix(tokens[4], "member_") {
 			return DestinationInbox, OperationMemberPublish
 		}
 		return DestinationInbox, OperationRoomPublish
@@ -143,6 +150,16 @@ func PublishLabelsFromSubject(subj string) (DestinationKind, Operation) {
 	default:
 		return DestinationUnknown, OperationUnknown
 	}
+}
+
+func isMemberEventAt(tokens []string, eventIndex int) bool {
+	if len(tokens) <= eventIndex {
+		return false
+	}
+	if tokens[eventIndex] == "member" {
+		return true
+	}
+	return tokens[eventIndex] == "event" && len(tokens) > eventIndex+1 && tokens[eventIndex+1] == "member"
 }
 
 func hasAnySuffix(value string, suffixes ...string) bool {

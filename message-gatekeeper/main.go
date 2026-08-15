@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -198,12 +199,12 @@ func main() {
 	if err := supervisor.StartWithRecovery(ctx, initialIteratorFactory, recoveryIteratorFactory,
 		consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		func(msgCtx context.Context, msg *natsmetrics.Message) {
+		guardedGatekeeperProcessor(func(msgCtx context.Context, msg *natsmetrics.Message) {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
 			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 			handler.HandleJetStreamMsg(handlerCtx, msg)
-		}); err != nil {
+		})); err != nil {
 		slog.Error("start consumer supervisor failed", "error", err)
 		os.Exit(1)
 	}
@@ -239,6 +240,12 @@ func main() {
 		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+func guardedGatekeeperProcessor(process natsmetrics.ProcessMessage) natsmetrics.ProcessMessage {
+	return func(msgCtx context.Context, msg *natsmetrics.Message) {
+		jobguard.Run(msg, func() { process(msgCtx, msg) })
+	}
 }
 
 // buildConsumerConfig returns the durable consumer config for

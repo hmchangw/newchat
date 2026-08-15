@@ -161,32 +161,48 @@ func TestSender_SendData(t *testing.T) {
 }
 
 func TestSender_WithMetricsRecordsBoundedPublishResult(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	metrics := natsmetrics.NewFromProvider(mp).Publisher("room-worker", "site-a")
-	sender := roomkeysender.NewSender(&mockPublisher{}, roomkeysender.WithMetrics(metrics))
+	for _, tt := range []struct {
+		name        string
+		publishErr  error
+		wantOutcome string
+	}{
+		{name: "success", wantOutcome: "success"},
+		{name: "failure", publishErr: errors.New("connection lost"), wantOutcome: "other_error"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			metrics := natsmetrics.NewFromProvider(mp).Publisher("room-worker", "site-a")
+			sender := roomkeysender.NewSender(&mockPublisher{err: tt.publishErr}, roomkeysender.WithMetrics(metrics))
 
-	require.NoError(t, sender.SendDataContext(context.Background(), "alice", []byte(`{}`)))
+			err := sender.SendDataContext(context.Background(), "alice", []byte(`{}`))
+			if tt.publishErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tt.publishErr)
+			}
 
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
-	var found bool
-	for _, scope := range rm.ScopeMetrics {
-		for _, metric := range scope.Metrics {
-			if metric.Name != "chat.nats.publish.attempts" {
-				continue
-			}
-			for _, point := range metric.Data.(metricdata.Sum[int64]).DataPoints {
-				attrs := map[string]string{}
-				for _, kv := range point.Attributes.ToSlice() {
-					attrs[string(kv.Key)] = kv.Value.AsString()
+			var rm metricdata.ResourceMetrics
+			require.NoError(t, reader.Collect(context.Background(), &rm))
+			var found bool
+			for _, scope := range rm.ScopeMetrics {
+				for _, metric := range scope.Metrics {
+					if metric.Name != "chat.nats.publish.attempts" {
+						continue
+					}
+					for _, point := range metric.Data.(metricdata.Sum[int64]).DataPoints {
+						attrs := map[string]string{}
+						for _, kv := range point.Attributes.ToSlice() {
+							attrs[string(kv.Key)] = kv.Value.AsString()
+						}
+						if attrs["destination_kind"] == "recipient_event" && attrs["operation"] == "room_publish" && attrs["outcome"] == tt.wantOutcome {
+							found = true
+							assert.Equal(t, int64(1), point.Value)
+						}
+					}
 				}
-				if attrs["destination_kind"] == "recipient_event" && attrs["operation"] == "room_publish" && attrs["outcome"] == "success" {
-					found = true
-					assert.Equal(t, int64(1), point.Value)
-				}
 			}
-		}
+			assert.True(t, found)
+		})
 	}
-	assert.True(t, found)
 }

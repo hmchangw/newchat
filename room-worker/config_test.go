@@ -63,6 +63,21 @@ func TestDeploymentServiceNamesAreDistinct(t *testing.T) {
 	teams, err := os.ReadFile("deploy/teams/docker-compose.yml")
 	require.NoError(t, err)
 
-	require.True(t, strings.Contains(string(normal), "OTEL_SERVICE_NAME=room-worker"))
-	require.True(t, strings.Contains(string(teams), "OTEL_SERVICE_NAME=teams-room-worker"))
+	require.True(t, hasComposeEnvironmentEntry(string(normal), "OTEL_SERVICE_NAME=room-worker"))
+	require.True(t, hasComposeEnvironmentEntry(string(teams), "OTEL_SERVICE_NAME=teams-room-worker"))
+}
+
+func TestHasComposeEnvironmentEntry_RejectsCommentsAndSuffixes(t *testing.T) {
+	content := "    # - OTEL_SERVICE_NAME=room-worker\n    - OTEL_SERVICE_NAME=room-worker-canary\n"
+
+	assert.False(t, hasComposeEnvironmentEntry(content, "OTEL_SERVICE_NAME=room-worker"))
+}
+
+func hasComposeEnvironmentEntry(content, entry string) bool {
+	for line := range strings.SplitSeq(content, "\n") {
+		if strings.TrimSpace(line) == "- "+entry {
+			return true
+		}
+	}
+	return false
 }
