@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
@@ -90,8 +91,11 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher("message-worker", cfg.SiteID)
+	domainMetrics := newPersistenceMetrics(sdk.MeterProvider().Meter("message-worker"))
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -154,16 +158,20 @@ func main() {
 		// verbose-tracing intent ride onto downstream badge/inbox events.
 		msg := natsutil.NewMsg(ctx, subj, data)
 		if msgID == "" {
-			if err := nc.PublishMsg(ctx, msg); err != nil {
+			err := nc.PublishMsg(ctx, msg)
+			publishMetrics.Attempt(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount, err)
+			if err != nil {
 				return fmt.Errorf("publish nats message to %s: %w", subj, err)
 			}
 			return nil
 		}
-		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
+		_, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
+		publishMetrics.Attempt(ctx, natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish, err)
+		if err != nil {
 			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
 		}
 		return nil
-	})
+	}, withPersistenceMetrics(domainMetrics))
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -175,7 +183,13 @@ func main() {
 		streamName = stream.MessagesTeams(cfg.SiteID).Name
 	}
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamName, buildConsumerConfig(cfg.Consumer, cfg.Mode, cfg.SiteID))
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode, cfg.SiteID)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "message-worker", Site: cfg.SiteID,
+		Stream: streamName, Consumer: consumerCfg.Durable,
+	})
+	consumerMetrics.LoopStopped(ctx)
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamName, consumerCfg)
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -186,6 +200,7 @@ func main() {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
+	consumerMetrics.LoopStarted(ctx)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
@@ -203,23 +218,35 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("marshal user identity fanout: %w", err)
 			}
-			if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subject.OrgSyncUsersUpsert(cfg.SiteID), data)); err != nil {
+			_, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subject.OrgSyncUsersUpsert(cfg.SiteID), data))
+			publishMetrics.Attempt(ctx, natsmetrics.DestinationUserSync, natsmetrics.OperationTeamsUserUpsert, err)
+			if err != nil {
 				return fmt.Errorf("publish user identity fanout: %w", err)
 			}
 			return nil
-		})
+		}, domainMetrics)
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
 
+	wg.Add(1)
 	go func() {
+		// The loop itself is counted so shutdown, which stops the iterator and
+		// then waits on wg, cannot pass through while a message Next already
+		// returned is still on its way to a worker.
+		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				consumerMetrics.LoopFailed(context.Background(), err)
 				return
 			}
 			sem <- struct{}{}
 			wg.Add(1)
-			go func() {
+			go func(msgCtx context.Context, msg jetstream.Msg) {
+				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
+				msg = tracked
+				msgCtx = tracked.Context(msgCtx)
 				defer func() {
+					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
 				}()
@@ -239,7 +266,7 @@ func main() {
 					logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 					handler.HandleJetStreamMsg(handlerCtx, msg)
 				})
-			}()
+			}(msgCtx, msg)
 		}
 	}()
 
@@ -255,6 +282,7 @@ func main() {
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error {
+			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
 			return nil
 		},

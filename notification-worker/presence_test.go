@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/natsmetrics"
+
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -197,7 +199,7 @@ func TestBulkPresence_Chunks(t *testing.T) {
 		return out, nil
 	}}
 
-	src := newBulkPresenceSource(stub, "site-a", 500, time.Second)
+	src := newBulkPresenceSource(stub, "site-a", 500, time.Second, natsmetrics.Publisher{})
 	got, err := src.Snapshot(context.Background(), accounts)
 	require.NoError(t, err)
 	assert.Equal(t, 3, stub.calls, "expect ceil(1500/500) chunks")
@@ -208,7 +210,7 @@ func TestBulkPresence_FailOpenOnError(t *testing.T) {
 	stub := &stubRequester{reply: func(model.PresenceSnapshotRequest) (model.PresenceSnapshotReply, error) {
 		return model.PresenceSnapshotReply{}, errors.New("nats: timeout")
 	}}
-	src := newBulkPresenceSource(stub, "site-a", 100, 50*time.Millisecond)
+	src := newBulkPresenceSource(stub, "site-a", 100, 50*time.Millisecond, natsmetrics.Publisher{})
 	got, err := src.Snapshot(context.Background(), []string{"a", "b"})
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -220,7 +222,7 @@ func TestBulkPresence_ErrorResponseLoggedAndFailOpen(t *testing.T) {
 			return errnats.MarshalQuiet(errcode.Internal("presence backend down")), nil
 		},
 	}
-	src := newBulkPresenceSource(stub, "site-a", 100, 50*time.Millisecond)
+	src := newBulkPresenceSource(stub, "site-a", 100, 50*time.Millisecond, natsmetrics.Publisher{})
 	got, err := src.Snapshot(context.Background(), []string{"alice", "bob"})
 	require.NoError(t, err) // fail-open: error envelope is swallowed
 	assert.Empty(t, got)

@@ -39,7 +39,7 @@ func Connect(cfg Config, opts ...Option) (*gocql.Session, error) {
 	if cc.obs != nil {
 		// gocql attaches observers via the ClusterConfig, so o11y must build the
 		// session rather than wrap a live one. Batch spans additionally require
-		// o11ycassandra.ExecuteBatch at the call site (a Phase 3 concern).
+		// o11ycassandra.ExecuteBatch at each production call site.
 		session, err = o11ycassandra.NewSession(cluster, cc.obs.TracerProvider(), cc.obs.MeterProvider())
 	} else {
 		session, err = cluster.CreateSession()

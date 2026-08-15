@@ -10,6 +10,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
@@ -18,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/outbox"
@@ -35,15 +37,34 @@ type Handler struct {
 	threadStore ThreadStore
 	siteID      string
 	publish     PublishFunc
+	metrics     *persistenceMetrics
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadStore, siteID string, publish PublishFunc) *Handler {
+type messageWorkerHandlerOption func(*messageWorkerHandlerOptions)
+
+type messageWorkerHandlerOptions struct {
+	metrics *persistenceMetrics
+}
+
+func withPersistenceMetrics(metrics *persistenceMetrics) messageWorkerHandlerOption {
+	return func(opts *messageWorkerHandlerOptions) { opts.metrics = metrics }
+}
+
+func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadStore, siteID string, publish PublishFunc, options ...messageWorkerHandlerOption) *Handler {
+	var opts messageWorkerHandlerOptions
+	for _, option := range options {
+		option(&opts)
+	}
+	if opts.metrics == nil {
+		opts.metrics = newPersistenceMetrics(otel.Meter("message-worker"))
+	}
 	return &Handler{
 		store:       store,
 		userStore:   userStore,
 		threadStore: threadStore,
 		siteID:      siteID,
 		publish:     publish,
+		metrics:     opts.metrics,
 	}
 }
 
@@ -71,6 +92,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration bool) error {
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		// Malformed payload — it will never parse on redelivery. Mark permanent
 		// so the handler Acks (drops) it instead of retrying until MaxDeliver.
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
@@ -153,8 +175,10 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		}
 		newTcount, err := h.store.SaveThreadMessage(ctx, &evt.Message, sender, evt.SiteID, threadRoomID)
 		if err != nil {
+			h.metrics.Record(ctx, kindThreadReply, persistError)
 			return fmt.Errorf("save thread message: %w", err)
 		}
+		h.metrics.Record(ctx, kindThreadReply, persistSuccess)
 		debugFlowPersisted(ctx, evt.Message.ID, true)
 		// Suppress the live tcount badge for migrated replies: the source already delivered it, and the
 		// badge carries no migration header so broadcast-worker would re-notify. The count is persisted above.
@@ -165,12 +189,27 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		}
 	} else {
 		if err := h.store.SaveMessage(ctx, &evt.Message, sender, evt.SiteID); err != nil {
+			h.metrics.Record(ctx, messageKind(&evt.Message), persistError)
 			return fmt.Errorf("save message: %w", err)
 		}
+		h.metrics.Record(ctx, messageKind(&evt.Message), persistSuccess)
 		debugFlowPersisted(ctx, evt.Message.ID, false)
 	}
 
 	return nil
+}
+
+func messageKind(msg *model.Message) messageKindLabel {
+	if msg.ThreadParentMessageID != "" {
+		return kindThreadReply
+	}
+	if model.IsSystemMessageType(msg.Type) {
+		return kindSystem
+	}
+	if msg.Type == "" || msg.Type == model.MessageTypeImportant {
+		return kindUser
+	}
+	return kindUnknown
 }
 
 // reprojectUnverifiedQuote corrects an untrusted quoted-parent snapshot before the
