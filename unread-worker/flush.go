@@ -19,8 +19,7 @@ import (
 // messages are settled only after their batch lands, so JetStream — not an
 // in-memory buffer — is what survives a MongoDB outage.
 type flusher struct {
-	store   Store
-	backoff []time.Duration
+	store Store
 
 	mu      sync.Mutex
 	pending *batch
@@ -29,8 +28,7 @@ type flusher struct {
 func newFlusher(store Store) *flusher {
 	return &flusher{
 		store:   store,
-		backoff: jsretry.DefaultBackoff,
-		pending: newBatch(),
+		pending: newBatch(nil),
 	}
 }
 
@@ -51,7 +49,7 @@ func (f *flusher) Flush(ctx context.Context) {
 		return
 	}
 	b := f.pending
-	f.pending = newBatch()
+	f.pending = newBatch(b)
 	f.mu.Unlock()
 
 	f.settle(ctx, b, f.write(ctx, b))
@@ -69,6 +67,12 @@ func (f *flusher) Flush(ctx context.Context) {
 type flushOutcome struct {
 	err        error
 	stageCodes []string
+	// mongoErrs carries the driver's own text per failing stage. The permanent
+	// err wraps it via errcode.WithCause, but that cause is unexported and only
+	// errcode.Classify reads it — and Classify logs under "request failed",
+	// which would cost the greppable poison-vs-retry distinction settle keeps.
+	// So the detail rides here instead, for the one branch that loses data.
+	mongoErrs []string
 }
 
 // write applies the batch in a fixed order: rooms, then lastSeenAt, then
@@ -93,6 +97,7 @@ type flushOutcome struct {
 func (f *flusher) write(ctx context.Context, b *batch) flushOutcome {
 	var permanentErrs []error
 	var stageCodes []string
+	var mongoErrs []string
 
 	// stage classifies one stage's raw store error. It returns (outcome, true)
 	// when the batch must stop right here (transient failure), or (_, false)
@@ -113,6 +118,7 @@ func (f *flusher) write(ctx context.Context, b *batch) flushOutcome {
 			// can't tell lastSeenAt and mentions apart, since both stages
 			// write the subscriptions collection.
 			stageCodes = append(stageCodes, fmt.Sprintf("%s=%v", name, bwe.ErrorCodes()))
+			mongoErrs = append(mongoErrs, fmt.Sprintf("%s=%s", name, bwe.Error()))
 		}
 		return flushOutcome{}, false
 	}
@@ -130,7 +136,7 @@ func (f *flusher) write(ctx context.Context, b *batch) flushOutcome {
 	if len(permanentErrs) == 0 {
 		return flushOutcome{}
 	}
-	return flushOutcome{err: errors.Join(permanentErrs...), stageCodes: stageCodes}
+	return flushOutcome{err: errors.Join(permanentErrs...), stageCodes: stageCodes, mongoErrs: mongoErrs}
 }
 
 // settle resolves every held message against the flush outcome. SettleQuiet is
@@ -141,25 +147,22 @@ func (f *flusher) write(ctx context.Context, b *batch) flushOutcome {
 // "this batch will retry" from the log line alone.
 func (f *flusher) settle(ctx context.Context, b *batch, out flushOutcome) {
 	if out.err != nil {
-		if _, ok := errcode.IsPermanent(out.err); ok {
-			slog.ErrorContext(ctx, "unread-state flush dropped poison batch",
-				"error", out.err,
-				"mongo_stage_codes", out.stageCodes,
-				"rooms", len(b.rooms),
-				"last_seen", len(b.lastSeen),
-				"mentions", len(b.mentions),
-				"held", len(b.held))
-		} else {
-			slog.ErrorContext(ctx, "unread-state flush failed, retrying",
-				"error", out.err,
-				"rooms", len(b.rooms),
-				"last_seen", len(b.lastSeen),
-				"mentions", len(b.mentions),
-				"held", len(b.held))
+		msg := "unread-state flush failed, retrying"
+		attrs := []any{
+			"error", out.err,
+			"rooms", len(b.rooms),
+			"last_seen", len(b.lastSeen),
+			"mentions", len(b.mentions),
+			"held", len(b.held),
 		}
+		if _, ok := errcode.IsPermanent(out.err); ok {
+			msg = "unread-state flush dropped poison batch"
+			attrs = append(attrs, "mongo_stage_codes", out.stageCodes, "mongo_errors", out.mongoErrs)
+		}
+		slog.ErrorContext(ctx, msg, attrs...)
 	}
 	for _, h := range b.held {
-		jsretry.SettleQuiet(h.ctx, h.msg, f.backoff, out.err)
+		jsretry.SettleQuiet(h.ctx, h.msg, jsretry.DefaultBackoff, out.err)
 	}
 }
 

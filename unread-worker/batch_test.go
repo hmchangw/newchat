@@ -37,7 +37,7 @@ func TestBatch_CoalescesRoomPointerToLatestMessage(t *testing.T) {
 	t1 := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Second)
 
-	b := newBatch()
+	b := newBatch(nil)
 	b.add(writeIntents{RoomID: "r1", LastMsgID: "m2", LastMsgAt: t2}, held(&fakeMsg{}))
 	// Older message arrives after the newer one (out-of-order redelivery).
 	b.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: t1}, held(&fakeMsg{}))
@@ -52,7 +52,7 @@ func TestBatch_LastMentionAllAtSticksAcrossLaterPlainMessages(t *testing.T) {
 	t1 := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Second)
 
-	b := newBatch()
+	b := newBatch(nil)
 	b.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: t1, LastMentionAllAt: t1}, held(&fakeMsg{}))
 	b.add(writeIntents{RoomID: "r1", LastMsgID: "m2", LastMsgAt: t2}, held(&fakeMsg{}))
 
@@ -64,7 +64,7 @@ func TestBatch_MentionAndLastSeenKeepLatestTimePerSubscription(t *testing.T) {
 	t1 := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Second)
 
-	b := newBatch()
+	b := newBatch(nil)
 	// First add with newer timestamps.
 	b.add(writeIntents{
 		RoomID: "r1", LastMsgID: "m1", LastMsgAt: t2,
@@ -87,7 +87,7 @@ func TestBatch_MentionAndLastSeenKeepLatestTimePerSubscription(t *testing.T) {
 }
 
 func TestBatch_HoldsNoOpMessagesForAck(t *testing.T) {
-	b := newBatch()
+	b := newBatch(nil)
 	b.add(writeIntents{}, held(&fakeMsg{}))
 
 	assert.False(t, b.empty(), "a no-op message still needs settling")
@@ -98,5 +98,5 @@ func TestBatch_HoldsNoOpMessagesForAck(t *testing.T) {
 }
 
 func TestBatch_EmptyWhenNothingAdded(t *testing.T) {
-	assert.True(t, newBatch().empty())
+	assert.True(t, newBatch(nil).empty())
 }

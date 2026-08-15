@@ -32,8 +32,10 @@ type heldMsg struct {
 }
 
 // batch accumulates write intents between flushes. The write maps are bounded
-// by distinct active rooms and mentioned accounts per interval, not by message
-// rate — held is not, which is why MaxAckPending must bound the consumer.
+// by held, which MaxAckPending bounds: a map entry only ever arrives with a held
+// message, and a failing flush swaps the batch out rather than accumulating.
+// mentions is the exception — it grows with mentioned accounts per message, so
+// it alone can exceed MaxAckPending.
 type batch struct {
 	rooms    map[string]roomLastMsgUpdate
 	lastSeen map[subKey]time.Time
@@ -41,11 +43,19 @@ type batch struct {
 	held     []heldMsg
 }
 
-func newBatch() *batch {
+// newBatch sizes the maps and the held slice from the previous batch: under
+// steady traffic the last interval is a good predictor, and it stops each flush
+// regrowing them from zero.
+func newBatch(prev *batch) *batch {
+	var nRooms, nSeen, nMentions, nHeld int
+	if prev != nil {
+		nRooms, nSeen, nMentions, nHeld = len(prev.rooms), len(prev.lastSeen), len(prev.mentions), len(prev.held)
+	}
 	return &batch{
-		rooms:    make(map[string]roomLastMsgUpdate),
-		lastSeen: make(map[subKey]time.Time),
-		mentions: make(map[subKey]time.Time),
+		rooms:    make(map[string]roomLastMsgUpdate, nRooms),
+		lastSeen: make(map[subKey]time.Time, nSeen),
+		mentions: make(map[subKey]time.Time, nMentions),
+		held:     make([]heldMsg, 0, nHeld),
 	}
 }
 

@@ -5,7 +5,10 @@ import (
 	"time"
 )
 
-//go:generate mockgen -destination=mock_store_test.go -package=main . Store
+// No mockgen directive: the tests use hand-written stubs (flush_test.go) because
+// they assert call order and context cancellation, which gomock expectations do
+// not express here. A generated mock would be regenerated but never compiled
+// against.
 
 // Store is the unread-state write surface. Every method issues a single unordered
 // BulkWrite and is safe to replay out of order — the flush path retries whole

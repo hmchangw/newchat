@@ -2,21 +2,29 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
+// The typed collections are only ever used for their BulkWrite, which supplies
+// the empty-input guard, the unordered execution every stage here depends on,
+// and a %w wrap that keeps errors.As(BulkWriteException) working in
+// classifyFlushErr.
 type mongoStore struct {
-	roomCol *mongo.Collection
-	subCol  *mongo.Collection
+	roomCol *mongoutil.Collection[model.Room]
+	subCol  *mongoutil.Collection[model.Subscription]
 }
 
 func NewMongoStore(roomCol, subCol *mongo.Collection) *mongoStore {
-	return &mongoStore{roomCol: roomCol, subCol: subCol}
+	return &mongoStore{
+		roomCol: mongoutil.NewCollection[model.Room](roomCol),
+		subCol:  mongoutil.NewCollection[model.Subscription](subCol),
+	}
 }
 
 // roomLastMsgFilter matches a room only when its stored lastMsgAt is not already
@@ -41,9 +49,6 @@ func mentionFilter(k subKey, at time.Time) bson.M {
 }
 
 func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error {
-	if len(updates) == 0 {
-		return nil
-	}
 	models := make([]mongo.WriteModel, 0, len(updates))
 	for roomID, u := range updates {
 		fields := bson.M{
@@ -58,40 +63,28 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 			SetFilter(roomLastMsgFilter(roomID, u.at)).
 			SetUpdate(bson.M{"$set": fields}))
 	}
-	if _, err := m.roomCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
-		return fmt.Errorf("bulk update room last message (%d rooms): %w", len(updates), err)
-	}
-	return nil
+	_, err := m.roomCol.BulkWrite(ctx, models)
+	return err
 }
 
 func (m *mongoStore) BulkAdvanceLastSeen(ctx context.Context, updates map[subKey]time.Time) error {
-	if len(updates) == 0 {
-		return nil
-	}
 	models := make([]mongo.WriteModel, 0, len(updates))
 	for k, at := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"roomId": k.roomID, "u.account": k.account}).
 			SetUpdate(bson.M{"$max": bson.M{"lastSeenAt": at}}))
 	}
-	if _, err := m.subCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
-		return fmt.Errorf("bulk advance subscription lastSeenAt (%d subscriptions): %w", len(updates), err)
-	}
-	return nil
+	_, err := m.subCol.BulkWrite(ctx, models)
+	return err
 }
 
 func (m *mongoStore) BulkSetMentions(ctx context.Context, updates map[subKey]time.Time) error {
-	if len(updates) == 0 {
-		return nil
-	}
 	models := make([]mongo.WriteModel, 0, len(updates))
 	for k, at := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(mentionFilter(k, at)).
 			SetUpdate(bson.M{"$set": bson.M{"hasMention": true}}))
 	}
-	if _, err := m.subCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
-		return fmt.Errorf("bulk set subscription mentions (%d subscriptions): %w", len(updates), err)
-	}
-	return nil
+	_, err := m.subCol.BulkWrite(ctx, models)
+	return err
 }

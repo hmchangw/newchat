@@ -38,20 +38,12 @@ type writeIntents struct {
 	MentionAt       time.Time
 }
 
-// isHiddenThreadReply mirrors broadcast-worker's shouldUseThreadFanOut. A
-// TShow=false thread reply never touches room-level state: it is invisible in
-// the main channel, and message-worker owns thread_rooms/thread_subscriptions
-// for it.
-func isHiddenThreadReply(msg *model.Message) bool {
-	return msg.ThreadParentMessageID != "" && !msg.TShow
-}
-
 // deriveIntents maps a canonical event to its room-level writes. Pure by
 // construction: mention.Parse is a function of content alone, and the room id
 // is carried on the message — so no MongoDB read is needed to decide anything.
 func deriveIntents(evt *model.MessageEvent) writeIntents {
 	msg := &evt.Message
-	if msg.RoomID == "" || isHiddenThreadReply(msg) {
+	if msg.RoomID == "" || msg.IsHiddenThreadReply() {
 		return writeIntents{}
 	}
 

@@ -147,7 +147,7 @@ func (h *Handler) HandleServerBroadcast(ctx context.Context, data []byte) {
 // broadcast path. True when the message is a thread reply hidden from the main
 // channel (TShow=false).
 func shouldUseThreadFanOut(msg *model.Message) bool {
-	return msg.ThreadParentMessageID != "" && !msg.TShow
+	return msg.IsHiddenThreadReply()
 }
 
 func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) error {
