@@ -14,6 +14,15 @@ import (
 // occurrences (e.g. "bob@example.com", "here@all") are not treated as mentions.
 var mentionRe = regexp.MustCompile(`(^|\s)@([0-9a-zA-Z_-]+(\.[0-9a-zA-Z_-]+)*)`)
 
+// literalMentions maps the two non-account mention tokens to the words they
+// render as in human-facing text. Keys are lowercased; the values' casing is
+// deliberate and asymmetric ("All" but "here"), matching the product copy.
+// These never hit the users collection — no account owns them.
+var literalMentions = map[string]string{
+	"all":  "All",
+	"here": "here",
+}
+
 // ParseResult holds parsed mention data extracted from message content.
 type ParseResult struct {
 	Accounts   []string // unique mentioned accounts, lowercased, excluding @all
@@ -111,4 +120,57 @@ func ResolveFromParsed(parsed ParseResult, users map[string]model.User) *Resolve
 		})
 	}
 	return result
+}
+
+// LookupAccounts returns the unique lowercased accounts in content that need a
+// user lookup to render — Parse's accounts minus @all/@here, which resolve from
+// literalMentions. Feed the result to a store, then pass the resulting
+// account→display-name map to ReplaceAccounts.
+func LookupAccounts(content string) []string {
+	return LookupAccountsFromParsed(Parse(content))
+}
+
+// LookupAccountsFromParsed is LookupAccounts over an already-parsed result. Use
+// it when the caller has parsed the content for its own reasons, so the hot
+// path runs the mention regexp once rather than twice.
+func LookupAccountsFromParsed(parsed ParseResult) []string { //nolint:gocritic // hugeParam: mirrors ResolveFromParsed's value semantics
+	out := make([]string, 0, len(parsed.Accounts))
+	for _, a := range parsed.Accounts {
+		if _, literal := literalMentions[a]; literal {
+			continue
+		}
+		out = append(out, a)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ReplaceAccounts rewrites @mention tokens in content for human-facing text:
+// @all/@here become their literal words and a known account becomes its display
+// name (the @ marker is dropped in both cases). names is keyed by lowercased
+// account. Anything unresolved — an unknown account, an empty display name, a
+// nil map — keeps its literal @token, so a failed lookup degrades to today's
+// output instead of inventing a name.
+func ReplaceAccounts(content string, names map[string]string) string {
+	if content == "" {
+		return content
+	}
+	return mentionRe.ReplaceAllStringFunc(content, func(match string) string {
+		// match carries the regexp's leading ^|\s group; keep that separator
+		// byte-for-byte and rewrite only the @token that follows it.
+		at := strings.IndexByte(match, '@')
+		if at < 0 {
+			return match
+		}
+		prefix, token := match[:at], match[at+1:]
+		if name, ok := literalMentions[strings.ToLower(token)]; ok {
+			return prefix + name
+		}
+		if name := names[strings.ToLower(token)]; name != "" {
+			return prefix + name
+		}
+		return match
+	})
 }

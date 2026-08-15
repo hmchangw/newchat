@@ -30,6 +30,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -59,6 +60,9 @@ type config struct {
 	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
 	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
 	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
+	UserCacheSize          int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL           time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	MentionNamesTimeout    time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
 	Mode                   stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
@@ -232,6 +236,18 @@ func main() {
 		settings = newMongoUserSettings(usersCol, cfg.UserSettingsBatchSize, cfg.UserSettingsTimeout)
 	}
 
+	// Display names for the push body read from the default (secondaryPreferred)
+	// collection handle, not the primary-pinned usersCol above: a renamed user
+	// tolerates replica lag, unlike the mute settings that gate delivery.
+	userCache, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
+		cfg.UserCacheSize, cfg.UserCacheTTL)
+	if err != nil {
+		slog.Error("init user cache failed", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mention display names enabled", "user_cache_size", cfg.UserCacheSize,
+		"user_cache_ttl", cfg.UserCacheTTL, "lookup_timeout", cfg.MentionNamesTimeout)
+
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
@@ -241,6 +257,7 @@ func main() {
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
+		MentionNames:       newUserMentionNames(userCache, cfg.MentionNamesTimeout),
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 	})

@@ -42,7 +42,8 @@ type HandlerDeps struct {
 	Settings           UserSettingsSnapshotter // nil → noopUserSettings (pre-enforcement behaviour)
 	Hook               Vetoer
 	Emitter            Emitter
-	RoomMeta           RoomMetaGetter // nil → title falls back to sender.Account
+	RoomMeta           RoomMetaGetter      // nil → title falls back to sender.Account
+	MentionNames       MentionNameResolver // nil → only @all/@here are substituted in the body
 	LargeRoomThreshold int
 	RecipientBatchSize int // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
 }
@@ -226,7 +227,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	pushEvt := model.PushNotificationEvent{
 		RoomID: msg.RoomID,
 		Title:  h.resolveTitle(ctx, msg.RoomID, roomType, sender),
-		Body:   msg.Content,
+		Body:   h.resolveBody(ctx, msg.Content, mentionInfo),
 		Data: model.PushNotificationData{
 			RoomID:            msg.RoomID,
 			MessageID:         msg.ID,
@@ -301,6 +302,28 @@ func shortRoomType(t model.RoomType) string {
 	default:
 		return "c"
 	}
+}
+
+// resolveBody renders the push body: @mentions become display names (@all/@here
+// become their literal words) so the lock screen shows a person, not an account.
+// Runs after the survivor filter, so a message nobody receives never pays for the
+// lookup. Fails open — a resolver error substitutes whatever names came back and
+// leaves the rest as raw @tokens rather than dropping the push.
+func (h *Handler) resolveBody(ctx context.Context, content string, parsed mention.ParseResult) string { //nolint:gocritic // hugeParam: mirrors mention.ParseResult's value semantics
+	if len(parsed.Accounts) == 0 && !parsed.MentionAll {
+		return content
+	}
+	var names map[string]string
+	if lookup := mention.LookupAccountsFromParsed(parsed); len(lookup) > 0 && h.deps.MentionNames != nil {
+		resolved, err := h.deps.MentionNames.Resolve(ctx, lookup)
+		if err != nil {
+			slog.Warn("mention name lookup failed, body keeps raw mentions",
+				"error", err, "mentions", len(lookup),
+				"request_id", natsutil.RequestIDFromContext(ctx))
+		}
+		names = resolved
+	}
+	return mention.ReplaceAccounts(content, names)
 }
 
 // resolveTitle returns the room name when present, else the sender's account (legacy rule).

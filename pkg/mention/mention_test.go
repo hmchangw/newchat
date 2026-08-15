@@ -221,3 +221,102 @@ func TestResolveFromParsed(t *testing.T) {
 		})
 	}
 }
+
+func TestReplaceAccounts(t *testing.T) {
+	names := map[string]string{
+		"alice":      "Alice Wang 愛麗絲",
+		"bob":        "Bob Chen",
+		"first.last": "First Last",
+	}
+
+	tests := []struct {
+		name    string
+		content string
+		names   map[string]string
+		want    string
+	}{
+		{name: "no mentions", content: "hello world", names: names, want: "hello world"},
+		{name: "empty content", content: "", names: names, want: ""},
+		{name: "single known mention", content: "hello @alice", names: names, want: "hello Alice Wang 愛麗絲"},
+		{name: "mention at start", content: "@alice hello", names: names, want: "Alice Wang 愛麗絲 hello"},
+		{name: "multiple known mentions", content: "@alice check with @bob", names: names, want: "Alice Wang 愛麗絲 check with Bob Chen"},
+		{name: "duplicate mention replaced every occurrence", content: "@bob and @bob again", names: names, want: "Bob Chen and Bob Chen again"},
+		{name: "unknown account kept verbatim", content: "hey @nobody", names: names, want: "hey @nobody"},
+		{name: "mixed known and unknown", content: "@alice and @nobody", names: names, want: "Alice Wang 愛麗絲 and @nobody"},
+		{name: "token casing folded for lookup", content: "hey @ALICE", names: names, want: "hey Alice Wang 愛麗絲"},
+		{name: "dotted account", content: "cc @first.last ok", names: names, want: "cc First Last ok"},
+		{name: "trailing punctuation preserved", content: "hey @bob. check", names: names, want: "hey Bob Chen. check"},
+		{name: "mention after newline", content: "line1\n@bob", names: names, want: "line1\nBob Chen"},
+		{name: "mention after tab", content: "hi\t@bob", names: names, want: "hi\tBob Chen"},
+		{name: "email address is not a mention", content: "mail bob@example.com now", names: names, want: "mail bob@example.com now"},
+		{name: "second @ without separator untouched", content: "@alice@bob", names: names, want: "Alice Wang 愛麗絲@bob"},
+		{name: "at all becomes All", content: "hey @all now", names: names, want: "hey All now"},
+		{name: "at all casing folded", content: "@All and @ALL", names: names, want: "All and All"},
+		{name: "at here becomes here", content: "hey @here now", names: names, want: "hey here now"},
+		{name: "at here casing folded", content: "@Here now", names: names, want: "here now"},
+		{name: "literals resolve without a names map", content: "@all @here", names: nil, want: "All here"},
+		{name: "nil names leaves accounts verbatim", content: "hey @alice", names: nil, want: "hey @alice"},
+		{name: "empty names leaves accounts verbatim", content: "hey @alice", names: map[string]string{}, want: "hey @alice"},
+		{name: "empty display name falls back to raw token", content: "hey @alice", names: map[string]string{"alice": ""}, want: "hey @alice"},
+		{name: "literals win over a same-named account", content: "@all", names: map[string]string{"all": "Should Not Win"}, want: "All"},
+		{name: "everything at once", content: "@all ping @alice and @nobody cc @here", names: names, want: "All ping Alice Wang 愛麗絲 and @nobody cc here"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ReplaceAccounts(tt.content, tt.names))
+		})
+	}
+}
+
+func TestReplaceAccounts_DoesNotMutateInput(t *testing.T) {
+	names := map[string]string{"alice": "Alice Wang"}
+	content := "hey @alice"
+
+	got := ReplaceAccounts(content, names)
+
+	assert.Equal(t, "hey @alice", content, "input content must not be mutated")
+	assert.Equal(t, "hey Alice Wang", got)
+	assert.Len(t, names, 1, "names map must not be mutated")
+}
+
+func TestLookupAccounts(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{name: "no mentions", content: "hello world", want: nil},
+		{name: "single account", content: "hey @alice", want: []string{"alice"}},
+		{name: "all is excluded", content: "@all hey", want: nil},
+		{name: "here is excluded", content: "@here hey", want: nil},
+		{name: "literals excluded, accounts kept", content: "@all @here @alice", want: []string{"alice"}},
+		{name: "deduplicated and lowercased", content: "@alice @ALICE @bob", want: []string{"alice", "bob"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, LookupAccounts(tt.content))
+		})
+	}
+}
+
+func TestLookupAccountsFromParsed(t *testing.T) {
+	tests := []struct {
+		name   string
+		parsed ParseResult
+		want   []string
+	}{
+		{name: "empty result", parsed: ParseResult{}, want: nil},
+		{name: "mention all only", parsed: ParseResult{MentionAll: true}, want: nil},
+		{name: "here is filtered out", parsed: ParseResult{Accounts: []string{"here"}}, want: nil},
+		{name: "accounts kept", parsed: ParseResult{Accounts: []string{"alice", "bob"}}, want: []string{"alice", "bob"}},
+		{name: "literals stripped from accounts", parsed: ParseResult{Accounts: []string{"here", "alice", "all"}}, want: []string{"alice"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, LookupAccountsFromParsed(tt.parsed))
+		})
+	}
+}
