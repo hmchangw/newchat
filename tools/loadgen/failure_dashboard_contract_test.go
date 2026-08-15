@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,10 +75,10 @@ func TestFailureDashboardContract_ObserverRatioUsesMatchingBoundedSelectors(t *t
 	contract := string(encoded)
 
 	assert.Contains(t, contract,
-		`loadgen_failure_observer_eligible_total{scenario="$scenario",lane="$lane",observer="$observer"}`,
+		`loadgen_failure_observer_eligible_total{scenario="message_soak",lane="$lane",observer="$observer"}`,
 	)
 	assert.Contains(t, contract,
-		`loadgen_failure_observations_total{scenario="$scenario",lane="$lane",observer="$observer",result="unverified"}`,
+		`loadgen_failure_observations_total{scenario="message_soak",lane="$lane",observer="$observer",result="unverified"}`,
 	)
 }
 
@@ -93,9 +94,15 @@ func TestFailureDashboardContract_AckFloorStallIsDocumentedAsAProxy(t *testing.T
 func TestFailureDashboardContract_UsesWorkloadOrientedScenario(t *testing.T) {
 	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
 	require.NoError(t, err)
+	contract := string(encoded)
+	observerStart := strings.Index(contract, "## Observer validity")
+	observerEnd := strings.Index(contract, "## Result interpretation")
+	require.NotEqual(t, -1, observerStart)
+	require.Greater(t, observerEnd, observerStart)
+	observerQueries := contract[observerStart:observerEnd]
 
-	assert.Contains(t, string(encoded), "`message_soak`")
-	assert.NotContains(t, string(encoded), "`cassandra_soak`")
+	assert.Contains(t, observerQueries, `scenario="message_soak"`)
+	assert.NotContains(t, observerQueries, "cassandra_soak")
 }
 
 func TestFailureRuntimeControlFollowUp_PinsAuthenticatedStatusAndPausedEvidence(t *testing.T) {

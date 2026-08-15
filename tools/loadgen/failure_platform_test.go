@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -675,6 +676,33 @@ func TestFailureRecipientConnection_DrainWaitsForClosedCallback(t *testing.T) {
 	}
 	close(closed)
 	require.NoError(t, <-done)
+}
+
+func TestFailureRecipientConnection_DrainWrapsErrors(t *testing.T) {
+	wantErr := errors.New("connection unavailable")
+	connection := &natsFailureRecipientConnection{
+		drain: func() error { return wantErr },
+	}
+
+	err := connection.Drain()
+
+	require.ErrorContains(t, err, "drain recipient observer connection")
+	assert.ErrorIs(t, err, wantErr)
+}
+
+func TestFailureRecipientConnection_DrainWrapsTimeout(t *testing.T) {
+	closed := make(chan struct{})
+	close(closed)
+	connection := &natsFailureRecipientConnection{
+		closed:    closed,
+		drain:     func() error { return nil },
+		lastError: func() error { return nats.ErrDrainTimeout },
+	}
+
+	err := connection.Drain()
+
+	require.ErrorContains(t, err, "drain recipient observer connection")
+	assert.ErrorIs(t, err, nats.ErrDrainTimeout)
 }
 
 func TestSoakRuntimeSelector_RecipientSetsExcludeBots(t *testing.T) {

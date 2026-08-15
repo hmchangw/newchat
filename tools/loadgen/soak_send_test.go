@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -188,7 +189,15 @@ func TestSoakSender_ChannelThreadReplySnapshotsExactFollowerSet(t *testing.T) {
 	}))
 	require.True(t, catalog.Accept("room-1", "BBBBBBBBBBBBBBBBBBBB"))
 
-	lifecycle := &recordingSoakSendLifecycle{}
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	var started *soakPendingSend
+	gomock.InOrder(
+		lifecycle.EXPECT().Start(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			started = cloneSoakPendingSend(pending)
+			return nil
+		}),
+		lifecycle.EXPECT().Activate(gomock.Any()).Return(nil),
+	)
 	sender := newSoakSender(
 		soakSendConfig{SiteID: "site-1", ThreadShare: 1, ReplyTimeout: time.Second},
 		catalog, &soakRecordingPublisher{}, clock, rand.New(rand.NewSource(1)),
@@ -200,8 +209,8 @@ func TestSoakSender_ChannelThreadReplySnapshotsExactFollowerSet(t *testing.T) {
 		Recipients: []string{"alice", "bob", "carol", "not-a-thread-follower"},
 	}, "next reply")
 	require.NoError(t, err)
-	require.Len(t, lifecycle.started, 1)
-	assert.Equal(t, []string{"alice", "bob", "carol"}, lifecycle.started[0].Target.Recipients)
+	require.NotNil(t, started)
+	assert.Equal(t, []string{"alice", "bob", "carol"}, started.Target.Recipients)
 }
 
 func TestSoakSender_RejectedThreadReplyReleasesParentBudget(t *testing.T) {
@@ -518,7 +527,20 @@ func TestSoakSender_PersistsLifecycleBeforePublishing(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
 	var sequence []string
 	publisher := &soakRecordingPublisher{onPublish: func() { sequence = append(sequence, "publish") }}
-	lifecycle := &recordingSoakSendLifecycle{sequence: &sequence}
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	var started, activated *soakPendingSend
+	gomock.InOrder(
+		lifecycle.EXPECT().Start(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			started = cloneSoakPendingSend(pending)
+			sequence = append(sequence, "start")
+			return nil
+		}),
+		lifecycle.EXPECT().Activate(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			activated = cloneSoakPendingSend(pending)
+			sequence = append(sequence, "activate")
+			return nil
+		}),
+	)
 	sender := newSoakSender(soakSendConfig{
 		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
 	}, newSoakCatalog(8, 100, 0, clock), publisher, clock,
@@ -532,10 +554,10 @@ func TestSoakSender_PersistsLifecycleBeforePublishing(t *testing.T) {
 		UserID: "u-1", Account: "alice", RoomID: "room-1",
 	}, "hello")
 	require.NoError(t, err)
-	require.Len(t, lifecycle.started, 1)
-	require.Len(t, lifecycle.activated, 1)
-	assert.Equal(t, pending.MessageID, lifecycle.started[0].MessageID)
-	assert.Equal(t, pending.MessageID, lifecycle.activated[0].MessageID)
+	require.NotNil(t, started)
+	require.NotNil(t, activated)
+	assert.Equal(t, pending.MessageID, started.MessageID)
+	assert.Equal(t, pending.MessageID, activated.MessageID)
 	assert.Equal(t, []string{"start", "publish", "activate"}, sequence)
 	assert.True(t, pending.Tracked)
 	subjects, _ := publisher.snapshot()
@@ -597,7 +619,8 @@ func TestSoakSender_AmbiguousPublishFailureRemainsActive(t *testing.T) {
 func TestSoakSender_LifecycleFailureKeepsTrafficFlowing(t *testing.T) {
 	wantErr := errors.New("ledger disk full")
 	publisher := &soakRecordingPublisher{}
-	lifecycle := &recordingSoakSendLifecycle{err: wantErr}
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	lifecycle.EXPECT().Start(gomock.Any()).Return(wantErr)
 	var observed []error
 	sender := newSoakSender(soakSendConfig{
 		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
@@ -626,7 +649,18 @@ func TestSoakSender_LifecycleFailureKeepsTrafficFlowing(t *testing.T) {
 func TestSoakSender_ActivationFailureKeepsTrafficFlowing(t *testing.T) {
 	wantErr := errors.New("ledger activation failed")
 	publisher := &soakRecordingPublisher{}
-	lifecycle := &recordingSoakSendLifecycle{activateErr: wantErr}
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	var started, activated *soakPendingSend
+	gomock.InOrder(
+		lifecycle.EXPECT().Start(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			started = cloneSoakPendingSend(pending)
+			return nil
+		}),
+		lifecycle.EXPECT().Activate(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			activated = cloneSoakPendingSend(pending)
+			return wantErr
+		}),
+	)
 	var observed []error
 	sender := newSoakSender(soakSendConfig{
 		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
@@ -646,8 +680,8 @@ func TestSoakSender_ActivationFailureKeepsTrafficFlowing(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pending)
 	assert.True(t, pending.Tracked)
-	require.Len(t, lifecycle.started, 1)
-	require.Len(t, lifecycle.activated, 1)
+	require.NotNil(t, started)
+	require.NotNil(t, activated)
 	require.Len(t, observed, 1)
 	assert.ErrorIs(t, observed[0], wantErr)
 	subjects, _ := publisher.snapshot()
@@ -696,44 +730,6 @@ type fakeSoakResponseSource struct {
 	flushErr     error
 	flushed      bool
 	handled      int
-}
-
-type recordingSoakSendLifecycle struct {
-	started     []*soakPendingSend
-	activated   []*soakPendingSend
-	sequence    *[]string
-	err         error
-	startErr    error
-	activateErr error
-}
-
-func (l *recordingSoakSendLifecycle) Start(pending *soakPendingSend) error {
-	l.started = append(l.started, cloneSoakPendingSend(pending))
-	if l.sequence != nil {
-		*l.sequence = append(*l.sequence, "start")
-	}
-	if l.startErr != nil {
-		return l.startErr
-	}
-	return l.err
-}
-
-func (l *recordingSoakSendLifecycle) Activate(pending *soakPendingSend) error {
-	l.activated = append(l.activated, cloneSoakPendingSend(pending))
-	if l.sequence != nil {
-		*l.sequence = append(*l.sequence, "activate")
-	}
-	if l.activateErr != nil {
-		return l.activateErr
-	}
-	return l.err
-}
-
-func (l *recordingSoakSendLifecycle) AbandonUnsent(pending *soakPendingSend) error {
-	if l.sequence != nil {
-		*l.sequence = append(*l.sequence, "abandon")
-	}
-	return l.err
 }
 
 func (f *fakeSoakResponseSource) Subscribe(

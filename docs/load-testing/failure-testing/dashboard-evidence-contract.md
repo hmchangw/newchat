@@ -71,8 +71,8 @@ observer is not eligible and cannot make the interval unverified.
 For each configured observer and lane:
 
 ```text
-eligible   = increase(loadgen_failure_observer_eligible_total{scenario="$scenario",lane="$lane",observer="$observer"}[2m])
-unverified = increase(loadgen_failure_observations_total{scenario="$scenario",lane="$lane",observer="$observer",result="unverified"}[2m])
+eligible   = increase(loadgen_failure_observer_eligible_total{scenario="message_soak",lane="$lane",observer="$observer"}[2m])
+unverified = increase(loadgen_failure_observations_total{scenario="message_soak",lane="$lane",observer="$observer",result="unverified"}[2m])
 limit      = max(3, ceil(0.001 * eligible))
 invalid    = unverified > limit
 ```

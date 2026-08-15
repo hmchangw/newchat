@@ -36,9 +36,10 @@ type failureRecipientConnection interface {
 }
 
 type natsFailureRecipientConnection struct {
-	nc     *nats.Conn
-	closed <-chan struct{}
-	drain  func() error
+	nc        *nats.Conn
+	closed    <-chan struct{}
+	drain     func() error
+	lastError func() error
 }
 
 func newNATSFailureRecipientConnection(nc *nats.Conn) *natsFailureRecipientConnection {
@@ -59,7 +60,7 @@ func newNATSFailureRecipientConnection(nc *nats.Conn) *natsFailureRecipientConne
 		markClosed()
 	}
 	return &natsFailureRecipientConnection{
-		nc: nc, closed: closed, drain: nc.Drain,
+		nc: nc, closed: closed, drain: nc.Drain, lastError: nc.LastError,
 	}
 }
 
@@ -76,13 +77,13 @@ func (c *natsFailureRecipientConnection) Drain() error {
 		return fmt.Errorf("recipient observer connection is not configured")
 	}
 	if err := c.drain(); err != nil {
-		return err
+		return fmt.Errorf("drain recipient observer connection: %w", err)
 	}
 	if c.closed != nil {
 		<-c.closed
 	}
-	if c.nc != nil && errors.Is(c.nc.LastError(), nats.ErrDrainTimeout) {
-		return nats.ErrDrainTimeout
+	if c.lastError != nil && errors.Is(c.lastError(), nats.ErrDrainTimeout) {
+		return fmt.Errorf("drain recipient observer connection: %w", nats.ErrDrainTimeout)
 	}
 	return nil
 }
