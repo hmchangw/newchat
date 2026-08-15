@@ -717,7 +717,7 @@ func TestHandleAuth_SessionToken_Admin(t *testing.T) {
 func TestHandleAuth_SessionToken_InvalidToken(t *testing.T) {
 	signingKP, accPub := mustAccountKP(t)
 	userPub := mustUserNKey(t)
-	bp := &fakeBPValidator{err: errcode.Unauthenticated("session token invalid",
+	bp := &fakeBPValidator{err: errcode.Unauthenticated("invalid session token",
 		errcode.WithReason(errcode.BotplatformInvalidToken))}
 	handler := NewAuthHandler(nil, signingKP, accPub, 2*time.Hour, false, WithBotplatformValidator(bp))
 	router := setupRouter(t, handler)

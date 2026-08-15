@@ -43,7 +43,9 @@ func newEmojiTestRouter(t *testing.T) (*gin.Engine, *MockavatarStore, *Mockemoji
 		EIDCacheTTL:          time.Minute,
 	})
 	r := gin.New()
-	registerRoutes(r, h)
+	// These tests exercise handlers, not auth; an admin session satisfies both rules.
+	// The middleware itself is covered by middleware_auth_test.go.
+	registerRoutes(r, h, &fakeSessionValidator{principal: adminPrincipal()}, testSiteID)
 	return r, store, emojis, blobs
 }
 

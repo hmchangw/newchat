@@ -3,6 +3,7 @@ package restyutil
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-resty/resty/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -64,9 +66,102 @@ func TestWithTransport_PreservesOTelWrap(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, WithTransport(custom))
+	assert.IsType(t, &otelhttp.Transport{}, c.GetClient().Transport, "OTel wrap must survive the option")
+
 	_, err := c.R().Get("/")
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), hits.Load(), "custom transport must run")
+}
+
+// WithMaxIdleConns tunes the transport installed when it runs, so ordering is
+// part of its contract. Both directions are pinned: placed after WithTransport
+// it sizes the supplied transport, placed before it the sizing is dropped.
+func TestWithMaxIdleConns_OrderingContract(t *testing.T) {
+	tests := []struct {
+		name string
+		opts func(tr *http.Transport) []Option
+		want int
+	}{
+		{
+			name: "after WithTransport sizes the supplied transport",
+			opts: func(tr *http.Transport) []Option {
+				return []Option{WithTransport(tr), WithMaxIdleConns(50)}
+			},
+			want: 50,
+		},
+		{
+			name: "before WithTransport the sizing is dropped",
+			opts: func(tr *http.Transport) []Option {
+				return []Option{WithMaxIdleConns(50), WithTransport(tr)}
+			},
+			want: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := http.DefaultTransport.(*http.Transport).Clone()
+			tr.MaxIdleConnsPerHost = 0
+			c := New("http://example", tc.opts(tr)...)
+
+			assert.Equal(t, tc.want, tr.MaxIdleConnsPerHost)
+			assert.IsType(t, &otelhttp.Transport{}, c.GetClient().Transport, "OTel wrap must survive both options")
+		})
+	}
+}
+
+func TestWithMaxIdleConns(t *testing.T) {
+	// Reaching New's own transport means unwrapping otelhttp, whose base is
+	// unexported — so supply the transport and assert on the copy we hold.
+	// A non-zero starting per-host value: the guard cases are only falsifiable if
+	// the field would visibly change when the guard is gone.
+	tune := func(n int) *http.Transport {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.MaxIdleConns = 10
+		tr.MaxIdleConnsPerHost = 7
+		New("http://example", WithTransport(tr), WithMaxIdleConns(n))
+		return tr
+	}
+
+	t.Run("raises both limits", func(t *testing.T) {
+		tr := tune(50)
+		assert.Equal(t, 50, tr.MaxIdleConnsPerHost)
+		assert.Equal(t, 50, tr.MaxIdleConns, "a finite total below the per-host cap must be raised")
+	})
+
+	t.Run("leaves a larger total alone", func(t *testing.T) {
+		tr := tune(5)
+		assert.Equal(t, 5, tr.MaxIdleConnsPerHost)
+		assert.Equal(t, 10, tr.MaxIdleConns)
+	})
+
+	// Both branches of the n <= 0 guard: without it, zero would overwrite 7 and a
+	// negative would install a nonsense cap.
+	for _, n := range []int{0, -1} {
+		t.Run(fmt.Sprintf("non-positive %d is a no-op", n), func(t *testing.T) {
+			tr := tune(n)
+			assert.Equal(t, 7, tr.MaxIdleConnsPerHost)
+			assert.Equal(t, 10, tr.MaxIdleConns)
+		})
+	}
+}
+
+// A RoundTripper that is not an *http.Transport has no pool to size; the option
+// must skip it rather than assert its way into a panic.
+func TestWithMaxIdleConns_IgnoresForeignRoundTripper(t *testing.T) {
+	var hits atomic.Int32
+	custom := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		hits.Add(1)
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, WithTransport(custom), WithMaxIdleConns(50))
+	_, err := c.R().Get("/")
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), hits.Load(), "the foreign transport must survive and still run")
 }
 
 // End-to-end: real httptest server, GET, JSON decode into a struct.

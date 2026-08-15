@@ -28,7 +28,7 @@ Public read endpoints + authenticated write endpoints:
 |----------|---------|------|
 | `GET /api/v1/avatar/:accountName` | User **and** bot avatar (frontend routes dm/botDM room avatars here too) | public |
 | `GET /api/v1/avatar/room/:roomID` | Room avatar — **channel / discussion only** | public |
-| `PUT /api/v1/avatar/bot/:botName` | Upload a custom bot avatar | **🔴 none (v1)** |
+| `PUT /api/v1/avatar/bot/:botName` | Upload a custom bot avatar | session token; bot-self or admin |
 
 **v1 write scope = bot uploads only.** Room and user avatars are never uploaded
 through this service: users resolve to the external employee-photo service, and
@@ -41,10 +41,8 @@ is the universal fallback.
 
 Non-goals: per-size rendering (`_120` is fixed for the employee-photo redirect);
 room/user uploads; deleting/resetting a custom avatar. **Read** endpoints are
-public; **🔴 the bot-upload endpoint is UNAUTHENTICATED in v1** — auth is
-deferred until the model is decided (§7a.4). This is a known risk (anyone can
-overwrite any bot's avatar / fill storage) and **MUST be gated before
-production**.
+public; the **bot-upload endpoint requires a botplatform session token** — the
+caller must be the bot named in the path or hold the `admin` role (§7a.4).
 
 > **Bot detection** uses the codebase's canonical `botPattern` (`` `\.bot$|^p_` ``):
 > an account is a bot if it ends in `.bot` **or** begins with `p_`. (Earlier
@@ -53,12 +51,13 @@ production**.
 ## 2. Service shape
 
 A new flat service `media-service/` at repo root, following the per-service
-layout. **It does not use NATS, and v1 has no auth** (§7a.4). Mongo + MinIO backed.
+layout. Write endpoints authenticate via `pkg/botauth` against botplatform
+(§7a.4); read endpoints are public. Mongo + MinIO backed.
 
 | File | Responsibility |
 |------|----------------|
 | `main.go` | Config (`caarlos0/env`), wire Mongo + MinIO, Gin server + timeouts, graceful shutdown (`pkg/shutdown.Wait`) |
-| `routes.go` | Register GET ×2 (public), `PUT /bot/:botName` (open in v1), `GET /healthz` |
+| `routes.go` | Register public `GET /healthz`, `GET /avatar/:accountName`, `GET /avatar/room/:roomID`, `GET /drive.members`, `GET /emoji/:shortcode`; session-gated `PUT /avatar/bot/:botName` and `PUT /emoji/:shortcode` |
 | `handler.go` | Read path: resolve owning site → cross-cluster redirect → avatars-doc lookup → stream/default |
 | `upload.go` | Bot-upload write path: validate (botPattern/type/size/decode), locality+existence, store to MinIO, upsert `avatars` doc |
 | `avatar.go` | `renderDefaultSVG(seed, initial)` pure deterministic generator + object-key helpers |
@@ -101,6 +100,7 @@ label — instrumented at one seam, not scattered across the decision tree.
 | `CACHE_MAX_AGE_SECONDS` | `Cache-Control: public, max-age=` value | `21600` (6h) |
 | `EID_CACHE_TTL` | account→employeeId cache TTL (near-immutable → long) | `24h` |
 | `EID_CACHE_CAPACITY` | account→employeeId cache max entries (≈ employee population) | `120000` |
+| `BOTPLATFORM_URL` | LOCAL site's botplatform-service, used to validate session tokens on the write endpoints | **required, non-empty** |
 
 `CLUSTER_DOMAINS` is a **JSON array** of `{"siteID","domain"}` objects mapping
 each `siteID` to the **full base URL (including scheme)** of *that cluster's*
@@ -440,17 +440,36 @@ locally even for a remote bot):
    correct domain itself.
 3. Otherwise (`siteID == SITE_ID`, exists) → proceed.
 
-### 7a.4 Authorization — 🔴 NONE in v1
+### 7a.4 Authorization — botplatform session token
 
-**The bot-upload endpoint is unauthenticated in v1** — no OIDC, no role check;
-**anyone who can reach it can upload/overwrite any existing bot's avatar.** This
-is a deliberate interim decision: the auth model is deferred until it is decided
-(candidates: OIDC + platform-admin role, an internal/service token, or a per-bot
-owner source). **It is a known risk and MUST be gated before any production
-exposure** (network-restrict the endpoint in the meantime). media-service
-therefore has **no `pkg/oidc` dependency and no auth config** in v1.
+Write endpoints require a botplatform session token (`x-user-id` +
+`x-auth-token`), validated through `pkg/botauth` against botplatform-service's
+`POST /api/v1/auth/validate`. media-service has no `pkg/oidc` dependency: SSO
+users never write here.
 
-Read endpoints (GET) are public by design.
+| Endpoint | Rule | Failure |
+|---|---|---|
+| `PUT /api/v1/avatar/bot/:botName` | session `account == :botName`, **or** `admin` role | `403 not_admin` |
+| `PUT /api/v1/emoji/:shortcode` | `admin` role only | `403 not_admin` |
+
+A bot owns its own avatar, so it may set it; an admin may set any bot's, for
+provisioning. Emoji are stricter because a shortcode is a **site-wide shared
+name** every user renders — one bot must not be able to overwrite `:party:` for
+the whole site.
+
+`BOTPLATFORM_URL` is a **required** env var: the service refuses to start
+without it, so no deployment can fall back to serving these endpoints
+anonymously.
+
+Read endpoints (GET) are public by design — the frontend loads them from
+`<img src>`, which cannot send credential headers.
+
+`GET /api/v1/drive.members` is also public and was **not** gated by this change. It
+is a server-to-server route for the Drive backend, but it discloses room existence,
+`roomName`/`roomType`, and a member's id and display name to any caller that can
+reach the service. Gating it needs its Drive-side caller updated in lockstep, so it
+is deliberately left as follow-up work rather than silently broken here — it must be
+network-restricted meanwhile.
 
 ## 8. Default image — dynamic, deterministic, not persisted
 
@@ -544,11 +563,10 @@ the rendering in one place.
   placeholder `?`) + `html.EscapeString`, plus `nosniff` + CSP `default-src
   'none'` on responses (§8.1, §7a.1).
 
+- **Bot-upload authentication/authorization** → shipped: botplatform session
+  token, bot-self or admin (§7a.4).
+
 **Deferred (post-v1, decided):**
-- **🔴 Bot-upload authentication/authorization:** removed in v1 — the endpoint is
-  **OPEN** (§7a.4). Deferred until the model is decided (OIDC + platform-admin /
-  internal service token / per-bot owner). **Must be gated before production**;
-  network-restrict the endpoint until then.
 - **OTel tracing + Prometheus `/metrics`:** deferred to post-v1. v1 ships
   auth-service-parity logging (slog + request-id + access-log, §2). The infra is
   ready to copy (`pkg/otelutil`; search-service's promauto + separate `/metrics`
@@ -594,8 +612,8 @@ the rendering in one place.
   (`BotSite` siteID ≠ local) → wrong-cluster error carrying the correct domain;
   accept PNG/JPEG within size; reject oversize (`MAX_UPLOAD_BYTES`), reject
   `image/svg+xml` and non-image bytes, reject decode failures; on success store to
-  MinIO + upsert the `avatars` doc; assert `nosniff`. (No auth tests — v1 endpoint
-  is open, §7a.4.)
+  MinIO + upsert the `avatars` doc; assert `nosniff`. Auth/authz is covered by
+  `middleware_auth_test.go` (§7a.4).
 - **Generation unit tests:** `renderDefaultSVG` is **deterministic** — same
   `(seed, initial)` yields byte-identical SVG *and* the same `ETag` across
   repeated calls; stable colour per seed, correct initial (incl. CJK), valid +
