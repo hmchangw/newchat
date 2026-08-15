@@ -1,14 +1,18 @@
 package roomkeysender_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 )
 
@@ -154,4 +158,35 @@ func TestSender_SendData(t *testing.T) {
 		assert.Contains(t, err.Error(), "publish room key event")
 		assert.ErrorIs(t, err, sentinel)
 	})
+}
+
+func TestSender_WithMetricsRecordsBoundedPublishResult(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	metrics := natsmetrics.NewFromProvider(mp).Publisher("room-worker", "site-a")
+	sender := roomkeysender.NewSender(&mockPublisher{}, roomkeysender.WithMetrics(metrics))
+
+	require.NoError(t, sender.SendDataContext(context.Background(), "alice", []byte(`{}`)))
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var found bool
+	for _, scope := range rm.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != "chat.nats.publish.attempts" {
+				continue
+			}
+			for _, point := range metric.Data.(metricdata.Sum[int64]).DataPoints {
+				attrs := map[string]string{}
+				for _, kv := range point.Attributes.ToSlice() {
+					attrs[string(kv.Key)] = kv.Value.AsString()
+				}
+				if attrs["destination_kind"] == "recipient_event" && attrs["operation"] == "room_publish" && attrs["outcome"] == "success" {
+					found = true
+					assert.Equal(t, int64(1), point.Value)
+				}
+			}
+		}
+	}
+	assert.True(t, found)
 }

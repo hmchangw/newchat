@@ -14,8 +14,23 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+type recordedRequest struct {
+	operation natsmetrics.Operation
+	duration  time.Duration
+	err       error
+}
+
+type recordingRequests struct {
+	requests []recordedRequest
+}
+
+func (r *recordingRequests) Request(_ context.Context, operation natsmetrics.Operation, duration time.Duration, err error) {
+	r.requests = append(r.requests, recordedRequest{operation: operation, duration: duration, err: err})
+}
 
 func startInProcessNATS(t *testing.T) *nats.Conn {
 	t.Helper()
@@ -55,6 +70,27 @@ func TestNATSMemberListClient_HappyPath(t *testing.T) {
 	got, err := client.ListMembers(context.Background(), requester, ch, 0)
 	require.NoError(t, err)
 	assert.Equal(t, members, got)
+}
+
+func TestNATSMemberListClient_RecordsBoundedRequestResult(t *testing.T) {
+	nc := startInProcessNATS(t)
+	recorder := &recordingRequests{}
+	client := NewNATSMemberListClient(nc, 2*time.Second, withMemberListRequestRecorder(recorder))
+	ch := model.ChannelRef{RoomID: "room-eng", SiteID: "site-us"}
+
+	sub, err := nc.Subscribe(subject.MemberList("alice", ch.RoomID, ch.SiteID), func(m *nats.Msg) {
+		data, _ := json.Marshal(model.ListRoomMembersResponse{})
+		_ = m.Respond(data)
+	})
+	require.NoError(t, err)
+	defer sub.Unsubscribe()
+
+	_, err = client.ListMembers(context.Background(), "alice", ch, 0)
+	require.NoError(t, err)
+	require.Len(t, recorder.requests, 1)
+	assert.Equal(t, natsmetrics.OperationMemberRead, recorder.requests[0].operation)
+	assert.GreaterOrEqual(t, recorder.requests[0].duration, time.Duration(0))
+	assert.NoError(t, recorder.requests[0].err)
 }
 
 func TestNATSMemberListClient_RemoteError(t *testing.T) {

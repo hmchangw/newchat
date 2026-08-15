@@ -23,3 +23,117 @@ func EventTypeFromSubject(subj string) EventType {
 	}
 	return NormalizeEventType(tail)
 }
+
+// RoomEventTypeFromSubject maps ROOMS and ROOMS-TEAMS subjects onto a closed
+// room/member vocabulary. Site IDs and room IDs never become metric labels.
+func RoomEventTypeFromSubject(subj string) EventType {
+	if strings.HasPrefix(subj, "chat.teams.room.canonical.") {
+		if strings.HasSuffix(subj, ".create") {
+			return EventRoomCreate
+		}
+		return EventUnknown
+	}
+	if !strings.HasPrefix(subj, "chat.room.canonical.") {
+		return EventUnknown
+	}
+	switch {
+	case strings.HasSuffix(subj, ".event.member.muted"):
+		return EventMemberMuted
+	case strings.HasSuffix(subj, ".member.add"):
+		return EventMemberAdd
+	case strings.HasSuffix(subj, ".member.remove"):
+		return EventMemberRemove
+	case strings.HasSuffix(subj, ".room.rename"):
+		return EventRoomRename
+	case strings.HasSuffix(subj, ".create"):
+		return EventRoomCreate
+	default:
+		return EventUnknown
+	}
+}
+
+// RequestOperationFromSubject maps concrete request subjects to the bounded
+// operation vocabulary used by natsrouter. Dynamic account, room, and site
+// tokens are inspected only for shape and never become labels.
+func RequestOperationFromSubject(subj string) Operation {
+	switch {
+	case strings.HasPrefix(subj, "chat.server.request.history."):
+		return OperationHistoryRead
+	case strings.HasPrefix(subj, "chat.server.request.thread."):
+		return OperationHistoryRead
+	case strings.Contains(subj, ".msg."):
+		switch {
+		case hasAnySuffix(subj, ".msg.edit", ".msg.delete", ".msg.pin", ".msg.unpin", ".msg.react"):
+			return OperationHistoryMutation
+		case hasAnySuffix(subj, ".msg.history", ".msg.next", ".msg.surrounding", ".msg.get", ".msg.get.ids", ".msg.pinned.list", ".msg.thread"):
+			return OperationHistoryRead
+		}
+	case strings.Contains(subj, ".teams."):
+		return OperationTeamsRoom
+	case hasAnySuffix(subj, ".member.list", ".member.statuses", ".subscription.mentionable", ".members"):
+		return OperationMemberRead
+	case hasAnySuffix(subj, ".member.add", ".member.remove", ".member.role-update", ".mute.toggle"):
+		return OperationMemberMutation
+	case hasAnySuffix(subj, ".key.get", ".open", ".app.tabs", ".app.cmd-menu"):
+		return OperationRoomRead
+	case hasAnySuffix(subj, ".room.rename", ".create", ".chat.move", ".favorite.toggle", ".message.read", ".message.read-receipt", ".message.thread.read"):
+		return OperationRoomMutation
+	case strings.HasPrefix(subj, "chat.server.request.room.") && hasAnySuffix(subj, ".info.batch", ".thread.info.batch"):
+		return OperationRoomRead
+	case strings.HasPrefix(subj, "chat.server.request.room."):
+		return OperationRoomMutation
+	default:
+		return OperationUnknown
+	}
+	return OperationUnknown
+}
+
+// PublishLabelsFromSubject maps a publish destination to closed labels. It is
+// intentionally conservative: a new subject family remains unknown until it
+// receives an explicit bounded mapping.
+func PublishLabelsFromSubject(subj string) (DestinationKind, Operation) {
+	switch {
+	case strings.HasPrefix(subj, "chat.msg.canonical."):
+		return DestinationCanonical, OperationCanonicalPublish
+	case strings.HasPrefix(subj, "chat.room.canonical."), strings.HasPrefix(subj, "chat.teams.room.canonical."):
+		operation := OperationRoomPublish
+		if strings.Contains(subj, ".member.") || strings.Contains(subj, ".event.member.") {
+			operation = OperationMemberPublish
+		}
+		return DestinationRoomCanonical, operation
+	case strings.HasPrefix(subj, "chat.outbox."):
+		return DestinationOutbox, OperationOutboxPublish
+	case strings.HasPrefix(subj, "chat.inbox."):
+		if strings.Contains(subj, ".member_") {
+			return DestinationInbox, OperationMemberPublish
+		}
+		return DestinationInbox, OperationRoomPublish
+	case strings.HasPrefix(subj, "chat.room.") && strings.HasSuffix(subj, ".event"),
+		strings.HasPrefix(subj, "chat.local.room.") && strings.HasSuffix(subj, ".event"):
+		return DestinationRoomEvent, OperationRoomPublish
+	case strings.HasPrefix(subj, "chat.room.") && strings.HasSuffix(subj, ".event.member"),
+		strings.HasPrefix(subj, "chat.local.room.") && strings.HasSuffix(subj, ".event.member"):
+		return DestinationMemberEvent, OperationMemberPublish
+	case strings.HasPrefix(subj, "chat.user.") && (strings.HasSuffix(subj, ".event.room") || strings.HasSuffix(subj, ".event.room.update")):
+		return DestinationRecipientEvent, OperationRoomPublish
+	case strings.HasPrefix(subj, "chat.user.") && strings.HasSuffix(subj, ".event.subscription.update"):
+		return DestinationRecipientEvent, OperationMemberPublish
+	case strings.HasPrefix(subj, "chat.user.") && strings.HasSuffix(subj, ".event.room.key"):
+		return DestinationRecipientEvent, OperationRoomPublish
+	case strings.HasPrefix(subj, "chat.user.") && strings.Contains(subj, ".response."):
+		return DestinationClientResponse, OperationClientResponse
+	case strings.HasPrefix(subj, "chat.hr.") && strings.HasSuffix(subj, ".users.upsert"):
+		return DestinationUserSync, OperationTeamsUserUpsert
+	default:
+		return DestinationUnknown, OperationUnknown
+	}
+}
+
+func hasAnySuffix(value string, suffixes ...string) bool {
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(value, suffix) {
+			return true
+		}
+	}
+	return false
+}

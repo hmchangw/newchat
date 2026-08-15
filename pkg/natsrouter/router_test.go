@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/trace/noop"
 
 	o11ynats "github.com/flywindy/o11y/nats"
@@ -20,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
@@ -62,6 +65,57 @@ func TestRegister_Success(t *testing.T) {
 	var result testResp
 	require.NoError(t, json.Unmarshal(resp.Data, &result))
 	assert.Equal(t, "hello world from alice", result.Greeting)
+}
+
+func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	metrics := natsmetrics.NewFromProvider(mp).Publisher("room-service", "site-a")
+	r := New(nc, "room-service", WithMetrics(metrics))
+
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.member.list",
+		func(_ *Context, req testReq) (*testResp, error) {
+			if req.Name == "deny" {
+				return nil, errcode.Forbidden("not allowed")
+			}
+			return &testResp{Greeting: "ok"}, nil
+		})
+
+	for _, body := range [][]byte{[]byte(`{"name":"ok"}`), []byte(`{"name":"deny"}`), []byte(`not json`)} {
+		_, err := nc.Request(context.Background(), "chat.user.alice.request.room.room-a.site-a.member.list", body, 2*time.Second)
+		require.NoError(t, err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	results := map[string]int64{}
+	var replyAttempts int64
+	for _, scope := range rm.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, point := range sum.DataPoints {
+				attrs := map[string]string{}
+				for _, kv := range point.Attributes.ToSlice() {
+					attrs[string(kv.Key)] = kv.Value.AsString()
+				}
+				switch metric.Name {
+				case "chat.nats.request.handled":
+					assert.Equal(t, "member_read", attrs["operation"])
+					results[attrs["result"]] += point.Value
+				case "chat.nats.publish.attempts":
+					if attrs["destination_kind"] == "client_response" && attrs["operation"] == "client_response" {
+						replyAttempts += point.Value
+					}
+				}
+			}
+		}
+	}
+	assert.Equal(t, map[string]int64{"success": 1, "forbidden": 1, "bad_request": 1}, results)
+	assert.Equal(t, int64(3), replyAttempts)
 }
 
 func TestRegister_ParamsExtraction(t *testing.T) {

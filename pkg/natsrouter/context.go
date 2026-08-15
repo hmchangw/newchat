@@ -3,6 +3,7 @@ package natsrouter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
 // HandlerFunc is the function type for handlers and middleware.
@@ -32,12 +34,13 @@ type responder interface {
 // single-writer contract: middleware must call SetContext before c.Next(),
 // never concurrently with handler-spawned goroutines that read c.Value.
 type Context struct {
-	ctx    context.Context
-	Msg    *nats.Msg
-	Params Params
-	reply  responder
-	keys   map[string]any
-	mu     sync.RWMutex
+	ctx           context.Context
+	Msg           *nats.Msg
+	Params        Params
+	reply         responder
+	keys          map[string]any
+	mu            sync.RWMutex
+	requestResult natsmetrics.RequestResult
 
 	chain *chainState
 }
@@ -60,11 +63,12 @@ func acquireContext(ctx context.Context, msg *nats.Msg, params Params, handlers 
 	cs.handlers = handlers
 	cs.index = -1
 	return &Context{
-		ctx:    ctx,
-		Msg:    msg,
-		Params: params,
-		reply:  reply,
-		chain:  cs,
+		ctx:           ctx,
+		Msg:           msg,
+		Params:        params,
+		reply:         reply,
+		chain:         cs,
+		requestResult: natsmetrics.RequestSuccess,
 	}
 }
 
@@ -85,9 +89,10 @@ func releaseContext(c *Context) {
 // NewContext creates a Context for testing handlers without a NATS connection.
 func NewContext(params map[string]string) *Context {
 	return &Context{
-		ctx:    context.Background(),
-		Params: NewParams(params),
-		chain:  &chainState{index: -1},
+		ctx:           context.Background(),
+		Params:        NewParams(params),
+		chain:         &chainState{index: -1},
+		requestResult: natsmetrics.RequestSuccess,
 	}
 }
 
@@ -230,6 +235,7 @@ func (c *Context) ReplyJSON(v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		slog.ErrorContext(c, "marshal response failed", "error", err, "subject", c.subject())
+		c.requestResult = natsmetrics.RequestInternal
 		c.respond([]byte(`{"code":"internal","error":"internal error"}`))
 		return
 	}
@@ -238,11 +244,13 @@ func (c *Context) ReplyJSON(v any) {
 
 // ReplyError classifies err, logs it once, and sends the errcode envelope.
 func (c *Context) ReplyError(err error) {
+	c.requestResult = requestResultFromError(err)
 	c.respond(errnats.Marshal(c, err))
 }
 
 // ReplyErrorQuiet sends an errcode envelope without logging classification.
 func (c *Context) ReplyErrorQuiet(err error) {
+	c.requestResult = requestResultFromError(err)
 	c.respond(errnats.MarshalQuiet(err))
 }
 
@@ -258,7 +266,33 @@ func (c *Context) respond(data []byte) {
 		err = c.Msg.Respond(data)
 	}
 	if err != nil {
+		c.requestResult = natsmetrics.RequestInternal
 		slog.ErrorContext(c, "reply failed", "error", err, "subject", c.Msg.Subject)
+	}
+}
+
+func requestResultFromError(err error) natsmetrics.RequestResult {
+	var coded *errcode.Error
+	if !errors.As(err, &coded) {
+		return natsmetrics.RequestInternal
+	}
+	switch coded.Code {
+	case errcode.CodeBadRequest:
+		return natsmetrics.RequestBadRequest
+	case errcode.CodeUnauthenticated:
+		return natsmetrics.RequestUnauthenticated
+	case errcode.CodeForbidden:
+		return natsmetrics.RequestForbidden
+	case errcode.CodeNotFound:
+		return natsmetrics.RequestNotFound
+	case errcode.CodeConflict:
+		return natsmetrics.RequestConflict
+	case errcode.CodeTooManyRequests:
+		return natsmetrics.RequestTooManyRequests
+	case errcode.CodeUnavailable:
+		return natsmetrics.RequestUnavailable
+	default:
+		return natsmetrics.RequestInternal
 	}
 }
 

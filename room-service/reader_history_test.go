@@ -16,6 +16,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -31,6 +32,25 @@ func startOtelNATS(t *testing.T) *o11ynats.Conn {
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
 	return nc
+}
+
+func TestHistoryMessageReader_RecordsBoundedRequestResult(t *testing.T) {
+	nc := startOtelNATS(t)
+	recorder := &recordingRequests{}
+	const siteID = "site-a"
+	_, err := nc.Subscribe(context.Background(), subject.MsgGet("alice", "room-a", siteID), func(_ context.Context, m *nats.Msg) {
+		data, _ := json.Marshal(cassandra.Message{RoomID: "room-a", CreatedAt: time.Now(), Sender: cassandra.Participant{Account: "alice"}})
+		_ = m.Respond(data)
+	})
+	require.NoError(t, err)
+
+	r := newHistoryMessageReader(nc, siteID, withHistoryRequestRecorder(recorder))
+	_, _, err = r.GetMessageReadMeta(context.Background(), "alice", "room-a", "message-a")
+	require.NoError(t, err)
+	require.Len(t, recorder.requests, 1)
+	assert.Equal(t, natsmetrics.OperationHistoryGetMessage, recorder.requests[0].operation)
+	assert.GreaterOrEqual(t, recorder.requests[0].duration, time.Duration(0))
+	assert.NoError(t, recorder.requests[0].err)
 }
 
 func TestHistoryMessageReader_GetMessageReadMeta(t *testing.T) {

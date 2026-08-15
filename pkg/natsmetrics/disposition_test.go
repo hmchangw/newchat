@@ -144,3 +144,5 @@ func (s *scriptedIterator) Next(...jetstream.NextOpt) (context.Context, jetstrea
 	s.msgs = s.msgs[1:]
 	return context.Background(), msg, nil
 }
+
+func (*scriptedIterator) Stop() {}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -30,13 +31,32 @@ type MemberListClient interface {
 type natsMemberListClient struct {
 	nc      *nats.Conn
 	timeout time.Duration
+	metrics requestRecorder
+}
+
+type requestRecorder interface {
+	Request(context.Context, natsmetrics.Operation, time.Duration, error)
+}
+
+type memberListClientOption func(*natsMemberListClient)
+
+func withMemberListRequestRecorder(metrics requestRecorder) memberListClientOption {
+	return func(c *natsMemberListClient) { c.metrics = metrics }
+}
+
+func withMemberListMetrics(metrics natsmetrics.Publisher) memberListClientOption {
+	return withMemberListRequestRecorder(metrics)
 }
 
 // NewNATSMemberListClient creates a NATS-backed MemberListClient. Returns the
 // concrete type so future struct-only methods don't require widening the
 // MemberListClient interface ("accept interfaces, return structs").
-func NewNATSMemberListClient(nc *nats.Conn, timeout time.Duration) *natsMemberListClient {
-	return &natsMemberListClient{nc: nc, timeout: timeout}
+func NewNATSMemberListClient(nc *nats.Conn, timeout time.Duration, opts ...memberListClientOption) *natsMemberListClient {
+	c := &natsMemberListClient{nc: nc, timeout: timeout}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // ListMembers fetches members from a remote or same-site room via NATS request.
@@ -57,7 +77,11 @@ func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string
 	// natsutil.NewMsg forwards the X-Request-ID from ctx for trace correlation;
 	// the remote member.list endpoint mints one (RequestID middleware) if absent.
 	out := natsutil.NewMsg(reqCtx, subject.MemberList(requester, ch.RoomID, ch.SiteID), body)
+	started := time.Now()
 	reply, err := c.nc.RequestMsgWithContext(reqCtx, out)
+	if c.metrics != nil {
+		c.metrics.Request(ctx, natsmetrics.OperationMemberRead, time.Since(started), err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("member.list request to %s: %w", ch.SiteID, err)
 	}

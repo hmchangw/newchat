@@ -192,12 +192,6 @@ func main() {
 		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
-	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
 
 	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
 	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
@@ -241,17 +235,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
+	var wg sync.WaitGroup
+	supervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
+	iteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := js.CreateOrUpdateConsumer(factoryCtx, wiring.CanonicalStream.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := supervisor.Start(ctx, iteratorFactory, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		guardedProcessor(broadcastProcessor(handler))); err != nil {
+		slog.Error("start consumer supervisor failed", "error", err)
 		os.Exit(1)
 	}
-	consumerMetrics.LoopStarted(ctx)
-
-	var wg sync.WaitGroup
-	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
-		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		guardedProcessor(broadcastProcessor(handler)))
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -267,9 +269,8 @@ func main() {
 		func(_ context.Context) error {
 			return broadcastSub.Unsubscribe()
 		},
-		func(ctx context.Context) error {
-			consumerMetrics.LoopStopped(ctx)
-			iter.Stop()
+		func(context.Context) error {
+			supervisor.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {

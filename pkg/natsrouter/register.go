@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
 // Register subscribes a typed handler to a subject pattern.
@@ -92,11 +93,13 @@ func RegisterVoid[Req any](
 	handler := HandlerFunc(func(c *Context) {
 		var req Req
 		if err := json.Unmarshal(c.Msg.Data, &req); err != nil {
+			c.requestResult = natsmetrics.RequestBadRequest
 			slog.Error("invalid payload in void handler", "error", err, "subject", c.Msg.Subject)
 			return
 		}
 
 		if err := fn(c, req); err != nil {
+			c.requestResult = requestResultFromError(err)
 			slog.Error("void handler error", "error", err, "subject", c.Msg.Subject)
 		}
 	})
