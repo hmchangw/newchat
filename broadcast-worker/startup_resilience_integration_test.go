@@ -18,6 +18,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -115,8 +116,19 @@ func TestStartup_ConsumerRedeliversUntilMongoRecovers(t *testing.T) {
 		process(msgCtx, msg)
 	}
 
+	// The production composition: natsmetrics.Consume driving
+	// guardedProcessor(broadcastProcessor(…)), same as main.go wires.
+	metrics, _ := newTestBroadcastMetrics(t)
+	consumer := metrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "broadcast-worker", Site: siteID,
+		Stream: stream.MessagesCanonical(siteID).Name, Consumer: "broadcast-worker",
+	})
+	consumer.LoopStarted(ctx)
+
 	var wg sync.WaitGroup
-	go consumeLoop(iter, counted, 4, &wg)
+	go natsmetrics.Consume(ctx, iter, consumer, 4, consumerMaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		guardedProcessor(counted))
 
 	evt := model.MessageEvent{
 		Event:  model.EventCreated,
@@ -171,9 +183,9 @@ const (
 
 // startCanonicalConsumer builds the worker's real durable consumer over
 // MESSAGES-CANONICAL on the shared test NATS, returning it both directly (for
-// ack-state assertions) and as a consumeLoop iterator, plus the subject to
-// publish canonical events on.
-func startCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetStream, jetstream.Consumer, messageIterator, string) {
+// ack-state assertions) and as a Consume iterator, plus the subject to publish
+// canonical events on.
+func startCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetStream, jetstream.Consumer, natsmetrics.Iterator, string) {
 	t.Helper()
 
 	nc, err := nats.Connect(testutil.NATS(t))
