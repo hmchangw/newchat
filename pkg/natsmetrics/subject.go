@@ -56,19 +56,20 @@ func RoomEventTypeFromSubject(subj string) EventType {
 // operation vocabulary used by natsrouter. Dynamic account, room, and site
 // tokens are inspected only for shape and never become labels.
 func RequestOperationFromSubject(subj string) Operation {
+	tokens := strings.Split(subj, ".")
 	switch {
 	case strings.HasPrefix(subj, "chat.server.request.history."):
 		return OperationHistoryRead
 	case strings.HasPrefix(subj, "chat.server.request.thread."):
 		return OperationHistoryRead
-	case strings.Contains(subj, ".msg."):
+	case isRequestFamily(tokens, "msg") || isMigrationFamily(tokens, "msg"):
 		switch {
 		case hasAnySuffix(subj, ".msg.edit", ".msg.delete", ".msg.pin", ".msg.unpin", ".msg.react"):
 			return OperationHistoryMutation
-		case hasAnySuffix(subj, ".msg.history", ".msg.next", ".msg.surrounding", ".msg.get", ".msg.get.ids", ".msg.pinned.list", ".msg.thread"):
+		case hasAnySuffix(subj, ".msg.history", ".msg.next", ".msg.surrounding", ".msg.get", ".msg.get.ids", ".msg.pinned.list", ".msg.thread", ".msg.thread.parent"):
 			return OperationHistoryRead
 		}
-	case strings.Contains(subj, ".teams."):
+	case isRequestFamily(tokens, "teams"):
 		return OperationTeamsRoom
 	case hasAnySuffix(subj, ".member.list", ".member.statuses", ".subscription.mentionable", ".members"):
 		return OperationMemberRead
@@ -86,6 +87,21 @@ func RequestOperationFromSubject(subj string) Operation {
 		return OperationUnknown
 	}
 	return OperationUnknown
+}
+
+func isRequestFamily(tokens []string, family string) bool {
+	if len(tokens) < 5 || tokens[0] != "chat" || tokens[1] != "user" || tokens[3] != "request" {
+		return false
+	}
+	if tokens[4] == family {
+		return true
+	}
+	return len(tokens) >= 8 && tokens[4] == "room" && tokens[7] == family
+}
+
+func isMigrationFamily(tokens []string, family string) bool {
+	return len(tokens) >= 5 && tokens[0] == "chat" && tokens[1] == "migration" &&
+		tokens[2] == "internal" && tokens[4] == family
 }
 
 // PublishLabelsFromSubject maps a publish destination to closed labels. It is

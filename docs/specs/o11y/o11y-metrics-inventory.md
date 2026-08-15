@@ -188,19 +188,29 @@ publish operations are coarse bounded categories such as `room_read`,
 Unknown subject families normalize to `unknown`. Raw subjects, room IDs,
 account IDs, site IDs from subject tokens, and error strings are never labels.
 
-The long-running pull consumers use a single-owner supervisor. A terminal
-iterator error first sets `chat.nats.consumer.loop.up` to zero and records a
-bounded terminal failure, then recreates the durable consumer and iterator with
-capped exponential backoff. Each failed or successful recreation increments
-`chat.nats.consumer.recovery.attempts`. One semaphore is shared across iterator
-generations, and concurrent starts on the same supervisor are rejected, so
-recovery cannot create duplicate active iterators or exceed the configured
-worker limit while earlier handlers drain. Context cancellation stops backoff,
-stops the active iterator, and leaves the existing graceful in-flight wait and
-NATS drain ordering intact. Recovery state is telemetry, not a liveness failure:
-transient iterator loss does not deliberately restart an otherwise healthy
-process. These mechanics do not change handler-owned Ack, Nak, Term, or publish
-retry decisions.
+The long-running pull consumers use a single-owner supervisor. Initial consumer
+and iterator creation is synchronous and fail-fast; only a loop that has
+successfully started enters recovery. A recoverable terminal iterator error
+first sets `chat.nats.consumer.loop.up` to zero and records a bounded terminal
+failure, then recreates the durable consumer and iterator with capped
+exponential backoff. Consecutive iterator generations that fail before receiving
+a message increase that backoff; a successful delivery resets it. Each failed or
+successful recreation increments `chat.nats.consumer.recovery.attempts`.
+
+`jetstream.ErrConsumerDeleted` is intentionally terminal and is not recreated.
+Deleting a durable also deletes its server-side cursor, so automatic recreation
+would replay the retention window for `DeliverAllPolicy` consumers or skip
+pending work for `DeliverNewPolicy` consumers. The loop remains down and its
+`consumer_deleted` terminal metric requires operator intervention instead.
+
+One semaphore is shared across iterator generations, and concurrent starts on
+the same supervisor are rejected, so recovery cannot create duplicate active
+iterators or exceed the configured worker limit while earlier handlers drain.
+Context cancellation stops backoff, stops the active iterator, and leaves the
+existing graceful in-flight wait and NATS drain ordering intact. Recovery state
+is telemetry, not a liveness failure: transient iterator loss does not
+deliberately restart an otherwise healthy process. These mechanics do not change
+handler-owned Ack, Nak, Term, or publish retry decisions.
 
 `notification-worker` applies the same supervision separately to its canonical
 message consumer and member-mute invalidation consumer. `room-worker` covers the

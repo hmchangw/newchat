@@ -67,6 +67,7 @@ func TestRequestOperationFromSubject(t *testing.T) {
 		want Operation
 	}{
 		{name: "history read", subj: subject.MsgHistory("alice", "room-a", "site-a"), want: OperationHistoryRead},
+		{name: "thread parent read", subj: "chat.user.alice.request.room.room-a.site-a.msg.thread.parent", want: OperationHistoryRead},
 		{name: "history mutation", subj: subject.MsgEdit("alice", "room-a", "site-a"), want: OperationHistoryMutation},
 		{name: "history migration mutation", subj: subject.MigrationInternalMsgEdit("site-a"), want: OperationHistoryMutation},
 		{name: "thread subscription read", subj: subject.ThreadSubscriptionList("site-a"), want: OperationHistoryRead},
@@ -75,6 +76,8 @@ func TestRequestOperationFromSubject(t *testing.T) {
 		{name: "member read", subj: subject.MemberList("alice", "room-a", "site-a"), want: OperationMemberRead},
 		{name: "organization member read", subj: subject.OrgMembers("alice", "org-a", "site-a"), want: OperationMemberRead},
 		{name: "member mutation", subj: subject.MemberAdd("alice", "room-a", "site-a"), want: OperationMemberMutation},
+		{name: "teams account does not hijack member mutation", subj: subject.MemberAdd("teams", "room-a", "site-a"), want: OperationMemberMutation},
+		{name: "msg room does not hijack room read", subj: subject.RoomKeyGet("alice", "msg", "site-a"), want: OperationRoomRead},
 		{name: "teams room", subj: teamsMeeting, want: OperationTeamsRoom},
 		{name: "server room read", subj: subject.RoomsInfoBatchSubscribe("site-a"), want: OperationRoomRead},
 		{name: "server room mutation", subj: subject.RoomKeyEnsure("site-a"), want: OperationRoomMutation},

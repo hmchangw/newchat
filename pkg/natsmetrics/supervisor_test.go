@@ -3,6 +3,7 @@ package natsmetrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -88,7 +89,7 @@ func TestSupervisor_RecoversAfterTerminalIteratorFailure(t *testing.T) {
 	recovered := make(chan struct{})
 	factory := func(context.Context) (Iterator, error) {
 		if factoryCalls.Add(1) == 1 {
-			return failingSupervisorIterator(&active, &maxActive, &duplicate, jetstream.ErrConsumerDeleted), nil
+			return failingSupervisorIterator(&active, &maxActive, &duplicate, errors.New("transient iterator failure")), nil
 		}
 		return blockingSupervisorIterator(recovered, &active, &maxActive, &duplicate), nil
 	}
@@ -117,13 +118,101 @@ func TestSupervisor_RecoversAfterTerminalIteratorFailure(t *testing.T) {
 	rm := collect(t, reader)
 	terminal := metricPoints[int64](t, rm, "chat.nats.terminal.failures")
 	require.Len(t, terminal, 1)
-	assert.Equal(t, string(TerminalConsumerDeleted), attrs(terminal[0])["reason"])
+	assert.Equal(t, string(TerminalInternal), attrs(terminal[0])["reason"])
 	recoveries := metricPoints[int64](t, rm, "chat.nats.consumer.recovery.attempts")
 	require.Len(t, recoveries, 1)
 	assert.Equal(t, string(RecoverySuccess), attrs(recoveries[0])["result"])
 	loop := metricPoints[int64](t, rm, "chat.nats.consumer.loop.up")
 	require.Len(t, loop, 1)
 	assert.Zero(t, loop[0].Value)
+}
+
+func TestSupervisor_DeletedConsumerStopsWithoutRecreation(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	consumer := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "site-a", Stream: "STREAM-site-a", Consumer: "durable"})
+	var (
+		factoryCalls atomic.Int64
+		active       atomic.Int64
+		maxActive    atomic.Int64
+		duplicate    atomic.Bool
+	)
+	recreated := make(chan struct{})
+	factory := func(context.Context) (Iterator, error) {
+		if factoryCalls.Add(1) == 1 {
+			return failingSupervisorIterator(&active, &maxActive, &duplicate, fmt.Errorf("next message: %w", jetstream.ErrConsumerDeleted)), nil
+		}
+		return blockingSupervisorIterator(recreated, &active, &maxActive, &duplicate), nil
+	}
+
+	supervisor := NewSupervisor(SupervisorConfig{
+		MinBackoff: time.Millisecond,
+		MaxBackoff: time.Millisecond,
+		wait:       func(context.Context, time.Duration) error { return nil },
+	})
+	var wg sync.WaitGroup
+	require.NoError(t, supervisor.Start(context.Background(), factory, consumer, 1, 5, &wg, nil, func(context.Context, *Message) {}))
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	select {
+	case <-done:
+	case <-recreated:
+		supervisor.Stop()
+		<-done
+		t.Fatal("deleted durable was recreated")
+	case <-time.After(2 * time.Second):
+		supervisor.Stop()
+		<-done
+		t.Fatal("supervisor did not stop after consumer deletion")
+	}
+
+	assert.Equal(t, int64(1), factoryCalls.Load())
+	assert.Equal(t, int64(1), maxActive.Load())
+	assert.False(t, duplicate.Load())
+	assert.Zero(t, active.Load())
+
+	rm := collect(t, reader)
+	terminal := metricPoints[int64](t, rm, "chat.nats.terminal.failures")
+	require.Len(t, terminal, 1)
+	assert.Equal(t, string(TerminalConsumerDeleted), attrs(terminal[0])["reason"])
+	assert.Empty(t, metricPoints[int64](t, rm, "chat.nats.consumer.recovery.attempts"))
+}
+
+func TestSupervisor_StartReturnsInitialFactoryError(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	consumer := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "site-a", Stream: "STREAM-site-a", Consumer: "durable"})
+	sentinel := errors.New("stream unavailable at startup")
+	var factoryCalls atomic.Int64
+	called := make(chan struct{})
+	var calledOnce sync.Once
+	supervisor := NewSupervisor(SupervisorConfig{})
+	var wg sync.WaitGroup
+
+	err := supervisor.Start(context.Background(), func(context.Context) (Iterator, error) {
+		factoryCalls.Add(1)
+		calledOnce.Do(func() { close(called) })
+		return nil, sentinel
+	}, consumer, 1, 5, &wg, nil, func(context.Context, *Message) {})
+	if err == nil {
+		<-called
+		supervisor.Stop()
+		wg.Wait()
+	}
+
+	require.ErrorIs(t, err, sentinel)
+	assert.Equal(t, int64(1), factoryCalls.Load())
+	created := make(chan struct{})
+	var active, maxActive atomic.Int64
+	var duplicate atomic.Bool
+	require.NoError(t, supervisor.Start(context.Background(), func(context.Context) (Iterator, error) {
+		return blockingSupervisorIterator(created, &active, &maxActive, &duplicate), nil
+	}, consumer, 1, 5, &wg, nil, func(context.Context, *Message) {}), "a failed startup must release single-owner state for a later retry")
+	<-created
+	supervisor.Stop()
+	wg.Wait()
+	assert.False(t, duplicate.Load())
+	rm := collect(t, reader)
+	assert.Empty(t, metricPoints[int64](t, rm, "chat.nats.consumer.recovery.attempts"), "startup failure is not a recovery attempt")
 }
 
 func TestSupervisor_RecreationFailuresUseCappedBackoff(t *testing.T) {
@@ -187,6 +276,116 @@ func TestSupervisor_RecreationFailuresUseCappedBackoff(t *testing.T) {
 	assert.Equal(t, int64(1), results[string(RecoverySuccess)])
 }
 
+func TestSupervisor_ImmediateIteratorFailuresEscalateBackoff(t *testing.T) {
+	m, _ := newTestMetrics(t)
+	consumer := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "site-a", Stream: "STREAM-site-a", Consumer: "durable"})
+	var (
+		factoryCalls atomic.Int64
+		active       atomic.Int64
+		maxActive    atomic.Int64
+		duplicate    atomic.Bool
+		waitMu       sync.Mutex
+		waits        []time.Duration
+	)
+	recovered := make(chan struct{})
+	factory := func(context.Context) (Iterator, error) {
+		if factoryCalls.Add(1) < 4 {
+			return failingSupervisorIterator(&active, &maxActive, &duplicate, errors.New("iterator unavailable")), nil
+		}
+		return blockingSupervisorIterator(recovered, &active, &maxActive, &duplicate), nil
+	}
+	supervisor := NewSupervisor(SupervisorConfig{
+		MinBackoff: 100 * time.Millisecond,
+		MaxBackoff: 400 * time.Millisecond,
+		wait: func(_ context.Context, d time.Duration) error {
+			waitMu.Lock()
+			waits = append(waits, d)
+			waitMu.Unlock()
+			return nil
+		},
+	})
+	var wg sync.WaitGroup
+	require.NoError(t, supervisor.Start(context.Background(), factory, consumer, 1, 5, &wg, nil, func(context.Context, *Message) {}))
+
+	select {
+	case <-recovered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not recover after immediate iterator failures")
+	}
+	supervisor.Stop()
+	wg.Wait()
+
+	waitMu.Lock()
+	assert.Equal(t, []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}, waits)
+	waitMu.Unlock()
+	assert.Equal(t, int64(1), maxActive.Load())
+	assert.False(t, duplicate.Load())
+}
+
+func TestSupervisor_SuccessfulDeliveryResetsBackoff(t *testing.T) {
+	m, _ := newTestMetrics(t)
+	consumer := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "site-a", Stream: "STREAM-site-a", Consumer: "durable"})
+	var (
+		factoryCalls atomic.Int64
+		active       atomic.Int64
+		maxActive    atomic.Int64
+		duplicate    atomic.Bool
+		waitMu       sync.Mutex
+		waits        []time.Duration
+	)
+	recovered := make(chan struct{})
+	factory := func(context.Context) (Iterator, error) {
+		switch factoryCalls.Add(1) {
+		case 1:
+			return failingSupervisorIterator(&active, &maxActive, &duplicate, errors.New("initial iterator failure")), nil
+		case 2:
+			if active.Add(1) != 1 {
+				duplicate.Store(true)
+			}
+			var delivered atomic.Bool
+			var stopOnce sync.Once
+			return &supervisorTestIterator{
+				next: func() (context.Context, jetstream.Msg, error) {
+					if delivered.CompareAndSwap(false, true) {
+						return context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}}, nil
+					}
+					return nil, nil, errors.New("post-delivery iterator failure")
+				},
+				stop: func() { stopOnce.Do(func() { active.Add(-1) }) },
+			}, nil
+		default:
+			return blockingSupervisorIterator(recovered, &active, &maxActive, &duplicate), nil
+		}
+	}
+	supervisor := NewSupervisor(SupervisorConfig{
+		MinBackoff: 100 * time.Millisecond,
+		MaxBackoff: 400 * time.Millisecond,
+		wait: func(_ context.Context, d time.Duration) error {
+			waitMu.Lock()
+			waits = append(waits, d)
+			waitMu.Unlock()
+			return nil
+		},
+	})
+	var wg sync.WaitGroup
+	require.NoError(t, supervisor.Start(context.Background(), factory, consumer, 1, 5, &wg, nil, func(_ context.Context, msg *Message) {
+		assert.NoError(t, msg.Ack())
+	}))
+
+	select {
+	case <-recovered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not recover after the post-delivery failure")
+	}
+	supervisor.Stop()
+	wg.Wait()
+
+	waitMu.Lock()
+	assert.Equal(t, []time.Duration{100 * time.Millisecond, 100 * time.Millisecond}, waits)
+	waitMu.Unlock()
+	assert.False(t, duplicate.Load())
+}
+
 func TestSupervisor_CancellationStopsRetries(t *testing.T) {
 	m, _ := newTestMetrics(t)
 	consumer := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "site-a", Stream: "STREAM-site-a", Consumer: "durable"})
@@ -203,7 +402,11 @@ func TestSupervisor_CancellationStopsRetries(t *testing.T) {
 	})
 	var wg sync.WaitGroup
 	require.NoError(t, supervisor.Start(context.Background(), func(context.Context) (Iterator, error) {
-		factoryCalls.Add(1)
+		if factoryCalls.Add(1) == 1 {
+			var active, maxActive atomic.Int64
+			var duplicate atomic.Bool
+			return failingSupervisorIterator(&active, &maxActive, &duplicate, errors.New("iterator unavailable")), nil
+		}
 		return nil, errors.New("consumer unavailable")
 	}, consumer, 1, 5, &wg, nil, func(context.Context, *Message) {}))
 
