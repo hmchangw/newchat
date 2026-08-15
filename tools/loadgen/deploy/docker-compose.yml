@@ -41,6 +41,7 @@ services:
       # overlay; all remaining values use the conservative binary defaults
       # unless overridden here.
       - SOAK_RUN_ID=${SOAK_RUN_ID:-}
+      - SOAK_ENVIRONMENT=${SOAK_ENVIRONMENT:-local}
       - SOAK_RUN_DURATION=${SOAK_RUN_DURATION:-72h}
       - SOAK_WARMUP=${SOAK_WARMUP:-30s}
       - SOAK_SEND_RATE=${SOAK_SEND_RATE:-100}

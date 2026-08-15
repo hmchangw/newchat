@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 type fakeSoakEncryptionStore struct {
@@ -88,6 +89,15 @@ func TestSoakMeasuredReadConfig_OneScheduledReadEqualsOneRPC(t *testing.T) {
 	assert.Equal(t, soakDefaultPageLimit, cfg.PageLimit)
 	assert.Equal(t, 1, cfg.MaxPages)
 	assert.Equal(t, soakRequestTimeout, cfg.RequestTimeout)
+}
+
+func TestSoakConsumerSamplerTargets_CoversBothMessageHops(t *testing.T) {
+	assert.Equal(t, []soakConsumerSamplerTarget{
+		{Stream: stream.Messages("site-test").Name, Durable: "message-gatekeeper"},
+		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "message-worker"},
+		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "broadcast-worker"},
+		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "notification-worker"},
+	}, soakConsumerSamplerTargets("site-test"))
 }
 
 func TestNewSoakRuntimeSelector_UsesOnlyPersistedActiveUsers(t *testing.T) {

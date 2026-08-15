@@ -12,7 +12,7 @@ import (
 
 func reviewFailureOperation(id string, now time.Time) *failureOperation {
 	return &failureOperation{
-		ID: id, Scenario: "cassandra_soak", Lane: "message_send",
+		ID: id, Scenario: soakFailureScenario, Lane: "message_send",
 		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
 		Expected: []failureObserver{failureObserverAdmission, failureObserverHistory},
 	}
@@ -84,6 +84,112 @@ func TestFailureLedger_BoundedResultReasons(t *testing.T) {
 		now,
 	)
 	assert.Error(t, err)
+}
+
+func TestFailureLedger_FinalizationPreservesDeterministicReason(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	tests := []struct {
+		name       string
+		operation  *failureOperation
+		observe    func(*testing.T, *failureLedger)
+		expire     bool
+		wantResult failureResult
+		wantReason failureReason
+	}{
+		{
+			name: "bad observations follow expected observer order",
+			operation: &failureOperation{
+				ID: "bad-order", Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
+				StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+				Expected: []failureObserver{failureObserverHistory, failureObserverAdmission},
+			},
+			observe: func(t *testing.T, ledger *failureLedger) {
+				_, err := ledger.ObserveWithReason(
+					"bad-order", failureObserverAdmission, failureObservationBad,
+					failureReasonAdmissionRejected, now,
+				)
+				require.NoError(t, err)
+				_, err = ledger.ObserveWithReason(
+					"bad-order", failureObserverHistory, failureObservationBad,
+					failureReasonHistoryContentMismatch, now,
+				)
+				require.NoError(t, err)
+			},
+			wantResult: failureResultBad,
+			wantReason: failureReasonHistoryContentMismatch,
+		},
+		{
+			name: "missing observations follow expected observer order",
+			operation: &failureOperation{
+				ID: "missing-order", Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
+				StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+				Expected: []failureObserver{
+					failureObserverAdmission, failureObserverHistory, failureObserverRecipient,
+				},
+				LifecycleState: failureOperationActive,
+			},
+			observe: func(t *testing.T, ledger *failureLedger) {
+				_, err := ledger.Observe(
+					"missing-order", failureObserverAdmission, failureObservationGood, now,
+				)
+				require.NoError(t, err)
+				_, err = ledger.ObserveWithReason(
+					"missing-order", failureObserverRecipient, failureObservationMissingAfterDeadline,
+					failureReasonRecipientMissing, now,
+				)
+				require.NoError(t, err)
+				_, err = ledger.ObserveWithReason(
+					"missing-order", failureObserverHistory, failureObservationMissingAfterDeadline,
+					failureReasonHistoryMissing, now,
+				)
+				require.NoError(t, err)
+			},
+			wantResult: failureResultMissingAfterDeadline,
+			wantReason: failureReasonHistoryMissing,
+		},
+		{
+			name:      "expiration retains an earlier bad reason",
+			operation: reviewFailureOperation("expire-bad", now),
+			observe: func(t *testing.T, ledger *failureLedger) {
+				_, err := ledger.ObserveWithReason(
+					"expire-bad", failureObserverAdmission, failureObservationBad,
+					failureReasonAdmissionRejected, now,
+				)
+				require.NoError(t, err)
+			},
+			expire:     true,
+			wantResult: failureResultBad,
+			wantReason: failureReasonAdmissionRejected,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			journal := &memoryFailureJournal{}
+			ledger, err := newFailureLedger(failureLedgerConfig{
+				Capacity: 1, Journal: journal, Now: func() time.Time { return now },
+			})
+			require.NoError(t, err)
+			require.NoError(t, ledger.Start(tt.operation))
+
+			tt.observe(t, ledger)
+			if tt.expire {
+				finalized, err := ledger.Expire(now.Add(time.Minute))
+				require.NoError(t, err)
+				require.Equal(t, 1, finalized)
+			}
+
+			var finalized *failureLedgerEvent
+			for i := range journal.events {
+				if journal.events[i].Type == failureLedgerEventFinalized {
+					finalized = &journal.events[i]
+				}
+			}
+			require.NotNil(t, finalized)
+			assert.Equal(t, tt.wantResult, finalized.Result)
+			assert.Equal(t, tt.wantReason, finalized.Reason)
+		})
+	}
 }
 
 func TestFailureLedger_NotSentRequiresBoundedLocalProofReason(t *testing.T) {

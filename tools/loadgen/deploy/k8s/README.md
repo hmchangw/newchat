@@ -88,6 +88,9 @@ ledger:
   capacity: "200000"
   reconcileDeadline: 10m
   reconcileRetryInterval: 1s
+
+soak:
+  environment: staging
 ```
 
 Staging releases must use an immutable digest. A mutable tag is accepted only

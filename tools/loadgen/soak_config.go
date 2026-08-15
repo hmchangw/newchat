@@ -18,10 +18,15 @@ const (
 	soakRunModeContinuous = "continuous"
 )
 
+var soakEnvironmentRegistry = map[string]struct{}{
+	"local": {}, "staging": {}, "production": {},
+}
+
 // soakConfig is the Run A configuration contract. I8, I10, and I12 remain
 // explicit inputs because their production interpretation is not yet confirmed.
 type soakConfig struct {
 	RunID                        string        `env:"RUN_ID"                          envDefault:""`
+	Environment                  string        `env:"ENVIRONMENT"                     envDefault:"local"`
 	RunMode                      string        `env:"RUN_MODE"                        envDefault:"duration"`
 	RunDuration                  time.Duration `env:"RUN_DURATION"                    envDefault:"72h"`
 	Warmup                       time.Duration `env:"WARMUP"                          envDefault:"30s"`
@@ -104,6 +109,9 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if !failureRunIDPattern.MatchString(cfg.RunID) || cfg.RunID == "." || cfg.RunID == ".." {
 		return fmt.Errorf("SOAK_RUN_ID must be a filename-safe run identifier")
+	}
+	if _, known := soakEnvironmentRegistry[cfg.Environment]; !known {
+		return fmt.Errorf("SOAK_ENVIRONMENT must be local, staging, or production")
 	}
 	switch cfg.RunMode {
 	case soakRunModeDuration:
@@ -192,6 +200,9 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if !isFinite(cfg.ReconcileReadShare) ||
 		cfg.ReconcileReadShare <= 0 || cfg.ReconcileReadShare > 1 {
 		return fmt.Errorf("SOAK_RECONCILE_READ_SHARE must be greater than zero and at most 1")
+	}
+	if cfg.RecipientObserverEnabled && strings.TrimSpace(cfg.LedgerDir) == "" {
+		return fmt.Errorf("SOAK_LEDGER_DIR is required when SOAK_RECIPIENT_OBSERVER_ENABLED=true")
 	}
 	if cfg.RecipientObserverQueue <= 0 || cfg.RecipientObserverQueue > maxFailureRecipientObserverQueue {
 		return fmt.Errorf("SOAK_RECIPIENT_OBSERVER_QUEUE must be between 1 and %d", maxFailureRecipientObserverQueue)

@@ -64,3 +64,13 @@ func TestFailureObserverHealthSnapshotCovers_RequiresContinuousHealthyHistory(t 
 		})
 	}
 }
+
+func TestFailureObserverHealth_HealthyThroughoutRejectsPreProcessWindow(t *testing.T) {
+	operationStarted := time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC)
+	processStarted := operationStarted.Add(30 * time.Second)
+	deadline := processStarted.Add(30 * time.Second)
+	health := newFailureObserverHealth(failureObserverRecipient, processStarted)
+	health.Set(true, processStarted, "subscribed")
+
+	assert.False(t, health.HealthyThroughout(operationStarted, deadline))
+}

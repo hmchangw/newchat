@@ -19,6 +19,7 @@ import (
 )
 
 func TestSoakFailureTracker_StartsDurableMessageOperation(t *testing.T) {
+	assert.Equal(t, "message_soak", soakFailureScenario)
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
@@ -49,6 +50,58 @@ func TestSoakFailureTracker_StartsDurableMessageOperation(t *testing.T) {
 	assert.Equal(t, "message-1", operation.Targets["messageId"])
 	assert.Equal(t, []failureObserver{failureObserverAdmission, failureObserverHistory, failureObserverRecipient}, operation.Expected)
 	assert.Len(t, operation.Effects, 3)
+}
+
+func TestSoakFailureExpiryLoop_FinalizesPastDeadline(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1,
+		Now:      func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(testFailureOperation("message-1", now)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ticks := make(chan time.Time, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSoakFailureExpiry(ctx, ledger, ticks, nil)
+	}()
+	ticks <- now.Add(2 * time.Minute)
+
+	require.Eventually(t, func() bool {
+		snapshot := ledger.Snapshot()
+		return snapshot.Active == 0 && snapshot.Results[failureResultUnverified] == 1
+	}, time.Second, time.Millisecond)
+	cancel()
+	<-done
+}
+
+func TestSoakFailureExpiryLoop_ReportsPersistenceFailureAndStopsOnCancel(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	journal := &failingFailureJournal{err: errors.New("disk full")}
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1,
+		Now:      func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(testFailureOperation("message-1", now)))
+	ledger.journal = journal
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ticks := make(chan time.Time, 1)
+	errorsSeen := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSoakFailureExpiry(ctx, ledger, ticks, func(err error) { errorsSeen <- err })
+	}()
+	ticks <- now.Add(2 * time.Minute)
+	require.ErrorContains(t, <-errorsSeen, "expire failure operations")
+	cancel()
+	<-done
 }
 
 func TestSoakFailureTracker_ForgetsRecipientExpectationWhenLedgerRejectsStart(t *testing.T) {
@@ -82,6 +135,21 @@ func TestSoakFailureTracker_RegistersRecipientExpectation(t *testing.T) {
 	require.NoError(t, tracker.Start(pending))
 	assert.True(t, observer.evidence.Observe("message-1", "alice"))
 	assert.False(t, observer.evidence.Complete("message-1"))
+}
+
+func TestSoakFailureTracker_DisabledRecipientObserverOmitsExactSetFromWAL(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
+	pending := testSoakFailurePending(now)
+	pending.Target.Recipients = []string{"alice", "bob"}
+
+	require.NoError(t, tracker.Start(pending))
+	operation, ok := ledger.Active(pending.MessageID)
+	require.True(t, ok)
+	assert.NotContains(t, operation.Attributes, "expected_recipients")
+	assert.NotContains(t, operation.Attributes, soakFailureAttributeRecipientEvent)
 }
 
 func TestSoakOpenFailureLedger_PersistentRecovery(t *testing.T) {
@@ -191,6 +259,40 @@ func TestSoakFailureReconciler_FinalizesRecipientAtDeadlineWithoutRepeatingHisto
 	assert.True(t, ran)
 	assert.Equal(t, 1, finalizer.calls)
 	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultMissingAfterDeadline])
+}
+
+func TestSoakFailureReconciler_UnverifiedRecipientDoesNotUseNegativeReason(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	recipientObserver := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, 10*time.Second, func() time.Time { return now },
+		withSoakFailureRecipientObserver(recipientObserver),
+	)
+	pending := testSoakFailurePending(now)
+	pending.Target.Recipients = []string{"alice", "bob"}
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
+	_, err = ledger.Observe("message-1", failureObserverAdmission, failureObservationGood, now)
+	require.NoError(t, err)
+	_, err = ledger.Observe("message-1", failureObserverHistory, failureObservationGood, now)
+	require.NoError(t, err)
+
+	finalizer := &fakeSoakRecipientFinalizer{result: recipientEvidenceResult{
+		Observation: failureObservationUnverified,
+		Missing:     []string{"bob"},
+	}}
+	reconciler := newSoakFailureReconciler(
+		ledger, &fakeSoakFailureVerifier{err: errors.New("must not query")}, time.Second,
+		func() time.Time { return now }, withSoakFailureRecipientFinalizer(finalizer),
+	)
+	now = now.Add(10 * time.Second)
+
+	ran, err := reconciler.Try(context.Background())
+	require.NoError(t, err)
+	assert.True(t, ran)
+	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultUnverified])
 }
 
 func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t *testing.T) {

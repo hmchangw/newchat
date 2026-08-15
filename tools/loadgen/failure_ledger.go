@@ -156,7 +156,7 @@ var failureInvalidationReasonRegistry = map[string]struct{}{
 	"capacity": {}, "wal": {}, "accounting_invariant": {}, "observer_queue": {},
 	"observer_malformed": {}, "recipient_recovery": {}, "recipient_observer": {},
 	"timeline": {}, "other": {},
-	"sidecar": {}, "consumer_sample": {},
+	"sidecar": {},
 }
 
 var failureOperationScenarioRegistry = map[string]struct{}{
@@ -641,7 +641,8 @@ func (l *failureLedger) ObserveWithReason(
 		l.enqueueLocked(operation)
 		return false, nil
 	}
-	if err := l.finalizeLocked(operation, failureOperationResult(operation), failureReasonNone, at); err != nil {
+	result := failureOperationResult(operation)
+	if err := l.finalizeLocked(operation, result, failureOperationFinalReason(operation, result), at); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -712,11 +713,9 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 				)
 			}
 		}
+		result := failureOperationResult(operation)
 		if err := l.finalizeLocked(
-			operation,
-			failureOperationResult(operation),
-			failureReasonNone,
-			now,
+			operation, result, failureOperationFinalReason(operation, result), now,
 		); err != nil {
 			return finalized, err
 		}
@@ -1308,6 +1307,30 @@ func failureOperationResult(operation *failureOperation) failureResult {
 		}
 	}
 	return result
+}
+
+func failureOperationFinalReason(
+	operation *failureOperation,
+	result failureResult,
+) failureReason {
+	var terminalObservation failureObservation
+	switch result {
+	case failureResultBad:
+		terminalObservation = failureObservationBad
+	case failureResultMissingAfterDeadline:
+		terminalObservation = failureObservationMissingAfterDeadline
+	default:
+		return failureReasonNone
+	}
+	for _, observer := range operation.Expected {
+		if operation.Observations[observer] != terminalObservation {
+			continue
+		}
+		if reason := operation.ObservationReasons[observer]; reason != failureReasonNone {
+			return reason
+		}
+	}
+	return failureReasonNone
 }
 
 func cloneFailureOperation(operation *failureOperation) *failureOperation {

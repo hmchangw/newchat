@@ -36,7 +36,31 @@ type failureRecipientConnection interface {
 }
 
 type natsFailureRecipientConnection struct {
-	nc *nats.Conn
+	nc     *nats.Conn
+	closed <-chan struct{}
+	drain  func() error
+}
+
+func newNATSFailureRecipientConnection(nc *nats.Conn) *natsFailureRecipientConnection {
+	if nc == nil {
+		return &natsFailureRecipientConnection{}
+	}
+	closed := make(chan struct{})
+	var closeOnce sync.Once
+	markClosed := func() { closeOnce.Do(func() { close(closed) }) }
+	previous := nc.ClosedHandler()
+	nc.SetClosedHandler(func(connection *nats.Conn) {
+		if previous != nil {
+			previous(connection)
+		}
+		markClosed()
+	})
+	if nc.IsClosed() {
+		markClosed()
+	}
+	return &natsFailureRecipientConnection{
+		nc: nc, closed: closed, drain: nc.Drain,
+	}
 }
 
 func (c *natsFailureRecipientConnection) Subscribe(
@@ -47,7 +71,21 @@ func (c *natsFailureRecipientConnection) Subscribe(
 }
 
 func (c *natsFailureRecipientConnection) Flush() error { return c.nc.Flush() }
-func (c *natsFailureRecipientConnection) Drain() error { return c.nc.Drain() }
+func (c *natsFailureRecipientConnection) Drain() error {
+	if c == nil || c.drain == nil {
+		return fmt.Errorf("recipient observer connection is not configured")
+	}
+	if err := c.drain(); err != nil {
+		return err
+	}
+	if c.closed != nil {
+		<-c.closed
+	}
+	if c.nc != nil && errors.Is(c.nc.LastError(), nats.ErrDrainTimeout) {
+		return nats.ErrDrainTimeout
+	}
+	return nil
+}
 
 type natsFailureRecipientSource struct {
 	mu          sync.Mutex
@@ -467,10 +505,10 @@ func (r *recipientEvidence) Finalize(operationID string, observerHealthy bool) r
 	slices.Sort(result.Duplicates)
 	slices.Sort(result.Mismatches)
 	switch {
-	case !observerHealthy:
-		result.Observation = failureObservationUnverified
 	case len(result.Mismatches) > 0 || len(result.Unexpected) > 0 || (!r.allowDuplicates && len(result.Duplicates) > 0):
 		result.Observation = failureObservationBad
+	case !observerHealthy:
+		result.Observation = failureObservationUnverified
 	case len(result.Missing) > 0:
 		result.Observation = failureObservationMissingAfterDeadline
 	}

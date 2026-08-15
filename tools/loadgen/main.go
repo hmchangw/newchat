@@ -582,7 +582,7 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 	}
 
 	metrics := NewMetrics()
-	defer metrics.StopNATSHealth()
+	defer metrics.stopNATSHealth()
 	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "members", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
@@ -816,7 +816,7 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	}
 
 	metrics := NewMetrics()
-	defer metrics.StopNATSHealth()
+	defer metrics.stopNATSHealth()
 	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "members", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
@@ -1022,7 +1022,7 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 	}
 
 	metrics := NewMetrics()
-	defer metrics.StopNATSHealth()
+	defer metrics.stopNATSHealth()
 	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "general", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
@@ -1400,7 +1400,7 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 	_, layout := BuildBotRoomFixtures(&p, *seed, cfg.SiteID)
 
 	metrics := NewMetrics()
-	defer metrics.StopNATSHealth()
+	defer metrics.stopNATSHealth()
 	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "general", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)

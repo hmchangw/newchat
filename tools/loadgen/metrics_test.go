@@ -50,15 +50,15 @@ func TestFailureLedgerPromRecorder_RecordsBoundedOutcomes(t *testing.T) {
 
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureOperations.WithLabelValues(
-			"cassandra_soak", "message_send", "good",
+			"message_soak", "message_send", "good",
 		),
 	))
 	assert.Equal(t, float64(0), testutil.ToFloat64(
-		metrics.FailureInflight.WithLabelValues("cassandra_soak", "message_send"),
+		metrics.FailureInflight.WithLabelValues("message_soak", "message_send"),
 	))
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureObservations.WithLabelValues(
-			"cassandra_soak", "message_send", "cassandra_history", "good",
+			"message_soak", "message_send", "cassandra_history", "good",
 		),
 	))
 }
@@ -84,12 +84,12 @@ func TestFailureLedgerPromRecorder_RecordsLifecycleAndGuardsNil(t *testing.T) {
 	assert.Equal(t, float64(512), testutil.ToFloat64(metrics.FailureJournalBytes))
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureObservations.WithLabelValues(
-			"cassandra_soak", "message_send", "admission", "bad",
+			"message_soak", "message_send", "admission", "bad",
 		),
 	))
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureOperations.WithLabelValues(
-			"cassandra_soak", "message_send", "unverified",
+			"message_soak", "message_send", "unverified",
 		),
 	))
 
@@ -109,7 +109,7 @@ func TestFailureLedgerPromRecorder_RecordsLifecycleAndGuardsNil(t *testing.T) {
 
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureOperations.WithLabelValues(
-			"cassandra_soak", "message_send", "unverified",
+			"message_soak", "message_send", "unverified",
 		),
 	))
 }
@@ -125,6 +125,7 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 	metrics.FailureObserverEvents.WithLabelValues("recipient_broadcast", "good").Inc()
 	metrics.FailureObserverQueueDepth.WithLabelValues("recipient_broadcast").Set(0)
 	metrics.ConsumerSampleErrors.WithLabelValues("MESSAGES-CANONICAL-site-local", "broadcast-worker", "lookup").Inc()
+	metrics.ConsumerAckFloorStall.WithLabelValues("MESSAGES-CANONICAL-site-local", "broadcast-worker").Set(3)
 	metrics.RunInfo.WithLabelValues("staging", soakFailureScenario, "cassandra-soak-v1").Set(1)
 
 	mfs, err := metrics.Registry.Gather()
@@ -143,12 +144,27 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 		"loadgen_failure_observer_events_total",
 		"loadgen_failure_observer_queue_depth",
 		"loadgen_consumer_sample_errors_total",
+		"loadgen_consumer_ack_floor_stall_seconds",
 		"loadgen_run_info",
 		"go_goroutines",
 		"process_resident_memory_bytes",
 	} {
 		assert.True(t, names[name], name)
 	}
+}
+
+func TestFailureMetrics_SetSoakRunInfo(t *testing.T) {
+	metrics := NewMetrics()
+
+	setSoakRunInfo(metrics, "staging")
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.RunInfo.WithLabelValues(
+			"staging",
+			soakFailureScenario,
+			soakFailureTrafficProfile,
+		),
+	))
 }
 
 func TestMetrics_FailureObservationConfigurationAndPacingFamilies(t *testing.T) {

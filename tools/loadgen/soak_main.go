@@ -397,7 +397,8 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
-	defer metrics.StopNATSHealth()
+	setSoakRunInfo(metrics, cfg.Soak.Environment)
+	defer metrics.stopNATSHealth()
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
 	if err != nil {
 		slog.Error("connect NATS for Cassandra soak", "error", err)
@@ -457,26 +458,45 @@ func runSoakWorkload(
 			slog.Error("close Cassandra soak failure ledger", "error", err)
 		}
 	}()
+	expiryCtx, stopExpiry := context.WithCancel(ctx)
+	expiryTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
+	expiryDone := make(chan struct{})
+	go func() {
+		defer close(expiryDone)
+		defer expiryTicker.Stop()
+		runSoakFailureExpiry(expiryCtx, ledger, expiryTicker.C, func(err error) {
+			slog.Error("expire Cassandra soak failure evidence", "error", err)
+		})
+	}()
+	var expiryShutdownOnce sync.Once
+	shutdownExpiry := func() {
+		expiryShutdownOnce.Do(func() {
+			stopExpiry()
+			<-expiryDone
+		})
+	}
+	defer shutdownExpiry()
 	consumerSamplerCtx, stopConsumerSamplers := context.WithCancel(context.Background())
 	var consumerSamplerWG sync.WaitGroup
 	js, jetStreamErr := jetstream.New(nc.NatsConn())
 	if jetStreamErr != nil {
-		ledger.Invalidate("consumer_sample")
 		slog.Error("initialize JetStream consumer sampling", "error", jetStreamErr)
 	} else {
-		canonicalStream := stream.MessagesCanonical(cfg.SiteID).Name
-		for _, durable := range []string{"message-worker", "broadcast-worker"} {
+		for _, target := range soakConsumerSamplerTargets(cfg.SiteID) {
 			sampler, samplerErr := NewConsumerSampler(
 				js,
-				canonicalStream,
-				durable,
+				target.Stream,
+				target.Durable,
 				metrics,
 				time.Second,
-				withConsumerSamplerInvalidation(func(string) { ledger.Invalidate("consumer_sample") }),
 			)
 			if samplerErr != nil {
-				ledger.Invalidate("consumer_sample")
-				slog.Error("configure soak consumer sampler", "durable", durable, "error", samplerErr)
+				slog.Error(
+					"configure soak consumer sampler",
+					"stream", target.Stream,
+					"durable", target.Durable,
+					"error", samplerErr,
+				)
 				continue
 			}
 			consumerSamplerWG.Add(1)
@@ -518,7 +538,7 @@ func runSoakWorkload(
 				if connectErr != nil {
 					return nil, connectErr
 				}
-				return &natsFailureRecipientConnection{nc: connection}, nil
+				return newNATSFailureRecipientConnection(connection), nil
 			},
 		)
 		if err := observationRuntime.StartRecipient(recipientSource, &topology, ledger.ActiveOperations()); err != nil {
@@ -740,9 +760,9 @@ func runSoakWorkload(
 				Action: action, Outcome: soakOutcomeFailed, At: now(),
 				ErrorClass: classifySoakRPCError(publishErr),
 			})
-			// The NATS call was attempted, so its outcome is ambiguous even when
-			// the client returned an error. Keep the operation active for admission
-			// timeout and downstream reconciliation instead of claiming not_sent.
+			// Publish classifies definite local rejections as not_sent. Ambiguous
+			// failures remain active for admission timeout and downstream
+			// reconciliation.
 			return nil
 		},
 		Read: func(actionCtx context.Context, _ bool) error {
@@ -813,6 +833,7 @@ func runSoakWorkload(
 		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
 	)
 	result, runErr := workload.Run(ctx)
+	shutdownExpiry()
 	shutdownConsumerSamplers()
 	if err := observationRuntime.Close(); err != nil {
 		ledger.Invalidate("recipient_observer")
@@ -832,6 +853,21 @@ func runSoakWorkload(
 		return 1
 	}
 	return 0
+}
+
+type soakConsumerSamplerTarget struct {
+	Stream  string
+	Durable string
+}
+
+func soakConsumerSamplerTargets(siteID string) []soakConsumerSamplerTarget {
+	canonicalStream := stream.MessagesCanonical(siteID).Name
+	return []soakConsumerSamplerTarget{
+		{Stream: stream.Messages(siteID).Name, Durable: "message-gatekeeper"},
+		{Stream: canonicalStream, Durable: "message-worker"},
+		{Stream: canonicalStream, Durable: "broadcast-worker"},
+		{Stream: canonicalStream, Durable: "notification-worker"},
+	}
 }
 
 func soakMeasuredReadConfig(siteID string, pageLimit int) soakReadConfig {

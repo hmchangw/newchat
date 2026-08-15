@@ -17,13 +17,53 @@ import (
 )
 
 const (
-	soakFailureScenario                = "cassandra_soak"
+	soakFailureScenario                = "message_soak"
+	soakFailureTrafficProfile          = "cassandra-soak-v1"
 	soakFailureLaneMessageSend         = "message_send"
 	soakFailureAttributeRoomID         = "room_id"
 	soakFailureAttributeAccount        = "account"
 	soakFailureAttributeContentSHA256  = "content_sha256"
 	soakFailureAttributeRecipientEvent = "expected_recipient_event"
 )
+
+func setSoakRunInfo(metrics *Metrics, environment string) {
+	if metrics == nil {
+		return
+	}
+	metrics.RunInfo.WithLabelValues(
+		environment,
+		soakFailureScenario,
+		soakFailureTrafficProfile,
+	).Set(1)
+}
+
+func soakFailureExpiryInterval(deadline time.Duration) time.Duration {
+	return min(30*time.Second, max(time.Second, deadline/10))
+}
+
+func runSoakFailureExpiry(
+	ctx context.Context,
+	ledger *failureLedger,
+	ticks <-chan time.Time,
+	onError func(error),
+) {
+	if ledger == nil || ticks == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case at, ok := <-ticks:
+			if !ok {
+				return
+			}
+			if _, err := ledger.Expire(at); err != nil && onError != nil {
+				onError(fmt.Errorf("expire failure operations: %w", err))
+			}
+		}
+	}
+}
 
 func openSoakFailureLedger(
 	cfg *soakConfig,
@@ -155,6 +195,11 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 	if pending.Kind == soakSendThreadReply {
 		recipientEvent = model.RoomEventNewThreadMessage
 	}
+	attributes := map[string]string{
+		soakFailureAttributeRoomID:        pending.Target.RoomID,
+		soakFailureAttributeAccount:       pending.Target.Account,
+		soakFailureAttributeContentSHA256: hex.EncodeToString(contentHash[:]),
+	}
 	if t.recipient != nil {
 		if err := t.recipient.ExpectEvent(
 			pending.MessageID,
@@ -164,6 +209,8 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 		); err != nil {
 			return fmt.Errorf("register soak recipient expectation: %w", err)
 		}
+		attributes[soakFailureAttributeRecipientEvent] = string(recipientEvent)
+		attributes["expected_recipients"] = strings.Join(recipients, "\n")
 	}
 	if err := t.ledger.Start(&failureOperation{
 		SchemaVersion: 2, ID: pending.MessageID, CorrelationID: pending.RequestID,
@@ -178,13 +225,7 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 			len(recipients),
 			hex.EncodeToString(recipientHash[:]),
 		),
-		Attributes: map[string]string{
-			soakFailureAttributeRoomID:         pending.Target.RoomID,
-			soakFailureAttributeAccount:        pending.Target.Account,
-			soakFailureAttributeContentSHA256:  hex.EncodeToString(contentHash[:]),
-			soakFailureAttributeRecipientEvent: string(recipientEvent),
-			"expected_recipients":              strings.Join(recipients, "\n"),
-		},
+		Attributes: attributes,
 	}); err != nil {
 		if t.recipient != nil {
 			t.recipient.evidence.Forget(pending.MessageID)
@@ -448,15 +489,18 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 					operation.Deadline,
 				)
 				observation = result.Observation
-				switch {
-				case len(result.Mismatches) > 0:
-					reason = failureReasonRecipientIdentityMismatch
-				case len(result.Unexpected) > 0:
-					reason = failureReasonRecipientUnexpected
-				case len(result.Duplicates) > 0 && observation == failureObservationBad:
-					reason = failureReasonRecipientDuplicate
-				case len(result.Missing) > 0:
-					reason = failureReasonRecipientMissing
+				if observation == failureObservationBad ||
+					observation == failureObservationMissingAfterDeadline {
+					switch {
+					case len(result.Mismatches) > 0:
+						reason = failureReasonRecipientIdentityMismatch
+					case len(result.Unexpected) > 0:
+						reason = failureReasonRecipientUnexpected
+					case len(result.Duplicates) > 0 && observation == failureObservationBad:
+						reason = failureReasonRecipientDuplicate
+					case len(result.Missing) > 0:
+						reason = failureReasonRecipientMissing
+					}
 				}
 			}
 			if _, err := r.ledger.ObserveWithReason(

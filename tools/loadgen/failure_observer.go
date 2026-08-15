@@ -110,15 +110,7 @@ func (h *failureObserverHealth) Set(up bool, at time.Time, reason string) {
 
 func (h *failureObserverHealth) HealthyThroughout(start, end time.Time) bool {
 	snapshot := h.Snapshot(end)
-	if snapshot.HistoryTruncated && start.Before(snapshot.HistoryAvailableFrom) {
-		return false
-	}
-	for _, interval := range snapshot.Intervals {
-		if interval.End.After(start) && interval.Start.Before(end) && !interval.Up {
-			return false
-		}
-	}
-	return true
+	return failureHealthSnapshotCovers(&snapshot, start, end)
 }
 
 func (h *failureObserverHealth) Snapshot(end time.Time) failureObserverHealthSnapshot {

@@ -52,7 +52,7 @@ func TestFailureObservationRuntime_LegacyWALAdoptsCompatibleContract(t *testing.
 	cfg.LedgerDir = t.TempDir()
 	cfg.RecipientObserverEnabled = false
 	path := filepath.Join(cfg.LedgerDir, cfg.RunID+".wal")
-	legacy := `{"type":"started","operation":{"id":"legacy-1","scenario":"cassandra_soak","lane":"message_send","startedAt":"2026-08-15T01:02:03Z","verifyAfter":"2026-08-15T01:02:03Z","deadline":"2026-08-15T01:03:03Z","expected":["admission","cassandra_history"]},"at":"2026-08-15T01:02:03Z"}` + "\n"
+	legacy := `{"type":"started","operation":{"id":"legacy-1","scenario":"message_soak","lane":"message_send","startedAt":"2026-08-15T01:02:03Z","verifyAfter":"2026-08-15T01:02:03Z","deadline":"2026-08-15T01:03:03Z","expected":["admission","cassandra_history"]},"at":"2026-08-15T01:02:03Z"}` + "\n"
 	require.NoError(t, os.WriteFile(path, []byte(legacy), 0o600))
 
 	ledger, err := openSoakFailureLedger(&cfg, NewMetrics(), func() time.Time { return now })
@@ -70,7 +70,7 @@ func TestFailureObservationRuntime_LegacyPendingOperationRejectsNewRecipientMode
 	cfg.LedgerDir = t.TempDir()
 	cfg.RecipientObserverEnabled = true
 	path := filepath.Join(cfg.LedgerDir, cfg.RunID+".wal")
-	legacy := `{"type":"started","operation":{"id":"legacy-1","scenario":"cassandra_soak","lane":"message_send","startedAt":"2026-08-15T01:02:03Z","verifyAfter":"2026-08-15T01:02:03Z","deadline":"2026-08-15T01:03:03Z","expected":["admission","cassandra_history"]},"at":"2026-08-15T01:02:03Z"}` + "\n"
+	legacy := `{"type":"started","operation":{"id":"legacy-1","scenario":"message_soak","lane":"message_send","startedAt":"2026-08-15T01:02:03Z","verifyAfter":"2026-08-15T01:02:03Z","deadline":"2026-08-15T01:03:03Z","expected":["admission","cassandra_history"]},"at":"2026-08-15T01:02:03Z"}` + "\n"
 	require.NoError(t, os.WriteFile(path, []byte(legacy), 0o600))
 
 	_, err := openSoakFailureLedger(&cfg, NewMetrics(), func() time.Time { return now })

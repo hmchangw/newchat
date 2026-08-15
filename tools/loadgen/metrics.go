@@ -11,23 +11,24 @@ import (
 
 // Metrics holds the Prometheus collectors used across loadgen components.
 type Metrics struct {
-	natsHealthMu        sync.Mutex
-	natsPoolHealth      map[string]*loadgenNATSPoolState
-	Registry            *prometheus.Registry
-	Published           *prometheus.CounterVec
-	PublishErrors       *prometheus.CounterVec
-	E1Latency           *prometheus.HistogramVec
-	E2Latency           *prometheus.HistogramVec
-	ConsumerPending     *prometheus.GaugeVec
-	ConsumerAckPending  *prometheus.GaugeVec
-	ConsumerRedelivered *prometheus.GaugeVec
-	ConsumerUp          *prometheus.GaugeVec
-	ConsumerDelivered   *prometheus.GaugeVec
-	ConsumerAckFloor    *prometheus.GaugeVec
-	ConsumerStreamFloor *prometheus.GaugeVec
-	ConsumerMaxDeliver  *prometheus.GaugeVec
-	ConsumerAckWait     *prometheus.GaugeVec
-	ConsumerLastActive  *prometheus.GaugeVec
+	natsHealthMu          sync.Mutex
+	natsPoolHealth        map[string]*loadgenNATSPoolState
+	Registry              *prometheus.Registry
+	Published             *prometheus.CounterVec
+	PublishErrors         *prometheus.CounterVec
+	E1Latency             *prometheus.HistogramVec
+	E2Latency             *prometheus.HistogramVec
+	ConsumerPending       *prometheus.GaugeVec
+	ConsumerAckPending    *prometheus.GaugeVec
+	ConsumerRedelivered   *prometheus.GaugeVec
+	ConsumerUp            *prometheus.GaugeVec
+	ConsumerDelivered     *prometheus.GaugeVec
+	ConsumerAckFloor      *prometheus.GaugeVec
+	ConsumerStreamFloor   *prometheus.GaugeVec
+	ConsumerMaxDeliver    *prometheus.GaugeVec
+	ConsumerAckWait       *prometheus.GaugeVec
+	ConsumerLastActive    *prometheus.GaugeVec
+	ConsumerAckFloorStall *prometheus.GaugeVec
 
 	MemberPublished     *prometheus.CounterVec
 	MemberPublishErrors *prometheus.CounterVec
@@ -142,6 +143,10 @@ func NewMetrics() *Metrics {
 		),
 		ConsumerLastActive: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{Name: "loadgen_consumer_last_active_timestamp_seconds", Help: "Timestamp of the latest consumer delivery sample."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerAckFloorStall: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_ack_floor_stall_seconds", Help: "Seconds since the ack floor last advanced while work remains pending."},
 			[]string{"stream", "durable"},
 		),
 	}
@@ -370,7 +375,7 @@ func NewMetrics() *Metrics {
 		m.E1Latency, m.E2Latency,
 		m.ConsumerPending, m.ConsumerAckPending, m.ConsumerRedelivered,
 		m.ConsumerUp, m.ConsumerDelivered, m.ConsumerAckFloor, m.ConsumerStreamFloor,
-		m.ConsumerMaxDeliver, m.ConsumerAckWait, m.ConsumerLastActive,
+		m.ConsumerMaxDeliver, m.ConsumerAckWait, m.ConsumerLastActive, m.ConsumerAckFloorStall,
 		m.MemberPublished, m.MemberPublishErrors,
 		m.MemberE1Latency, m.MemberE2Latency, m.MemberRoomSize,
 		m.BotRoomPublished, m.BotRoomPublishErrors,

@@ -15,6 +15,7 @@ data:
   METRICS_ADDR: {{ printf ":%d" (.Values.metrics.port | int) | quote }}
   MAX_IN_FLIGHT: {{ .Values.soak.maxInFlight | quote }}
   SOAK_RUN_ID: {{ .Values.runId | quote }}
+  SOAK_ENVIRONMENT: {{ .Values.soak.environment | quote }}
   SOAK_RUN_MODE: {{ .Values.soak.runMode | quote }}
   SOAK_RUN_DURATION: "0s"
   SOAK_WARMUP: {{ .Values.soak.warmup | quote }}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -93,6 +94,7 @@ type soakSendReplyResult struct {
 type soakSendLifecycle interface {
 	Start(*soakPendingSend) error
 	Activate(*soakPendingSend) error
+	AbandonUnsent(*soakPendingSend) error
 }
 
 type soakSenderOption func(*soakSender)
@@ -245,15 +247,32 @@ func (s *soakSender) Publish(
 	if published == nil {
 		published = cloneSoakPendingSend(pending)
 	}
+	publishErr := s.publisher.Publish(ctx, pending.Subject, pending.Payload)
+	definitelyNotSent := publishErr != nil && soakPublishDefinitelyNotSent(publishErr)
 	if tracked {
-		if err := s.lifecycle.Activate(cloneSoakPendingSend(published)); err != nil {
+		if definitelyNotSent {
+			if err := s.lifecycle.AbandonUnsent(cloneSoakPendingSend(published)); err != nil {
+				s.reportLifecycleError(fmt.Errorf("persist unsent soak send: %w", err))
+			}
+		} else if err := s.lifecycle.Activate(cloneSoakPendingSend(published)); err != nil {
 			s.reportLifecycleError(fmt.Errorf("persist soak send activation: %w", err))
 		}
 	}
-	if err := s.publisher.Publish(ctx, pending.Subject, pending.Payload); err != nil {
-		return published, fmt.Errorf("publish soak send: %w", err)
+	if definitelyNotSent {
+		s.Discard(pending.RequestID)
+	}
+	if publishErr != nil {
+		return published, fmt.Errorf("publish soak send: %w", publishErr)
 	}
 	return published, nil
+}
+
+func soakPublishDefinitelyNotSent(err error) bool {
+	return errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrConnectionDraining) ||
+		errors.Is(err, nats.ErrBadSubject) ||
+		errors.Is(err, nats.ErrMaxPayload) ||
+		errors.Is(err, nats.ErrReconnectBufExceeded)
 }
 
 func (s *soakSender) Retry(ctx context.Context, requestID string) error {

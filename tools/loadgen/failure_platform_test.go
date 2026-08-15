@@ -654,6 +654,29 @@ func TestFailureRecipientObserver_ShutdownStopsIngressBeforeDrainingQueue(t *tes
 	assert.True(t, observer.evidence.Complete("message-1"))
 }
 
+func TestFailureRecipientConnection_DrainWaitsForClosedCallback(t *testing.T) {
+	closed := make(chan struct{})
+	drainCalled := make(chan struct{})
+	connection := &natsFailureRecipientConnection{
+		closed: closed,
+		drain: func() error {
+			close(drainCalled)
+			return nil
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- connection.Drain() }()
+
+	<-drainCalled
+	select {
+	case err := <-done:
+		require.Failf(t, "drain returned early", "error: %v", err)
+	default:
+	}
+	close(closed)
+	require.NoError(t, <-done)
+}
+
 func TestSoakRuntimeSelector_RecipientSetsExcludeBots(t *testing.T) {
 	topology := &soakTopology{
 		ActiveUsers: []model.User{{ID: "u-alice", Account: "alice"}},

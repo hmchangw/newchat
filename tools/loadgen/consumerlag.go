@@ -22,6 +22,7 @@ type ConsumerSampler struct {
 	metrics  *Metrics
 	interval time.Duration
 	sample   func(context.Context) (*jetstream.ConsumerInfo, error)
+	now      func() time.Time
 
 	hasSample        bool
 	minPending       uint64
@@ -40,8 +41,13 @@ func withConsumerSamplerInvalidation(invalidate func(string)) consumerSamplerOpt
 	return func(sampler *ConsumerSampler) { sampler.invalidate = invalidate }
 }
 
+func withConsumerSamplerNow(now func() time.Time) consumerSamplerOption {
+	return func(sampler *ConsumerSampler) { sampler.now = now }
+}
+
 var consumerDurableRegistry = map[string]struct{}{
-	"room-worker": {}, "message-worker": {}, "broadcast-worker": {}, "notification-worker": {},
+	"room-worker": {}, "message-gatekeeper": {}, "message-worker": {},
+	"broadcast-worker": {}, "notification-worker": {},
 }
 
 // NewConsumerSampler constructs a sampler after validating its bounded labels.
@@ -62,7 +68,10 @@ func NewConsumerSampler(
 	if interval <= 0 {
 		return nil, errors.New("consumer sample interval must be greater than zero")
 	}
-	sampler := &ConsumerSampler{js: js, stream: stream, durable: durable, metrics: m, interval: interval}
+	sampler := &ConsumerSampler{
+		js: js, stream: stream, durable: durable, metrics: m, interval: interval,
+		now: time.Now,
+	}
 	for _, option := range options {
 		option(sampler)
 	}
@@ -70,7 +79,7 @@ func NewConsumerSampler(
 }
 
 func validConsumerStream(name string) bool {
-	for _, prefix := range []string{"MESSAGES-CANONICAL-", "ROOMS-"} {
+	for _, prefix := range []string{"MESSAGES-CANONICAL-", "MESSAGES-", "ROOMS-"} {
 		if site, found := strings.CutPrefix(name, prefix); found {
 			return failureRunIDPattern.MatchString(site)
 		}
@@ -124,6 +133,7 @@ func (s *ConsumerSampler) recordSampleError(reason string, err error) {
 	if s.metrics != nil {
 		s.metrics.ConsumerSampleErrors.WithLabelValues(s.stream, s.durable, reason).Inc()
 		s.metrics.ConsumerUp.WithLabelValues(s.stream, s.durable).Set(0)
+		s.metrics.ConsumerAckFloorStall.DeleteLabelValues(s.stream, s.durable)
 	}
 	if invalidate != nil {
 		invalidate(reason)
@@ -151,6 +161,12 @@ func (s *ConsumerSampler) recordInfo(info *jetstream.ConsumerInfo) {
 		s.metrics.ConsumerStreamFloor.WithLabelValues(s.stream, s.durable).Set(float64(info.AckFloor.Stream))
 		s.metrics.ConsumerMaxDeliver.WithLabelValues(s.stream, s.durable).Set(float64(info.Config.MaxDeliver))
 		s.metrics.ConsumerAckWait.WithLabelValues(s.stream, s.durable).Set(info.Config.AckWait.Seconds())
+		if pending > 0 && info.AckFloor.Last != nil {
+			stall := max(0, s.now().UTC().Sub(info.AckFloor.Last.UTC()).Seconds())
+			s.metrics.ConsumerAckFloorStall.WithLabelValues(s.stream, s.durable).Set(stall)
+		} else {
+			s.metrics.ConsumerAckFloorStall.DeleteLabelValues(s.stream, s.durable)
+		}
 		if info.Delivered.Last != nil {
 			s.metrics.ConsumerLastActive.WithLabelValues(s.stream, s.durable).Set(float64(info.Delivered.Last.UTC().Unix()))
 		}

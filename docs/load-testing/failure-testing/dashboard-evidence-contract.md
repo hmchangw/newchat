@@ -71,8 +71,8 @@ observer is not eligible and cannot make the interval unverified.
 For each configured observer and lane:
 
 ```text
-eligible   = increase(loadgen_failure_observer_eligible_total[2m])
-unverified = increase(loadgen_failure_observations_total{result="unverified"}[2m])
+eligible   = increase(loadgen_failure_observer_eligible_total{scenario="$scenario",lane="$lane",observer="$observer"}[2m])
+unverified = increase(loadgen_failure_observations_total{scenario="$scenario",lane="$lane",observer="$observer",result="unverified"}[2m])
 limit      = max(3, ceil(0.001 * eligible))
 invalid    = unverified > limit
 ```
@@ -129,7 +129,15 @@ Metrics added by this work:
 - `loadgen_failure_observer_configured` and
   `loadgen_failure_observer_eligible_total`;
 - `loadgen_failure_observation_reasons_total` and
-  `loadgen_failure_not_sent_total`.
+  `loadgen_failure_not_sent_total`;
+- `loadgen_consumer_ack_floor_stall_seconds`.
+
+The ack-floor stall gauge is emitted only while `NumPending > 0` and
+`ConsumerInfo.AckFloor.Last` is available. It detects a parked head of line by
+measuring how long the acknowledgment floor has remained still. It does not
+replace a true oldest-pending-age signal: a consumer can keep advancing too
+slowly to catch up without freezing its acknowledgment floor. Missing input
+remains unknown rather than being emitted as zero.
 
 Externally owned metrics include application service metrics, NATS/JetStream
 exporter state, NATS topology, leader, and quorum state, Kubernetes restart/OOM
@@ -138,7 +146,7 @@ synthesize or own these series, and their absence is not synthesized as
 success.
 
 Allowed hot-path label values are code-owned registries: scenario is fixed to
-`cassandra_soak`; lanes, observers, results, reasons, NATS pools/events, and
+`message_soak`; lanes, observers, results, reasons, NATS pools/events, and
 consumer identifiers are bounded configuration values. Run, operation,
 message, room, account, user, recipient, subject, inbox, raw error/advisory,
 and pod UID values are forbidden labels.

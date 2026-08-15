@@ -68,6 +68,36 @@ func TestFailureDashboardContract_DocPinsCadenceAndMissingSeriesSemantics(t *tes
 	}
 }
 
+func TestFailureDashboardContract_ObserverRatioUsesMatchingBoundedSelectors(t *testing.T) {
+	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
+	require.NoError(t, err)
+	contract := string(encoded)
+
+	assert.Contains(t, contract,
+		`loadgen_failure_observer_eligible_total{scenario="$scenario",lane="$lane",observer="$observer"}`,
+	)
+	assert.Contains(t, contract,
+		`loadgen_failure_observations_total{scenario="$scenario",lane="$lane",observer="$observer",result="unverified"}`,
+	)
+}
+
+func TestFailureDashboardContract_AckFloorStallIsDocumentedAsAProxy(t *testing.T) {
+	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
+	require.NoError(t, err)
+	contract := string(encoded)
+
+	assert.Contains(t, contract, "loadgen_consumer_ack_floor_stall_seconds")
+	assert.Contains(t, contract, "replace a true oldest-pending-age signal")
+}
+
+func TestFailureDashboardContract_UsesWorkloadOrientedScenario(t *testing.T) {
+	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
+	require.NoError(t, err)
+
+	assert.Contains(t, string(encoded), "`message_soak`")
+	assert.NotContains(t, string(encoded), "`cassandra_soak`")
+}
+
 func TestFailureRuntimeControlFollowUp_PinsAuthenticatedStatusAndPausedEvidence(t *testing.T) {
 	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/runtime-control-api.md")
 	require.NoError(t, err)

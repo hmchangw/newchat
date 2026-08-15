@@ -36,7 +36,7 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 	})
 	require.NoError(t, err)
 	metrics := NewMetrics()
-	t.Cleanup(metrics.StopNATSHealth)
+	t.Cleanup(metrics.stopNATSHealth)
 	recipientObserver := newFailureRecipientObserver(
 		ledger, metrics, 8, func() time.Time { return now },
 		withFailureRecipientEvidenceDir(evidenceDirectory),
@@ -53,7 +53,7 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 		if connectErr != nil {
 			return nil, connectErr
 		}
-		return &natsFailureRecipientConnection{nc: connection}, nil
+		return newNATSFailureRecipientConnection(connection), nil
 	})
 	t.Cleanup(func() { _ = recipientSource.Close() })
 	subscriptions, err := startFailureRecipientSubscriptions(
@@ -124,6 +124,6 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 	ran, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
-	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultGood])
+	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultUnverified])
 
 }

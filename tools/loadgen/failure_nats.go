@@ -227,8 +227,12 @@ func (h *loadgenNATSHealth) bufferFull(err error) {
 	if h.metrics != nil {
 		h.metrics.NATSConnectionEvents.WithLabelValues(h.pool, "buffer_full").Inc()
 	}
-	if h.observer != nil {
-		h.observer.Set(false, h.now().UTC(), "buffer_full")
+	h.mu.Lock()
+	observer := h.observer
+	now := h.now().UTC()
+	h.mu.Unlock()
+	if observer != nil {
+		observer.Set(false, now, "buffer_full")
 	}
 	slog.Error("nats observer buffer full", "error", err)
 }
@@ -411,8 +415,8 @@ func (s *loadgenNATSPoolState) stop() {
 	s.mu.Unlock()
 }
 
-// StopNATSHealth terminates background outage sampling owned by this registry.
-func (m *Metrics) StopNATSHealth() {
+// stopNATSHealth terminates background outage sampling owned by this registry.
+func (m *Metrics) stopNATSHealth() {
 	if m == nil {
 		return
 	}

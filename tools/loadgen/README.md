@@ -244,6 +244,7 @@ Run A environment variables:
 | Variable | Default | Purpose |
 |---|---:|---|
 | `SOAK_RUN_ID` | required | Unique ownership and lifecycle ID. |
+| `SOAK_ENVIRONMENT` | `local` | Bounded `loadgen_run_info` environment label: `local`, `staging`, or `production`. |
 | `SOAK_RUN_MODE` | `duration` | `duration` for a bounded smoke/run, or `continuous` until SIGTERM. |
 | `SOAK_RUN_DURATION` | `72h` | Total wall-clock duration in `duration` mode; ignored in `continuous` mode. |
 | `SOAK_WARMUP` | `30s` | Per-process warm-up excluded from operation totals. |

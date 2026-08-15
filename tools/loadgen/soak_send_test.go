@@ -536,10 +536,62 @@ func TestSoakSender_PersistsLifecycleBeforePublishing(t *testing.T) {
 	require.Len(t, lifecycle.activated, 1)
 	assert.Equal(t, pending.MessageID, lifecycle.started[0].MessageID)
 	assert.Equal(t, pending.MessageID, lifecycle.activated[0].MessageID)
-	assert.Equal(t, []string{"start", "activate", "publish"}, sequence)
+	assert.Equal(t, []string{"start", "publish", "activate"}, sequence)
 	assert.True(t, pending.Tracked)
 	subjects, _ := publisher.snapshot()
 	assert.Len(t, subjects, 1)
+}
+
+func TestSoakSender_LocalPublishFailureBecomesNotSent(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
+	publisher := &soakRecordingPublisher{errors: []error{nats.ErrConnectionClosed}}
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, nil), publisher, nil,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(tracker, nil),
+	)
+
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+
+	require.ErrorIs(t, err, nats.ErrConnectionClosed)
+	require.NotNil(t, pending)
+	snapshot := ledger.Snapshot()
+	assert.Zero(t, snapshot.Active)
+	assert.Equal(t, uint64(1), snapshot.Results[failureResultNotSent])
+	assert.Zero(t, sender.Pending(), "a definite local rejection must not expire as a second admission result")
+}
+
+func TestSoakSender_AmbiguousPublishFailureRemainsActive(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
+	publisher := &soakRecordingPublisher{errors: []error{errors.New("ambiguous publish failure")}}
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, nil), publisher, nil,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(tracker, nil),
+	)
+
+	_, err = sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+
+	require.Error(t, err)
+	operation, ok := ledger.Active(soakTestMessageID)
+	require.True(t, ok)
+	assert.Equal(t, failureOperationActive, operation.LifecycleState)
 }
 
 func TestSoakSender_LifecycleFailureKeepsTrafficFlowing(t *testing.T) {
@@ -673,6 +725,13 @@ func (l *recordingSoakSendLifecycle) Activate(pending *soakPendingSend) error {
 	}
 	if l.activateErr != nil {
 		return l.activateErr
+	}
+	return l.err
+}
+
+func (l *recordingSoakSendLifecycle) AbandonUnsent(pending *soakPendingSend) error {
+	if l.sequence != nil {
+		*l.sequence = append(*l.sequence, "abandon")
 	}
 	return l.err
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -60,6 +62,31 @@ func TestParseDailyConfig_RejectsTooManyConns(t *testing.T) {
 // testEnvFactory returns a stepEnv with stubs so runDaily can run without real NATS.
 type testEnvFactory struct{}
 
+type recordingDailyCloser struct {
+	closed int
+}
+
+func (c *recordingDailyCloser) Close() {
+	c.closed++
+}
+
+type recordingDailyMetricsServer struct {
+	shutdownErr   error
+	closeErr      error
+	shutdownCalls int
+	closeCalls    int
+}
+
+func (s *recordingDailyMetricsServer) Shutdown(context.Context) error {
+	s.shutdownCalls++
+	return s.shutdownErr
+}
+
+func (s *recordingDailyMetricsServer) Close() error {
+	s.closeCalls++
+	return s.closeErr
+}
+
 //nolint:gocritic // cfg passed by value to satisfy envFactory interface
 func (testEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 	return &stepEnv{
@@ -91,6 +118,91 @@ func TestRunDaily_SmokeOnTinyConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.False(t, results[0].Tripped)
+}
+
+func TestDailyMetricsOwnership(t *testing.T) {
+	external := NewMetrics()
+	t.Cleanup(external.stopNATSHealth)
+
+	metrics, owned := selectDailyMetrics(external)
+	assert.Same(t, external, metrics)
+	assert.False(t, owned)
+
+	metrics, owned = selectDailyMetrics(nil)
+	require.NotNil(t, metrics)
+	assert.True(t, owned)
+	metrics.stopNATSHealth()
+}
+
+func TestClosePools_ClosesPublisherAndOwnedMetrics(t *testing.T) {
+	publisher := &recordingDailyCloser{}
+	metrics := NewMetrics()
+	state := &loadgenNATSPoolState{outageStop: make(chan struct{})}
+	metrics.natsPoolHealth["daily"] = state
+	env := &stepEnv{pubConn: publisher, ownedMetrics: metrics}
+
+	closePools(env)
+
+	assert.Equal(t, 1, publisher.closed)
+	state.mu.Lock()
+	assert.True(t, state.stopped)
+	state.mu.Unlock()
+}
+
+func TestNewDailyMetricsServer_BoundsRequests(t *testing.T) {
+	server := newDailyMetricsServer(":9099", http.NewServeMux())
+
+	assert.Equal(t, 5*time.Second, server.ReadHeaderTimeout)
+	assert.Equal(t, 10*time.Second, server.ReadTimeout)
+	assert.Equal(t, 30*time.Second, server.WriteTimeout)
+	assert.Equal(t, 60*time.Second, server.IdleTimeout)
+}
+
+func TestShutdownDailyMetricsServer_ForceClosesAfterFailure(t *testing.T) {
+	shutdownErr := errors.New("shutdown timeout")
+	closeErr := errors.New("force close")
+	tests := []struct {
+		name           string
+		server         *recordingDailyMetricsServer
+		wantErr        error
+		wantCloseCalls int
+	}{
+		{
+			name:           "graceful shutdown",
+			server:         &recordingDailyMetricsServer{},
+			wantCloseCalls: 0,
+		},
+		{
+			name: "force close succeeds",
+			server: &recordingDailyMetricsServer{
+				shutdownErr: shutdownErr,
+			},
+			wantErr:        shutdownErr,
+			wantCloseCalls: 1,
+		},
+		{
+			name: "force close failure is retained",
+			server: &recordingDailyMetricsServer{
+				shutdownErr: shutdownErr,
+				closeErr:    closeErr,
+			},
+			wantErr:        closeErr,
+			wantCloseCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := shutdownDailyMetricsServer(context.Background(), tt.server)
+			if tt.wantErr == nil {
+				require.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, tt.wantErr)
+			}
+			assert.Equal(t, 1, tt.server.shutdownCalls)
+			assert.Equal(t, tt.wantCloseCalls, tt.server.closeCalls)
+		})
+	}
 }
 
 func TestRunStep_StubReturnsPassWhenEverythingIsGreen(t *testing.T) {
@@ -290,7 +402,7 @@ func TestSnapshotPresenceStats_NilWhenPoolInitFailed(t *testing.T) {
 
 func TestProdEnvFactory_PresenceDisabledLeavesNil(t *testing.T) {
 	metrics := NewMetrics()
-	t.Cleanup(metrics.StopNATSHealth)
+	t.Cleanup(metrics.stopNATSHealth)
 	f := &prodEnvFactory{
 		baseCfg: &config{NatsURL: "nats://127.0.0.1:14222", SiteID: "site-test"},
 		metrics: metrics,
@@ -298,8 +410,10 @@ func TestProdEnvFactory_PresenceDisabledLeavesNil(t *testing.T) {
 	users := []*userState{{ID: "u0", Account: "user-0"}}
 	cfg := dailyConfig{Preset: "daily-heavy", MultiplexPoolSize: 0} // Presence false
 	env := f.Build(cfg, users)
+	t.Cleanup(func() { closePools(env) })
 	assert.Nil(t, env.presencePool)
 	assert.Nil(t, env.presenceCollector)
 	assert.Nil(t, users[0].presence)
 	assert.Same(t, metrics, env.collector.m)
+	assert.Nil(t, env.ownedMetrics)
 }

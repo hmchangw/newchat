@@ -157,6 +157,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "environment",
         "runMode",
         "randomSeed",
         "warmup",
@@ -195,6 +196,7 @@
         "resources"
       ],
       "properties": {
+        "environment": {"type": "string", "enum": ["local", "staging", "production"]},
         "runMode": {"type": "string", "enum": ["continuous"]},
         "randomSeed": {"type": "integer"},
         "warmup": {"type": "string", "minLength": 1},

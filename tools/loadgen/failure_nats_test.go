@@ -34,7 +34,7 @@ func (c *lockedFailureClock) Advance(duration time.Duration) {
 func TestLoadgenNATSHealth_TracksDisconnectAndRecovery(t *testing.T) {
 	clock := newLockedFailureClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
 	metrics := NewMetrics()
-	t.Cleanup(metrics.StopNATSHealth)
+	t.Cleanup(metrics.stopNATSHealth)
 	health := newLoadgenNATSHealth("soak", metrics, clock.Now)
 
 	health.connected()
@@ -64,7 +64,7 @@ func TestLoadgenNATSHealth_TracksDisconnectAndRecovery(t *testing.T) {
 
 func TestLoadgenNATSHealth_ClosedInvalidatesConnectionState(t *testing.T) {
 	metrics := NewMetrics()
-	t.Cleanup(metrics.StopNATSHealth)
+	t.Cleanup(metrics.stopNATSHealth)
 	health := newLoadgenNATSHealth("members", metrics, time.Now)
 	health.connected()
 	health.closed()
@@ -80,7 +80,7 @@ func TestLoadgenNATSHealth_ClosedInvalidatesConnectionState(t *testing.T) {
 func TestLoadgenNATSHealth_AggregatesEveryConnectionInPool(t *testing.T) {
 	clock := newLockedFailureClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
 	metrics := NewMetrics()
-	t.Cleanup(metrics.StopNATSHealth)
+	t.Cleanup(metrics.stopNATSHealth)
 	first := newLoadgenNATSHealth("recipient_observer", metrics, clock.Now)
 	second := newLoadgenNATSHealth("recipient_observer", metrics, clock.Now)
 	first.connected()
@@ -134,7 +134,7 @@ func TestLoadgenNATSHealth_InitialConnectedDoesNotOverwriteCallbackState(t *test
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			metrics := NewMetrics()
-			t.Cleanup(metrics.StopNATSHealth)
+			t.Cleanup(metrics.stopNATSHealth)
 			health := newLoadgenNATSHealth("soak", metrics, time.Now)
 
 			tt.transition(health)
@@ -168,7 +168,7 @@ func TestLoadgenNATSHealth_RejectsUnboundedPool(t *testing.T) {
 func TestLoadgenNATSHealth_ObserverDisconnectOverflowAndReconnect(t *testing.T) {
 	clock := newLockedFailureClock(time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC))
 	metrics := NewMetrics()
-	t.Cleanup(metrics.StopNATSHealth)
+	t.Cleanup(metrics.stopNATSHealth)
 	observer := newFailureObserverHealth(failureObserverRecipient, clock.Now())
 	health := newLoadgenNATSHealth("recipient_observer", metrics, clock.Now)
 	health.observer = observer
@@ -199,7 +199,7 @@ func TestLoadgenNATSHealth_StopTerminatesOutageTickers(t *testing.T) {
 	health.connected()
 	health.disconnected(errors.New("connection reset"))
 
-	metrics.StopNATSHealth()
+	metrics.stopNATSHealth()
 	health.reconnected("nats://late-reconnect")
 	health.disconnected(errors.New("late disconnect"))
 
@@ -210,7 +210,7 @@ func TestLoadgenNATSHealth_StopTerminatesOutageTickers(t *testing.T) {
 
 func TestFailureNATSConnect_WrapsConnectionError(t *testing.T) {
 	metrics := NewMetrics()
-	t.Cleanup(metrics.StopNATSHealth)
+	t.Cleanup(metrics.stopNATSHealth)
 
 	connection, err := connectWithCredsHealth("://invalid", "test", "", "daily", metrics)
 

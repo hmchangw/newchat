@@ -259,9 +259,11 @@ type stepEnv struct {
 	scrapeServices func(ctx context.Context) (map[string]int64, error)
 	publish        publishFn // nil in stub mode → emitters no-op
 	request        requestFn // nil in stub mode → emitters no-op
-	siteID         string    // propagated from cfg / baseCfg
-	runSeed        int64     // for deterministic per-user RNG seeding
-	maxDirect      int       // direct pool cap (from cfg.MaxDirectUsers)
+	pubConn        dailyConnectionCloser
+	ownedMetrics   *Metrics
+	siteID         string // propagated from cfg / baseCfg
+	runSeed        int64  // for deterministic per-user RNG seeding
+	maxDirect      int    // direct pool cap (from cfg.MaxDirectUsers)
 	warmup         time.Duration
 	hold           time.Duration
 	cooldown       time.Duration
@@ -277,6 +279,15 @@ type stepEnv struct {
 	holdDurationNanos atomic.Int64
 	activatedCount    atomic.Int64
 	skippedCount      atomic.Int64
+}
+
+type dailyConnectionCloser interface {
+	Close()
+}
+
+type dailyMetricsServer interface {
+	Shutdown(context.Context) error
+	Close() error
 }
 
 // setHold updates the current envelope anchor. Emitters read these on every
@@ -769,6 +780,9 @@ func factoryBaseCfg(f envFactory) (*config, bool) {
 }
 
 func closePools(env *stepEnv) {
+	if env == nil {
+		return
+	}
 	if env.direct != nil {
 		env.direct.Close()
 	}
@@ -777,6 +791,12 @@ func closePools(env *stepEnv) {
 	}
 	if env.presencePool != nil {
 		env.presencePool.Close()
+	}
+	if env.pubConn != nil {
+		env.pubConn.Close()
+	}
+	if env.ownedMetrics != nil {
+		env.ownedMetrics.stopNATSHealth()
 	}
 }
 
@@ -794,12 +814,16 @@ type prodEnvFactory struct {
 	metrics *Metrics
 }
 
+func selectDailyMetrics(metrics *Metrics) (*Metrics, bool) {
+	if metrics != nil {
+		return metrics, false
+	}
+	return NewMetrics(), true
+}
+
 //nolint:gocritic // cfg passed by value to satisfy envFactory interface
 func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
-	metrics := f.metrics
-	if metrics == nil {
-		metrics = NewMetrics()
-	}
+	metrics, ownsMetrics := selectDailyMetrics(f.metrics)
 	col := NewCollector(metrics, cfg.Preset)
 	direct := newDirectPool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile, col)
 	var mux *multiplexPool
@@ -904,7 +928,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		}
 	}
 
-	return &stepEnv{
+	env := &stepEnv{
 		collector: col, direct: direct, multiplex: mux, users: users,
 		thresholds: defaultThresholds(),
 		pollPending: func(ctx context.Context) (map[string]int64, error) {
@@ -915,6 +939,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		},
 		publish:           publish,
 		request:           request,
+		pubConn:           pubConn,
 		siteID:            siteID,
 		maxDirect:         cfg.MaxDirectUsers,
 		mintJWT:           buildAuthMintFn(),
@@ -925,6 +950,10 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		presenceCollector: presenceCollector,
 		presenceHeartbeat: cfg.PresenceHeartbeat,
 	}
+	if ownsMetrics {
+		env.ownedMetrics = metrics
+	}
+	return env
 }
 
 // buildAuthMintFn returns a best-effort one-time auth-service login function.
@@ -943,6 +972,35 @@ func buildAuthMintFn() func(ctx context.Context, account string) error {
 }
 
 // runDaily is the production entrypoint invoked by main.go.
+func newDailyMetricsServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+func shutdownDailyMetricsServer(ctx context.Context, server dailyMetricsServer) error {
+	if server == nil {
+		return nil
+	}
+	shutdownErr := server.Shutdown(ctx)
+	if shutdownErr == nil {
+		return nil
+	}
+	closeErr := server.Close()
+	if closeErr == nil {
+		return fmt.Errorf("shutdown daily metrics server: %w", shutdownErr)
+	}
+	return errors.Join(
+		fmt.Errorf("shutdown daily metrics server: %w", shutdownErr),
+		fmt.Errorf("force close daily metrics server: %w", closeErr),
+	)
+}
+
 func runDaily(ctx context.Context, baseCfg *config, args []string) int {
 	cfg, err := parseDailyConfig(args)
 	if err != nil {
@@ -961,9 +1019,7 @@ func runDaily(ctx context.Context, baseCfg *config, args []string) int {
 	if metricsAddr == "" {
 		metricsAddr = ":9099"
 	}
-	metricsServer := &http.Server{
-		Addr: metricsAddr, Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second,
-	}
+	metricsServer := newDailyMetricsServer(metricsAddr, metrics.Handler())
 	go func() {
 		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Warn("daily metrics server stopped", "error", err)
@@ -972,10 +1028,10 @@ func runDaily(ctx context.Context, baseCfg *config, args []string) int {
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		if err := shutdownDailyMetricsServer(shutdownCtx, metricsServer); err != nil {
 			slog.Warn("shutdown daily metrics server", "error", err)
 		}
-		metrics.StopNATSHealth()
+		metrics.stopNATSHealth()
 	}()
 	results, err := runDailyForTest(ctx, cfg, &prodEnvFactory{baseCfg: baseCfg, metrics: metrics})
 	if err != nil {
