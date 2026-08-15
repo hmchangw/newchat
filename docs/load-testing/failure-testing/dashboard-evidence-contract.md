@@ -131,6 +131,19 @@ Metrics added by this work:
 - `loadgen_failure_observation_reasons_total` and
   `loadgen_failure_not_sent_total`;
 - `loadgen_consumer_ack_floor_stall_seconds`.
+- `loadgen_failure_wal_append_duration_seconds`,
+  `loadgen_failure_wal_appends_total`,
+  `loadgen_failure_wal_flush_duration_seconds`,
+  `loadgen_failure_wal_flush_batch_size`,
+  `loadgen_failure_evidence_flush_duration_seconds`, and
+  `loadgen_failure_evidence_records_total`.
+
+The WAL flush histogram measures the actual grouped fsync, while append latency
+is caller-observed and includes the durability wait for pre-publish intents.
+Correlate WAL flush p95 and batch size with dispatch ratio and saturation.
+Sidecar flush errors make the dependent recipient interval inconclusive; a
+missing ordinary-delivery sidecar is expected because only terminal anomalies
+and authoritative missing sets are persisted.
 
 The ack-floor stall gauge is emitted only while `NumPending > 0` and
 `ConsumerInfo.AckFloor.Last` is available. It detects a parked head of line by

@@ -8,8 +8,11 @@ recovery.
 
 ## Durable message observation
 
-Before each message publish attempt, loadgen appends and fsyncs a versioned WAL
-intent. After the publish attempt begins, the operation is active even if the
+Before each message publish attempt, loadgen appends a versioned WAL intent and
+waits for its grouped fsync durability barrier. Concurrent intents may share a
+barrier for up to 10 milliseconds. Non-intent lifecycle records use the same
+bounded group-commit writer and are fsynced by the next barrier, the 10 ms
+flush timer, compaction, or shutdown. After the publish attempt begins, the operation is active even if the
 NATS client returns an error because the downstream outcome is ambiguous.
 `not_sent` is reserved for a proven local pre-publish failure and uses the
 bounded reason `publish_local_error`.
@@ -19,6 +22,24 @@ effects. When `SOAK_RECIPIENT_OBSERVER_ENABLED=true`, newly admitted messages
 also require an account-attributed recipient event for every subscribed human
 recipient. Disabled recipient observation creates no recipient effect and no
 recipient `unverified` result.
+
+Recipient expectations retain a bounded route (`room` or `user`), set source,
+and completeness flag in the WAL. The room observer treats one global and one
+local copy of the same logical room event as one delivery; a repeated copy on
+the same route remains duplicate evidence. Locally tracked thread followers
+survive recent-message eviction. An externally discovered thread parent has an
+incomplete follower set, so absence and unexpected-recipient claims are
+`unverified` rather than false violations.
+
+Ordinary expected recipient deliveries remain in bounded memory and are not
+fsynced individually. Exact anomalies are durably recorded when observed;
+authoritative missing-recipient sets and terminal `unverified` markers are
+flushed as batches. Every positive result has a completed sidecar barrier before
+it can be recorded in the ledger. A failed barrier downgrades the result to `unverified`,
+marks the observer down, and invalidates the evidence interval. Durable positive
+sidecars are replayed after restart; ordinary recovered recipient operations
+without such evidence remain `unverified` because pre-restart observer-health
+coverage cannot be reconstructed.
 
 Terminal results are `good`, `bad`, `unverified`, `not_sent`, and
 `missing_after_deadline`. `bad` and authoritative absence retain bounded
@@ -54,6 +75,17 @@ not add an unbudgeted reader.
 Ledger capacity, WAL, observer, and queue failures degrade evidence but do not
 stop safe traffic. The single-replica `Deployment` uses `Recreate` with a
 retained `ReadWriteOnce` PVC, so unresolved operations resume after replacement.
+
+WAL and sidecar performance are directly observable through
+`loadgen_failure_wal_append_duration_seconds`,
+`loadgen_failure_wal_flush_duration_seconds`,
+`loadgen_failure_wal_flush_batch_size`,
+`loadgen_failure_wal_appends_total`,
+`loadgen_failure_evidence_flush_duration_seconds`, and
+`loadgen_failure_evidence_records_total`. Rising WAL flush latency together
+with falling dispatch ratio or lane/global saturation identifies evidence I/O
+as a loadgen bottleneck. Sidecar flush errors or latency are independent from
+the recipient callback queue and invalidate positive absence claims.
 
 ## Configuration
 

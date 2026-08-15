@@ -211,6 +211,9 @@ func TestSoakSender_ChannelThreadReplySnapshotsExactFollowerSet(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, started)
 	assert.Equal(t, []string{"alice", "bob", "carol"}, started.Target.Recipients)
+	assert.Equal(t, recipientSetSourceThreadFollowers, started.Target.RecipientSetSource)
+	assert.True(t, started.Target.RecipientSetComplete)
+	assert.Equal(t, recipientExpectedRouteUser, started.Target.RecipientRoute)
 }
 
 func TestSoakSender_RejectedThreadReplyReleasesParentBudget(t *testing.T) {

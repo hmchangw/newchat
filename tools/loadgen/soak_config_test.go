@@ -114,6 +114,13 @@ func TestValidateSoakConfig_RequiresRunID(t *testing.T) {
 	assert.Contains(t, err.Error(), "SOAK_RUN_ID")
 }
 
+func TestValidateSoakConfig_AcceptsBoundedTestEnvironment(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.Environment = "test"
+
+	require.NoError(t, validateSoakConfig(&cfg, "chat"))
+}
+
 func TestValidateSoakConfig_RejectsUnsafeRunIDs(t *testing.T) {
 	for _, runID := range []string{"../escape", "folder/run", `folder\\run`, ".", "..", " leading", "trailing "} {
 		t.Run(runID, func(t *testing.T) {

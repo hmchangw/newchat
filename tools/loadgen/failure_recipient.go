@@ -224,6 +224,9 @@ func shutdownFailureRecipientObserver(
 	if observer != nil {
 		observer.Wait()
 		observer.Drain()
+		if err := observer.CloseEvidence(); err != nil {
+			closeErr = errors.Join(closeErr, err)
+		}
 	}
 	if closeErr != nil {
 		return fmt.Errorf("drain recipient observer ingress: %w", closeErr)
@@ -246,16 +249,17 @@ func startFailureRecipientSubscriptions(
 	type target struct {
 		subject   string
 		recipient string
+		route     recipientDeliveryRoute
 	}
 	targets := make([]target, 0, len(topology.Subscriptions)*3)
 	seen := make(map[string]struct{}, len(topology.Subscriptions)*3)
-	add := func(subjectName, recipient string) {
+	add := func(subjectName, recipient string, route recipientDeliveryRoute) {
 		key := subjectName + "\x00" + recipient
 		if _, duplicate := seen[key]; duplicate {
 			return
 		}
 		seen[key] = struct{}{}
-		targets = append(targets, target{subject: subjectName, recipient: recipient})
+		targets = append(targets, target{subject: subjectName, recipient: recipient, route: route})
 	}
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
@@ -263,10 +267,10 @@ func startFailureRecipientSubscriptions(
 		if !subscription.IsSubscribed || subscription.User.IsBot || account == "" {
 			continue
 		}
-		add(subject.UserRoomEvent(account), account)
+		add(subject.UserRoomEvent(account), account, recipientDeliveryRouteUser)
 		if roomTypes[subscription.RoomID] == model.RoomTypeChannel {
-			add(subject.RoomEvent(subscription.RoomID, true), account)
-			add(subject.RoomEvent(subscription.RoomID, false), account)
+			add(subject.RoomEvent(subscription.RoomID, true), account, recipientDeliveryRouteRoomGlobal)
+			add(subject.RoomEvent(subscription.RoomID, false), account, recipientDeliveryRouteRoomLocal)
 		}
 	}
 	if len(targets) == 0 {
@@ -281,8 +285,9 @@ func startFailureRecipientSubscriptions(
 	result := &failureRecipientSubscriptions{source: source}
 	for _, target := range targets {
 		recipient := target.recipient
+		route := target.route
 		subscription, err := source.Subscribe(target.subject, recipient, func(message *nats.Msg) {
-			observer.Enqueue(recipient, message.Data)
+			observer.EnqueueRoute(recipient, route, message.Data)
 		})
 		if err != nil {
 			_ = result.Close()
@@ -305,19 +310,62 @@ func startFailureRecipientSubscriptions(
 }
 
 type recipientEvidenceResult struct {
-	Observation failureObservation `json:"observation"`
-	Missing     []string           `json:"missing,omitempty"`
-	Unexpected  []string           `json:"unexpected,omitempty"`
-	Duplicates  []string           `json:"duplicates,omitempty"`
-	Mismatches  []string           `json:"mismatches,omitempty"`
+	Observation    failureObservation `json:"observation"`
+	Missing        []string           `json:"missing,omitempty"`
+	Unexpected     []string           `json:"unexpected,omitempty"`
+	Duplicates     []string           `json:"duplicates,omitempty"`
+	Mismatches     []string           `json:"mismatches,omitempty"`
+	durableRecords map[string]map[string]struct{}
+}
+
+type recipientDeliveryRoute string
+
+const (
+	recipientDeliveryRouteUnknown    recipientDeliveryRoute = "unknown"
+	recipientDeliveryRouteRoomGlobal recipientDeliveryRoute = "room_global"
+	recipientDeliveryRouteRoomLocal  recipientDeliveryRoute = "room_local"
+	recipientDeliveryRouteUser       recipientDeliveryRoute = "user"
+)
+
+type recipientExpectedRoute string
+
+const (
+	recipientExpectedRouteAny  recipientExpectedRoute = "any"
+	recipientExpectedRouteRoom recipientExpectedRoute = "room"
+	recipientExpectedRouteUser recipientExpectedRoute = "user"
+)
+
+type recipientSetSource string
+
+const (
+	recipientSetSourceLegacy          recipientSetSource = "legacy"
+	recipientSetSourceTopology        recipientSetSource = "topology_subscriptions"
+	recipientSetSourceThreadFollowers recipientSetSource = "catalog_thread_followers"
+)
+
+type recipientExpectationConfig struct {
+	OperationID string
+	Recipients  []string
+	RoomID      string
+	EventType   model.RoomEventType
+	Route       recipientExpectedRoute
+	Source      recipientSetSource
+	Complete    bool
 }
 
 type recipientExpectation struct {
-	expected   map[string]struct{}
-	observed   map[string]int
-	mismatches map[string]struct{}
-	roomID     string
-	eventType  model.RoomEventType
+	expected          map[string]struct{}
+	observed          map[string]map[recipientDeliveryRoute]int
+	mismatches        map[string]struct{}
+	roomID            string
+	eventType         model.RoomEventType
+	route             recipientExpectedRoute
+	source            recipientSetSource
+	complete          bool
+	durableMissing    map[string]struct{}
+	durableUnexpected map[string]struct{}
+	durableDuplicates map[string]struct{}
+	durableMismatches map[string]struct{}
 }
 
 type recipientEvidence struct {
@@ -329,9 +377,11 @@ type recipientEvidence struct {
 type recipientEvidenceDisposition string
 
 const (
-	recipientEvidenceUntracked recipientEvidenceDisposition = "untracked"
-	recipientEvidenceObserved  recipientEvidenceDisposition = "observed"
-	recipientEvidenceMismatch  recipientEvidenceDisposition = "mismatch"
+	recipientEvidenceUntracked  recipientEvidenceDisposition = "untracked"
+	recipientEvidenceExpected   recipientEvidenceDisposition = "expected"
+	recipientEvidenceDuplicate  recipientEvidenceDisposition = "duplicate"
+	recipientEvidenceUnexpected recipientEvidenceDisposition = "unexpected"
+	recipientEvidenceMismatch   recipientEvidenceDisposition = "mismatch"
 )
 
 func newRecipientEvidence(allowDuplicates bool) *recipientEvidence {
@@ -339,7 +389,10 @@ func newRecipientEvidence(allowDuplicates bool) *recipientEvidence {
 }
 
 func (r *recipientEvidence) Expect(operationID string, recipients []string) error {
-	return r.ExpectEvent(operationID, recipients, "", "")
+	return r.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: operationID, Recipients: recipients,
+		Route: recipientExpectedRouteAny, Source: recipientSetSourceLegacy, Complete: true,
+	})
 }
 
 func (r *recipientEvidence) ExpectEvent(
@@ -348,14 +401,33 @@ func (r *recipientEvidence) ExpectEvent(
 	roomID string,
 	eventType model.RoomEventType,
 ) error {
-	if r == nil || operationID == "" || len(recipients) == 0 {
+	return r.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: operationID, Recipients: recipients, RoomID: roomID, EventType: eventType,
+		Route: recipientExpectedRouteAny, Source: recipientSetSourceLegacy, Complete: true,
+	})
+}
+
+func (r *recipientEvidence) ExpectDelivery(config *recipientExpectationConfig) error {
+	if r == nil || config == nil || config.OperationID == "" || len(config.Recipients) == 0 {
 		return fmt.Errorf("recipient expectation requires operation and recipients")
 	}
-	if (roomID == "") != (eventType == "") {
+	if (config.RoomID == "") != (config.EventType == "") {
 		return fmt.Errorf("recipient expectation room and event type must be provided together")
 	}
-	expected := make(map[string]struct{}, len(recipients))
-	for _, recipient := range recipients {
+	if config.Route == "" {
+		config.Route = recipientExpectedRouteAny
+	}
+	if config.Source == "" {
+		config.Source = recipientSetSourceLegacy
+	}
+	if config.Route != recipientExpectedRouteAny && config.Route != recipientExpectedRouteRoom && config.Route != recipientExpectedRouteUser {
+		return fmt.Errorf("recipient expectation has unknown route %q", config.Route)
+	}
+	if config.Source != recipientSetSourceLegacy && config.Source != recipientSetSourceTopology && config.Source != recipientSetSourceThreadFollowers {
+		return fmt.Errorf("recipient expectation has unknown source %q", config.Source)
+	}
+	expected := make(map[string]struct{}, len(config.Recipients))
+	for _, recipient := range config.Recipients {
 		if recipient == "" {
 			return fmt.Errorf("recipient expectation contains an empty recipient")
 		}
@@ -366,12 +438,16 @@ func (r *recipientEvidence) ExpectEvent(
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.operations[operationID]; exists {
-		return fmt.Errorf("recipient expectation %q already exists", operationID)
+	if _, exists := r.operations[config.OperationID]; exists {
+		return fmt.Errorf("recipient expectation %q already exists", config.OperationID)
 	}
-	r.operations[operationID] = &recipientExpectation{
-		expected: expected, observed: make(map[string]int), mismatches: make(map[string]struct{}),
-		roomID: roomID, eventType: eventType,
+	r.operations[config.OperationID] = &recipientExpectation{
+		expected: expected, observed: make(map[string]map[recipientDeliveryRoute]int), mismatches: make(map[string]struct{}),
+		roomID: config.RoomID, eventType: config.EventType,
+		route: config.Route, source: config.Source, complete: config.Complete,
+		durableMissing: make(map[string]struct{}), durableUnexpected: make(map[string]struct{}),
+		durableDuplicates: make(map[string]struct{}),
+		durableMismatches: make(map[string]struct{}),
 	}
 	return nil
 }
@@ -386,7 +462,7 @@ func (r *recipientEvidence) Observe(operationID, recipient string) bool {
 	if expectation == nil {
 		return false
 	}
-	expectation.observed[recipient]++
+	incrementRecipientRoute(expectation, recipient, recipientDeliveryRouteUnknown)
 	return true
 }
 
@@ -396,42 +472,80 @@ func (r *recipientEvidence) ObserveEvent(
 	roomID string,
 	eventType model.RoomEventType,
 ) bool {
-	disposition, err := r.observeEventDurably(operationID, recipient, roomID, eventType, nil)
-	return err == nil && disposition != recipientEvidenceUntracked
+	disposition := r.ObserveDelivery(operationID, recipient, roomID, eventType, recipientDeliveryRouteUnknown)
+	return disposition != recipientEvidenceUntracked
 }
 
-func (r *recipientEvidence) observeEventDurably(
+func (r *recipientEvidence) ObserveDelivery(
 	operationID,
 	recipient,
 	roomID string,
 	eventType model.RoomEventType,
-	persist func(recipientEvidenceDisposition) error,
-) (recipientEvidenceDisposition, error) {
+	route recipientDeliveryRoute,
+) recipientEvidenceDisposition {
 	if r == nil {
-		return recipientEvidenceUntracked, nil
+		return recipientEvidenceUntracked
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	expectation := r.operations[operationID]
 	if expectation == nil {
-		return recipientEvidenceUntracked, nil
+		return recipientEvidenceUntracked
 	}
-	disposition := recipientEvidenceObserved
+	disposition := recipientEvidenceExpected
 	if expectation.roomID != "" &&
 		(expectation.roomID != roomID || expectation.eventType != eventType) {
 		disposition = recipientEvidenceMismatch
 	}
-	if persist != nil {
-		if err := persist(disposition); err != nil {
-			return disposition, err
+	if !recipientRouteMatches(expectation.route, route) {
+		disposition = recipientEvidenceMismatch
+	}
+	if disposition == recipientEvidenceExpected && expectation.complete {
+		if _, expected := expectation.expected[recipient]; !expected {
+			disposition = recipientEvidenceUnexpected
 		}
 	}
 	if disposition == recipientEvidenceMismatch {
 		expectation.mismatches[recipient] = struct{}{}
-		return disposition, nil
+		return disposition
 	}
-	expectation.observed[recipient]++
-	return disposition, nil
+	if disposition == recipientEvidenceUnexpected {
+		incrementRecipientRoute(expectation, recipient, route)
+		return disposition
+	}
+	if recipientRouteIsDuplicate(expectation, recipient, route) {
+		disposition = recipientEvidenceDuplicate
+	}
+	incrementRecipientRoute(expectation, recipient, route)
+	return disposition
+}
+
+func recipientRouteMatches(expected recipientExpectedRoute, actual recipientDeliveryRoute) bool {
+	switch expected {
+	case recipientExpectedRouteAny:
+		return true
+	case recipientExpectedRouteRoom:
+		return actual == recipientDeliveryRouteRoomGlobal || actual == recipientDeliveryRouteRoomLocal
+	case recipientExpectedRouteUser:
+		return actual == recipientDeliveryRouteUser
+	default:
+		return false
+	}
+}
+
+func recipientRouteIsDuplicate(expectation *recipientExpectation, recipient string, route recipientDeliveryRoute) bool {
+	routes := expectation.observed[recipient]
+	if routes == nil {
+		return false
+	}
+	return routes[route] > 0
+}
+
+func incrementRecipientRoute(expectation *recipientExpectation, recipient string, route recipientDeliveryRoute) {
+	if expectation.observed[recipient] == nil {
+		expectation.observed[recipient] = make(map[recipientDeliveryRoute]int)
+	}
+	expectation.observed[recipient][route]++
 }
 
 func (r *recipientEvidence) ObserveMismatch(operationID, recipient string) bool {
@@ -445,6 +559,32 @@ func (r *recipientEvidence) ObserveMismatch(operationID, recipient string) bool 
 		return false
 	}
 	expectation.mismatches[recipient] = struct{}{}
+	return true
+}
+
+func (r *recipientEvidence) ReplayPositive(kind, operationID, recipient string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	expectation := r.operations[operationID]
+	if expectation == nil {
+		return false
+	}
+	switch kind {
+	case "missing":
+		expectation.durableMissing[recipient] = struct{}{}
+	case "unexpected":
+		expectation.durableUnexpected[recipient] = struct{}{}
+	case "duplicate":
+		expectation.durableDuplicates[recipient] = struct{}{}
+	case "mismatch":
+		expectation.mismatches[recipient] = struct{}{}
+		expectation.durableMismatches[recipient] = struct{}{}
+	default:
+		return false
+	}
 	return true
 }
 
@@ -464,13 +604,16 @@ func (r *recipientEvidence) Complete(operationID string) bool {
 	if expectation == nil {
 		return false
 	}
+	if !expectation.complete {
+		return false
+	}
 	for recipient := range expectation.expected {
-		if expectation.observed[recipient] == 0 {
+		if !recipientWasObserved(expectation, recipient) {
 			return false
 		}
 	}
-	for recipient, count := range expectation.observed {
-		if _, expected := expectation.expected[recipient]; !expected || (!r.allowDuplicates && count > 1) {
+	for recipient := range expectation.observed {
+		if _, expected := expectation.expected[recipient]; !expected || (!r.allowDuplicates && recipientHasDuplicate(expectation, recipient)) {
 			return false
 		}
 	}
@@ -484,22 +627,59 @@ func (r *recipientEvidence) Finalize(operationID string, observerHealthy bool) r
 	if expectation == nil {
 		return recipientEvidenceResult{Observation: failureObservationUnverified}
 	}
-	result := recipientEvidenceResult{Observation: failureObservationGood}
-	for recipient := range expectation.expected {
-		if expectation.observed[recipient] == 0 {
-			result.Missing = append(result.Missing, recipient)
+	result := recipientEvidenceResult{
+		Observation:    failureObservationGood,
+		durableRecords: make(map[string]map[string]struct{}),
+	}
+	for recipient := range expectation.durableMissing {
+		result.Missing = append(result.Missing, recipient)
+		markRecipientEvidenceDurable(&result, "missing", recipient)
+	}
+	for recipient := range expectation.durableUnexpected {
+		result.Unexpected = append(result.Unexpected, recipient)
+		markRecipientEvidenceDurable(&result, "unexpected", recipient)
+	}
+	for recipient := range expectation.durableDuplicates {
+		result.Duplicates = append(result.Duplicates, recipient)
+		markRecipientEvidenceDurable(&result, "duplicate", recipient)
+	}
+	for recipient := range expectation.durableMismatches {
+		result.Mismatches = append(result.Mismatches, recipient)
+		markRecipientEvidenceDurable(&result, "mismatch", recipient)
+	}
+	durableClaim := len(result.Missing)+len(result.Unexpected)+len(result.Mismatches) > 0 ||
+		(!r.allowDuplicates && len(result.Duplicates) > 0)
+	if durableClaim {
+		slices.Sort(result.Missing)
+		slices.Sort(result.Unexpected)
+		slices.Sort(result.Duplicates)
+		slices.Sort(result.Mismatches)
+		if len(result.Mismatches) > 0 || len(result.Unexpected) > 0 ||
+			(!r.allowDuplicates && len(result.Duplicates) > 0) {
+			result.Observation = failureObservationBad
+		} else if len(result.Missing) > 0 {
+			result.Observation = failureObservationMissingAfterDeadline
+		}
+		delete(r.operations, operationID)
+		return result
+	}
+	if expectation.complete {
+		for recipient := range expectation.expected {
+			if !recipientWasObserved(expectation, recipient) {
+				result.Missing = appendRecipientOnce(result.Missing, recipient)
+			}
 		}
 	}
-	for recipient, count := range expectation.observed {
-		if _, expected := expectation.expected[recipient]; !expected {
-			result.Unexpected = append(result.Unexpected, recipient)
+	for recipient := range expectation.observed {
+		if _, expected := expectation.expected[recipient]; expectation.complete && !expected {
+			result.Unexpected = appendRecipientOnce(result.Unexpected, recipient)
 		}
-		if count > 1 {
-			result.Duplicates = append(result.Duplicates, recipient)
+		if recipientHasDuplicate(expectation, recipient) {
+			result.Duplicates = appendRecipientOnce(result.Duplicates, recipient)
 		}
 	}
 	for recipient := range expectation.mismatches {
-		result.Mismatches = append(result.Mismatches, recipient)
+		result.Mismatches = appendRecipientOnce(result.Mismatches, recipient)
 	}
 	slices.Sort(result.Missing)
 	slices.Sort(result.Unexpected)
@@ -508,7 +688,7 @@ func (r *recipientEvidence) Finalize(operationID string, observerHealthy bool) r
 	switch {
 	case len(result.Mismatches) > 0 || len(result.Unexpected) > 0 || (!r.allowDuplicates && len(result.Duplicates) > 0):
 		result.Observation = failureObservationBad
-	case !observerHealthy:
+	case !observerHealthy || !expectation.complete:
 		result.Observation = failureObservationUnverified
 	case len(result.Missing) > 0:
 		result.Observation = failureObservationMissingAfterDeadline
@@ -517,8 +697,42 @@ func (r *recipientEvidence) Finalize(operationID string, observerHealthy bool) r
 	return result
 }
 
+func appendRecipientOnce(recipients []string, recipient string) []string {
+	if slices.Contains(recipients, recipient) {
+		return recipients
+	}
+	return append(recipients, recipient)
+}
+
+func markRecipientEvidenceDurable(result *recipientEvidenceResult, kind, recipient string) {
+	if result.durableRecords[kind] == nil {
+		result.durableRecords[kind] = make(map[string]struct{})
+	}
+	result.durableRecords[kind][recipient] = struct{}{}
+}
+
+func recipientWasObserved(expectation *recipientExpectation, recipient string) bool {
+	for _, count := range expectation.observed[recipient] {
+		if count > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func recipientHasDuplicate(expectation *recipientExpectation, recipient string) bool {
+	routes := expectation.observed[recipient]
+	for _, count := range routes {
+		if count > 1 {
+			return true
+		}
+	}
+	return false
+}
+
 type recipientDelivery struct {
 	recipient string
+	route     recipientDeliveryRoute
 	payload   []byte
 }
 
@@ -530,8 +744,25 @@ type failureRecipientObserver struct {
 	queue         chan recipientDelivery
 	now           func() time.Time
 	wg            sync.WaitGroup
-	sidecarMu     sync.Mutex
 	evidenceDir   string
+	syncDirectory func(string) error
+	journal       failureRecipientEvidenceJournal
+}
+
+type failureRecipientEvidenceJournal interface {
+	AppendBatch([]failureRecipientEvidenceRecord) error
+	Close() error
+}
+
+type failureRecipientEvidenceRecord struct {
+	Kind        string `json:"-"`
+	OperationID string `json:"operationId"`
+	Recipient   string `json:"recipient,omitempty"`
+}
+
+type fileFailureRecipientEvidenceJournal struct {
+	mu            sync.Mutex
+	directory     string
 	syncDirectory func(string) error
 }
 
@@ -549,6 +780,10 @@ func withFailureRecipientDuplicatePolicy(allow bool) failureRecipientObserverOpt
 
 func withFailureRecipientDirectorySync(syncDirectory func(string) error) failureRecipientObserverOption {
 	return func(observer *failureRecipientObserver) { observer.syncDirectory = syncDirectory }
+}
+
+func withFailureRecipientEvidenceJournal(journal failureRecipientEvidenceJournal) failureRecipientObserverOption {
+	return func(observer *failureRecipientObserver) { observer.journal = journal }
 }
 
 func newFailureRecipientObserver(
@@ -573,6 +808,11 @@ func newFailureRecipientObserver(
 	}
 	for _, option := range options {
 		option(observer)
+	}
+	if observer.journal == nil && observer.evidenceDir != "" {
+		observer.journal = &fileFailureRecipientEvidenceJournal{
+			directory: observer.evidenceDir, syncDirectory: observer.syncDirectory,
+		}
 	}
 	if metrics != nil {
 		metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(0)
@@ -600,6 +840,13 @@ func (o *failureRecipientObserver) ExpectEvent(
 	return o.evidence.ExpectEvent(operationID, recipients, roomID, eventType)
 }
 
+func (o *failureRecipientObserver) ExpectDelivery(config *recipientExpectationConfig) error {
+	if o == nil {
+		return fmt.Errorf("recipient observer is required")
+	}
+	return o.evidence.ExpectDelivery(config)
+}
+
 func (o *failureRecipientObserver) Recover(operations []failureOperation) error {
 	if o == nil {
 		return fmt.Errorf("recipient observer is required")
@@ -617,12 +864,22 @@ func (o *failureRecipientObserver) Recover(operations []failureOperation) error 
 		})
 		eventType := model.RoomEventType(operation.Attributes["expected_recipient_event"])
 		var err error
-		if eventType == "" {
+		source := recipientSetSource(operation.Attributes[soakFailureAttributeRecipientSource])
+		route := recipientExpectedRoute(operation.Attributes[soakFailureAttributeRecipientRoute])
+		complete := operation.Attributes[soakFailureAttributeRecipientComplete] == "true"
+		if source == "" && route == "" && eventType == "" {
 			// Operations written before target-aware recipient correlation retain
-			// their original message-ID and recipient-set replay semantics.
-			err = o.Expect(operation.ID, recipients)
+			// their recipient list, but cannot make authoritative exact-set claims.
+			err = o.ExpectDelivery(&recipientExpectationConfig{
+				OperationID: operation.ID, Recipients: recipients,
+				Route: recipientExpectedRouteAny, Source: recipientSetSourceLegacy, Complete: false,
+			})
 		} else {
-			err = o.ExpectEvent(operation.ID, recipients, operation.Targets["roomId"], eventType)
+			err = o.ExpectDelivery(&recipientExpectationConfig{
+				OperationID: operation.ID, Recipients: recipients,
+				RoomID: operation.Targets["roomId"], EventType: eventType,
+				Route: route, Source: source, Complete: complete,
+			})
 		}
 		if err != nil {
 			return fmt.Errorf("recover recipient expectation %q: %w", operation.ID, err)
@@ -635,8 +892,8 @@ func (o *failureRecipientObserver) replayObservedEvidence() error {
 	if o.evidenceDir == "" {
 		return nil
 	}
-	for _, kind := range []recipientEvidenceDisposition{recipientEvidenceObserved, recipientEvidenceMismatch} {
-		path := filepath.Join(o.evidenceDir, ".recipient-"+string(kind)+".raw.jsonl")
+	for _, kind := range []string{"missing", "unexpected", "duplicate", "mismatch"} {
+		path := filepath.Join(o.evidenceDir, ".recipient-"+kind+".raw.jsonl")
 		file, err := os.Open(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -651,11 +908,7 @@ func (o *failureRecipientObserver) replayObservedEvidence() error {
 				_ = file.Close()
 				return fmt.Errorf("decode %s recipient evidence: %w", kind, err)
 			}
-			if kind == recipientEvidenceMismatch {
-				o.evidence.ObserveMismatch(evidence.OperationID, evidence.Recipient)
-			} else {
-				o.evidence.Observe(evidence.OperationID, evidence.Recipient)
-			}
+			o.evidence.ReplayPositive(kind, evidence.OperationID, evidence.Recipient)
 		}
 		if err := scanner.Err(); err != nil {
 			_ = file.Close()
@@ -669,10 +922,18 @@ func (o *failureRecipientObserver) replayObservedEvidence() error {
 }
 
 func (o *failureRecipientObserver) Enqueue(recipient string, payload []byte) bool {
+	return o.EnqueueRoute(recipient, recipientDeliveryRouteUnknown, payload)
+}
+
+func (o *failureRecipientObserver) EnqueueRoute(
+	recipient string,
+	route recipientDeliveryRoute,
+	payload []byte,
+) bool {
 	if o == nil {
 		return false
 	}
-	delivery := recipientDelivery{recipient: recipient, payload: append([]byte(nil), payload...)}
+	delivery := recipientDelivery{recipient: recipient, route: route, payload: append([]byte(nil), payload...)}
 	select {
 	case o.queue <- delivery:
 		if o.metrics != nil {
@@ -758,27 +1019,27 @@ func (o *failureRecipientObserver) process(delivery recipientDelivery) {
 		}
 		return
 	}
-	disposition, evidenceErr := o.evidence.observeEventDurably(
+	disposition := o.evidence.ObserveDelivery(
 		event.LastMsgID,
 		delivery.recipient,
 		event.RoomID,
 		event.Type,
-		func(kind recipientEvidenceDisposition) error {
-			return o.appendRawEvidence(string(kind), event.LastMsgID, delivery.recipient)
-		},
+		delivery.route,
 	)
-	if evidenceErr != nil {
-		o.health.Set(false, o.now().UTC(), "sidecar_failure")
-		if o.ledger != nil {
-			o.ledger.Invalidate("sidecar")
+	if o.journal != nil && (disposition == recipientEvidenceMismatch || disposition == recipientEvidenceUnexpected || disposition == recipientEvidenceDuplicate) {
+		kind := string(disposition)
+		record := failureRecipientEvidenceRecord{
+			Kind: kind, OperationID: event.LastMsgID, Recipient: delivery.recipient,
 		}
-		return
+		if err := o.persistEvidenceRecords([]failureRecipientEvidenceRecord{record}, "positive"); err != nil {
+			o.markSidecarFailure()
+			return
+		}
+		o.evidence.ReplayPositive(kind, event.LastMsgID, delivery.recipient)
 	}
 	if disposition == recipientEvidenceUntracked {
-		if err := o.appendRawEvidence("untracked", event.LastMsgID, delivery.recipient); err != nil {
-			if o.ledger != nil {
-				o.ledger.Invalidate("sidecar")
-			}
+		if o.metrics != nil {
+			o.metrics.FailureUntracked.WithLabelValues(failureUntrackedReasonObserve).Inc()
 		}
 		return
 	}
@@ -788,7 +1049,10 @@ func (o *failureRecipientObserver) Finalize(operationID string, startedAt, deadl
 	healthy := o.health.HealthyThroughout(startedAt, deadline)
 	result := o.evidence.Finalize(operationID, healthy)
 	if err := o.persistResult(operationID, &result); err != nil {
-		o.ledger.Invalidate("sidecar")
+		o.markSidecarFailure()
+		if result.Observation == failureObservationBad || result.Observation == failureObservationMissingAfterDeadline {
+			result.Observation = failureObservationUnverified
+		}
 	}
 	if o.metrics != nil {
 		o.metrics.FailureObserverEvents.WithLabelValues(string(failureObserverRecipient), string(result.Observation)).Inc()
@@ -796,84 +1060,177 @@ func (o *failureRecipientObserver) Finalize(operationID string, startedAt, deadl
 	return result
 }
 
-type failureRecipientRawEvidence struct {
-	OperationID string `json:"operationId"`
-	Recipient   string `json:"recipient,omitempty"`
+func (o *failureRecipientObserver) markSidecarFailure() {
+	now := o.now().UTC()
+	o.health.Set(false, now, "sidecar_failure")
+	if o.metrics != nil {
+		o.metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(0)
+	}
+	if o.ledger != nil {
+		o.ledger.Invalidate("sidecar")
+	}
 }
+
+type failureRecipientRawEvidence = failureRecipientEvidenceRecord
 
 func (o *failureRecipientObserver) persistResult(
 	operationID string,
 	result *recipientEvidenceResult,
 ) error {
-	for _, item := range []struct {
+	type evidenceItems struct {
 		kind       string
 		recipients []string
-	}{
-		{kind: "missing", recipients: result.Missing},
-		{kind: "unexpected", recipients: result.Unexpected},
-		{kind: "duplicate", recipients: result.Duplicates},
-		{kind: "mismatch", recipients: result.Mismatches},
-	} {
+	}
+	items := make([]evidenceItems, 0, 4)
+	if result.Observation == failureObservationMissingAfterDeadline {
+		items = append(items, evidenceItems{kind: "missing", recipients: result.Missing})
+	}
+	items = append(items,
+		evidenceItems{kind: "unexpected", recipients: result.Unexpected},
+		evidenceItems{kind: "duplicate", recipients: result.Duplicates},
+		evidenceItems{kind: "mismatch", recipients: result.Mismatches},
+	)
+	records := make([]failureRecipientEvidenceRecord, 0)
+	for _, item := range items {
 		for _, recipient := range item.recipients {
-			if err := o.appendRawEvidence(item.kind, operationID, recipient); err != nil {
-				return err
+			if _, durable := result.durableRecords[item.kind][recipient]; durable {
+				continue
 			}
+			records = append(records, failureRecipientEvidenceRecord{
+				Kind: item.kind, OperationID: operationID, Recipient: recipient,
+			})
 		}
 	}
 	if result.Observation == failureObservationUnverified {
-		if err := o.appendRawEvidence("unverified", operationID, ""); err != nil {
-			return err
+		records = append(records, failureRecipientEvidenceRecord{Kind: "unverified", OperationID: operationID})
+	}
+	if len(records) == 0 || o.journal == nil {
+		return nil
+	}
+	claim := "unverified"
+	if result.Observation == failureObservationBad || result.Observation == failureObservationMissingAfterDeadline {
+		claim = "positive"
+	}
+	return o.persistEvidenceRecords(records, claim)
+}
+
+func (o *failureRecipientObserver) persistEvidenceRecords(
+	records []failureRecipientEvidenceRecord,
+	claim string,
+) error {
+	if len(records) == 0 || o.journal == nil {
+		return nil
+	}
+	startedAt := time.Now()
+	err := o.journal.AppendBatch(records)
+	if o.metrics != nil {
+		flushResult := "success"
+		if err != nil {
+			flushResult = "error"
+		}
+		o.metrics.FailureEvidenceFlushDuration.WithLabelValues(claim, flushResult).Observe(time.Since(startedAt).Seconds())
+		if err == nil {
+			for _, record := range records {
+				o.metrics.FailureEvidenceRecords.WithLabelValues(record.Kind).Inc()
+			}
 		}
 	}
-	return nil
+	return err
 }
 
 func (o *failureRecipientObserver) appendRawEvidence(kind, operationID, recipient string) error {
 	if o == nil || o.evidenceDir == "" {
 		return nil
 	}
-	if _, known := map[string]struct{}{
-		"missing": {}, "unexpected": {}, "duplicate": {}, "mismatch": {}, "unverified": {}, "untracked": {}, "observed": {},
-	}[kind]; !known {
+	if !knownRecipientEvidenceKind(kind) {
 		return fmt.Errorf("unknown recipient evidence kind %q", kind)
 	}
-	o.sidecarMu.Lock()
-	defer o.sidecarMu.Unlock()
-	if err := os.MkdirAll(o.evidenceDir, 0o750); err != nil {
+	if o.journal == nil {
+		return nil
+	}
+	return o.journal.AppendBatch([]failureRecipientEvidenceRecord{{
+		Kind: kind, OperationID: operationID, Recipient: recipient,
+	}})
+}
+
+func (o *failureRecipientObserver) CloseEvidence() error {
+	if o == nil || o.journal == nil {
+		return nil
+	}
+	if err := o.journal.Close(); err != nil {
+		return fmt.Errorf("close recipient evidence journal: %w", err)
+	}
+	return nil
+}
+
+func (j *fileFailureRecipientEvidenceJournal) AppendBatch(records []failureRecipientEvidenceRecord) error {
+	if j == nil || len(records) == 0 {
+		return nil
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if err := os.MkdirAll(j.directory, 0o750); err != nil {
 		return fmt.Errorf("create recipient evidence directory: %w", err)
 	}
-	path := filepath.Join(o.evidenceDir, ".recipient-"+kind+".raw.jsonl")
-	created := false
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		created = true
-	} else if err != nil {
-		return fmt.Errorf("stat recipient evidence journal: %w", err)
+	grouped := make(map[string][]failureRecipientEvidenceRecord)
+	for _, record := range records {
+		if !knownRecipientEvidenceKind(record.Kind) {
+			return fmt.Errorf("unknown recipient evidence kind %q", record.Kind)
+		}
+		grouped[record.Kind] = append(grouped[record.Kind], record)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return fmt.Errorf("open recipient evidence journal: %w", err)
+	kinds := make([]string, 0, len(grouped))
+	for kind := range grouped {
+		kinds = append(kinds, kind)
 	}
-	encoded, err := json.Marshal(failureRecipientRawEvidence{OperationID: operationID, Recipient: recipient})
-	if err != nil {
-		_ = file.Close()
-		return fmt.Errorf("encode recipient evidence: %w", err)
+	slices.Sort(kinds)
+	createdAny := false
+	for _, kind := range kinds {
+		path := filepath.Join(j.directory, ".recipient-"+kind+".raw.jsonl")
+		created := false
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			created = true
+		} else if err != nil {
+			return fmt.Errorf("stat recipient evidence journal: %w", err)
+		}
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return fmt.Errorf("open recipient evidence journal: %w", err)
+		}
+		for _, record := range grouped[kind] {
+			encoded, encodeErr := json.Marshal(record)
+			if encodeErr != nil {
+				_ = file.Close()
+				return fmt.Errorf("encode recipient evidence: %w", encodeErr)
+			}
+			if _, writeErr := file.Write(append(encoded, '\n')); writeErr != nil {
+				_ = file.Close()
+				return fmt.Errorf("append recipient evidence: %w", writeErr)
+			}
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("sync recipient evidence: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close recipient evidence: %w", err)
+		}
+		createdAny = createdAny || created
 	}
-	encoded = append(encoded, '\n')
-	if _, err := file.Write(encoded); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("append recipient evidence: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("sync recipient evidence: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close recipient evidence: %w", err)
-	}
-	if created && o.syncDirectory != nil {
-		if err := o.syncDirectory(o.evidenceDir); err != nil {
+	if createdAny && j.syncDirectory != nil {
+		if err := j.syncDirectory(j.directory); err != nil {
 			return fmt.Errorf("sync recipient evidence directory: %w", err)
 		}
 	}
 	return nil
+}
+
+func (*fileFailureRecipientEvidenceJournal) Close() error { return nil }
+
+func knownRecipientEvidenceKind(kind string) bool {
+	_, known := map[string]struct{}{
+		"missing": {}, "unexpected": {}, "duplicate": {}, "mismatch": {},
+		"unverified": {}, "untracked": {}, "observed": {},
+	}[kind]
+	return known
 }

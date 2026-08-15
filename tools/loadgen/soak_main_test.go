@@ -104,7 +104,7 @@ func TestNewSoakRuntimeSelector_UsesOnlyPersistedActiveUsers(t *testing.T) {
 	cfg := validSoakConfig(t)
 	topology := soakTopology{
 		ActiveUsers: []model.User{{ID: "active-id", Account: "active"}},
-		Rooms:       []model.Room{{ID: "room-1"}},
+		Rooms:       []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
 		Subscriptions: []model.Subscription{
 			{
 				RoomID: "room-1", IsSubscribed: true,
@@ -124,6 +124,9 @@ func TestNewSoakRuntimeSelector_UsesOnlyPersistedActiveUsers(t *testing.T) {
 		target, _ := selector.nextSend()
 		assert.Equal(t, "active-id", target.UserID)
 		assert.Equal(t, "active", target.Account)
+		assert.Equal(t, recipientSetSourceTopology, target.RecipientSetSource)
+		assert.True(t, target.RecipientSetComplete)
+		assert.Equal(t, recipientExpectedRouteRoom, target.RecipientRoute)
 	}
 }
 

@@ -17,13 +17,18 @@ import (
 )
 
 const (
-	soakFailureScenario                = "message_soak"
-	soakFailureTrafficProfile          = "cassandra-soak-v1"
-	soakFailureLaneMessageSend         = "message_send"
-	soakFailureAttributeRoomID         = "room_id"
-	soakFailureAttributeAccount        = "account"
-	soakFailureAttributeContentSHA256  = "content_sha256"
-	soakFailureAttributeRecipientEvent = "expected_recipient_event"
+	soakFailureScenario                   = "message_soak"
+	soakFailureTrafficProfile             = "cassandra-soak-v1"
+	soakFailureLaneMessageSend            = "message_send"
+	soakFailureAttributeRoomID            = "room_id"
+	soakFailureAttributeAccount           = "account"
+	soakFailureAttributeContentSHA256     = "content_sha256"
+	soakFailureAttributeRecipientEvent    = "expected_recipient_event"
+	soakFailureAttributeRecipientSource   = "expected_recipient_source"
+	soakFailureAttributeRecipientComplete = "expected_recipient_complete"
+	soakFailureAttributeRecipientRoute    = "expected_recipient_route"
+	soakFailureWALGroupCommitDelay        = 10 * time.Millisecond
+	soakFailureWALGroupCommitBatchSize    = 256
 )
 
 func setSoakRunInfo(metrics *Metrics, environment string) {
@@ -80,7 +85,15 @@ func openSoakFailureLedger(
 		if err != nil {
 			return nil, err
 		}
-		journal = wal
+		journal = newFailureJournalMetrics(
+			newFailureJournalGroupCommit(
+				wal,
+				soakFailureWALGroupCommitDelay,
+				soakFailureWALGroupCommitBatchSize,
+				metrics,
+			),
+			metrics,
+		)
 	}
 	ledger, err := newFailureLedger(failureLedgerConfig{
 		Capacity:         cfg.LedgerCapacity,
@@ -201,15 +214,34 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 		soakFailureAttributeContentSHA256: hex.EncodeToString(contentHash[:]),
 	}
 	if t.recipient != nil {
-		if err := t.recipient.ExpectEvent(
-			pending.MessageID,
-			recipients,
-			pending.Target.RoomID,
-			recipientEvent,
-		); err != nil {
+		source := pending.Target.RecipientSetSource
+		complete := pending.Target.RecipientSetComplete
+		if source == "" {
+			source = recipientSetSourceTopology
+			complete = true
+		}
+		route := pending.Target.RecipientRoute
+		if route == "" {
+			route = recipientExpectedRouteUser
+			if pending.Kind != soakSendThreadReply && pending.Target.RoomType == model.RoomTypeChannel {
+				route = recipientExpectedRouteRoom
+			}
+		}
+		if err := t.recipient.ExpectDelivery(&recipientExpectationConfig{
+			OperationID: pending.MessageID,
+			Recipients:  recipients,
+			RoomID:      pending.Target.RoomID,
+			EventType:   recipientEvent,
+			Route:       route,
+			Source:      source,
+			Complete:    complete,
+		}); err != nil {
 			return fmt.Errorf("register soak recipient expectation: %w", err)
 		}
 		attributes[soakFailureAttributeRecipientEvent] = string(recipientEvent)
+		attributes[soakFailureAttributeRecipientSource] = string(source)
+		attributes[soakFailureAttributeRecipientComplete] = fmt.Sprintf("%t", complete)
+		attributes[soakFailureAttributeRecipientRoute] = string(route)
 		attributes["expected_recipients"] = strings.Join(recipients, "\n")
 	}
 	if err := t.ledger.Start(&failureOperation{

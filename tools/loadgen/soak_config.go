@@ -19,7 +19,7 @@ const (
 )
 
 var soakEnvironmentRegistry = map[string]struct{}{
-	"local": {}, "staging": {}, "production": {},
+	"local": {}, "test": {}, "staging": {}, "production": {},
 }
 
 // soakConfig is the Run A configuration contract. I8, I10, and I12 remain
@@ -111,7 +111,7 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 		return fmt.Errorf("SOAK_RUN_ID must be a filename-safe run identifier")
 	}
 	if _, known := soakEnvironmentRegistry[cfg.Environment]; !known {
-		return fmt.Errorf("SOAK_ENVIRONMENT must be local, staging, or production")
+		return fmt.Errorf("SOAK_ENVIRONMENT must be local, test, staging, or production")
 	}
 	switch cfg.RunMode {
 	case soakRunModeDuration:

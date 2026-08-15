@@ -35,6 +35,7 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 		ObserverContract: &contract,
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = ledger.Close() })
 	metrics := NewMetrics()
 	t.Cleanup(metrics.stopNATSHealth)
 	recipientObserver := newFailureRecipientObserver(
@@ -89,9 +90,16 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, publisher.Publish(subject.RoomEvent("room-1", true), payload))
 	require.NoError(t, publisher.Flush())
-	require.Eventually(t, func() bool {
+	completed := assert.Eventually(t, func() bool {
 		return recipientObserver.evidence.Complete("message-1")
 	}, 5*time.Second, 10*time.Millisecond)
+	if !completed {
+		recipientObserver.evidence.mu.Lock()
+		expectation := recipientObserver.evidence.operations["message-1"]
+		t.Logf("recipient expectation after timeout: %#v", expectation)
+		recipientObserver.evidence.mu.Unlock()
+		require.True(t, completed)
+	}
 
 	require.NoError(t, shutdownFailureRecipientObserver(subscriptions, stopObserver, recipientObserver))
 	now = now.Add(time.Minute)

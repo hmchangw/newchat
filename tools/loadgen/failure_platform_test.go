@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,36 @@ import (
 
 type memoryFailureJournal struct {
 	events []failureLedgerEvent
+}
+
+type forwardingFailureJournal struct {
+	memoryFailureJournal
+	configured bool
+	upgrade    bool
+}
+
+func (j *forwardingFailureJournal) ConfigureObserverContract(
+	failureObserverContract,
+	[]failureOperation,
+) error {
+	j.configured = true
+	return nil
+}
+
+func (j *forwardingFailureJournal) NeedsUpgrade() bool { return j.upgrade }
+
+func TestFailureJournalMetrics_ForwardsOptionalWALContractsAndRecordsAppendLatency(t *testing.T) {
+	metrics := NewMetrics()
+	inner := &forwardingFailureJournal{upgrade: true}
+	journal := newFailureJournalMetrics(inner, metrics)
+
+	require.True(t, journal.NeedsUpgrade())
+	require.NoError(t, journal.ConfigureObserverContract(failureObserverContract{}, nil))
+	require.True(t, inner.configured)
+	require.NoError(t, journal.Append(&failureLedgerEvent{Type: failureLedgerEventCheckpoint}))
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.FailureWALAppends.WithLabelValues("success")))
+	assert.Equal(t, float64(0), testutil.ToFloat64(metrics.FailureWALAppends.WithLabelValues("error")))
 }
 
 func (j *memoryFailureJournal) Replay() ([]failureLedgerEvent, error) {
@@ -292,6 +323,55 @@ func TestFailureRecipientObserver_ExactPartialUnexpectedAndDuplicate(t *testing.
 	}
 }
 
+func TestFailureRecipientEvidence_DeduplicatesDualRoomRoutesButRetainsSameRouteDuplicate(t *testing.T) {
+	evidence := newRecipientEvidence(false)
+	require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: "message-1",
+		Recipients:  []string{"alice"},
+		RoomID:      "room-1",
+		EventType:   model.RoomEventNewMessage,
+		Route:       recipientExpectedRouteRoom,
+		Source:      recipientSetSourceTopology,
+		Complete:    true,
+	}))
+
+	assert.Equal(t, recipientEvidenceExpected, evidence.ObserveDelivery(
+		"message-1", "alice", "room-1", model.RoomEventNewMessage, recipientDeliveryRouteRoomGlobal,
+	))
+	assert.Equal(t, recipientEvidenceExpected, evidence.ObserveDelivery(
+		"message-1", "alice", "room-1", model.RoomEventNewMessage, recipientDeliveryRouteRoomLocal,
+	))
+	assert.Equal(t, recipientEvidenceDuplicate, evidence.ObserveDelivery(
+		"message-1", "alice", "room-1", model.RoomEventNewMessage, recipientDeliveryRouteRoomGlobal,
+	))
+
+	result := evidence.Finalize("message-1", true)
+	assert.Equal(t, failureObservationBad, result.Observation)
+	assert.Equal(t, []string{"alice"}, result.Duplicates)
+}
+
+func TestFailureRecipientEvidence_IncompleteExpectedSetCannotCreateMissingOrUnexpectedViolation(t *testing.T) {
+	evidence := newRecipientEvidence(false)
+	require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: "message-1",
+		Recipients:  []string{"alice"},
+		RoomID:      "room-1",
+		EventType:   model.RoomEventNewThreadMessage,
+		Route:       recipientExpectedRouteUser,
+		Source:      recipientSetSourceThreadFollowers,
+		Complete:    false,
+	}))
+
+	assert.Equal(t, recipientEvidenceExpected, evidence.ObserveDelivery(
+		"message-1", "bob", "room-1", model.RoomEventNewThreadMessage, recipientDeliveryRouteUser,
+	))
+	result := evidence.Finalize("message-1", true)
+
+	assert.Equal(t, failureObservationUnverified, result.Observation)
+	assert.Empty(t, result.Missing)
+	assert.Empty(t, result.Unexpected)
+}
+
 func TestFailureRecipientEvidence_ValidationAllowedDuplicatesAndForget(t *testing.T) {
 	assert.Error(t, (*recipientEvidence)(nil).Expect("", nil))
 	evidence := newRecipientEvidence(true)
@@ -307,6 +387,19 @@ func TestFailureRecipientEvidence_ValidationAllowedDuplicatesAndForget(t *testin
 	evidence.Forget("missing")
 	assert.False(t, evidence.Observe("missing", "alice"))
 	assert.Equal(t, failureObservationUnverified, evidence.Finalize("missing", true).Observation)
+}
+
+func TestFailureRecipientEvidence_DurableAllowedDuplicateDoesNotOverrideMissingClaim(t *testing.T) {
+	evidence := newRecipientEvidence(true)
+	require.NoError(t, evidence.Expect("message", []string{"alice", "bob"}))
+	assert.True(t, evidence.ReplayPositive("duplicate", "message", "alice"))
+	assert.True(t, evidence.ReplayPositive("missing", "message", "bob"))
+
+	result := evidence.Finalize("message", false)
+
+	assert.Equal(t, failureObservationMissingAfterDeadline, result.Observation)
+	assert.Equal(t, []string{"bob"}, result.Missing)
+	assert.Equal(t, []string{"alice"}, result.Duplicates)
 }
 
 func TestFailureRecipientObserver_AppliesManifestDuplicatePolicy(t *testing.T) {
@@ -368,15 +461,18 @@ func TestFailureRecipientObserver_ProcessesExactSet(t *testing.T) {
 	cancel()
 	observer.Wait()
 
+	_, err = os.Stat(filepath.Join(evidenceDirectory, ".recipient-observed.raw.jsonl"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+
 	recovered := newFailureRecipientObserver(
 		ledger, metrics, 4, func() time.Time { return now },
 		withFailureRecipientEvidenceDir(evidenceDirectory),
 	)
 	require.NoError(t, recovered.Recover(ledger.ActiveOperations()))
-	assert.True(t, recovered.evidence.Complete("message-1"))
+	assert.False(t, recovered.evidence.Complete("message-1"))
 }
 
-func TestFailureRecipientObserver_PersistsExactAnomalySidecars(t *testing.T) {
+func TestFailureRecipientObserver_UnverifiedAbsenceDoesNotPersistAuthoritativeMissingEvidence(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	directory := t.TempDir()
 	observer := newFailureRecipientObserver(
@@ -388,12 +484,8 @@ func TestFailureRecipientObserver_PersistsExactAnomalySidecars(t *testing.T) {
 	result := observer.Finalize("message-1", now, now.Add(time.Minute))
 	assert.Equal(t, failureObservationUnverified, result.Observation)
 
-	// A startup-down observer makes the absence unverified, but the exact
-	// missing recipient remains retained evidence rather than disappearing.
-	raw, err := os.ReadFile(filepath.Join(directory, ".recipient-missing.raw.jsonl"))
-	require.NoError(t, err)
-	assert.Contains(t, string(raw), `"operationId":"message-1"`)
-	assert.Contains(t, string(raw), `"recipient":"bob"`)
+	_, err := os.Stat(filepath.Join(directory, ".recipient-missing.raw.jsonl"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestFailureRecipientObserver_SubscriptionsAreAttributedAndFlushedBeforeHealthy(t *testing.T) {
@@ -509,6 +601,66 @@ func TestFailureRecipientObserver_SyncsDirectoryWhenCreatingRawJournal(t *testin
 	assert.Equal(t, []string{directory}, synced)
 }
 
+type recordingFailureRecipientEvidenceJournal struct {
+	batches [][]failureRecipientEvidenceRecord
+	err     error
+	closed  bool
+}
+
+func (j *recordingFailureRecipientEvidenceJournal) AppendBatch(records []failureRecipientEvidenceRecord) error {
+	j.batches = append(j.batches, append([]failureRecipientEvidenceRecord(nil), records...))
+	return j.err
+}
+
+func (j *recordingFailureRecipientEvidenceJournal) Close() error {
+	j.closed = true
+	return nil
+}
+
+func TestFailureRecipientObserver_BatchesDurableAnomaliesBeforeReturningPositiveClaim(t *testing.T) {
+	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
+	journal := &recordingFailureRecipientEvidenceJournal{}
+	observer := newFailureRecipientObserver(
+		nil, NewMetrics(), 2, func() time.Time { return now },
+		withFailureRecipientEvidenceJournal(journal),
+	)
+	observer.health.Set(true, now, "subscribed")
+	require.NoError(t, observer.Expect("message-1", []string{"alice"}))
+	assert.True(t, observer.evidence.Observe("message-1", "alice"))
+	assert.True(t, observer.evidence.Observe("message-1", "alice"))
+
+	result := observer.Finalize("message-1", now, now)
+
+	require.Equal(t, failureObservationBad, result.Observation)
+	require.Len(t, journal.batches, 1)
+	assert.Equal(t, []failureRecipientEvidenceRecord{{
+		Kind: "duplicate", OperationID: "message-1", Recipient: "alice",
+	}}, journal.batches[0])
+}
+
+func TestFailureRecipientObserver_DowngradesPositiveClaimWhenDurabilityBarrierFails(t *testing.T) {
+	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
+	metrics := NewMetrics()
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	journal := &recordingFailureRecipientEvidenceJournal{err: assert.AnError}
+	observer := newFailureRecipientObserver(
+		ledger, metrics, 2, func() time.Time { return now },
+		withFailureRecipientEvidenceJournal(journal),
+	)
+	observer.health.Set(true, now, "subscribed")
+	metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient)).Set(1)
+	require.NoError(t, observer.Expect("message-1", []string{"alice"}))
+	assert.True(t, observer.evidence.Observe("message-1", "alice"))
+	assert.True(t, observer.evidence.Observe("message-1", "alice"))
+
+	result := observer.Finalize("message-1", now, now)
+
+	assert.Equal(t, failureObservationUnverified, result.Observation)
+	assert.Equal(t, "sidecar", ledger.Snapshot().InvalidReason)
+	assert.Zero(t, testutil.ToFloat64(metrics.FailureObserverUp.WithLabelValues(string(failureObserverRecipient))))
+}
+
 func TestFailureRecipientObserver_IgnoresUnrelatedRoomEvents(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
@@ -589,6 +741,9 @@ func TestFailureRecipientObserver_ReplaysDurableMismatchAfterRestart(t *testing.
 	})
 	require.NoError(t, err)
 	first.process(recipientDelivery{recipient: "alice", payload: payload})
+	raw, err := os.ReadFile(filepath.Join(directory, ".recipient-mismatch.raw.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(raw), "\n"))
 
 	restarted := newFailureRecipientObserver(
 		nil,
@@ -611,6 +766,71 @@ func TestFailureRecipientObserver_ReplaysDurableMismatchAfterRestart(t *testing.
 	result := restarted.Finalize("message-1", now, now)
 	assert.Equal(t, failureObservationBad, result.Observation)
 	assert.Equal(t, []string{"alice"}, result.Mismatches)
+}
+
+func TestFailureRecipientObserver_ReplaysDurablePositiveRecipientClaimsAfterRestart(t *testing.T) {
+	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		observe    func(*recipientEvidence)
+		want       failureObservation
+		duplicates []string
+		missing    []string
+	}{
+		{
+			name: "duplicate",
+			observe: func(e *recipientEvidence) {
+				assert.True(t, e.Observe("message-1", "alice"))
+				assert.True(t, e.Observe("message-1", "alice"))
+			},
+			want: failureObservationBad, duplicates: []string{"alice"},
+		},
+		{
+			name: "authoritative missing",
+			observe: func(e *recipientEvidence) {
+				assert.True(t, e.Observe("message-1", "alice"))
+			},
+			want: failureObservationMissingAfterDeadline, missing: []string{"bob"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			directory := t.TempDir()
+			first := newFailureRecipientObserver(
+				nil, NewMetrics(), 2, func() time.Time { return now },
+				withFailureRecipientEvidenceDir(directory),
+			)
+			first.health.Set(true, now, "subscribed")
+			recipients := []string{"alice"}
+			if len(tc.missing) > 0 {
+				recipients = append(recipients, "bob")
+			}
+			require.NoError(t, first.ExpectDelivery(&recipientExpectationConfig{
+				OperationID: "message-1", Recipients: recipients,
+				Route: recipientExpectedRouteAny, Source: recipientSetSourceTopology, Complete: true,
+			}))
+			tc.observe(first.evidence)
+			assert.Equal(t, tc.want, first.Finalize("message-1", now, now.Add(time.Second)).Observation)
+
+			restarted := newFailureRecipientObserver(
+				nil, NewMetrics(), 2, func() time.Time { return now.Add(time.Second) },
+				withFailureRecipientEvidenceDir(directory),
+			)
+			require.NoError(t, restarted.Recover([]failureOperation{{
+				ID: "message-1", Expected: []failureObserver{failureObserverRecipient},
+				Attributes: map[string]string{
+					"expected_recipients":                 strings.Join(recipients, "\n"),
+					soakFailureAttributeRecipientSource:   string(recipientSetSourceTopology),
+					soakFailureAttributeRecipientComplete: "true",
+					soakFailureAttributeRecipientRoute:    string(recipientExpectedRouteAny),
+				},
+			}}))
+
+			result := restarted.Finalize("message-1", now, now)
+			assert.Equal(t, tc.want, result.Observation)
+			assert.Equal(t, tc.duplicates, result.Duplicates)
+			assert.Equal(t, tc.missing, result.Missing)
+		})
+	}
 }
 
 func TestFailureRecipientObserver_DrainProcessesQueuedEvidence(t *testing.T) {

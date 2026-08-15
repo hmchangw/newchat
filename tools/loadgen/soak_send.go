@@ -51,11 +51,14 @@ func newProductionSoakSendIDs() *soakSendIDs {
 }
 
 type soakSendTarget struct {
-	UserID     string
-	Account    string
-	RoomID     string
-	RoomType   model.RoomType
-	Recipients []string
+	UserID               string
+	Account              string
+	RoomID               string
+	RoomType             model.RoomType
+	Recipients           []string
+	RecipientSetSource   recipientSetSource
+	RecipientSetComplete bool
+	RecipientRoute       recipientExpectedRoute
 }
 
 type soakPendingSend struct {
@@ -191,11 +194,13 @@ func (s *soakSender) Publish(
 		} else {
 			threadParentID = parent.ID
 			if target.RoomType == model.RoomTypeChannel {
-				target.Recipients = s.catalog.ThreadRecipients(
+				target.Recipients, target.RecipientSetComplete = s.catalog.ThreadRecipientSet(
 					target.RoomID,
 					threadParentID,
 					target.Account,
 				)
+				target.RecipientSetSource = recipientSetSourceThreadFollowers
+				target.RecipientRoute = recipientExpectedRouteUser
 			}
 		}
 	}

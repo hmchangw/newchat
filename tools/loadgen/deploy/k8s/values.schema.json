@@ -196,7 +196,7 @@
         "resources"
       ],
       "properties": {
-        "environment": {"type": "string", "enum": ["local", "staging", "production"]},
+        "environment": {"type": "string", "enum": ["local", "test", "staging", "production"]},
         "runMode": {"type": "string", "enum": ["continuous"]},
         "randomSeed": {"type": "integer"},
         "warmup": {"type": "string", "minLength": 1},

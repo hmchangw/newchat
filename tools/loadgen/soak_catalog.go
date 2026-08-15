@@ -65,10 +65,12 @@ type soakCatalogEntry struct {
 	// gatekeeper responses arrive. threadReplies counts only accepted replies;
 	// keeping them separate prevents a reservation from making a non-existent
 	// thread eligible for reads.
-	threadReservations int
-	threadReplies      int
-	threadReadableAt   time.Time
-	globalElement      *list.Element
+	threadReservations      int
+	threadReplies           int
+	threadReadableAt        time.Time
+	threadFollowers         map[string]struct{}
+	threadFollowersComplete bool
+	globalElement           *list.Element
 }
 
 type soakCatalogRoom struct {
@@ -177,6 +179,10 @@ func (c *soakCatalog) AcceptAt(
 		acceptedAt:           c.clock.Now(),
 		reactions:            make(map[string]map[string]struct{}),
 	}
+	if entry.ThreadParentID == "" {
+		entry.threadFollowers = map[string]struct{}{entry.Author: {}}
+		entry.threadFollowersComplete = true
+	}
 	shard := c.shard(roomID)
 	shard.mu.Lock()
 	room := shard.room(roomID)
@@ -184,6 +190,14 @@ func (c *soakCatalog) AcceptAt(
 		shard.mu.Unlock()
 		c.globalMu.Unlock()
 		return false
+	}
+	if entry.ThreadParentID != "" {
+		if parent := room.messages[entry.ThreadParentID]; parent != nil && entry.Author != "" {
+			if parent.threadFollowers == nil {
+				parent.threadFollowers = make(map[string]struct{})
+			}
+			parent.threadFollowers[entry.Author] = struct{}{}
+		}
 	}
 	entry.globalElement = c.globalOrder.PushBack(entry)
 	room.messages[messageID] = entry
@@ -466,6 +480,15 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 		pinned:     true,
 		reactions:  make(map[string]map[string]struct{}),
 	}
+	if entry.ThreadParentID == "" {
+		entry.threadFollowers = map[string]struct{}{entry.Author: {}}
+		entry.threadFollowersComplete = false
+	} else if parent := room.messages[entry.ThreadParentID]; parent != nil && entry.Author != "" {
+		if parent.threadFollowers == nil {
+			parent.threadFollowers = make(map[string]struct{})
+		}
+		parent.threadFollowers[entry.Author] = struct{}{}
+	}
 	entry.globalElement = c.globalOrder.PushBack(entry)
 	room.messages[message.MessageID] = entry
 	room.order = append(room.order, entry)
@@ -558,23 +581,31 @@ func (c *soakCatalog) ConfirmThreadReply(roomID, messageID string) bool {
 // will include for a channel thread reply without mentions: the sender, parent
 // author, and authors of accepted replies that already follow the thread.
 func (c *soakCatalog) ThreadRecipients(roomID, parentID, sender string) []string {
+	recipients, _ := c.ThreadRecipientSet(roomID, parentID, sender)
+	return recipients
+}
+
+func (c *soakCatalog) ThreadRecipientSet(roomID, parentID, sender string) ([]string, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return nil
+		return nil, false
 	}
 	recipients := make(map[string]struct{})
 	if sender != "" {
 		recipients[sender] = struct{}{}
 	}
-	if parent := room.messages[parentID]; parent != nil && parent.Author != "" {
-		recipients[parent.Author] = struct{}{}
+	parent := room.messages[parentID]
+	if parent == nil {
+		return nil, false
 	}
-	for _, entry := range room.order {
-		if entry.ThreadParentID == parentID && entry.Author != "" {
-			recipients[entry.Author] = struct{}{}
+	if len(parent.threadFollowers) == 0 && parent.Author != "" {
+		recipients[parent.Author] = struct{}{}
+	} else {
+		for account := range parent.threadFollowers {
+			recipients[account] = struct{}{}
 		}
 	}
 	result := make([]string, 0, len(recipients))
@@ -582,7 +613,7 @@ func (c *soakCatalog) ThreadRecipients(roomID, parentID, sender string) []string
 		result = append(result, account)
 	}
 	sort.Strings(result)
-	return result
+	return result, parent.threadFollowersComplete
 }
 
 func (c *soakCatalog) Size() int {

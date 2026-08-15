@@ -105,6 +105,48 @@ func TestFailureDashboardContract_UsesWorkloadOrientedScenario(t *testing.T) {
 	assert.NotContains(t, observerQueries, "cassandra_soak")
 }
 
+func TestFailureDashboardContract_BundledDashboardUsesCurrentMetricContract(t *testing.T) {
+	encoded, err := os.ReadFile("deploy/grafana/dashboards/loadtest.json")
+	require.NoError(t, err)
+	dashboard := string(encoded)
+
+	for _, query := range []string{
+		`loadgen_failure_operations_total{scenario=\"message_soak\"}`,
+		`loadgen_failure_inflight{scenario=\"message_soak\"}`,
+		`loadgen_failure_observations_total{scenario=\"message_soak\"}`,
+		"loadgen_failure_wal_flush_duration_seconds_bucket",
+		"loadgen_failure_wal_flush_batch_size_sum",
+		"loadgen_failure_wal_appends_total",
+		"loadgen_failure_evidence_flush_duration_seconds_bucket",
+	} {
+		assert.Contains(t, dashboard, query)
+	}
+	assert.NotContains(t, dashboard, "cassandra_soak")
+}
+
+func TestFailureObservationDeploymentContract_AcceptsBoundedTestEnvironment(t *testing.T) {
+	schema, err := os.ReadFile("deploy/k8s/values.schema.json")
+	require.NoError(t, err)
+	readme, err := os.ReadFile("README.md")
+	require.NoError(t, err)
+
+	assert.Contains(t, string(schema), `"enum": ["local", "test", "staging", "production"]`)
+	assert.Contains(t, string(readme), "`local`, `test`, `staging`, or `production`")
+	values, err := os.ReadFile("deploy/k8s/values.yaml")
+	require.NoError(t, err)
+	assert.Contains(t, string(values), "environment: staging")
+}
+
+func TestFailureDashboardContract_ObservabilityInventoryUsesSplitSaturationMetrics(t *testing.T) {
+	encoded, err := os.ReadFile("../../docs/specs/o11y/storage-dependency-metrics.md")
+	require.NoError(t, err)
+	contract := string(encoded)
+
+	assert.Contains(t, contract, "loadgen_soak_lane_saturation_total")
+	assert.Contains(t, contract, "loadgen_soak_global_saturation_total")
+	assert.NotContains(t, contract, "loadgen_soak_saturation_total")
+}
+
 func TestFailureRuntimeControlFollowUp_PinsAuthenticatedStatusAndPausedEvidence(t *testing.T) {
 	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/runtime-control-api.md")
 	require.NoError(t, err)

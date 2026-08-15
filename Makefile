@@ -88,10 +88,13 @@ else
 	go test -race -tags integration ./...
 endif
 
-FAILURE_TEST_PATTERN := 'Failure|ObservationRuntime|Observer|Recipient|ConsumerSampler|SoakSender|SoakRuntimeSelector|SoakPacing|LoadgenNATSHealth'
+FAILURE_TEST_PATTERN := 'Failure|ObservationRuntime|Observer|Recipient|ConsumerSampler|SoakCatalog|SoakSender|SoakRuntimeSelector|SoakPacing|LoadgenNATSHealth'
 
 test-loadgen-failure:
 	go test -race -run $(FAILURE_TEST_PATTERN) ./tools/loadgen/...
+
+characterize-loadgen-failure-wal:
+	go test -race -run '^TestFailureWALCharacterization$$' -v ./tools/loadgen/...
 
 test-loadgen-failure-integration:
 	go test -race -tags integration -run '^TestFailureObservation_' ./tools/loadgen/...

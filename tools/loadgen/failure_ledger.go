@@ -287,7 +287,8 @@ type failureLedgerSnapshot struct {
 }
 
 type failureLedger struct {
-	mu sync.Mutex
+	mu         sync.Mutex
+	startingWG sync.WaitGroup
 
 	capacity     int
 	compactEvery int
@@ -296,6 +297,7 @@ type failureLedger struct {
 	recorder     failureLedgerRecorder
 
 	active                map[string]*failureOperation
+	starting              map[string]struct{}
 	verifyQueue           failureVerifyQueue
 	results               map[failureResult]uint64
 	observations          map[failureObserver]map[failureObservation]uint64
@@ -361,6 +363,7 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 		now:          cfg.Now,
 		recorder:     cfg.Recorder,
 		active:       make(map[string]*failureOperation, cfg.Capacity),
+		starting:     make(map[string]struct{}),
 		results:      make(map[failureResult]uint64),
 		observations: make(map[failureObserver]map[failureObservation]uint64),
 		notSent:      make(map[string]struct{}),
@@ -416,24 +419,46 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 	tracked.nextVerifyAt = tracked.VerifyAfter
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if err := l.ensureOpen(); err != nil {
+		l.mu.Unlock()
 		return err
 	}
-	if _, exists := l.active[tracked.ID]; exists {
+	_, active := l.active[tracked.ID]
+	_, starting := l.starting[tracked.ID]
+	if active || starting {
+		l.mu.Unlock()
 		return fmt.Errorf("failure operation %q is already active", tracked.ID)
 	}
-	if len(l.active) >= l.capacity {
+	if len(l.active)+len(l.starting) >= l.capacity {
 		l.invalidateLocked(invalidReasonCapacity)
+		l.mu.Unlock()
 		return fmt.Errorf("start failure operation %q: %w", tracked.ID, errFailureLedgerCapacity)
 	}
+	l.starting[tracked.ID] = struct{}{}
+	l.startingWG.Add(1)
+	l.mu.Unlock()
+
 	event := failureLedgerEvent{
 		Type: failureLedgerEventStarted, Operation: cloneFailureOperation(tracked),
 		At: l.now().UTC(),
 	}
-	if err := l.appendLocked(&event); err != nil {
+	var appendErr error
+	if l.journal != nil {
+		appendErr = l.journal.Append(&event)
+	}
+
+	l.mu.Lock()
+	delete(l.starting, tracked.ID)
+	defer func() {
+		l.mu.Unlock()
+		l.startingWG.Done()
+	}()
+	if appendErr != nil {
 		l.invalidateLocked("wal")
-		return fmt.Errorf("persist failure operation %q: %w", tracked.ID, err)
+		return fmt.Errorf("persist failure operation %q: %w", tracked.ID, appendErr)
+	}
+	if l.recorder != nil && l.journal != nil {
+		l.recorder.JournalSize(l.journal.Size())
 	}
 	l.active[tracked.ID] = tracked
 	l.enqueueLocked(tracked)
@@ -861,15 +886,18 @@ func (l *failureLedger) Invalidate(reason string) {
 
 func (l *failureLedger) Close() error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
+		l.mu.Unlock()
 		return nil
 	}
 	l.closed = true
-	if l.journal == nil {
+	journal := l.journal
+	l.mu.Unlock()
+	l.startingWG.Wait()
+	if journal == nil {
 		return nil
 	}
-	if err := l.journal.Close(); err != nil {
+	if err := journal.Close(); err != nil {
 		return fmt.Errorf("close failure ledger journal: %w", err)
 	}
 	return nil
@@ -906,7 +934,7 @@ func (l *failureLedger) finalizeLocked(
 		}
 	}
 	l.finalizedSinceCompact++
-	if l.journal != nil && l.finalizedSinceCompact >= l.compactEvery {
+	if l.journal != nil && len(l.starting) == 0 && l.finalizedSinceCompact >= l.compactEvery {
 		if err := l.compactLocked(at); err != nil {
 			l.invalidateLocked("wal")
 			return fmt.Errorf("compact failure ledger: %w", err)
@@ -1626,6 +1654,22 @@ func (w *fileFailureWAL) writeHeaderLocked() error {
 func (w *fileFailureWAL) Append(event *failureLedgerEvent) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := w.appendBufferedLocked(event); err != nil {
+		return err
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync failure WAL event: %w", err)
+	}
+	return nil
+}
+
+func (w *fileFailureWAL) AppendBuffered(event *failureLedgerEvent) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.appendBufferedLocked(event)
+}
+
+func (w *fileFailureWAL) appendBufferedLocked(event *failureLedgerEvent) error {
 	if w.file == nil {
 		return fmt.Errorf("failure WAL is closed")
 	}
@@ -1649,10 +1693,19 @@ func (w *fileFailureWAL) Append(event *failureLedgerEvent) error {
 	if written != len(encoded) {
 		return fmt.Errorf("append failure WAL event: wrote %d of %d bytes", written, len(encoded))
 	}
+	w.size += int64(written)
+	return nil
+}
+
+func (w *fileFailureWAL) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return fmt.Errorf("failure WAL is closed")
+	}
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync failure WAL event: %w", err)
 	}
-	w.size += int64(written)
 	return nil
 }
 

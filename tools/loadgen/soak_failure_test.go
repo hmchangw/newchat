@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
@@ -32,7 +33,7 @@ func TestSoakFailureTracker_StartsDurableMessageOperation(t *testing.T) {
 
 	require.NoError(t, tracker.Start(&soakPendingSend{
 		Kind: soakSendTopLevel, MessageID: "message-1", RequestID: "request-1",
-		Target:  soakSendTarget{Account: "alice", RoomID: "room-1", Recipients: []string{"alice", "bob"}},
+		Target:  soakSendTarget{Account: "alice", RoomID: "room-1", RoomType: model.RoomTypeChannel, Recipients: []string{"alice", "bob"}},
 		Content: "secret message", PublishedAt: now,
 	}))
 
@@ -42,6 +43,7 @@ func TestSoakFailureTracker_StartsDurableMessageOperation(t *testing.T) {
 	assert.Equal(t, "room-1", operation.Attributes[soakFailureAttributeRoomID])
 	assert.Equal(t, "alice", operation.Attributes[soakFailureAttributeAccount])
 	assert.NotEmpty(t, operation.Attributes[soakFailureAttributeContentSHA256])
+	assert.Equal(t, string(recipientExpectedRouteRoom), operation.Attributes[soakFailureAttributeRecipientRoute])
 	assert.NotContains(t, operation.Attributes, "content")
 	assert.Equal(t, 2, operation.SchemaVersion)
 	assert.Equal(t, "run-1", operation.RunID)
@@ -135,6 +137,31 @@ func TestSoakFailureTracker_RegistersRecipientExpectation(t *testing.T) {
 	require.NoError(t, tracker.Start(pending))
 	assert.True(t, observer.evidence.Observe("message-1", "alice"))
 	assert.False(t, observer.evidence.Complete("message-1"))
+}
+
+func TestSoakFailureTracker_PersistsRecipientExpectationSemantics(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	observer := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, time.Minute, func() time.Time { return now },
+		withSoakFailureRecipientObserver(observer),
+	)
+	pending := testSoakFailurePending(now)
+	pending.Kind = soakSendThreadReply
+	pending.Target.RoomType = model.RoomTypeChannel
+	pending.Target.Recipients = []string{"alice", "bob"}
+	pending.Target.RecipientSetSource = recipientSetSourceThreadFollowers
+	pending.Target.RecipientSetComplete = true
+	pending.Target.RecipientRoute = recipientExpectedRouteUser
+
+	require.NoError(t, tracker.Start(pending))
+	operation, ok := ledger.Active(pending.MessageID)
+	require.True(t, ok)
+	assert.Equal(t, string(recipientSetSourceThreadFollowers), operation.Attributes[soakFailureAttributeRecipientSource])
+	assert.Equal(t, "true", operation.Attributes[soakFailureAttributeRecipientComplete])
+	assert.Equal(t, string(recipientExpectedRouteUser), operation.Attributes[soakFailureAttributeRecipientRoute])
 }
 
 func TestSoakFailureTracker_DisabledRecipientObserverOmitsExactSetFromWAL(t *testing.T) {

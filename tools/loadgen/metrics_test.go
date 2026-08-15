@@ -124,6 +124,12 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 	metrics.FailureObserverUp.WithLabelValues("recipient_broadcast").Set(1)
 	metrics.FailureObserverEvents.WithLabelValues("recipient_broadcast", "good").Inc()
 	metrics.FailureObserverQueueDepth.WithLabelValues("recipient_broadcast").Set(0)
+	metrics.FailureWALAppendDuration.Observe(0.002)
+	metrics.FailureWALAppends.WithLabelValues("success").Inc()
+	metrics.FailureWALFlushDuration.WithLabelValues("success").Observe(0.004)
+	metrics.FailureWALFlushBatchSize.WithLabelValues("success").Observe(6)
+	metrics.FailureEvidenceFlushDuration.WithLabelValues("positive", "success").Observe(0.003)
+	metrics.FailureEvidenceRecords.WithLabelValues("duplicate").Add(2)
 	metrics.ConsumerSampleErrors.WithLabelValues("MESSAGES-CANONICAL-site-local", "broadcast-worker", "lookup").Inc()
 	metrics.ConsumerAckFloorStall.WithLabelValues("MESSAGES-CANONICAL-site-local", "broadcast-worker").Set(3)
 	metrics.RunInfo.WithLabelValues("staging", soakFailureScenario, "cassandra-soak-v1").Set(1)
@@ -143,6 +149,12 @@ func TestNewMetrics_RegistersFailureAndProcessFamilies(t *testing.T) {
 		"loadgen_failure_observer_up",
 		"loadgen_failure_observer_events_total",
 		"loadgen_failure_observer_queue_depth",
+		"loadgen_failure_wal_append_duration_seconds",
+		"loadgen_failure_wal_appends_total",
+		"loadgen_failure_wal_flush_duration_seconds",
+		"loadgen_failure_wal_flush_batch_size",
+		"loadgen_failure_evidence_flush_duration_seconds",
+		"loadgen_failure_evidence_records_total",
 		"loadgen_consumer_sample_errors_total",
 		"loadgen_consumer_ack_floor_stall_seconds",
 		"loadgen_run_info",

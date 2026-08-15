@@ -277,7 +277,10 @@ func newSoakRuntimeSelector(
 			soakSendTarget{
 				UserID: subscription.User.ID, Account: subscription.User.Account,
 				RoomID: subscription.RoomID, RoomType: roomTypes[subscription.RoomID],
-				Recipients: append([]string(nil), recipients[subscription.RoomID]...),
+				Recipients:           append([]string(nil), recipients[subscription.RoomID]...),
+				RecipientSetSource:   recipientSetSourceTopology,
+				RecipientSetComplete: true,
+				RecipientRoute:       recipientRouteForRoomType(roomTypes[subscription.RoomID]),
 			},
 		)
 	}
@@ -287,6 +290,13 @@ func newSoakRuntimeSelector(
 		}
 	}
 	return selector, nil
+}
+
+func recipientRouteForRoomType(roomType model.RoomType) recipientExpectedRoute {
+	if roomType == model.RoomTypeChannel {
+		return recipientExpectedRouteRoom
+	}
+	return recipientExpectedRouteUser
 }
 
 func soakRecipientSets(topology *soakTopology) map[string][]string {

@@ -121,7 +121,10 @@ new message independently requires gatekeeper admission, Cassandra history,
 and exact recipient-broadcast evidence. Recipient subscriptions use a separate
 NATS observer pool, are established before measurement, and retain missing,
 unexpected, duplicate, unverified, and untracked identifiers outside
-Prometheus labels. When
+Prometheus labels. Expected deliveries remain in bounded memory; anomalies are
+durable when observed, and authoritative missing sets are batch-fsynced before
+a positive claim. Room global/local route copies are deduplicated as one logical delivery,
+while same-route repeats remain duplicate evidence. When
 `SOAK_LEDGER_DIR` is configured, it persists the ledger there and recovers
 unresolved operations after restart; the default empty value used by direct
 invocation is in-memory only and is not restart-durable. The ledger records an
@@ -130,6 +133,13 @@ read-lane slots to reconcile every ledger-admitted message through
 `GetMessageByID`. Fault injection remains external and does not change the
 configured traffic profile. See
 [`docs/load-testing/loadgen-failure-observation.md`](../../docs/load-testing/loadgen-failure-observation.md).
+
+Persistent WAL writes use a 10 ms bounded group-commit window. A pre-publish
+intent waits for the shared fsync barrier; later lifecycle records flush on the
+next barrier, timer, compaction, or shutdown. Use
+`make characterize-loadgen-failure-wal` to measure the existing per-record
+fsync sensitivity on the current host. The runtime metrics distinguish
+caller-observed append latency from actual grouped flush latency and batch size.
 
 It is not a full-newchat capacity test and it does not establish product SLOs.
 Run B/C, direct-CQL injection, historical backfill, and the optional service
@@ -244,7 +254,7 @@ Run A environment variables:
 | Variable | Default | Purpose |
 |---|---:|---|
 | `SOAK_RUN_ID` | required | Unique ownership and lifecycle ID. |
-| `SOAK_ENVIRONMENT` | `local` | Bounded `loadgen_run_info` environment label: `local`, `staging`, or `production`. |
+| `SOAK_ENVIRONMENT` | `local` | Bounded `loadgen_run_info` environment label: `local`, `test`, `staging`, or `production`. |
 | `SOAK_RUN_MODE` | `duration` | `duration` for a bounded smoke/run, or `continuous` until SIGTERM. |
 | `SOAK_RUN_DURATION` | `72h` | Total wall-clock duration in `duration` mode; ignored in `continuous` mode. |
 | `SOAK_WARMUP` | `30s` | Per-process warm-up excluded from operation totals. |

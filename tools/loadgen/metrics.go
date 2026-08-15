@@ -54,16 +54,22 @@ type Metrics struct {
 	SoakLaneSaturation        *prometheus.CounterVec
 	SoakGlobalSaturation      *prometheus.CounterVec
 
-	FailureOperations         *prometheus.CounterVec
-	FailureObservations       *prometheus.CounterVec
-	FailureObservationReasons *prometheus.CounterVec
-	FailureInflight           *prometheus.GaugeVec
-	FailureRecovered          prometheus.Counter
-	FailureInvalidations      *prometheus.CounterVec
-	FailureJournalBytes       prometheus.Gauge
-	FailureUntracked          *prometheus.CounterVec
-	FailureDropped            prometheus.Counter
-	FailureNotSent            *prometheus.CounterVec
+	FailureOperations            *prometheus.CounterVec
+	FailureObservations          *prometheus.CounterVec
+	FailureObservationReasons    *prometheus.CounterVec
+	FailureInflight              *prometheus.GaugeVec
+	FailureRecovered             prometheus.Counter
+	FailureInvalidations         *prometheus.CounterVec
+	FailureJournalBytes          prometheus.Gauge
+	FailureUntracked             *prometheus.CounterVec
+	FailureDropped               prometheus.Counter
+	FailureNotSent               *prometheus.CounterVec
+	FailureWALAppendDuration     prometheus.Histogram
+	FailureWALAppends            *prometheus.CounterVec
+	FailureWALFlushDuration      *prometheus.HistogramVec
+	FailureWALFlushBatchSize     *prometheus.HistogramVec
+	FailureEvidenceFlushDuration *prometheus.HistogramVec
+	FailureEvidenceRecords       *prometheus.CounterVec
 
 	NATSConnected             *prometheus.GaugeVec
 	NATSConnectionEvents      *prometheus.CounterVec
@@ -316,6 +322,51 @@ func NewMetrics() *Metrics {
 		prometheus.CounterOpts{Name: "loadgen_failure_not_sent_total", Help: "Proven local pre-publish failures by bounded reason."},
 		[]string{"scenario", "lane", "reason"},
 	)
+	m.FailureWALAppendDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_wal_append_duration_seconds",
+			Help:    "Caller-observed failure-ledger append duration; intent records include the grouped durability barrier.",
+			Buckets: []float64{0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1},
+		},
+	)
+	m.FailureWALAppends = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_wal_appends_total",
+			Help: "Failure-ledger append attempts by bounded result (success or error).",
+		},
+		[]string{"result"},
+	)
+	m.FailureWALFlushDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_wal_flush_duration_seconds",
+			Help:    "Duration of grouped failure-ledger fsync barriers by bounded result.",
+			Buckets: []float64{0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1},
+		},
+		[]string{"result"},
+	)
+	m.FailureWALFlushBatchSize = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_wal_flush_batch_size",
+			Help:    "Number of WAL records committed by each grouped durability barrier.",
+			Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256},
+		},
+		[]string{"result"},
+	)
+	m.FailureEvidenceFlushDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_evidence_flush_duration_seconds",
+			Help:    "Duration of batched recipient sidecar durability barriers.",
+			Buckets: []float64{0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1},
+		},
+		[]string{"claim", "result"},
+	)
+	m.FailureEvidenceRecords = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_evidence_records_total",
+			Help: "Recipient sidecar evidence records durably flushed by bounded kind.",
+		},
+		[]string{"kind"},
+	)
 	m.NATSConnected = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "loadgen_nats_connected",
@@ -387,6 +438,9 @@ func NewMetrics() *Metrics {
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
 		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,
+		m.FailureWALAppendDuration, m.FailureWALAppends,
+		m.FailureWALFlushDuration, m.FailureWALFlushBatchSize,
+		m.FailureEvidenceFlushDuration, m.FailureEvidenceRecords,
 		m.NATSConnected, m.NATSConnectionEvents, m.NATSOutageDuration, m.NATSCurrentOutage,
 		m.FailureObserverUp, m.FailureObserverConfigured, m.FailureObserverEligible,
 		m.FailureObserverEvents, m.FailureObserverQueueDepth,
