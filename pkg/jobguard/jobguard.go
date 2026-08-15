@@ -51,6 +51,9 @@ func Guard(label string, fn func()) (panicked bool) {
 // natsrouter.Recovery, which Acks-on-panic with an Internal reply.
 func Run(msg Message, process func()) {
 	if Guard(msg.Subject(), process) {
+		if marker, ok := msg.(interface{ MarkHandlerPanic() }); ok {
+			marker.MarkHandlerPanic()
+		}
 		if err := msg.Ack(); err != nil {
 			slog.Error("failed to ack after panic", "error", err, "subject", msg.Subject())
 			return

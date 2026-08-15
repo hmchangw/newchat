@@ -10,14 +10,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -1643,9 +1647,13 @@ func TestHandleReacted_MissingDelta_LogsAndDrops(t *testing.T) {
 	data, _ := json.Marshal(&evt)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
-	err := h.HandleMessage(context.Background(), data)
+	var err error
+	terminal := terminalCountFor(t, "invalid_payload", func(ctx context.Context) {
+		err = h.HandleMessage(ctx, data)
+	})
 	require.NoError(t, err, "malformed event must be acked, not NAK-ed")
 	assert.Empty(t, pub.records)
+	assert.Equal(t, int64(1), terminal, "a permanently dropped malformed event must leave terminal evidence")
 }
 
 // TestHandleReacted_MissingUpdatedAt_LogsAndDrops mirrors the missing-
@@ -1672,9 +1680,13 @@ func TestHandleReacted_MissingUpdatedAt_LogsAndDrops(t *testing.T) {
 	data, _ := json.Marshal(&evt)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
-	err := h.HandleMessage(context.Background(), data)
+	var err error
+	terminal := terminalCountFor(t, "invalid_payload", func(ctx context.Context) {
+		err = h.HandleMessage(ctx, data)
+	})
 	require.NoError(t, err, "malformed event must be acked, not NAK-ed")
 	assert.Empty(t, pub.records)
+	assert.Equal(t, int64(1), terminal, "a permanently dropped malformed event must leave terminal evidence")
 }
 
 // findPublishRecord returns the first record whose subject matches, or nil.
@@ -3340,4 +3352,46 @@ func TestHandleCreated_AdvanceSenderLastSeen_FailureSwallowed(t *testing.T) {
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime)))
+}
+
+// stubJSMsg is the minimum jetstream.Msg surface Consumer.Track needs to build
+// a tracked delivery in a unit test. The drop paths under test Ack via the
+// tracked wrapper, so the disposition methods only need to succeed.
+type stubJSMsg struct {
+	subject string
+	data    []byte
+}
+
+func (s stubJSMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{NumDelivered: 1}, nil
+}
+func (s stubJSMsg) Data() []byte                     { return s.data }
+func (s stubJSMsg) Headers() nats.Header             { return nats.Header{} }
+func (s stubJSMsg) Subject() string                  { return s.subject }
+func (s stubJSMsg) Reply() string                    { return "" }
+func (s stubJSMsg) Ack() error                       { return nil }
+func (s stubJSMsg) DoubleAck(context.Context) error  { return nil }
+func (s stubJSMsg) Nak() error                       { return nil }
+func (s stubJSMsg) NakWithDelay(time.Duration) error { return nil }
+func (s stubJSMsg) InProgress() error                { return nil }
+func (s stubJSMsg) Term() error                      { return nil }
+func (s stubJSMsg) TermWithReason(string) error      { return nil }
+
+// terminalCountFor runs fn under a tracked delivery and returns how many
+// terminal failures it recorded for reason. A log-and-drop path returns nil, so
+// the counter is the only evidence the message was permanently discarded.
+func terminalCountFor(t *testing.T, reason string, fn func(context.Context)) int64 {
+	t.Helper()
+	m, reader := newTestBroadcastMetrics(t)
+	consumer := m.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "broadcast-worker", Site: "s1",
+		Stream: "MESSAGES-CANONICAL-s1", Consumer: "broadcast-worker",
+	})
+	tracked := consumer.Track(context.Background(), stubJSMsg{subject: "chat.msg.canonical.s1.created"}, natsmetrics.EventCreated, 5)
+	fn(tracked.Context(context.Background()))
+	tracked.Finish(context.Background())
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	return sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": reason})
 }

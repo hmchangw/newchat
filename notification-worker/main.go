@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -140,6 +141,9 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher("notification-worker", cfg.SiteID)
+	domainMetrics := newNotificationMetrics(sdk.MeterProvider().Meter("notification-worker"))
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
 	if err != nil {
@@ -185,7 +189,7 @@ func main() {
 	loader := &mongoMemberLoader{col: subCol}
 	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -206,16 +210,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated))
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "notification-worker", Site: cfg.SiteID,
+		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
+	})
+	consumerMetrics.LoopStopped(ctx)
+	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
-
 	// The broker advertises max_payload in its INFO on connect, so this is
 	// always in step with the server. An env var was a second source of truth
 	// that silently dropped batches whenever it drifted below the real limit.
-	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, wiring.PushSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
+	emitter := newMobileEmitter(&jsPublisher{js: otelJS, metrics: publishMetrics}, wiring.PushSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
 
 	var presence PresenceSnapshotter = noopPresenceSnapshotter{}
 	if cfg.PresenceEnabled {
@@ -224,6 +233,7 @@ func main() {
 			cfg.SiteID,
 			cfg.PresenceBatchSize,
 			cfg.PresenceRPCTimeout,
+			publishMetrics,
 		)
 	}
 
@@ -235,7 +245,7 @@ func main() {
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
-		Parent:             newHistoryParentFetcher(nc),
+		Parent:             newHistoryParentFetcher(nc, publishMetrics),
 		Presence:           presence,
 		Settings:           settings,
 		Hook:               noopVetoer{},
@@ -243,6 +253,7 @@ func main() {
 		RoomMeta:           roomMetaCache,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
+		Metrics:            domainMetrics,
 	})
 
 	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
@@ -303,20 +314,31 @@ func main() {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
+	consumerMetrics.LoopStarted(ctx)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	wg.Add(1)
 	go func() {
+		// The loop itself is counted so shutdown, which stops the iterator and
+		// then waits on wg, cannot pass through while a message Next already
+		// returned is still on its way to a worker.
+		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				consumerMetrics.LoopFailed(context.Background(), err)
 				return
 			}
 			sem <- struct{}{}
 			wg.Add(1)
-			go func() {
+			go func(msgCtx context.Context, msg jetstream.Msg) {
+				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
+				msg = tracked
+				msgCtx = tracked.Context(msgCtx)
 				defer func() {
+					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
 				}()
@@ -331,12 +353,13 @@ func main() {
 						if err := msg.Ack(); err != nil {
 							slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
 						}
+						domainMetrics.Record(handlerCtx, notifyKindPush, notifySuppressed)
 						return
 					}
 					// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
 					jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
 				})
-			}()
+			}(msgCtx, msg)
 		}
 	}()
 
@@ -359,6 +382,7 @@ func main() {
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(_ context.Context) error {
+			consumerMetrics.LoopStopped(context.Background())
 			iter.Stop()
 			return nil
 		},

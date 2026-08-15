@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
@@ -82,8 +83,11 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher("message-gatekeeper", cfg.SiteID)
+	domainMetrics := newGatekeeperMetrics(sdk.MeterProvider().Meter("message-gatekeeper"))
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -139,19 +143,22 @@ func main() {
 	)
 	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 		ack, err := js.PublishMsg(ctx, msg, opts...)
+		publishMetrics.Attempt(ctx, natsmetrics.DestinationCanonical, natsmetrics.OperationCanonicalPublish, err)
 		if err != nil {
 			return nil, fmt.Errorf("publish to %q: %w", msg.Subject, err)
 		}
 		return ack, nil
 	}
 	reply := func(ctx context.Context, msg *nats.Msg) error {
-		if err := nc.PublishMsg(ctx, msg); err != nil {
+		err := nc.PublishMsg(ctx, msg)
+		publishMetrics.Attempt(ctx, natsmetrics.DestinationClientResponse, natsmetrics.OperationClientResponse, err)
+		if err != nil {
 			return fmt.Errorf("reply to %q: %w", msg.Subject, err)
 		}
 		return nil
 	}
-	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL)
-	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL)
+	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL, publishMetrics)
+	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL, withGatekeeperMetrics(domainMetrics))
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -159,7 +166,13 @@ func main() {
 	}
 
 	messagesCfg := stream.Messages(cfg.SiteID)
-	cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, buildConsumerConfig(cfg.Consumer))
+	consumerCfg := buildConsumerConfig(cfg.Consumer)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "message-gatekeeper", Site: cfg.SiteID,
+		Stream: messagesCfg.Name, Consumer: consumerCfg.Durable,
+	})
+	consumerMetrics.LoopStopped(ctx)
+	cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, consumerCfg)
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -170,30 +183,18 @@ func main() {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
+	consumerMetrics.LoopStarted(ctx)
 
-	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	go func() {
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				return
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func() {
-				defer func() {
-					<-sem
-					wg.Done()
-				}()
-				handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-				handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-				logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
-				handler.HandleJetStreamMsg(handlerCtx, msg)
-			}()
-		}
-	}()
+	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		func(msgCtx context.Context, msg *natsmetrics.Message) {
+			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+			handler.HandleJetStreamMsg(handlerCtx, msg)
+		})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -207,6 +208,7 @@ func main() {
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error {
+			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
 			return nil
 		},
