@@ -132,12 +132,15 @@ function toSummary(room) {
 // Build a stored preview from a live message. Returns null when there is
 // nothing to store, so callers leave the map untouched rather than writing an
 // empty sentinel.
-function previewFromMessage(msg) {
+function previewFromMessage(msg, fallbackMentions) {
   if (!msg || !msg.id) return null
   return {
     messageId: msg.id,
     senderName: messageSenderName(msg),
-    text: previewSnippet(msg.content, msg.mentions, msg.attachments),
+    // Mentions ride the event, not the message — the gatekeeper never populates
+    // Message.Mentions. Without the fallback a live preview shows the raw
+    // @account while the same message shows @Display Name after a reload.
+    text: previewSnippet(msg.content, msg.mentions ?? fallbackMentions, msg.attachments),
   }
 }
 
@@ -332,13 +335,17 @@ export function roomEventsReducer(state, action) {
           subs[s.id] ? mergeSubscriptionIntoSummary(s, subs[s.id]) : s
         )
       }
-      // Seed from the room metadata user-service embeds on each list row.
-      // Starts from the existing map so the partial-update path (no rooms
-      // supplied) doesn't wipe previews already in hand.
-      const previews = { ...state.previews }
+      // Seed only rooms with no preview yet. A live message can land before
+      // fetchSidebarBuckets resolves (the DM subscription goes live first), and
+      // that message is NEWER than this list snapshot — overwriting it would show
+      // an older message in the sidebar than the room itself displays.
+      let previews = state.previews
       for (const [roomId, sub] of Object.entries(subs)) {
+        if (previews[roomId]) continue
         const preview = previewFromWire(sub?.room?.previewMessage)
-        if (preview) previews[roomId] = preview
+        if (!preview) continue
+        if (previews === state.previews) previews = { ...state.previews }
+        previews[roomId] = preview
       }
       return {
         ...state,
@@ -480,7 +487,14 @@ export function roomEventsReducer(state, action) {
       // Thread replies returned above, so anything reaching here belongs in
       // the room timeline and is a preview candidate. Computed once and
       // applied at every return point below.
-      const nextPreview = previewFromMessage(msg)
+      //
+      // Note: excluding EVERY thread reply this way is broader than the
+      // server's rule — the server excludes only hidden (tshow: false)
+      // replies, and a tshow: true reply can legitimately be a room's
+      // preview. That's fine only because this frontend has no tshow
+      // support at all, so no thread reply ever reaches the room timeline
+      // here. Anyone adding tshow must revisit this.
+      const nextPreview = previewFromMessage(msg, evt.mentions)
       const previews =
         !nextPreview || samePreview(state.previews[roomId], nextPreview)
           ? state.previews
@@ -788,8 +802,15 @@ export function roomEventsReducer(state, action) {
       if (prev.messages.some((m) => m.id === msg.id)) return state
       const messages = appendBounded(prev.messages, msg)
       // A thread reply doesn't appear in the room timeline, so it isn't the
-      // room's preview either — matching the server, which omits
-      // previewMessage for hidden thread replies.
+      // room's preview either. This excludes EVERY thread reply, which is
+      // broader than the server's rule — the server excludes only hidden
+      // (tshow: false) replies; a tshow: true reply can legitimately be a
+      // room's preview. Correct only because this frontend has no tshow
+      // support: no thread reply ever appears in the room timeline here.
+      // Anyone adding tshow must revisit this.
+      // A local optimistic send has no event, so there's no fallback mentions
+      // source — msg.mentions is always undefined for these and the raw
+      // @account renders until the server echo (MESSAGE_RECEIVED) arrives.
       const nextPreview = msg.threadParentMessageId ? null : previewFromMessage(msg)
       const previews =
         !nextPreview || samePreview(state.previews[roomId], nextPreview)

@@ -1776,6 +1776,46 @@ describe('roomEventsReducer previews', () => {
     expect(next.previews.r1).toBeUndefined()
   })
 
+  it('BUCKETS_LOADED does not clobber a fresher live preview already in state', () => {
+    // Regression: the DM subscription goes live BEFORE fetchSidebarBuckets
+    // resolves, so a live message can land and be written to previews via
+    // MESSAGE_RECEIVED before this dispatch fires. That live entry is NEWER
+    // than the list snapshot's previewMessage and must survive.
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' } },
+    }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview({ messageId: 'm-stale' }) } } },
+    })
+    expect(next.previews.r1).toEqual({ messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' })
+  })
+
+  it('BUCKETS_LOADED still seeds a room with no prior preview alongside one that is guarded', () => {
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' } },
+    }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1', 'r2'],
+      rooms: [
+        { id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 },
+        { id: 'r2', name: 'Other', type: 'channel', siteId: 'site-A', userCount: 2 },
+      ],
+      subscriptions: {
+        r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview({ messageId: 'm-stale' }) } },
+        r2: { roomId: 'r2', name: 'Other', room: { previewMessage: wirePreview({ messageId: 'm-new-r2' }) } },
+      },
+    })
+    // r1's live entry survives; r2 (no prior entry) is seeded normally.
+    expect(next.previews.r1.messageId).toBe('m-live')
+    expect(next.previews.r2.messageId).toBe('m-new-r2')
+  })
+
   it('MESSAGE_RECEIVED overwrites the preview for a room with no message buffer', () => {
     const next = roomEventsReducer(initialState, {
       type: 'MESSAGE_RECEIVED',
@@ -1802,11 +1842,14 @@ describe('roomEventsReducer previews', () => {
   })
 
   it('MESSAGE_RECEIVED keeps the previews reference stable on a content-identical write', () => {
-    // Mirrors the server echoing back a message this client already stored
-    // optimistically (the existingIdx >= 0 branch): the incoming message
-    // renders to the exact same stored preview already in state, so the
-    // previews map must not be reallocated — a fresh object here would
-    // invalidate useSidebarSections' memo for every room in the sidebar.
+    // No roomState.r1 is seeded here, so this exercises the NEW-message
+    // branch (existingIdx < 0), not the existingIdx >= 0 server-echo branch.
+    // previews is computed once and shared across every return point though,
+    // so the reference-stability guarantee is exercised either way: the
+    // incoming message renders to the exact same stored preview already in
+    // state, so the previews map must not be reallocated — a fresh object
+    // here would invalidate useSidebarSections' memo for every room in the
+    // sidebar.
     const seeded = {
       ...initialState,
       previews: { r1: { messageId: 'm2', senderName: 'Bob Lin', text: 'newest' } },
@@ -1819,6 +1862,27 @@ describe('roomEventsReducer previews', () => {
       },
     })
     expect(next.previews).toBe(seeded.previews)
+  })
+
+  it('MESSAGE_RECEIVED resolves mentions from the event when the message carries none', () => {
+    // Message.Mentions is never populated by the gatekeeper — mentions ride
+    // the event, not the message. Without the fallback, a live preview would
+    // show the raw @account instead of the resolved display name.
+    const next = roomEventsReducer(initialState, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        roomId: 'r1',
+        mentions: [{ account: 'alice', engName: 'Alice Chen' }],
+        message: {
+          id: 'm10',
+          content: 'hey @alice check this out',
+          userDisplayName: 'Bob Lin',
+          createdAt: '2026-08-14T11:00:00Z',
+          // no mentions on the message itself
+        },
+      },
+    })
+    expect(next.previews.r1.text).toBe('hey @Alice Chen check this out')
   })
 
   it('MESSAGE_RECEIVED ignores a thread reply', () => {

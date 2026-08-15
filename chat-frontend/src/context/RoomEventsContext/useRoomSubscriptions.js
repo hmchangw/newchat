@@ -201,8 +201,13 @@ export function useRoomSubscriptions(
         // Preview first, and unconditionally: the sidebar snippet must update
         // even when the edit itself can't be applied — an encrypted body
         // returns below, and MESSAGE_EDITED bails for a room with no buffer.
-        // The server omits previewMessage for hidden thread-reply edits, so
-        // no client-side thread guard is needed here.
+        // No client-side thread guard needed here — we just apply whatever
+        // previewMessage the server sends. Separately, this frontend's own
+        // preview computation (reducer.js) excludes EVERY thread reply from
+        // being a preview candidate, which is broader than the server's rule
+        // (hidden/tshow: false only) — correct only because this frontend has
+        // no tshow support, so no shown reply ever reaches the room timeline
+        // here. Anyone adding tshow must revisit that exclusion.
         if (evt.previewMessage) {
           safeDispatch({
             type: 'ROOM_PREVIEW_UPDATED',
