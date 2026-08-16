@@ -216,8 +216,19 @@ func TestFailureObservation_ReadReceiptCursorNeverAppears(t *testing.T) {
 	lanes, verifier := harness.lanes(t, ledger)
 	require.NoError(t, lanes.ReadReceipt(ctx))
 
-	// The subscription document is never written, so the accepted mark-read
-	// left no cursor behind.
+	operations := ledger.ActiveOperations()
+	require.Len(t, operations, 1)
+	// The membership exists — the lane only ever marks rooms its account
+	// belongs to — but the accepted mark-read never wrote a cursor. That is the
+	// lost write; a subscription that vanished entirely is a different claim and
+	// is covered separately below.
+	_, err := harness.store.db.Collection("subscriptions").InsertOne(ctx, bson.M{
+		"_id":    "sub-1",
+		"roomId": operations[0].Targets["roomId"],
+		"u":      bson.M{"account": operations[0].Targets["account"]},
+	})
+	require.NoError(t, err)
+
 	harness.now = harness.now.Add(2 * time.Minute)
 
 	reconciled, err := lanes.Reconcile(ctx, verifier)
@@ -227,6 +238,30 @@ func TestFailureObservation_ReadReceiptCursorNeverAppears(t *testing.T) {
 	assert.Equal(t, uint64(1),
 		ledger.Snapshot().Results[failureResultMissingAfterDeadline],
 		"room-service accepted the mark-read and the cursor never moved, which is real loss")
+}
+
+// A subscription that is gone entirely is not a lost mark-read: the lane only
+// targets rooms its account is subscribed to, so its absence is a state that
+// could not legally occur. Scoring it as data loss would blame the write for
+// something that happened to the membership.
+func TestFailureObservation_ReadReceiptVanishedSubscriptionIsBad(t *testing.T) {
+	harness := newSoakRoomMemberEvidenceHarness(t)
+	ctx := context.Background()
+
+	ledger := harness.openLedger(t, "v1")
+	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
+	lanes, verifier := harness.lanes(t, ledger)
+	require.NoError(t, lanes.ReadReceipt(ctx))
+
+	// Nothing is written to MongoDB, so the subscription itself is missing.
+	harness.now = harness.now.Add(2 * time.Minute)
+
+	reconciled, err := lanes.Reconcile(ctx, verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultBad])
+	assert.Equal(t, uint64(0), ledger.Snapshot().Results[failureResultMissingAfterDeadline])
 }
 
 func TestSoakStore_SubscriptionLastSeenReadsThePrimary(t *testing.T) {
