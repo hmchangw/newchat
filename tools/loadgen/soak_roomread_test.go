@@ -183,3 +183,65 @@ func TestSoakRoomReader_RejectsMissingArguments(t *testing.T) {
 	_, err = reader.RoomState(context.Background(), "room-1", "")
 	require.Error(t, err)
 }
+
+func TestSoakRoomReader_RoomInfoForReturnsTheRequestedRoom(t *testing.T) {
+	transport := &soakRoomOpsTransport{
+		reply: []byte(`{"rooms":[{"roomId":"other","found":true},{"roomId":"room-1","found":true,"name":"soak-channel","userCount":4}]}`),
+	}
+	reader, _, _ := newSoakRoomReadFixture(t, transport, 11)
+
+	info, err := reader.RoomInfoFor(context.Background(), "room-1")
+
+	require.NoError(t, err)
+	assert.True(t, info.Found)
+	assert.Equal(t, "soak-channel", info.Name)
+	assert.JSONEq(t, `{"roomIds":["room-1"]}`, string(transport.bodies[0]))
+}
+
+func TestSoakRoomReader_RoomInfoForReportsAnAbsentRoom(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"rooms":[]}`)}
+	reader, _, _ := newSoakRoomReadFixture(t, transport, 12)
+
+	info, err := reader.RoomInfoFor(context.Background(), "room-1")
+
+	require.NoError(t, err)
+	assert.False(t, info.Found, "a room the batch omits is reported absent, not as an error")
+}
+
+func TestSoakRoomReader_RoomInfoForRejectsAnEmptyRoom(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"rooms":[]}`)}
+	reader, _, _ := newSoakRoomReadFixture(t, transport, 13)
+
+	_, err := reader.RoomInfoFor(context.Background(), "")
+
+	require.Error(t, err)
+}
+
+func TestSoakRoomReader_RoomInfoForSurfacesTransportFailures(t *testing.T) {
+	transport := &soakRoomOpsTransport{err: nats.ErrNoResponders}
+	reader, _, _ := newSoakRoomReadFixture(t, transport, 14)
+
+	_, err := reader.RoomInfoFor(context.Background(), "room-1")
+
+	require.Error(t, err)
+}
+
+func TestSoakRoomReader_SubscriptionsForRejectsAnEmptyAccount(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+	reader, _, _ := newSoakRoomReadFixture(t, transport, 15)
+
+	_, err := reader.SubscriptionsFor(context.Background(), "")
+
+	require.Error(t, err)
+}
+
+func TestSoakRoomReader_RequiresAnRPCClient(t *testing.T) {
+	reader := newSoakRoomReader(
+		soakRoomReadConfig{SiteID: "site-a"}, nil, nil, nil,
+		rand.New(rand.NewSource(16)), nil,
+	)
+
+	_, err := reader.ListMembers(context.Background(), "room-1", "user-a0")
+
+	require.Error(t, err)
+}

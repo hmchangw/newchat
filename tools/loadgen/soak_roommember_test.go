@@ -653,3 +653,15 @@ func TestSoakRoomLanes_ReleaseRejectsUnknownOperations(t *testing.T) {
 
 	require.Error(t, err)
 }
+
+func TestNewSoakRoomLanes_AppliesSafeDefaults(t *testing.T) {
+	lanes := newSoakRoomLanes(
+		soakRoomLaneConfig{RunID: "run-1"}, nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+
+	assert.Equal(t, 10*time.Minute, lanes.cfg.Deadline)
+	assert.Equal(t, time.Second, lanes.cfg.RetryInterval)
+	assert.Equal(t, 2, lanes.cfg.CreateRoomSize)
+	assert.NotNil(t, lanes.now)
+	assert.Equal(t, 0, lanes.budget)
+}

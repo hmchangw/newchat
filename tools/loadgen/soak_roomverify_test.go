@@ -373,3 +373,58 @@ func TestSoakRoomStateVerifier_RejectsMissingStore(t *testing.T) {
 
 	require.Error(t, err)
 }
+
+func TestSoakRoomStateVerifier_FallsBackToTheOperationRequester(t *testing.T) {
+	transport := &soakRoomOpsTransport{
+		reply: []byte(`{"members":[{"id":"m1","rid":"room-unknown","member":{"account":"user-b0"}}]}`),
+	}
+	verifier, metrics := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{member: true})
+	operation := soakMemberOperation(true)
+	operation.Targets["roomId"] = "room-unknown"
+
+	result, _, err := verifier.Verify(context.Background(), operation)
+
+	require.NoError(t, err)
+	assert.Equal(t, soakRoomStateMatched, result)
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.SoakRoomStateSources.WithLabelValues(soakRoomStateSourceRPC, "matched")),
+		"a room outside the pool is still readable through the operation's requester")
+}
+
+func TestSoakRoomStateVerifier_SkipsTheRPCSourceWithoutAnAccount(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"members":[]}`)}
+	verifier, metrics := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{member: true})
+	operation := soakMemberOperation(true)
+	operation.Targets["roomId"] = "room-unknown"
+	delete(operation.Attributes, soakFailureAttributeRequester)
+
+	result, _, err := verifier.Verify(context.Background(), operation)
+
+	require.NoError(t, err)
+	assert.Equal(t, soakRoomStateMatched, result)
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.SoakRoomStateSources.WithLabelValues(soakRoomStateSourceRPC, "unknown")))
+}
+
+func TestSoakRoomStateVerifier_WorksWithoutMetricsOrHealth(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"members":[]}`)}
+	pool, _ := newSoakRoomStateTestPool(t, 3, 8)
+	reader := newSoakRoomReader(
+		soakRoomReadConfig{SiteID: "site-a"}, pool,
+		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+		&soakRoomReadRecorder{}, rand.New(rand.NewSource(20)), nil,
+	)
+	verifier := newSoakRoomStateVerifier(reader, &soakRoomStateStoreStub{}, nil, nil, nil)
+
+	assert.NotPanics(t, func() {
+		_, _, err := verifier.Verify(context.Background(), soakMemberOperation(false))
+		require.NoError(t, err)
+	})
+}
+
+func TestFlipSoakRoomStatePresence_LeavesNonPresenceVerdicts(t *testing.T) {
+	assert.Equal(t, soakRoomStateAbsent, flipSoakRoomStatePresence(soakRoomStateMatched))
+	assert.Equal(t, soakRoomStateMatched, flipSoakRoomStatePresence(soakRoomStateAbsent))
+	assert.Equal(t, soakRoomStateUnknown, flipSoakRoomStatePresence(soakRoomStateUnknown))
+	assert.Equal(t, soakRoomStateMismatch, flipSoakRoomStatePresence(soakRoomStateMismatch))
+}
