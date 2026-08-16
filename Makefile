@@ -1,4 +1,4 @@
-.PHONY: lint fmt tidy test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
+.PHONY: lint fmt tidy test test-integration benchmark-natsmetrics coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
         o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep
 
@@ -79,6 +79,12 @@ ifdef SERVICE
 else
 	go test -race ./...
 endif
+
+# Measure the repository-owned JetStream delivery tracking overhead. The
+# benchmark uses pre-decoded metadata so nats.go reply-subject parsing remains
+# outside the result.
+benchmark-natsmetrics:
+	go test -run '^$$' -bench 'Benchmark(Consumer|Message)_' -benchmem ./pkg/natsmetrics
 
 # Run integration tests (requires Docker)
 test-integration:

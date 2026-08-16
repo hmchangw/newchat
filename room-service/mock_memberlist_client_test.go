@@ -12,8 +12,10 @@ package main
 import (
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	model "github.com/hmchangw/chat/pkg/model"
+	natsmetrics "github.com/hmchangw/chat/pkg/natsmetrics"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -54,4 +56,40 @@ func (m *MockMemberListClient) ListMembers(ctx context.Context, requester string
 func (mr *MockMemberListClientMockRecorder) ListMembers(ctx, requester, ch, limit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListMembers", reflect.TypeOf((*MockMemberListClient)(nil).ListMembers), ctx, requester, ch, limit)
+}
+
+// MockrequestRecorder is a mock of requestRecorder interface.
+type MockrequestRecorder struct {
+	ctrl     *gomock.Controller
+	recorder *MockrequestRecorderMockRecorder
+	isgomock struct{}
+}
+
+// MockrequestRecorderMockRecorder is the mock recorder for MockrequestRecorder.
+type MockrequestRecorderMockRecorder struct {
+	mock *MockrequestRecorder
+}
+
+// NewMockrequestRecorder creates a new mock instance.
+func NewMockrequestRecorder(ctrl *gomock.Controller) *MockrequestRecorder {
+	mock := &MockrequestRecorder{ctrl: ctrl}
+	mock.recorder = &MockrequestRecorderMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockrequestRecorder) EXPECT() *MockrequestRecorderMockRecorder {
+	return m.recorder
+}
+
+// Request mocks base method.
+func (m *MockrequestRecorder) Request(arg0 context.Context, arg1 natsmetrics.Operation, arg2 time.Duration, arg3 error) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Request", arg0, arg1, arg2, arg3)
+}
+
+// Request indicates an expected call of Request.
+func (mr *MockrequestRecorderMockRecorder) Request(arg0, arg1, arg2, arg3 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Request", reflect.TypeOf((*MockrequestRecorder)(nil).Request), arg0, arg1, arg2, arg3)
 }

@@ -43,6 +43,15 @@ func TestConfig_Mode(t *testing.T) {
 	}
 }
 
+func TestConfig_ServiceName(t *testing.T) {
+	t.Setenv("MODE", "bot")
+	t.Setenv("OTEL_SERVICE_NAME", "bot-broadcast-worker")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, "bot-broadcast-worker", cfg.ServiceName)
+}
+
 func TestConfig_RoomSubjectMode(t *testing.T) {
 	t.Setenv("MODE", "user")
 
