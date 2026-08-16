@@ -65,7 +65,10 @@ func (h *handler) inspect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	case err != nil:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Generic body only — a store error can carry URIs/hosts the browser
+		// must never see; the detail goes to the server log.
+		slog.Error("inspect failed", "collection", collection, "error", err)
+		http.Error(w, "inspect failed; see server log", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, res)
@@ -117,7 +120,10 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		case <-keepalive.C:
 			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
-		case frame := <-ch:
+		case frame, ok := <-ch:
+			if !ok {
+				return // hub disconnected us as a slow client; the browser reconnects
+			}
 			fmt.Fprintf(w, "data: %s\n\n", frame)
 			flusher.Flush()
 		}

@@ -70,7 +70,7 @@ func buildConnInfo(cfg *config, streamName string, cassandraInUse bool) ConnInfo
 
 	info.SourceMongo.URI = redactURI(cfg.SourceMongoURI)
 	info.SourceMongo.DB = cfg.SourceDB
-	info.SourceMongo.ReadPreference = "primaryPreferred"
+	info.SourceMongo.ReadPreference = cfg.SourceReadPreference
 
 	info.TargetMongo.URI = redactURI(cfg.TargetMongoURI)
 	info.TargetMongo.DB = cfg.TargetDB

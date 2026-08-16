@@ -36,6 +36,7 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 1000, cfg.FailedCap)
 	assert.Equal(t, 5*time.Second, cfg.StatsInterval)
 	assert.Equal(t, 72, cfg.MessageBucketHours)
+	assert.Equal(t, "primary", cfg.SourceReadPreference)
 	assert.False(t, cfg.Bootstrap.Enabled)
 	assert.NoError(t, cfg.validate())
 }
@@ -65,9 +66,17 @@ func TestConfig_Validate(t *testing.T) {
 		{"sample percent negative", func(c *config) { c.SamplePercent = -1 }, "SAMPLE_PERCENT"},
 		{"zero poll", func(c *config) { c.VerifyPoll = 0 }, "VERIFY_POLL"},
 		{"timeout below poll", func(c *config) { c.VerifyTimeout = time.Second }, "VERIFY_TIMEOUT"},
+		{"zero max checks", func(c *config) { c.MaxChecks = 0 }, "MAX_CHECKS"},
+		{"negative max checks", func(c *config) { c.MaxChecks = -1 }, "MAX_CHECKS"},
+		{"zero recent cap", func(c *config) { c.RecentCap = 0 }, "RECENT_CAP"},
+		{"zero failed cap", func(c *config) { c.FailedCap = 0 }, "RECENT_CAP and FAILED_CAP"},
+		{"zero stats interval", func(c *config) { c.StatsInterval = 0 }, "STATS_INTERVAL"},
+		{"negative stats interval", func(c *config) { c.StatsInterval = -time.Second }, "STATS_INTERVAL"},
 		{"zero bucket hours", func(c *config) { c.MessageBucketHours = 0 }, "MESSAGE_BUCKET_HOURS"},
 		{"bad start time", func(c *config) { c.StartAtTime = "not-a-time" }, "START_AT_TIME"},
 		{"ok start time", func(c *config) { c.StartAtTime = "2026-08-10T00:00:00Z" }, ""},
+		{"bad read preference", func(c *config) { c.SourceReadPreference = "quorum" }, "SOURCE_READ_PREFERENCE"},
+		{"ok read preference", func(c *config) { c.SourceReadPreference = "secondaryPreferred" }, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
