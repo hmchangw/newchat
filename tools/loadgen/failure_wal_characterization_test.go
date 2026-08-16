@@ -12,9 +12,10 @@ import (
 
 const (
 	failureWALCharacterizationOfferedOperations = 100.0
-	// A completed message operation currently journals started, activated,
-	// admission, history, recipient, and finalized records.
-	failureWALCharacterizationEventsPerOperation = 6.0
+	// At the default configuration the recipient observer is disabled, so a
+	// completed message operation journals started, activated, admission,
+	// history, and finalized records.
+	failureWALCharacterizationEventsPerOperation = 5.0
 )
 
 type delayedFailureJournal struct {

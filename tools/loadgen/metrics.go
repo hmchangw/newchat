@@ -173,7 +173,7 @@ func NewMetrics() *Metrics {
 		[]string{"preset", "inject"},
 	)
 	m.MemberRoomSize = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{Name: "loadgen_member_room_size", Help: "Current member count by bounded size bucket (capacity mode only)."},
+		prometheus.GaugeOpts{Name: "loadgen_member_room_size", Help: "Rooms currently in each bounded member-count bucket (capacity mode only)."},
 		[]string{"size_bucket"},
 	)
 	m.BotRoomPublished = prometheus.NewCounterVec(

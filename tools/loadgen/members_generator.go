@@ -384,6 +384,8 @@ func (g *CapacityMembersGenerator) Run(ctx context.Context) error {
 
 func (g *CapacityMembersGenerator) runRoom(ctx context.Context, room *model.Room, ack <-chan struct{}) {
 	size := g.cfg.Preset.BaselineSize
+	bucket := memberRoomSizeBucket(size)
+	g.cfg.Metrics.MemberRoomSize.WithLabelValues(bucket).Inc()
 	defer func() {
 		g.finalMu.Lock()
 		g.finalSizes[room.ID] = size
@@ -435,7 +437,14 @@ func (g *CapacityMembersGenerator) runRoom(ctx context.Context, room *model.Room
 		select {
 		case <-ack:
 			size += g.cfg.UsersPerAdd
-			g.cfg.Metrics.MemberRoomSize.WithLabelValues(memberRoomSizeBucket(size)).Set(float64(size))
+			// The gauge counts rooms per bucket. Writing the size itself would make
+			// every room in a bucket share one series, reporting whichever room
+			// updated last instead of the distribution.
+			if next := memberRoomSizeBucket(size); next != bucket {
+				g.cfg.Metrics.MemberRoomSize.WithLabelValues(bucket).Dec()
+				g.cfg.Metrics.MemberRoomSize.WithLabelValues(next).Inc()
+				bucket = next
+			}
 		case <-time.After(g.cfg.E2Timeout):
 			g.cfg.Metrics.MemberPublishErrors.WithLabelValues("timeout").Inc()
 			return

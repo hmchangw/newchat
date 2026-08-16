@@ -150,19 +150,26 @@ func TestFailureLedger_DoesNotCompactAwayAConcurrentStartingIntent(t *testing.T)
 	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
 	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
 	require.NoError(t, ledger.Start(testFailureOperation("message-1", now)))
-	<-inner.written
+	awaitBufferedWrite(t, inner.written, "first intent")
 
 	startResult := make(chan error, 1)
 	go func() { startResult <- ledger.Start(testFailureOperation("message-2", now)) }()
-	select {
-	case <-inner.written:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for concurrent starting intent")
-	}
+	awaitBufferedWrite(t, inner.written, "concurrent starting intent")
 	require.NoError(t, ledger.Abandon("message-1", failureResultNotSent, now))
 	assert.Zero(t, inner.compactCount())
 	require.NoError(t, <-startResult)
 
 	require.NoError(t, ledger.Abandon("message-2", failureResultNotSent, now))
 	assert.Equal(t, 1, inner.compactCount())
+}
+
+// awaitBufferedWrite fails the test instead of hanging until the package
+// timeout when a buffered write never reaches the journal.
+func awaitBufferedWrite(t *testing.T, written <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-written:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
 }
