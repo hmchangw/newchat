@@ -154,6 +154,9 @@ type RoomSource interface {
 	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	SetPreviewMessage(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) error
+	UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, asOf int64) error
+	ClearPreview(ctx context.Context, roomID string, asOf int64) error
 }
 
 type roomTimes struct {
@@ -218,11 +221,34 @@ func (c *RoomCache) GetRoomUserCount(ctx context.Context, roomID string) (int, e
 }
 
 // GetRoomTimesByIDs bypasses the per-key cache and delegates to the source.
-// It is a batch read for rooms without a usable caller-supplied hint, called
-// at most once per RoomsGet request — not a hot single-room path — so there is
-// no per-room caching benefit to justify the bookkeeping.
+// It is called at most once per RoomsGet request — not a hot single-room path —
+// so there is no per-room caching benefit to justify the bookkeeping. Caching it
+// would also be wrong now that it carries the stored preview: the freshness check
+// is an identity comparison against a lastMsgId that must be read live.
 func (c *RoomCache) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
 	return c.inner.GetRoomTimesByIDs(ctx, ids)
+}
+
+// SetPreviewMessage bypasses the cache and delegates to the source — a write,
+// not a read this cache fronts.
+//
+//nolint:gocritic // hugeParam: pvw's by-value shape is the RoomSource contract this passes through unchanged.
+func (c *RoomCache) SetPreviewMessage(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) error {
+	return c.inner.SetPreviewMessage(ctx, roomID, pvw, forMsgID, asOf)
+}
+
+// UpdatePreviewBody bypasses the cache and delegates to the source — a write,
+// not a read this cache fronts.
+//
+//nolint:gocritic // hugeParam: pvw's by-value shape is the RoomSource contract this passes through unchanged.
+func (c *RoomCache) UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, asOf int64) error {
+	return c.inner.UpdatePreviewBody(ctx, roomID, pvw, asOf)
+}
+
+// ClearPreview bypasses the cache and delegates to the source — a write, not a
+// read this cache fronts.
+func (c *RoomCache) ClearPreview(ctx context.Context, roomID string, asOf int64) error {
+	return c.inner.ClearPreview(ctx, roomID, asOf)
 }
 
 // previewEntry is the cached resolved room preview. found=false is never stored

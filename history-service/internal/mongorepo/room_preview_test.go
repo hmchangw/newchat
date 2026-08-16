@@ -1,0 +1,344 @@
+//go:build integration
+
+package mongorepo
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/preview"
+)
+
+// previewCipher is real AES-GCM keyed by sha256(keyID), so a wrong epoch fails
+// authentication as a production per-epoch DEK would, rather than silently decrypting.
+type previewCipher struct{}
+
+func (previewCipher) aead(keyID string) (cipher.AEAD, error) {
+	sum := sha256.Sum256([]byte(keyID))
+	block, err := aes.NewCipher(sum[:])
+	if err != nil {
+		return nil, fmt.Errorf("create AES cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("create GCM: %w", err)
+	}
+	return gcm, nil
+}
+
+func (c previewCipher) Encrypt(_ context.Context, keyID string, fields atrest.EncryptedFields) ([]byte, atrest.EncMeta, error) { //nolint:gocritic // hugeParam: matches the atrest.Cipher interface
+	gcm, err := c.aead(keyID)
+	if err != nil {
+		return nil, atrest.EncMeta{}, fmt.Errorf("create preview AEAD: %w", err)
+	}
+	plaintext, err := json.Marshal(fields)
+	if err != nil {
+		return nil, atrest.EncMeta{}, fmt.Errorf("marshal preview fields: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, atrest.EncMeta{}, fmt.Errorf("generate preview nonce: %w", err)
+	}
+	return gcm.Seal(nil, nonce, plaintext, nil), atrest.EncMeta{Nonce: nonce}, nil
+}
+
+func (c previewCipher) Decrypt(_ context.Context, keyID string, payload []byte, meta atrest.EncMeta) (atrest.EncryptedFields, error) { //nolint:gocritic // hugeParam: matches the atrest.Cipher interface
+	gcm, err := c.aead(keyID)
+	if err != nil {
+		return atrest.EncryptedFields{}, fmt.Errorf("create preview AEAD: %w", err)
+	}
+	plaintext, err := gcm.Open(nil, meta.Nonce, payload, nil)
+	if err != nil {
+		return atrest.EncryptedFields{}, atrest.ErrAuthFailed
+	}
+	var out atrest.EncryptedFields
+	if err := json.Unmarshal(plaintext, &out); err != nil {
+		return atrest.EncryptedFields{}, atrest.ErrPayloadMalformed
+	}
+	return out, nil
+}
+
+func (previewCipher) EnsureDEK(context.Context, string) error { return nil }
+
+var previewKey = preview.Key{SiteID: "site-A", Epoch: 2}
+
+// samplePreview carries one of every enriched field, so a round-trip proves both halves.
+func samplePreview() model.PreviewMessage {
+	return model.PreviewMessage{
+		MessageID: "m-preview",
+		Sender:    model.Participant{UserID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"},
+		Content:   "hello",
+		CreatedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		Attachments: []cassandra.Attachment{
+			{ID: "f1", Title: "a.png", Type: "file"},
+		},
+		Mentions:  []model.Participant{{UserID: "u2", Account: "bob", ChineseName: "小明"}},
+		VisibleTo: "u1",
+	}
+}
+
+// seedRoomWithPreview seals a preview for forMsgID against lastMsgID; equal means current.
+func seedRoomWithPreview(t *testing.T, repo *RoomRepo, roomID, forMsgID, lastMsgID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	sealed, err := preview.Seal(ctx, previewCipher{}, previewKey, forMsgID, samplePreview())
+	require.NoError(t, err)
+
+	_, err = repo.rooms.Raw().InsertOne(ctx, bson.M{
+		"_id":               roomID,
+		"siteId":            previewKey.SiteID,
+		"type":              model.RoomTypeChannel,
+		"createdAt":         time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		"lastMsgAt":         time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		"lastMsgId":         lastMsgID,
+		"previewMeta":       sealed.Meta,
+		"previewCiphertext": sealed.Ciphertext,
+		"previewNonce":      sealed.Nonce,
+		"previewKeyEpoch":   sealed.KeyEpoch,
+		"previewForMsgId":   sealed.ForMsgID,
+		"previewAsOf":       int64(1),
+	})
+	require.NoError(t, err)
+}
+
+// A current, same-epoch, decryptable preview round-trips with every field intact.
+func TestRoomRepo_GetRoomTimesByIDs_ServesCurrentStoredPreview(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	seedRoomWithPreview(t, repo, "r-current", "m-preview", "m-preview")
+
+	got, err := repo.GetRoomTimesByIDs(context.Background(), []string{"r-current"})
+	require.NoError(t, err)
+	require.Contains(t, got, "r-current")
+
+	pvw := got["r-current"].Preview
+	require.NotNil(t, pvw, "a current preview on the configured epoch must be served")
+	assert.Equal(t, "m-preview", pvw.MessageID)
+	assert.Equal(t, "hello", pvw.Content)
+	assert.Equal(t, "愛麗絲", pvw.Sender.ChineseName)
+	assert.Equal(t, "u1", pvw.VisibleTo)
+	require.Len(t, pvw.Attachments, 1)
+	assert.Equal(t, "a.png", pvw.Attachments[0].Title)
+	require.Len(t, pvw.Mentions, 1)
+	assert.Equal(t, "bob", pvw.Mentions[0].Account)
+}
+
+// The freshness key is an identity check against lastMsgId: a newer message this preview
+// does not describe means it is withheld, not served as current.
+func TestRoomRepo_GetRoomTimesByIDs_StalePreviewIsWithheld(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	seedRoomWithPreview(t, repo, "r-stale", "m-old", "m-new")
+
+	got, err := repo.GetRoomTimesByIDs(context.Background(), []string{"r-stale"})
+	require.NoError(t, err)
+	require.Contains(t, got, "r-stale", "the row itself still comes back")
+	assert.Nil(t, got["r-stale"].Preview, "previewForMsgId != lastMsgId must withhold the preview")
+}
+
+// A preview on a retired epoch reads as absent, so no reader ever needs a retired DEK.
+func TestRoomRepo_GetRoomTimesByIDs_EpochMismatchIsWithheld(t *testing.T) {
+	db := setupMongo(t)
+	// Seed on the configured epoch, then read through a repo on a later one.
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	seedRoomWithPreview(t, repo, "r-epoch", "m-preview", "m-preview")
+
+	rotated := NewRoomRepo(db, previewCipher{}, preview.Key{SiteID: previewKey.SiteID, Epoch: previewKey.Epoch + 1})
+	got, err := rotated.GetRoomTimesByIDs(context.Background(), []string{"r-epoch"})
+	require.NoError(t, err)
+	require.Contains(t, got, "r-epoch")
+	assert.Nil(t, got["r-epoch"].Preview, "a preview on a retired epoch must be withheld")
+}
+
+// A ciphertext that fails authentication drops the preview, not the whole read.
+func TestRoomRepo_GetRoomTimesByIDs_UndecryptablePreviewIsWithheld(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	seedRoomWithPreview(t, repo, "r-corrupt", "m-preview", "m-preview")
+
+	_, err := repo.rooms.Raw().UpdateByID(context.Background(), "r-corrupt",
+		bson.M{"$set": bson.M{"previewCiphertext": []byte("not a valid ciphertext")}})
+	require.NoError(t, err)
+
+	got, err := repo.GetRoomTimesByIDs(context.Background(), []string{"r-corrupt"})
+	require.NoError(t, err, "an undecryptable preview must not fail the batch")
+	require.Contains(t, got, "r-corrupt")
+	assert.Nil(t, got["r-corrupt"].Preview)
+}
+
+// With no cipher the preview fields are unreadable, so the row returns times and no preview.
+func TestRoomRepo_GetRoomTimesByIDs_NoCipherWithholdsPreview(t *testing.T) {
+	db := setupMongo(t)
+	seeder := NewRoomRepo(db, previewCipher{}, previewKey)
+	seedRoomWithPreview(t, seeder, "r-nocipher", "m-preview", "m-preview")
+
+	repo := NewRoomRepo(db, nil, previewKey)
+	got, err := repo.GetRoomTimesByIDs(context.Background(), []string{"r-nocipher"})
+	require.NoError(t, err)
+	require.Contains(t, got, "r-nocipher")
+	assert.Nil(t, got["r-nocipher"].Preview)
+}
+
+// seedBareRoom stores a room with no preview — the pre-rollout shape.
+func seedBareRoom(t *testing.T, repo *RoomRepo, roomID, lastMsgID string) {
+	t.Helper()
+	_, err := repo.rooms.Raw().InsertOne(context.Background(), bson.M{
+		"_id":       roomID,
+		"siteId":    previewKey.SiteID,
+		"type":      model.RoomTypeChannel,
+		"createdAt": time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		"lastMsgAt": time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		"lastMsgId": lastMsgID,
+	})
+	require.NoError(t, err)
+}
+
+// The warm-back round-trip: a room with no preview gets one, and the next read serves it.
+func TestRoomRepo_SetPreviewMessage_WarmsBackAndIsThenServed(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedBareRoom(t, repo, "r-warm", "m-newest")
+
+	before, err := repo.GetRoomTimesByIDs(ctx, []string{"r-warm"})
+	require.NoError(t, err)
+	require.Nil(t, before["r-warm"].Preview, "precondition: the room starts with no stored preview")
+
+	// forMsgID is the newest message the walk observed, which is lastMsgId here.
+	require.NoError(t, repo.SetPreviewMessage(ctx, "r-warm", samplePreview(), "m-newest", 100))
+
+	after, err := repo.GetRoomTimesByIDs(ctx, []string{"r-warm"})
+	require.NoError(t, err)
+	pvw := after["r-warm"].Preview
+	require.NotNil(t, pvw, "the warmed-back preview must read as current")
+	assert.Equal(t, "m-preview", pvw.MessageID)
+	assert.Equal(t, "hello", pvw.Content)
+	assert.Equal(t, "愛麗絲", pvw.Sender.ChineseName)
+}
+
+// Stamped with a non-newest id: stored, but the identity guard withholds it.
+func TestRoomRepo_SetPreviewMessage_StaleKeyIsStoredButWithheld(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedBareRoom(t, repo, "r-raced", "m-newest")
+
+	require.NoError(t, repo.SetPreviewMessage(ctx, "r-raced", samplePreview(), "m-older", 100))
+
+	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-raced"})
+	require.NoError(t, err)
+	assert.Nil(t, got["r-raced"].Preview, "previewForMsgId != lastMsgId must withhold")
+}
+
+// The watermark is the only coordination between the writers: a late older write loses.
+func TestRoomRepo_SetPreviewMessage_OlderAsOfDoesNotRegress(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedBareRoom(t, repo, "r-guard", "m-newest")
+
+	newer := samplePreview()
+	newer.MessageID = "m-newer"
+	newer.Content = "newer body"
+	require.NoError(t, repo.SetPreviewMessage(ctx, "r-guard", newer, "m-newest", 500))
+
+	older := samplePreview()
+	older.Content = "older body"
+	require.NoError(t, repo.SetPreviewMessage(ctx, "r-guard", older, "m-newest", 100),
+		"a losing guarded write is a no-op, not an error")
+
+	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-guard"})
+	require.NoError(t, err)
+	require.NotNil(t, got["r-guard"].Preview)
+	assert.Equal(t, "newer body", got["r-guard"].Preview.Content, "the newer write must survive")
+}
+
+// A mutation reseals the body only: an edit does not move lastMsgId.
+func TestRoomRepo_UpdatePreviewBody_ReplacesBodyKeepingFreshnessKey(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedRoomWithPreview(t, repo, "r-edit", "m-preview", "m-preview")
+
+	edited := samplePreview()
+	edited.Content = "edited content"
+	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-edit", edited, 200))
+
+	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-edit"})
+	require.NoError(t, err)
+	pvw := got["r-edit"].Preview
+	require.NotNil(t, pvw, "the preview must still read as current after a body-only update")
+	assert.Equal(t, "edited content", pvw.Content)
+
+	var raw bson.M
+	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-edit"}).Decode(&raw))
+	assert.Equal(t, "m-preview", raw["previewForMsgId"], "a mutation must not restamp the freshness key")
+}
+
+// An insert is the sole creator: a doc minted by a mutation would carry no key.
+func TestRoomRepo_UpdatePreviewBody_RefusesToCreate(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedBareRoom(t, repo, "r-nopreview", "m-newest")
+
+	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-nopreview", samplePreview(), 200))
+
+	var raw bson.M
+	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-nopreview"}).Decode(&raw))
+	assert.NotContains(t, raw, "previewCiphertext", "a mutation must not create a preview")
+	assert.NotContains(t, raw, "previewForMsgId")
+}
+
+// Clearing removes every field together: a nonce describing a gone ciphertext is the risk.
+func TestRoomRepo_ClearPreview_RemovesEveryPreviewField(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedRoomWithPreview(t, repo, "r-cleared", "m-preview", "m-preview")
+
+	require.NoError(t, repo.ClearPreview(ctx, "r-cleared", 200))
+
+	var raw bson.M
+	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-cleared"}).Decode(&raw))
+	for _, f := range []string{"previewMeta", "previewCiphertext", "previewNonce", "previewKeyEpoch", "previewForMsgId"} {
+		assert.NotContains(t, raw, f, "clearing must remove every preview field")
+	}
+	assert.Equal(t, int64(200), raw["previewAsOf"], "the watermark must advance so an older redelivery cannot resurrect it")
+
+	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-cleared"})
+	require.NoError(t, err)
+	assert.Nil(t, got["r-cleared"].Preview)
+}
+
+// Previews off means no write on any path: a nil cipher cannot seal a body.
+func TestRoomRepo_PreviewWrites_NoCipherIsANoOp(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, nil, previewKey)
+	ctx := context.Background()
+	seedBareRoom(t, repo, "r-off", "m-newest")
+
+	require.NoError(t, repo.SetPreviewMessage(ctx, "r-off", samplePreview(), "m-newest", 100))
+	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-off", samplePreview(), 100))
+	require.NoError(t, repo.ClearPreview(ctx, "r-off", 100))
+
+	var raw bson.M
+	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-off"}).Decode(&raw))
+	assert.NotContains(t, raw, "previewCiphertext")
+	assert.NotContains(t, raw, "previewAsOf", "a disabled writer must not even advance the watermark")
+}

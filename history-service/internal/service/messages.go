@@ -33,10 +33,8 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 	c.WithLogValues("account", account, "room_id", roomID)
 	now := time.Now().UTC()
 
-	// The access check and room-times resolve are independent Mongo reads; run
-	// them concurrently so the worst-case latency is one RTT, not two. Access
-	// errors take precedence so a "not subscribed" 403 isn't masked by a
-	// transient room-times error.
+	// Two independent Mongo reads, run concurrently for one RTT. Access errors take
+	// precedence so a "not subscribed" 403 isn't masked by a transient room-times error.
 	accessSince, lastMsgAt, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
@@ -164,10 +162,8 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 	}, nil
 }
 
-// LoadSurroundingMessages centers a window on exactly one of req.MessageID (a
-// central message spliced into the middle) or req.Timestamp (a UTC-millis pivot,
-// no central message). It validates the exactly-one-of contract, clamps the
-// limit, and dispatches to the mode-specific handler.
+// LoadSurroundingMessages centers a window on exactly one of req.MessageID (spliced into
+// the middle) or req.Timestamp (a UTC-millis pivot, no central message).
 func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req models.LoadSurroundingMessagesRequest) (*models.LoadSurroundingMessagesResponse, error) {
 	account := c.Param("account")
 	roomID := c.Param("roomID")
@@ -196,9 +192,7 @@ func (s *HistoryService) LoadSurroundingMessages(c *natsrouter.Context, req mode
 	return s.loadSurroundingByMessageID(c, account, roomID, req, limit)
 }
 
-// loadSurroundingByMessageID centers the window on req.MessageID: the central
-// message is looked up, spliced into the middle of the result, and the before /
-// after reads use strict bounds around its created_at.
+// loadSurroundingByMessageID splices req.MessageID into the middle, with strict bounds.
 func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, account, roomID string, req models.LoadSurroundingMessagesRequest, limit int) (*models.LoadSurroundingMessagesResponse, error) {
 	accessSince, err := s.getAccessSince(c, account, roomID)
 	if err != nil {
@@ -257,24 +251,15 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 	return s.assembleSurrounding(c, roomID, accessSince, centralMsg, beforeFn, afterFn)
 }
 
-// loadSurroundingByTimestamp centers the window on a UTC-millis pivot. There is
-// no central message, so limit splits cleanly (before gets the larger half). The
-// before read must be inclusive of a message sitting exactly on the pivot
-// (created_at <= pivot); since created_at and the pivot are both millisecond-
-// precision, `created_at < pivot+1ms` is exactly `created_at <= pivot`, so the
-// existing strict reads are reused with the pivot shifted up one millisecond.
-// The after read stays strict (created_at > pivot), so an exact-match message
-// anchors the read group without being duplicated below.
+// loadSurroundingByTimestamp centers on a UTC-millis pivot. The before read is inclusive
+// (via +1ms) and the after read strict, so a message on the pivot is never duplicated.
 func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, account, roomID string, req models.LoadSurroundingMessagesRequest, limit int) (*models.LoadSurroundingMessagesResponse, error) {
 	if *req.Timestamp <= 0 {
 		return nil, errcode.BadRequest("timestamp must be positive")
 	}
 	pivot := time.UnixMilli(*req.Timestamp).UTC()
-	// Inclusive upper bound via +1ms — equivalent to created_at <= pivot at
-	// millisecond precision. When pivot is the last ms of its bucket window
-	// (the only case where pivot+1ms crosses into the next bucket), pivot is
-	// also that bucket's maximum time, so "all of the bucket" still equals
-	// "created_at <= pivot": the shift stays exact at bucket boundaries.
+	// Exact at bucket boundaries too: when pivot is the last ms of its window it is also
+	// that bucket's maximum, so "all of the bucket" still equals created_at <= pivot.
 	beforeUpper := pivot.Add(time.Millisecond)
 
 	now := time.Now().UTC()
@@ -296,8 +281,7 @@ func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, accou
 	if err != nil {
 		return nil, err
 	}
-	// afterCount == 0 only when limit == 1; skip the read rather than let
-	// parsePageRequest(0) balloon the page size to defaultCassPageSize.
+	// afterCount == 0 only when limit == 1; skip it, or parsePageRequest(0) balloons.
 	var afterPageReq cassrepo.PageRequest
 	if afterCount > 0 {
 		afterPageReq, err = parsePageRequest("", afterCount)
@@ -322,9 +306,7 @@ func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, accou
 	return s.assembleSurrounding(c, roomID, accessSince, nil, beforeFn, afterFn)
 }
 
-// assembleSurrounding runs the before/after page reads plus the read-floor read
-// in parallel, then assembles them ASC: the reversed DESC before-page, the
-// optional central message (nil in timestamp-pivot mode), then the after-page.
+// assembleSurrounding reads before/after/read-floor in parallel and assembles them ASC.
 func (s *HistoryService) assembleSurrounding(
 	c *natsrouter.Context,
 	roomID string,
@@ -395,8 +377,7 @@ func millisPtr(t *time.Time) *int64 {
 	return &ms
 }
 
-// readFloorInto returns an errgroup task that best-effort loads the room read-floor
-// into *dst. A read error logs and leaves *dst nil — messages still return.
+// readFloorInto is an errgroup task loading the read-floor into *dst; an error leaves nil.
 func (s *HistoryService) readFloorInto(ctx context.Context, roomID string, dst **time.Time) func() error {
 	return func() error {
 		t, err := s.rooms.GetMinUserLastSeenAt(ctx, roomID)
@@ -409,8 +390,7 @@ func (s *HistoryService) readFloorInto(ctx context.Context, roomID string, dst *
 	}
 }
 
-// minUserLastSeenMillis reads the room read-floor as UTC millis; best-effort — a read error logs and yields nil.
-// Serial counterpart to readFloorInto for paths with no page read to parallelise against.
+// minUserLastSeenMillis is readFloorInto's serial counterpart; best-effort, nil on error.
 func (s *HistoryService) minUserLastSeenMillis(ctx context.Context, roomID string) *int64 {
 	var t *time.Time
 	_ = s.readFloorInto(ctx, roomID, &t)()
@@ -519,10 +499,8 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 
 	editedAt := time.Now().UTC()
 	if err := s.msgWriter.UpdateMessageContent(c, msg, req.NewMsg, editedAt); err != nil {
-		// A TOCTOU between findMessage and the CAS edit (or a concurrent
-		// hard-delete / soft-delete) surfaces as ErrMessageNotFound from
-		// the repo. Map it to 4xx so it doesn't pollute 5xx telemetry —
-		// it's a benign race, not a server fault.
+		// A TOCTOU between findMessage and the CAS edit is a benign race, not a server
+		// fault — map it to 4xx so it doesn't pollute 5xx telemetry.
 		if errors.Is(err, cassrepo.ErrMessageNotFound) {
 			return nil, errcode.NotFound("message not found")
 		}
@@ -554,8 +532,12 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 		Timestamp: editedAtMs,
 	}
 
-	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, editedAt)
+	// Resolve, publish, then persist: the Cassandra edit has committed, so a stalled store
+	// must not leave the mutation invisible to every canonical consumer.
+	pvw := s.previewAfterMutation(c, msg, roomID)
+	canonicalEvt.PreviewMessage = pvw.EventPreview()
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUpdated(siteID), &canonicalEvt)
+	s.persistMutatedPreview(c, roomID, &pvw, editedAt)
 
 	return &models.EditMessageResponse{
 		MessageID: req.MessageID,
@@ -583,10 +565,8 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 		return nil, errcode.Forbidden("only the sender can delete")
 	}
 
-	// Already-deleted short-circuit: echo the current updated_at as the DeletedAt.
-	// Prevents tcount double-decrement on caller retry and avoids duplicate events.
-	// countAndSetParentTcount already wrote the correct tcount on the first delete,
-	// so no re-publish is needed — the tcount is durable in Cassandra.
+	// Echo updated_at rather than re-deleting: prevents tcount double-decrement on retry
+	// and duplicate events. The first delete's tcount is already durable in Cassandra.
 	if msg.Deleted {
 		var deletedAtMs int64
 		if msg.UpdatedAt != nil {
@@ -633,8 +613,11 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 		NewThreadLastMsgAt: newThreadLastMsgAt,
 	}
 
-	canonicalEvt.PreviewMessage = s.previewAfterMutation(c, msg, roomID, actualDeletedAt)
+	// Resolve, publish, then persist — see EditMessage.
+	pvw := s.previewAfterMutation(c, msg, roomID)
+	canonicalEvt.PreviewMessage = pvw.EventPreview()
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
+	s.persistMutatedPreview(c, roomID, &pvw, actualDeletedAt)
 
 	return &models.DeleteMessageResponse{
 		MessageID: req.MessageID,
@@ -642,20 +625,39 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 	}, nil
 }
 
-// previewAfterMutation resolves the room's current last-eligible preview (same walk as
-// subscription.list) to carry on an edit/delete fan-out. Hidden thread replies (TShow==false)
-// never appear in the room timeline, so they're skipped — clients tell those apart via the
-// event's threadParentMessageId and drive the room preview themselves. TShow==true replies do
-// appear in the room, so they still get a preview. nil for a hidden thread reply, when the room
-// has no eligible message, or on a read error.
-func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string, at time.Time) *models.PreviewMessage {
+// previewAfterMutation resolves the room's last-eligible preview after an edit or delete,
+// skipping hidden thread replies. It does not persist: the caller publishes first.
+func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models.Message, roomID string) previewWalk {
 	if msg.ThreadParentID != "" && !msg.TShow {
-		return nil
+		return previewWalk{State: previewSkipped}
 	}
-	if preview, ok := s.roomLastPreviewMessage(c, roomID, nil, at); ok {
-		return &preview
+	return s.roomLastPreviewMessage(c, roomID, nil, time.Now().UTC())
+}
+
+// persistMutatedPreview writes what the mutation walk resolved — best-effort and bounded.
+// A failed write leaves the previous preview reading as current (#226).
+func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID string, w *previewWalk, at time.Time) {
+	asOf := at.UnixMilli()
+
+	switch w.State {
+	case previewFound:
+		// Body only: a mutation does not move lastMsgId, so previewForMsgId stays correct.
+		ctx, cancel := context.WithTimeout(c, warmBackTimeout)
+		defer cancel()
+		if err := s.rooms.UpdatePreviewBody(ctx, roomID, w.Preview, asOf); err != nil {
+			slog.WarnContext(c, "update mutated room preview failed", "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(c), "error", err)
+		}
+	case previewEmpty:
+		// The one outcome authorising a destructive write: completed, and nothing left.
+		ctx, cancel := context.WithTimeout(c, warmBackTimeout)
+		defer cancel()
+		if err := s.rooms.ClearPreview(ctx, roomID, asOf); err != nil {
+			slog.WarnContext(c, "clear room preview failed", "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(c), "error", err)
+		}
+	default: // previewDegraded / previewSkipped — a survivor may still exist, touch nothing
 	}
-	return nil
 }
 
 // publishCanonicalBestEffort publishes a canonical event; failures are logged and swallowed (Cassandra is source of truth).

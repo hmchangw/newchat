@@ -15,15 +15,13 @@ import (
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
 
-// ReactMessage toggles one (emoji, user_account) reaction on a message.
-// Any subscribed member may react; adding to a soft-deleted message is
-// rejected, removing an existing reaction is always allowed. After the
-// Cassandra write succeeds the canonical MessageEvent is published
-// best-effort for downstream fan-out.
+// ReactMessage toggles one (emoji, user_account) reaction. Adding to a soft-deleted
+// message is rejected; removing is always allowed. Publishes the canonical event after.
 func (s *HistoryService) ReactMessage(c *natsrouter.Context, siteID string, req models.ReactMessageRequest) (*models.ReactMessageResponse, error) {
 	account := c.Param("account")
 	roomID := c.Param("roomID")
@@ -39,8 +37,7 @@ func (s *HistoryService) ReactMessage(c *natsrouter.Context, siteID string, req 
 	if err != nil {
 		return nil, errcode.BadRequest("invalid reaction shortcode")
 	}
-	// From here on, use the canonicalized shortcode (NFC-canonical) for any
-	// storage key or wire echo; req.Shortcode is raw input.
+	// Use the canonicalized shortcode from here on; req.Shortcode is raw input.
 
 	if _, err := s.getAccessSince(c, account, roomID); err != nil {
 		return nil, err
@@ -120,9 +117,7 @@ func (s *HistoryService) ReactMessage(c *natsrouter.Context, siteID string, req 
 	}, nil
 }
 
-// toWireMessage builds the full wire Message for the reaction notification's
-// canonical event (#459 — was a 6-field skeleton). updatedAt is the reaction
-// toggle time.
+// toWireMessage builds the full wire Message for a reaction event; updatedAt is toggle time.
 func toWireMessage(msg *cassandra.Message, updatedAt *time.Time) pkgmodel.Message {
 	var mentions []pkgmodel.Participant
 	if msg.Mentions != nil {
@@ -161,23 +156,17 @@ func toWireMessage(msg *cassandra.Message, updatedAt *time.Time) pkgmodel.Messag
 	}
 }
 
-// toWireParticipant maps the persisted (Cassandra) participant fields onto the
-// wire Participant. ChineseName is carried by the Cassandra company_name field;
-// SiteID/DisplayName have no Cassandra source.
+// toWireParticipant maps Cassandra fields to the wire Participant; ChineseName is company_name.
 func toWireParticipant(p *cassandra.Participant) pkgmodel.Participant {
 	return pkgmodel.Participant{UserID: p.ID, Account: p.Account, EngName: p.EngName, ChineseName: p.CompanyName}
 }
 
-// botAwareDisplayName composes a render-ready name; for a bot account it prefers the
-// app's display name, degrading to the composed name on lookup miss/error.
+// botAwareDisplayName composes a render-ready name, preferring a bot's app name. The
+// lookup is built only when wired — a method value derefs its receiver where written.
 func (s *HistoryService) botAwareDisplayName(ctx context.Context, engName, chineseName, account string) string {
-	name := displayfmt.CombineWithFallback(engName, chineseName, account)
-	if pkgmodel.IsBot(account) {
-		if appName, err := s.apps.AppNameByAccount(ctx, account); err != nil {
-			slog.WarnContext(ctx, "app name lookup failed, using composed name", "account", account, "error", err)
-		} else if appName != "" {
-			name = appName
-		}
+	var lookup preview.AppNameLookup
+	if s.apps != nil {
+		lookup = s.apps.AppNameByAccount
 	}
-	return name
+	return preview.BotAwareDisplayName(ctx, lookup, engName, chineseName, account)
 }

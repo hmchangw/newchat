@@ -67,6 +67,18 @@ type RoomRepository interface {
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
 	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	// SetPreviewMessage seals and stores a walk-resolved preview, guarded by asOf
+	// so it fills a room the eager writer never reached but never regresses a
+	// newer write. forMsgID is the freshness key; see previewWalk.NewestObservedID.
+	// Best-effort: the caller logs and carries on.
+	SetPreviewMessage(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error
+	// UpdatePreviewBody reseals the body after an edit/delete, leaving the
+	// freshness key alone (a mutation does not move lastMsgId) and refusing to
+	// create — an insert is the sole creator.
+	UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, asOf int64) error
+	// ClearPreview removes the stored preview under the same guard, for a
+	// mutation that leaves the room with no eligible message.
+	ClearPreview(ctx context.Context, roomID string, asOf int64) error
 }
 
 // EventPublisher publishes events to NATS with a Nats-Msg-Id dedup header.
@@ -103,7 +115,7 @@ type AppStore interface {
 	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
 }
 
-// PreviewCache fronts the per-room preview resolve on the rooms.get read path.
+// PreviewCache fronts the per-room preview resolve on the rooms.get lazy fallback.
 // Positives are cached; not-found and errors pass through. *readcache.PreviewCache
 // satisfies it.
 type PreviewCache interface {
@@ -113,8 +125,9 @@ type PreviewCache interface {
 // Option configures optional HistoryService dependencies.
 type Option func(*HistoryService)
 
-// WithPreviewCache installs a room-preview cache used by RoomsGet. Without it,
-// previews resolve directly (uncached).
+// WithPreviewCache installs a room-preview cache fronting RoomsGet's lazy fallback.
+// Without it, the fallback resolves directly (uncached). Rooms served from a stored
+// preview never reach the cache — they never reach the walk it fronts.
 func WithPreviewCache(pc PreviewCache) Option {
 	return func(s *HistoryService) { s.previewCache = pc }
 }

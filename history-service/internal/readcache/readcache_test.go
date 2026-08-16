@@ -160,6 +160,22 @@ type fakeRoomSource struct {
 	timesByIDsIDs   []string
 	timesByIDs      map[string]mongorepo.RoomTimes
 	timesByIDsErr   error
+
+	setPreviewCalls   atomic.Int32
+	setPreviewArgs    previewWrite
+	setPreviewErr     error
+	updateBodyCalls   atomic.Int32
+	updateBodyArgs    previewWrite
+	clearPreviewCalls atomic.Int32
+	clearPreviewArgs  previewWrite
+}
+
+// previewWrite captures the identifying arguments of a preview write so a test can
+// assert the cache forwarded them unchanged.
+type previewWrite struct {
+	roomID   string
+	forMsgID string
+	asOf     int64
 }
 
 func (f *fakeRoomSource) GetRoomTimes(_ context.Context, _ string) (time.Time, time.Time, error) {
@@ -183,6 +199,55 @@ func (f *fakeRoomSource) GetRoomTimesByIDs(_ context.Context, ids []string) (map
 		return nil, f.timesByIDsErr
 	}
 	return f.timesByIDs, nil
+}
+
+//nolint:gocritic // hugeParam: the by-value shape is the RoomSource contract under test.
+func (f *fakeRoomSource) SetPreviewMessage(_ context.Context, roomID string, _ pkgmodel.PreviewMessage, forMsgID string, asOf int64) error {
+	f.setPreviewCalls.Add(1)
+	f.setPreviewArgs = previewWrite{roomID: roomID, forMsgID: forMsgID, asOf: asOf}
+	return f.setPreviewErr
+}
+
+//nolint:gocritic // hugeParam: the by-value shape is the RoomSource contract under test.
+func (f *fakeRoomSource) UpdatePreviewBody(_ context.Context, roomID string, _ pkgmodel.PreviewMessage, asOf int64) error {
+	f.updateBodyCalls.Add(1)
+	f.updateBodyArgs = previewWrite{roomID: roomID, asOf: asOf}
+	return nil
+}
+
+func (f *fakeRoomSource) ClearPreview(_ context.Context, roomID string, asOf int64) error {
+	f.clearPreviewCalls.Add(1)
+	f.clearPreviewArgs = previewWrite{roomID: roomID, asOf: asOf}
+	return nil
+}
+
+// The three preview writes are pass-throughs, not cached reads: a stale write would
+// be a correctness bug, where a stale read is only a stale row.
+func TestRoomCache_PreviewWrites_BypassTheCache(t *testing.T) {
+	src := &fakeRoomSource{}
+	c, err := NewRoomCache(src, 8, time.Minute)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	require.NoError(t, c.SetPreviewMessage(ctx, "r1", pkgmodel.PreviewMessage{}, "m-9", 100))
+	require.NoError(t, c.SetPreviewMessage(ctx, "r1", pkgmodel.PreviewMessage{}, "m-9", 100))
+	require.NoError(t, c.UpdatePreviewBody(ctx, "r1", pkgmodel.PreviewMessage{}, 200))
+	require.NoError(t, c.ClearPreview(ctx, "r1", 300))
+
+	assert.Equal(t, int32(2), src.setPreviewCalls.Load(), "an identical repeat write must still reach the source")
+	assert.Equal(t, previewWrite{roomID: "r1", forMsgID: "m-9", asOf: 100}, src.setPreviewArgs)
+	assert.Equal(t, int32(1), src.updateBodyCalls.Load())
+	assert.Equal(t, previewWrite{roomID: "r1", asOf: 200}, src.updateBodyArgs)
+	assert.Equal(t, int32(1), src.clearPreviewCalls.Load())
+	assert.Equal(t, previewWrite{roomID: "r1", asOf: 300}, src.clearPreviewArgs)
+}
+
+func TestRoomCache_SetPreviewMessage_PropagatesError(t *testing.T) {
+	src := &fakeRoomSource{setPreviewErr: errors.New("mongo down")}
+	c, err := NewRoomCache(src, 8, time.Minute)
+	require.NoError(t, err)
+
+	assert.ErrorContains(t, c.SetPreviewMessage(context.Background(), "r1", pkgmodel.PreviewMessage{}, "m-1", 1), "mongo down")
 }
 
 func TestRoomCache_CachesRoomTimes(t *testing.T) {
@@ -312,7 +377,36 @@ func TestSubscriptionCache_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
 	assert.Equal(t, int32(1), src.calls.Load(), "shared load should have populated the cache")
 }
 
-func TestPreviewCache_CachesPositiveNotNegative(t *testing.T) {
+func TestSubscriptionCache_CallerCancelReturnsCtxErr(t *testing.T) {
+	ts := time.Now().UTC()
+	src := &fakeSubSource{
+		sharedSince: &ts,
+		subscribed:  true,
+		block:       make(chan struct{}),
+		started:     make(chan struct{}),
+	}
+	defer close(src.block)
+	c, err := NewSubscriptionCache(src, 100, time.Minute)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, e := c.GetHistorySharedSince(ctx, "alice", "r1")
+		done <- e
+	}()
+	<-src.started
+	cancel()
+
+	select {
+	case e := <-done:
+		require.ErrorIs(t, e, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller did not return on its own ctx cancel within 2s")
+	}
+}
+
+func TestPreviewCache_Get_CachesPositiveNotNegative(t *testing.T) {
 	pc, err := NewPreviewCache(100, time.Minute)
 	require.NoError(t, err)
 	ctx := context.Background()
@@ -342,7 +436,7 @@ func TestPreviewCache_CachesPositiveNotNegative(t *testing.T) {
 	assert.Equal(t, 2, negCalls, "negative result is not cached")
 }
 
-func TestPreviewCache_ErrorNotCachedAndPropagated(t *testing.T) {
+func TestPreviewCache_Get_ErrorNotCachedAndPropagated(t *testing.T) {
 	pc, err := NewPreviewCache(100, time.Minute)
 	require.NoError(t, err)
 	ctx := context.Background()
@@ -359,7 +453,7 @@ func TestPreviewCache_ErrorNotCachedAndPropagated(t *testing.T) {
 	assert.Equal(t, 2, calls, "errors are not cached")
 }
 
-func TestPreviewCache_SingleflightDedupsConcurrentMisses(t *testing.T) {
+func TestPreviewCache_Get_SingleflightDedupsConcurrentMisses(t *testing.T) {
 	pc, err := NewPreviewCache(100, time.Minute)
 	require.NoError(t, err)
 	ctx := context.Background()
@@ -386,33 +480,4 @@ func TestPreviewCache_SingleflightDedupsConcurrentMisses(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "concurrent misses for the same key should load once")
-}
-
-func TestSubscriptionCache_CallerCancelReturnsCtxErr(t *testing.T) {
-	ts := time.Now().UTC()
-	src := &fakeSubSource{
-		sharedSince: &ts,
-		subscribed:  true,
-		block:       make(chan struct{}),
-		started:     make(chan struct{}),
-	}
-	defer close(src.block)
-	c, err := NewSubscriptionCache(src, 100, time.Minute)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, _, e := c.GetHistorySharedSince(ctx, "alice", "r1")
-		done <- e
-	}()
-	<-src.started
-	cancel()
-
-	select {
-	case e := <-done:
-		require.ErrorIs(t, e, context.Canceled)
-	case <-time.After(2 * time.Second):
-		t.Fatal("caller did not return on its own ctx cancel within 2s")
-	}
 }
