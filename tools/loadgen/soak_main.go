@@ -828,8 +828,11 @@ func runSoakWorkload(
 	// and restarts the create cap from zero.
 	if recovered := ledger.ActiveOperations(); len(recovered) > 0 {
 		if inFlight := roomLanes.Rehydrate(recovered); inFlight > 0 {
+			// Counted for visibility only. An in-flight create whose room was
+			// made is already included in the created count below, and one
+			// whose room was not made occupies no allowance, so charging it
+			// here would double-spend the budget.
 			slog.Info("recovered in-flight soak room creates", "count", inFlight)
-			roomLanes.SpendCreateBudget(inFlight)
 		}
 	}
 	if created, countErr := store.CountCreatedRooms(ctx, cfg.Soak.RunID); countErr != nil {
