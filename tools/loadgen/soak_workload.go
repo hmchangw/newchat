@@ -21,6 +21,8 @@ type soakWorkloadActions struct {
 	RoomMutation   soakWorkloadAction
 	RoomRead       soakWorkloadAction
 	RoomCreate     soakWorkloadAction
+	ReadReceipt    soakWorkloadAction
+	Presence       soakWorkloadAction
 }
 
 type soakWorkloadConfig struct {
@@ -39,6 +41,8 @@ type soakWorkloadConfig struct {
 	RoomMutationRate   float64
 	RoomReadRate       float64
 	RoomCreateRate     float64
+	ReadReceiptRate    float64
+	PresenceRate       float64
 	MaxInFlight        int
 	StopOnActionError  bool
 }
@@ -391,6 +395,11 @@ func (w *soakWorkload) lanes() []soakLane {
 			name: soakFailureLaneRoomCreate, rate: w.cfg.RoomCreateRate,
 			action: w.actions.RoomCreate,
 		},
+		{
+			name: soakFailureLaneReadReceipt, rate: w.cfg.ReadReceiptRate,
+			action: w.actions.ReadReceipt,
+		},
+		{name: "presence", rate: w.cfg.PresenceRate, action: w.actions.Presence},
 	}
 }
 

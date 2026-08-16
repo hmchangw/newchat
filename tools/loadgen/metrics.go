@@ -60,6 +60,9 @@ type Metrics struct {
 	SoakRoomPoolDegraded          prometheus.Gauge
 	SoakRoomCreateBudgetRemaining prometheus.Gauge
 	SoakRoomStateSources          *prometheus.CounterVec
+	SoakPresenceSignals           *prometheus.CounterVec
+	SoakPresenceChecks            *prometheus.CounterVec
+	SoakPresenceConnections       *prometheus.GaugeVec
 
 	FailureOperations            *prometheus.CounterVec
 	FailureObservations          *prometheus.CounterVec
@@ -306,6 +309,27 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"source", "result"},
 	)
+	m.SoakPresenceSignals = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_presence_signals_total",
+			Help: "Presence signals published by bounded kind. A publish is unacknowledged and is never evidence the server saw it.",
+		},
+		[]string{"signal"},
+	)
+	m.SoakPresenceChecks = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_presence_checks_total",
+			Help: "Presence query comparisons by bounded result.",
+		},
+		[]string{"result"},
+	)
+	m.SoakPresenceConnections = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "loadgen_soak_presence_connections",
+			Help: "Virtual presence connections by the status the lane last asked for.",
+		},
+		[]string{"status"},
+	)
 	m.FailureOperations = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_operations_total",
@@ -491,6 +515,7 @@ func NewMetrics() *Metrics {
 		m.SoakDispatched, m.SoakSchedulerUnderrun, m.SoakLaneSaturation, m.SoakGlobalSaturation,
 		m.SoakRoomCandidates, m.SoakRoomQuarantineProbes, m.SoakRoomPoolExhausted,
 		m.SoakRoomPoolDegraded, m.SoakRoomCreateBudgetRemaining, m.SoakRoomStateSources,
+		m.SoakPresenceSignals, m.SoakPresenceChecks, m.SoakPresenceConnections,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
 		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,

@@ -41,6 +41,9 @@ const (
 	soakRPCRoomsInfo        soakRPCAction = "rooms_info"
 	soakRPCSubscriptionList soakRPCAction = "subscription_list"
 	soakRPCRoomStateRead    soakRPCAction = "room_state_read"
+	soakRPCMessageRead      soakRPCAction = "message_read"
+	soakRPCReadReceiptList  soakRPCAction = "read_receipt_list"
+	soakRPCPresenceQuery    soakRPCAction = "presence_query"
 )
 
 func validSoakRPCAction(action soakRPCAction) bool {
@@ -51,7 +54,8 @@ func validSoakRPCAction(action soakRPCAction) bool {
 		soakRPCReadBack, soakRPCMarkRead, soakRPCScroll,
 		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename,
 		soakRPCMuteToggle, soakRPCRoomCreate, soakRPCMemberList,
-		soakRPCRoomsInfo, soakRPCSubscriptionList, soakRPCRoomStateRead:
+		soakRPCRoomsInfo, soakRPCSubscriptionList, soakRPCRoomStateRead,
+		soakRPCMessageRead, soakRPCReadReceiptList, soakRPCPresenceQuery:
 		return true
 	default:
 		return false

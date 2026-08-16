@@ -24,6 +24,7 @@ const (
 	soakFailureLaneMemberMutation         = "member_mutation"
 	soakFailureLaneRoomMutation           = "room_mutation"
 	soakFailureLaneRoomCreate             = "room_create"
+	soakFailureLaneReadReceipt            = "read_receipt"
 	soakFailureDefaultLedgerEpoch         = "v1"
 	soakFailureAttributeRoomID            = "room_id"
 	soakFailureAttributeAccount           = "account"

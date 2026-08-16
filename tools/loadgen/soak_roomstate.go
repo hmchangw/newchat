@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"slices"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -69,6 +70,16 @@ type soakMuteIntent struct {
 	TargetMuted bool
 }
 
+// soakReadIntent marks one subscription read. The baseline is the last
+// server-written lastSeenAt this pool confirmed, so the expectation compares two
+// values the server itself stamped and never depends on loadgen's clock.
+type soakReadIntent struct {
+	RoomID   string
+	Account  string
+	Baseline time.Time
+	Known    bool
+}
+
 // soakRoomProbe re-reads state the pool stopped trusting. A mutation that ended
 // unverified leaves the real state unknown, and acting on a guess would either
 // re-add an existing member or toggle a mute twice.
@@ -81,6 +92,11 @@ type soakRoomProbe struct {
 type soakMuteState struct {
 	muted bool
 	known bool
+}
+
+type soakReadState struct {
+	lastSeenAt time.Time
+	known      bool
 }
 
 type soakRoomState struct {
@@ -102,6 +118,10 @@ type soakRoomState struct {
 	mute         map[string]soakMuteState
 	muteCursor   int
 	muteLeases   map[string]struct{}
+
+	read       map[string]soakReadState
+	readCursor int
+	readLeases map[string]struct{}
 
 	memberLease bool
 	renameLease bool
@@ -152,6 +172,7 @@ func newSoakRoomStatePool(
 			confirmedName: room.Name, nameKnown: true,
 			states: make(map[string]soakMemberCandidateState),
 			mute:   make(map[string]soakMuteState), muteLeases: make(map[string]struct{}),
+			read: make(map[string]soakReadState), readLeases: make(map[string]struct{}),
 		}
 		order = append(order, room.ID)
 	}
@@ -177,6 +198,11 @@ func newSoakRoomStatePool(
 		// mute toggle can never race the membership cycle for one account.
 		state.muteAccounts = append(state.muteAccounts, subscription.User.Account)
 		state.mute[subscription.User.Account] = soakMuteState{muted: subscription.Muted, known: true}
+		readState := soakReadState{}
+		if subscription.LastSeenAt != nil && !subscription.LastSeenAt.IsZero() {
+			readState = soakReadState{lastSeenAt: subscription.LastSeenAt.UTC(), known: true}
+		}
+		state.read[subscription.User.Account] = readState
 	}
 
 	pool := &soakRoomStatePool{
@@ -396,6 +422,56 @@ func (p *soakRoomStatePool) SettleMute(intent soakMuteIntent, result failureResu
 		p.quarantineLocked(soakRoomProbe{RoomID: room.id, Account: intent.Account, Mute: true}, room)
 	}
 	p.refreshGaugesLocked()
+}
+
+// NextReadIntent picks a subscription to mark read. Mark-read only moves
+// lastSeenAt forward, so unlike mute it needs no known baseline to be safe to
+// issue — an unknown baseline simply weakens the expectation to "a timestamp
+// appeared" for that one operation.
+func (p *soakRoomStatePool) NextReadIntent() (soakReadIntent, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for roomOffset := range p.rooms {
+		room := p.rooms[(p.memberCursor+roomOffset)%len(p.rooms)]
+		for accountOffset := range room.muteAccounts {
+			account := room.muteAccounts[(room.readCursor+accountOffset)%len(room.muteAccounts)]
+			if _, leased := room.readLeases[account]; leased {
+				continue
+			}
+			room.readLeases[account] = struct{}{}
+			room.readCursor = (room.readCursor + accountOffset + 1) % len(room.muteAccounts)
+			state := room.read[account]
+			return soakReadIntent{
+				RoomID: room.id, Account: account,
+				Baseline: state.lastSeenAt, Known: state.known,
+			}, true
+		}
+	}
+	p.countExhausted(soakRoomPoolReasonNoCandidate)
+	return soakReadIntent{}, false
+}
+
+// SettleRead records the timestamp the observer confirmed, which becomes the
+// baseline the next mark-read must strictly beat.
+func (p *soakRoomStatePool) SettleRead(intent soakReadIntent, result failureResult, observed time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	room, ok := p.byID[intent.RoomID]
+	if !ok {
+		return
+	}
+	delete(room.readLeases, intent.Account)
+	if result == failureResultGood && !observed.IsZero() {
+		room.read[intent.Account] = soakReadState{lastSeenAt: observed.UTC(), known: true}
+		return
+	}
+	if result != failureResultBad && result != failureResultNotSent {
+		// The write may or may not have landed, so the stored baseline can no
+		// longer be trusted as the value the next operation must beat.
+		state := room.read[intent.Account]
+		state.known = false
+		room.read[intent.Account] = state
+	}
 }
 
 func (p *soakRoomStatePool) NextProbe() (soakRoomProbe, bool) {

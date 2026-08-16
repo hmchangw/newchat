@@ -570,6 +570,95 @@ func TestValidateSoakConfig_AllowsDisabledRoomLanes(t *testing.T) {
 	cfg.RoomMutationRate = 0
 	cfg.RoomCreateRate = 0
 	cfg.RoomReadRate = 0
+	cfg.ReadReceiptRate = 0
+
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}
+
+func TestSoakConfig_PresenceAndReadReceiptDefaults(t *testing.T) {
+	cfg := validSoakConfig(t)
+
+	assert.InDelta(t, 5.0, cfg.ReadReceiptRate, 0.0001)
+	assert.InDelta(t, 30.0, cfg.PresenceRate, 0.0001)
+	assert.Equal(t, 2000, cfg.PresenceConnections)
+	assert.InDelta(t, 0.1, cfg.PresenceQueryShare, 0.0001)
+	assert.Equal(t, 50, cfg.PresenceQueryBatch)
+	assert.Equal(t, 5*time.Second, cfg.PresenceSettle)
+	assert.Equal(t, 5*time.Minute, cfg.PresenceTTL)
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}
+
+func TestValidateSoakConfig_PresenceAndReadReceiptBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*soakConfig)
+		want   string
+	}{
+		{
+			name:   "negative read receipt rate",
+			mutate: func(cfg *soakConfig) { cfg.ReadReceiptRate = -1 },
+			want:   "SOAK_READ_RECEIPT_RATE",
+		},
+		{
+			name:   "negative presence rate",
+			mutate: func(cfg *soakConfig) { cfg.PresenceRate = -1 },
+			want:   "SOAK_PRESENCE_RATE",
+		},
+		{
+			name:   "zero presence connections",
+			mutate: func(cfg *soakConfig) { cfg.PresenceConnections = 0 },
+			want:   "SOAK_PRESENCE_CONNECTIONS",
+		},
+		{
+			name:   "query share above one",
+			mutate: func(cfg *soakConfig) { cfg.PresenceQueryShare = 1.5 },
+			want:   "SOAK_PRESENCE_QUERY_SHARE",
+		},
+		{
+			name:   "query batch too large",
+			mutate: func(cfg *soakConfig) { cfg.PresenceQueryBatch = 5000 },
+			want:   "SOAK_PRESENCE_QUERY_BATCH",
+		},
+		{
+			name:   "zero settle",
+			mutate: func(cfg *soakConfig) { cfg.PresenceSettle = 0 },
+			want:   "SOAK_PRESENCE_SETTLE",
+		},
+		{
+			name:   "ttl below settle",
+			mutate: func(cfg *soakConfig) { cfg.PresenceTTL = time.Second },
+			want:   "SOAK_PRESENCE_TTL",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			tt.mutate(&cfg)
+
+			err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestValidateSoakConfig_ReadReceiptCountsTowardReconciliationCapacity(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.ReadReceiptRate = 40
+
+	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_ROOM_READ_RATE",
+		"mark-read is reconciled like any other mutation, so it must fit the read budget")
+}
+
+func TestValidateSoakConfig_PresenceBoundsAreSkippedWhenDisabled(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.PresenceRate = 0
+	cfg.PresenceConnections = 0
 
 	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
 }

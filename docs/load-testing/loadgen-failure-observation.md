@@ -108,6 +108,13 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_ROOM_CREATE_SIZE` | `5` | Members a created room starts with |
 | `SOAK_ROOM_RECONCILE_READ_SHARE` | `0.5` | Maximum room-read share reconciliation may claim |
 | `SOAK_MEMBER_QUARANTINE_MAX` | `10000` | Bounded parked room/account pairs awaiting a re-probe |
+| `SOAK_READ_RECEIPT_RATE` | `5` | Mark-read operations per second |
+| `SOAK_PRESENCE_RATE` | `30` | Presence signals per second |
+| `SOAK_PRESENCE_CONNECTIONS` | `2000` | Simulated presence connections held online |
+| `SOAK_PRESENCE_QUERY_SHARE` | `0.1` | Share of presence slots spent verifying instead of signalling |
+| `SOAK_PRESENCE_QUERY_BATCH` | `50` | Accounts per batch presence query |
+| `SOAK_PRESENCE_SETTLE` | `5s` | Grace before a published signal is compared |
+| `SOAK_PRESENCE_TTL` | `5m` | Connection TTL past which an absence is legal |
 
 Helm exposes the same opt-in as
 `recipientObserver.enabled|queue|connections`. Queue and connection bounds are
@@ -127,10 +134,13 @@ and no extra phase.
 | `member_mutation` | `member_add`, `member_remove` | `admission` + `room_state` |
 | `room_mutation` | `room_rename`, `mute_toggle` | `admission` + `room_state` |
 | `room_create` | `room_create` | `admission` + `room_state` |
+| `read_receipt` | `message_read` | `admission` + `room_state` |
 | `room_read` | member list, rooms-info batch, subscription list | none |
+| `presence` | hello / ping / activity / bye, batch query | none |
 
 `room_read` is read-only. A read has no expected side effect to reconcile, so
 it emits latency, error, and result metrics and creates no ledger operation.
+`presence` is a special case covered below.
 
 ### The room_state observer
 
@@ -202,6 +212,47 @@ pinned catalog once at startup — adding rooms mid-run would shift the traffic
 profile that a fault window is compared against, and a new room's encryption
 key is provisioned asynchronously.
 
+### Read receipts
+
+`messageRead` is a synchronous room-service write to `subscriptions.lastSeenAt`,
+so it is ledger-tracked like any other mutation. The cursor only ever moves
+forward, which makes it verifiable without trusting loadgen's clock: the lane
+records the previously confirmed cursor as the operation's baseline and the
+observer compares it against the new value. Both timestamps are written by the
+server, so clock skew between loadgen and room-service cannot produce a
+verdict.
+
+The first mark-read on a subscription has no baseline yet. Any cursor present
+at reconciliation settles it `good`; from then on the baseline is known and a
+cursor that failed to advance is real loss. A cursor that moved *backwards* is
+a `mismatch`, not a lost write — the monotonic guarantee was violated.
+
+The lane shares the room-read reconciliation budget, so its rate is included in
+the startup capacity check and in the chart's equivalent guard.
+
+### Presence
+
+Presence is deliberately outside the evidence ledger. Its signals — hello,
+ping, activity, bye — are core NATS fire-and-forget publishes: they are
+buffered client-side during an outage and flushed on reconnect, so a successful
+publish proves nothing about delivery and a failed one proves nothing about
+loss. Recording them as ledger operations would manufacture verdicts from
+non-evidence.
+
+What *is* evidence is the batch query. The lane keeps its own view of the
+connections it announced and periodically asks presence-service for the same
+set, comparing the answer. Two windows are excluded from comparison because a
+disagreement there is legal rather than a fault:
+
+- **Settle** (`SOAK_PRESENCE_SETTLE`) — a just-published signal has not
+  necessarily been applied yet.
+- **TTL** (`SOAK_PRESENCE_TTL`) — past the connection TTL, presence-service is
+  entitled to have expired the connection on its own.
+
+Outcomes land in `loadgen_soak_presence_checks_total{result}`; the announced
+population is reported as `loadgen_soak_presence_connections`. Accounts and
+connection IDs stay out of labels.
+
 ### Ledger epoch
 
 The run ID owns the seeded topology; the epoch owns the evidence journal. The
@@ -234,6 +285,9 @@ and every mutation eventually expires unverified.
 | `loadgen_soak_room_pool_degraded` | Reversible candidate-pool degradation flag |
 | `loadgen_soak_room_create_budget_remaining` | Rooms the create lane may still add |
 | `loadgen_soak_room_state_source_total{source,result}` | Room-state observer outcomes per source |
+| `loadgen_soak_presence_signals_total{signal}` | Presence signals published, by kind |
+| `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
+| `loadgen_soak_presence_connections` | Connections the lane currently claims online |
 | `loadgen_failure_abandoned_journals` | Retained journals from earlier epochs |
 
 The existing `loadgen_failure_operations_total`,

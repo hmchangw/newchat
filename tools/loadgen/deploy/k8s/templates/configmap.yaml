@@ -38,6 +38,13 @@ data:
   SOAK_ROOM_CREATE_RATE: {{ .Values.soak.roomCreateRate | quote }}
   SOAK_ROOM_CREATE_BUDGET: {{ .Values.soak.roomCreateBudget | quote }}
   SOAK_ROOM_CREATE_SIZE: {{ .Values.soak.roomCreateSize | quote }}
+  SOAK_READ_RECEIPT_RATE: {{ .Values.soak.readReceiptRate | quote }}
+  SOAK_PRESENCE_RATE: {{ .Values.soak.presenceRate | quote }}
+  SOAK_PRESENCE_CONNECTIONS: {{ .Values.soak.presenceConnections | quote }}
+  SOAK_PRESENCE_QUERY_SHARE: {{ .Values.soak.presenceQueryShare | quote }}
+  SOAK_PRESENCE_QUERY_BATCH: {{ .Values.soak.presenceQueryBatch | quote }}
+  SOAK_PRESENCE_SETTLE: {{ .Values.soak.presenceSettle | quote }}
+  SOAK_PRESENCE_TTL: {{ .Values.soak.presenceTTL | quote }}
   SOAK_MEMBER_QUARANTINE_MAX: {{ .Values.soak.memberQuarantineMax | quote }}
   SOAK_MAX_USERS: {{ .Values.soak.maxUsers | quote }}
   SOAK_ACTIVE_USERS: {{ .Values.soak.activeUsers | quote }}

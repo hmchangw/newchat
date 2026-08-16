@@ -42,6 +42,7 @@ var failureObserverRegistry = map[failureObserver]failureObserverDefinition{
 		Effects: []failureEffect{
 			failureEffectMemberState, failureEffectRoomName,
 			failureEffectSubscriptionMute, failureEffectRoomCreated,
+			failureEffectSubscriptionRead,
 		},
 		FinalReconciliation: true,
 	},

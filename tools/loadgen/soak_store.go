@@ -774,6 +774,7 @@ type soakRoomStateStore interface {
 	RoomName(ctx context.Context, roomID string) (string, bool, error)
 	IsRoomMember(ctx context.Context, roomID, account string) (bool, error)
 	SubscriptionMuted(ctx context.Context, roomID, account string) (muted bool, found bool, err error)
+	SubscriptionLastSeen(ctx context.Context, roomID, account string) (lastSeenAt time.Time, found bool, err error)
 	AppendOwnedRooms(ctx context.Context, runID string, roomIDs []string) error
 }
 
@@ -863,6 +864,42 @@ func (s *mongoSoakStore) SubscriptionMuted(
 		return false, false, fmt.Errorf("read soak mute state for %q: %w", roomID, err)
 	}
 	return document.Muted, true, nil
+}
+
+// SubscriptionLastSeen reads the authoritative read cursor. mark-read only ever
+// moves it forward, so comparing two server-written values proves the write
+// landed without trusting loadgen's clock.
+func (s *mongoSoakStore) SubscriptionLastSeen(
+	ctx context.Context,
+	roomID, account string,
+) (time.Time, bool, error) {
+	if roomID == "" || account == "" {
+		return time.Time{}, false, fmt.Errorf("read soak read cursor requires a room ID and account")
+	}
+	var document struct {
+		LastSeenAt *time.Time `bson:"lastSeenAt"`
+	}
+	err := s.primary("subscriptions").FindOne(
+		ctx,
+		bson.D{
+			{Key: "roomId", Value: roomID},
+			{Key: "u.account", Value: account},
+		},
+		options.FindOne().SetProjection(bson.D{
+			{Key: "_id", Value: 0},
+			{Key: "lastSeenAt", Value: 1},
+		}),
+	).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("read soak read cursor for %q: %w", roomID, err)
+	}
+	if document.LastSeenAt == nil {
+		return time.Time{}, true, nil
+	}
+	return document.LastSeenAt.UTC(), true, nil
 }
 
 // AppendOwnedRooms takes ownership of rooms created during the run. Teardown

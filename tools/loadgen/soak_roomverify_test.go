@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"strconv"
 	"testing"
 	"time"
 
@@ -21,6 +22,9 @@ type soakRoomStateStoreStub struct {
 	muted      bool
 	mutedFound bool
 	mutedErr   error
+	lastSeen   time.Time
+	seenFound  bool
+	seenErr    error
 	appended   []string
 	appendErr  error
 }
@@ -37,6 +41,12 @@ func (s *soakRoomStateStoreStub) SubscriptionMuted(
 	context.Context, string, string,
 ) (bool, bool, error) {
 	return s.muted, s.mutedFound, s.mutedErr
+}
+
+func (s *soakRoomStateStoreStub) SubscriptionLastSeen(
+	context.Context, string, string,
+) (time.Time, bool, error) {
+	return s.lastSeen, s.seenFound, s.seenErr
 }
 
 func (s *soakRoomStateStoreStub) AppendOwnedRooms(
@@ -427,4 +437,123 @@ func TestFlipSoakRoomStatePresence_LeavesNonPresenceVerdicts(t *testing.T) {
 	assert.Equal(t, soakRoomStateMatched, flipSoakRoomStatePresence(soakRoomStateAbsent))
 	assert.Equal(t, soakRoomStateUnknown, flipSoakRoomStatePresence(soakRoomStateUnknown))
 	assert.Equal(t, soakRoomStateMismatch, flipSoakRoomStatePresence(soakRoomStateMismatch))
+}
+
+func soakReadOperation(baseline time.Time, hasBaseline bool) *failureOperation {
+	attributes := map[string]string{
+		soakFailureAttributeTargetAccount: "user-b0",
+		soakFailureAttributeRequester:     "user-b0",
+	}
+	if hasBaseline {
+		attributes[soakFailureAttributeReadBaseline] =
+			strconv.FormatInt(baseline.UTC().UnixMilli(), 10)
+	}
+	return &failureOperation{
+		ID: "operation-5", OperationType: failureOperationMessageRead,
+		Targets:    map[string]string{"roomId": "room-1", "account": "user-b0"},
+		Attributes: attributes,
+	}
+}
+
+func TestSoakRoomStateVerifier_ReadCursorVerdicts(t *testing.T) {
+	baseline := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
+	for _, testCase := range []struct {
+		name       string
+		lastSeen   time.Time
+		found      bool
+		want       soakRoomStateResult
+		wantReason failureReason
+	}{
+		{
+			name: "cursor advanced", lastSeen: baseline.Add(time.Second), found: true,
+			want: soakRoomStateMatched, wantReason: failureReasonNone,
+		},
+		{
+			name: "cursor unchanged", lastSeen: baseline, found: true,
+			want: soakRoomStateAbsent, wantReason: failureReasonRoomStateMissing,
+		},
+		{
+			name: "cursor moved backwards", lastSeen: baseline.Add(-time.Minute), found: true,
+			want: soakRoomStateMismatch, wantReason: failureReasonReadStateRegressed,
+		},
+		{
+			name: "cursor never set", found: true,
+			want: soakRoomStateAbsent, wantReason: failureReasonRoomStateMissing,
+		},
+		{
+			name: "subscription vanished",
+			want: soakRoomStateMismatch, wantReason: failureReasonReadStateRegressed,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+			verifier, _ := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{
+				lastSeen: testCase.lastSeen, seenFound: testCase.found,
+			})
+
+			result, reason, err := verifier.Verify(
+				context.Background(), soakReadOperation(baseline, true),
+			)
+
+			require.NoError(t, err)
+			assert.Equal(t, testCase.want, result)
+			assert.Equal(t, testCase.wantReason, reason)
+		})
+	}
+}
+
+func TestSoakRoomStateVerifier_ReadCursorWithoutBaselineOnlyNeedsAValue(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+	verifier, _ := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{
+		lastSeen: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), seenFound: true,
+	})
+
+	result, _, err := verifier.Verify(
+		context.Background(), soakReadOperation(time.Time{}, false),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, soakRoomStateMatched, result,
+		"without a trusted baseline a stale cursor cannot be called a loss")
+}
+
+func TestSoakRoomStateVerifier_ReadCursorUsesTheRPCSubscriptionList(t *testing.T) {
+	baseline := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
+	advanced := baseline.Add(time.Minute)
+	transport := &soakRoomOpsTransport{
+		reply: []byte(`{"subscriptions":[{"roomId":"room-1","lastSeenAt":"` +
+			advanced.Format(time.RFC3339Nano) + `"}]}`),
+	}
+	verifier, metrics := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{
+		seenErr: errors.New("primary unavailable"),
+	})
+
+	result, _, err := verifier.Verify(context.Background(), soakReadOperation(baseline, true))
+
+	require.NoError(t, err)
+	assert.Equal(t, soakRoomStateMatched, result)
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.SoakRoomStateSources.WithLabelValues(soakRoomStateSourceRPC, "matched")))
+}
+
+func TestSoakRoomStateVerifier_ReadCursorRejectsAnUnreadableBaseline(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+	verifier, _ := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{})
+	operation := soakReadOperation(time.Time{}, false)
+	operation.Attributes[soakFailureAttributeReadBaseline] = "not-a-number"
+
+	_, _, err := verifier.Verify(context.Background(), operation)
+
+	require.Error(t, err)
+}
+
+func TestSoakRoomStateVerifier_ReadCursorRequiresAnAccount(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+	verifier, _ := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{})
+	operation := soakReadOperation(time.Time{}, false)
+	delete(operation.Attributes, soakFailureAttributeTargetAccount)
+
+	_, _, err := verifier.Verify(context.Background(), operation)
+
+	require.Error(t, err)
 }

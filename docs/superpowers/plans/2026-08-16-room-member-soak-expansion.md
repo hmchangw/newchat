@@ -2027,6 +2027,55 @@ git push -u origin claude/room-member-soak-expansion-6l6qq3
 
 ---
 
+### Task 13: Presence and read-receipt lanes (added mid-implementation)
+
+The first round excludes push notification, federation, and mass-WSS client
+scenarios only. Presence and read receipts fell into neither exclusion and were
+otherwise uncovered, so both were added to this same round.
+
+**Files:**
+- Add: `tools/loadgen/soak_presence.go`, `tools/loadgen/soak_presence_test.go`
+- Modify: `soak_roomstate.go`, `soak_roomops.go`, `soak_roomverify.go`, `soak_roommember.go`, `failure_ledger.go`, `soak_rpc.go`, `soak_wire.go`, `soak_store.go`, `soak_config.go`, `soak_workload.go`, `soak_main.go`, `metrics.go`
+- Modify: Helm values/schema/configmap/helpers, Compose, dashboard, both docs
+
+- [x] **Step 1: `read_receipt` lane, ledger-tracked**
+
+`messageRead` is a synchronous room-service write to `subscriptions.lastSeenAt`,
+so it reuses the whole room-lane machinery: `soakRPCMessageRead` with
+`soakRetryNever`, an intent journaled before send, and reconciliation through
+the existing `room_state` observer via a new `subscription_read` effect.
+
+The cursor is monotonic, which makes it verifiable without loadgen's clock: the
+lane journals the previously confirmed cursor as `read_baseline_unix_ms` and
+`classifySoakReadCursor` compares it against the value read back. Both
+timestamps are server-written. No baseline yet ⇒ any present cursor is `good`;
+a cursor that moved backwards is `mismatch`, not loss.
+
+The lane borrows room-read reconciliation slots, so `SOAK_READ_RECEIPT_RATE` is
+counted in `validateSoakRoomLaneConfig` and in the chart's equivalent guard.
+
+- [x] **Step 2: `presence` lane, deliberately outside the ledger**
+
+Presence signals are core NATS fire-and-forget publishes: buffered client-side
+during an outage and flushed on reconnect. A successful publish is not evidence
+of delivery and a failed one is not evidence of loss, so journaling them would
+manufacture verdicts. `soakPresenceLane` therefore keeps no ledger operations.
+
+Evidence comes from `queryBatch` alone. The lane holds its own view of the
+connections it announced and re-queries the same set, suppressing comparison in
+two windows where disagreement is legal: within `SOAK_PRESENCE_SETTLE` of a
+publish, and past `SOAK_PRESENCE_TTL` where presence-service may legitimately
+have expired the connection. `SOAK_PRESENCE_QUERY_SHARE` splits lane slots
+between signalling and verifying.
+
+- [x] **Step 3: Verification**
+
+Same gate list as Task 12, plus new unit tests for the presence lane, the read
+cursor pool state, the cursor classifier, and integration tests for the
+read-receipt lane and `SubscriptionLastSeen`.
+
+---
+
 ## Self-Review
 
 **Spec coverage**
@@ -2054,6 +2103,8 @@ git push -u origin claude/room-member-soak-expansion-6l6qq3
 | No high-cardinality labels | 2 (test asserts it) |
 | Helm room/member lane rates, no new deployment or phase | 11 |
 | New `runId` per upgrade / incompatible contract handling | 1 (epoch), 12 (docs) |
+| `read_receipt`: monotonic cursor verified without loadgen's clock | 13 |
+| `presence`: signal + batch-query lane, no ledger by design | 13 |
 
 **Placeholder scan:** every code step carries real code; every test step carries real test bodies or an explicit enumerated case list with exact names; every run step names the exact `make` target and the expected result.
 

@@ -144,6 +144,16 @@ room-service RPC with a MongoDB primary read as the authoritative arbiter.
 Mutations are never resent, and only a request proven not to have left the
 process is recorded as `not_sent`.
 
+`read_receipt` marks rooms as read. The subscription cursor only moves forward,
+so the lane journals the previously confirmed cursor as a baseline and the
+observer compares two server-written timestamps — loadgen's clock never enters
+the verdict. `presence` publishes hello/ping/activity/bye and periodically
+re-queries presence-service in batches. It is intentionally outside the ledger:
+core NATS publishes are buffered during an outage, so only the query answer is
+evidence, and comparison is suppressed while a signal is still settling
+(`SOAK_PRESENCE_SETTLE`) or old enough for the connection TTL
+(`SOAK_PRESENCE_TTL`) to have legitimately expired it.
+
 The evidence journal is identified by `SOAK_LEDGER_EPOCH` rather than the run
 ID alone: the run ID owns the seeded topology, the epoch owns the journal, so
 an image whose ledger contract changed starts a fresh journal without a

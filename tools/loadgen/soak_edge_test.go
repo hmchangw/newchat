@@ -173,7 +173,7 @@ func TestNewSoakWorkload_AppliesSafeDefaults(t *testing.T) {
 	assert.NotNil(t, workload.dispatch)
 	assert.NotNil(t, workload.now)
 	assert.NotNil(t, workload.onSaturation)
-	assert.Len(t, workload.lanes(), 10)
+	assert.Len(t, workload.lanes(), 12)
 }
 
 func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {

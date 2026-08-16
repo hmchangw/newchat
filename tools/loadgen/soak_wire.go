@@ -203,8 +203,9 @@ type soakRoomsInfoResponse struct {
 }
 
 type soakSubscriptionRow struct {
-	RoomID string `json:"roomId"`
-	Muted  bool   `json:"muted"`
+	RoomID     string     `json:"roomId"`
+	Muted      bool       `json:"muted"`
+	LastSeenAt *time.Time `json:"lastSeenAt,omitempty"`
 }
 
 type soakSubscriptionListResponse struct {

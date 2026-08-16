@@ -309,7 +309,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (lane, result) (rate(loadgen_failure_operations_total{scenario=\"message_soak\", lane=~\"member_mutation|room_mutation|room_create\"}[5m]))",
+          "expr": "sum by (lane, result) (rate(loadgen_failure_operations_total{scenario=\"message_soak\", lane=~\"member_mutation|room_mutation|room_create|read_receipt\"}[5m]))",
           "legendFormat": "{{lane}} {{result}}",
           "refId": "A"
         }
@@ -383,6 +383,33 @@
           "expr": "loadgen_failure_abandoned_journals",
           "legendFormat": "abandoned journals",
           "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Presence signals and verification",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 88
+      },
+      "targets": [
+        {
+          "expr": "sum by (signal) (rate(loadgen_soak_presence_signals_total[5m]))",
+          "legendFormat": "{{signal}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (result) (rate(loadgen_soak_presence_checks_total[5m]))",
+          "legendFormat": "check {{result}}",
+          "refId": "B"
+        },
+        {
+          "expr": "loadgen_soak_presence_connections",
+          "legendFormat": "connections online",
+          "refId": "C"
         }
       ]
     }

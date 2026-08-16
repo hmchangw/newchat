@@ -51,6 +51,13 @@ type soakConfig struct {
 	RoomCreateSize               int           `env:"ROOM_CREATE_SIZE"                 envDefault:"5"`
 	RoomReconcileReadShare       float64       `env:"ROOM_RECONCILE_READ_SHARE"        envDefault:"0.5"`
 	MemberQuarantineMax          int           `env:"MEMBER_QUARANTINE_MAX"            envDefault:"10000"`
+	ReadReceiptRate              float64       `env:"READ_RECEIPT_RATE"                envDefault:"5"`
+	PresenceRate                 float64       `env:"PRESENCE_RATE"                    envDefault:"30"`
+	PresenceConnections          int           `env:"PRESENCE_CONNECTIONS"             envDefault:"2000"`
+	PresenceQueryShare           float64       `env:"PRESENCE_QUERY_SHARE"             envDefault:"0.1"`
+	PresenceQueryBatch           int           `env:"PRESENCE_QUERY_BATCH"             envDefault:"50"`
+	PresenceSettle               time.Duration `env:"PRESENCE_SETTLE"                  envDefault:"5s"`
+	PresenceTTL                  time.Duration `env:"PRESENCE_TTL"                     envDefault:"5m"`
 	MaxUsers                     int           `env:"MAX_USERS"                        envDefault:"20000"`
 	ActiveUsers                  int           `env:"ACTIVE_USERS"                     envDefault:"2000"`
 	RoomCount                    int           `env:"ROOM_COUNT"                       envDefault:"10000"`
@@ -164,6 +171,8 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 		{"SOAK_ROOM_MUTATION_RATE", cfg.RoomMutationRate},
 		{"SOAK_ROOM_READ_RATE", cfg.RoomReadRate},
 		{"SOAK_ROOM_CREATE_RATE", cfg.RoomCreateRate},
+		{"SOAK_READ_RECEIPT_RATE", cfg.ReadReceiptRate},
+		{"SOAK_PRESENCE_RATE", cfg.PresenceRate},
 	} {
 		if err := validateNonNegativeRate(rate.name, rate.value); err != nil {
 			return err
@@ -300,12 +309,16 @@ func validateSoakRoomLaneConfig(cfg *soakConfig) error {
 	if cfg.MemberQuarantineMax <= 0 || cfg.MemberQuarantineMax > 1000000 {
 		return fmt.Errorf("SOAK_MEMBER_QUARANTINE_MAX must be between 1 and 1000000")
 	}
+	if err := validateSoakPresenceConfig(cfg); err != nil {
+		return err
+	}
 
 	// Room and member reconciliation borrows room-read slots, so the read lane
 	// must retire mutations at least as fast as they are produced. Below that
 	// the unresolved backlog grows without bound and every mutation eventually
 	// expires unverified — a run that can conclude nothing.
-	mutationRate := cfg.MemberMutationRate + cfg.RoomMutationRate + cfg.RoomCreateRate
+	mutationRate := cfg.MemberMutationRate + cfg.RoomMutationRate +
+		cfg.RoomCreateRate + cfg.ReadReceiptRate
 	if mutationRate <= 0 {
 		return nil
 	}
@@ -313,10 +326,39 @@ func validateSoakRoomLaneConfig(cfg *soakConfig) error {
 	if reconcileCapacity < mutationRate {
 		return fmt.Errorf(
 			"SOAK_ROOM_READ_RATE %.3f at SOAK_ROOM_RECONCILE_READ_SHARE %.3f reconciles %.3f "+
-				"operations/s, below the %.3f operations/s the room and member mutation lanes "+
-				"produce; raise SOAK_ROOM_READ_RATE or lower the mutation rates",
+				"operations/s, below the %.3f operations/s the room, member and read-receipt "+
+				"lanes produce; raise SOAK_ROOM_READ_RATE or lower the mutation rates",
 			cfg.RoomReadRate, cfg.RoomReconcileReadShare, reconcileCapacity, mutationRate,
 		)
+	}
+	return nil
+}
+
+// validateSoakPresenceConfig guards the two values that decide whether a
+// presence comparison is meaningful. The TTL must match the presence service's
+// CONNS_TTL: set it too high and an expectation the server was entitled to drop
+// gets reported as a mismatch.
+func validateSoakPresenceConfig(cfg *soakConfig) error {
+	if cfg.PresenceRate <= 0 {
+		return nil
+	}
+	if cfg.PresenceConnections <= 0 || cfg.PresenceConnections > maxBorrowedSoakUsers {
+		return fmt.Errorf(
+			"SOAK_PRESENCE_CONNECTIONS must be between 1 and %d", maxBorrowedSoakUsers,
+		)
+	}
+	if !isFinite(cfg.PresenceQueryShare) ||
+		cfg.PresenceQueryShare < 0 || cfg.PresenceQueryShare > 1 {
+		return fmt.Errorf("SOAK_PRESENCE_QUERY_SHARE must be between zero and one")
+	}
+	if cfg.PresenceQueryBatch <= 0 || cfg.PresenceQueryBatch > 500 {
+		return fmt.Errorf("SOAK_PRESENCE_QUERY_BATCH must be between 1 and 500")
+	}
+	if cfg.PresenceSettle <= 0 {
+		return fmt.Errorf("SOAK_PRESENCE_SETTLE must be greater than zero")
+	}
+	if cfg.PresenceTTL <= cfg.PresenceSettle {
+		return fmt.Errorf("SOAK_PRESENCE_TTL must be greater than SOAK_PRESENCE_SETTLE")
 	}
 	return nil
 }

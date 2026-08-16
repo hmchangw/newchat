@@ -788,6 +788,26 @@ func runSoakWorkload(
 	)
 	roomReconcileGate := newSoakShareGate(cfg.Soak.RoomReconcileReadShare)
 
+	presenceLane, err := newSoakPresenceLane(
+		soakPresenceConfig{
+			SiteID: cfg.SiteID, Connections: cfg.Soak.PresenceConnections,
+			QueryShare: cfg.Soak.PresenceQueryShare, Settle: cfg.Soak.PresenceSettle,
+			TTL: cfg.Soak.PresenceTTL, QueryBatchSize: cfg.Soak.PresenceQueryBatch,
+			RequestTimeout: soakRequestTimeout,
+		},
+		&topology,
+		newNATSSoakPresencePublisher(nc.NatsConn()),
+		rpc,
+		metrics,
+		recorders.read,
+		rand.New(rand.NewSource(seed+10)),
+		now,
+	)
+	if err != nil {
+		slog.Error("prepare soak presence lane", "error", err)
+		return 1
+	}
+
 	var verificationSequence atomic.Uint64
 	actions := soakWorkloadActions{
 		Send: func(actionCtx context.Context, _ bool) error {
@@ -915,6 +935,18 @@ func runSoakWorkload(
 		RoomCreate: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomCreate(actionCtx); err != nil {
 				slog.Error("run Cassandra soak room create", "error", err)
+			}
+			return nil
+		},
+		ReadReceipt: func(actionCtx context.Context, _ bool) error {
+			if err := roomLanes.ReadReceipt(actionCtx); err != nil {
+				slog.Error("run Cassandra soak read receipt", "error", err)
+			}
+			return nil
+		},
+		Presence: func(actionCtx context.Context, _ bool) error {
+			if err := presenceLane.Signal(actionCtx); err != nil {
+				slog.Error("run Cassandra soak presence signal", "error", err)
 			}
 			return nil
 		},
@@ -1103,6 +1135,8 @@ func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
 		soakRPCMemberList:       cfg.RoomReadRate * 0.5,
 		soakRPCRoomsInfo:        cfg.RoomReadRate * 0.3,
 		soakRPCSubscriptionList: cfg.RoomReadRate * 0.2,
+		soakRPCMessageRead:      cfg.ReadReceiptRate,
+		soakRPCPresenceQuery:    cfg.PresenceRate * cfg.PresenceQueryShare,
 	}
 }
 

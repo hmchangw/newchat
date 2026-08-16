@@ -43,14 +43,20 @@ func newSoakRoomMemberEvidenceHarness(t *testing.T) *soakRoomMemberEvidenceHarne
 	responder, err := nats.Connect(harness.natsURL)
 	require.NoError(t, err)
 	t.Cleanup(responder.Close)
-	subscription, err := responder.Subscribe(
-		subject.MemberAddPattern("site-a"),
-		func(msg *nats.Msg) {
+	// The wildcard forms are what a real room-service subscribes with; the
+	// `{account}` documentation patterns are literal tokens on the wire and
+	// would silently never match the requests the lanes send.
+	for _, pattern := range []string{
+		subject.MemberAddWildcard("site-a"),
+		subject.MemberRemoveWildcard("site-a"),
+		subject.MessageReadWildcard("site-a"),
+	} {
+		subscription, subscribeErr := responder.Subscribe(pattern, func(msg *nats.Msg) {
 			_ = msg.Respond([]byte(`{"status":"accepted"}`))
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+		})
+		require.NoError(t, subscribeErr)
+		t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	}
 	require.NoError(t, responder.Flush())
 
 	pool, err := newSoakRoomStatePool(
@@ -165,6 +171,90 @@ func TestFailureObservation_RoomMemberMissingStateAfterDeadline(t *testing.T) {
 	assert.Equal(t, uint64(1),
 		ledger.Snapshot().Results[failureResultMissingAfterDeadline],
 		"room-service accepted the add and the member never appeared, which is real loss")
+}
+
+func TestFailureObservation_ReadReceiptCursorMovesForward(t *testing.T) {
+	harness := newSoakRoomMemberEvidenceHarness(t)
+	ctx := context.Background()
+
+	ledger := harness.openLedger(t, "v1")
+	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
+	lanes, verifier := harness.lanes(t, ledger)
+	require.NoError(t, lanes.ReadReceipt(ctx))
+
+	operations := ledger.ActiveOperations()
+	require.Len(t, operations, 1)
+	operation := operations[0]
+	assert.Equal(t, soakFailureLaneReadReceipt, operation.Lane)
+	assert.Equal(t, failureObservationGood, operation.Observations[failureObserverAdmission],
+		"a real reply to the mark-read RPC means the subscription write ran")
+
+	// room-service writes the cursor with its own clock; the verifier only ever
+	// compares two server-written timestamps.
+	_, err := harness.store.db.Collection("subscriptions").InsertOne(ctx, bson.M{
+		"_id":        "sub-1",
+		"roomId":     operation.Targets["roomId"],
+		"u":          bson.M{"account": operation.Targets["account"]},
+		"lastSeenAt": harness.now.Add(time.Minute),
+	})
+	require.NoError(t, err)
+
+	harness.now = harness.now.Add(time.Second)
+	reconciled, err := lanes.Reconcile(ctx, verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultGood])
+}
+
+func TestFailureObservation_ReadReceiptCursorNeverAppears(t *testing.T) {
+	harness := newSoakRoomMemberEvidenceHarness(t)
+	ctx := context.Background()
+
+	ledger := harness.openLedger(t, "v1")
+	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
+	lanes, verifier := harness.lanes(t, ledger)
+	require.NoError(t, lanes.ReadReceipt(ctx))
+
+	// The subscription document is never written, so the accepted mark-read
+	// left no cursor behind.
+	harness.now = harness.now.Add(2 * time.Minute)
+
+	reconciled, err := lanes.Reconcile(ctx, verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Equal(t, uint64(1),
+		ledger.Snapshot().Results[failureResultMissingAfterDeadline],
+		"room-service accepted the mark-read and the cursor never moved, which is real loss")
+}
+
+func TestSoakStore_SubscriptionLastSeenReadsThePrimary(t *testing.T) {
+	ctx := context.Background()
+	store := &mongoSoakStore{db: testutil.MongoDB(t, "loadgen_soak_lastseen")}
+	written := time.Now().UTC().Truncate(time.Millisecond)
+
+	_, err := store.db.Collection("subscriptions").InsertMany(ctx, []any{
+		bson.M{
+			"_id": "sub-seen", "roomId": "room-1",
+			"u": bson.M{"account": "reader"}, "lastSeenAt": written,
+		},
+		bson.M{"_id": "sub-unseen", "roomId": "room-2", "u": bson.M{"account": "reader"}},
+	})
+	require.NoError(t, err)
+
+	lastSeen, found, err := store.SubscriptionLastSeen(ctx, "room-1", "reader")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.WithinDuration(t, written, lastSeen, time.Millisecond)
+
+	_, found, err = store.SubscriptionLastSeen(ctx, "room-2", "reader")
+	require.NoError(t, err)
+	assert.True(t, found, "a subscription with no cursor yet still exists")
+
+	_, found, err = store.SubscriptionLastSeen(ctx, "room-3", "reader")
+	require.NoError(t, err)
+	assert.False(t, found)
 }
 
 func TestFailureObservation_RoomMemberEpochStartsAFreshJournal(t *testing.T) {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -15,6 +16,7 @@ const (
 	soakFailureAttributeExpectedName   = "expected_name"
 	soakFailureAttributePreviousName   = "previous_name"
 	soakFailureAttributeExpectedMuted  = "expected_muted"
+	soakFailureAttributeReadBaseline   = "read_baseline_unix_ms"
 	soakFailureAttributeRequester      = "requester_account"
 )
 
@@ -89,6 +91,8 @@ func (v *soakRoomStateVerifier) Verify(
 		return v.verifyMute(ctx, operation, roomID)
 	case failureOperationRoomCreate:
 		return v.verifyCreated(ctx, roomID)
+	case failureOperationMessageRead:
+		return v.verifyRead(ctx, operation, roomID)
 	default:
 		return soakRoomStateUnknown, failureReasonNone,
 			fmt.Errorf("failure operation %q has no room state rule for type %q",
@@ -255,6 +259,99 @@ func (v *soakRoomStateVerifier) verifyCreated(
 
 	result := resolveSoakRoomState(rpc, authoritative)
 	return result, soakRoomStateReasonFor(result, failureReasonRoomStateMissing), nil
+}
+
+// verifyRead compares the read cursor against the baseline the pool captured
+// before the request. mark-read is monotonic, so "did not move" means the write
+// never landed and "moved backwards" is a state that cannot legally occur.
+func (v *soakRoomStateVerifier) verifyRead(
+	ctx context.Context,
+	operation *failureOperation,
+	roomID string,
+) (soakRoomStateResult, failureReason, error) {
+	account := operation.Attributes[soakFailureAttributeTargetAccount]
+	if account == "" {
+		return soakRoomStateUnknown, failureReasonNone,
+			fmt.Errorf("failure operation %q has no target account", operation.ID)
+	}
+	baseline, hasBaseline, parseErr := soakReadBaseline(operation)
+	if parseErr != nil {
+		return soakRoomStateUnknown, failureReasonNone, parseErr
+	}
+
+	rpc := soakRoomStateUnknown
+	if response, err := v.reader.SubscriptionsFor(ctx, account); err == nil {
+		rpc = soakRoomStateMismatch
+		for i := range response.Subscriptions {
+			if response.Subscriptions[i].RoomID != roomID {
+				continue
+			}
+			rpc = classifySoakReadCursor(
+				response.Subscriptions[i].LastSeenAt, baseline, hasBaseline,
+			)
+			break
+		}
+	}
+	v.countSource(soakRoomStateSourceRPC, rpc)
+
+	authoritative := soakRoomStateUnknown
+	lastSeenAt, found, err := v.store.SubscriptionLastSeen(ctx, roomID, account)
+	switch {
+	case err != nil:
+		v.setHealth(false, "read_cursor")
+	case !found:
+		authoritative = soakRoomStateMismatch
+		v.setHealth(true, "read_cursor")
+	default:
+		observed := &lastSeenAt
+		if lastSeenAt.IsZero() {
+			observed = nil
+		}
+		authoritative = classifySoakReadCursor(observed, baseline, hasBaseline)
+		v.setHealth(true, "read_cursor")
+	}
+	v.countSource(soakRoomStateSourceStore, authoritative)
+
+	result := resolveSoakRoomState(rpc, authoritative)
+	return result, soakRoomStateReasonFor(result, failureReasonReadStateRegressed), nil
+}
+
+// classifySoakReadCursor turns an observed cursor into a verdict. Without a
+// trusted baseline the only defensible expectation is that some timestamp
+// exists, so a stale value cannot be called a loss.
+func classifySoakReadCursor(
+	observed *time.Time,
+	baseline time.Time,
+	hasBaseline bool,
+) soakRoomStateResult {
+	if observed == nil || observed.IsZero() {
+		return soakRoomStateAbsent
+	}
+	if !hasBaseline {
+		return soakRoomStateMatched
+	}
+	switch {
+	case observed.After(baseline):
+		return soakRoomStateMatched
+	case observed.Before(baseline):
+		return soakRoomStateMismatch
+	default:
+		return soakRoomStateAbsent
+	}
+}
+
+func soakReadBaseline(operation *failureOperation) (time.Time, bool, error) {
+	raw := operation.Attributes[soakFailureAttributeReadBaseline]
+	if raw == "" {
+		return time.Time{}, false, nil
+	}
+	millis, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf(
+			"failure operation %q has an unreadable read baseline: %w", operation.ID, err,
+		)
+	}
+	return time.UnixMilli(millis).UTC(), true, nil
 }
 
 func (v *soakRoomStateVerifier) readerAccount(

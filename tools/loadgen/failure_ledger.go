@@ -58,6 +58,7 @@ func newFailureObserverContract(recipientEnabled bool) failureObserverContract {
 			soakFailureLaneMemberMutation: slices.Clone(roomObservers),
 			soakFailureLaneRoomMutation:   slices.Clone(roomObservers),
 			soakFailureLaneRoomCreate:     slices.Clone(roomObservers),
+			soakFailureLaneReadReceipt:    slices.Clone(roomObservers),
 		},
 		RecipientObserverEnabled: recipientEnabled,
 	}
@@ -72,12 +73,14 @@ const (
 	failureOperationRoomRename    failureOperationType = "room_rename"
 	failureOperationMuteToggle    failureOperationType = "mute_toggle"
 	failureOperationRoomCreate    failureOperationType = "room_create"
+	failureOperationMessageRead   failureOperationType = "message_read"
 )
 
 var failureOperationTypeRegistry = map[failureOperationType]struct{}{
 	failureOperationMessageCreate: {}, failureOperationMemberAdd: {},
 	failureOperationMemberRemove: {}, failureOperationRoomRename: {},
 	failureOperationMuteToggle: {}, failureOperationRoomCreate: {},
+	failureOperationMessageRead: {},
 }
 
 type failureOperationLifecycle string
@@ -97,6 +100,7 @@ const (
 	failureEffectRoomName         failureEffect = "room_name"
 	failureEffectSubscriptionMute failureEffect = "subscription_mute"
 	failureEffectRoomCreated      failureEffect = "room_created"
+	failureEffectSubscriptionRead failureEffect = "subscription_read"
 )
 
 type failureCardinality struct {
@@ -152,6 +156,13 @@ func roomMutationExpectedEffects(operationType failureOperationType) []failureEx
 	}
 }
 
+func readReceiptExpectedEffects() []failureExpectedEffect {
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: failureEffectSubscriptionRead, Observer: failureObserverRoomState, Required: true},
+	}
+}
+
 func roomCreateExpectedEffects() []failureExpectedEffect {
 	return []failureExpectedEffect{
 		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
@@ -186,6 +197,7 @@ const (
 	failureReasonRoomNameMismatch          failureReason = "room_name_mismatch"
 	failureReasonMuteStateMismatch         failureReason = "mute_state_mismatch"
 	failureReasonRoomStateMissing          failureReason = "room_state_missing"
+	failureReasonReadStateRegressed        failureReason = "read_state_regressed"
 )
 
 var failureReasonRegistry = map[failureReason]struct{}{
@@ -195,7 +207,7 @@ var failureReasonRegistry = map[failureReason]struct{}{
 	failureReasonRecipientIdentityMismatch: {}, failureReasonRecipientMissing: {},
 	failureReasonPublishLocalError: {}, failureReasonMemberStateMismatch: {},
 	failureReasonRoomNameMismatch: {}, failureReasonMuteStateMismatch: {},
-	failureReasonRoomStateMissing: {},
+	failureReasonRoomStateMissing: {}, failureReasonReadStateRegressed: {},
 }
 
 var errFailureObserverContractMismatch = errors.New("failure observer contract mismatch")
@@ -235,6 +247,7 @@ var failureOperationLaneRegistry = map[string]struct{}{
 	soakFailureLaneMemberMutation: {},
 	soakFailureLaneRoomMutation:   {},
 	soakFailureLaneRoomCreate:     {},
+	soakFailureLaneReadReceipt:    {},
 }
 
 type failureOperation struct {

@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -524,4 +525,98 @@ func TestSoakRoomStatePool_RejectedRenameKeepsTheKnownName(t *testing.T) {
 	name, known := pool.RoomName("room-1")
 	assert.True(t, known, "a rejected rename changed nothing")
 	assert.Equal(t, "soak-run-channel-000001", name)
+}
+
+func TestSoakRoomStatePool_ReadIntentCarriesTheServerBaseline(t *testing.T) {
+	topology := soakRoomStateTestTopology(3)
+	seen := time.Date(2026, 8, 16, 3, 0, 0, 0, time.UTC)
+	topology.Subscriptions[0].LastSeenAt = &seen
+	pool, err := newSoakRoomStatePool(topology, 8, NewMetrics(), rand.New(rand.NewSource(30)))
+	require.NoError(t, err)
+
+	intent, ok := pool.NextReadIntent()
+	require.True(t, ok)
+	if intent.Account == "user-a0" {
+		assert.True(t, intent.Known)
+		assert.Equal(t, seen, intent.Baseline)
+		return
+	}
+	assert.False(t, intent.Known, "a subscription that was never read has no baseline to beat")
+}
+
+func TestSoakRoomStatePool_ConfirmedReadBecomesTheNextBaseline(t *testing.T) {
+	pool, _ := newSoakRoomStateTestPool(t, 3, 8)
+	observed := time.Date(2026, 8, 16, 4, 0, 0, 0, time.UTC)
+
+	first, ok := pool.NextReadIntent()
+	require.True(t, ok)
+	pool.SettleRead(first, failureResultGood, observed)
+
+	next, found := soakNextReadIntentFor(t, pool, first.Account)
+	require.True(t, found)
+	assert.True(t, next.Known)
+	assert.Equal(t, observed, next.Baseline,
+		"the next mark-read must beat the timestamp the server just wrote")
+}
+
+func TestSoakRoomStatePool_UnresolvedReadDropsTheBaseline(t *testing.T) {
+	pool, _ := newSoakRoomStateTestPool(t, 3, 8)
+	observed := time.Date(2026, 8, 16, 4, 0, 0, 0, time.UTC)
+
+	first, ok := pool.NextReadIntent()
+	require.True(t, ok)
+	pool.SettleRead(first, failureResultGood, observed)
+	second, found := soakNextReadIntentFor(t, pool, first.Account)
+	require.True(t, found)
+	pool.SettleRead(second, failureResultUnverified, time.Time{})
+
+	third, found := soakNextReadIntentFor(t, pool, first.Account)
+	require.True(t, found)
+	assert.False(t, third.Known,
+		"an unresolved mark-read leaves the stored timestamp untrustworthy")
+}
+
+func TestSoakRoomStatePool_RejectedReadKeepsTheBaseline(t *testing.T) {
+	pool, _ := newSoakRoomStateTestPool(t, 3, 8)
+	observed := time.Date(2026, 8, 16, 4, 0, 0, 0, time.UTC)
+
+	first, ok := pool.NextReadIntent()
+	require.True(t, ok)
+	pool.SettleRead(first, failureResultGood, observed)
+	second, found := soakNextReadIntentFor(t, pool, first.Account)
+	require.True(t, found)
+	pool.SettleRead(second, failureResultBad, time.Time{})
+
+	third, found := soakNextReadIntentFor(t, pool, first.Account)
+	require.True(t, found)
+	assert.True(t, third.Known)
+	assert.Equal(t, observed, third.Baseline)
+}
+
+func TestSoakRoomStatePool_ReadLeaseBlocksConcurrentMarks(t *testing.T) {
+	pool, _ := newSoakRoomStateTestPool(t, 3, 8)
+
+	first, ok := pool.NextReadIntent()
+	require.True(t, ok)
+
+	second, ok := pool.NextReadIntent()
+	if ok {
+		assert.NotEqual(t, first.Account, second.Account,
+			"one subscription must never have two mark-reads in flight")
+	}
+}
+
+func soakNextReadIntentFor(t *testing.T, pool *soakRoomStatePool, account string) (soakReadIntent, bool) {
+	t.Helper()
+	for range 16 {
+		intent, ok := pool.NextReadIntent()
+		if !ok {
+			return soakReadIntent{}, false
+		}
+		if intent.Account == account {
+			return intent, true
+		}
+		pool.SettleRead(intent, failureResultGood, time.Time{})
+	}
+	return soakReadIntent{}, false
 }

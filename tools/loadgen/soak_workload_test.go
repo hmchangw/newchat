@@ -661,3 +661,32 @@ func TestSoakWorkload_RoomLanesReportPacingMetrics(t *testing.T) {
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.SoakIntended.WithLabelValues("room_read")))
 }
+
+func TestSoakWorkload_RunsPresenceAndReadReceiptLanes(t *testing.T) {
+	dispatcher := &recordingSoakDispatcher{}
+	var calls sync.Map
+	actions := soakWorkloadActions{
+		Send:        countSoakAction(&calls, "send"),
+		ReadReceipt: countSoakAction(&calls, "read_receipt"),
+		Presence:    countSoakAction(&calls, "presence"),
+	}
+	workload := newSoakWorkload(&soakWorkloadConfig{
+		RunID: "run-1", Duration: time.Hour,
+		SendRate: 1, ReadReceiptRate: 5, PresenceRate: 30,
+		MaxInFlight: 16,
+	}, seededLifecycleStore("run-1"), &actions, dispatcher.Dispatch, time.Now, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := workload.Run(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+
+	assert.Equal(t, map[string]float64{
+		"send": 1, "read_receipt": 5, "presence": 30,
+	}, dispatcher.rates())
+	for _, name := range []string{"read_receipt", "presence"} {
+		value, ok := calls.Load(name)
+		require.True(t, ok, "lane %s must be dispatched", name)
+		assert.Equal(t, int64(1), value.(*atomic.Int64).Load())
+	}
+}

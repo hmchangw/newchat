@@ -125,6 +125,28 @@ func (m *soakRoomMutator) ToggleMute(
 	})
 }
 
+// MarkRead is the client's "I opened this room" signal. room-service applies it
+// inline, so a reply proves the write was attempted against MongoDB.
+func (m *soakRoomMutator) MarkRead(
+	ctx context.Context,
+	account, roomID string,
+) (soakRoomMutationOutcome, error) {
+	if account == "" || roomID == "" {
+		return soakRoomMutationOutcome{Action: soakRPCMessageRead},
+			fmt.Errorf("mark read requires an account and room")
+	}
+	var reply soakStatusReply
+	return m.call(ctx, soakRPCRequest{
+		Action:  soakRPCMessageRead,
+		Subject: subject.MessageRead(account, roomID, m.siteID),
+		Timeout: m.timeout, RetryMode: soakRetryNever,
+	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
+		// room-service replies with a plain status; any successful reply means
+		// the subscription write ran.
+		outcome.Accepted = true
+	})
+}
+
 func (m *soakRoomMutator) CreateRoom(
 	ctx context.Context,
 	requester, name string,

@@ -11,6 +11,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type soakRoomLaneFixture struct {
@@ -708,4 +710,83 @@ func TestSoakRoomLanes_SettleFinalizedKeepsLiveReservations(t *testing.T) {
 		"an operation still awaiting verification keeps its reservation")
 	_, ok := fixture.pool.NextMemberIntent()
 	assert.False(t, ok, "the room lease is still held")
+}
+
+func TestSoakRoomLanes_ReadReceiptJournalsTheBaseline(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+
+	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
+
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, soakFailureLaneReadReceipt, operation.Lane)
+	assert.Equal(t, failureOperationMessageRead, operation.OperationType)
+	assert.Equal(t, failureObservationGood, operation.Observations[failureObserverAdmission])
+	assert.Equal(t, subject.MessageRead(
+		operation.Attributes[soakFailureAttributeTargetAccount], "room-1", "site-a",
+	), fixture.transport.subjects[0])
+}
+
+func TestSoakRoomLanes_ReadReceiptConfirmsAnAdvancedCursor(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
+	fixture.store.seenFound = true
+	fixture.store.lastSeen = fixture.now.Add(time.Second)
+	fixture.advance(2 * time.Second)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Equal(t, uint64(1), fixture.ledger.Snapshot().Results[failureResultGood])
+}
+
+func TestSoakRoomLanes_ReadReceiptMissingCursorAtDeadlineIsMissing(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
+	fixture.store.seenFound = true
+	fixture.store.lastSeen = time.Time{}
+	fixture.advance(2 * time.Minute)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Equal(t, uint64(1),
+		fixture.ledger.Snapshot().Results[failureResultMissingAfterDeadline],
+		"room-service accepted the mark-read and the cursor never moved")
+}
+
+func TestSoakRoomLanes_ReadReceiptCursorBecomesTheNextBaseline(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
+	first := soakSingleActiveOperation(t, fixture.ledger)
+	observed := fixture.now.Add(time.Second).UTC()
+	fixture.store.seenFound = true
+	fixture.store.lastSeen = observed
+	fixture.advance(2 * time.Second)
+	_, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+
+	account := first.Attributes[soakFailureAttributeTargetAccount]
+	next, found := soakNextReadIntentFor(t, fixture.pool, account)
+	require.True(t, found)
+	assert.True(t, next.Known)
+	assert.Equal(t, observed, next.Baseline)
+}
+
+func TestSoakRoomLanes_ReadReceiptWithoutBaselineAcceptsAnyCursor(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	require.NotContains(t, operation.Attributes, soakFailureAttributeReadBaseline,
+		"the seeded subscriptions were never read, so there is no baseline to beat")
+
+	fixture.store.seenFound = true
+	fixture.store.lastSeen = fixture.now.Add(-time.Hour)
+	fixture.advance(2 * time.Second)
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Equal(t, uint64(1), fixture.ledger.Snapshot().Results[failureResultGood])
 }

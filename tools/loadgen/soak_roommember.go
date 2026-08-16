@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type soakRoomPending struct {
 	member soakMemberIntent
 	rename soakRenameIntent
 	mute   soakMuteIntent
+	read   soakReadIntent
 	roomID string
 }
 
@@ -58,6 +60,7 @@ var soakRoomLaneNames = []string{
 	soakFailureLaneMemberMutation,
 	soakFailureLaneRoomMutation,
 	soakFailureLaneRoomCreate,
+	soakFailureLaneReadReceipt,
 }
 
 func newSoakRoomLanes(
@@ -197,6 +200,40 @@ func (l *soakRoomLanes) muteToggle(ctx context.Context) error {
 	}
 
 	outcome, err := l.mutator.ToggleMute(ctx, intent.Account, intent.RoomID)
+	return l.observeAdmission(operation.ID, &outcome, err)
+}
+
+// ReadReceipt marks one subscription read. The expected effect is that the
+// server-written read cursor moves past the baseline the pool captured, which
+// is what makes a lost write detectable without comparing clocks.
+func (l *soakRoomLanes) ReadReceipt(ctx context.Context) error {
+	intent, ok := l.pool.NextReadIntent()
+	if !ok {
+		return nil
+	}
+	attributes := map[string]string{
+		soakFailureAttributeTargetAccount: intent.Account,
+		soakFailureAttributeRequester:     intent.Account,
+	}
+	if intent.Known {
+		attributes[soakFailureAttributeReadBaseline] =
+			strconv.FormatInt(intent.Baseline.UTC().UnixMilli(), 10)
+	}
+	operation := l.newOperation(
+		soakFailureLaneReadReceipt, failureOperationMessageRead,
+		map[string]string{"roomId": intent.RoomID, "account": intent.Account},
+		attributes,
+		readReceiptExpectedEffects(),
+	)
+	pending := soakRoomPending{
+		kind: failureOperationMessageRead, read: intent, roomID: intent.RoomID,
+	}
+	if !l.journal(operation, &pending) {
+		l.pool.SettleRead(intent, failureResultNotSent, time.Time{})
+		return nil
+	}
+
+	outcome, err := l.mutator.MarkRead(ctx, intent.Account, intent.RoomID)
 	return l.observeAdmission(operation.ID, &outcome, err)
 }
 
@@ -478,6 +515,8 @@ func (l *soakRoomLanes) settle(operationID string, result failureResult) {
 		l.pool.SettleMute(pending.mute, result)
 	case failureOperationRoomCreate:
 		l.finishCreate(pending.roomID, result)
+	case failureOperationMessageRead:
+		l.pool.SettleRead(pending.read, result, l.observedReadCursor(&pending))
 	case failureOperationMessageCreate:
 		// The message lane keeps no pool reservation, so it never settles here.
 	}
@@ -503,6 +542,24 @@ func (l *soakRoomLanes) finishCreate(roomID string, result failureResult) {
 			l.reader.RegisterCreatedRoom(roomID, requester)
 		}
 	}
+}
+
+// observedReadCursor fetches the cursor the run just confirmed so it becomes
+// the next operation's baseline. A failure to read it only costs the baseline,
+// which the pool then treats as unknown.
+func (l *soakRoomLanes) observedReadCursor(pending *soakRoomPending) time.Time {
+	if l.store == nil || pending.read.RoomID == "" {
+		return time.Time{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), soakRequestTimeout)
+	defer cancel()
+	lastSeenAt, found, err := l.store.SubscriptionLastSeen(
+		ctx, pending.read.RoomID, pending.read.Account,
+	)
+	if err != nil || !found {
+		return time.Time{}
+	}
+	return lastSeenAt
 }
 
 func (l *soakRoomLanes) takeCreateBudget() bool {
