@@ -122,3 +122,19 @@ func TestPublishLabelsFromSubject(t *testing.T) {
 		})
 	}
 }
+
+// Suffix matching must not classify subjects that are not requests at all.
+// Every label in this family is derived from fixed token positions precisely so
+// a subject from another family cannot mint one.
+func TestRequestOperationFromSubject_NonRequestSubjectsAreUnknown(t *testing.T) {
+	for _, subj := range []string{
+		"chat.dynamic.member.list",
+		"chat.room.canonical.site-a.member.add",
+		"chat.inbox.site-a.external.create",
+		"chat.server.broadcast.site-a.message.read",
+	} {
+		t.Run(subj, func(t *testing.T) {
+			assert.Equal(t, OperationUnknown, RequestOperationFromSubject(subj))
+		})
+	}
+}

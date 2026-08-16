@@ -57,6 +57,11 @@ func RoomEventTypeFromSubject(subj string) EventType {
 // tokens are inspected only for shape and never become labels.
 func RequestOperationFromSubject(subj string) Operation {
 	tokens := strings.Split(subj, ".")
+	// Suffix matching alone would classify any subject that happens to end in a
+	// request-shaped tail, so it is gated on the subject actually being a
+	// request. Every other label in this file is anchored to fixed token
+	// positions for the same reason.
+	isRequest := isRequestSubject(tokens)
 	switch {
 	case strings.HasPrefix(subj, "chat.server.request.history."):
 		return OperationHistoryRead
@@ -71,13 +76,13 @@ func RequestOperationFromSubject(subj string) Operation {
 		}
 	case isRequestFamily(tokens, "teams"):
 		return OperationTeamsRoom
-	case hasAnySuffix(subj, ".member.list", ".member.statuses", ".subscription.mentionable", ".members"):
+	case isRequest && hasAnySuffix(subj, ".member.list", ".member.statuses", ".subscription.mentionable", ".members"):
 		return OperationMemberRead
-	case hasAnySuffix(subj, ".member.add", ".member.remove", ".member.role-update", ".mute.toggle"):
+	case isRequest && hasAnySuffix(subj, ".member.add", ".member.remove", ".member.role-update", ".mute.toggle"):
 		return OperationMemberMutation
-	case hasAnySuffix(subj, ".key.get", ".open", ".app.tabs", ".app.cmd-menu"):
+	case isRequest && hasAnySuffix(subj, ".key.get", ".open", ".app.tabs", ".app.cmd-menu"):
 		return OperationRoomRead
-	case hasAnySuffix(subj, ".room.rename", ".create", ".chat.move", ".favorite.toggle", ".message.read", ".message.read-receipt", ".message.thread.read"):
+	case isRequest && hasAnySuffix(subj, ".room.rename", ".create", ".chat.move", ".favorite.toggle", ".message.read", ".message.read-receipt", ".message.thread.read"):
 		return OperationRoomMutation
 	case strings.HasPrefix(subj, "chat.server.request.room.") && hasAnySuffix(subj, ".info.batch", ".thread.info.batch"):
 		return OperationRoomRead
@@ -87,6 +92,16 @@ func RequestOperationFromSubject(subj string) Operation {
 		return OperationUnknown
 	}
 	return OperationUnknown
+}
+
+// isRequestSubject reports whether tokens name a client or server request
+// subject: chat.user.{account}.request.… or chat.server.request.….
+func isRequestSubject(tokens []string) bool {
+	if len(tokens) < 4 || tokens[0] != "chat" {
+		return false
+	}
+	return (tokens[1] == "user" && tokens[3] == "request") ||
+		(tokens[1] == "server" && tokens[2] == "request")
 }
 
 func isRequestFamily(tokens []string, family string) bool {

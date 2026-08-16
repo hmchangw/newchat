@@ -139,7 +139,9 @@ The shared consumer, request, and publisher helpers are adopted by
 `notification-worker`, `history-service`, and `room-service`. Connection
 lifecycle metrics are opt-in through `natsutil.ConnectWithMetrics`. Names are
 OTel instrument names; Prometheus renders them with `_` separators and adds
-`_total` / unit suffixes.
+counter / unit suffixes. An instrument whose name already ends in `_total`
+keeps exactly one — the exporter strips the existing token before appending —
+so `nats_slow_consumer_events_total` exports under that name, not a doubled one.
 
 Consumer and publisher families share a base of `service_name` + `site`; the
 "labels" column lists what each adds on top. Every adopter reads `service_name`

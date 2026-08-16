@@ -1,3 +1,5 @@
+//go:generate mockgen -source=publisher.go -destination=mock_publisher_test.go -package=publisher
+
 // Package publisher adapts NATS connections to the service.EventPublisher interface.
 package publisher
 
