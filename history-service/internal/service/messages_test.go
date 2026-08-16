@@ -231,7 +231,7 @@ func TestHistoryService_LoadHistory_WithBeforeTimestamp(t *testing.T) {
 	assert.Len(t, resp.Messages, 2)
 }
 
-func TestHistoryService_LoadHistory_HasNextTrue_AccessWindowed(t *testing.T) {
+func TestHistoryService_LoadHistory_HasNext(t *testing.T) {
 	svc, msgs, subs, _, _ := newService(t)
 	c := testContext()
 
@@ -248,20 +248,19 @@ func TestHistoryService_LoadHistory_HasNextTrue_AccessWindowed(t *testing.T) {
 	assert.True(t, resp.HasNext)
 }
 
-func TestHistoryService_LoadHistory_HasNextTrue_OpenWalk(t *testing.T) {
+// An empty-but-resumable page (budget-exhausted walk) must report hasNext=false:
+// with no oldest message to derive `before` from, the client could never advance.
+func TestHistoryService_LoadHistory_HasNextFalse_EmptyResumablePage(t *testing.T) {
 	svc, msgs, subs, _, _ := newService(t)
 	c := testContext()
 
-	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
-
-	messages := []models.Message{
-		{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)},
-	}
-	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(makePage(messages, true), nil)
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).Return(makePage(nil, true), nil)
 
 	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
 	require.NoError(t, err)
-	assert.True(t, resp.HasNext)
+	assert.Empty(t, resp.Messages)
+	assert.False(t, resp.HasNext)
 }
 
 func TestHistoryService_LoadHistory_ReturnsMinUserLastSeenAt(t *testing.T) {

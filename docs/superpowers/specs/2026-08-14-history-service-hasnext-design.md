@@ -41,6 +41,16 @@ below are empty). The frontend's next fetch then returns an empty page with
 `hasNext=false`. This is the identical contract already shipped by
 `msg.next` (Load Next Messages), thread replies, and pinned messages.
 
+One divergence from the raw walker flag (added during review): an **empty page
+always reports `hasNext=false`**, i.e. the handler returns
+`page.HasNext && len(page.Data) > 0`. The walker can return an empty
+*resumable* page when its bucket budget is exhausted crossing a long silent
+gap; cursor RPCs resume via `nextCursor`, but this RPC pages by `before` =
+oldest returned `createdAt` — an empty page gives the client nothing to advance
+with, so passing the raw flag through would livelock the client on an
+identical request. Any history hidden by this guard is unreachable via the
+`before` contract regardless.
+
 ## Changes
 
 1. **Model** — `history-service/internal/models/message.go`:
