@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -31,6 +32,9 @@ type soakRoomPending struct {
 	mute   soakMuteIntent
 	read   soakReadIntent
 	roomID string
+	// roomName identifies a created room before its server-generated ID is
+	// known, and remains the only handle when the reply is lost.
+	roomName string
 }
 
 // soakRoomLanes journals every room and member mutation before it is sent and
@@ -95,11 +99,94 @@ func newSoakRoomLanes(
 	return lanes
 }
 
+// Rehydrate restores the reservations an earlier process held for operations
+// the ledger recovered from the WAL, and reports how much of the run's create
+// budget those in-flight creates already spent.
+//
+// Both matter after a pod replacement. Without the reservations a new process
+// can race a mutation that is still unresolved; without the budget accounting
+// the create lane restarts at a full allowance and the per-run cap becomes a
+// per-process one, so a crash loop grows MongoDB without bound.
+//
+// A reservation that cannot be retaken is not fatal: the operation stays in the
+// ledger and still reconciles, it just no longer blocks the pool. That is
+// counted rather than hidden.
+func (l *soakRoomLanes) Rehydrate(operations []failureOperation) int {
+	inFlightCreates := 0
+	for i := range operations {
+		operation := &operations[i]
+		if !slices.Contains(soakRoomLaneNames, operation.Lane) {
+			continue
+		}
+		if operation.OperationType == failureOperationRoomCreate {
+			inFlightCreates++
+			l.mu.Lock()
+			l.pending[operation.ID] = soakRoomPending{
+				kind:     failureOperationRoomCreate,
+				roomName: operation.Targets["roomName"],
+			}
+			l.mu.Unlock()
+			continue
+		}
+		roomID := operation.Targets["roomId"]
+		account := operation.Targets["account"]
+		if !l.pool.ReserveInFlight(operation.OperationType, roomID, account) {
+			l.countUntracked("reservation")
+			continue
+		}
+		// The intents are reconstructed from the journaled attributes, not from
+		// zero values: settle writes the pool's next expectation from them, so
+		// a defaulted Add or TargetMuted would record the opposite of what the
+		// operation actually asked for.
+		baseline, hasBaseline, _ := soakReadBaseline(operation)
+		l.mu.Lock()
+		l.pending[operation.ID] = soakRoomPending{
+			kind:   operation.OperationType,
+			roomID: roomID,
+			member: soakMemberIntent{
+				RoomID: roomID, Account: account,
+				Add:       operation.OperationType == failureOperationMemberAdd,
+				Requester: operation.Attributes[soakFailureAttributeRequester],
+			},
+			rename: soakRenameIntent{
+				RoomID:    roomID,
+				NewName:   operation.Attributes[soakFailureAttributeExpectedName],
+				Requester: operation.Attributes[soakFailureAttributeRequester],
+			},
+			mute: soakMuteIntent{
+				RoomID: roomID, Account: account,
+				TargetMuted: operation.Attributes[soakFailureAttributeExpectedMuted] == "true",
+			},
+			read: soakReadIntent{
+				RoomID: roomID, Account: account,
+				Baseline: baseline, Known: hasBaseline,
+			},
+		}
+		l.mu.Unlock()
+	}
+	return inFlightCreates
+}
+
+// SpendCreateBudget lowers the remaining allowance by rooms this run already
+// created, so the cap is per run rather than per process.
+func (l *soakRoomLanes) SpendCreateBudget(spent int) {
+	if spent <= 0 {
+		return
+	}
+	l.mu.Lock()
+	l.budget = max(0, l.budget-spent)
+	l.mu.Unlock()
+	l.setBudgetGauge()
+}
+
 func (l *soakRoomLanes) MemberMutation(ctx context.Context) error {
 	intent, ok := l.pool.NextMemberIntent()
 	if !ok {
+		l.countAttempt(soakFailureLaneMemberMutation, false)
+		l.countExhausted(soakRoomPoolReasonNoCandidate)
 		return nil
 	}
+	l.countAttempt(soakFailureLaneMemberMutation, true)
 	expectMember := "false"
 	if intent.Add {
 		expectMember = "true"
@@ -144,8 +231,10 @@ func (l *soakRoomLanes) RoomMutation(ctx context.Context) error {
 func (l *soakRoomLanes) rename(ctx context.Context) error {
 	intent, ok := l.pool.NextRenameIntent()
 	if !ok {
+		l.countAttempt(soakFailureLaneRoomMutation, false)
 		return nil
 	}
+	l.countAttempt(soakFailureLaneRoomMutation, true)
 	// An unknown previous name is passed through as empty on purpose: asserting
 	// a stale one would let the observer call a merely lost rename a name nobody
 	// asked for, reporting corruption that never happened.
@@ -175,8 +264,10 @@ func (l *soakRoomLanes) rename(ctx context.Context) error {
 func (l *soakRoomLanes) muteToggle(ctx context.Context) error {
 	intent, ok := l.pool.NextMuteIntent()
 	if !ok {
+		l.countAttempt(soakFailureLaneRoomMutation, false)
 		return nil
 	}
+	l.countAttempt(soakFailureLaneRoomMutation, true)
 	expectMuted := "false"
 	if intent.TargetMuted {
 		expectMuted = "true"
@@ -209,8 +300,10 @@ func (l *soakRoomLanes) muteToggle(ctx context.Context) error {
 func (l *soakRoomLanes) ReadReceipt(ctx context.Context) error {
 	intent, ok := l.pool.NextReadIntent()
 	if !ok {
+		l.countAttempt(soakFailureLaneReadReceipt, false)
 		return nil
 	}
+	l.countAttempt(soakFailureLaneReadReceipt, true)
 	attributes := map[string]string{
 		soakFailureAttributeTargetAccount: intent.Account,
 		soakFailureAttributeRequester:     intent.Account,
@@ -242,47 +335,37 @@ func (l *soakRoomLanes) ReadReceipt(ctx context.Context) error {
 // other room and member lanes keep running.
 func (l *soakRoomLanes) RoomCreate(ctx context.Context) error {
 	if !l.takeCreateBudget() {
+		l.countAttempt(soakFailureLaneRoomCreate, false)
 		l.countExhausted("create_budget")
 		return nil
 	}
 	requester, members, ok := l.pool.CreateRoomMembers(l.cfg.CreateRoomSize)
 	if !ok {
 		l.releaseCreateBudget()
+		l.countAttempt(soakFailureLaneRoomCreate, false)
 		l.countExhausted(soakRoomPoolReasonNoCandidate)
 		return nil
 	}
-	name := fmt.Sprintf("soak-%s-created-%s", l.cfg.RunID, idgen.GenerateID())
-
-	outcome, err := l.mutator.CreateRoom(ctx, requester, name, members)
-	l.record(soakRPCRoomCreate, &outcome)
-	if err != nil || outcome.RoomID == "" {
-		// Without a room ID there is no target to reconcile. The attempt is
-		// still counted as spent budget so a broken create lane cannot spin.
-		if err != nil {
-			return fmt.Errorf("create soak room: %w", err)
-		}
-		return nil
-	}
-
+	l.countAttempt(soakFailureLaneRoomCreate, true)
+	// The room ID is server-generated, so the name is the only identifier that
+	// exists before the request. Journaling it first is what makes a lost reply
+	// recoverable: the room may already exist, and the name is how a later pass
+	// — in this process or a replacement one — finds, verifies and claims it.
+	name := soakCreatedRoomPrefix(l.cfg.RunID) + idgen.GenerateID()
 	operation := l.newOperation(
 		soakFailureLaneRoomCreate, failureOperationRoomCreate,
-		map[string]string{"roomId": outcome.RoomID},
+		map[string]string{"roomName": name},
 		map[string]string{soakFailureAttributeRequester: requester},
 		roomCreateExpectedEffects(),
 	)
-	pending := soakRoomPending{kind: failureOperationRoomCreate, roomID: outcome.RoomID}
+	pending := soakRoomPending{kind: failureOperationRoomCreate, roomName: name}
 	if !l.journal(operation, &pending) {
-		// room-service accepted the create, so the room will exist without this
-		// run being able to claim or verify it. Name it in the log: teardown
-		// only removes rooms carrying the run marker, and this one will not.
-		slog.Warn("created soak room is untracked and will outlive teardown",
-			"runId", l.cfg.RunID, "roomId", outcome.RoomID)
-		l.countUntracked("ownership")
+		l.releaseCreateBudget()
 		return nil
 	}
-	// The reply already arrived, so the operation is activated and its
-	// admission recorded from the same outcome the create used.
-	return l.observeAdmission(operation.ID, &outcome, nil)
+
+	outcome, err := l.mutator.CreateRoom(ctx, requester, name, members)
+	return l.observeAdmission(operation.ID, &outcome, err)
 }
 
 // Reconcile retires one due room or member operation. Callers run it inside the
@@ -514,7 +597,7 @@ func (l *soakRoomLanes) settle(operationID string, result failureResult) {
 	case failureOperationMuteToggle:
 		l.pool.SettleMute(pending.mute, result)
 	case failureOperationRoomCreate:
-		l.finishCreate(pending.roomID, result)
+		l.finishCreate(pending.roomName, result)
 	case failureOperationMessageRead:
 		l.pool.SettleRead(pending.read, result, l.observedReadCursor(&pending))
 	case failureOperationMessageCreate:
@@ -525,17 +608,25 @@ func (l *soakRoomLanes) settle(operationID string, result failureResult) {
 // finishCreate takes ownership of a confirmed room. Teardown only deletes rooms
 // carrying the run marker, so a created room that is never claimed would
 // outlive the run.
-func (l *soakRoomLanes) finishCreate(roomID string, result failureResult) {
-	if roomID == "" || result != failureResultGood {
+func (l *soakRoomLanes) finishCreate(roomName string, result failureResult) {
+	if roomName == "" || result != failureResultGood || l.store == nil {
 		return
 	}
-	if l.store != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), soakRequestTimeout)
-		defer cancel()
-		if err := l.store.AppendOwnedRooms(ctx, l.cfg.RunID, []string{roomID}); err != nil {
-			l.countUntracked("ownership")
-			return
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), soakRequestTimeout)
+	defer cancel()
+	// The ID is resolved from the name rather than remembered from the reply,
+	// so a room whose reply was lost is still claimable — including by a
+	// replacement process, whose in-memory reservation is gone.
+	roomID, found, err := l.store.RoomIDByName(ctx, roomName)
+	if err != nil || !found || roomID == "" {
+		slog.Warn("created soak room could not be resolved for ownership",
+			"runId", l.cfg.RunID, "roomName", roomName, "error", err)
+		l.countUntracked("ownership")
+		return
+	}
+	if err := l.store.AppendOwnedRooms(ctx, l.cfg.RunID, []string{roomID}); err != nil {
+		l.countUntracked("ownership")
+		return
 	}
 	if l.reader != nil {
 		if requester, ok := l.pool.AnyOwner(); ok {
@@ -626,6 +717,21 @@ func (l *soakRoomLanes) countExhausted(reason string) {
 	l.metrics.SoakRoomPoolExhausted.WithLabelValues(reason).Inc()
 }
 
+// countAttempt separates a lane slot that produced a request from one that
+// found no usable target. loadgen_soak_dispatched_total counts scheduler slots
+// and is consumed either way, so without this a lane whose pool is exhausted
+// still looks like it is offering its configured load.
+func (l *soakRoomLanes) countAttempt(lane string, sent bool) {
+	if l.metrics == nil {
+		return
+	}
+	outcome := "no_target"
+	if sent {
+		outcome = "sent"
+	}
+	l.metrics.SoakLaneAttempts.WithLabelValues(lane, outcome).Inc()
+}
+
 func (l *soakRoomLanes) countProbe(result string) {
 	if l.metrics == nil {
 		return
@@ -635,14 +741,14 @@ func (l *soakRoomLanes) countProbe(result string) {
 
 // soakRoomMutationNeverSent reports whether a failed mutation is proven not to
 // have left the process. Only a body that could not be encoded and a request
-// that was never attempted qualify: a timeout or a dropped connection may have
-// been delivered, so calling those not_sent would erase a real effect from the
-// accounting.
+// that was never attempted qualify: a timeout, a dropped connection, or a
+// reply that failed to decode may all have been delivered, so calling those
+// not_sent would erase a real effect from the accounting.
 func soakRoomMutationNeverSent(outcome *soakRoomMutationOutcome, err error) bool {
 	if err == nil {
 		return false
 	}
-	if outcome.ErrorClass == soakErrorDecode {
+	if outcome.ErrorClass == soakErrorRequestEncode {
 		return true
 	}
 	return outcome.ErrorClass == "" && !errors.Is(err, context.Canceled) &&

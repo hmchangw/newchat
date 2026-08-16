@@ -244,6 +244,60 @@ func newSoakRoomStatePool(
 	return pool, nil
 }
 
+// ReserveInFlight re-takes the lease an operation held before the process was
+// replaced. Without it a replacement process can issue a second mutation
+// against a target whose first one is still unresolved, and that second
+// mutation can supply the very effect the first one lost — scoring real data
+// loss as good.
+//
+// It deliberately does not touch candidate state: the pool rebuilds that from
+// the reloaded subscriptions, which already reflect whatever actually landed.
+func (p *soakRoomStatePool) ReserveInFlight(
+	kind failureOperationType,
+	roomID, account string,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	room := p.byID[roomID]
+	if room == nil {
+		return false
+	}
+	switch kind {
+	case failureOperationMemberAdd, failureOperationMemberRemove:
+		if room.memberLease {
+			return false
+		}
+		room.memberLease = true
+		return true
+	case failureOperationRoomRename:
+		if room.renameLease {
+			return false
+		}
+		room.renameLease = true
+		return true
+	case failureOperationMuteToggle:
+		if account == "" {
+			return false
+		}
+		if _, leased := room.muteLeases[account]; leased {
+			return false
+		}
+		room.muteLeases[account] = struct{}{}
+		return true
+	case failureOperationMessageRead:
+		if account == "" {
+			return false
+		}
+		if _, leased := room.readLeases[account]; leased {
+			return false
+		}
+		room.readLeases[account] = struct{}{}
+		return true
+	default:
+		return false
+	}
+}
+
 func (p *soakRoomStatePool) RoomIDs() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

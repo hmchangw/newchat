@@ -295,8 +295,8 @@ func TestSoakRoomLanes_RoomCreateTakesOwnershipOnceConfirmed(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t,
 		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
 	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
-	fixture.store.nameFound = true
-	fixture.store.name = "soak-run-1-created"
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
 	fixture.advance(2 * time.Second)
 
 	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
@@ -311,7 +311,7 @@ func TestSoakRoomLanes_RoomCreateSkipsOwnershipWhenNotConfirmed(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t,
 		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
 	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
-	fixture.store.nameFound = false
+	fixture.store.byNameOK = false
 	fixture.advance(2 * time.Minute)
 
 	_, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
@@ -534,22 +534,34 @@ func TestSoakRoomLanes_RoomCreateReturnsBudgetWhenNoMembersAreAvailable(t *testi
 		"an unspent attempt must return its budget")
 }
 
-func TestSoakRoomLanes_RoomCreateSurfacesRequestFailures(t *testing.T) {
+// A timed-out create may still have made the room. The intent is journaled
+// before the request precisely so that ambiguity stays reconcilable instead of
+// leaving an unowned room behind.
+func TestSoakRoomLanes_RoomCreateKeepsATimedOutAttemptReconcilable(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t, nil, nats.ErrTimeout)
 
-	err := fixture.lanes.RoomCreate(context.Background())
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
 
-	require.Error(t, err)
-	assert.Empty(t, fixture.ledger.ActiveOperations(),
-		"a create with no room ID has no target to reconcile")
+	operations := fixture.ledger.ActiveOperations()
+	require.Len(t, operations, 1)
+	assert.Equal(t, soakFailureLaneRoomCreate, operations[0].Lane)
+	assert.NotEmpty(t, operations[0].Targets["roomName"],
+		"the client-generated name is the only handle a lost reply leaves")
+	assert.Equal(t, failureObservationUnverified,
+		operations[0].Observations[failureObserverAdmission],
+		"a timeout proves nothing about whether the room was created")
 }
 
-func TestSoakRoomLanes_RoomCreateWithoutRoomIDIsNotTracked(t *testing.T) {
+// A reply that omits the room ID is not a failure: the name still identifies
+// the room, and the store resolves the ID when ownership is claimed.
+func TestSoakRoomLanes_RoomCreateTracksAReplyWithoutARoomID(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 
 	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
 
-	assert.Empty(t, fixture.ledger.ActiveOperations())
+	operations := fixture.ledger.ActiveOperations()
+	require.Len(t, operations, 1)
+	assert.NotEmpty(t, operations[0].Targets["roomName"])
 }
 
 func TestSoakRoomLanes_OwnershipFailureIsCountedAsUntracked(t *testing.T) {
@@ -557,7 +569,8 @@ func TestSoakRoomLanes_OwnershipFailureIsCountedAsUntracked(t *testing.T) {
 		[]byte(`{"status":"accepted","roomId":"room-new"}`), nil)
 	fixture.store.appendErr = errors.New("mongo unavailable")
 	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
-	fixture.store.nameFound = true
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
 	fixture.advance(2 * time.Second)
 
 	_, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
@@ -573,7 +586,7 @@ func TestSoakRoomLanes_SettleIgnoresUnknownOperations(t *testing.T) {
 	assert.NotPanics(t, func() {
 		fixture.lanes.settle("missing-operation", failureResultGood)
 		fixture.lanes.finishCreate("", failureResultGood)
-		fixture.lanes.finishCreate("room-x", failureResultUnverified)
+		fixture.lanes.finishCreate("soak-run-1-created-x", failureResultUnverified)
 	})
 	assert.Empty(t, fixture.store.appended)
 }
@@ -601,8 +614,8 @@ func TestSoakRoomMutationNeverSent_OnlyProvenLocalFailures(t *testing.T) {
 	}{
 		{name: "no error", want: false},
 		{
-			name: "marshal failure", err: errors.New("marshal"),
-			outcome: soakRoomMutationOutcome{ErrorClass: soakErrorDecode}, want: true,
+			name: "request never encoded", err: errors.New("marshal"),
+			outcome: soakRoomMutationOutcome{ErrorClass: soakErrorRequestEncode}, want: true,
 		},
 		{
 			name: "never attempted", err: errors.New("no rpc client"), want: true,
@@ -789,4 +802,94 @@ func TestSoakRoomLanes_ReadReceiptWithoutBaselineAcceptsAnyCursor(t *testing.T) 
 	require.NoError(t, err)
 	assert.True(t, reconciled)
 	assert.Equal(t, uint64(1), fixture.ledger.Snapshot().Results[failureResultGood])
+}
+
+// A body that could not be encoded never reached the wire. A reply that could
+// not be decoded did: the server answered, so the mutation very likely ran.
+// Collapsing both into one class made an executed mutation settle as not_sent,
+// which closes the operation and drops a real effect from the accounting.
+func TestSoakRoomMutationNeverSent_SeparatesEncodeFromDecode(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		class soakErrorClass
+		want  bool
+	}{
+		{name: "request never encoded", class: soakErrorRequestEncode, want: true},
+		{name: "reply arrived but did not decode", class: soakErrorResponseDecode, want: false},
+		{name: "timeout is ambiguous", class: soakErrorTimeout, want: false},
+		{name: "no responder is ambiguous", class: soakErrorNoResponder, want: false},
+		{name: "disconnected is ambiguous", class: soakErrorDisconnected, want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			outcome := soakRoomMutationOutcome{ErrorClass: testCase.class}
+
+			got := soakRoomMutationNeverSent(&outcome, assert.AnError)
+
+			assert.Equal(t, testCase.want, got)
+		})
+	}
+}
+
+// A replacement process must retake the reservations its predecessor held, and
+// must rebuild each intent from the journaled attributes. settle writes the
+// pool's next expectation from the intent, so a defaulted Add or TargetMuted
+// records the opposite of what the operation actually asked for.
+func TestSoakRoomLanes_RehydrateRestoresIntentsFromTheJournal(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+
+	inFlight := fixture.lanes.Rehydrate([]failureOperation{
+		{
+			ID: "op-add", Lane: soakFailureLaneMemberMutation,
+			OperationType: failureOperationMemberAdd,
+			Targets:       map[string]string{"roomId": "room-1", "account": "user-a1"},
+			Attributes: map[string]string{
+				soakFailureAttributeRequester: "user-a0",
+			},
+		},
+		{
+			ID: "op-mute", Lane: soakFailureLaneRoomMutation,
+			OperationType: failureOperationMuteToggle,
+			Targets:       map[string]string{"roomId": "room-1", "account": "user-a2"},
+			Attributes:    map[string]string{soakFailureAttributeExpectedMuted: "true"},
+		},
+		{
+			ID: "op-create", Lane: soakFailureLaneRoomCreate,
+			OperationType: failureOperationRoomCreate,
+			Targets:       map[string]string{"roomName": "soak-run-1-created-abc"},
+		},
+		{
+			ID: "op-message", Lane: soakFailureLaneMessageSend,
+			OperationType: failureOperationMessageCreate,
+			Targets:       map[string]string{"roomId": "room-1"},
+		},
+	})
+
+	assert.Equal(t, 1, inFlight, "only creates consume the run's room budget")
+
+	fixture.lanes.mu.Lock()
+	add := fixture.lanes.pending["op-add"]
+	mute := fixture.lanes.pending["op-mute"]
+	create := fixture.lanes.pending["op-create"]
+	_, tookMessageLane := fixture.lanes.pending["op-message"]
+	fixture.lanes.mu.Unlock()
+
+	assert.True(t, add.member.Add, "an add that settles as a remove corrupts the ring")
+	assert.Equal(t, "user-a0", add.member.Requester)
+	assert.True(t, mute.mute.TargetMuted, "the pool would otherwise record the opposite state")
+	assert.Equal(t, "soak-run-1-created-abc", create.roomName)
+	assert.False(t, tookMessageLane, "the message lane holds no pool reservation")
+
+	// The reservation is real: the room is now leased, so the lane cannot issue
+	// a second member mutation against it.
+	assert.False(t, fixture.pool.ReserveInFlight(failureOperationMemberAdd, "room-1", "user-a3"))
+}
+
+func TestSoakRoomLanes_SpendCreateBudgetMakesTheCapPerRun(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+
+	fixture.lanes.SpendCreateBudget(fixture.lanes.cfg.RoomCreateBudget)
+
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	assert.Empty(t, fixture.ledger.ActiveOperations(),
+		"a run that already spent its budget must not create more rooms after a restart")
 }

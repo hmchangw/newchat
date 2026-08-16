@@ -76,6 +76,11 @@ func (v *soakRoomStateVerifier) Verify(
 		return soakRoomStateUnknown, failureReasonNone,
 			fmt.Errorf("soak room state verification requires an operation")
 	}
+	// A created room is identified by the name journaled before the request,
+	// because its ID does not exist until the server answers.
+	if operation.OperationType == failureOperationRoomCreate {
+		return v.verifyCreated(ctx, operation.Targets["roomName"])
+	}
 	roomID := operation.Targets["roomId"]
 	if roomID == "" {
 		return soakRoomStateUnknown, failureReasonNone,
@@ -89,8 +94,6 @@ func (v *soakRoomStateVerifier) Verify(
 		return v.verifyRename(ctx, operation, roomID)
 	case failureOperationMuteToggle:
 		return v.verifyMute(ctx, operation, roomID)
-	case failureOperationRoomCreate:
-		return v.verifyCreated(ctx, roomID)
 	case failureOperationMessageRead:
 		return v.verifyRead(ctx, operation, roomID)
 	default:
@@ -230,25 +233,25 @@ func (v *soakRoomStateVerifier) verifyMute(
 	return result, soakRoomStateReasonFor(result, failureReasonMuteStateMismatch), nil
 }
 
+// verifyCreated answers by name. The store is the only source: the rooms-info
+// RPC needs an ID the run does not have until the room is found, so asking it
+// first would make the probe depend on the very answer it is looking for.
 func (v *soakRoomStateVerifier) verifyCreated(
 	ctx context.Context,
-	roomID string,
+	roomName string,
 ) (soakRoomStateResult, failureReason, error) {
-	rpc := soakRoomStateUnknown
-	if info, err := v.reader.RoomInfoFor(ctx, roomID); err == nil {
-		rpc = soakRoomStateAbsent
-		if info.Found {
-			rpc = soakRoomStateMatched
-		}
+	if roomName == "" {
+		return soakRoomStateUnknown, failureReasonNone,
+			fmt.Errorf("room create operation has no room name target")
 	}
-	v.countSource(soakRoomStateSourceRPC, rpc)
+	v.countSource(soakRoomStateSourceRPC, soakRoomStateUnknown)
 
 	authoritative := soakRoomStateUnknown
-	_, found, err := v.store.RoomName(ctx, roomID)
+	roomID, found, err := v.store.RoomIDByName(ctx, roomName)
 	switch {
 	case err != nil:
 		v.setHealth(false, "room_read")
-	case found:
+	case found && roomID != "":
 		authoritative = soakRoomStateMatched
 		v.setHealth(true, "room_read")
 	default:
@@ -257,7 +260,7 @@ func (v *soakRoomStateVerifier) verifyCreated(
 	}
 	v.countSource(soakRoomStateSourceStore, authoritative)
 
-	result := resolveSoakRoomState(rpc, authoritative)
+	result := resolveSoakRoomState(soakRoomStateUnknown, authoritative)
 	return result, soakRoomStateReasonFor(result, failureReasonRoomStateMissing), nil
 }
 
