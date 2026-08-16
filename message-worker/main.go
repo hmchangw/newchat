@@ -34,6 +34,7 @@ type config struct {
 	// .created feed off MESSAGES-CANONICAL; "teams" runs the Teams-migration batch
 	// feed off MESSAGES-TEAMS. Two deploys of the same binary, gated by env only.
 	Mode               string                  `env:"MODE"                 envDefault:"default"`
+	ServiceName        string                  `env:"OTEL_SERVICE_NAME"    envDefault:"unknown-service"`
 	NatsURL            string                  `env:"NATS_URL,required"`
 	NatsCredsFile      string                  `env:"NATS_CREDS_FILE"      envDefault:""`
 	SiteID             string                  `env:"SITE_ID,required"`
@@ -92,7 +93,7 @@ func main() {
 		os.Exit(1)
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher("message-worker", cfg.SiteID)
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
 	domainMetrics := newPersistenceMetrics(sdk.MeterProvider().Meter("message-worker"))
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
@@ -185,24 +186,9 @@ func main() {
 
 	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode, cfg.SiteID)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: "message-worker", Site: cfg.SiteID,
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
 		Stream: streamName, Consumer: consumerCfg.Durable,
 	})
-	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamName, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
-
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-	consumerMetrics.LoopStarted(ctx)
-
-	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
 	// Built unconditionally in both modes: the consumer filter already scopes each
@@ -227,48 +213,53 @@ func main() {
 		}, domainMetrics)
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
 
-	wg.Add(1)
-	go func() {
-		// The loop itself is counted so shutdown, which stops the iterator and
-		// then waits on wg, cannot pass through while a message Next already
-		// returned is still on its way to a worker.
-		defer wg.Done()
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				consumerMetrics.LoopFailed(context.Background(), err)
-				return
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func(msgCtx context.Context, msg jetstream.Msg) {
-				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
-				msg = tracked
-				msgCtx = tracked.Context(msgCtx)
-				defer func() {
-					tracked.Finish(msgCtx)
-					<-sem
-					wg.Done()
-				}()
-				// jobguard recovers handler panics — this goroutine runs outside
-				// natsrouter's Recovery middleware, so an unrecovered panic would
-				// crash the worker and crash-loop on JetStream redelivery.
-				jobguard.Run(msg, func() {
-					handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-					handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-					// Dispatch by subject: the one-time .teams.batch migration
-					// writes straight to Cassandra; the live .created feed runs the
-					// normal pipeline.
-					if msg.Subject() == teamsBatchSubj {
-						teamsMigration.consume(handlerCtx, msg)
-						return
-					}
-					logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
-					handler.HandleJetStreamMsg(handlerCtx, msg)
-				})
-			}(msgCtx, msg)
+	supervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
+	initialIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := js.CreateOrUpdateConsumer(factoryCtx, streamName, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
 		}
-	}()
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create iterator: %w", err)
+		}
+		return iter, nil
+	}
+	recoveryIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := js.Consumer(factoryCtx, streamName, consumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("lookup consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create recovery iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := supervisor.StartWithRecovery(ctx, initialIteratorFactory, recoveryIteratorFactory,
+		consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		func(msgCtx context.Context, msg *natsmetrics.Message) {
+			// jobguard recovers handler panics — this goroutine runs outside
+			// natsrouter's Recovery middleware, so an unrecovered panic would
+			// crash the worker and crash-loop on JetStream redelivery.
+			jobguard.Run(msg, func() {
+				handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+				handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+				// Dispatch by subject: the one-time .teams.batch migration
+				// writes straight to Cassandra; the live .created feed runs the
+				// normal pipeline.
+				if msg.Subject() == teamsBatchSubj {
+					teamsMigration.consume(handlerCtx, msg)
+					return
+				}
+				logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+				handler.HandleJetStreamMsg(handlerCtx, msg)
+			})
+		}); err != nil {
+		slog.Error("start consumer supervisor failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -281,9 +272,8 @@ func main() {
 	slog.Info("message-worker running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error {
-			consumerMetrics.LoopStopped(ctx)
-			iter.Stop()
+		func(context.Context) error {
+			supervisor.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {

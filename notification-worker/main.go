@@ -8,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bytedance/sonic"
-
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -35,6 +33,7 @@ import (
 )
 
 type config struct {
+	ServiceName   string `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
@@ -142,7 +141,7 @@ func main() {
 		os.Exit(1)
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher("notification-worker", cfg.SiteID)
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
 	domainMetrics := newNotificationMetrics(sdk.MeterProvider().Meter("notification-worker"))
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
@@ -212,15 +211,9 @@ func main() {
 
 	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: "notification-worker", Site: cfg.SiteID,
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
-	consumerMetrics.LoopStopped(ctx)
-	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
 	// The broker advertises max_payload in its INFO on connect, so this is
 	// always in step with the server. An env var was a second source of truth
 	// that silently dropped batches whenever it drifted below the real limit.
@@ -271,97 +264,100 @@ func main() {
 	// Mute is the only canonical member event still on this stream; add/remove invalidation rides on MESSAGES-CANONICAL sys-messages.
 	// DeliverNewPolicy: skip history on restart; roomsubcache TTL reconciles any boundary staleness.
 	roomsCfg := stream.Rooms(cfg.SiteID)
-	invalCons, err := otelJS.CreateOrUpdateConsumer(ctx, roomsCfg.Name, jetstream.ConsumerConfig{
+	invalConsumerCfg := jetstream.ConsumerConfig{
 		Durable:       cfg.Mode.ConsumerName("notification-worker-room-event-invalidate"),
 		FilterSubject: subject.RoomCanonicalMemberEvent(cfg.SiteID, model.CanonicalMemberEventMuted),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		DeliverPolicy: jetstream.DeliverNewPolicy,
-	})
-	if err != nil {
-		slog.Error("create canonical member event consumer failed", "error", err)
-		os.Exit(1)
 	}
-	invalIter, err := invalCons.Messages(ctx, jetstream.PullMaxMessages(64))
-	if err != nil {
-		slog.Error("canonical member event iterator failed", "error", err)
-		os.Exit(1)
-	}
-	go func() {
-		for {
-			_, msg, err := invalIter.Next()
-			if err != nil {
-				return
-			}
-			var evt model.CanonicalMemberEvent
-			if err := sonic.Unmarshal(msg.Data(), &evt); err != nil {
-				slog.Warn("canonical member event decode failed", "error", err)
-				_ = msg.Ack()
-				continue
-			}
-			if evt.RoomID != "" {
-				select {
-				case invalCh <- evt.RoomID:
-				default:
-					slog.Warn("invalidation queue full, dropping (TTL will reconcile)", "roomId", evt.RoomID)
-				}
-			}
-			_ = msg.Ack()
-		}
-	}()
-
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-	consumerMetrics.LoopStarted(ctx)
-
-	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go func() {
-		// The loop itself is counted so shutdown, which stops the iterator and
-		// then waits on wg, cannot pass through while a message Next already
-		// returned is still on its way to a worker.
-		defer wg.Done()
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				consumerMetrics.LoopFailed(context.Background(), err)
-				return
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func(msgCtx context.Context, msg jetstream.Msg) {
-				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
-				msg = tracked
-				msgCtx = tracked.Context(msgCtx)
-				defer func() {
-					tracked.Finish(msgCtx)
-					<-sem
-					wg.Done()
-				}()
-				// jobguard recovers handler panics — this goroutine runs outside natsrouter's Recovery
-				// middleware, so an unrecovered panic would crash the worker and crash-loop on redelivery.
-				jobguard.Run(msg, func() {
-					handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-					// Migrated events carry X-Migration: live — the source already delivered them, so
-					// this live-delivery worker must not re-notify. Ack and drop without invoking the handler.
-					if natsutil.IsMigrationLiveHeader(msg.Headers()) {
-						slog.Info("skipping migrated event (no re-notify)", "subject", msg.Subject(), "request_id", reqID)
-						if err := msg.Ack(); err != nil {
-							slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
-						}
-						domainMetrics.Record(handlerCtx, notifyKindPush, notifySuppressed)
-						return
-					}
-					// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
-					jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
-				})
-			}(msgCtx, msg)
+	invalConsumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Stream: roomsCfg.Name, Consumer: invalConsumerCfg.Durable,
+	})
+	invalSupervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
+	initialInvalFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := otelJS.CreateOrUpdateConsumer(factoryCtx, roomsCfg.Name, invalConsumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create invalidation consumer: %w", err)
 		}
-	}()
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(64))
+		if err != nil {
+			return nil, fmt.Errorf("create invalidation iterator: %w", err)
+		}
+		return iter, nil
+	}
+	recoveryInvalFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := otelJS.Consumer(factoryCtx, roomsCfg.Name, invalConsumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("lookup invalidation consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(64))
+		if err != nil {
+			return nil, fmt.Errorf("create recovery invalidation iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := invalSupervisor.StartWithRecovery(ctx, initialInvalFactory, recoveryInvalFactory,
+		invalConsumerMetrics, 1, invalConsumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType {
+			return natsmetrics.RoomEventTypeFromSubject(msg.Subject())
+		},
+		func(msgCtx context.Context, msg *natsmetrics.Message) {
+			processInvalidationMessage(msgCtx, msg, invalCh)
+		}); err != nil {
+		slog.Error("start invalidation consumer supervisor failed", "error", err)
+		os.Exit(1)
+	}
+
+	supervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
+	initialIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := otelJS.CreateOrUpdateConsumer(factoryCtx, wiring.CanonicalStream.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create iterator: %w", err)
+		}
+		return iter, nil
+	}
+	recoveryIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := otelJS.Consumer(factoryCtx, wiring.CanonicalStream.Name, consumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("lookup consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create recovery iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := supervisor.StartWithRecovery(ctx, initialIteratorFactory, recoveryIteratorFactory,
+		consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		func(msgCtx context.Context, msg *natsmetrics.Message) {
+			// jobguard recovers handler panics — this goroutine runs outside natsrouter's Recovery
+			// middleware, so an unrecovered panic would crash the worker and crash-loop on redelivery.
+			jobguard.Run(msg, func() {
+				handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+				// Migrated events carry X-Migration: live — the source already delivered them, so
+				// this live-delivery worker must not re-notify. Ack and drop without invoking the handler.
+				if natsutil.IsMigrationLiveHeader(msg.Headers()) {
+					slog.Info("skipping migrated event (no re-notify)", "subject", msg.Subject(), "request_id", reqID)
+					if err := msg.Ack(); err != nil {
+						slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
+					}
+					domainMetrics.Record(handlerCtx, notifyKindPush, notifySuppressed)
+					return
+				}
+				// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
+				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
+			})
+		}); err != nil {
+		slog.Error("start consumer supervisor failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -381,9 +377,9 @@ func main() {
 	)
 
 	shutdown.Wait(ctx, 25*time.Second,
-		func(_ context.Context) error {
-			consumerMetrics.LoopStopped(context.Background())
-			iter.Stop()
+		func(context.Context) error {
+			supervisor.Stop()
+			invalSupervisor.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {
@@ -395,10 +391,6 @@ func main() {
 			case <-ctx.Done():
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
-		},
-		func(_ context.Context) error {
-			invalIter.Stop()
-			return nil
 		},
 		func(stepCtx context.Context) error {
 			close(invalCh) // stop accepting work; worker drains the buffer

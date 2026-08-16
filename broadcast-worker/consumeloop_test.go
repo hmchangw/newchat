@@ -35,6 +35,8 @@ func (a plainIterAdapter) Next(opts ...jetstream.NextOpt) (context.Context, jets
 	return context.Background(), msg, nil
 }
 
+func (a plainIterAdapter) Stop() { a.inner.Stop() }
+
 // startEmbeddedCanonicalConsumer spins up an in-process JetStream server (no
 // Docker) with the MESSAGES-CANONICAL stream and a broadcast-worker-style
 // durable consumer, returning the JetStream handle, the iterator, the subject

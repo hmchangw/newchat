@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -34,6 +35,7 @@ type config struct {
 	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
 	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
 	Mode              string                  `env:"MODE"            envDefault:"default"`
+	ServiceName       string                  `env:"OTEL_SERVICE_NAME" envDefault:"unknown-service"`
 	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
 	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
@@ -121,8 +123,10 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -159,7 +163,7 @@ func main() {
 		slog.Info("room-meta L2 invalidation enabled")
 	}
 
-	keySender := roomkeysender.NewSender(nc.NatsConn())
+	keySender := roomkeysender.NewSender(nc.NatsConn(), roomkeysender.WithMetrics(publishMetrics))
 
 	// Eager at-rest DEK provisioning for synchronously-created DM rooms (the
 	// serverCreateDM path bypasses room-service's create-room flow). nil when
@@ -212,13 +216,19 @@ func main() {
 		msg := natsutil.NewMsg(ctx, subj, data)
 		if msgID == "" {
 			// Ephemeral client-delivery — core NATS, not persisted.
-			if err := nc.PublishMsg(ctx, msg); err != nil {
+			err := nc.PublishMsg(ctx, msg)
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Attempt(ctx, destination, operation, err)
+			if err != nil {
 				return fmt.Errorf("publish to %q: %w", subj, err)
 			}
 			return nil
 		}
 		// JetStream-backed (MESSAGES-CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
-		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
+		_, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
+		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+		publishMetrics.Attempt(ctx, destination, operation, err)
+		if err != nil {
 			return fmt.Errorf("publish to %q: %w", subj, err)
 		}
 		return nil
@@ -231,7 +241,11 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("marshal user identity fanout: %w", err)
 		}
-		if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subject.OrgSyncUsersUpsert(cfg.SiteID), data)); err != nil {
+		subj := subject.OrgSyncUsersUpsert(cfg.SiteID)
+		_, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
+		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+		publishMetrics.Attempt(ctx, destination, operation, err)
+		if err != nil {
 			return fmt.Errorf("publish user identity fanout: %w", err)
 		}
 		return nil
@@ -240,45 +254,53 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.New(nc, "room-worker", natsrouter.WithSiteID(cfg.SiteID))
+	router := natsrouter.New(nc, "room-worker", natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
-	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
-
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode))
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
-
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-
-	go func() {
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				return
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func() {
-				// runJobWithRecovery contains handler panics (it Acks — drops — the
-				// poison message) so this async goroutine, which runs outside
-				// natsrouter's recovery middleware, can't crash the worker.
-				defer func() {
-					<-sem
-					wg.Done()
-				}()
-				runJobWithRecovery(msgCtx, handler, msg)
-			}()
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Stream: streamCfg.Name, Consumer: consumerCfg.Durable,
+	})
+	supervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
+	initialIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := js.CreateOrUpdateConsumer(factoryCtx, streamCfg.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
 		}
-	}()
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create iterator: %w", err)
+		}
+		return iter, nil
+	}
+	recoveryIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := js.Consumer(factoryCtx, streamCfg.Name, consumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("lookup consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create recovery iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := supervisor.StartWithRecovery(ctx, initialIteratorFactory, recoveryIteratorFactory,
+		consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType {
+			return natsmetrics.RoomEventTypeFromSubject(msg.Subject())
+		},
+		func(msgCtx context.Context, msg *natsmetrics.Message) {
+			// runJobWithRecovery contains handler panics (it Acks — drops — the
+			// poison message) so this async goroutine, which runs outside
+			// natsrouter's recovery middleware, can't crash the worker.
+			runJobWithRecovery(msgCtx, handler, msg)
+		}); err != nil {
+		slog.Error("start consumer supervisor failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -294,8 +316,8 @@ func main() {
 	// THEN flush observability exporters. Reverse order drops traces/metrics
 	// emitted during NATS drain, mongo disconnect, and keyStore close.
 	hooks := []func(ctx context.Context) error{
-		func(ctx context.Context) error {
-			iter.Stop()
+		func(context.Context) error {
+			supervisor.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {

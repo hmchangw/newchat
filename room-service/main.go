@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgraph"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -27,6 +28,7 @@ import (
 )
 
 type config struct {
+	ServiceName   string `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	NatsURL       string `env:"NATS_URL,required"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
@@ -152,7 +154,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -204,7 +208,7 @@ func main() {
 	// dependency. A history-service outage degrades only read receipts
 	// (errcode.Unavailable); core room/membership/subscription operations are
 	// all MongoDB-backed and unaffected.
-	msgReader := newHistoryMessageReader(nc, cfg.SiteID)
+	msgReader := newHistoryMessageReader(nc, cfg.SiteID, withHistoryMetrics(publishMetrics))
 
 	// Graph clients back the meetings RPC. Constructed only when the Azure app
 	// credentials are present; otherwise the meetings RPC reports not-configured
@@ -250,7 +254,7 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout)
+	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics))
 	handler := NewHandler(store, keyStore, memberListClient, msgReader, cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
 		func(ctx context.Context, subj string, data []byte, msgID string) error {
 			msg := natsutil.NewMsg(ctx, subj, data)
@@ -258,13 +262,19 @@ func main() {
 			if msgID != "" {
 				opts = append(opts, jetstream.WithMsgID(msgID))
 			}
-			if _, err := js.PublishMsg(ctx, msg, opts...); err != nil {
+			_, err := js.PublishMsg(ctx, msg, opts...)
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Attempt(ctx, destination, operation, err)
+			if err != nil {
 				return fmt.Errorf("publish to %q: %w", subj, err)
 			}
 			return nil
 		},
 		func(ctx context.Context, subj string, data []byte) error {
-			if err := nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+			err := nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Attempt(ctx, destination, operation, err)
+			if err != nil {
 				return fmt.Errorf("publish core to %q: %w", subj, err)
 			}
 			return nil
@@ -283,7 +293,7 @@ func main() {
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}

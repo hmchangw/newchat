@@ -121,6 +121,7 @@ func TestConsumerLoopFailureUsesBoundedReason(t *testing.T) {
 		want TerminalReason
 	}{
 		{name: "consumer deleted", err: jetstream.ErrConsumerDeleted, want: TerminalConsumerDeleted},
+		{name: "consumer missing", err: jetstream.ErrConsumerNotFound, want: TerminalConsumerDeleted},
 		{name: "stream unavailable", err: jetstream.ErrNoStreamResponse, want: TerminalStreamUnavailable},
 		{name: "unexpected iterator failure", err: errors.New("dynamic error text"), want: TerminalInternal},
 	}
@@ -274,11 +275,30 @@ func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 	assert.Equal(t, string(OperationUnknown), attrs(requestPoints[0])["operation"])
 }
 
+func TestHandledRequestMetricsUseBoundedResults(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	p := m.Publisher("room-service", "site-a")
+	p.HandledRequest(context.Background(), OperationMemberRead, 12*time.Millisecond, RequestSuccess)
+	p.HandledRequest(context.Background(), Operation("dynamic.operation"), time.Millisecond, RequestResult("dynamic.error"))
+
+	rm := collect(t, reader)
+	points := metricPoints[int64](t, rm, "chat.nats.request.handled")
+	require.Len(t, points, 2)
+	got := map[string]map[string]string{}
+	for _, point := range points {
+		got[attrs(point)["operation"]] = attrs(point)
+	}
+	assert.Equal(t, string(RequestSuccess), got[string(OperationMemberRead)]["result"])
+	assert.Equal(t, string(RequestInternal), got[string(OperationUnknown)]["result"])
+	assert.Len(t, histogramPoints(t, rm, "chat.nats.request.handler.duration"), 2)
+}
+
 func TestZeroValuePublisherDoesNotAffectBusinessFlow(t *testing.T) {
 	var publisher Publisher
 	publisher.Attempt(context.Background(), DestinationPush, OperationPushPublish, errors.New("publish failed"))
 	publisher.Retry(context.Background(), DestinationPush, OperationPushPublish)
 	publisher.Request(context.Background(), OperationPresenceLookup, time.Millisecond, errors.New("request failed"))
+	publisher.HandledRequest(context.Background(), OperationMemberRead, time.Millisecond, RequestInternal)
 }
 
 func TestClassifiersAreBounded(t *testing.T) {

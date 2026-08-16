@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -26,6 +27,7 @@ import (
 )
 
 type config struct {
+	ServiceName        string                  `env:"OTEL_SERVICE_NAME" envDefault:"unknown-service"`
 	NatsURL            string                  `env:"NATS_URL,required"`
 	NatsCredsFile      string                  `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID             string                  `env:"SITE_ID,required"`
@@ -84,7 +86,7 @@ func main() {
 		os.Exit(1)
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher("message-gatekeeper", cfg.SiteID)
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
 	domainMetrics := newGatekeeperMetrics(sdk.MeterProvider().Meter("message-gatekeeper"))
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
@@ -167,33 +169,45 @@ func main() {
 	messagesCfg := stream.Messages(cfg.SiteID)
 	consumerCfg := buildConsumerConfig(cfg.Consumer)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: "message-gatekeeper", Site: cfg.SiteID,
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
 		Stream: messagesCfg.Name, Consumer: consumerCfg.Durable,
 	})
-	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
-
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
-	if err != nil {
-		slog.Error("messages failed", "error", err)
-		os.Exit(1)
-	}
-	consumerMetrics.LoopStarted(ctx)
-
 	var wg sync.WaitGroup
-
-	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+	supervisor := natsmetrics.NewSupervisor(natsmetrics.SupervisorConfig{})
+	initialIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := js.CreateOrUpdateConsumer(factoryCtx, messagesCfg.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create iterator: %w", err)
+		}
+		return iter, nil
+	}
+	recoveryIteratorFactory := func(factoryCtx context.Context) (natsmetrics.Iterator, error) {
+		cons, err := js.Consumer(factoryCtx, messagesCfg.Name, consumerCfg.Durable)
+		if err != nil {
+			return nil, fmt.Errorf("lookup consumer: %w", err)
+		}
+		iter, err := cons.Messages(factoryCtx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("create recovery iterator: %w", err)
+		}
+		return iter, nil
+	}
+	if err := supervisor.StartWithRecovery(ctx, initialIteratorFactory, recoveryIteratorFactory,
+		consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		func(msgCtx context.Context, msg *natsmetrics.Message) {
+		guardedGatekeeperProcessor(func(msgCtx context.Context, msg *natsmetrics.Message) {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
 			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 			handler.HandleJetStreamMsg(handlerCtx, msg)
-		})
+		})); err != nil {
+		slog.Error("start consumer supervisor failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -206,9 +220,8 @@ func main() {
 	slog.Info("message-gatekeeper running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error {
-			consumerMetrics.LoopStopped(ctx)
-			iter.Stop()
+		func(context.Context) error {
+			supervisor.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {
@@ -227,6 +240,12 @@ func main() {
 		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+func guardedGatekeeperProcessor(process natsmetrics.ProcessMessage) natsmetrics.ProcessMessage {
+	return func(msgCtx context.Context, msg *natsmetrics.Message) {
+		jobguard.Run(msg, func() { process(msgCtx, msg) })
+	}
 }
 
 // buildConsumerConfig returns the durable consumer config for

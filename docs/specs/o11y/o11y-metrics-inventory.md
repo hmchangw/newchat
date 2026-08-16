@@ -131,17 +131,21 @@ missing beyond shared cache/key counters.
 | history-service | — | ✅ | — | ✅ | spans | — | shared `cache_*_total` | history reads, bucket-walk depth |
 | data-migration/oplog-* | — | ✅ | — | — | spans | — | **rich counters** (`oplog_*_events_processed_total`, `_naks_total`, `_terms_total`, `_skipped_total`, `_exhausted_total`, …) | (good exemplar — copy this pattern) |
 
-### 2.1 Shared application NATS metrics (2026-08-14)
+### 2.1 Shared application NATS metrics (2026-08-15)
 
 The SDK emits no NATS client metrics (§1), so these are owned by this repo.
-The shared consumer/publisher helpers are adopted by the four first-campaign
-services. Connection lifecycle metrics are opt-in through
-`natsutil.ConnectWithMetrics` and use the same four-service scope. Names are
-OTel instrument names; Prometheus renders them with `_` separators and adds
-`_total` / unit suffixes.
+The shared consumer, supervisor, request, and publisher helpers are adopted by
+the first single-site failure-readiness services: `message-gatekeeper`,
+`message-worker`, `broadcast-worker`, `notification-worker`, `history-service`,
+`room-service`, and `room-worker`. Connection lifecycle metrics are opt-in
+through `natsutil.ConnectWithMetrics`. Names are OTel instrument names;
+Prometheus renders them with `_` separators and adds `_total` / unit suffixes.
 
 Consumer and publisher families share a base of `service_name` + `site`; the
-"labels" column lists what each adds on top.
+"labels" column lists what each adds on top. Every adopter reads
+`service_name` from `OTEL_SERVICE_NAME`, matching the OTel resource. Normal,
+bot, and Teams deployments use distinct resource identities while the package
+instrumentation scopes remain stable.
 
 | Instrument | Type | Owner | Labels beyond the base |
 |---|---|---|---|
@@ -150,10 +154,13 @@ Consumer and publisher families share a base of `service_name` + `site`; the
 | `chat.nats.consumer.redeliveries` | counter | `pkg/natsmetrics` | stream, consumer, event_type |
 | `chat.nats.consumer.processing.duration` | histogram (s) | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
 | `chat.nats.terminal.failures` | counter | `pkg/natsmetrics` | stream, consumer, event_type, reason |
+| `chat.nats.consumer.recovery.attempts` | counter | `pkg/natsmetrics` | stream, consumer, result |
 | `chat.nats.publish.attempts` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
 | `chat.nats.publish.retries` | counter | `pkg/natsmetrics` | destination_kind, operation |
 | `chat.nats.requests` | counter | `pkg/natsmetrics` | operation, outcome |
 | `chat.nats.request.duration` | histogram (s) | `pkg/natsmetrics` | operation, outcome |
+| `chat.nats.request.handled` | counter | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
+| `chat.nats.request.handler.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
 | `chat.nats.client.connected` | up-down counter | `pkg/natsutil` | none — one series per process; value is the live connection count |
 | `chat.nats.client.connection.events` | counter | `pkg/natsutil` | event |
 | `nats_slow_consumer_events_total` | counter | `pkg/natsutil` | subject, queue |
@@ -171,6 +178,59 @@ through `ErrorHandler`, so it is counted as
 `chat_nats_publish_attempts_total{outcome="buffer_full"}`. The full semantics,
 label enums, and the alerts these drive are specified in the NATS failure
 metrics contract under `docs/load-testing/failure-testing/`.
+
+All subject- and error-derived metric dimensions are closed enums. Request
+`result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
+`not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
+Room/history request and publish operations are coarse bounded categories such
+as `room_read`, `room_mutation`, `member_read`, `member_mutation`,
+`history_read`, `history_mutation`, `room_publish`, `member_publish`, and
+`outbox_publish`. `service_name` and `site` are operator-provided deployment
+identity dimensions, not closed enums; deployment configuration must constrain
+them to the deployed service and site inventory. Unknown subject families
+normalize to `unknown`. Raw subjects, room IDs, account IDs, site IDs parsed
+from subject tokens, and error strings are never labels.
+
+The long-running pull consumers use a single-owner supervisor. Initial consumer
+and iterator creation is synchronous and fail-fast; only a loop that has
+successfully started enters recovery. A recoverable terminal iterator error
+first sets `chat.nats.consumer.loop.up` to zero and records a bounded terminal
+failure, then looks up the existing durable and recreates only its iterator with
+capped exponential backoff. Recovery never creates a missing durable.
+Every production recovery factory calls `js.Consumer(stream, durable)` before
+`consumer.Messages(...)`; none calls `CreateOrUpdateConsumer` after startup.
+Consecutive iterator generations that fail before receiving a message increase
+that backoff; a successful delivery resets it. Each retryable failed or
+successful recreation increments `chat.nats.consumer.recovery.attempts`.
+
+`jetstream.ErrConsumerDeleted` is intentionally terminal and is not recreated.
+Deleting a durable also deletes its server-side cursor, so automatic recreation
+would replay the retention window for `DeliverAllPolicy` consumers or skip
+pending work for `DeliverNewPolicy` consumers. The loop remains down and its
+`consumer_deleted` terminal metric requires operator intervention instead.
+The same terminal behavior applies when recovery lookup returns
+`jetstream.ErrConsumerNotFound`, including when a transport failure masked a
+concurrent durable deletion from the old iterator.
+
+One semaphore is shared across iterator generations, and concurrent starts on
+the same supervisor are rejected, so recovery cannot create duplicate active
+iterators or exceed the configured worker limit while earlier handlers drain.
+Context cancellation stops backoff, stops the active iterator, and leaves the
+existing graceful in-flight wait and NATS drain ordering intact. Recovery state
+is telemetry, not a liveness failure: transient iterator loss does not
+deliberately restart an otherwise healthy process. These mechanics do not change
+handler-owned Ack, Nak, Term, or publish retry decisions.
+
+`notification-worker` applies the same supervision separately to its canonical
+message consumer and member-mute invalidation consumer. `room-worker` covers the
+normal and Teams room streams. `history-service` has no JetStream consumer loop;
+it adopts only connection, request/reply, and mutation-publish metrics.
+
+The Layer B rows above that show NATS spans only for `room-service`,
+`room-worker`, or `history-service` are superseded by this section: all three now
+emit the applicable `chat.nats.*` families. Their remaining gaps are domain
+outcomes such as room/member business results and history bucket-walk depth,
+not NATS failure evidence.
 
 ### 2.2 Services not previously inventoried (2026-08-14)
 

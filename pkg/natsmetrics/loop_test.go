@@ -18,6 +18,7 @@ type failingIterator struct{ err error }
 func (i failingIterator) Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error) {
 	return nil, nil, i.err
 }
+func (failingIterator) Stop() {}
 
 type oneMessageIterator struct {
 	msg  jetstream.Msg
@@ -31,6 +32,7 @@ func (i *oneMessageIterator) Next(...jetstream.NextOpt) (context.Context, jetstr
 	i.done = true
 	return context.Background(), i.msg, nil
 }
+func (*oneMessageIterator) Stop() {}
 
 func TestConsume_TerminalNextFailureStopsLoop(t *testing.T) {
 	m, reader := newTestMetrics(t)
@@ -87,6 +89,7 @@ func (i *blockingIterator) Next(...jetstream.NextOpt) (context.Context, jetstrea
 	i.done = true
 	return context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}}, nil
 }
+func (*blockingIterator) Stop() {}
 
 // A zero MAX_WORKERS must not wedge the consumer. An unbuffered semaphore would
 // park the dispatch send forever, leaving the loop-up gauge at 1 with no error

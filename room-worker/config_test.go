@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/caarlos0/env/v11"
@@ -46,4 +47,37 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 			assert.Equal(t, tc.want, mode)
 		})
 	}
+}
+
+func TestConfig_ServiceName(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "teams-room-worker")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, "teams-room-worker", cfg.ServiceName)
+}
+
+func TestDeploymentServiceNamesAreDistinct(t *testing.T) {
+	normal, err := os.ReadFile("deploy/docker-compose.yml")
+	require.NoError(t, err)
+	teams, err := os.ReadFile("deploy/teams/docker-compose.yml")
+	require.NoError(t, err)
+
+	require.True(t, hasComposeEnvironmentEntry(string(normal), "OTEL_SERVICE_NAME=room-worker"))
+	require.True(t, hasComposeEnvironmentEntry(string(teams), "OTEL_SERVICE_NAME=teams-room-worker"))
+}
+
+func TestHasComposeEnvironmentEntry_RejectsCommentsAndSuffixes(t *testing.T) {
+	content := "    # - OTEL_SERVICE_NAME=room-worker\n    - OTEL_SERVICE_NAME=room-worker-canary\n"
+
+	assert.False(t, hasComposeEnvironmentEntry(content, "OTEL_SERVICE_NAME=room-worker"))
+}
+
+func hasComposeEnvironmentEntry(content, entry string) bool {
+	for line := range strings.SplitSeq(content, "\n") {
+		if strings.TrimSpace(line) == "- "+entry {
+			return true
+		}
+	}
+	return false
 }
