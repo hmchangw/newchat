@@ -663,21 +663,35 @@ func TestValidateSoakConfig_PresenceBoundsAreSkippedWhenDisabled(t *testing.T) {
 	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
 }
 
-func TestValidateSoakConfig_SearchObserverNeedsReconciliationCapacity(t *testing.T) {
+// The observer needs a per-message searchable marker the payload does not carry
+// yet, so enabling it is refused outright rather than allowed to manufacture a
+// data-loss report from a query that matches nothing.
+func TestValidateSoakConfig_SearchObserverIsRefusedUntilPayloadsAreMarked(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.SearchObserverEnabled = true
+
+	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_SEARCH_OBSERVER_ENABLED")
+	assert.Contains(t, err.Error(), "marker")
+}
+
+// The capacity rule stays enforced for when the observer is usable: it adds a
+// second reconcile step to every admitted message, drawn from the same share
+// the history step already uses.
+func TestValidateSoakSearchReconcileCapacity_CoversTwoStepsPerMessage(t *testing.T) {
+	cfg := validSoakConfig(t)
 	cfg.SendRate = 100
 	cfg.ReadRate = 700
 	cfg.ReconcileReadShare = 0.5
 
-	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace),
+	require.NoError(t, validateSoakSearchReconcileCapacity(&cfg),
 		"two reconcile steps per message fit inside 350 slots/s at 100 msg/s")
 
-	// Each admitted message now needs a history step and a search step, so the
-	// budget has to cover both.
 	cfg.ReadRate = 200
 
-	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+	err := validateSoakSearchReconcileCapacity(&cfg)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SOAK_SEARCH_OBSERVER_ENABLED")
@@ -699,10 +713,9 @@ func TestValidateSoakConfig_SearchCapacityCheckOnlyAppliesWhenEnabled(t *testing
 // message resolves unverified for lack of time to answer.
 func TestValidateSoakConfig_SearchSettleMustFitTheDeadline(t *testing.T) {
 	cfg := validSoakConfig(t)
-	cfg.SearchObserverEnabled = true
 	cfg.SearchSettle = cfg.ReconcileDeadline
 
-	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+	err := validateSoakSearchSettle(&cfg)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SOAK_SEARCH_SETTLE")

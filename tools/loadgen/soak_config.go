@@ -453,6 +453,28 @@ func validateSoakSearchConfig(cfg *soakConfig) error {
 	if !cfg.SearchObserverEnabled {
 		return nil
 	}
+	if err := validateSoakSearchSettle(cfg); err != nil {
+		return err
+	}
+	if err := validateSoakSearchReconcileCapacity(cfg); err != nil {
+		return err
+	}
+	// The probe locates a message by full-text search, so the payload has to
+	// contain something that identifies one message. Today every soak body is a
+	// run of the same character differing only in length, which analyzes to a
+	// single huge token: the query matches nothing useful and every message
+	// would be reported missing. Refuse rather than let the run manufacture a
+	// data-loss report.
+	return fmt.Errorf(
+		"SOAK_SEARCH_OBSERVER_ENABLED is not usable yet: soak message bodies carry no " +
+			"per-message searchable marker, so the index probe cannot distinguish one " +
+			"message from another and would report every message as lost",
+	)
+}
+
+// validateSoakSearchSettle keeps the window inside the reconcile deadline, or
+// the probe never gets an answer before the operation expires.
+func validateSoakSearchSettle(cfg *soakConfig) error {
 	if cfg.SearchSettle <= 0 {
 		return fmt.Errorf("SOAK_SEARCH_SETTLE must be greater than zero")
 	}
@@ -463,6 +485,12 @@ func validateSoakSearchConfig(cfg *soakConfig) error {
 			cfg.SearchSettle, cfg.ReconcileDeadline,
 		)
 	}
+	return nil
+}
+
+// validateSoakSearchReconcileCapacity is kept separate so the capacity rule
+// stays testable while the observer itself is refused above.
+func validateSoakSearchReconcileCapacity(cfg *soakConfig) error {
 	// One step for the history observer, one for the search observer.
 	const reconcileStepsPerMessage = 2
 	capacity := cfg.ReadRate * cfg.ReconcileReadShare

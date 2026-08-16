@@ -40,12 +40,29 @@ func (t *soakRoomOpsTransport) calls() int {
 	return len(t.subjects)
 }
 
+// soakRoomOpsLatency is what the injected clock advances per call, so latency
+// assertions test that the mutator records a measurement rather than testing
+// the host's clock resolution — which is not uniform across platforms and made
+// a strictly-positive assertion flake.
+const soakRoomOpsLatency = 7 * time.Millisecond
+
 func newSoakRoomOpsMutator(transport soakRPCTransport) *soakRoomMutator {
+	current := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	calls := 0
 	return newSoakRoomMutator(
 		"site-a",
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 3}, &soakRecordingSleeper{}, nil),
 		time.Second,
-		nil,
+		func() time.Time {
+			// Even calls start a measurement, odd calls end it.
+			at := current
+			if calls%2 == 1 {
+				at = current.Add(soakRoomOpsLatency)
+				current = at
+			}
+			calls++
+			return at
+		},
 	)
 }
 
@@ -59,7 +76,7 @@ func TestSoakRoomMutator_AddMemberAddressesTheOwnerSubject(t *testing.T) {
 	assert.True(t, outcome.Accepted)
 	assert.Equal(t, soakRPCMemberAdd, outcome.Action)
 	assert.Equal(t, "room-1", outcome.RoomID)
-	assert.Positive(t, outcome.Latency)
+	assert.Equal(t, soakRoomOpsLatency, outcome.Latency)
 	assert.Equal(t, subject.MemberAdd("user-1", "room-1", "site-a"), transport.subjects[0])
 	assert.JSONEq(t, `{"roomId":"room-1","users":["user-9"]}`, string(transport.bodies[0]))
 }

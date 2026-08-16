@@ -184,9 +184,15 @@ func TestSoakSearchReader_IndexProbeRejectsIncompleteTargets(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestSearchProbeTerm_PicksAMatchableToken(t *testing.T) {
-	assert.Equal(t, "hello", searchProbeTerm("hello soak world"))
-	assert.Equal(t, "soak", searchProbeTerm("a b c"), "short tokens are skipped")
+// This documents what the probe actually gets today, not a payload shape the
+// soak never produces. Bodies are a single run of one character with no
+// whitespace, so the "term" is the whole body — which is why the observer is
+// refused at startup until payloads carry a per-message marker.
+func TestSearchProbeTerm_ReflectsTheRealPayloadShape(t *testing.T) {
+	body := soakContentOfSize(64)
+
+	assert.Equal(t, body, searchProbeTerm(body),
+		"a body with no whitespace yields itself, not a distinguishing term")
 	assert.Equal(t, "soak", searchProbeTerm(""))
 }
 

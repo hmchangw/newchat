@@ -305,7 +305,7 @@ func TestNewSoakRPCClient_DefaultsAndInputFailures(t *testing.T) {
 		Body:   make(chan int),
 	}, nil)
 	require.Error(t, err)
-	assert.Equal(t, soakErrorDecode, result.ErrorClass)
+	assert.Equal(t, soakErrorRequestEncode, result.ErrorClass)
 }
 
 func TestSoakRPCClient_PropagatesResolverAndSleeperFailures(t *testing.T) {
@@ -671,7 +671,8 @@ func TestClassifySoakVerifyRPCError_CoversTerminalAndTransientClasses(t *testing
 		want  soakVerifyClass
 	}{
 		{class: soakErrorNotFound, want: soakVerifyMissing},
-		{class: soakErrorDecode, want: soakVerifyMalformed},
+		{class: soakErrorRequestEncode, want: soakVerifyMalformed},
+		{class: soakErrorResponseDecode, want: soakVerifyMalformed},
 		{class: soakErrorTimeout, want: soakVerifyRetryable},
 		{class: soakErrorForbidden, want: soakVerifyRPCError},
 	}
