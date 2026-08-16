@@ -670,26 +670,31 @@ dependency boundary: our streams and durables, hosted on their server.
 
 #### D2-5.1 · Consumer backlog
 
-- **Source:** Proposed (recording rules over platform exporter series)
+- **Source:** Proposed — recording rules over exporter series (guide §9.3).
+  Blocked only on the exporter being scraped; no application change needed.
 - **Applies to:** operations, soak, failure
 
 ```promql
-chat_jetstream_consumer_pending{site="$site"}
-chat_jetstream_consumer_ack_pending{site="$site"}
+chat_jetstream_consumer_pending{site="$site", stream=~"$stream"}
+chat_jetstream_consumer_ack_pending{site="$site", stream=~"$stream"}
+chat_jetstream_consumer_redelivered{site="$site", stream=~"$stream"}
 ```
 
 - **Expected reading:** pending returns to baseline between bursts. A rising
-  floor is production outpacing consumption.
-- **No data:** the recording rules are not installed, or the exporter is not
-  scraped. It does **not** mean the backlog is zero.
-- **Traps:** 7.6 (without the leader filter these are multiplied by the
-  replication factor). Guide §2 item 4 — the same number means opposite things
-  on different consumers; thresholds must be per consumer.
+  floor is production outpacing consumption. Ack-pending is the in-flight
+  window: it should sit well below the consumer's `MaxAckPending`, and pinned
+  at the limit means workers are the bottleneck rather than the broker.
+- **No data:** the exporter is not scraped, or the recording rules are not
+  installed. It does **not** mean the backlog is zero.
+- **Traps:** 7.6 (without leader deduplication these are multiplied by the
+  replication factor — guide §9.4 question 3). Guide §2 item 4 — the same number
+  means opposite things on different consumers, so thresholds are per consumer.
 
 #### D2-5.2 · Ack floor stalled
 
-- **Source:** Proposed; depends on `ack_floor` being present in the exporter
-  output (guide §8.1)
+- **Source:** Proposed — recording rule over
+  `jetstream_consumer_ack_floor_stream_seq`, which **is** in the exporter
+  vocabulary (guide §9.1)
 - **Applies to:** operations, soak, failure
 
 ```promql
@@ -697,16 +702,64 @@ chat_jetstream_consumer_ack_floor_stalled{site="$site"} == 1
 ```
 
 - **Expected reading:** empty. A stuck floor with non-zero pending is the
-  substitute for the missing oldest-pending-age gauge. It is the **only**
-  signal that works on `outbox-worker`'s ordered lanes, where `MaxAckPending=1`
-  makes ack-pending thresholds structurally incapable of firing (guide §2
-  item 3).
-- **No data:** healthy, or the rule is not installed. These are not
-  distinguishable from this panel alone, which is why guide §12 requires every
-  panel to have produced data at least once.
+  substitute for the missing oldest-pending-age gauge. It is the **only** signal
+  that works on `outbox-worker`'s ordered lanes, where `MaxAckPending=1` makes
+  ack-pending thresholds structurally incapable of firing (guide §2 item 3).
+- **No data:** healthy, or the rule is not installed. Not distinguishable from
+  this panel alone, which is why guide §12 requires every panel to have produced
+  data at least once.
+- **Traps:** the condition is **necessary but not sufficient**. A consumer that
+  keeps acknowledging too slowly to catch up never freezes its floor, so this
+  reads clean while the backlog grows. Read it beside D2-5.1 and D2-5.3.
 - **Note:** a parked forward to a down peer is by design — `MaxDeliver=-1`,
-  never Ack. This panel says the floor is stuck, not for how long. The duration
-  question needs `oldest_pending_age_seconds`, which does not exist.
+  never Ack. This panel says the floor is stuck, **not for how long**. During a
+  loadgen run `loadgen_consumer_ack_floor_stall_seconds` answers the duration
+  question; outside a run nothing does.
+
+#### D2-5.3 · Publish versus ack throughput
+
+- **Source:** Proposed — recording rules over the two monotonic cursors
+  (guide §9.3)
+- **Applies to:** operations, soak, failure
+
+```promql
+# Publish rate into the stream
+chat_jetstream_stream_publish_rate{site="$site", stream=~"$stream"}
+
+# Ack rate out of each consumer
+chat_jetstream_consumer_ack_rate{site="$site", stream=~"$stream"}
+
+# The gap that D2-5.2 cannot see
+chat_jetstream_stream_publish_rate{site="$site", stream=~"$stream"}
+  - on (site, stream) group_right ()
+    chat_jetstream_consumer_ack_rate{site="$site", stream=~"$stream"}
+```
+
+- **Expected reading:** the two rates track each other. **A sustained positive
+  gap is the failure mode D2-5.2 is blind to** — the consumer is still
+  acknowledging, so its floor advances and no stall fires, but it acknowledges
+  more slowly than production and the backlog grows without bound. This panel is
+  what makes the stall signal safe to rely on.
+- **No data:** the exporter is not scraped. Note both inputs are derived from
+  monotonic sequence gauges via `rate()`, so a consumer reset or stream purge
+  produces a counter-reset artifact rather than a real rate.
+
+#### D2-5.4 · Stream retention
+
+- **Source:** Proposed — recording rules over `jetstream_stream_total_messages`
+  and `_total_bytes` (guide §9.1)
+- **Applies to:** operations, soak, failure
+
+```promql
+chat_jetstream_stream_messages{site="$site", stream=~"$stream"}
+chat_jetstream_stream_bytes{site="$site", stream=~"$stream"}
+```
+
+- **Expected reading:** bounded by the stream's retention policy. Monotonic
+  growth against a limits-based policy predicts discard; against an
+  interest-based policy it means a consumer is not acknowledging, which should
+  already be visible in D2-5.1.
+- **No data:** the exporter is not scraped.
 
 ### Row 6 — Runtime
 
@@ -1472,23 +1525,42 @@ advisory text, and pod UID.
 
 ### A.7 Platform exporter series
 
-Consumed through the recording rules recommended in guide §9, never referenced
-directly by a panel. The canonical names this project expects are specified in
-the NATS failure metrics contract §5 (`chat_jetstream_consumer_pending`,
-`_ack_pending`, `_redelivered`, `_ack_floor_stream_sequence`,
-`_ack_floor_consumer_sequence`, `chat_jetstream_stream_leader_up`, and so on).
+Consumed through the recording rules in guide §9.3, never referenced directly
+by a panel. The exporter vocabulary itself is verified in guide §9.1 against
+`natsio/prometheus-nats-exporter:0.16.0` with `-jsz=all`, which is what
+`tools/observability/` runs and what the repo's own local dashboards query.
 
-Two of them are not obtainable today:
+| Exporter series (source) | Normalized to | Feeds |
+|---|---|---|
+| `jetstream_consumer_num_pending` | `chat_jetstream_consumer_pending` | D2-5.1, D2-5.2, alert 9 |
+| `jetstream_consumer_num_ack_pending` | `chat_jetstream_consumer_ack_pending` | D2-5.1 |
+| `jetstream_consumer_num_redelivered` | `chat_jetstream_consumer_redelivered` | D2-5.1 |
+| `jetstream_consumer_num_waiting` | `chat_jetstream_consumer_waiting` | (declared; no panel yet) |
+| `jetstream_consumer_ack_floor_stream_seq` | `chat_jetstream_consumer_ack_floor`, `chat_jetstream_consumer_ack_rate` | D2-5.2, D2-5.3, alert 9 |
+| `jetstream_consumer_delivered_stream_seq` | `chat_jetstream_consumer_delivered` | (declared; no panel yet) |
+| `jetstream_stream_last_seq` | `chat_jetstream_stream_publish_rate` | D2-5.3 |
+| `jetstream_stream_total_messages` | `chat_jetstream_stream_messages` | D2-5.4 |
+| `jetstream_stream_total_bytes` | `chat_jetstream_stream_bytes` | D2-5.4 |
 
-- `chat_jetstream_consumer_oldest_pending_age_seconds` — **Missing**. No
-  exporter exposes it; the contract itself notes it may need a bounded
-  collector. An ack-floor stall is a partial substitute only — a consumer that
-  keeps acknowledging too slowly to catch up never freezes its floor.
-- `chat_jetstream_consumer_ack_floor_*` — **Unverified**. Whether the deployed
-  exporter emits it decides whether the stall rule is a recording rule or a
-  collector (guide §8.1).
+Source labels are `stream_name` and `consumer_name`; the rules rename them to
+`stream` and `consumer` so they join the application families.
 
-#271 gave loadgen its own `loadgen_consumer_ack_floor_stall_seconds`, which is
-the shape this row wants. It does not close the gap: it exists only during a
-run, so daily operations still has no backlog-stall signal until the platform
-exporter is verified.
+**Everything in this table is Proposed, and blocked on one thing only: the
+exporter being scraped in staging and production.** No application change is
+involved. Guide §9.4 lists what to establish before adopting the rules.
+
+Absent from the exporter vocabulary, confirmed rather than assumed:
+
+- `chat_jetstream_consumer_oldest_pending_age_seconds` — **Missing.** jsz does
+  not expose it. The ack-floor stall rule is a partial substitute; a consumer
+  that keeps acknowledging too slowly to catch up never freezes its floor, so
+  D2-5.3's publish-versus-ack gap is the complementary signal.
+- `chat_jetstream_consumer_last_active_age_seconds` — **Missing.** Listed in the
+  NATS failure metrics contract §5; no jsz source. Nothing here depends on it.
+- Per-subject message counts — **Missing** and not expected. jsz breaks down by
+  stream and consumer only. Since durables are named after the consuming
+  service, per-consumer is the axis that matters.
+
+During a loadgen run the `loadgen_consumer_*` family (A.6) covers the same
+ground from the client side, including an ack-floor stall **duration** the
+exporter cannot provide. Outside a run there is no substitute.

@@ -158,6 +158,24 @@ against `main`. Everything that depends on the supervisor —
 is therefore still blocked, and the loop-failure semantics on `main` are the
 pre-supervisor ones (trap 7.11).
 
+### 3.2 If #283 is abandoned
+
+**#283 is the only pending dependency in this document, and exactly one metric
+hangs off it:** `chat_nats_consumer_recovery_attempts_total`. It appears in four
+places — panel D1-3.2, the second query in D2-1.1, row D4-4.2, and alert rule 3.
+Nothing else references it.
+
+If #283 is dropped, **delete those four and simplify trap 7.11 to a single
+statement**. No monitoring gap results, and that is worth being explicit about
+because it is counter-intuitive: the recovery counter only has meaning if a
+supervisor exists to recover. Without one there is no churn failure mode to
+miss — a loop either runs or it is gone, and `chat_nats_consumer_loop_up`
+(alert rule 2) covers the second case completely.
+
+The only cost is the one trap 7.11 already records: anyone who read the #283
+discussion will expect self-healing that `main` does not have. Keep that
+paragraph either way.
+
 ---
 
 ## 4. Dashboard map
@@ -511,15 +529,17 @@ question that stays unanswerable until the item lands.
 
 | Prerequisite | Status | Question it blocks |
 |---|---|---|
-| Verify exporter metric names against the deployed NATS exporter | Not started | Whether the JetStream consumer rows on D2 are a recording rule over existing series or need a collector. Capture a raw `/metrics` sample first; the deployment doc already requires this before applying canonical rules. **This is now the largest single blocker**, because it is all that stands between the daily-operations backlog row and being buildable. |
-| `ack_floor` series present in the exporter output | Unverified | The stall signal for `outbox-worker`'s FIFO lanes **during daily operations**. #271 gave loadgen its own ack-floor stall gauge, but that only exists while a run is in progress. If the exporter exposes it, Section 9's stall rule is a recording rule; if not, it needs a bounded collector. |
-| PR #283 merged | Open, draft, conflicted | `chat_nats_consumer_recovery_attempts_total` and everything reading it: the churn failure mode (trap 7.11) and alert rule 3. Nothing else — #286 shipped the rest of #283's scope. |
+| **Scrape the NATS exporter in staging and production** | Not deployed | The entire JetStream backlog row (D2 Row 5), its two alerts, and the daily-operations outage backstop that `sli-slo.md` §7 names for every asynchronous SLO. **This is the largest single blocker and it is a deployment task, not a metrics one** — Section 9 specifies every rule and panel that appears the moment the series arrive. |
+| Diff the deployed exporter's `/metrics` against Section 9.1 | Not started | Whether the recording rules can be adopted as written. Section 9.1's vocabulary is verified against `natsio/prometheus-nats-exporter:0.16.0` with `-jsz=all`, which is what `tools/observability/` runs; a different pinned version needs one sample captured and diffed. |
+| Establish how the deployment exposes consumer-leader identity | Open | Whether the rules need a leader-label filter or `max by (...)` over replicas is sufficient (Section 9.4 question 3). Getting this wrong does not break a panel — it multiplies it by the replication factor (trap 7.6). |
+| PR #283 merged | Open, draft, conflicted | `chat_nats_consumer_recovery_attempts_total` and everything reading it: the churn failure mode (trap 7.11) and alert rule 3. **Nothing else**, and Section 3.2 explains why dropping it costs no coverage. |
 
 ### 8.2 Known gaps with no panel
 
 | Gap | Status | Question it blocks |
 |---|---|---|
-| `chat_jetstream_consumer_oldest_pending_age_seconds` | Missing | How long the oldest unacknowledged message has been waiting. Neither substitute closes it: an ack-floor stall proves the floor is stuck, but **a consumer can fall permanently behind without ever freezing its floor** — it just advances too slowly to catch up. The evidence contract states this limitation explicitly. |
+| `chat_jetstream_consumer_oldest_pending_age_seconds` | Missing — **confirmed absent** from the exporter vocabulary (Section 9.1), not merely unverified | How long the oldest unacknowledged message has been waiting. Neither substitute closes it: an ack-floor stall proves the floor is stuck, but **a consumer can fall permanently behind without ever freezing its floor** — it just advances too slowly to catch up. The evidence contract states this limitation explicitly. |
+| `chat_jetstream_consumer_last_active_age_seconds` | Missing — no exporter source | The contract §5 lists it; jsz does not emit a last-active timestamp. Nothing in this document depends on it. |
 | Cassandra batch telemetry at the 10 bare `ExecuteBatch` sites | Missing | Latency and error rate for the reaction and pin/unpin write paths (trap 7.10). Unchanged by #271/#286: still 4 sites in `reactions.go`, 2 in `pin.go`, 4 in `bot-message-worker/store_cassandra.go`. |
 | Refined `operation` label for the read lane | Not proposed | SLO-4 and SLO-5 evaluation from service-side metrics (trap 7.9). |
 | Domain metrics for `room-service`, `room-worker`, `inbox-worker`, `outbox-worker`, `search-sync-worker` | Missing | Business outcomes on the room, membership, and federation paths. #286 gave the first three `chat_nats_*` coverage, which is NATS failure evidence — not business outcomes. `o11y-metrics-inventory.md` §2 tracks these as F-items. |
@@ -537,71 +557,161 @@ forgotten:
 | D4 Evidence row: dispatch validity, observer validity, dispatch identity | Available via #271 |
 | Consumer sampler coverage for `message-gatekeeper` and `notification-worker` | Available via #271 — all four hot-path durables are sampled |
 | Ack-floor gauge in the loadgen sampler | Available via #271, and better than proposed: `loadgen_consumer_ack_floor_stall_seconds` is a **duration**, not a boolean |
+| Whether the exporter exposes an ack floor at all | Answered: **yes.** `jetstream_consumer_ack_floor_stream_seq` is in active use by the repo's own local dashboards (Section 9.1), so the stall rule is a recording rule, not a collector |
 
 ---
 
-## 9. Recording rules — recommendations
+## 9. Platform exporter metrics and recording rules
 
-These are recommendations, not a committed layout. The file location and
-ownership are an operations decision and are deliberately left open.
+This section is the specification for the JetStream backlog row: which
+exporter series it needs, how they are normalized, and which panels appear the
+moment those series are scraped. Nothing here needs new application code.
 
-The case for putting this logic in recording rules rather than in each panel is
-trap 7.6: a missing leader filter does not break a panel, it multiplies it by
-the replication factor. That class of error has to be structurally impossible,
-not left to whoever writes the next query.
+Recording-rule file location and ownership are an operations decision and are
+deliberately left open. The rules themselves are not optional — see 9.2.
 
-Four jobs for the rule layer:
+### 9.1 Verified source vocabulary
 
-1. **Normalize** the platform exporter's names into a stable
-   `chat_jetstream_*` namespace, so an exporter version bump changes one file
-   instead of every panel and alert. Document the source expression beside each
-   rule, as the NATS metrics contract §5 requires.
-2. **Deduplicate** clustered replica exports by filtering to the leader before
-   aggregating.
+`prometheus-nats-exporter` run with `-jsz=all` emits the families below. These
+names are **not guesses**: `tools/observability/` runs
+`natsio/prometheus-nats-exporter:0.16.0` with that flag, and the dashboards
+under `tools/observability/grafana/dashboards/` query these series today.
+
+| Exporter series | Type | What it gives us |
+|---|---|---|
+| `jetstream_consumer_num_pending` | gauge | Undelivered backlog per consumer |
+| `jetstream_consumer_num_ack_pending` | gauge | Delivered-but-unacknowledged, the in-flight window |
+| `jetstream_consumer_num_redelivered` | gauge | Currently-redelivering count |
+| `jetstream_consumer_num_waiting` | gauge | Outstanding pull requests |
+| `jetstream_consumer_delivered_stream_seq` | gauge | Delivery cursor, monotonic |
+| `jetstream_consumer_ack_floor_stream_seq` | gauge | **Acknowledgment floor** — the stall signal's input |
+| `jetstream_stream_last_seq` | gauge | Publish cursor, monotonic |
+| `jetstream_stream_total_messages` | gauge | Messages retained |
+| `jetstream_stream_total_bytes` | gauge | Bytes retained |
+
+Labels are `stream_name` and `consumer_name` (stream families carry only
+`stream_name`), plus the exporter's server identity labels.
+
+**The ack floor is present.** That was previously listed as unverified, and it
+is what makes the stall rule a recording rule rather than a bounded collector.
+
+Three things this vocabulary does **not** contain, which is why Section 8.2
+still lists gaps:
+
+- **No oldest-pending age.** Confirmed absent, not merely unverified. The
+  stall rule below is the substitute, with the limitation stated in 9.3.
+- **No last-active timestamp.** `chat_jetstream_consumer_last_active_age_seconds`
+  from the NATS failure metrics contract §5 has no source here.
+- **No per-subject counts.** jsz does not break messages down by subject. The
+  practical axes are per-stream and per-consumer; since durables are named
+  after the consuming service, per-consumer is the axis that matters here.
+
+### 9.2 Why a rule layer rather than raw series in panels
+
+Four jobs, and the first two are the reason this cannot be left to whoever
+writes the next query:
+
+1. **Normalize** exporter names into a stable `chat_jetstream_*` namespace, so
+   an exporter version bump changes one file instead of every panel and alert.
+   Document the source expression beside each rule, as the NATS metrics
+   contract §5 requires.
+2. **Deduplicate** clustered replica exports. Trap 7.6: a missing leader filter
+   does not break a panel, it multiplies it by the replication factor.
 3. **Join ownership** — map `(stream, consumer)` to the owning service and
    journey, so a backlog panel can say which SLO is at risk.
-4. **Derive** the signals that have no direct series, notably the ack-floor
-   stall condition.
+4. **Derive** the ack-floor stall condition, which has no direct series.
 
-Sketches, to be adapted once the exporter's real metric names are captured:
+### 9.3 The rules
+
+Label names below assume `stream_name` / `consumer_name` as verified in 9.1.
+The leader filter is written as a placeholder because it is the one thing 9.4
+still has to establish.
 
 ```promql
-# 1+2. Normalize and deduplicate. Source metric names are placeholders until
-# a raw /metrics sample from the deployed exporter is captured.
+# --- Normalize + deduplicate -------------------------------------------------
+# Source: jetstream_consumer_num_pending (exporter 0.16.0, -jsz=all)
 chat_jetstream_consumer_pending
-  = max by (cluster, site, stream, consumer) (
-      <exporter>_consumer_num_pending{is_consumer_leader="true"}
+  = max by (site, stream, consumer) (
+      label_replace(label_replace(
+        jetstream_consumer_num_pending,
+        "stream", "$1", "stream_name", "(.*)"),
+        "consumer", "$1", "consumer_name", "(.*)")
     )
 
-# 4. Ack-floor stall: pending work exists and the floor has not moved.
-# The partial substitute for the missing oldest-pending-age gauge.
+# Same shape for: num_ack_pending -> chat_jetstream_consumer_ack_pending
+#                 num_redelivered -> chat_jetstream_consumer_redelivered
+#                 num_waiting     -> chat_jetstream_consumer_waiting
+#                 ack_floor_stream_seq   -> chat_jetstream_consumer_ack_floor
+#                 delivered_stream_seq   -> chat_jetstream_consumer_delivered
+
+# --- Derive: throughput ------------------------------------------------------
+# Both cursors are monotonic, so rate() is the message rate. Publish rate comes
+# from the stream, ack rate from the consumer's floor.
+chat_jetstream_stream_publish_rate
+  = sum by (site, stream) (rate(jetstream_stream_last_seq[5m]))
+
+chat_jetstream_consumer_ack_rate
+  = sum by (site, stream, consumer) (
+      rate(jetstream_consumer_ack_floor_stream_seq[5m])
+    )
+
+# --- Derive: ack-floor stall -------------------------------------------------
+# Pending work exists and the floor has not moved in the lookback.
 chat_jetstream_consumer_ack_floor_stalled
-  = (increase(chat_jetstream_consumer_ack_floor_stream_sequence[10m]) == 0)
+  = (increase(chat_jetstream_consumer_ack_floor[10m]) == 0)
     and (chat_jetstream_consumer_pending > 0)
 ```
 
-`loadgen_consumer_ack_floor_stall_seconds` (#271) is the same idea expressed as
-a **duration** — seconds since the floor last advanced while work remains
-pending — computed from `ConsumerInfo.AckFloor.Last`. Prefer that shape for the
-recording rule too if the exporter exposes a last-advance timestamp: a boolean
+Two notes on shape.
+
+**Prefer a duration to a boolean if the exporter ever exposes a last-advance
+timestamp.** `loadgen_consumer_ack_floor_stall_seconds` (#271) is the same idea
+expressed in seconds, computed from `ConsumerInfo.AckFloor.Last`. A boolean
 cannot distinguish a two-minute pause from a two-hour park, and the threshold
-that separates them is the whole point.
+separating them is the whole point. jsz does not expose that timestamp today,
+so the boolean is what the rule layer can build; the loadgen gauge remains the
+better instrument during a run.
 
-Both forms share one limitation, which the evidence contract states directly:
-**a consumer can fall permanently behind without ever freezing its floor.** If
-it keeps acknowledging, just slower than production, the floor advances and the
-stall signal stays silent while the backlog grows without bound. Pair it with
-`chat_jetstream_consumer_pending` rather than treating it as sufficient.
+**The stall condition is not sufficient on its own.** The evidence contract
+states it directly: a consumer can fall permanently behind without ever
+freezing its floor — it just advances more slowly than production. The floor
+keeps moving, the stall rule stays silent, and the backlog grows without bound.
+Always pair it with `chat_jetstream_consumer_pending`, and treat a
+consistently-negative `chat_jetstream_consumer_ack_rate` minus publish rate as
+the complementary signal.
 
-Only `max by (...)` — not `sum by (...)` — is safe for deduplication if the
-leader label turns out to be unavailable, since replicas report the same value.
-Verify which is correct against the real output before committing either.
-
-**Do not add `run_id` to hot-path series.** Keep run identity on loadgen and run
+**Do not add `run_id` to any of these.** Keep run identity on loadgen and run
 metadata, and correlate by time range plus environment and site labels.
-Otherwise each run multiplies hot-path cardinality permanently.
+Otherwise each run permanently multiplies hot-path cardinality.
 
----
+### 9.4 What to establish before adopting the rules
+
+Three questions, in order. Only the third is genuinely open.
+
+1. **Is the exporter scraped in staging and production at all?** The
+   deployment matrix marks it Required for both, which means intended, not
+   present. This is a deployment question, not a metrics one.
+2. **Is the deployed version's vocabulary the same as 0.16.0's?** The
+   deployment doc already requires pinning an approved version and validating
+   raw names before applying canonical rules. Capture one `/metrics` sample and
+   diff it against the table in 9.1.
+3. **How does the deployment expose leader identity?** This is the real
+   unknown. Locally NATS is single-node, so replica duplication cannot occur
+   and the local dashboards do not need a filter. In a clustered deployment,
+   whether `-jsz=all` against one server returns cluster-wide state, and
+   whether the exporter labels the consumer leader at all, decides between:
+   - an `is_consumer_leader`-style filter, if the label exists;
+   - `max by (...)` over replicas, which is safe because replicas report the
+     same value for these gauges — this is why 9.3 uses `max`, not `sum`;
+   - scraping every server and deduplicating in the rule.
+
+   **`sum by (...)` is wrong in every case** and is the specific mistake trap
+   7.6 exists to prevent.
+
+Until question 1 is answered, D2 Row 5 has no data and the daily-operations
+backlog signal does not exist. During a loadgen run the `loadgen_consumer_*`
+family (Appendix A.6) covers the same ground; outside a run there is no
+substitute.
 
 ## 10. Dashboard conventions
 

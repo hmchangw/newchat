@@ -5,9 +5,9 @@
 > references ("trap 7.x") point at the guide.
 >
 > Re-verified 2026-08-16 against `main` at `a96389f`, after #271 and #286
-> merged. One rule changed: rule 3 is **not deployable** because #286 shipped
-> without the consumer supervisor, so seven of the eight rules can be written
-> today. Rule 2's `for` window shortened accordingly.
+> merged. Nine rules, **seven deployable today**: rule 3 needs #283 (which #286
+> did not include), and rule 9 needs the NATS exporter scraped. Rule 2's `for`
+> window shortened because there is no supervisor to wait out.
 
 ---
 
@@ -45,12 +45,14 @@ observationally for four to six weeks, with **no paging alerts before then**.
 | Admission rule | The healthy value is **structurally 0 or 1**, derivable from the metric's own semantics | Ratios and durations whose healthy range must be measured |
 | Basis | Metric semantics | Four to six weeks of observed distribution |
 | Action | Mostly ticket; three exceptions page (Section 3) | Multi-window burn-rate paging per `sli-slo.md` §7 |
-| Size | 8 rules | Grows with the SLO set |
+| Size | 9 rules, 7 deployable | Grows with the SLO set |
 
 The Phase 0 admission rule does most of the work. Applied to the metrics this
-project owns, it yields exactly eight rules, every one of which can be written
-today without waiting for any baseline — because the metric's own contract says
-what healthy means.
+project owns — and to the platform-exporter series the recording rules in guide
+§9.3 derive from — it yields exactly nine rules, none of which needs a baseline,
+because each metric's own contract says what healthy means. Seven can be written
+today; the other two are blocked on a merge and a deployment respectively, not
+on measurement.
 
 Phase 0 rules are not provisional. They remain in place through Phase 1; the
 burn-rate rules are added beside them, not instead of them.
@@ -59,7 +61,7 @@ burn-rate rules are added beside them, not instead of them.
 
 ## 3. Phase 0 rule set
 
-Eight rules. Severity `critical` means it pages; `warning` means it opens a
+Nine rules. Severity `critical` means it pages; `warning` means it opens a
 ticket or posts to a channel.
 
 | # | Rule | `for` | Severity | Pages | Deployable |
@@ -72,16 +74,25 @@ ticket or posts to a channel.
 | 6 | `ChatNATSClientDisconnected` | 5m | warning | no | yes |
 | 7 | `ChatNATSSlowConsumer` | 5m | warning | no | yes |
 | 8 | `AtRestKEKRenewalFailing` | 30m | critical | yes | yes |
+| 9 | `ChatJetStreamAckFloorStalled` | 15m | warning | no | **not yet — exporter** |
 
-Three page, five do not. The three that page share a property: by the time a
+Three page, six do not. The three that page share a property: by the time a
 human notices without being told, data has already been lost or a total outage
 is imminent.
 
-**Seven of the eight can be written today.** Rule 3 is specified but not
-deployable: it reads a metric that only exists under #283, which #286 did not
-include. It is kept here rather than deleted because the failure mode it covers
-is real and reappears the moment the supervisor lands — and because writing it
-down is what stops someone from concluding that rule 2 already covers it.
+**Seven of the nine can be written today.** Two are specified but not
+deployable, for different reasons:
+
+- **Rule 3** reads a metric that only exists under #283, which #286 did not
+  include. It is kept rather than deleted because the failure mode reappears the
+  moment the supervisor lands, and because writing it down is what stops someone
+  concluding that rule 2 already covers it. **If #283 is abandoned, delete rule
+  3 outright** — guide §3.2 explains why no coverage is lost.
+- **Rule 9** is blocked on the NATS exporter being scraped in staging and
+  production. Unlike rule 3 it needs no application change at all, and it closes
+  a gap nothing else covers: `sli-slo.md` §7 names stalled JetStream backlog as
+  the outage backstop for every asynchronous SLO, and today that backstop does
+  not exist outside a loadgen run.
 
 ### 3.1 `ChatConsumerMissing`
 
@@ -273,6 +284,41 @@ sum(rate(atrest_kek_renewal_failures_total[15m])) > 0
   fire while creating the impression of coverage.
 - **Panel:** D1-3.7
 
+### 3.9 `ChatJetStreamAckFloorStalled`
+
+```promql
+chat_jetstream_consumer_ack_floor_stalled == 1
+```
+
+- **`for`:** 15m · **Severity:** warning · **Pages:** no
+- **Deployable:** **not yet.** The recording rule is fully specified in guide
+  §9.3 and its exporter input (`jetstream_consumer_ack_floor_stream_seq`) is
+  verified to exist. What is missing is the exporter being scraped in staging
+  and production — a deployment task, not an instrumentation one.
+- **Threshold rationale:** the rule already encodes the condition, so the alert
+  expression is binary and needs no baseline: pending work exists and the
+  acknowledgment floor has not advanced in the lookback. `for: 15m` outlasts a
+  deploy-window pause; a genuinely parked head-of-line lasts far longer.
+- **What only this catches:** the `outbox-worker` ordered lanes. They run with
+  `MaxAckPending=1`, so a generic ack-pending threshold is **structurally
+  incapable** of firing on them no matter how long a peer has been parked
+  (guide §2 item 3). This is the only rule that sees them.
+- **Why it does not page:** a parked forward to a down peer is by design
+  (`MaxDeliver=-1`, never Ack). Firing means "a lane has been stuck long
+  enough to look at", which is a ticket. Promote to a page only after the
+  calibration window shows what a normal parked duration looks like.
+- **Known blind spot, and its mitigation:** the condition is necessary but not
+  sufficient. **A consumer that keeps acknowledging too slowly to catch up
+  never freezes its floor**, so this rule stays silent while the backlog grows
+  without bound. Panel D2-5.3 (publish rate minus ack rate) is the
+  complementary signal, and a sustained-gap alert on it is a Phase 1 candidate
+  because that threshold does need a baseline.
+- **Per-consumer thresholds:** guide §2 item 4 — do not generalize the `for`
+  window across consumers without checking. A soak-time pause on
+  `message-worker` and a parked outbox lane are the same series with opposite
+  meanings.
+- **Panel:** D2-5.2
+
 ---
 
 ## 4. Deliberately excluded from Phase 0
@@ -286,7 +332,7 @@ Excluding these is a decision, not an oversight. Each has a stated reason.
 | `chat_nats_request_handled_total` error ratio | Available since #286, but the healthy ratio is unknown — it is a ratio, so it needs the calibration window by definition. The strongest Phase 1 candidate: its `result` enum maps exactly onto the error-budget eligibility table in `sli-slo.md` §0.1, so no new classification has to be invented. |
 | Any p99 latency threshold | Two independent reasons. No baseline, and `sli-slo.md` §0.1 forbids raw percentiles as targets outright — a percentile has no good/valid ratio, so no error budget or burn rate can be computed from it. Latency alerts must be written as "share completing within a bound", which is a Phase 1 construction. |
 | JetStream backlog thresholds | The same series means opposite things on different consumers (guide §2 item 4). 5000 pending on `message-worker` during a soak is routine; the same on an `outbox-worker` FIFO lane means a peer has been down for hours. Requires per-consumer baselines. |
-| Ack-floor stall | Structurally a good Phase 0 candidate — the healthy value is binary. Blocked on verifying that `ack_floor` exists in the deployed exporter's output (guide §8.1); loadgen's own stall gauge from #271 is run-scoped and cannot back a production alert. Promote as soon as the exporter is confirmed. |
+| JetStream backlog *rate* gap (publish minus ack) | Needs a baseline: the healthy gap is not zero, it oscillates around zero. Phase 1 candidate, and the necessary complement to rule 9 — see that rule's blind spot. |
 | Fan-out size versus deliveries | Not a ratio for channel rooms (trap 7.8). An alert on it would fire constantly on the dominant room type. |
 | SLO burn rate | Phase 1 by definition. Also blocked on the P2 counters in `sli-slo.md` §8, which do not exist yet. |
 | Cassandra reaction/pin write path | Cannot be alerted on at all: ten bare `ExecuteBatch` call sites emit no client telemetry (trap 7.10). Listed here so the absence is recorded rather than assumed covered. |
@@ -392,13 +438,22 @@ who receives a page must find the corresponding panel without searching.
 | 6 `ChatNATSClientDisconnected` | D1-3.5 | D2-1.6 | D4-4.5 |
 | 7 `ChatNATSSlowConsumer` | D1-3.6 | D2-1.7 | D4-4.6 |
 | 8 `AtRestKEKRenewalFailing` | D1-3.7 | — | — |
+| 9 `ChatJetStreamAckFloorStalled` | — | D2-5.2 | — |
 
 Rule 1 has no D4 series by design: consumer absence during a fault window is
 usually a killed pod, which the Kubernetes alerts already explain.
 
 Rule 3's panels (D1-3.2, D4-4.2) are specified but must not be built until #283
 merges — a permanently empty tile on the health strip teaches the same
-no-data blindness this document is built to avoid (guide §4.2).
+no-data blindness this document is built to avoid (guide §4.2). The same applies
+to rule 9's panel (D2-5.2) until the exporter is scraped.
+
+Rule 9 has no D1 tile by design. The health strip answers "is the pipeline
+moving right now"; a stalled ack floor is a slower question that belongs on the
+drill-down. Rule 9 also has no D4 series: during a declared fault a parked
+consumer is the expected outcome, and D4-2.4's run-scoped
+`loadgen_consumer_ack_floor_stall_seconds` already measures it in seconds
+rather than as a boolean.
 
 ---
 
