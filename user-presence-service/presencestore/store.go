@@ -9,18 +9,18 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-const keyPrefix = "presence:"
-const sweepKey = keyPrefix + "sweep"
+var sweepKey = cachekeys.PresenceSweep()
 
-func connsKey(account string) string  { return keyPrefix + "{" + account + "}:conns" }
-func manualKey(account string) string { return keyPrefix + "{" + account + "}:manual" }
-func statusKey(account string) string { return keyPrefix + "{" + account + "}:status" }
-func azureKey(account string) string  { return keyPrefix + "{" + account + "}:azure" }
+func connsKey(account string) string  { return cachekeys.PresenceConns(account) }
+func manualKey(account string) string { return cachekeys.PresenceManual(account) }
+func statusKey(account string) string { return cachekeys.PresenceStatus(account) }
+func azureKey(account string) string  { return cachekeys.PresenceAzure(account) }
 
 // StatusChange is an account whose effective status was (re)computed.
 type StatusChange struct {

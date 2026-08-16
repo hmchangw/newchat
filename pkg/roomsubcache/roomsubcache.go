@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -91,7 +92,7 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 }
 
 func cacheKey(roomID string) string {
-	return "room:" + roomID + ":subs"
+	return cachekeys.RoomSubs(roomID)
 }
 
 // Get returns the cached member list for roomID. On absence it returns

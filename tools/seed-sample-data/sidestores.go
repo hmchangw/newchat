@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -15,7 +16,7 @@ import (
 const restrictedCacheTTL = 5 * time.Minute
 
 func restrictedCacheKey(account string) string {
-	return fmt.Sprintf("searchservice:restrictedrooms:%s", account)
+	return cachekeys.SearchRestrictedRooms(account)
 }
 
 func restrictedCachePayload(e RestrictedCacheEntry) (string, error) {

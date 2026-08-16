@@ -9,6 +9,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -24,7 +25,7 @@ type Recorder interface {
 // hash tag colocates it in the same cluster slot as the room's encryption
 // key (pkg/roomkeystore), matching house convention for room-scoped keys.
 func MetaKey(roomID string) string {
-	return "room:{" + roomID + "}:meta"
+	return cachekeys.RoomMeta(roomID)
 }
 
 // readL2 attempts the L2 (Valkey) read for roomID, records the outcome on rec,
