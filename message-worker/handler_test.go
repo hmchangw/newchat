@@ -225,10 +225,12 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				// Subsequent-reply path: upsert parent and replier subscriptions.
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-1").
 					Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-				// Once for the thread-sub inbox routing, once in fanOutThreadUnread
-				// (the parent author is appended to the reply's unread audience).
+				// Thread-sub inbox routing (single lookup); fanOutThreadUnread resolves
+				// its recipients in one batch.
 				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).Times(2)
+					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+					Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-2", gomock.Any(), now).Return(nil)
@@ -249,9 +251,10 @@ func TestHandler_ProcessMessage(t *testing.T) {
 					Return(&model.ThreadRoom{ID: "tr-1"}, nil)
 				store.EXPECT().GetMessageSender(gomock.Any(), "msg-1").
 					Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-				// Thread-sub routing + fanOutThreadUnread home-site resolution.
 				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).Times(2)
+					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+					Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-2", gomock.Any(), now).Return(nil)
@@ -351,13 +354,10 @@ func TestHandler_ProcessMessage(t *testing.T) {
 						assert.Nil(t, sub.LastSeenAt)
 						return nil
 					})
-				// fanOutThreadUnread: [parentAuthor] + mentionees, both local — one
-				// AddThreadUnread call, no outbox publish. Re-resolves each recipient's
-				// home site (the parent-author lookup above was for cross-site
-				// thread-sub routing, a separate concern).
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(bobUser, nil)
+				// fanOutThreadUnread: [parentAuthor] + mentionees, both local — home
+				// sites resolved in one batch, no outbox publish.
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user", "bob"}).
+					Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, *bobUser}, nil)
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-1", []string{"parent-user", "bob"}).Return(nil)
 				store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a", gomock.Any()).Return((*int)(nil), nil)
 			},
@@ -379,10 +379,10 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				ts.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
 				// MarkThreadSubscriptionMention must NOT be called — sender excluded.
-				// fanOutThreadUnread: recipients = [parentAuthor] (self-mention yields no
-				// mentionees) — one local AddThreadUnread call, no outbox publish.
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+				// fanOutThreadUnread: recipients = [parentAuthor] (self-mention yields
+				// no mentionees) — one batched lookup, no outbox publish.
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+					Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-1", []string{"parent-user"}).Return(nil)
 				store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a", gomock.Any()).Return((*int)(nil), nil)
 			},
@@ -402,10 +402,10 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				ts.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 				ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
 				// MarkThreadSubscriptionMention must NOT be called — @all is thread-ignored.
-				// fanOutThreadUnread: recipients = [parentAuthor] (@all yields no mentionees)
-				// — one local AddThreadUnread call, no outbox publish.
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+				// fanOutThreadUnread: recipients = [parentAuthor] (@all yields no
+				// mentionees) — one batched lookup, no outbox publish.
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+					Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-1", []string{"parent-user"}).Return(nil)
 				store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a", gomock.Any()).Return((*int)(nil), nil)
 			},
@@ -432,10 +432,9 @@ func TestHandler_ProcessMessage(t *testing.T) {
 						return nil
 					})
 				// fanOutThreadUnread: [parentAuthor] + bob (@all contributes nothing) —
-				// one local AddThreadUnread call, no outbox publish.
-				us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-					Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(bobUser, nil)
+				// home sites resolved in one batch, no outbox publish.
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user", "bob"}).
+					Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, *bobUser}, nil)
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-1", []string{"parent-user", "bob"}).Return(nil)
 				store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site-a", gomock.Any()).Return((*int)(nil), nil)
 			},
@@ -577,10 +576,10 @@ func TestHandler_ProcessMessage_ThreadReply_PublishesBadgeEvent(t *testing.T) {
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
 	mockStore.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-99").Return(nil)
-	// Thread-sub routing + fanOutThreadUnread home-site resolution (the parent
-	// author is appended to the reply's unread audience).
 	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).Times(2)
+		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+	mockUserStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+		Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	mockThreadStore.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-99", "msg-reply", gomock.Any(), now).Return(nil)
@@ -691,8 +690,9 @@ func TestHandler_ProcessMessage_ThreadReply_AdvancesReplierLastSeen(t *testing.T
 		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
 		store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-77").Return(nil)
 		if !migration {
-			// Thread-sub routing + fanOutThreadUnread home-site resolution.
-			us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).Times(2)
+			us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+			us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+				Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 			ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil).Times(2)
 			ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "msg-parent", []string{"parent-user"}).Return(nil)
 		}
@@ -1960,8 +1960,8 @@ func TestHandler_FanOutThreadUnread(t *testing.T) {
 			recipients: []string{"bob", "carol"},
 			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob", "carol"}).Return(nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-a"}, nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "carol").Return(&model.User{Account: "carol", SiteID: "site-a"}, nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "carol"}).
+					Return([]model.User{{Account: "bob", SiteID: "site-a"}, {Account: "carol", SiteID: "site-a"}}, nil)
 			},
 			wantPublish: map[string][]string{},
 		},
@@ -1971,7 +1971,8 @@ func TestHandler_FanOutThreadUnread(t *testing.T) {
 			recipients: []string{"bob"},
 			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-b"}, nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+					Return([]model.User{{Account: "bob", SiteID: "site-b"}}, nil)
 			},
 			wantPublish: map[string][]string{"site-b": {"bob"}},
 		},
@@ -1981,8 +1982,8 @@ func TestHandler_FanOutThreadUnread(t *testing.T) {
 			recipients: []string{"bob", "carol"},
 			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob", "carol"}).Return(nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-b"}, nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "carol").Return(&model.User{Account: "carol", SiteID: "site-b"}, nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "carol"}).
+					Return([]model.User{{Account: "bob", SiteID: "site-b"}, {Account: "carol", SiteID: "site-b"}}, nil)
 			},
 			wantPublish: map[string][]string{"site-b": {"bob", "carol"}},
 		},
@@ -1992,7 +1993,18 @@ func TestHandler_FanOutThreadUnread(t *testing.T) {
 			recipients: []string{"alice", "bob"},
 			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-a"}, nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+					Return([]model.User{{Account: "bob", SiteID: "site-a"}}, nil)
+			},
+			wantPublish: map[string][]string{},
+		},
+		{
+			name:       "recipient missing from the users collection — skipped, no error",
+			sender:     "alice",
+			recipients: []string{"bob"},
+			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
+				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return(nil, nil)
 			},
 			wantPublish: map[string][]string{},
 		},
@@ -2019,7 +2031,7 @@ func TestHandler_FanOutThreadUnread(t *testing.T) {
 			recipients: []string{"bob"},
 			setupMocks: func(ts *MockThreadStore, us *MockUserStore) {
 				ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
-				us.EXPECT().FindUserByAccount(gomock.Any(), "bob").
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
 					Return(nil, errors.New("mongo: connection refused"))
 			},
 			wantErr: true,
@@ -2088,7 +2100,8 @@ func TestHandler_FanOutThreadUnread_DedupID(t *testing.T) {
 		ts := NewMockThreadStore(ctrl)
 		us := NewMockUserStore(ctrl)
 		ts.EXPECT().AddThreadUnread(gomock.Any(), "r1", "p1", []string{"bob"}).Return(nil)
-		us.EXPECT().FindUserByAccount(gomock.Any(), "bob").Return(&model.User{Account: "bob", SiteID: "site-b"}, nil)
+		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+			Return([]model.User{{Account: "bob", SiteID: "site-b"}}, nil)
 		return NewHandler(NewMockStore(ctrl), us, ts, "site-a",
 			func(_ context.Context, _ string, _ []byte, msgID string) error {
 				*capture = msgID
@@ -2202,12 +2215,12 @@ func TestHandler_ProcessMessage_LegacyThreadRoom_ParentAuthorGetsUnread(t *testi
 	store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
 	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-legacy").Return(nil)
-	// Thread-sub path resolves the parent's home site once; fanOutThreadUnread
-	// re-resolves each recipient's home site independently.
+	// Thread-sub path resolves the parent's home site; fanOutThreadUnread
+	// resolves its recipients in one batch.
 	us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).Times(2)
-	us.EXPECT().FindUserByAccount(gomock.Any(), "bob").
-		Return(&model.User{ID: "u-bob", Account: "bob", SiteID: "site-a"}, nil)
+		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob", "parent-user"}).
+		Return([]model.User{{ID: "u-bob", Account: "bob", SiteID: "site-a"}, {ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 	ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil).Times(2)
 	ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-legacy", "msg-reply", gomock.Any(), now).Return(nil)
 	ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), "tr-legacy", "alice", now).Return(nil)
@@ -2600,10 +2613,10 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 			Return(&model.ThreadRoom{ID: "tr-1"}, nil)
 		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 			Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-		// Thread-sub routing + fanOutThreadUnread home-site resolution (the
-		// parent author is appended to the reply's unread audience).
 		us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-			Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).Times(2)
+			Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+			Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 		ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 		ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 		ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-reply", gomock.Any(), now).Return(nil)
@@ -2677,9 +2690,10 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 			Return(&model.ThreadRoom{ID: "tr-1"}, nil)
 		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 			Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
-		// Thread-sub routing + fanOutThreadUnread home-site resolution.
 		us.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-			Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).Times(2)
+			Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+			Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 		ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 		ts.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 		ts.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-1", "msg-reply", gomock.Any(), now).Return(nil)
@@ -2865,9 +2879,10 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 	mockStore.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").
 		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
 	mockStore.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "msg-parent", "r1", parentCreatedAt, "tr-99").Return(nil)
-	// Thread-sub routing + fanOutThreadUnread home-site resolution.
 	mockUserStore.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
-		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil).Times(2)
+		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}, nil)
+	mockUserStore.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+		Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site-a"}}, nil)
 	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	mockThreadStore.EXPECT().UpsertThreadSubscription(gomock.Any(), gomock.Any()).Return(nil)
 	mockThreadStore.EXPECT().UpdateThreadRoomLastMessage(gomock.Any(), "tr-99", "msg-reply", gomock.Any(), now).Return(nil)

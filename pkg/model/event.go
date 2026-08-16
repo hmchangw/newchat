@@ -170,21 +170,20 @@ type SubscriptionReadEvent struct {
 }
 
 // ThreadReadEvent is the InboxEvent.Payload for type "thread_read". The
-// destination advances the home-replica ThreadSubscription read state
-// (lastSeenAt, hasMention) under a $lt order-safety guard, and — gated on that
-// same guard matching — mirrors NewThreadUnread onto the home-replica
-// Subscription. RoomID rides here (not the OutboxEvent envelope) because the
-// destination InboxEvent carries no room context of its own.
+// destination advances the home-replica ThreadSubscription read state under a
+// $lt guard, then $pulls ParentMessageID from the home-replica
+// Subscription.threadUnread — an operation, not a snapshot, so it commutes
+// with concurrent thread_unread_added merges for other threads. RoomID rides
+// here because the destination InboxEvent carries no room context of its own.
 type ThreadReadEvent struct {
 	Account      string `json:"account"`
 	RoomID       string `json:"roomId"`
 	ThreadRoomID string `json:"threadRoomId"`
 	LastSeenAt   int64  `json:"lastSeenAt"`
-	// NewThreadUnread is the result of a $pull array operation removing the
-	// thread's parent from subscription.threadUnread. post-$pull array; nil/absent
-	// means cleared.
-	NewThreadUnread []string `json:"newThreadUnread,omitempty"`
-	Timestamp       int64    `json:"timestamp"`
+	// ParentMessageID is the read thread's parent — the one ID to $pull.
+	// Empty on legacy events; the destination then skips the threadUnread pull.
+	ParentMessageID string `json:"parentMessageId,omitempty"`
+	Timestamp       int64  `json:"timestamp"`
 }
 
 // ThreadReadAllEvent is InboxEvent.Payload for "thread_read_all": the destination inbox-worker

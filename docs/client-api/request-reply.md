@@ -568,10 +568,11 @@ Synchronous RPC. Advances the caller's `lastSeenAt` and clears the per-subscript
 
 Synchronous RPC. Clears one thread's unread state for the caller: refreshes the
 `ThreadSubscription` (`lastSeenAt`, `hasMention=false`) and concurrently `$pull`s the
-thread's parent message ID from the caller's `Subscription.threadUnread` (`$unset`
-once the array empties). No alert coupling — room-level unread is untouched. For
-cross-site users the `thread_read` event federated to the home site carries
-`newThreadUnread` (the post-`$pull` array) so the home replica converges. A caller
+thread's parent message ID from the caller's `Subscription.threadUnread`. No alert
+coupling — room-level unread is untouched. For cross-site users the `thread_read`
+event federated to the home site carries `parentMessageId`, and the home replica
+applies the same per-ID `$pull` — so it converges without overwriting IDs added
+concurrently by other threads' replies. A caller
 who does not follow the thread (no `ThreadSubscription`) gets an idempotent no-op
 that still returns `accepted`.
 

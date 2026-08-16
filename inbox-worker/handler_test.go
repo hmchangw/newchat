@@ -72,7 +72,7 @@ type threadRead struct {
 	roomID          string
 	threadRoomID    string
 	account         string
-	newThreadUnread []string
+	parentMessageID string
 	lastSeenAt      time.Time
 }
 
@@ -354,7 +354,7 @@ func (s *stubInboxStore) getSubReads() []subRead {
 	return cp
 }
 
-func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error {
+func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID, account, parentMessageID string, lastSeenAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.applyThreadReadErr != nil {
@@ -362,7 +362,7 @@ func (s *stubInboxStore) ApplyThreadRead(_ context.Context, roomID, threadRoomID
 	}
 	s.threadReads = append(s.threadReads, threadRead{
 		roomID: roomID, threadRoomID: threadRoomID, account: account,
-		newThreadUnread: newThreadUnread, lastSeenAt: lastSeenAt,
+		parentMessageID: parentMessageID, lastSeenAt: lastSeenAt,
 	})
 	return nil
 }
@@ -1787,7 +1787,7 @@ func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
 		Account:         "alice",
 		RoomID:          "r1",
 		ThreadRoomID:    "tr1",
-		NewThreadUnread: []string{"p2"},
+		ParentMessageID: "p2",
 		LastSeenAt:      1735689600000,
 		Timestamp:       1735689600001,
 	}
@@ -1809,7 +1809,7 @@ func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
 	assert.Equal(t, "r1", tr.roomID)
 	assert.Equal(t, "tr1", tr.threadRoomID)
 	assert.Equal(t, "alice", tr.account)
-	assert.Equal(t, []string{"p2"}, tr.newThreadUnread)
+	assert.Equal(t, "p2", tr.parentMessageID)
 	assert.Equal(t, time.UnixMilli(1735689600000).UTC(), tr.lastSeenAt)
 }
 

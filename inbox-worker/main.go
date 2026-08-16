@@ -533,24 +533,24 @@ func threadReadUpdate(lastSeenAt time.Time) bson.M {
 // newThreadUnread onto the home-replica Subscription. The MatchedCount gate
 // protects the Subscription overwrite from a stale/duplicate event the same way
 // it protects the ThreadSubscription write.
-func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error {
+func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account, parentMessageID string, lastSeenAt time.Time) error {
 	filter := threadReadGuard(bson.M{"threadRoomId": threadRoomID, "userAccount": account}, lastSeenAt)
 	tsRes, err := s.threadSubCol.UpdateOne(ctx, filter, threadReadUpdate(lastSeenAt))
 	if err != nil {
 		return fmt.Errorf("apply thread read for %q in thread room %q: %w", account, threadRoomID, err)
 	}
-	if tsRes.MatchedCount == 0 {
+	// Guard rejected (stale/duplicate) or legacy event without a parent ID:
+	// leave threadUnread alone.
+	if tsRes.MatchedCount == 0 || parentMessageID == "" {
 		return nil
 	}
 
-	subFilter := bson.M{"roomId": roomID, "u.account": account}
-	var subUpdate bson.M
-	if len(newThreadUnread) == 0 {
-		subUpdate = bson.M{"$unset": bson.M{"threadUnread": ""}}
-	} else {
-		subUpdate = bson.M{"$set": bson.M{"threadUnread": newThreadUnread}}
-	}
-	if _, err := s.subCol.UpdateOne(ctx, subFilter, subUpdate); err != nil {
+	// $pull only this thread's ID — never overwrites unrelated IDs, so it
+	// commutes with concurrent thread_unread_added $addToSet merges.
+	if _, err := s.subCol.UpdateOne(ctx,
+		bson.M{"roomId": roomID, "u.account": account},
+		bson.M{"$pull": bson.M{"threadUnread": parentMessageID}},
+	); err != nil {
 		return fmt.Errorf("apply thread read on subscription for %q in room %q: %w", account, roomID, err)
 	}
 	return nil

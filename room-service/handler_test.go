@@ -4315,7 +4315,7 @@ func TestHandler_MessageThreadRead_CrossSite_PublishesInbox(t *testing.T) {
 	assert.Equal(t, "alice", inner.Account)
 	assert.Equal(t, "r1", inner.RoomID)
 	assert.Equal(t, "tr1", inner.ThreadRoomID)
-	assert.Equal(t, []string{"p2"}, inner.NewThreadUnread)
+	assert.Equal(t, "p1", inner.ParentMessageID)
 	assert.Greater(t, inner.LastSeenAt, int64(0))
 	assert.Greater(t, inner.Timestamp, int64(0))
 }

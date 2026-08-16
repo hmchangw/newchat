@@ -744,11 +744,11 @@ func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
 	_, err = db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, now))
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", "p1", now))
 
 	var gotSub model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&gotSub))
-	assert.Equal(t, []string{"p2"}, gotSub.ThreadUnread)
+	assert.Equal(t, []string{"p2"}, gotSub.ThreadUnread, "$pull removes only the read thread's ID")
 
 	var gotTS model.ThreadSubscription
 	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsub-1"}).Decode(&gotTS))
@@ -757,8 +757,9 @@ func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
 	assert.False(t, gotTS.HasMention)
 }
 
-// An empty/nil newThreadUnread must $unset the field, not store an empty array.
-func TestInboxStore_ApplyThreadRead_EmptyArrayUnsetsField(t *testing.T) {
+// A legacy event without a parent ID must leave threadUnread untouched (the
+// read state still applies).
+func TestInboxStore_ApplyThreadRead_LegacyEmptyParentID_SkipsPull(t *testing.T) {
 	db := setupMongo(t)
 	store := &mongoInboxStore{
 		subCol:       db.Collection("subscriptions"),
@@ -784,12 +785,15 @@ func TestInboxStore_ApplyThreadRead_EmptyArrayUnsetsField(t *testing.T) {
 	_, err = db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", nil, time.Now().UTC()))
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", "", time.Now().UTC()))
 
-	var raw bson.M
-	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
-	_, present := raw["threadUnread"]
-	assert.False(t, present, "threadUnread must be $unset, not stored as empty array")
+	var gotSub model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&gotSub))
+	assert.Equal(t, []string{"p1"}, gotSub.ThreadUnread, "legacy event must not touch threadUnread")
+
+	var gotTS model.ThreadSubscription
+	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsub-1"}).Decode(&gotTS))
+	require.NotNil(t, gotTS.LastSeenAt, "read state must still advance")
 }
 
 // Missing subscription: the guarded thread-sub update still succeeds; the
@@ -811,7 +815,7 @@ func TestInboxStore_ApplyThreadRead_MissingSubscription_NoError(t *testing.T) {
 	_, err := db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, now))
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", "p1", now))
 
 	var gotTS model.ThreadSubscription
 	require.NoError(t, db.Collection("thread_subscriptions").FindOne(ctx, bson.M{"_id": "tsub-1"}).Decode(&gotTS))
@@ -933,7 +937,7 @@ func TestInboxStore_ApplyThreadRead_OutOfOrderThreadSub(t *testing.T) {
 	_, err = db.Collection("thread_subscriptions").InsertOne(ctx, &seedTS)
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", []string{"p2"}, t1))
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr1", "alice", "p1", t1))
 
 	var gotSub model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&gotSub))
@@ -1286,7 +1290,7 @@ func TestInboxStore_ApplyThreadRead_MissingThreadSubscription_NoError(t *testing
 	_, err := db.Collection("subscriptions").InsertOne(ctx, &seedSub)
 	require.NoError(t, err)
 
-	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr-missing", "alice", nil, time.Now().UTC()))
+	require.NoError(t, store.ApplyThreadRead(ctx, "r1", "tr-missing", "alice", "p1", time.Now().UTC()))
 
 	count, err := db.Collection("thread_subscriptions").CountDocuments(ctx, bson.M{})
 	require.NoError(t, err)

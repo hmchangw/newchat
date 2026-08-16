@@ -5087,16 +5087,17 @@ func TestThreadUnreadAddedEventJSON(t *testing.T) {
 	roundTrip(t, &src, &model.ThreadUnreadAddedEvent{})
 }
 
-func TestThreadReadEventJSON_NewThreadUnread(t *testing.T) {
+func TestThreadReadEventJSON_ParentMessageID(t *testing.T) {
 	src := model.ThreadReadEvent{
 		Account: "alice", RoomID: "r1", ThreadRoomID: "tr1",
-		NewThreadUnread: []string{"p2"}, LastSeenAt: 1735689600000, Timestamp: 1735689600001,
+		ParentMessageID: "p2", LastSeenAt: 1735689600000, Timestamp: 1735689600001,
 	}
 	roundTrip(t, &src, &model.ThreadReadEvent{})
-	// Wire-compat: a payload without the field decodes to nil (old producers).
+	// Wire-compat: a legacy payload without the field decodes to "" (the
+	// destination skips the threadUnread pull).
 	var dst model.ThreadReadEvent
 	require.NoError(t, json.Unmarshal([]byte(`{"account":"a","threadRoomId":"tr","lastSeenAt":1,"timestamp":2}`), &dst))
-	assert.Nil(t, dst.NewThreadUnread)
+	assert.Empty(t, dst.ParentMessageID)
 }
 
 func TestTeamsChatJSON_NeedVerify(t *testing.T) {

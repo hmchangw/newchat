@@ -630,19 +630,30 @@ func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageI
 		return fmt.Errorf("add thread unread: %w", err)
 	}
 
+	// One batched lookup resolves every recipient's home site; a lookup error
+	// NAKs, an unknown user just isn't federated (the local write stands).
+	users, err := h.userStore.FindUsersByAccounts(ctx, accounts)
+	if err != nil {
+		return fmt.Errorf("lookup thread-unread recipients: %w", err)
+	}
+	siteByAccount := make(map[string]string, len(users))
+	for i := range users {
+		siteByAccount[users[i].Account] = users[i].SiteID
+	}
 	bySite := map[string][]string{}
+	var missing []string
 	for _, a := range accounts {
-		// A genuine lookup failure NAKs (mirrors every other lookupOwnerSiteID call
-		// site in this file); "not found" already degrades to ("", nil) inside the
-		// helper, so it — like a same-site home — simply needs no federation here.
-		site, err := h.lookupOwnerSiteID(ctx, a, "thread-unread recipient")
-		if err != nil {
-			return fmt.Errorf("lookup owner site for %s: %w", a, err)
+		site, ok := siteByAccount[a]
+		switch {
+		case !ok:
+			missing = append(missing, a)
+		case site != "" && site != h.siteID:
+			bySite[site] = append(bySite[site], a)
 		}
-		if site == "" || site == h.siteID {
-			continue
-		}
-		bySite[site] = append(bySite[site], a)
+	}
+	if len(missing) > 0 {
+		slog.WarnContext(ctx, "thread-unread recipients not found — skipping federation",
+			"accounts", missing, "request_id", natsutil.RequestIDFromContext(ctx))
 	}
 
 	now := time.Now().UTC().UnixMilli()

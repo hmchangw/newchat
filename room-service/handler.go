@@ -1648,14 +1648,11 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 
 	now := time.Now().UTC()
 
-	var newThreadUnread []string
 	wg, wctx := errgroup.WithContext(ctx)
 	wg.Go(func() error {
-		nu, err := h.store.UpdateSubscriptionThreadRead(wctx, roomID, account, req.ThreadID)
-		if err != nil {
+		if _, err := h.store.UpdateSubscriptionThreadRead(wctx, roomID, account, req.ThreadID); err != nil {
 			return fmt.Errorf("update subscription thread-read: %w", err)
 		}
-		newThreadUnread = nu
 		return nil
 	})
 	wg.Go(func() error {
@@ -1685,7 +1682,7 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 			Account:         account,
 			RoomID:          roomID,
 			ThreadRoomID:    tsub.ThreadRoomID,
-			NewThreadUnread: newThreadUnread,
+			ParentMessageID: req.ThreadID,
 			LastSeenAt:      now.UnixMilli(),
 			Timestamp:       now.UnixMilli(),
 		}

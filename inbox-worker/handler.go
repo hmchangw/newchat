@@ -42,11 +42,11 @@ type InboxStore interface {
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead advances the home-replica ThreadSubscription read state
-	// (lastSeenAt, updatedAt, hasMention=false) under a $lt lastSeenAt guard, and
-	// — gated on that same guard matching — mirrors newThreadUnread onto the
-	// home-replica Subscription (roomID, account): $set when non-empty, $unset
-	// when empty/nil.
-	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, lastSeenAt time.Time) error
+	// (lastSeenAt, updatedAt, hasMention=false) under a $lt guard, and — gated
+	// on that guard matching — $pulls parentMessageID from the subscription's
+	// threadUnread. A per-ID pull commutes with thread_unread_added's $addToSet
+	// for other threads; empty parentMessageID (legacy event) skips the pull.
+	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account, parentMessageID string, lastSeenAt time.Time) error
 	// ApplyThreadReadAll is the federated "mark all threads read" bulk clear on the
 	// user's home replica: it advances every one of account's thread subscriptions
 	// to lastSeenAt under a per-doc $lt guard (clearing hasMention), and $unsets
@@ -406,7 +406,7 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 		return fmt.Errorf("unmarshal thread_read payload: %w", err)
 	}
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
-	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.NewThreadUnread, lastSeenAt); err != nil {
+	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.ParentMessageID, lastSeenAt); err != nil {
 		return fmt.Errorf("apply thread read (thread %q, account %q): %w",
 			e.ThreadRoomID, e.Account, err)
 	}
