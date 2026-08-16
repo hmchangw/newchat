@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -59,4 +60,11 @@ func decryptClientMessage(t *testing.T, data []byte, key *roomkeystore.Versioned
 	var msg model.ClientMessage
 	require.NoError(t, json.Unmarshal([]byte(plaintext), &msg))
 	return evt, &msg
+}
+
+// lastMsg builds the room-doc update a plain (preview-less) insert produces, so
+// the many existing expectations stay one line. Preview is nil: these tests run
+// with previews off, which is also the ATREST_ENABLED=false production shape.
+func lastMsg(roomID, msgID string, at time.Time, mentionAll bool) roomLastMessage {
+	return roomLastMessage{RoomID: roomID, MsgID: msgID, At: at, MentionAll: mentionAll}
 }

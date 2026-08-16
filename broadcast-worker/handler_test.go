@@ -176,7 +176,7 @@ func TestHandleMessage_DispatchesByEvent(t *testing.T) {
 				// Created path: expect the full created-flow mock calls.
 				key := testRoomKey(t)
 				keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
-				store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+				store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 				store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 				store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -249,7 +249,7 @@ func TestHandler_HandleMessage_ChannelRoom(t *testing.T) {
 			keyStore := NewMockRoomKeyProvider(ctrl)
 			keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, tc.wantMentionAll)).Return(nil)
 			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 
@@ -355,7 +355,7 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 			}
 			data, _ := json.Marshal(evt)
 
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil)
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("dm-1", "msg-1", msgTime, false)).Return(nil)
 			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil)
 			store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
 			store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
@@ -433,7 +433,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		pub := &mockPublisher{}
 
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // combined lookup runs before UpdateRoomLastMessage
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(errors.New("not found"))
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(errors.New("not found"))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
@@ -449,7 +449,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		pub := &mockPublisher{}
 
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // combined lookup runs before UpdateRoomLastMessage
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(errors.New("db error"))
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(errors.New("db error"))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
@@ -465,7 +465,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		pub := &mockPublisher{}
 
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender", "alice"}).Return(testUsers[:1], nil) // single combined lookup
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.Any(), gomock.Any()).Return(errors.New("db error"))
@@ -488,7 +488,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 			ID: "room-1", Name: "general", Type: "unknown",
 			SiteID: "site-a", UserCount: 5,
 		}
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(unknownRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // sender lookup
@@ -506,7 +506,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		us := NewMockUserStore(ctrl)
 		pub := &mockPublisher{}
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("dm-1", "msg-1", msgTime, false)).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // sender lookup
@@ -540,7 +540,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", []string{"sender"}, msgTime).Return(nil)
@@ -569,7 +569,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, errors.New("db error")) // sender lookup
@@ -613,7 +613,7 @@ func TestHandler_HandleMessage_DMRoom_PublishError(t *testing.T) {
 	pub := &failingPublisher{failAfter: 0}
 
 	us := NewMockUserStore(ctrl)
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("dm-1", "msg-1", msgTime, false)).Return(nil)
 	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
 	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
@@ -648,7 +648,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, nil)
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -669,7 +669,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, errors.New("valkey down"))
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -692,7 +692,7 @@ func TestHandler_HandleMessage_ChannelRoom_Encryption(t *testing.T) {
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
-		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+		store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 		store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return([]model.User{{ID: "u-sender", Account: "sender", EngName: "Sender Lin", ChineseName: "寄件者", SiteID: "site-a"}}, nil)
@@ -774,7 +774,7 @@ func TestHandler_FetchAndUpdateRoom_Missing(t *testing.T) {
 	pub := &mockPublisher{}
 
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // single combined lookup
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "ghost-room", "msg-1", msgTime, false).
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("ghost-room", "msg-1", msgTime, false)).
 		Return(fmt.Errorf("update room last message ghost-room: %w", mongo.ErrNoDocuments))
 
 	keyStore := NewMockRoomKeyProvider(ctrl)
@@ -1484,7 +1484,7 @@ func TestHandler_HandleMessage_ChannelEncryptionDisabled(t *testing.T) {
 			us := NewMockUserStore(ctrl)
 			pub := &mockPublisher{}
 
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, tc.wantMentionAll)).Return(nil)
 			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 			if tc.wantSetMentions != nil {
@@ -3304,7 +3304,7 @@ func TestHandleCreated_NonRename_NoRoomRenamedEvent(t *testing.T) {
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
 	msgTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -3326,7 +3326,7 @@ func TestHandleCreated_AdvancesSenderLastSeen(t *testing.T) {
 	pub := &mockPublisher{}
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
@@ -3344,7 +3344,7 @@ func TestHandleCreated_AdvanceSenderLastSeen_FailureSwallowed(t *testing.T) {
 	pub := &mockPublisher{}
 	keyStore := NewMockRoomKeyProvider(ctrl)
 
-	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, false).Return(nil)
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), lastMsg("room-1", "msg-1", msgTime, false)).Return(nil)
 	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(errors.New("mongo down"))
 	// Fan-out still runs after the swallowed advance error.
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
