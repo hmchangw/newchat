@@ -222,6 +222,19 @@ func (p *soakRoomStatePool) RoomIDs() []string {
 	return ids
 }
 
+// Owner returns the account the pool addresses a room as. Readers and the
+// state observer reuse it so every request comes from an identity room-service
+// already accepts as a member.
+func (p *soakRoomStatePool) Owner(roomID string) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	room, ok := p.byID[roomID]
+	if !ok {
+		return "", false
+	}
+	return room.owner, true
+}
+
 // NextMemberIntent prefers removing a candidate the pool already added, so the
 // add/remove cycle stays paired and room size oscillates by one instead of
 // growing until the room hits room-service's capacity ceiling.
