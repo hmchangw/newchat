@@ -560,3 +560,47 @@ func TestSupervisor_StopWaitsForInFlightHandler(t *testing.T) {
 	require.Len(t, messages, 1)
 	assert.Equal(t, string(OutcomeAck), attrs(messages[0])["outcome"])
 }
+
+// TestSupervisor_RecoverySuccessSurvivesShutdownRace pins the recreation
+// counter to the recreation attempt itself. Recording success only once the
+// next generation starts loses it whenever shutdown cancels the context between
+// the factory returning and activate running — a window a caller can hit simply
+// by stopping as soon as it observes the new iterator.
+func TestSupervisor_RecoverySuccessSurvivesShutdownRace(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	consumer := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "site-a", Stream: "STREAM-site-a", Consumer: "durable"})
+	var (
+		factoryCalls atomic.Int64
+		active       atomic.Int64
+		maxActive    atomic.Int64
+		duplicate    atomic.Bool
+		supervisor   *Supervisor
+	)
+	factory := func(context.Context) (Iterator, error) {
+		if factoryCalls.Add(1) == 1 {
+			return failingSupervisorIterator(&active, &maxActive, &duplicate, errors.New("terminal iterator failure")), nil
+		}
+		// Cancel before returning: the recreation has succeeded, but the
+		// supervisor will never activate this iterator.
+		supervisor.Stop()
+		return failingSupervisorIterator(&active, &maxActive, &duplicate, errors.New("unused")), nil
+	}
+	supervisor = NewSupervisor(SupervisorConfig{
+		MinBackoff: time.Millisecond,
+		MaxBackoff: time.Millisecond,
+		wait:       func(context.Context, time.Duration) error { return nil },
+	})
+
+	var wg sync.WaitGroup
+	require.NoError(t, supervisor.Start(context.Background(), factory, consumer, 1, 5, &wg, nil, func(context.Context, *Message) {}))
+	wg.Wait()
+
+	rm := collect(t, reader)
+	points := metricPoints[int64](t, rm, "chat.nats.consumer.recovery.attempts")
+	results := map[string]int64{}
+	for _, point := range points {
+		results[attrs(point)["result"]] = point.Value
+	}
+	assert.Equal(t, int64(1), results[string(RecoverySuccess)],
+		"a recreation that returned an iterator must be counted even if shutdown wins the activate race")
+}

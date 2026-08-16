@@ -204,9 +204,6 @@ func (s *Supervisor) run(ctx context.Context, iter Iterator, recoveryFactory Ite
 	backoff := s.minBackoff
 	recovered := false
 	for {
-		if recovered {
-			consumer.RecoveryAttempt(ctx, RecoverySuccess)
-		}
 		consumer.LoopStarted(ctx)
 		received, err := consume(ctx, iter, consumer, maxDeliver, wg, sem, classify, process)
 		s.stopActive()
@@ -230,6 +227,11 @@ func (s *Supervisor) run(ctx context.Context, iter Iterator, recoveryFactory Ite
 			}
 			iter, err = recoveryFactory(ctx)
 			if err == nil {
+				// Recorded here, symmetrically with the RecoveryFailure below, so
+				// the counter describes the recreation attempt itself. Deferring it
+				// until the next generation starts would drop the success whenever
+				// shutdown cancels the context between this point and activate.
+				consumer.RecoveryAttempt(ctx, RecoverySuccess)
 				if !s.activate(ctx, iter) {
 					iter.Stop()
 					return
