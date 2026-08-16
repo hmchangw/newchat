@@ -60,6 +60,7 @@ type Metrics struct {
 	SoakRoomPoolDegraded          prometheus.Gauge
 	SoakRoomCreateBudgetRemaining prometheus.Gauge
 	SoakRoomStateSources          *prometheus.CounterVec
+	SoakLaneAttempts              *prometheus.CounterVec
 	SoakPresenceSignals           *prometheus.CounterVec
 	SoakPresenceChecks            *prometheus.CounterVec
 	SoakPresenceConnections       *prometheus.GaugeVec
@@ -309,6 +310,13 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"source", "result"},
 	)
+	m.SoakLaneAttempts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_lane_attempts_total",
+			Help: "Lane slots by whether they produced a request. loadgen_soak_dispatched_total counts scheduler slots, which a lane with no usable target still consumes; only this distinguishes offered load from a lane idling on an exhausted pool.",
+		},
+		[]string{"lane", "outcome"},
+	)
 	m.SoakPresenceSignals = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_soak_presence_signals_total",
@@ -515,6 +523,7 @@ func NewMetrics() *Metrics {
 		m.SoakDispatched, m.SoakSchedulerUnderrun, m.SoakLaneSaturation, m.SoakGlobalSaturation,
 		m.SoakRoomCandidates, m.SoakRoomQuarantineProbes, m.SoakRoomPoolExhausted,
 		m.SoakRoomPoolDegraded, m.SoakRoomCreateBudgetRemaining, m.SoakRoomStateSources,
+		m.SoakLaneAttempts,
 		m.SoakPresenceSignals, m.SoakPresenceChecks, m.SoakPresenceConnections,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,

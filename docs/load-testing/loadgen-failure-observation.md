@@ -200,9 +200,14 @@ Quarantine overflow is a **reversible traffic degradation**, reported through
 It never invalidates the ledger: invalidation is a one-way, process-lifetime
 latch, so using it here would make every later fault window in a multi-day run
 inconclusive. Operators should gate on offered load instead — a lane whose
-`loadgen_soak_dispatched_total` falls below 90% of
+`loadgen_soak_lane_attempts_total{outcome="sent"}` falls below 90% of
 `loadgen_soak_configured_rate` over a window makes that window inconclusive for
 that lane only.
+
+Use the attempts counter, **not** `loadgen_soak_dispatched_total`: dispatched
+counts scheduler slots and holds the pacing identity `intended = dispatched +
+scheduler_underrun + lane_saturation + global_saturation`, so a lane that found
+no usable target still consumes one and looks fully loaded.
 
 ### Room creation budget
 
@@ -328,10 +333,17 @@ replacement therefore has no term to query with and resolves `unverified` — th
 same stance recovered recipient operations already take, and the honest one,
 since the pre-restart evidence cannot be reconstructed.
 
-The observer is **opt-in** via `SOAK_SEARCH_OBSERVER_ENABLED`. With it off the
-observer contract is byte-identical to one built before the observer existed,
-so an existing `SOAK_LEDGER_EPOCH` stays valid. Turning it on changes the
-contract and requires a new epoch.
+The observer is **opt-in** via `SOAK_SEARCH_OBSERVER_ENABLED`, and **enabling
+it is currently refused at startup**. The probe locates a message by full-text
+search, but every soak body is a single run of one character differing only in
+length, which analyzes to one huge token: the query distinguishes nothing and
+would report every message lost. Payloads need a per-message searchable marker
+before the observer can be trusted, so the run refuses rather than manufacture
+a data-loss report.
+
+With it off the observer contract is byte-identical to one built before the
+observer existed, so an existing `SOAK_LEDGER_EPOCH` stays valid. Turning it on
+will change the contract and require a new epoch.
 
 ### Ledger epoch
 
@@ -365,6 +377,7 @@ and every mutation eventually expires unverified.
 | `loadgen_soak_room_pool_degraded` | Reversible candidate-pool degradation flag |
 | `loadgen_soak_room_create_budget_remaining` | Rooms the create lane may still add |
 | `loadgen_soak_room_state_source_total{source,result}` | Room-state observer outcomes per source |
+| `loadgen_soak_lane_attempts_total{lane,outcome}` | Lane slots that produced a request vs found no target |
 | `loadgen_soak_presence_signals_total{signal}` | Presence signals published, by kind |
 | `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
 | `loadgen_soak_presence_connections` | Connections the lane currently claims online |

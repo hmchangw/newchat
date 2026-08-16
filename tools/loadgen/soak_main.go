@@ -822,6 +822,21 @@ func runSoakWorkload(
 		recorders.mutation,
 		now,
 	)
+	// A replacement process inherits the run's unresolved operations from the
+	// WAL. Retake their pool reservations and subtract the rooms the run already
+	// created, or the new process races its predecessor's in-flight mutations
+	// and restarts the create cap from zero.
+	if recovered := ledger.ActiveOperations(); len(recovered) > 0 {
+		if inFlight := roomLanes.Rehydrate(recovered); inFlight > 0 {
+			slog.Info("recovered in-flight soak room creates", "count", inFlight)
+			roomLanes.SpendCreateBudget(inFlight)
+		}
+	}
+	if created, countErr := store.CountCreatedRooms(ctx, cfg.Soak.RunID); countErr != nil {
+		slog.Error("count rooms this soak run already created", "error", countErr)
+	} else {
+		roomLanes.SpendCreateBudget(created)
+	}
 	roomReconcileGate := newSoakShareGate(cfg.Soak.RoomReconcileReadShare)
 
 	presenceLane, err := newSoakPresenceLane(
