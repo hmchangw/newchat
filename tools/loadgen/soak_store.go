@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -313,8 +314,36 @@ func (s *mongoSoakStore) LoadTopology(
 			runID,
 		)
 	}
+	// The member lane draws every candidate from BorrowedUsers, so a topology
+	// without it builds a pool with no candidates and takes the run down before
+	// it sends anything. Rebuilding from the subscribed users is enough and
+	// needs no extra persistence: a candidate only has to be a real account in
+	// this run's topology, and the pool already excludes each room's own
+	// members. Order is the subscription order, which is sorted by _id, so a
+	// replacement process sees the same candidate ring.
+	borrowedUsers := make([]model.User, 0, len(usersByID))
+	seen := make(map[string]struct{}, len(usersByID))
+	for i := range subscriptions {
+		user := subscriptions[i].User
+		if user.ID == "" {
+			continue
+		}
+		if _, duplicate := seen[user.ID]; duplicate {
+			continue
+		}
+		seen[user.ID] = struct{}{}
+		borrowedUsers = append(borrowedUsers, usersByID[user.ID])
+	}
+	if len(borrowedUsers) == 0 {
+		return soakTopology{}, fmt.Errorf(
+			"load soak topology for run %q: no borrowed users",
+			runID,
+		)
+	}
+
 	return soakTopology{
-		ActiveUsers: activeUsers, Rooms: rooms, Subscriptions: subscriptions,
+		BorrowedUsers: borrowedUsers, ActiveUsers: activeUsers,
+		Rooms: rooms, Subscriptions: subscriptions,
 	}, nil
 }
 
@@ -375,6 +404,12 @@ func (s *mongoSoakStore) loadOwnedTopologyPage(
 				{Key: "roomType", Value: 1},
 				{Key: "isSubscribed", Value: 1},
 				{Key: "joinedAt", Value: 1},
+				// The room pool seeds its next mute toggle and its read-receipt
+				// baseline from these. Dropping them makes a restarted process
+				// expect the opposite mute state and report a correctness
+				// violation it caused itself.
+				{Key: "muted", Value: 1},
+				{Key: "lastSeenAt", Value: 1},
 			}).
 			SetSort(bson.D{{Key: "_id", Value: 1}}),
 	)
@@ -775,6 +810,8 @@ type soakRoomStateStore interface {
 	IsRoomMember(ctx context.Context, roomID, account string) (bool, error)
 	SubscriptionMuted(ctx context.Context, roomID, account string) (muted bool, found bool, err error)
 	SubscriptionLastSeen(ctx context.Context, roomID, account string) (lastSeenAt time.Time, found bool, err error)
+	RoomIDByName(ctx context.Context, name string) (roomID string, found bool, err error)
+	CountCreatedRooms(ctx context.Context, runID string) (int, error)
 	AppendOwnedRooms(ctx context.Context, runID string, roomIDs []string) error
 }
 
@@ -786,6 +823,65 @@ var _ soakRoomStateStore = (*mongoSoakStore)(nil)
 // claim during exactly the failures this run is measuring.
 func (s *mongoSoakStore) primary(name string) *mongo.Collection {
 	return mongoutil.CollectionWithReadPreference(s.db.Collection(name), readpref.Primary())
+}
+
+// soakCreatedRoomPrefix is the name every room the create lane makes starts
+// with. It is what separates them from the far larger seeded population, which
+// shares the same ownership records.
+func soakCreatedRoomPrefix(runID string) string {
+	return fmt.Sprintf("soak-%s-created-", runID)
+}
+
+// CountCreatedRooms totals the rooms the create lane has already made. The
+// budget is a per-run cap, so a replacement process must start from what the
+// run already spent rather than from a full allowance.
+//
+// It counts by name prefix rather than by ownership, because the seeded rooms
+// carry the same ownership marker and outnumber the budget many times over —
+// counting those would zero the allowance the moment any process restarted.
+func (s *mongoSoakStore) CountCreatedRooms(ctx context.Context, runID string) (int, error) {
+	if runID == "" {
+		return 0, fmt.Errorf("count created soak rooms requires a run ID")
+	}
+	total, err := s.primary("rooms").CountDocuments(ctx, bson.D{
+		{Key: "soakRunId", Value: runID},
+		{Key: "name", Value: bson.D{
+			{Key: "$regex", Value: "^" + regexp.QuoteMeta(soakCreatedRoomPrefix(runID))},
+		}},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("count created soak rooms for run %q: %w", runID, err)
+	}
+	return int(total), nil
+}
+
+// RoomIDByName resolves a room the create lane made from the name it chose
+// before sending. The room ID is server-generated, so the name is the only
+// identifier the run can journal ahead of the request — and therefore the only
+// way a replacement process can find, verify and take ownership of a room whose
+// reply was lost.
+func (s *mongoSoakStore) RoomIDByName(
+	ctx context.Context,
+	name string,
+) (string, bool, error) {
+	if name == "" {
+		return "", false, fmt.Errorf("resolve soak room by name requires a name")
+	}
+	var document struct {
+		ID string `bson:"_id"`
+	}
+	err := s.primary("rooms").FindOne(
+		ctx,
+		bson.D{{Key: "name", Value: name}},
+		options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}}),
+	).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve soak room named %q: %w", name, err)
+	}
+	return document.ID, true, nil
 }
 
 func (s *mongoSoakStore) RoomName(ctx context.Context, roomID string) (string, bool, error) {
@@ -917,6 +1013,12 @@ func (s *mongoSoakStore) AppendOwnedRooms(
 	if len(roomIDs) == 0 {
 		return nil
 	}
+	// Teardown needs both the marker and a chunk that lists the room, so a crash
+	// between these two writes leaks the room either way round. The marker goes
+	// first because it is the auditable half: a marked room can still be found
+	// by its run ID, while a chunk entry for an unmarked room is invisible to
+	// teardown's per-room ownership check. The caller counts the failure as
+	// untracked so the leak is reported rather than silent.
 	if _, err := s.db.Collection("rooms").UpdateMany(
 		ctx,
 		bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: roomIDs}}}},
@@ -925,25 +1027,48 @@ func (s *mongoSoakStore) AppendOwnedRooms(
 		return fmt.Errorf("mark rooms owned by soak run %q: %w", runID, err)
 	}
 
-	next, err := s.nextOwnershipChunkIndex(ctx, runID)
-	if err != nil {
-		return err
-	}
 	collection := s.db.Collection(soakOwnershipCollection)
-	docs := make([]any, 0, (len(roomIDs)+soakOwnershipChunkSize-1)/soakOwnershipChunkSize)
 	for start := 0; start < len(roomIDs); start += soakOwnershipChunkSize {
 		end := min(start+soakOwnershipChunkSize, len(roomIDs))
-		docs = append(docs, soakOwnershipChunk{
-			ID:        fmt.Sprintf("%s:%06d", runID, next),
-			SoakRunID: runID,
-			RoomIDs:   append([]string(nil), roomIDs[start:end]...),
-		})
-		next++
-	}
-	if err := insertSoakBatches(ctx, collection, docs); err != nil {
-		return fmt.Errorf("append ownership chunks for run %q: %w", runID, err)
+		if err := s.insertOwnershipChunk(ctx, collection, runID, roomIDs[start:end]); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// insertOwnershipChunk retries past the duplicate-key race between two
+// concurrent appends that computed the same next index. Reconciliation runs
+// from several lane slots at once, so the read-then-insert is genuinely
+// concurrent and a lost race would strand the room outside teardown's reach.
+func (s *mongoSoakStore) insertOwnershipChunk(
+	ctx context.Context,
+	collection *mongo.Collection,
+	runID string,
+	roomIDs []string,
+) error {
+	const maxAttempts = 8
+	for attempt := range maxAttempts {
+		next, err := s.nextOwnershipChunkIndex(ctx, runID)
+		if err != nil {
+			return err
+		}
+		_, err = collection.InsertOne(ctx, soakOwnershipChunk{
+			ID:        fmt.Sprintf("%s:%06d", runID, next+attempt),
+			SoakRunID: runID,
+			RoomIDs:   append([]string(nil), roomIDs...),
+		})
+		if err == nil {
+			return nil
+		}
+		if !mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("append ownership chunk for run %q: %w", runID, err)
+		}
+	}
+	return fmt.Errorf(
+		"append ownership chunk for run %q: %d concurrent appends contended for the same index",
+		runID, maxAttempts,
+	)
 }
 
 // nextOwnershipChunkIndex keeps appended chunk IDs sorting after existing ones

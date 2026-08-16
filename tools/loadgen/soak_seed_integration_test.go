@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -351,4 +352,169 @@ func TestSoakStore_AppendOwnedRoomsIsANoOpWithoutRooms(t *testing.T) {
 	page, err := store.NextOwnershipPage(ctx, "run-1", "", soakOwnershipChunkSize)
 	require.NoError(t, err)
 	assert.Nil(t, page)
+}
+
+// The soak phase never rebuilds the topology in memory — it loads it back from
+// MongoDB. Every unit test built a topology directly, so nothing covered the
+// seed -> LoadTopology -> pool path, and a field the loader dropped took the
+// whole run down before it sent a single request.
+func TestLoadTopology_RestoresEnoughStateToBuildTheRoomPool(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "loadgen_soak_reload")
+
+	users := makeSoakUsers(12, "site-a")
+	userDocs := make([]any, len(users))
+	for i := range users {
+		userDocs[i] = users[i]
+	}
+	_, err := db.Collection("users").InsertMany(ctx, userDocs)
+	require.NoError(t, err)
+
+	store := &mongoSoakStore{db: db}
+	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
+	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
+	cfg := validSoakConfig(t)
+	cfg.MaxUsers = 12
+	cfg.ActiveUsers = 6
+	cfg.RoomCount = 5
+	cfg.ChannelRatio = 0.6
+	cfg.ChannelMembers = 3
+	cfg.ReactionsPerHotMessage = 3
+
+	seeded, err := seedSoak(ctx, store, keyStore, &soakSeedInput{
+		RunID: cfg.RunID, SiteID: "site-a", MongoDatabase: db.Name(),
+		CassandraKeyspace: "chat", Seed: 42, Config: &cfg,
+	}, newProductionSoakIDs())
+	require.NoError(t, err)
+	require.NotEmpty(t, seeded.BorrowedUsers)
+
+	reloaded, err := store.LoadTopology(ctx, cfg.RunID, "site-a")
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, reloaded.BorrowedUsers,
+		"the member lane draws every candidate from BorrowedUsers")
+	assert.Len(t, reloaded.ActiveUsers, len(seeded.ActiveUsers))
+
+	// The real assertion: the reloaded topology must actually build a pool.
+	// Without it the workload exits before sending anything.
+	pool, err := newSoakRoomStatePool(
+		&reloaded, cfg.MemberQuarantineMax, NewMetrics(), rand.New(rand.NewSource(1)),
+	)
+	require.NoError(t, err)
+	assert.NotEmpty(t, pool.RoomIDs())
+}
+
+// The pool seeds its mute and read-cursor expectations from the reloaded
+// subscriptions. A projection that drops those fields makes a restarted process
+// expect the opposite mute state and report a correctness violation it caused.
+func TestLoadTopology_RestoresMuteAndReadCursorState(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "loadgen_soak_reload_state")
+
+	users := makeSoakUsers(12, "site-a")
+	userDocs := make([]any, len(users))
+	for i := range users {
+		userDocs[i] = users[i]
+	}
+	_, err := db.Collection("users").InsertMany(ctx, userDocs)
+	require.NoError(t, err)
+
+	store := &mongoSoakStore{db: db}
+	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
+	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
+	cfg := validSoakConfig(t)
+	cfg.MaxUsers = 12
+	cfg.ActiveUsers = 6
+	cfg.RoomCount = 5
+	cfg.ChannelRatio = 0.6
+	cfg.ChannelMembers = 3
+	cfg.ReactionsPerHotMessage = 3
+
+	_, err = seedSoak(ctx, store, keyStore, &soakSeedInput{
+		RunID: cfg.RunID, SiteID: "site-a", MongoDatabase: db.Name(),
+		CassandraKeyspace: "chat", Seed: 42, Config: &cfg,
+	}, newProductionSoakIDs())
+	require.NoError(t, err)
+
+	// Mimic a mark-read and a mute that landed before the pod was replaced.
+	lastSeen := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	result, err := db.Collection("subscriptions").UpdateOne(
+		ctx,
+		bson.D{{Key: "soakRunId", Value: cfg.RunID}},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "muted", Value: true},
+			{Key: "lastSeenAt", Value: lastSeen},
+		}}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), result.ModifiedCount)
+
+	reloaded, err := store.LoadTopology(ctx, cfg.RunID, "site-a")
+	require.NoError(t, err)
+
+	muted, seen := 0, 0
+	for i := range reloaded.Subscriptions {
+		if reloaded.Subscriptions[i].Muted {
+			muted++
+		}
+		if reloaded.Subscriptions[i].LastSeenAt != nil {
+			seen++
+		}
+	}
+	assert.Equal(t, 1, muted, "a muted subscription must survive the reload")
+	assert.Equal(t, 1, seen, "the read cursor is the next mark-read's baseline")
+}
+
+// The create budget is a per-run cap, so a restart must subtract what the run
+// already created. Seeded rooms carry the same ownership marker and outnumber
+// the budget many times over, so counting those would zero the allowance the
+// moment any process restarted.
+func TestCountCreatedRooms_ExcludesTheSeededPopulation(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "loadgen_soak_created_count")
+
+	users := makeSoakUsers(12, "site-a")
+	userDocs := make([]any, len(users))
+	for i := range users {
+		userDocs[i] = users[i]
+	}
+	_, err := db.Collection("users").InsertMany(ctx, userDocs)
+	require.NoError(t, err)
+
+	store := &mongoSoakStore{db: db}
+	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
+	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
+	cfg := validSoakConfig(t)
+	cfg.MaxUsers = 12
+	cfg.ActiveUsers = 6
+	cfg.RoomCount = 5
+	cfg.ChannelRatio = 0.6
+	cfg.ChannelMembers = 3
+	cfg.ReactionsPerHotMessage = 3
+
+	_, err = seedSoak(ctx, store, keyStore, &soakSeedInput{
+		RunID: cfg.RunID, SiteID: "site-a", MongoDatabase: db.Name(),
+		CassandraKeyspace: "chat", Seed: 42, Config: &cfg,
+	}, newProductionSoakIDs())
+	require.NoError(t, err)
+
+	created, err := store.CountCreatedRooms(ctx, cfg.RunID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, created, "seeded rooms are not create-lane rooms")
+
+	_, err = db.Collection("rooms").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "room-created-1"},
+		{Key: "soakRunId", Value: cfg.RunID},
+		{Key: "name", Value: soakCreatedRoomPrefix(cfg.RunID) + "abc"},
+	})
+	require.NoError(t, err)
+
+	created, err = store.CountCreatedRooms(ctx, cfg.RunID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, created)
+
+	roomID, found, err := store.RoomIDByName(ctx, soakCreatedRoomPrefix(cfg.RunID)+"abc")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "room-created-1", roomID)
 }

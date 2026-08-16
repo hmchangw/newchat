@@ -27,10 +27,26 @@ type soakRoomStateStoreStub struct {
 	seenErr    error
 	appended   []string
 	appendErr  error
+	byName     string
+	byNameOK   bool
+	byNameErr  error
+	ownedRooms int
+	ownedErr   error
 }
 
 func (s *soakRoomStateStoreStub) RoomName(context.Context, string) (string, bool, error) {
 	return s.name, s.nameFound, s.nameErr
+}
+
+func (s *soakRoomStateStoreStub) CountCreatedRooms(context.Context, string) (int, error) {
+	return s.ownedRooms, s.ownedErr
+}
+
+func (s *soakRoomStateStoreStub) RoomIDByName(
+	context.Context,
+	string,
+) (string, bool, error) {
+	return s.byName, s.byNameOK, s.byNameErr
 }
 
 func (s *soakRoomStateStoreStub) IsRoomMember(context.Context, string, string) (bool, error) {
@@ -305,24 +321,40 @@ func TestSoakRoomStateVerifier_MuteReadsTheRPCSubscriptionList(t *testing.T) {
 }
 
 func TestSoakRoomStateVerifier_RoomCreateVerdicts(t *testing.T) {
+	// The room is identified by the name journaled before the request; its ID
+	// does not exist until the server answers, so a lost reply leaves the name
+	// as the only handle.
 	operation := &failureOperation{
 		ID: "operation-4", OperationType: failureOperationRoomCreate,
-		Targets: map[string]string{"roomId": "room-created"},
+		Targets: map[string]string{"roomName": "soak-run-1-created-abc"},
 	}
 
 	transport := &soakRoomOpsTransport{reply: []byte(`{"rooms":[]}`)}
 	verifier, _ := newSoakRoomVerifyFixture(t, transport,
-		&soakRoomStateStoreStub{name: "soak-room", nameFound: true})
+		&soakRoomStateStoreStub{byName: "room-created", byNameOK: true})
 	result, reason, err := verifier.Verify(context.Background(), operation)
 	require.NoError(t, err)
 	assert.Equal(t, soakRoomStateMatched, result)
 	assert.Equal(t, failureReasonNone, reason)
 
-	verifier, _ = newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{nameFound: false})
+	verifier, _ = newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{byNameOK: false})
 	result, reason, err = verifier.Verify(context.Background(), operation)
 	require.NoError(t, err)
 	assert.Equal(t, soakRoomStateAbsent, result)
 	assert.Equal(t, failureReasonRoomStateMissing, reason)
+}
+
+// A create operation without its name has nothing to look up, so it must error
+// rather than silently report the room absent.
+func TestSoakRoomStateVerifier_RoomCreateRequiresTheRoomName(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"rooms":[]}`)}
+	verifier, _ := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{})
+
+	_, _, err := verifier.Verify(context.Background(), &failureOperation{
+		ID: "operation-5", OperationType: failureOperationRoomCreate,
+	})
+
+	require.Error(t, err)
 }
 
 func TestSoakRoomStateVerifier_RejectsIncompleteOperations(t *testing.T) {
