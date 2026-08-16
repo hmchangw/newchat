@@ -123,12 +123,12 @@ missing beyond shared cache/key counters.
 | outbox-worker | — | — | — | — | spans | — | — | forwarded/dropped/retried events by destination and type |
 | search-sync-worker | — | — | — | — | spans (Fetch) | spans | — | bulk actions/flush, index vs delete, ES failures |
 | search-service | — | ✅ | ✅ | — | spans | spans | **`search_service_requests_total`, `search_service_request_duration_seconds`, `search_service_es_duration_seconds`** | (well covered after request traffic) |
-| room-service | — | ✅ | ✅ | ✅ | spans | — | — | room create/join/leave outcomes |
-| room-worker | — | ✅ | ✅ | ✅ | spans | — | shared `cache_*_total`, `room_key_*_total` | member-add results, roomkey distributions, vault ops |
+| room-service | — | ✅ | ✅ | ✅ | spans + `chat_nats_*` | — | — | room create/join/leave outcomes |
+| room-worker | — | ✅ | ✅ | ✅ | spans + `chat_nats_*` | — | shared `cache_*_total`, `room_key_*_total` | member-add results, roomkey distributions, vault ops |
 | inbox-worker | — | ✅ | — | — | spans | — | — | cross-site events applied/dropped by type |
 | user-service | — | ✅ | ✅ | — | spans | — | — | subscription/room RPC outcomes |
 | user-presence-service | — | ✅ | ✅? | — | spans | — | — | presence queries, cache hit rate |
-| history-service | — | ✅ | — | ✅ | spans | — | shared `cache_*_total` | history reads, bucket-walk depth |
+| history-service | — | ✅ | — | ✅ | spans + `chat_nats_*` | — | shared `cache_*_total` | history reads, bucket-walk depth |
 | data-migration/oplog-* | — | ✅ | — | — | spans | — | **rich counters** (`oplog_*_events_processed_total`, `_naks_total`, `_terms_total`, `_skipped_total`, `_exhausted_total`, …) | (good exemplar — copy this pattern) |
 
 ### 2.1 Shared application NATS metrics (2026-08-16)
@@ -136,7 +136,9 @@ missing beyond shared cache/key counters.
 The SDK emits no NATS client metrics (§1), so these are owned by this repo.
 The shared consumer, request, and publisher helpers are adopted by
 `message-gatekeeper`, `message-worker`, `broadcast-worker`,
-`notification-worker`, `history-service`, and `room-service`. Connection
+`notification-worker`, `history-service`, `room-service`, and
+`room-worker` — the seven services in the NATS failure-test scope
+(`docs/load-testing/nats-jetstream-failure-test-plan.md`). Connection
 lifecycle metrics are opt-in through `natsutil.ConnectWithMetrics`. Names are
 OTel instrument names; Prometheus renders them with `_` separators and adds
 counter / unit suffixes. An instrument whose name already ends in `_total`

@@ -2549,7 +2549,7 @@ func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 				<-sem
 				wg.Done()
 			}()
-			if err := h.keySender.SendData(acct, data); err != nil {
+			if err := h.keySender.SendDataContext(ctx, acct, data); err != nil {
 				slog.ErrorContext(ctx, "send room key", "error", err, "account", acct, "roomId", roomID)
 				roomkeymetrics.FanoutErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("roomId", roomID)))
 				failed.Add(1)
