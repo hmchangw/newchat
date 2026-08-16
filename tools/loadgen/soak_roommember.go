@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -142,6 +143,9 @@ func (l *soakRoomLanes) rename(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
+	// An unknown previous name is passed through as empty on purpose: asserting
+	// a stale one would let the observer call a merely lost rename a name nobody
+	// asked for, reporting corruption that never happened.
 	previous, _ := l.pool.RoomName(intent.RoomID)
 	operation := l.newOperation(
 		soakFailureLaneRoomMutation, failureOperationRoomRename,
@@ -231,6 +235,12 @@ func (l *soakRoomLanes) RoomCreate(ctx context.Context) error {
 	)
 	pending := soakRoomPending{kind: failureOperationRoomCreate, roomID: outcome.RoomID}
 	if !l.journal(operation, &pending) {
+		// room-service accepted the create, so the room will exist without this
+		// run being able to claim or verify it. Name it in the log: teardown
+		// only removes rooms carrying the run marker, and this one will not.
+		slog.Warn("created soak room is untracked and will outlive teardown",
+			"runId", l.cfg.RunID, "roomId", outcome.RoomID)
+		l.countUntracked("ownership")
 		return nil
 	}
 	// The reply already arrived, so the operation is activated and its
@@ -273,6 +283,35 @@ func (l *soakRoomLanes) Reconcile(
 		// admission accepted the request.
 		return true, l.observe(operation.ID, failureObservationMissingAfterDeadline, reason, now)
 	}
+}
+
+// SettleFinalized returns pool reservations whose operation the ledger already
+// closed without this lane seeing it. The background expiry sweep finalizes any
+// unclaimed operation once its deadline passes, which is exactly what happens
+// when a fault leaves more unresolved work than the reconcile budget retires;
+// without this the room keeps its lease forever and stops mutating.
+func (l *soakRoomLanes) SettleFinalized() int {
+	if l.ledger == nil {
+		return 0
+	}
+	l.mu.Lock()
+	operationIDs := make([]string, 0, len(l.pending))
+	for operationID := range l.pending {
+		operationIDs = append(operationIDs, operationID)
+	}
+	l.mu.Unlock()
+
+	settled := 0
+	for _, operationID := range operationIDs {
+		if _, active := l.ledger.Active(operationID); active {
+			continue
+		}
+		// Expiry means nothing was verified, so the effect's real state is
+		// unknown and the pair has to be re-probed rather than assumed.
+		l.settle(operationID, failureResultUnverified)
+		settled++
+	}
+	return settled
 }
 
 // ProbeQuarantine re-reads one parked room/account pair so a candidate whose

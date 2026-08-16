@@ -84,10 +84,15 @@ type soakMuteState struct {
 }
 
 type soakRoomState struct {
-	id        string
-	baseName  string
-	owner     string
-	renameSeq int
+	id string
+	// baseName is the seeded name and never changes: rename suffixes are built
+	// from a monotonic counter on top of it, so a name can never repeat once the
+	// length cap starts truncating.
+	baseName      string
+	confirmedName string
+	nameKnown     bool
+	owner         string
+	renameSeq     int
 
 	available []string
 	members   []string
@@ -144,6 +149,7 @@ func newSoakRoomStatePool(
 		}
 		channels[room.ID] = &soakRoomState{
 			id: room.ID, baseName: room.Name,
+			confirmedName: room.Name, nameKnown: true,
 			states: make(map[string]soakMemberCandidateState),
 			mute:   make(map[string]soakMuteState), muteLeases: make(map[string]struct{}),
 		}
@@ -332,12 +338,13 @@ func (p *soakRoomStatePool) SettleRename(intent soakRenameIntent, result failure
 		return
 	}
 	room.renameLease = false
-	// A rename sets an absolute name rather than flipping a state, so an
-	// unresolved attempt poisons nothing: the sequence has already advanced and
-	// the next name is still unique.
-	if result == failureResultGood {
-		room.baseName = intent.NewName
-		room.renameSeq = 0
+	switch result {
+	case failureResultGood:
+		room.confirmedName, room.nameKnown = intent.NewName, true
+	case failureResultBad, failureResultNotSent:
+		// Refused or never sent, so the stored name still holds.
+	default:
+		room.nameKnown = false
 	}
 }
 
@@ -504,17 +511,18 @@ func soakRoomRenameName(base string, sequence int) string {
 	return base + suffix
 }
 
-// RoomName returns the last name the pool saw confirmed for a room, which the
-// rename observer uses to tell "the rename did not land" from a name nobody
-// asked for.
+// RoomName returns the last name the pool saw confirmed, and whether it is
+// still trustworthy. After an unresolved rename the real name is unknown, and
+// claiming a stale one would turn a merely lost rename into a name nobody
+// asked for — a reported corruption that never happened.
 func (p *soakRoomStatePool) RoomName(roomID string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	room, ok := p.byID[roomID]
-	if !ok {
+	if !ok || !room.nameKnown {
 		return "", false
 	}
-	return room.baseName, true
+	return room.confirmedName, true
 }
 
 // AnyOwner returns one owner account, used to address rooms the create lane

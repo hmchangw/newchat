@@ -665,3 +665,47 @@ func TestNewSoakRoomLanes_AppliesSafeDefaults(t *testing.T) {
 	assert.NotNil(t, lanes.now)
 	assert.Equal(t, 0, lanes.budget)
 }
+
+func TestSoakRoomLanes_ReleasesReservationsTheLedgerExpired(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+
+	// The background expiry sweep finalizes any unclaimed operation past its
+	// deadline, so a reconcile slot is not guaranteed to be the path that ends
+	// an operation. The lane must still get its room lease back.
+	fixture.advance(2 * time.Minute)
+	expired, err := fixture.ledger.Expire(fixture.now)
+	require.NoError(t, err)
+	require.Equal(t, 1, expired)
+
+	settled := fixture.lanes.SettleFinalized()
+
+	assert.Equal(t, 1, settled)
+	_, ok := fixture.pool.NextMemberIntent()
+	assert.True(t, ok, "a room whose operation expired must keep producing mutations")
+}
+
+func TestSoakRoomLanes_ExpiredReservationIsTreatedAsUnknownState(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+	fixture.advance(2 * time.Minute)
+	_, err := fixture.ledger.Expire(fixture.now)
+	require.NoError(t, err)
+
+	fixture.lanes.SettleFinalized()
+
+	probe, ok := fixture.pool.NextProbe()
+	require.True(t, ok,
+		"an expired mutation was never verified, so the candidate's state is unknown")
+	assert.False(t, probe.Mute)
+}
+
+func TestSoakRoomLanes_SettleFinalizedKeepsLiveReservations(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+
+	assert.Equal(t, 0, fixture.lanes.SettleFinalized(),
+		"an operation still awaiting verification keeps its reservation")
+	_, ok := fixture.pool.NextMemberIntent()
+	assert.False(t, ok, "the room lease is still held")
+}

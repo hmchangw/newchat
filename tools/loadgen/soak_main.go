@@ -899,6 +899,13 @@ func runSoakWorkload(
 				if probed {
 					return nil
 				}
+				// The expiry sweep can finalize an operation this lane never
+				// claimed, which happens whenever a fault leaves more work than
+				// the reconcile budget retires. Reclaim those reservations or
+				// the affected rooms stop mutating for the rest of the run.
+				if roomLanes.SettleFinalized() > 0 {
+					return nil
+				}
 			}
 			if err := roomReader.ReadMixed(actionCtx); err != nil {
 				slog.Error("run Cassandra soak room read", "error", err)

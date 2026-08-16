@@ -452,21 +452,76 @@ func TestSoakRoomStatePool_WorksWithoutMetrics(t *testing.T) {
 	})
 }
 
-func TestSoakRoomStatePool_RenameKeepsTheConfirmedName(t *testing.T) {
+func TestSoakRoomStatePool_RenameCountsUpFromAFixedBase(t *testing.T) {
 	pool, _ := newSoakRoomStateTestPool(t, 3, 8)
 
 	first, ok := pool.NextRenameIntent()
 	require.True(t, ok)
+	assert.Equal(t, "soak-run-channel-000001-r1", first.NewName)
 	pool.SettleRename(first, failureResultGood)
 
 	second, ok := pool.NextRenameIntent()
 	require.True(t, ok)
-	assert.Contains(t, second.NewName, first.NewName,
-		"a confirmed rename becomes the base the next name extends")
+	assert.Equal(t, "soak-run-channel-000001-r2", second.NewName,
+		"names count up from the seeded base so they never chain or repeat")
 
 	pool.SettleRename(second, failureResultUnverified)
 	third, ok := pool.NextRenameIntent()
 	require.True(t, ok)
-	assert.NotEqual(t, second.NewName, third.NewName,
+	assert.Equal(t, "soak-run-channel-000001-r3", third.NewName,
 		"an unresolved rename still advances so names stay unique")
+}
+
+func TestSoakRoomStatePool_RenameNamesStayUniqueAtTheLengthCap(t *testing.T) {
+	topology := soakRoomStateTestTopology(3)
+	topology.Rooms[0].Name = strings.Repeat("x", 96)
+	pool, err := newSoakRoomStatePool(topology, 8, NewMetrics(), rand.New(rand.NewSource(21)))
+	require.NoError(t, err)
+
+	seen := make(map[string]struct{})
+	for range 25 {
+		intent, ok := pool.NextRenameIntent()
+		require.True(t, ok)
+		assert.LessOrEqual(t, utf8.RuneCountInString(intent.NewName), soakRoomMaxNameRunes)
+		_, duplicate := seen[intent.NewName]
+		assert.False(t, duplicate,
+			"a repeated name makes a lost rename look applied: %q", intent.NewName)
+		seen[intent.NewName] = struct{}{}
+		pool.SettleRename(intent, failureResultGood)
+	}
+}
+
+func TestSoakRoomStatePool_UnconfirmedRenameMakesTheNameUnknown(t *testing.T) {
+	pool, _ := newSoakRoomStateTestPool(t, 3, 8)
+
+	name, known := pool.RoomName("room-1")
+	require.True(t, known)
+	assert.Equal(t, "soak-run-channel-000001", name)
+
+	first, ok := pool.NextRenameIntent()
+	require.True(t, ok)
+	pool.SettleRename(first, failureResultUnverified)
+
+	_, known = pool.RoomName("room-1")
+	assert.False(t, known,
+		"an unresolved rename leaves the real name unknown, so no name may be asserted as the prior one")
+
+	second, ok := pool.NextRenameIntent()
+	require.True(t, ok)
+	pool.SettleRename(second, failureResultGood)
+	name, known = pool.RoomName("room-1")
+	assert.True(t, known)
+	assert.Equal(t, second.NewName, name)
+}
+
+func TestSoakRoomStatePool_RejectedRenameKeepsTheKnownName(t *testing.T) {
+	pool, _ := newSoakRoomStateTestPool(t, 3, 8)
+
+	intent, ok := pool.NextRenameIntent()
+	require.True(t, ok)
+	pool.SettleRename(intent, failureResultBad)
+
+	name, known := pool.RoomName("room-1")
+	assert.True(t, known, "a rejected rename changed nothing")
+	assert.Equal(t, "soak-run-channel-000001", name)
 }
