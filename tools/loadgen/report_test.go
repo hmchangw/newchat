@@ -86,8 +86,8 @@ func TestPrintSummary_WithConsumers(t *testing.T) {
 		Consumers: []ConsumerStat{
 			{
 				Stream: "MESSAGES-CANONICAL-site-a", Durable: "message-worker",
-				MinPending: 0, PeakPending: 150, FinalPending: 2,
-				PeakAckPending: 10, Redelivered: 1,
+				BaselinePending: 4, MinPending: 0, PeakPending: 150, FinalPending: 2,
+				PeakAckPending: 10, Redelivered: 1, HasSample: true, SampleErrors: 3,
 			},
 		},
 	}
@@ -96,6 +96,10 @@ func TestPrintSummary_WithConsumers(t *testing.T) {
 	assert.True(t, strings.Contains(out, "consumer lag"), "missing consumer lag header; got:\n%s", out)
 	assert.True(t, strings.Contains(out, "message-worker"), "missing durable name; got:\n%s", out)
 	assert.True(t, strings.Contains(out, "150"), "missing peak pending; got:\n%s", out)
+	assert.Contains(t, out, "baseline_pending")
+	assert.Contains(t, out, "sample_errors")
+	assert.Contains(t, out, "true")
+	assert.Contains(t, out, "3")
 }
 
 func TestWriteCSV_Empty(t *testing.T) {

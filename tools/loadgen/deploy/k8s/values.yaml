@@ -42,6 +42,11 @@ ledger:
   reconcileRetryInterval: 1s
   reconcileReadShare: 0.5
 
+recipientObserver:
+  enabled: false
+  queue: 8192
+  connections: 32
+
 seed:
   randomSeed: 42
   activeDeadlineSeconds: 7200
@@ -56,6 +61,7 @@ seed:
 soak:
   # A Deployment must remain continuous. Use the CLI/Compose duration mode for
   # bounded local runs.
+  environment: staging
   runMode: continuous
   randomSeed: 42
   warmup: 30s

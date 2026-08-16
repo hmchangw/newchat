@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -49,7 +50,7 @@ func newDirectPool(natsURL, credsFile string, c *Collector) *directPool {
 // mode-agnostic: under ROOM_SUBJECT_MODE=local, hard-coding the global lane would
 // silently receive nothing and report degraded latency instead of failing loudly.
 func (p *directPool) Add(u *userState) error {
-	nc, err := connectWithCreds(p.url, "loadgen-daily-"+u.ID, p.credsFile)
+	nc, err := connectWithCredsHealth(p.url, "loadgen-daily-"+u.ID, p.credsFile, "daily", p.collector.m)
 	if err != nil {
 		return fmt.Errorf("connect for %s: %w", u.ID, err)
 	}
@@ -141,7 +142,7 @@ func newMultiplexPool(natsURL, credsFile string, c *Collector, size int) (*multi
 		userInbox: make(map[string]chan *nats.Msg),
 	}
 	for i := 0; i < size; i++ {
-		nc, err := connectWithCreds(natsURL, fmt.Sprintf("loadgen-daily-mux-%d", i), credsFile)
+		nc, err := connectWithCredsHealth(natsURL, fmt.Sprintf("loadgen-daily-mux-%d", i), credsFile, "daily", c.m)
 		if err != nil {
 			p.Close()
 			return nil, fmt.Errorf("multiplex conn %d: %w", i, err)
@@ -151,19 +152,43 @@ func newMultiplexPool(natsURL, credsFile string, c *Collector, size int) (*multi
 	return p, nil
 }
 
-// connectWithCreds is the single dial helper for daily-IM pools and the
-// publisher conn. When credsFile is non-empty, the connection is opened
-// with nats.UserCredentials so it authenticates against operator-mode
-// NATS servers; otherwise it falls back to anonymous dial (only valid
-// against servers that allow anonymous, e.g. a minimal test setup).
-// Without this, the daily-IM pools were silently dialing anonymous and
-// getting "permissions violation" on subscribe.
-func connectWithCreds(url, name, credsFile string) (*nats.Conn, error) {
-	opts := []nats.Option{nats.Name(name)}
+func connectWithCredsHealth(
+	url,
+	name,
+	credsFile,
+	pool string,
+	metrics *Metrics,
+	observers ...*failureObserverHealth,
+) (*nats.Conn, error) {
+	health := newLoadgenNATSHealth(pool, metrics, nil)
+	if health == nil {
+		return nil, fmt.Errorf("unknown loadgen NATS pool %q", pool)
+	}
+	if len(observers) > 0 {
+		health.observer = observers[0]
+	}
+	opts := []nats.Option{
+		nats.Name(name),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) { health.disconnected(err) }),
+		nats.ReconnectHandler(func(connection *nats.Conn) { health.reconnected(connection.ConnectedUrlRedacted()) }),
+		nats.ClosedHandler(func(_ *nats.Conn) { health.closed() }),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+			if errors.Is(err, nats.ErrSlowConsumer) {
+				health.bufferFull(err)
+				return
+			}
+			health.asyncError(err)
+		}),
+	}
 	if credsFile != "" {
 		opts = append(opts, nats.UserCredentials(credsFile))
 	}
-	return nats.Connect(url, opts...)
+	connection, err := nats.Connect(url, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("connect NATS pool %s: %w", pool, err)
+	}
+	health.connected()
+	return connection, nil
 }
 
 // Add registers a user with the multiplex pool. Subscribes the shared

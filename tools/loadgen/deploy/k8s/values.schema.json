@@ -12,6 +12,7 @@
     "cassandra",
     "metrics",
     "ledger",
+    "recipientObserver",
     "seed",
     "soak",
     "teardown"
@@ -118,6 +119,20 @@
         "reconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
       }
     },
+    "recipientObserver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "queue",
+        "connections"
+      ],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "queue": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "connections": {"type": "integer", "minimum": 1, "maximum": 256}
+      }
+    },
     "seed": {
       "type": "object",
       "additionalProperties": false,
@@ -142,6 +157,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "environment",
         "runMode",
         "randomSeed",
         "warmup",
@@ -180,6 +196,7 @@
         "resources"
       ],
       "properties": {
+        "environment": {"type": "string", "enum": ["local", "test", "staging", "production"]},
         "runMode": {"type": "string", "enum": ["continuous"]},
         "randomSeed": {"type": "integer"},
         "warmup": {"type": "string", "minLength": 1},

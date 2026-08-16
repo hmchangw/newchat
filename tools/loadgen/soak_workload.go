@@ -72,6 +72,58 @@ type soakLaneDispatcher func(
 	action func(context.Context),
 )
 
+type soakPacingOutcome string
+
+const (
+	soakPacingDispatched        soakPacingOutcome = "dispatched"
+	soakPacingSchedulerUnderrun soakPacingOutcome = "scheduler_underrun"
+	soakPacingLaneSaturation    soakPacingOutcome = "lane_saturation"
+	soakPacingGlobalSaturation  soakPacingOutcome = "global_saturation"
+)
+
+type soakPacingMetrics struct {
+	metrics *Metrics
+}
+
+func newSoakPacingMetrics(metrics *Metrics) *soakPacingMetrics {
+	return &soakPacingMetrics{metrics: metrics}
+}
+
+func (r *soakPacingMetrics) Configure(lane string, rate float64) {
+	if r == nil || r.metrics == nil {
+		return
+	}
+	r.metrics.SoakConfiguredRate.WithLabelValues(lane).Set(rate)
+}
+
+func (r *soakPacingMetrics) Record(lane string, outcome soakPacingOutcome, count int) {
+	if r == nil || r.metrics == nil || count <= 0 {
+		return
+	}
+	value := float64(count)
+	var recordOutcome func()
+	switch outcome {
+	case soakPacingDispatched:
+		recordOutcome = func() { r.metrics.SoakDispatched.WithLabelValues(lane).Add(value) }
+	case soakPacingSchedulerUnderrun:
+		recordOutcome = func() { r.metrics.SoakSchedulerUnderrun.WithLabelValues(lane).Add(value) }
+	case soakPacingLaneSaturation:
+		recordOutcome = func() { r.metrics.SoakLaneSaturation.WithLabelValues(lane).Add(value) }
+	case soakPacingGlobalSaturation:
+		recordOutcome = func() { r.metrics.SoakGlobalSaturation.WithLabelValues(lane).Add(value) }
+	default:
+		return
+	}
+	r.metrics.SoakIntended.WithLabelValues(lane).Add(value)
+	recordOutcome()
+}
+
+type soakWorkloadOption func(*soakWorkload)
+
+func withSoakPacingMetrics(recorder *soakPacingMetrics) soakWorkloadOption {
+	return func(workload *soakWorkload) { workload.pacing = recorder }
+}
+
 type soakWorkload struct {
 	cfg          soakWorkloadConfig
 	store        soakLifecycleStore
@@ -79,6 +131,7 @@ type soakWorkload struct {
 	dispatch     soakLaneDispatcher
 	now          func() time.Time
 	onSaturation func()
+	pacing       *soakPacingMetrics
 }
 
 func newSoakWorkload(
@@ -88,6 +141,7 @@ func newSoakWorkload(
 	dispatch soakLaneDispatcher,
 	now func() time.Time,
 	onSaturation func(),
+	options ...soakWorkloadOption,
 ) *soakWorkload {
 	if cfg == nil {
 		cfg = &soakWorkloadConfig{}
@@ -108,10 +162,14 @@ func newSoakWorkload(
 	if onSaturation == nil {
 		onSaturation = func() {}
 	}
-	return &soakWorkload{
+	workload := &soakWorkload{
 		cfg: config, store: store, actions: actions, dispatch: dispatch,
 		now: now, onSaturation: onSaturation,
 	}
+	for _, option := range options {
+		option(workload)
+	}
+	return workload
 }
 
 func (w *soakWorkload) Run(
@@ -215,6 +273,7 @@ func (w *soakWorkload) Run(
 			continue
 		}
 		lane := lane
+		w.pacing.Configure(lane.name, lane.rate)
 		laneWG.Add(1)
 		go func() {
 			defer laneWG.Done()
@@ -223,15 +282,22 @@ func (w *soakWorkload) Run(
 				lane.name,
 				lane.rate,
 				w.cfg.MaxInFlight,
-				func(int) {},
-				w.onSaturation,
+				func(count int) {
+					w.pacing.Record(lane.name, soakPacingSchedulerUnderrun, count)
+				},
+				func() {
+					w.pacing.Record(lane.name, soakPacingLaneSaturation, 1)
+					w.onSaturation()
+				},
 				func(actionCtx context.Context) {
 					select {
 					case globalBudget <- struct{}{}:
 					default:
+						w.pacing.Record(lane.name, soakPacingGlobalSaturation, 1)
 						w.onSaturation()
 						return
 					}
+					w.pacing.Record(lane.name, soakPacingDispatched, 1)
 					defer func() { <-globalBudget }()
 					measured := !w.now().Before(warmupDeadline)
 					setFatal(lane.action(actionCtx, measured))

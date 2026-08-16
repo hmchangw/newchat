@@ -32,6 +32,7 @@ seed:
       memory: 1Gi
 
 soak:
+  environment: local
   warmup: 2s
   heartbeatInterval: 5s
   heartbeatStaleAfter: 20s

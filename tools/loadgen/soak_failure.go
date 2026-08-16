@@ -7,19 +7,68 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
 const (
-	soakFailureScenario               = "cassandra_soak"
-	soakFailureLaneMessageSend        = "message_send"
-	soakFailureAttributeRoomID        = "room_id"
-	soakFailureAttributeAccount       = "account"
-	soakFailureAttributeContentSHA256 = "content_sha256"
+	soakFailureScenario                   = "message_soak"
+	soakFailureTrafficProfile             = "cassandra-soak-v1"
+	soakFailureLaneMessageSend            = "message_send"
+	soakFailureAttributeRoomID            = "room_id"
+	soakFailureAttributeAccount           = "account"
+	soakFailureAttributeContentSHA256     = "content_sha256"
+	soakFailureAttributeRecipientEvent    = "expected_recipient_event"
+	soakFailureAttributeRecipientSource   = "expected_recipient_source"
+	soakFailureAttributeRecipientComplete = "expected_recipient_complete"
+	soakFailureAttributeRecipientRoute    = "expected_recipient_route"
+	soakFailureWALGroupCommitDelay        = 10 * time.Millisecond
+	soakFailureWALGroupCommitBatchSize    = 256
 )
+
+func setSoakRunInfo(metrics *Metrics, environment string) {
+	if metrics == nil {
+		return
+	}
+	metrics.RunInfo.WithLabelValues(
+		environment,
+		soakFailureScenario,
+		soakFailureTrafficProfile,
+	).Set(1)
+}
+
+func soakFailureExpiryInterval(deadline time.Duration) time.Duration {
+	return min(30*time.Second, max(time.Second, deadline/10))
+}
+
+func runSoakFailureExpiry(
+	ctx context.Context,
+	ledger *failureLedger,
+	ticks <-chan time.Time,
+	onError func(error),
+) {
+	if ledger == nil || ticks == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case at, ok := <-ticks:
+			if !ok {
+				return
+			}
+			if _, err := ledger.Expire(at); err != nil && onError != nil {
+				onError(fmt.Errorf("expire failure operations: %w", err))
+			}
+		}
+	}
+}
 
 func openSoakFailureLedger(
 	cfg *soakConfig,
@@ -30,18 +79,28 @@ func openSoakFailureLedger(
 		return nil, fmt.Errorf("soak configuration is required")
 	}
 	var journal failureJournal
+	contract := newFailureObserverContract(cfg.RecipientObserverEnabled)
 	if cfg.LedgerDir != "" {
 		wal, err := openFailureWAL(filepath.Join(cfg.LedgerDir, cfg.RunID+".wal"))
 		if err != nil {
 			return nil, err
 		}
-		journal = wal
+		journal = newFailureJournalMetrics(
+			newFailureJournalGroupCommit(
+				wal,
+				soakFailureWALGroupCommitDelay,
+				soakFailureWALGroupCommitBatchSize,
+				metrics,
+			),
+			metrics,
+		)
 	}
 	ledger, err := newFailureLedger(failureLedgerConfig{
-		Capacity: cfg.LedgerCapacity,
-		Journal:  journal,
-		Now:      now,
-		Recorder: newFailureLedgerPromRecorder(metrics),
+		Capacity:         cfg.LedgerCapacity,
+		Journal:          journal,
+		Now:              now,
+		Recorder:         newFailureLedgerPromRecorder(metrics),
+		ObserverContract: &contract,
 	})
 	if err != nil {
 		if journal != nil {
@@ -49,7 +108,23 @@ func openSoakFailureLedger(
 		}
 		return nil, fmt.Errorf("open soak failure ledger: %w", err)
 	}
+	recordFailureObserverConfiguration(metrics, contract)
 	return ledger, nil
+}
+
+func recordFailureObserverConfiguration(metrics *Metrics, contract failureObserverContract) {
+	if metrics == nil {
+		return
+	}
+	for _, observer := range []failureObserver{
+		failureObserverAdmission, failureObserverHistory, failureObserverRecipient,
+	} {
+		configured := 0.0
+		if slices.Contains(contract.Observers, observer) {
+			configured = 1
+		}
+		metrics.FailureObserverConfigured.WithLabelValues(string(observer)).Set(configured)
+	}
 }
 
 const (
@@ -64,6 +139,8 @@ type soakFailureTracker struct {
 	deadline     time.Duration
 	now          func() time.Time
 	metrics      *Metrics
+	runID        string
+	recipient    *failureRecipientObserver
 }
 
 type soakFailureTrackerOption func(*soakFailureTracker)
@@ -72,6 +149,14 @@ func withSoakFailureMetrics(metrics *Metrics) soakFailureTrackerOption {
 	return func(tracker *soakFailureTracker) {
 		tracker.metrics = metrics
 	}
+}
+
+func withSoakFailureRunID(runID string) soakFailureTrackerOption {
+	return func(tracker *soakFailureTracker) { tracker.runID = runID }
+}
+
+func withSoakFailureRecipientObserver(observer *failureRecipientObserver) soakFailureTrackerOption {
+	return func(tracker *soakFailureTracker) { tracker.recipient = observer }
 }
 
 func newSoakFailureTracker(
@@ -86,7 +171,7 @@ func newSoakFailureTracker(
 	}
 	tracker := &soakFailureTracker{
 		ledger: ledger, persistGrace: max(0, persistGrace),
-		deadline: max(time.Second, deadline), now: now,
+		deadline: max(time.Second, deadline), now: now, runID: "legacy",
 	}
 	for _, option := range options {
 		option(tracker)
@@ -113,19 +198,84 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 		startedAt = t.now().UTC()
 	}
 	contentHash := sha256.Sum256([]byte(pending.Content))
+	recipients := append([]string(nil), pending.Target.Recipients...)
+	if len(recipients) == 0 && pending.Target.Account != "" {
+		recipients = []string{pending.Target.Account}
+	}
+	slices.Sort(recipients)
+	recipientHash := sha256.Sum256([]byte(strings.Join(recipients, "\n")))
+	recipientEvent := model.RoomEventNewMessage
+	if pending.Kind == soakSendThreadReply {
+		recipientEvent = model.RoomEventNewThreadMessage
+	}
+	attributes := map[string]string{
+		soakFailureAttributeRoomID:        pending.Target.RoomID,
+		soakFailureAttributeAccount:       pending.Target.Account,
+		soakFailureAttributeContentSHA256: hex.EncodeToString(contentHash[:]),
+	}
+	if t.recipient != nil {
+		source := pending.Target.RecipientSetSource
+		complete := pending.Target.RecipientSetComplete
+		if source == "" {
+			source = recipientSetSourceTopology
+			complete = true
+		}
+		route := pending.Target.RecipientRoute
+		if route == "" {
+			route = recipientExpectedRouteUser
+			if pending.Kind != soakSendThreadReply && pending.Target.RoomType == model.RoomTypeChannel {
+				route = recipientExpectedRouteRoom
+			}
+		}
+		if err := t.recipient.ExpectDelivery(&recipientExpectationConfig{
+			OperationID: pending.MessageID,
+			Recipients:  recipients,
+			RoomID:      pending.Target.RoomID,
+			EventType:   recipientEvent,
+			Route:       route,
+			Source:      source,
+			Complete:    complete,
+		}); err != nil {
+			return fmt.Errorf("register soak recipient expectation: %w", err)
+		}
+		attributes[soakFailureAttributeRecipientEvent] = string(recipientEvent)
+		attributes[soakFailureAttributeRecipientSource] = string(source)
+		attributes[soakFailureAttributeRecipientComplete] = fmt.Sprintf("%t", complete)
+		attributes[soakFailureAttributeRecipientRoute] = string(route)
+		attributes["expected_recipients"] = strings.Join(recipients, "\n")
+	}
 	if err := t.ledger.Start(&failureOperation{
-		ID: pending.MessageID, CorrelationID: pending.RequestID,
+		SchemaVersion: 2, ID: pending.MessageID, CorrelationID: pending.RequestID,
+		RunID: t.runID, OperationType: failureOperationMessageCreate,
 		Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
-		StartedAt: startedAt, VerifyAfter: startedAt.Add(t.persistGrace),
+		LifecycleState: failureOperationJournaled,
+		StartedAt:      startedAt, VerifyAfter: startedAt.Add(t.persistGrace),
 		Deadline: startedAt.Add(t.deadline),
-		Expected: []failureObserver{failureObserverAdmission, failureObserverHistory},
-		Attributes: map[string]string{
-			soakFailureAttributeRoomID:        pending.Target.RoomID,
-			soakFailureAttributeAccount:       pending.Target.Account,
-			soakFailureAttributeContentSHA256: hex.EncodeToString(contentHash[:]),
-		},
+		Targets:  map[string]string{"messageId": pending.MessageID, "roomId": pending.Target.RoomID},
+		Effects: messageCreateExpectedEffectsForObservers(
+			t.recipient != nil,
+			len(recipients),
+			hex.EncodeToString(recipientHash[:]),
+		),
+		Attributes: attributes,
 	}); err != nil {
+		if t.recipient != nil {
+			t.recipient.evidence.Forget(pending.MessageID)
+		}
 		return fmt.Errorf("start soak failure operation: %w", err)
+	}
+	return nil
+}
+
+func (t *soakFailureTracker) Activate(pending *soakPendingSend) error {
+	if t == nil || t.ledger == nil {
+		return fmt.Errorf("soak failure ledger is required")
+	}
+	if pending == nil || pending.MessageID == "" {
+		return fmt.Errorf("soak pending send with message ID is required")
+	}
+	if err := t.ledger.Activate(pending.MessageID, t.now().UTC()); err != nil {
+		return fmt.Errorf("activate soak failure operation: %w", err)
 	}
 	return nil
 }
@@ -169,6 +319,8 @@ func (t *soakFailureTracker) ObserveReply(result *soakSendReplyResult) error {
 	observation := failureObservationBad
 	if result.Status == soakSendReplyAccepted {
 		observation = failureObservationGood
+	} else if result.ErrorClass == soakErrorTimeout || transientSoakError(result.ErrorClass) {
+		observation = failureObservationUnverified
 	}
 	_, err := t.ledger.Observe(
 		result.MessageID,
@@ -312,6 +464,17 @@ type soakFailureReconciler struct {
 	verifier      soakFailureHistoryVerifier
 	retryInterval time.Duration
 	now           func() time.Time
+	recipient     soakFailureRecipientFinalizer
+}
+
+type soakFailureRecipientFinalizer interface {
+	Finalize(string, time.Time, time.Time) recipientEvidenceResult
+}
+
+type soakFailureReconcilerOption func(*soakFailureReconciler)
+
+func withSoakFailureRecipientFinalizer(finalizer soakFailureRecipientFinalizer) soakFailureReconcilerOption {
+	return func(reconciler *soakFailureReconciler) { reconciler.recipient = finalizer }
 }
 
 func newSoakFailureReconciler(
@@ -319,14 +482,19 @@ func newSoakFailureReconciler(
 	verifier soakFailureHistoryVerifier,
 	retryInterval time.Duration,
 	now func() time.Time,
+	options ...soakFailureReconcilerOption,
 ) *soakFailureReconciler {
 	if now == nil {
 		now = time.Now
 	}
-	return &soakFailureReconciler{
+	reconciler := &soakFailureReconciler{
 		ledger: ledger, verifier: verifier,
 		retryInterval: max(time.Millisecond, retryInterval), now: now,
 	}
+	for _, option := range options {
+		option(reconciler)
+	}
+	return reconciler
 }
 
 // Try consumes at most one due reconciliation operation. Callers use this in
@@ -340,6 +508,64 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	operation, ok := r.ledger.ClaimDue(now)
 	if !ok {
 		return false, nil
+	}
+	if _, historyObserved := operation.Observations[failureObserverHistory]; historyObserved {
+		if _, recipientObserved := operation.Observations[failureObserverRecipient]; !recipientObserved &&
+			slices.Contains(operation.Expected, failureObserverRecipient) {
+			observation := failureObservationUnverified
+			reason := failureReasonNone
+			if r.recipient != nil {
+				result := r.recipient.Finalize(
+					operation.ID,
+					operation.StartedAt,
+					operation.Deadline,
+				)
+				observation = result.Observation
+				if observation == failureObservationBad ||
+					observation == failureObservationMissingAfterDeadline {
+					switch {
+					case len(result.Mismatches) > 0:
+						reason = failureReasonRecipientIdentityMismatch
+					case len(result.Unexpected) > 0:
+						reason = failureReasonRecipientUnexpected
+					case len(result.Duplicates) > 0 && observation == failureObservationBad:
+						reason = failureReasonRecipientDuplicate
+					case len(result.Missing) > 0:
+						reason = failureReasonRecipientMissing
+					}
+				}
+			}
+			if _, err := r.ledger.ObserveWithReason(
+				operation.ID,
+				failureObserverRecipient,
+				observation,
+				reason,
+				now,
+			); err != nil {
+				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
+				return true, fmt.Errorf("record soak recipient observation: %w", err)
+			}
+			return true, nil
+		}
+		for _, observer := range operation.Expected {
+			if _, observed := operation.Observations[observer]; observed {
+				continue
+			}
+			if _, err := r.ledger.Observe(
+				operation.ID,
+				observer,
+				failureObservationUnverified,
+				now,
+			); err != nil {
+				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
+				return true, fmt.Errorf("record unresolved soak observation: %w", err)
+			}
+			return true, nil
+		}
+		if err := r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval)); err != nil {
+			return true, fmt.Errorf("release malformed failure operation %q: %w", operation.ID, err)
+		}
+		return true, fmt.Errorf("failure operation %q was queued without an unresolved observer", operation.ID)
 	}
 	result, verifyErr := r.verifier.Verify(ctx, &operation)
 	if verifyErr == nil && result == soakFailureHistoryFound {
@@ -355,7 +581,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
-	// Past the deadline the verdict depends on what the verifier could actually
+	// Past the deadline the result depends on what the verifier could actually
 	// establish. An unreachable history service proves nothing, so it must not
 	// be recorded as a missing message: that would turn every dependency outage
 	// longer than the deadline into a data-loss report.

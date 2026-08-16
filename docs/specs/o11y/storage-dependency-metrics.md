@@ -93,13 +93,17 @@ These metrics do not replace database telemetry; they connect dependency behavio
 | `loadgen_soak_rpc_latency_seconds_*{action}` | loadgen soak | End-to-end latency through message/history paths | Existing |
 | `loadgen_soak_verifications_total{action,class}` | loadgen soak | Sampled Cassandra read-back correctness | Existing |
 | `loadgen_soak_mutation_target_missing_total` | loadgen soak | Persisted target still absent after the dedicated wait/retry policy | Existing |
-| `loadgen_soak_saturation_total{lane}` | loadgen soak | Invalid-run detector: loadgen dropped work because its own in-flight budget filled | Existing |
+| `loadgen_soak_lane_saturation_total{lane}` | loadgen soak | Invalid-run detector: a lane dropped work because its own in-flight budget filled | Existing |
+| `loadgen_soak_global_saturation_total{lane}` | loadgen soak | Invalid-run detector: a lane dropped work because the shared in-flight budget filled | Existing |
 | `loadgen_failure_operations_total{scenario,lane,result}` | loadgen soak | Terminal `good`/`bad`/`unverified`/`not_sent`/`missing_after_deadline` results for durable operation lanes | Existing for Cassandra user-message sends |
 | `loadgen_failure_observations_total{scenario,lane,observer,result}` | loadgen soak | Separates admission failures from Cassandra history loss or mismatch | Existing for admission and Cassandra history |
 | `loadgen_failure_inflight{scenario,lane}` | loadgen soak | Unresolved-operation backlog and deadline pressure | Existing for Cassandra user-message sends |
 | `loadgen_failure_recovered_operations_total` | loadgen soak | Operations restored from the PVC-backed WAL after loadgen restart | Existing |
 | `loadgen_failure_invalidations_total{reason}` | loadgen soak | Ledger capacity or WAL failures that invalidate evidence | Existing |
 | `loadgen_failure_journal_bytes` | loadgen soak | Persistent evidence footprint and compaction health | Existing |
+| `loadgen_failure_wal_append_duration_seconds`, `loadgen_failure_wal_appends_total{result}` | loadgen soak | Caller-visible WAL delay and bounded append result; pre-publish intents include the durability barrier | Existing |
+| `loadgen_failure_wal_flush_duration_seconds{result}`, `loadgen_failure_wal_flush_batch_size{result}` | loadgen soak | Direct grouped fsync latency and records committed per barrier | Existing |
+| `loadgen_failure_evidence_flush_duration_seconds{claim,result}`, `loadgen_failure_evidence_records_total{kind}` | loadgen soak | Terminal recipient-sidecar barrier latency, failures, and bounded evidence kinds | Existing |
 | `loadgen_failure_untracked_total{reason}` | loadgen soak | Sends the ledger could not account for, so degraded observation is visible instead of silent | Existing |
 | `loadgen_failure_dropped_total` | loadgen soak | Recovered operations discarded because the WAL exceeded the configured capacity | Existing |
 | `loadgen_nats_connected{pool}`, `loadgen_nats_connection_events_total{pool,event}`, `loadgen_nats_outage_duration_seconds_*{pool}` | loadgen soak | Separates generator connection loss from service/storage impact | Existing for soak; other loadgen pools remain a gap |

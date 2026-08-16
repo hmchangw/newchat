@@ -236,7 +236,7 @@ func (f *prodCapacityFactory) Build(cfg capacityConfig) *capacityEnv {
 	if siteID == "" {
 		siteID = "site-local"
 	}
-	pool, err := newPresencePool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile, cfg.PublisherConns, cfg.ObserverConns, c)
+	pool, err := newPresencePool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile, cfg.PublisherConns, cfg.ObserverConns, c, nil)
 	if err != nil {
 		slog.Error("presence pool init failed; emitters will no-op", "err", err)
 	}

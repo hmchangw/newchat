@@ -5,13 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func reviewFailureOperation(id string, now time.Time) *failureOperation {
 	return &failureOperation{
-		ID: id, Scenario: "cassandra_soak", Lane: "message_send",
+		ID: id, Scenario: soakFailureScenario, Lane: "message_send",
 		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
 		Expected: []failureObserver{failureObserverAdmission, failureObserverHistory},
 	}
@@ -35,6 +36,260 @@ func TestFailureLedger_AbandonFinalizesWithoutDataLoss(t *testing.T) {
 	expired, err := ledger.Expire(now.Add(time.Hour))
 	require.NoError(t, err)
 	assert.Zero(t, expired)
+}
+
+func TestFailureLedger_BoundedResultReasons(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	metrics := NewMetrics()
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 2, Recorder: newFailureLedgerPromRecorder(metrics),
+	})
+	require.NoError(t, err)
+	operation := reviewFailureOperation("rejected", now)
+	require.NoError(t, ledger.Start(operation))
+
+	_, err = ledger.ObserveWithReason(
+		operation.ID,
+		failureObserverAdmission,
+		failureObservationBad,
+		failureReasonAdmissionRejected,
+		now,
+	)
+	require.NoError(t, err)
+	_, err = ledger.ObserveWithReason(
+		operation.ID,
+		failureObserverHistory,
+		failureObservationGood,
+		failureReasonNone,
+		now,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureObservationReasons.WithLabelValues(
+			soakFailureScenario,
+			soakFailureLaneMessageSend,
+			string(failureObserverAdmission),
+			string(failureObservationBad),
+			string(failureReasonAdmissionRejected),
+		),
+	))
+
+	second := reviewFailureOperation("invalid-reason", now)
+	require.NoError(t, ledger.Start(second))
+	_, err = ledger.ObserveWithReason(
+		second.ID,
+		failureObserverAdmission,
+		failureObservationBad,
+		failureReason("raw broker error"),
+		now,
+	)
+	assert.Error(t, err)
+}
+
+func TestFailureLedger_FinalizationPreservesDeterministicReason(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	tests := []struct {
+		name       string
+		operation  *failureOperation
+		observe    func(*testing.T, *failureLedger)
+		expire     bool
+		wantResult failureResult
+		wantReason failureReason
+	}{
+		{
+			name: "bad observations follow expected observer order",
+			operation: &failureOperation{
+				ID: "bad-order", Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
+				StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+				Expected: []failureObserver{failureObserverHistory, failureObserverAdmission},
+			},
+			observe: func(t *testing.T, ledger *failureLedger) {
+				_, err := ledger.ObserveWithReason(
+					"bad-order", failureObserverAdmission, failureObservationBad,
+					failureReasonAdmissionRejected, now,
+				)
+				require.NoError(t, err)
+				_, err = ledger.ObserveWithReason(
+					"bad-order", failureObserverHistory, failureObservationBad,
+					failureReasonHistoryContentMismatch, now,
+				)
+				require.NoError(t, err)
+			},
+			wantResult: failureResultBad,
+			wantReason: failureReasonHistoryContentMismatch,
+		},
+		{
+			name: "missing observations follow expected observer order",
+			operation: &failureOperation{
+				ID: "missing-order", Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
+				StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+				Expected: []failureObserver{
+					failureObserverAdmission, failureObserverHistory, failureObserverRecipient,
+				},
+				LifecycleState: failureOperationActive,
+			},
+			observe: func(t *testing.T, ledger *failureLedger) {
+				_, err := ledger.Observe(
+					"missing-order", failureObserverAdmission, failureObservationGood, now,
+				)
+				require.NoError(t, err)
+				_, err = ledger.ObserveWithReason(
+					"missing-order", failureObserverRecipient, failureObservationMissingAfterDeadline,
+					failureReasonRecipientMissing, now,
+				)
+				require.NoError(t, err)
+				_, err = ledger.ObserveWithReason(
+					"missing-order", failureObserverHistory, failureObservationMissingAfterDeadline,
+					failureReasonHistoryMissing, now,
+				)
+				require.NoError(t, err)
+			},
+			wantResult: failureResultMissingAfterDeadline,
+			wantReason: failureReasonHistoryMissing,
+		},
+		{
+			name:      "expiration retains an earlier bad reason",
+			operation: reviewFailureOperation("expire-bad", now),
+			observe: func(t *testing.T, ledger *failureLedger) {
+				_, err := ledger.ObserveWithReason(
+					"expire-bad", failureObserverAdmission, failureObservationBad,
+					failureReasonAdmissionRejected, now,
+				)
+				require.NoError(t, err)
+			},
+			expire:     true,
+			wantResult: failureResultBad,
+			wantReason: failureReasonAdmissionRejected,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			journal := &memoryFailureJournal{}
+			ledger, err := newFailureLedger(failureLedgerConfig{
+				Capacity: 1, Journal: journal, Now: func() time.Time { return now },
+			})
+			require.NoError(t, err)
+			require.NoError(t, ledger.Start(tt.operation))
+
+			tt.observe(t, ledger)
+			if tt.expire {
+				finalized, err := ledger.Expire(now.Add(time.Minute))
+				require.NoError(t, err)
+				require.Equal(t, 1, finalized)
+			}
+
+			var finalized *failureLedgerEvent
+			for i := range journal.events {
+				if journal.events[i].Type == failureLedgerEventFinalized {
+					finalized = &journal.events[i]
+				}
+			}
+			require.NotNil(t, finalized)
+			assert.Equal(t, tt.wantResult, finalized.Result)
+			assert.Equal(t, tt.wantReason, finalized.Reason)
+		})
+	}
+}
+
+func TestFailureLedger_NotSentRequiresBoundedLocalProofReason(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	metrics := NewMetrics()
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1, Recorder: newFailureLedgerPromRecorder(metrics),
+	})
+	require.NoError(t, err)
+	operation := reviewFailureOperation("local-failure", now)
+	require.NoError(t, ledger.Start(operation))
+
+	require.NoError(t, ledger.AbandonWithReason(
+		operation.ID,
+		failureResultNotSent,
+		failureReasonPublishLocalError,
+		now,
+	))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureNotSent.WithLabelValues(
+			soakFailureScenario,
+			soakFailureLaneMessageSend,
+			string(failureReasonPublishLocalError),
+		),
+	))
+}
+
+func TestFailureLedger_ActivatedPublishCannotBecomeNotSent(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	operation := testFailureOperation("message-1", now)
+	operation.LifecycleState = failureOperationJournaled
+	require.NoError(t, ledger.Start(operation))
+	require.NoError(t, ledger.Activate(operation.ID, now))
+
+	err = ledger.Abandon(operation.ID, failureResultNotSent, now)
+
+	assert.ErrorContains(t, err, "publish was attempted")
+	assert.Equal(t, 1, ledger.Snapshot().Active)
+}
+
+func TestFailureLedger_StartRejectsVersionTwoWithoutLifecycleState(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	operation := testFailureOperation("message-v2", now)
+	operation.SchemaVersion = 2
+	operation.RunID = "run-1"
+	operation.OperationType = failureOperationMessageCreate
+	operation.Targets = map[string]string{"messageId": operation.ID}
+	operation.Effects = messageCreateExpectedEffects(1, "hash")
+	operation.Expected = nil
+
+	err = ledger.Start(operation)
+
+	assert.ErrorContains(t, err, "lifecycle state")
+}
+
+func TestFailureLedger_StartDoesNotMutateCallerExpectedObservers(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	operation := testFailureOperation("message-v2", now)
+	operation.SchemaVersion = 2
+	operation.RunID = "run-1"
+	operation.OperationType = failureOperationMessageCreate
+	operation.LifecycleState = failureOperationJournaled
+	operation.Targets = map[string]string{"messageId": operation.ID}
+	operation.Effects = messageCreateExpectedEffects(1, "hash")
+	operation.Expected = []failureObserver{"caller-owned"}
+
+	require.NoError(t, ledger.Start(operation))
+
+	assert.Equal(t, []failureObserver{"caller-owned"}, operation.Expected)
+}
+
+func TestFailureLedger_AccountingInvariantNormalizesZeroTimestamp(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "run.wal")
+	wal, err := openFailureWAL(path)
+	require.NoError(t, err)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1, Journal: wal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(testFailureOperation("not-sent", now)))
+	require.NoError(t, ledger.Abandon("not-sent", failureResultNotSent, now))
+
+	_, err = ledger.Observe("not-sent", failureObserverHistory, failureObservationGood, time.Time{})
+	assert.ErrorContains(t, err, "accounting invariant")
+	require.NoError(t, ledger.Close())
+
+	reopened, err := openFailureWAL(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	events, err := reopened.Replay()
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	assert.Equal(t, now, events[len(events)-1].At)
 }
 
 func TestFailureLedger_AbandonRejectsUnknownOperationAndResult(t *testing.T) {
@@ -199,6 +454,7 @@ func TestFailureLedger_UnverifiedObservationDoesNotReportDataLoss(t *testing.T) 
 func TestFailureOperationResult_Precedence(t *testing.T) {
 	tests := []struct {
 		name         string
+		lifecycle    failureOperationLifecycle
 		observations map[failureObserver]failureObservation
 		want         failureResult
 	}{
@@ -211,12 +467,31 @@ func TestFailureOperationResult_Precedence(t *testing.T) {
 			want: failureResultGood,
 		},
 		{
-			name: "confirmed loss outranks everything",
+			name:      "accepted missing effect outranks everything",
+			lifecycle: failureOperationActive,
+			observations: map[failureObserver]failureObservation{
+				failureObserverAdmission: failureObservationGood,
+				failureObserverHistory:   failureObservationMissingAfterDeadline,
+			},
+			want: failureResultMissingAfterDeadline,
+		},
+		{
+			name:      "rejected admission prevents missing claim",
+			lifecycle: failureOperationActive,
 			observations: map[failureObserver]failureObservation{
 				failureObserverAdmission: failureObservationBad,
 				failureObserverHistory:   failureObservationMissingAfterDeadline,
 			},
-			want: failureResultMissingAfterDeadline,
+			want: failureResultBad,
+		},
+		{
+			name:      "ambiguous admission prevents missing claim",
+			lifecycle: failureOperationActive,
+			observations: map[failureObserver]failureObservation{
+				failureObserverAdmission: failureObservationUnverified,
+				failureObserverHistory:   failureObservationMissingAfterDeadline,
+			},
+			want: failureResultUnverified,
 		},
 		{
 			name: "bad outranks unverified",
@@ -246,9 +521,34 @@ func TestFailureOperationResult_Precedence(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			assert.Equal(t, test.want, failureOperationResult(&failureOperation{
-				Observations: test.observations,
+				LifecycleState: test.lifecycle,
+				Observations:   test.observations,
 			}))
 		})
+	}
+}
+
+func TestFailureOperationResult_MissingWithoutAcceptedPublishIsUnverified(t *testing.T) {
+	operation := testFailureOperation("message-1", time.Now().UTC())
+	operation.LifecycleState = failureOperationJournaled
+	operation.Observations = map[failureObserver]failureObservation{
+		failureObserverAdmission: failureObservationUnverified,
+		failureObserverHistory:   failureObservationMissingAfterDeadline,
+	}
+
+	assert.Equal(t, failureResultUnverified, failureOperationResult(operation))
+}
+
+func TestFailureOperationResult_JournaledMissingDoesNotHideBadEvidence(t *testing.T) {
+	operation := testFailureOperation("message-1", time.Now().UTC())
+	operation.LifecycleState = failureOperationJournaled
+	operation.Observations = map[failureObserver]failureObservation{
+		failureObserverAdmission: failureObservationBad,
+		failureObserverHistory:   failureObservationMissingAfterDeadline,
+	}
+
+	for range 100 {
+		assert.Equal(t, failureResultBad, failureOperationResult(operation))
 	}
 }
 

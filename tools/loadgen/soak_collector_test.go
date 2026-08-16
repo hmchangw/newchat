@@ -60,6 +60,7 @@ func TestSoakCollector_AchievedRateExcludesWarmup(t *testing.T) {
 	assert.Equal(t, uint64(100), snapshot.Total.Attempted)
 	assert.InDelta(t, 10, snapshot.Total.AchievedRate, 0.001)
 	assert.Equal(t, uint64(10), snapshot.WarmupAttempted)
+	assert.Equal(t, uint64(10), snapshot.WarmupActions[soakRPCLoadHistory])
 }
 
 func TestSoakCollector_FixedHistogramPercentiles(t *testing.T) {
