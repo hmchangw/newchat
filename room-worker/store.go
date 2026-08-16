@@ -167,10 +167,6 @@ type RoomKeyStore interface {
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
 	// Set writes a fresh keypair at version 0 — used when seeding a brand-new room.
 	Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
-	// SetWithVersion writes pair at an explicit version. Used by the rotate
-	// fallback when Rotate finds no current key but fan-out already committed
-	// to predictedVersion = currentPair.Version + 1.
-	SetWithVersion(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair, version int) error
 	// Rotate atomically increments version and writes newPair as current.
 	Rotate(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair) (int, error)
 }

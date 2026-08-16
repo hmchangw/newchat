@@ -553,17 +553,3 @@ func (mr *MockRoomKeyStoreMockRecorder) Set(ctx, roomID, pair any) *gomock.Call 
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockRoomKeyStore)(nil).Set), ctx, roomID, pair)
 }
-
-// SetWithVersion mocks base method.
-func (m *MockRoomKeyStore) SetWithVersion(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair, version int) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetWithVersion", ctx, roomID, pair, version)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// SetWithVersion indicates an expected call of SetWithVersion.
-func (mr *MockRoomKeyStoreMockRecorder) SetWithVersion(ctx, roomID, pair, version any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetWithVersion", reflect.TypeOf((*MockRoomKeyStore)(nil).SetWithVersion), ctx, roomID, pair, version)
-}

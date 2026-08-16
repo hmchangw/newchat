@@ -26,8 +26,6 @@ type VersionedKeyPair struct {
 // RoomKeyStore defines storage operations for room encryption secrets.
 type RoomKeyStore interface {
 	Set(ctx context.Context, roomID string, pair RoomKeyPair) (int, error)
-	// SetWithVersion stamps pair at an explicit version for the rotate fallback.
-	SetWithVersion(ctx context.Context, roomID string, pair RoomKeyPair, version int) error
 	Get(ctx context.Context, roomID string) (*VersionedKeyPair, error)
 	GetMany(ctx context.Context, roomIDs []string) (map[string]*VersionedKeyPair, error)
 	GetByVersion(ctx context.Context, roomID string, version int) (*RoomKeyPair, error)
