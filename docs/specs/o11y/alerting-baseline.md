@@ -3,6 +3,11 @@
 > Companion to the [Dashboard and Alert Guide](dashboard-and-alert-guide.md)
 > and the [Dashboard Panel Catalog](dashboard-panel-catalog.md). Trap
 > references ("trap 7.x") point at the guide.
+>
+> Re-verified 2026-08-16 against `main` at `a96389f`, after #271 and #286
+> merged. One rule changed: rule 3 is **not deployable** because #286 shipped
+> without the consumer supervisor, so seven of the eight rules can be written
+> today. Rule 2's `for` window shortened accordingly.
 
 ---
 
@@ -57,20 +62,26 @@ burn-rate rules are added beside them, not instead of them.
 Eight rules. Severity `critical` means it pages; `warning` means it opens a
 ticket or posts to a channel.
 
-| # | Rule | `for` | Severity | Pages |
-|---|---|---|---|---|
-| 1 | `ChatConsumerMissing` | 10m | critical | yes |
-| 2 | `ChatNATSConsumerLoopStopped` | 5m | critical | yes |
-| 3 | `ChatNATSConsumerRecoveryFailing` | 15m | warning | no |
-| 4 | `ChatNATSTerminalFailures` | 10m | warning | no |
-| 5 | `ChatNATSReconnectBufferFull` | 0m | critical | yes |
-| 6 | `ChatNATSClientDisconnected` | 5m | warning | no |
-| 7 | `ChatNATSSlowConsumer` | 5m | warning | no |
-| 8 | `AtRestKEKRenewalFailing` | 30m | critical | yes |
+| # | Rule | `for` | Severity | Pages | Deployable |
+|---|---|---|---|---|---|
+| 1 | `ChatConsumerMissing` | 10m | critical | yes | yes |
+| 2 | `ChatNATSConsumerLoopStopped` | 2m | critical | yes | yes |
+| 3 | `ChatNATSConsumerRecoveryFailing` | 15m | warning | no | **no — #283** |
+| 4 | `ChatNATSTerminalFailures` | 10m | warning | no | yes |
+| 5 | `ChatNATSReconnectBufferFull` | 0m | critical | yes | yes |
+| 6 | `ChatNATSClientDisconnected` | 5m | warning | no | yes |
+| 7 | `ChatNATSSlowConsumer` | 5m | warning | no | yes |
+| 8 | `AtRestKEKRenewalFailing` | 30m | critical | yes | yes |
 
 Three page, five do not. The three that page share a property: by the time a
 human notices without being told, data has already been lost or a total outage
 is imminent.
+
+**Seven of the eight can be written today.** Rule 3 is specified but not
+deployable: it reads a metric that only exists under #283, which #286 did not
+include. It is kept here rather than deleted because the failure mode it covers
+is real and reappears the moment the supervisor lands — and because writing it
+down is what stops someone from concluding that rule 2 already covers it.
 
 ### 3.1 `ChatConsumerMissing`
 
@@ -106,16 +117,18 @@ absent(chat_nats_consumer_loop_up{
 chat_nats_consumer_loop_up == 0
 ```
 
-- **`for`:** 5m · **Severity:** critical · **Pages:** yes
+- **`for`:** 2m · **Severity:** critical · **Pages:** yes
 - **Threshold rationale:** `pkg/natsmetrics` sets this to 1 only after iterator
   creation succeeds and to 0 before returning from a terminal `Next`, iterator,
   or consumer-lookup error. A running process should read 1. No baseline
   applies to a structurally binary gauge.
-- **Why `for: 5m` and not shorter:** with #283, a terminal iterator error
-  triggers recreation with capped exponential backoff, so a transient loss
-  self-heals in seconds (trap 7.11). A sustained zero now means **recovery is
-  repeatedly failing**, which is a much stronger statement than the pre-#283
-  meaning. Before #283 merges, 2m is appropriate; after it merges, 5m.
+- **Why `for: 2m`:** on `main` there is no supervisor. `natsmetrics.Consume`
+  calls `LoopFailed` on a terminal `Next` error and returns, so the loop is gone
+  until the process restarts (trap 7.11) — there is no recovery window to wait
+  out, and a longer `for` only delays the response. **If #283 ever merges this
+  must be lengthened to about 5m**, because a transient loss would then
+  self-heal in seconds and a sustained zero would mean repeated recovery
+  failure instead.
 - **Why this is ours:** from the broker's side the consumer looks healthy — the
   durable exists, it has a leader, pending climbs slowly and would take a long
   time to cross any generic threshold. Nothing outside this repository knows
@@ -135,7 +148,12 @@ sum by (service_name, site, stream, consumer) (
 ) > 0
 ```
 
-- **`for`:** 15m · **Severity:** warning · **Pages:** no · **Source:** #283 pending
+- **`for`:** 15m · **Severity:** warning · **Pages:** no
+- **Deployable:** **no.** `chat_nats_consumer_recovery_attempts_total` does not
+  exist on `main`. #286 shipped the rest of #283's scope without the consumer
+  supervisor, and #283 is open, draft, and conflicted. Writing this rule today
+  produces one that can never fire — the failure mode rule 8 exists to warn
+  about.
 - **Threshold rationale:** healthy is zero — a stable consumer never needs
   recreating. Non-zero is not immediately user-visible because backoff may still
   succeed, so it opens a ticket rather than paging.
@@ -143,6 +161,11 @@ sum by (service_name, site, stream, consumer) (
   successful and failed recreation leaves `chat_nats_consumer_loop_up` reading 1
   for most of every evaluation window, so rule 2 never fires, while the consumer
   is in fact unstable. This rule is the only view of it.
+- **Why it is not urgent today:** churn is a *consequence* of the supervisor.
+  Without one, a loop either runs or is gone, and rule 2 covers the second case
+  completely. Nothing is unmonitored while this rule is unbuildable — but that
+  stops being true on the day the supervisor lands, which is why this stays
+  written down.
 - **False positives:** a broker restart produces a burst of failures followed by
   success. `for: 15m` outlasts a normal restart.
 - **Panel:** D1-3.2, D2-1.1, D4-4.2
@@ -260,10 +283,10 @@ Excluding these is a decision, not an oversight. Each has a stated reason.
 |---|---|
 | `message_gatekeeper_messages_total{result="rejected"}` ratio | A non-zero floor is legitimate — `not_subscribed` and `room_restricted` are normal client outcomes. Needs a measured baseline. |
 | `notification_worker_outcomes_total{result="suppressed"}` ratio | Presence-based suppression is the design. A high suppressed share is correct behavior. |
-| `chat_nats_request_handled_total` error ratio | #283 pending, and the healthy ratio is unknown. Phase 1 candidate, and a strong one: its `result` enum maps exactly onto the error-budget eligibility table in `sli-slo.md` §0.1. |
+| `chat_nats_request_handled_total` error ratio | Available since #286, but the healthy ratio is unknown — it is a ratio, so it needs the calibration window by definition. The strongest Phase 1 candidate: its `result` enum maps exactly onto the error-budget eligibility table in `sli-slo.md` §0.1, so no new classification has to be invented. |
 | Any p99 latency threshold | Two independent reasons. No baseline, and `sli-slo.md` §0.1 forbids raw percentiles as targets outright — a percentile has no good/valid ratio, so no error budget or burn rate can be computed from it. Latency alerts must be written as "share completing within a bound", which is a Phase 1 construction. |
 | JetStream backlog thresholds | The same series means opposite things on different consumers (guide §2 item 4). 5000 pending on `message-worker` during a soak is routine; the same on an `outbox-worker` FIFO lane means a peer has been down for hours. Requires per-consumer baselines. |
-| Ack-floor stall | Structurally a good Phase 0 candidate — the healthy value is binary. Blocked on verifying that `ack_floor` exists in the deployed exporter's output (guide §8.1). Promote as soon as that is confirmed. |
+| Ack-floor stall | Structurally a good Phase 0 candidate — the healthy value is binary. Blocked on verifying that `ack_floor` exists in the deployed exporter's output (guide §8.1); loadgen's own stall gauge from #271 is run-scoped and cannot back a production alert. Promote as soon as the exporter is confirmed. |
 | Fan-out size versus deliveries | Not a ratio for channel rooms (trap 7.8). An alert on it would fire constantly on the dominant room type. |
 | SLO burn rate | Phase 1 by definition. Also blocked on the P2 counters in `sli-slo.md` §8, which do not exist yet. |
 | Cassandra reaction/pin write path | Cannot be alerted on at all: ten bare `ExecuteBatch` call sites emit no client telemetry (trap 7.10). Listed here so the absence is recorded rather than assumed covered. |
@@ -287,9 +310,13 @@ Two things gate the handover:
    numerator and denominator across windows. Until the exact outcome ledger
    lands, **the primary enforcement signal is consumer lag and oldest-pending
    age**, not the ratio.
-2. **Oldest-pending age does not exist** (guide §8.2). The ack-floor stall rule
-   is the substitute: it proves the floor is stuck, not for how long. A
-   duration-based backlog alert cannot be written until the gauge exists.
+2. **Oldest-pending age does not exist** (guide §8.2). #271 added
+   `loadgen_consumer_ack_floor_stall_seconds`, which is the right shape — a
+   duration — but it exists only while a loadgen run is in progress, so it
+   cannot back a production alert. And neither form closes the gap: a consumer
+   that keeps acknowledging too slowly to catch up never freezes its floor, so
+   the stall signal stays silent while the backlog grows. A duration-based
+   backlog alert needs the platform exporter verified first (guide §8.1).
 
 Consequence: the Phase 0 set above is not a placeholder for burn-rate alerting.
 It covers a different failure class — structural failures with binary healthy
@@ -305,8 +332,8 @@ that would have come from an alert comes from D4 Row 4, which draws each Phase 0
 signal as a time series with the fault annotation overlaid. That row is
 maintained one-to-one with Section 3 (see Section 7) so the two cannot drift.
 
-When alerting is enabled, four of the eight rules — 2, 4, 5, and 6 — will fire
-during a NATS failure test. That is the expected result of the test.
+When alerting is enabled, four of the seven deployable rules — 2, 4, 5, and 6 —
+will fire during a NATS failure test. That is the expected result of the test.
 
 ### 6.1 Route, do not suppress
 
@@ -369,6 +396,10 @@ who receives a page must find the corresponding panel without searching.
 Rule 1 has no D4 series by design: consumer absence during a fault window is
 usually a killed pod, which the Kubernetes alerts already explain.
 
+Rule 3's panels (D1-3.2, D4-4.2) are specified but must not be built until #283
+merges — a permanently empty tile on the health strip teaches the same
+no-data blindness this document is built to avoid (guide §4.2).
+
 ---
 
 ## 8. Before enabling any rule
@@ -378,8 +409,15 @@ usually a killed pod, which the Kubernetes alerts already explain.
 2. **Confirm label spelling** against the deployed collector, including whether
    `service_name` and `site` appear inline or only via `target_info`
    (traps 7.12, 7.13).
-3. **Confirm the rule can fire.** Force the condition in a non-production
+3. **Confirm the rule covers every deployment of the binary.** Since #286 the
+   Teams and bot deployments carry their own `service_name`
+   (`teams-message-worker`, `bot-broadcast-worker`, `bot-notification-worker`,
+   `teams-room-worker`). A rule pinned to the base name alone silently excludes
+   them, and the exclusion looks like a narrower scope rather than a gap
+   (trap 7.15). None of the eight rules above needs a `service_name` selector —
+   keep it that way unless there is a reason, and use a regex if there is.
+4. **Confirm the rule can fire.** Force the condition in a non-production
    environment and observe the alert. The NATS metrics contract §12 requires a
    deliberate known failure to change the expected series; the same standard
    applies to the rule built on it. An untested rule is an assumption.
-4. **Confirm the routing** before the first campaign, per Section 6.
+5. **Confirm the routing** before the first campaign, per Section 6.

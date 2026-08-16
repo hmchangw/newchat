@@ -1,7 +1,8 @@
 # Dashboard and Alert Guide
 
-> Status: design specification. Written 2026-08-15 against `main` at `c9f1351`
-> (#272 merged), plus the unmerged work described in Section 3. This document
+> Status: design specification. Written against `main` at `a96389f`
+> (#272, #271, and #286 merged), plus the unmerged work described in Section 3.
+> Re-verified 2026-08-16 after #271 and #286 landed. This document
 > and its two companions are the only version-controlled description of the
 > dashboards. Grafana JSON is not committed to this repository, so a dashboard
 > that drifts from this document is wrong, and a dashboard lost to a Grafana
@@ -20,15 +21,16 @@ Upstream contracts this document extends rather than restates:
 
 | Document | Owns | Availability |
 |---|---|---|
-| `docs/load-testing/failure-testing/dashboard-evidence-contract.md` | The three independent dimensions, query cadence, dispatch and observer validity, recovery classification. Section 5 here explains which parts survive outside a failure test. | **Not on `main`** — branch `codex/loadgen-failure-evidence` |
+| [`../../load-testing/failure-testing/dashboard-evidence-contract.md`](../../load-testing/failure-testing/dashboard-evidence-contract.md) | The three independent dimensions, query cadence, dispatch and observer validity, recovery classification. Section 5 here explains which parts survive outside a failure test. | On `main` since #271 |
 | `docs/load-testing/failure-testing/nats-failure-metrics-contract.md` | Shared NATS metric semantics, label enums, required alert list. | **Not on `main`** — branch `codex/failure-testing-docs` |
 | [`storage-dependency-metrics.md`](storage-dependency-metrics.md) §7 | The production-base plus failure-test-overlay model. Section 4 here implements it. | On `main` |
 | [`../../load-testing/system/sli-slo.md`](../../load-testing/system/sli-slo.md) | Authoritative SLO definitions, the error-budget eligibility table, the burn-rate alerting policy. | On `main` |
 | [`o11y-metrics-inventory.md`](o11y-metrics-inventory.md) | Per-service metric coverage. | On `main` |
 
-The first two are referenced by section number throughout. Until their branches
-merge, those references resolve only against the named branch — this is stated
-rather than linked so a broken link does not read as a missing document.
+The NATS failure metrics contract is referenced by section number throughout.
+Until its branch merges, those references resolve only against the named branch
+— this is stated rather than linked so a broken link does not read as a missing
+document.
 
 ---
 
@@ -130,16 +132,31 @@ Every panel and alert in the companions carries one of these:
 
 | Status | Meaning |
 |---|---|
-| **Available** | Emitted by code on `main` at `c9f1351` and scrapeable wherever the service is deployed |
-| **#283 pending** | Depends on PR #283 (`codex/nats-metrics-review-followup`), which is open and in draft |
-| **#271 pending** | Depends on the loadgen work on `codex/loadgen-failure-evidence` |
+| **Available** | Emitted by code on `main` at `a96389f` and scrapeable wherever the service is deployed |
+| **#283 pending** | Depends on PR #283 (`codex/nats-metrics-review-followup`), which is open, in draft, and currently conflicted |
 | **Proposed** | Reviewed but not yet on any branch |
 | **Missing** | Not emitted and not planned; the panel is not built, and the gap is listed in Section 8 |
 
-#283 and #271 are tracked separately on purpose. They land independently: if
-#283 merges first, the request/reply rows on D2 can be built while the D4
-evidence rows still cannot; if #271 merges first, the reverse. Anyone building
-a dashboard needs to know which half is unblocked.
+### 3.1 What #271 and #286 changed
+
+Both merged on 2026-08-16, and between them they cleared most of what this
+document previously listed as blocked.
+
+- **#271** landed the loadgen evidence ledger. Every dispatch-validity,
+  observer-validity, and terminal-result series on D4 is now Available, and the
+  consumer sampler grew from two durables to all four hot-path durables plus a
+  full set of JetStream cursor gauges, including an ack-floor stall **duration**.
+- **#286** landed the inbound request/reply metrics and extended the shared NATS
+  families to `history-service`, `room-service`, and `room-worker`. The D2
+  request/reply row is now Available.
+
+**#286 is not #283.** It is a re-scoped subset (branch `codex/nats-metrics-only`)
+that deliberately shipped the request metrics and the three extra services
+*without* the consumer supervisor. #283 remains open, in draft, and conflicted
+against `main`. Everything that depends on the supervisor —
+`chat_nats_consumer_recovery_attempts_total` and the alerting rule built on it —
+is therefore still blocked, and the loop-failure semantics on `main` are the
+pre-supervisor ones (trap 7.11).
 
 ---
 
@@ -387,18 +404,29 @@ Combined with 7.9, this means the soak lane with the second-highest rate
 the Cassandra client series. A reaction-path storage problem will show up as
 latency on `history_mutation` and nowhere else.
 
-### 7.11 Consumer recovery hides transient iterator loss
+### 7.11 A stopped consumer loop does not restart itself
 
-With #283, a terminal iterator error sets `chat_nats_consumer_loop_up` to zero,
-records a terminal failure, then recreates the consumer and iterator with
-capped exponential backoff. A single transient loss therefore self-heals in
-seconds and `loop_up` is back at 1 before most evaluation windows notice.
+On `main` there is no consumer supervisor. `natsmetrics.Consume` calls
+`LoopFailed` on a terminal `Next` error and then **returns** — the loop is gone
+until the process restarts. `chat_nats_consumer_loop_up` therefore stays at zero
+once it drops, which makes it a strong and immediate signal.
 
-Two readings follow. A sustained `loop_up == 0` now means **recovery is
-repeatedly failing**, not that the iterator died once. And a consumer that is
-churning — recovery alternating between success and failure — leaves `loop_up`
-reading 1 most of the time and is visible only in
-`chat_nats_consumer_recovery_attempts_total`.
+This is worth stating explicitly because #283 proposed the opposite behavior
+(capped-backoff iterator recreation with a
+`chat_nats_consumer_recovery_attempts_total` counter), and #286 shipped without
+it. Anyone reading the #283 discussion will expect self-healing that `main` does
+not have.
+
+Two consequences, both of which flip back if #283 ever merges:
+
+- A short `for:` on the loop-down alert is correct today (2m), because there is
+  no recovery window to wait out. Under #283 it would need lengthening, and
+  sustained zero would mean *recovery repeatedly failing* rather than *the loop
+  died*.
+- There is no churn case to detect today — a loop either runs or it is gone.
+  The churn failure mode (recovery alternating between success and failure while
+  `loop_up` mostly reads 1) only exists under #283, and only the recovery
+  counter would reveal it.
 
 ### 7.12 `chat_nats_client_*` carry no service or site label
 
@@ -436,6 +464,42 @@ the resource attributes. Before building a panel or an alert on them, confirm
 Prometheus actually scrapes the endpoint that exposes them. An alert on an
 unscraped series is worse than no alert: it is a rule that can never fire.
 
+### 7.15 One binary, several `service_name` values
+
+Since #286 every adopter reads `service_name` from `OTEL_SERVICE_NAME`, and the
+bot and Teams deployments of the same binary set different values:
+
+| Binary | Deployments and their `service_name` |
+|---|---|
+| `message-worker` | `message-worker`, `teams-message-worker` |
+| `broadcast-worker` | `broadcast-worker`, `bot-broadcast-worker` |
+| `notification-worker` | `notification-worker`, `bot-notification-worker` |
+| `room-worker` | `room-worker`, `teams-room-worker` |
+
+A panel or alert pinned to `service_name="message-worker"` **silently excludes
+the Teams pod**, and the exclusion looks like a healthy narrower scope rather
+than like missing coverage. Use a regex (`service_name=~"(teams-|bot-)?message-worker"`)
+or a template variable populated from the live label values, and never hardcode
+the base name alone.
+
+This is the one pre-existing label #286 changed: both `room-worker` deployments
+previously reported as `room-worker` and were indistinguishable.
+
+### 7.16 Outbound request metrics deliberately exclude business rejections
+
+`chat_nats_requests_total` carries a transport-shaped outcome enum. A remote
+"you are not a room member" means the exchange worked and the peer answered, so
+counting it as a failure would land it in `other_error` and leave the family
+non-zero at baseline — useless as a failure signal. `ListMembers` and
+`GetMessageReadMeta` both exclude their expected business rejections for this
+reason.
+
+The consequence for reading: **this family is a transport-health signal, not a
+success-rate signal.** The business outcome of an outbound request is not
+visible here, and for the inbound side it belongs to
+`chat_nats_request_handled_total`, whose `result` enum does distinguish the
+categories.
+
 ---
 
 ## 8. Prerequisites
@@ -447,22 +511,32 @@ question that stays unanswerable until the item lands.
 
 | Prerequisite | Status | Question it blocks |
 |---|---|---|
-| PR #283 merged | Draft, CI blocked | Every inbound request/reply panel on D2 (`chat_nats_request_handled_total`, `chat_nats_request_handler_duration_seconds`) and the consumer recovery panels. Without it, the read path — the highest-volume soak lane — has no RPC-level success or latency signal at all. |
-| PR #271 merged | Open | The entire Evidence row on D4: dispatch validity, observer validity, and the intended/dispatched identity. Without it, D4 can show impact but cannot state whether the observation window was complete. |
-| Verify exporter metric names against the deployed NATS exporter | Not started | Whether the JetStream consumer rows on D2 are a recording rule over existing series or need a collector. Capture a raw `/metrics` sample first; the deployment doc already requires this before applying canonical rules. |
-| `ack_floor` series present in the exporter output | Unverified | The stall signal for `outbox-worker`'s FIFO lanes. If present, Section 9's stall rule is a recording rule. If absent, it needs a bounded collector. |
+| Verify exporter metric names against the deployed NATS exporter | Not started | Whether the JetStream consumer rows on D2 are a recording rule over existing series or need a collector. Capture a raw `/metrics` sample first; the deployment doc already requires this before applying canonical rules. **This is now the largest single blocker**, because it is all that stands between the daily-operations backlog row and being buildable. |
+| `ack_floor` series present in the exporter output | Unverified | The stall signal for `outbox-worker`'s FIFO lanes **during daily operations**. #271 gave loadgen its own ack-floor stall gauge, but that only exists while a run is in progress. If the exporter exposes it, Section 9's stall rule is a recording rule; if not, it needs a bounded collector. |
+| PR #283 merged | Open, draft, conflicted | `chat_nats_consumer_recovery_attempts_total` and everything reading it: the churn failure mode (trap 7.11) and alert rule 3. Nothing else — #286 shipped the rest of #283's scope. |
 
 ### 8.2 Known gaps with no panel
 
 | Gap | Status | Question it blocks |
 |---|---|---|
-| `chat_jetstream_consumer_oldest_pending_age_seconds` | Missing | How long the oldest unacknowledged message has been waiting. Pending count alone cannot separate a fresh burst from a permanently parked message. The ack-floor stall rule is a substitute, not an equivalent — it detects that the floor is stuck, not for how long. |
-| Cassandra batch telemetry at the 10 bare `ExecuteBatch` sites | Missing | Latency and error rate for the reaction and pin/unpin write paths (trap 7.10). |
-| Consumer sampler coverage for `message-gatekeeper` (MESSAGES) and `notification-worker` | Proposed in #271 review | Backlog on two of the four hot-path durables during a test run. Only `message-worker` and `broadcast-worker` are sampled today. |
-| Ack-floor gauge in the loadgen sampler | Proposed in #271 review | Stall detection from the loadgen side. `tools/loadgen/consumerlag.go` reads `NumPending`, `NumAckPending`, and `NumRedelivered` only. |
+| `chat_jetstream_consumer_oldest_pending_age_seconds` | Missing | How long the oldest unacknowledged message has been waiting. Neither substitute closes it: an ack-floor stall proves the floor is stuck, but **a consumer can fall permanently behind without ever freezing its floor** — it just advances too slowly to catch up. The evidence contract states this limitation explicitly. |
+| Cassandra batch telemetry at the 10 bare `ExecuteBatch` sites | Missing | Latency and error rate for the reaction and pin/unpin write paths (trap 7.10). Unchanged by #271/#286: still 4 sites in `reactions.go`, 2 in `pin.go`, 4 in `bot-message-worker/store_cassandra.go`. |
 | Refined `operation` label for the read lane | Not proposed | SLO-4 and SLO-5 evaluation from service-side metrics (trap 7.9). |
-| Domain metrics for `room-service`, `room-worker`, `inbox-worker`, `outbox-worker`, `search-sync-worker` | Missing | Business outcomes on the room, membership, and federation paths. `o11y-metrics-inventory.md` §2 tracks these as F-items. |
+| Domain metrics for `room-service`, `room-worker`, `inbox-worker`, `outbox-worker`, `search-sync-worker` | Missing | Business outcomes on the room, membership, and federation paths. #286 gave the first three `chat_nats_*` coverage, which is NATS failure evidence — not business outcomes. `o11y-metrics-inventory.md` §2 tracks these as F-items. |
+| Inbound request metrics for `user-service`, `search-service`, `media-service`, `bot-message-handler`, `bot-room-service` | Missing | Server-side success rate and latency for every request/reply service outside the seven-service failure-test scope. These build a `natsrouter` **without** `WithMetrics`, so the router is unchanged and emits nothing. |
 | Fault annotation source | Missing | Aligning injection, failover, recovery, and settle timestamps on D4. Manual annotations are acceptable locally; a durable event source is required for staging campaigns. |
+
+### 8.3 Cleared by #271 and #286
+
+Recorded so a reader coming from an earlier revision knows these are done, not
+forgotten:
+
+| Was blocked on | Now |
+|---|---|
+| Inbound request/reply panels (D2 Row 4) | Available via #286, on `history-service`, `room-service`, and `room-worker` |
+| D4 Evidence row: dispatch validity, observer validity, dispatch identity | Available via #271 |
+| Consumer sampler coverage for `message-gatekeeper` and `notification-worker` | Available via #271 — all four hot-path durables are sampled |
+| Ack-floor gauge in the loadgen sampler | Available via #271, and better than proposed: `loadgen_consumer_ack_floor_stall_seconds` is a **duration**, not a boolean |
 
 ---
 
@@ -500,12 +574,24 @@ chat_jetstream_consumer_pending
     )
 
 # 4. Ack-floor stall: pending work exists and the floor has not moved.
-# This is the substitute for the missing oldest-pending-age gauge. It proves
-# the floor is stuck; it does not say for how long.
+# The partial substitute for the missing oldest-pending-age gauge.
 chat_jetstream_consumer_ack_floor_stalled
   = (increase(chat_jetstream_consumer_ack_floor_stream_sequence[10m]) == 0)
     and (chat_jetstream_consumer_pending > 0)
 ```
+
+`loadgen_consumer_ack_floor_stall_seconds` (#271) is the same idea expressed as
+a **duration** — seconds since the floor last advanced while work remains
+pending — computed from `ConsumerInfo.AckFloor.Last`. Prefer that shape for the
+recording rule too if the exporter exposes a last-advance timestamp: a boolean
+cannot distinguish a two-minute pause from a two-hour park, and the threshold
+that separates them is the whole point.
+
+Both forms share one limitation, which the evidence contract states directly:
+**a consumer can fall permanently behind without ever freezing its floor.** If
+it keeps acknowledging, just slower than production, the floor advances and the
+stall signal stays silent while the backlog grows without bound. Pair it with
+`chat_jetstream_consumer_pending` rather than treating it as sufficient.
 
 Only `max by (...)` — not `sum by (...)` — is safe for deduplication if the
 leader label turns out to be unavailable, since replicas report the same value.
