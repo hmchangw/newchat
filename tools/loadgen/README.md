@@ -134,6 +134,22 @@ read-lane slots to reconcile every ledger-admitted message through
 configured traffic profile. See
 [`docs/load-testing/loadgen-failure-observation.md`](../../docs/load-testing/loadgen-failure-observation.md).
 
+The same run also drives room and member traffic: `member_mutation` cycles
+paired add/remove operations over a reusable per-room candidate ring,
+`room_mutation` alternates renames and mute toggles over a fixed room pool,
+`room_read` covers member list, rooms-info batch, and subscription list, and
+`room_create` adds rooms at a low rate until `SOAK_ROOM_CREATE_BUDGET` is
+spent. Every mutation is journaled before it is sent and reconciled through the
+room-service RPC with a MongoDB primary read as the authoritative arbiter.
+Mutations are never resent, and only a request proven not to have left the
+process is recorded as `not_sent`.
+
+The evidence journal is identified by `SOAK_LEDGER_EPOCH` rather than the run
+ID alone: the run ID owns the seeded topology, the epoch owns the journal, so
+an image whose ledger contract changed starts a fresh journal without a
+re-seed. Earlier journals are retained, never replayed, and counted in
+`loadgen_failure_abandoned_journals`.
+
 Persistent WAL writes use a 10 ms bounded group-commit window. A pre-publish
 intent waits for the shared fsync barrier; later lifecycle records flush on the
 next barrier, timer, compaction, or shutdown. Use

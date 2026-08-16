@@ -32,6 +32,10 @@ metrics:
 
 ledger:
   enabled: true
+  # The run ID owns the seeded topology; the epoch owns the evidence journal.
+  # Bump the epoch whenever a loadgen image changes the ledger contract, so a
+  # fresh journal starts without re-seeding the room set.
+  epoch: v1
   existingClaim: ""
   storageClassName: ""
   accessMode: ReadWriteOnce
@@ -41,6 +45,7 @@ ledger:
   reconcileDeadline: 10m
   reconcileRetryInterval: 1s
   reconcileReadShare: 0.5
+  roomReconcileReadShare: 0.5
 
 recipientObserver:
   enabled: false
@@ -80,6 +85,13 @@ soak:
   reactionRemoveShare: "0.20"
   pinnedListRate: "1"
   verifyRate: "1"
+  memberMutationRate: "2"
+  roomMutationRate: "1"
+  roomReadRate: "20"
+  roomCreateRate: "0.05"
+  roomCreateBudget: "2000"
+  roomCreateSize: "5"
+  memberQuarantineMax: "10000"
   maxUsers: "20000"
   activeUsers: "2000"
   roomCount: "10000"

@@ -47,6 +47,14 @@ loadgen.newchat/run: {{ include "cassandra-soak.runSlug" . | quote }}
 {{- if and .Values.recipientObserver.enabled (not .Values.ledger.enabled) -}}
 {{- fail "ledger.enabled=true is required when recipientObserver.enabled=true" -}}
 {{- end -}}
+{{- if not .Values.ledger.epoch -}}
+{{- fail "ledger.epoch is required; bump it whenever the loadgen image changes the ledger contract" -}}
+{{- end -}}
+{{- $mutationRate := addf .Values.soak.memberMutationRate .Values.soak.roomMutationRate .Values.soak.roomCreateRate -}}
+{{- $reconcileCapacity := mulf .Values.soak.roomReadRate .Values.ledger.roomReconcileReadShare -}}
+{{- if and (gt $mutationRate 0.0) (lt $reconcileCapacity $mutationRate) -}}
+{{- fail "soak.roomReadRate * ledger.roomReconcileReadShare must be at least the sum of soak.memberMutationRate, soak.roomMutationRate and soak.roomCreateRate" -}}
+{{- end -}}
 {{- $image := include "cassandra-soak.image" . -}}
 {{- end -}}
 
