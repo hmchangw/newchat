@@ -22,6 +22,9 @@ type Router struct {
 	nc         *o11ynats.Conn
 	queue      string
 	middleware []HandlerFunc
+	// siteID labels client-facing requests whose subject pins the site to a
+	// static token, leaving no {siteID} param. Configured by WithSiteID.
+	siteID string
 
 	// sem gates handler concurrency: every handler invocation acquires a
 	// slot before running and releases it on return. cap(sem) is the
@@ -67,6 +70,16 @@ func WithMaxConcurrency(n int) Option {
 			"n", n,
 			"sem_currently_installed", r.sem != nil)
 	}
+}
+
+// WithSiteID supplies the service's own site for telemetry identity. A
+// client-facing route whose subject carries a static site token has no
+// {siteID} param to label the request with, and the caller's baggage is not
+// trusted there — this is the trustworthy source for that value. Internal
+// routes are unaffected: they keep the originating site propagated by the
+// upstream hop, which for a federated event is not this site.
+func WithSiteID(siteID string) Option {
+	return func(r *Router) { r.siteID = siteID }
 }
 
 // New creates a Router with the given NATS connection and queue group.
@@ -165,8 +178,12 @@ func (r *Router) Use(mw ...HandlerFunc) {
 
 func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 	rt := parsePattern(pattern)
-	all := make([]HandlerFunc, 0, len(r.middleware)+len(handlers))
+	all := make([]HandlerFunc, 0, len(r.middleware)+1+len(handlers))
 	all = append(all, r.middleware...)
+	// Identity enrichment is router plumbing, not an opt-in middleware. Keep it
+	// immediately before the typed handler so every New/Default call path is
+	// covered while Recovery, RequestID, Logging, and HandlerTimeout can wrap it.
+	all = append(all, traceIdentity(r.siteID))
 	all = append(all, handlers...)
 
 	natsHandler := func(msgCtx context.Context, m *nats.Msg) {

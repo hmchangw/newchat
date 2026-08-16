@@ -64,6 +64,9 @@ admin-frontend/junit.xml
 # Local-only verification cache (tools/buildcache).
 .cache/
 
+# Localized documentation mirrors (English files under docs/ are authoritative).
+/.local-docs/
+
 # air live-reload tmp artifacts.
 tmp/
 .air.*.toml

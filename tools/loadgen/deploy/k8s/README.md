@@ -21,7 +21,9 @@ seed Job -> soak Deployment -> stopped -> teardown Job
   read-only, creates run-owned room/subscription topology, seeds room
   transport keys, and writes the ownership manifest.
 - `phase=soak` renders one single-replica Deployment. It runs continuously
-  through the real service path until the release changes phase.
+  through the real service path until the release changes phase. Its
+  operation ledger uses a run-specific PVC and resumes unresolved Cassandra
+  message reconciliation after pod replacement.
 - `phase=stopped` renders no workload controller. Argo CD removes the
   Deployment and Kubernetes sends SIGTERM, allowing loadgen to drain
   in-flight work and mark the run stopped.
@@ -36,6 +38,48 @@ Deployment has no duration or Kubernetes deadline.
 The phase resources are ordinary Argo CD managed resources, not
 `PreSync`/`Sync`/`PostSync` hooks. In particular, teardown can never run
 automatically after soak completion.
+
+The ledger PVC is annotated with `helm.sh/resource-policy: keep` and
+`argocd.argoproj.io/sync-options: Prune=false`. It intentionally survives
+`phase=stopped`, `phase=teardown`, and release removal until an operator has
+retained the evidence and explicitly deletes the claim.
+
+Failure observation is continuous and never injects or schedules faults. The
+versioned WAL remains on the retained ledger PVC and resumes unresolved
+admission/history reconciliation after replacement. Optional exact-recipient
+observation is enabled independently with `recipientObserver.enabled=true`;
+its subscriptions are flushed before they are marked healthy. WAL, observer,
+or queue failures remain visible while production-shaped traffic continues.
+Dashboard query time defines the fault window and evaluates evidence validity,
+impact, and correctness as independent dimensions.
+
+## Upgrading an existing release
+
+**Allocate a new `runId`.** The observer contract and the scenario label changed,
+so a WAL written by an earlier image is rejected on replay. The pod does not
+crash: it falls back to an in-memory ledger and marks the whole run's evidence
+invalid (`loadgen_failure_invalidations_total{reason="wal"}`), which is easy to
+miss. The WAL file is named after the run ID, so a new ID starts a clean journal.
+
+**Check the run ID format.** `SOAK_RUN_ID` is now validated against
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. A non-conforming ID exits with status 2 at
+startup instead of running with a degraded journal.
+
+**Set `soak.environment`.** Allowed values are `local`, `test`, `staging`, and
+`production`. It defaults to `local`, which is valid but mislabels
+`loadgen_run_info` on any shared dashboard.
+
+**Update dashboards before the first run.** Three series changed:
+
+| Before | After |
+|---|---|
+| `loadgen_soak_saturation_total` | `loadgen_soak_lane_saturation_total` and `loadgen_soak_global_saturation_total` |
+| `loadgen_member_room_size{room_id}` | `loadgen_member_room_size{size_bucket}` |
+| `scenario="cassandra_soak"` | `scenario="message_soak"` |
+
+The retained PVC needs no resizing. At `sendRate=100` and a ten-minute
+reconcile deadline the WAL holds roughly 68 MB, peaking near 220 MB while a
+compaction keeps the current, temporary, and backup files together.
 
 ## Required release inputs
 
@@ -61,6 +105,20 @@ cassandra:
   cleanup: none
   confirmKeyspace: chat_soak_20260725
   messageBucketHours: 72
+
+ledger:
+  enabled: true
+  existingClaim: ""
+  storageClassName: ""
+  accessMode: ReadWriteOnce
+  size: 20Gi
+  mountPath: /var/lib/loadgen/ledger
+  capacity: "200000"
+  reconcileDeadline: 10m
+  reconcileRetryInterval: 1s
+
+soak:
+  environment: staging
 ```
 
 Staging releases must use an immutable digest. A mutable tag is accepted only
@@ -135,8 +193,10 @@ Cassandra soak encryption preflight passed
 
 The Deployment then runs until another release changes its phase. Pod
 replacement reloads the Mongo manifest, increments the restart count, starts
-a fresh warm-up, and rebuilds the in-memory recent-message catalog. Prometheus
-counters are the authoritative cross-restart evidence.
+a fresh warm-up, rebuilds the in-memory recent-message catalog, and reloads
+unresolved operations from the PVC-backed WAL. Prometheus retains aggregate
+cross-restart evidence while the WAL retains unresolved per-operation
+evidence. The interrupted traffic/SLO interval remains inconclusive.
 
 Freeze the image and workload configuration while collecting a comparable
 run. A values change restarts the Deployment because the Pod template carries
@@ -166,12 +226,20 @@ Before teardown, retain:
 - Deployment/Pod status, events, node identity, and restart history;
 - logs and process-local reports;
 - Prometheus rate, error, retry, latency, saturation, and verification data;
+- operation outcome, inflight, recovery, invalidation, WAL-size, NATS
+  connection, Go runtime, and process metrics;
+- the versioned WAL, observer health, exact-recipient anomaly journals, and
+  their retained SHA-256 content hashes;
 - Cassandra service metrics, disk usage, compaction, timeout, and latency
   evidence;
 - Mongo owned-object counts before and after cleanup.
 
 Never export Secret values, NATS credentials, plaintext message bodies, or
 wrapped key material into the evidence bundle.
+
+The controller intentionally remains a single-replica `Deployment` with
+`Recreate`, not a StatefulSet. Do not approve teardown until the retained PVC
+has been copied and its evidence digests verified.
 
 ### 5. Teardown
 
@@ -219,7 +287,8 @@ The Chart and binary both require exact keyspace confirmation. A shared
 staging keyspace must never use `truncate`.
 
 After the Teardown Job completes and cleanup evidence is retained, remove the
-run release from desired state.
+run release from desired state. Delete the retained ledger PVC only through a
+separate, explicitly targeted operator action.
 
 ## Validation
 
@@ -275,7 +344,7 @@ docker run --rm --network chat-local \
   -v "$PWD:/src" -w /src \
   -e MONGO_URI=mongodb://mongodb:27017 \
   -e VALKEY_ADDRS=valkey:6379 \
-  golang:1.25.12 make seed
+  golang:1.25.13 make seed
 ```
 
 Create the cluster, build the exact loadgen image, and load it into kind:

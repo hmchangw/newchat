@@ -14,12 +14,14 @@ import (
 
 	o11ygin "github.com/flywindy/o11y/gin"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -78,7 +80,7 @@ func run() error {
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB/MinIO. MAX_CONCURRENCY=0 disables.
-	var routerOpts []natsrouter.Option
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
@@ -89,11 +91,13 @@ func run() error {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(corsMiddleware())
-	r.Use(o11ygin.Middleware("media-service", sdk.TracerProvider(), sdk.MeterProvider(), sdk.Propagator, o11ygin.WithSkipPaths())...)
+	r.Use(o11ygin.Middleware("media-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	registerRoutes(r, h)
+	sessions := botauth.NewValidator(
+		restyutil.New("", restyutil.WithTimeout(5*time.Second), restyutil.WithMaxIdleConns(32)), cfg.BotplatformURL)
+	registerRoutes(r, h, sessions, cfg.SiteID)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
@@ -102,20 +106,30 @@ func run() error {
 		WriteTimeout: 30 * time.Second,
 	}
 
-	go shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(_ context.Context) error { return nc.Drain() },
-		func(ctx context.Context) error {
-			slog.Info("shutting down media-service")
-			return srv.Shutdown(ctx)
-		},
-		// obsShutdown LAST so all prior teardown telemetry is exported.
-		func(ctx context.Context) error { return obsShutdown(ctx) },
-	)
+	srvErr := make(chan error, 1)
+	go func() {
+		slog.Info("media-service listening", "port", cfg.Port, "site", cfg.SiteID)
+		srvErr <- srv.ListenAndServe()
+	}()
 
-	slog.Info("media-service listening", "port", cfg.Port, "site", cfg.SiteID)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		shutdown.Wait(ctx, 25*time.Second,
+			func(ctx context.Context) error { return router.Shutdown(ctx) },
+			func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+			func(ctx context.Context) error {
+				slog.Info("shutting down media-service")
+				return srv.Shutdown(ctx)
+			},
+			// obsShutdown LAST so all prior teardown telemetry is exported.
+			func(ctx context.Context) error { return obsShutdown(ctx) },
+		)
+	}()
+
+	if err := <-srvErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("listen and serve: %w", err)
 	}
+	<-shutdownDone
 	return nil
 }

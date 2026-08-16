@@ -20,7 +20,7 @@ const (
 // search against the spotlight index. It returns a user-facing *errcode.Error
 // on invalid/unsupported roomType values and a plain error on marshalling
 // failures.
-func buildRoomQuery(req model.SearchRoomsRequest, account string) (json.RawMessage, error) {
+func buildRoomQuery(req model.SearchRoomsRequest, account string, showTeamsRoom bool) (json.RawMessage, error) {
 	roomTypeFilter, rerr := roomTypeFilterClause(req.RoomType)
 	if rerr != nil {
 		return nil, rerr
@@ -31,6 +31,10 @@ func buildRoomQuery(req model.SearchRoomsRequest, account string) (json.RawMessa
 	}
 	if roomTypeFilter != nil {
 		filters = append(filters, roomTypeFilter)
+	}
+	mustNot := []any{}
+	if !showTeamsRoom {
+		mustNot = append(mustNot, map[string]any{"term": map[string]any{"origin": model.OriginTeams}})
 	}
 
 	body := map[string]any{
@@ -49,7 +53,8 @@ func buildRoomQuery(req model.SearchRoomsRequest, account string) (json.RawMessa
 						},
 					},
 				},
-				"filter": filters,
+				"filter":   filters,
+				"must_not": mustNot,
 			},
 		},
 		"sort": []any{

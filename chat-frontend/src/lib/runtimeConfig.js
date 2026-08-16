@@ -41,6 +41,14 @@ export const OTEL_DEPLOYMENT_ENVIRONMENT =
   import.meta.env.VITE_OTEL_DEPLOYMENT_ENVIRONMENT ||
   'local'
 
+// Dev-only: route the chatlist section RPCs/events to an in-memory mock so
+// the grouped sidebar can be demoed before the backend chatlist RPCs land.
+// Default false — production/live always uses the real NATS subjects.
+export const CHATLIST_MOCK = boolConfig(
+  runtime.CHATLIST_MOCK ?? import.meta.env.VITE_CHATLIST_MOCK,
+  false,
+)
+
 // Mirrors portal-service's BOT_LOGIN_ENABLED flag (surfaced via /api/settings
 // as botLoginEnabled). Default true: a missing flag (old portal, or a deploy
 // that hasn't wired the var yet) must not silently lock out bots that were

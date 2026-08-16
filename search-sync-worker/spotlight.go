@@ -37,6 +37,17 @@ func (c *spotlightCollection) TemplateBody() json.RawMessage {
 	return searchindex.SpotlightTemplateBody(c.indexName, c.devMode)
 }
 
+// MappingUpdate backfills the SpotlightDoc properties (incl. the new `origin`
+// keyword) onto the already-created, non-rolled spotlight index — the template
+// alone only covers new indices. Without this, `origin` lands in `_source` but
+// stays unindexed on the existing index, so search-service's origin filter
+// silently no-ops. Overrides the embedded inboxMemberCollection no-op.
+func (c *spotlightCollection) MappingUpdate() (string, json.RawMessage) {
+	// Error discarded: input is a static map of literals, marshal cannot fail.
+	body, _ := json.Marshal(map[string]any{"properties": searchindex.EsPropertiesFromStruct[searchindex.SpotlightDoc]()})
+	return c.indexName, body
+}
+
 // BuildAction fans a member_added / member_removed event out into one ES
 // action per account in the payload. Bulk invites produce N spotlight docs
 // from a single event; single-user invites produce one.
@@ -107,6 +118,7 @@ func newSpotlightSearchIndex(account string, evt *model.InboxMemberEvent) search
 		RoomType:    string(evt.RoomType),
 		SiteID:      evt.SiteID,
 		JoinedAt:    convertJoinedAt(evt.JoinedAt),
+		Origin:      evt.Origin,
 	})
 }
 

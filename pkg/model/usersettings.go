@@ -25,6 +25,12 @@ type UserSettings struct {
 	ShowPreviewsInNotifications      *bool   `json:"showPreviewsInNotifications,omitempty"             bson:"showPreviewsInNotifications,omitempty"`
 	ShowNotificationsInCall          *bool   `json:"showNotificationsInCall,omitempty"                 bson:"showNotificationsInCall,omitempty"`
 	InitialChatScrollPosition        *string `json:"initialChatScrollPosition,omitempty"               bson:"initialChatScrollPosition,omitempty"`
+
+	// PriorityContacts is written ONLY by the settings.priorityContacts.{add,remove}
+	// RPCs, never by settings.set: UpdateUserSettings deliberately never references it,
+	// and it is deliberately absent from IsEmpty so a settings.set carrying only this
+	// field falls through to bad_request. Holds raw accounts — users and ".bot" alike.
+	PriorityContacts []string `json:"priorityContacts,omitempty" bson:"priorityContacts,omitempty"`
 }
 
 // IsEmpty reports whether no field is set — the "nothing to write" guard for

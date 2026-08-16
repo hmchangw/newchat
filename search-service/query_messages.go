@@ -28,8 +28,28 @@ var MessageIndexPattern = []string{"messages-*", "*:messages-*"}
 // (req.RoomIDs != nil), the inline terms clause is STILL gated by the
 // terms-lookup so a caller can't reach rooms they don't belong to by
 // passing arbitrary roomIds.
-func buildMessageQuery(req model.SearchMessagesRequest, account string, restricted map[string]int64, recentWindow time.Duration, userRoomIndex string) (json.RawMessage, error) {
+func buildMessageQuery(req model.SearchMessagesRequest, account string, restricted map[string]int64, recentWindow time.Duration, userRoomIndex string, showTeamsRoom bool) (json.RawMessage, error) {
 	clauses := roomAccessClauses(req.RoomIDs, account, restricted, userRoomIndex)
+
+	filter := []any{
+		map[string]any{
+			"range": map[string]any{
+				"createdAt": map[string]any{
+					"gte": fmt.Sprintf("now-%s", recentWindowToGte(recentWindow)),
+				},
+			},
+		},
+		map[string]any{
+			"bool": map[string]any{
+				"should":               clauses,
+				"minimum_should_match": 1,
+			},
+		},
+	}
+	mustNot := []any{}
+	if !showTeamsRoom {
+		mustNot = append(mustNot, map[string]any{"term": map[string]any{"origin": model.OriginTeams}})
+	}
 
 	body := map[string]any{
 		"from":             req.Offset,
@@ -52,21 +72,8 @@ func buildMessageQuery(req model.SearchMessagesRequest, account string, restrict
 						},
 					},
 				},
-				"filter": []any{
-					map[string]any{
-						"range": map[string]any{
-							"createdAt": map[string]any{
-								"gte": fmt.Sprintf("now-%s", recentWindowToGte(recentWindow)),
-							},
-						},
-					},
-					map[string]any{
-						"bool": map[string]any{
-							"should":               clauses,
-							"minimum_should_match": 1,
-						},
-					},
-				},
+				"filter":   filter,
+				"must_not": mustNot,
 			},
 		},
 		"sort": []any{
@@ -138,11 +145,9 @@ func scopedAccessClauses(roomIDs []string, account string, restricted map[string
 }
 
 // termsLookupClause resolves the user's allowed rooms via ES terms-lookup
-// instead of shipping the rooms[] array on every query. The caller must
-// pass a concrete, non-empty index name (enforced upstream by the
-// SEARCH_USER_ROOM_INDEX env var being marked ,required in main.go). ES
-// terms_lookup rejects wildcard patterns, which is why this index is
-// intentionally unversioned across the codebase.
+// instead of shipping the rooms[] array on every query. USER_ROOM_INDEX is
+// required,notEmpty and intentionally unversioned: terms_lookup rejects
+// wildcard patterns, so this must be a concrete index name.
 func termsLookupClause(account, userRoomIndex string) map[string]any {
 	return map[string]any{
 		"terms": map[string]any{

@@ -19,20 +19,23 @@ import (
 	"github.com/hmchangw/chat/pkg/session"
 )
 
-// Handler wires the AdminStore, session.Store, Config, and room-service RPC
-// client into HTTP handler methods.
+// Handler wires the AdminStore, session.Store, Config, room-service RPC
+// client, and cross-site inbox publisher into HTTP handler methods.
 type Handler struct {
-	store    AdminStore
-	sessions session.Store
-	cfg      Config
-	roomRPC  roomRequester
+	store        AdminStore
+	sessions     session.Store
+	cfg          Config
+	roomRPC      roomRequester
+	publishInbox func(ctx context.Context, subj string, data []byte) error
 }
 
-// newHandler constructs a Handler with the given stores, config, and room RPC.
-// A nil rpc is tolerated so tests that never touch a room route need not build
-// one; the duty handler answers 503 rather than dereferencing it.
-func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
-	return &Handler{store: store, sessions: sessions, cfg: cfg, roomRPC: rpc}
+// newHandler constructs a Handler with the given stores, config, room RPC, and
+// inbox publisher. A nil rpc is tolerated so tests that never touch a room
+// route need not build one; the duty handler answers 503 rather than
+// dereferencing it. A nil publishInbox is tolerated the same way — fanout
+// no-ops in tests that don't exercise it.
+func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester, publishInbox func(ctx context.Context, subj string, data []byte) error) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
+	return &Handler{store: store, sessions: sessions, cfg: cfg, roomRPC: rpc, publishInbox: publishInbox}
 }
 
 // nowMillis returns the current UTC time in unix milliseconds. Injected as a
@@ -88,12 +91,12 @@ func toView(u *model.User) userView {
 	}
 }
 
-// audit appends an audit entry for a mutating admin action; a write failure
-// is logged but not fatal. Details must carry non-secret context only —
-// never passwords, hashes, or tokens.
-func (h *Handler) audit(ctx context.Context, c *gin.Context, action, targetUserID, targetAccount string, details map[string]string) {
+// auditEntry builds one audit entry stamped with the request's principal and this
+// site. Details must carry non-secret context only — never passwords, hashes, or
+// tokens. ts is passed in so a batch can share one timestamp with its ledger rows.
+func (h *Handler) auditEntry(c *gin.Context, action, targetUserID, targetAccount string, details map[string]string, ts time.Time) *AuditEntry {
 	p := principalFrom(c)
-	e := &AuditEntry{
+	return &AuditEntry{
 		ID:            idgen.GenerateUUIDv7(),
 		ActorUserID:   p.UserID,
 		ActorAccount:  p.Account,
@@ -102,9 +105,14 @@ func (h *Handler) audit(ctx context.Context, c *gin.Context, action, targetUserI
 		TargetAccount: targetAccount,
 		Details:       details, // non-secret only — NEVER password/hash/token
 		SiteID:        h.cfg.SiteID,
-		Timestamp:     time.Now().UTC().UnixMilli(),
+		Timestamp:     ts.UnixMilli(),
 	}
-	if err := h.store.AppendAudit(ctx, e); err != nil {
+}
+
+// audit appends an audit entry for a mutating admin action; a write failure
+// is logged but not fatal.
+func (h *Handler) audit(ctx context.Context, c *gin.Context, action, targetUserID, targetAccount string, details map[string]string) {
+	if err := h.store.AppendAudit(ctx, h.auditEntry(c, action, targetUserID, targetAccount, details, time.Now().UTC())); err != nil {
 		slog.ErrorContext(ctx, "append audit entry failed", "action", action, "error", err)
 	}
 }

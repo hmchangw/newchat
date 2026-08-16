@@ -16,6 +16,8 @@ import (
 )
 
 func TestUserJSON(t *testing.T) {
+	from := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
 	u := model.User{
 		ID:          "u1",
 		Account:     "alice",
@@ -25,8 +27,78 @@ func TestUserJSON(t *testing.T) {
 		EngName:     "Alice Wang",
 		ChineseName: "愛麗絲",
 		EmployeeID:  "EMP001",
+		Permissions: &model.UserPermissions{
+			ExternalImageView: &model.PermissionState{
+				Granted:       true,
+				EffectiveFrom: &from,
+				ExpiresAt:     &until,
+				UpdatedAt:     time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+			},
+		},
 	}
 	roundTrip(t, &u, &model.User{})
+}
+
+func TestPermissionGrantJSON(t *testing.T) {
+	from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := model.PermissionGrant{
+		ID:               "0199f2c3a4b5701e8f2a4c6e9b1d3f00",
+		Permission:       model.PermissionExternalImageView,
+		SubjectAccount:   "alice",
+		Granted:          true,
+		EffectiveFrom:    &from,
+		ExpiresAt:        &until,
+		ApplicantAccount: "carol",
+		ApproverAccount:  "dave",
+		Reason:           "On-call staff must review production line photos from outside the fab.",
+		RecordedBy:       "p_admin_wang",
+		RecordedAt:       time.Date(2026, 8, 11, 3, 0, 0, 0, time.UTC),
+	}
+	roundTrip(t, &g, &model.PermissionGrant{})
+}
+
+func TestPermissionGrantRevokeJSON(t *testing.T) {
+	g := model.PermissionGrant{
+		ID:               "0199f2c3a4b6802f9a3b5d7fac2e4011",
+		Permission:       model.PermissionExternalImageView,
+		SubjectAccount:   "alice",
+		Granted:          false,
+		EffectiveFrom:    nil,
+		ExpiresAt:        nil,
+		ApplicantAccount: "carol",
+		ApproverAccount:  "dave",
+		Reason:           "Project ended.",
+		RecordedBy:       "p_admin_wang",
+		RecordedAt:       time.Date(2026, 8, 11, 3, 5, 0, 0, time.UTC),
+	}
+	roundTrip(t, &g, &model.PermissionGrant{})
+}
+
+func TestPermissionStateJSON(t *testing.T) {
+	from := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	ps := model.PermissionState{
+		Granted:       true,
+		EffectiveFrom: &from,
+		ExpiresAt:     &until,
+		UpdatedAt:     time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+	}
+	roundTrip(t, &ps, &model.PermissionState{})
+}
+
+func TestUserPermissionsJSON(t *testing.T) {
+	from := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	up := model.UserPermissions{
+		ExternalImageView: &model.PermissionState{
+			Granted:       true,
+			EffectiveFrom: &from,
+			ExpiresAt:     &until,
+			UpdatedAt:     time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+		},
+	}
+	roundTrip(t, &up, &model.UserPermissions{})
 }
 
 func TestUserJSON_WithSectAndDept(t *testing.T) {
@@ -1230,6 +1302,110 @@ func TestSubscriptionUpdateEventJSON(t *testing.T) {
 	}
 }
 
+func TestSubscriptionUpdateEventCounterpartJSON(t *testing.T) {
+	base := model.Subscription{
+		ID:       "s1",
+		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID:   "r1",
+		SiteID:   "site-a",
+		JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	tests := []struct {
+		name     string
+		src      model.SubscriptionUpdateEvent
+		wantKeys []string
+		absent   []string
+	}{
+		{
+			name: "dm carries hrInfo",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				RoomName:     "Bob Chan",
+				HRInfo:       &model.CounterpartHRInfo{Account: "bob", ChineseName: "陳大文", EngName: "Bob Chan"},
+				Timestamp:    1735689600000,
+			},
+			wantKeys: []string{`"hrInfo"`, `"account":"bob"`, `"chineseName":"陳大文"`, `"engName":"Bob Chan"`},
+			absent:   []string{`"appInfo"`},
+		},
+		{
+			name: "botDM carries appInfo",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				RoomName:     "Helper",
+				AppInfo:      &model.CounterpartAppInfo{ID: "app-1", Name: "Helper", AssistantName: "helper.bot"},
+				Timestamp:    1735689600000,
+			},
+			wantKeys: []string{`"appInfo"`, `"id":"app-1"`, `"name":"Helper"`, `"assistantName":"helper.bot"`},
+			absent:   []string{`"hrInfo"`},
+		},
+		{
+			name: "both omitted when unresolved",
+			src: model.SubscriptionUpdateEvent{
+				UserID:       "u1",
+				Subscription: base,
+				Action:       "added",
+				Timestamp:    1735689600000,
+			},
+			absent: []string{`"hrInfo"`, `"appInfo"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(&tt.src)
+			require.NoError(t, err)
+			for _, k := range tt.wantKeys {
+				assert.Contains(t, string(data), k)
+			}
+			for _, k := range tt.absent {
+				assert.NotContains(t, string(data), k)
+			}
+			var dst model.SubscriptionUpdateEvent
+			require.NoError(t, json.Unmarshal(data, &dst))
+			assert.Equal(t, tt.src, dst)
+		})
+	}
+}
+
+// Payloads written before hrInfo/appInfo existed must still decode — both fields
+// are omitempty pointers, so absent and explicit null both mean "no counterpart".
+func TestSubscriptionUpdateEventCounterpartDecodesLegacyPayload(t *testing.T) {
+	for _, raw := range []string{
+		`{"userId":"u1","action":"added","roomName":"eng","timestamp":1735689600000}`,
+		`{"userId":"u1","action":"added","hrInfo":null,"appInfo":null,"timestamp":1735689600000}`,
+	} {
+		var evt model.SubscriptionUpdateEvent
+		require.NoError(t, json.Unmarshal([]byte(raw), &evt))
+		assert.Nil(t, evt.HRInfo)
+		assert.Nil(t, evt.AppInfo)
+	}
+}
+
+func TestCounterpartHRInfoJSON(t *testing.T) {
+	src := model.CounterpartHRInfo{Account: "bob", ChineseName: "陳大文", EngName: "Bob Chan"}
+	roundTrip(t, &src, &model.CounterpartHRInfo{})
+
+	// Both names are omitempty; a directory record without them keeps only account.
+	data, err := json.Marshal(model.CounterpartHRInfo{Account: "dave"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"account":"dave"}`, string(data))
+}
+
+func TestCounterpartAppInfoJSON(t *testing.T) {
+	src := model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}
+	roundTrip(t, &src, &model.CounterpartAppInfo{})
+
+	// No field is omitempty, so a nameless app still ships all three keys.
+	data, err := json.Marshal(model.CounterpartAppInfo{ID: "app-2", AssistantName: "solo.bot"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"id":"app-2","name":"","assistantName":"solo.bot"}`, string(data))
+}
+
 func TestInboxEventJSON(t *testing.T) {
 	src := model.InboxEvent{
 		Type:       "member_added",
@@ -1457,23 +1633,51 @@ func TestMessage_TypeAndSysMsgDataJSON(t *testing.T) {
 }
 
 func TestAddMembersRequestJSON(t *testing.T) {
+	hss := int64(1700000000000)
 	req := model.AddMembersRequest{
-		RoomID:   "r1",
-		Users:    []string{"alice", "bob"},
-		Orgs:     []string{"engineering"},
-		Channels: []model.ChannelRef{{RoomID: "general", SiteID: "site-a"}},
-		History:  model.HistoryConfig{Mode: model.HistoryModeAll},
+		RoomID:             "r1",
+		Users:              []string{"alice", "bob"},
+		Orgs:               []string{"engineering"},
+		Channels:           []model.ChannelRef{{RoomID: "general", SiteID: "site-a"}},
+		History:            model.HistoryConfig{Mode: model.HistoryModeAll},
+		HistorySharedSince: &hss,
 	}
 	data, err := json.Marshal(req)
 	require.NoError(t, err)
+	assert.Contains(t, string(data), `"historySharedSince":1700000000000`)
 	var dst model.AddMembersRequest
-	require.NoError(t, json.Unmarshal(data, &dst))
-	assert.Equal(t, req, dst)
+	roundTrip(t, &req, &dst)
+
+	// nil cap must be omitted from the wire, not serialized as null/0.
+	req.HistorySharedSince = nil
+	data, err = json.Marshal(req)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "historySharedSince")
 }
 
 func TestHistoryModeConstants(t *testing.T) {
 	assert.Equal(t, model.HistoryMode("none"), model.HistoryModeNone)
 	assert.Equal(t, model.HistoryMode("all"), model.HistoryModeAll)
+}
+
+// SharesAll is the single share-all predicate used by both room-service (cap
+// stamping) and room-worker (cap application) — the two sides must agree.
+func TestHistoryConfig_SharesAll(t *testing.T) {
+	cases := []struct {
+		name string
+		mode model.HistoryMode
+		want bool
+	}{
+		{"none does not share", model.HistoryModeNone, false},
+		{"all shares", model.HistoryModeAll, true},
+		{"empty defaults to share-all", model.HistoryMode(""), true},
+		{"unknown mode shares (rejected upstream at the RPC boundary)", model.HistoryMode("nonee"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, model.HistoryConfig{Mode: tc.mode}.SharesAll())
+		})
+	}
 }
 
 func TestRoomMemberJSON(t *testing.T) {
@@ -4507,6 +4711,22 @@ func TestUserStatusUpdated_RoundTrip(t *testing.T) {
 	roundTrip(t, &src, &dst)
 }
 
+func TestUserSettingsPriorityContactsRoundTrip(t *testing.T) {
+	src := model.UserSettings{PriorityContacts: []string{"alice", "helper.bot"}}
+	dst := model.UserSettings{}
+	roundTrip(t, &src, &dst)
+}
+
+// priorityContacts must NOT satisfy settings.set: it is written only by the
+// dedicated add/remove RPCs, so a settings.set carrying just this field has to
+// fall through to bad_request "no settings provided".
+func TestUserSettingsIsEmptyIgnoresPriorityContacts(t *testing.T) {
+	s := model.UserSettings{PriorityContacts: []string{"alice"}}
+	if !s.IsEmpty() {
+		t.Error("IsEmpty() = false, want true")
+	}
+}
+
 func TestUserSettingsUpdated_RoundTrip(t *testing.T) {
 	mute, width := true, false
 	lang := "ja"
@@ -4539,6 +4759,24 @@ func TestUserSettingsUpdated_UnsetSettingsOmittedFromJSON(t *testing.T) {
 	require.True(t, ok)
 	_, present := settings["fullWidth"]
 	assert.False(t, present, "an unset setting must be omitted, so absent keeps meaning client-default")
+}
+
+func TestUserPermissionsUpdatedJSON(t *testing.T) {
+	from := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	src := model.UserPermissionsUpdated{
+		Permission: model.PermissionExternalImageView,
+		Accounts:   []string{"alice", "bob"},
+		State: model.PermissionState{
+			Granted:       true,
+			EffectiveFrom: &from,
+			ExpiresAt:     &until,
+			UpdatedAt:     time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
+		},
+		Timestamp: 1735689600000,
+	}
+	dst := model.UserPermissionsUpdated{}
+	roundTrip(t, &src, &dst)
 }
 
 func TestUserStatusUpdated_StatusIsShowOmittedWhenNil(t *testing.T) {

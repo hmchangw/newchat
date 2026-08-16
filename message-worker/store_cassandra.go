@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	o11ycassandra "github.com/flywindy/o11y/cassandra"
 	"github.com/gocql/gocql"
 
 	"github.com/hmchangw/chat/pkg/atrest"
@@ -57,13 +58,25 @@ func toMentionSet(mentions []model.Participant) []*cassParticipant {
 
 // CassandraStore implements Store using a Cassandra session.
 type CassandraStore struct {
-	cassSession *gocql.Session
-	bucket      msgbucket.Sizer
-	cipher      atrest.Cipher // nil when ATREST_ENABLED=false
+	cassSession  *gocql.Session
+	bucket       msgbucket.Sizer
+	cipher       atrest.Cipher // nil when ATREST_ENABLED=false
+	newBatch     func(context.Context) *gocql.Batch
+	executeBatch func(context.Context, *gocql.Batch) error
 }
 
 func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
-	return &CassandraStore{cassSession: session, bucket: bucket, cipher: cipher}
+	return &CassandraStore{
+		cassSession: session,
+		bucket:      bucket,
+		cipher:      cipher,
+		newBatch: func(ctx context.Context) *gocql.Batch {
+			return session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
+		},
+		executeBatch: func(ctx context.Context, batch *gocql.Batch) error {
+			return o11ycassandra.ExecuteBatch(ctx, session, batch)
+		},
+	}
 }
 
 // SaveMessage inserts msg into both messages_by_room and messages_by_id via a
@@ -83,7 +96,7 @@ func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, se
 	b := s.bucket.Of(msg.CreatedAt)
 	mentions := toMentionSet(msg.Mentions)
 
-	batch := s.cassSession.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
+	batch := s.newBatch(ctx)
 	batch.Query(
 		`INSERT INTO messages_by_room
 		   (room_id, bucket, created_at, message_id, sender, msg, site_id, updated_at,
@@ -104,7 +117,7 @@ func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, se
 		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
 		msg.Attachments, msg.Card, msg.CardAction,
 	)
-	if err := s.cassSession.ExecuteBatch(batch); err != nil {
+	if err := s.executeBatch(ctx, batch); err != nil {
 		return fmt.Errorf("save message %s: %w", msg.ID, err)
 	}
 	return nil
@@ -134,7 +147,7 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 	// attachments/card alongside the new enc_payload, and decryptIfNeeded would
 	// later overwrite them with empty fields from the bundle. sys_msg_data is
 	// NOT encrypted, so it is written as plaintext like any other metadata column.
-	batch := s.cassSession.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
+	batch := s.newBatch(ctx)
 	batch.Query(
 		`INSERT INTO messages_by_room
 		   (room_id, bucket, created_at, message_id, sender, site_id, updated_at,
@@ -155,7 +168,7 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, siteID, msg.CreatedAt,
 		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
 	)
-	if err := s.cassSession.ExecuteBatch(batch); err != nil {
+	if err := s.executeBatch(ctx, batch); err != nil {
 		return fmt.Errorf("save message %s: %w", msg.ID, err)
 	}
 	return nil
@@ -177,7 +190,7 @@ func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Messa
 	// One UnloggedBatch (same pattern as SaveMessage) groups the messages_by_id +
 	// thread_messages_by_thread writes (plus the conditional TShow mirror); each INSERT
 	// is idempotent so redelivery is safe. countAndSetParentTcount runs after commit.
-	batch := s.cassSession.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
+	batch := s.newBatch(ctx)
 	batch.Query(
 		`INSERT INTO messages_by_id
 		 (message_id, created_at, room_id, sender, msg, site_id, updated_at, mentions,
@@ -219,7 +232,7 @@ func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Messa
 			msg.Attachments, msg.Card, msg.CardAction,
 		)
 	}
-	if err := s.cassSession.ExecuteBatch(batch); err != nil {
+	if err := s.executeBatch(ctx, batch); err != nil {
 		return nil, fmt.Errorf("save thread message %s: %w", msg.ID, err)
 	}
 
@@ -248,7 +261,7 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 	// Single UnloggedBatch for both encrypted writes (plus the conditional TShow
 	// mirror) — same rationale as SaveThreadMessage. Encrypted body columns are bound
 	// NULL so a redelivered pre-encryption row can't end up in a hybrid state.
-	batch := s.cassSession.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
+	batch := s.newBatch(ctx)
 	batch.Query(
 		`INSERT INTO messages_by_id
 		 (message_id, created_at, room_id, sender, site_id, updated_at, mentions,
@@ -290,7 +303,7 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 			cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
 		)
 	}
-	if err := s.cassSession.ExecuteBatch(batch); err != nil {
+	if err := s.executeBatch(ctx, batch); err != nil {
 		return nil, fmt.Errorf("save thread message %s: %w", msg.ID, err)
 	}
 
@@ -326,10 +339,9 @@ func buildCassandraMessage(msg *model.Message) cassandra.Message {
 	return cm
 }
 
-// countThreadReplies returns the bounded, soft-delete-aware reply count for the
+// countThreadReplies returns the exact, soft-delete-aware reply count for the
 // thread. It delegates to pkg/threadcount so this add-path writer and the
-// history-service delete-path writer compute an identical, identically-capped
-// value (see pkg/threadcount.Cap).
+// history-service delete-path writer compute an identical value.
 func (s *CassandraStore) countThreadReplies(ctx context.Context, threadRoomID string) (int, error) {
 	return threadcount.Count(ctx, s.cassSession, threadRoomID)
 }

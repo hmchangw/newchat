@@ -25,7 +25,7 @@
     "oidc-client-ts": "^3.5.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "uuid": "^11.1.0"
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.4.0",

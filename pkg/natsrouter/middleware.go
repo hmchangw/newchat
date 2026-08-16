@@ -10,6 +10,8 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // Middleware is a handler that participates in the middleware chain.
@@ -77,6 +79,36 @@ func RequireRequestID() HandlerFunc {
 		c.Set(requestIDKey, id)
 		c.SetContext(ctx)
 		c.WithLogValues("request_id", id)
+		c.Next()
+	}
+}
+
+// traceIdentity enriches the active NATS entry span and all downstream spans
+// and contextual logs with trusted route identity. Router.addRoute installs it
+// for every router, including callers that use New with a hand-built middleware
+// stack. Params were extracted before middleware runs; account has also been
+// decoded from its NATS-safe bot transport form by route.extractParams.
+//
+// On a client-facing subject the caller supplies the inbound baggage, so every
+// managed key is dropped before the route's own identity is applied — a key the
+// subject does not carry (a static site token leaves no {siteID} param) would
+// otherwise be whatever the client sent. Internal subjects keep the upstream
+// hop's values, which is how identity stays continuous across services.
+func traceIdentity(configuredSiteID string) HandlerFunc {
+	return func(c *Context) {
+		apply := obs.ContextWithIdentity
+		siteID := c.Params.Get("siteID")
+		if c.Msg != nil && subject.IsClientFacing(c.Msg.Subject) {
+			apply = obs.ContextWithPublicIdentity
+			if siteID == "" {
+				// The request reached this site's service, so its own configured
+				// site is the trustworthy label. Only client-facing routes may
+				// substitute it: an internal hop's event can originate elsewhere.
+				siteID = configuredSiteID
+			}
+		}
+		ctx := apply(c.ctx, c.Params.Get("account"), c.Params.Get("roomID"), siteID)
+		c.SetContext(ctx)
 		c.Next()
 	}
 }

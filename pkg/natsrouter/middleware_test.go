@@ -2,17 +2,25 @@ package natsrouter
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
+	o11ynats "github.com/flywindy/o11y/nats"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 )
 
 // flowRecorder captures records for asserting on the on-demand FLOW lines.
@@ -268,4 +276,181 @@ func TestRequestID_NoDebugHeaderIsOff(t *testing.T) {
 	c.Next()
 
 	assert.Equal(t, natsutil.DebugOff, observed, "no X-Debug header → no rung on ctx")
+}
+
+// initIdentityTelemetry turns the o11y master switch on with every exporting
+// pillar off, so identity enrichment is live without starting exporters or a
+// metrics listener, and restores the OTel/slog globals afterwards.
+func initIdentityTelemetry(t *testing.T) {
+	t.Helper()
+
+	previousTracer := otel.GetTracerProvider()
+	previousMeter := otel.GetMeterProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	previousLogger := slog.Default()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousTracer)
+		otel.SetMeterProvider(previousMeter)
+		otel.SetTextMapPropagator(previousPropagator)
+		slog.SetDefault(previousLogger)
+	})
+
+	t.Setenv("O11Y_ENABLED", "true")
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+	t.Setenv("OTEL_SERVICE_NAME", "natsrouter-identity-test")
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", "0")
+
+	_, shutdown, err := obs.Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+}
+
+func TestRouter_AutomaticallyEnrichesIdentityWithoutOptInMiddleware(t *testing.T) {
+	initIdentityTelemetry(t)
+
+	nc := startTestNATS(t)
+	r := New(nc, "identity-test")
+	got := make(chan baggage.Baggage, 1)
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity",
+		func(c *Context, _ testReq) (*testResp, error) {
+			got <- baggage.FromContext(c)
+			return &testResp{Greeting: "ok"}, nil
+		})
+
+	data, err := json.Marshal(testReq{})
+	require.NoError(t, err)
+	_, err = nc.Request(context.Background(),
+		"chat.user.weather_bot.request.room.room-42.site-1.identity", data, 2*time.Second)
+	require.NoError(t, err)
+
+	bag := <-got
+	assert.Equal(t, "weather.bot", bag.Member("user.name").Value())
+	assert.Equal(t, "room-42", bag.Member(obs.RoomIDKey).Value())
+}
+
+// TestRouter_DropsForgedIdentityOnClientFacingRoutes covers the ingress a
+// browser reaches directly. The route's subject pins the site to a static
+// token, so no {siteID} param exists to overwrite the caller's value — without
+// the public-ingress drop, a forged chat.site.id would ride into every span
+// and log of the request.
+func TestRouter_DropsForgedIdentityOnClientFacingRoutes(t *testing.T) {
+	initIdentityTelemetry(t)
+
+	nc := startTestNATSWithBaggage(t)
+	r := New(nc, "forged-identity-test")
+	got := make(chan baggage.Baggage, 1)
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity",
+		func(c *Context, _ testReq) (*testResp, error) {
+			got <- baggage.FromContext(c)
+			return &testResp{Greeting: "ok"}, nil
+		})
+
+	data, err := json.Marshal(testReq{})
+	require.NoError(t, err)
+	// The caller's own baggage is what the client controls: the publish path
+	// injects it into the message headers, exactly as a browser would.
+	_, err = nc.Request(callerBaggage(t,
+		"user.name", "forged-user",
+		obs.RoomIDKey, "forged-room",
+		obs.SiteIDKey, "forged-site",
+	), "chat.user.weather_bot.request.room.room-42.site-1.identity", data, 2*time.Second)
+	require.NoError(t, err)
+
+	bag := <-got
+	assert.Equal(t, "weather.bot", bag.Member("user.name").Value(), "the subject's account is authoritative")
+	assert.Equal(t, "room-42", bag.Member(obs.RoomIDKey).Value(), "the subject's room is authoritative")
+	assert.Empty(t, bag.Member(obs.SiteIDKey).Value(),
+		"a managed key the route does not carry must be dropped, not taken from the caller")
+}
+
+// TestRouter_KeepsUpstreamIdentityOnInternalRoutes is the other half of the
+// policy: an internal hop's baggage is trusted, so a key the route does not
+// carry survives instead of being dropped.
+func TestRouter_KeepsUpstreamIdentityOnInternalRoutes(t *testing.T) {
+	initIdentityTelemetry(t)
+
+	nc := startTestNATSWithBaggage(t)
+	r := New(nc, "internal-identity-test")
+	got := make(chan baggage.Baggage, 1)
+	Register(r, "chat.server.request.room.{roomID}.identity",
+		func(c *Context, _ testReq) (*testResp, error) {
+			got <- baggage.FromContext(c)
+			return &testResp{Greeting: "ok"}, nil
+		})
+
+	data, err := json.Marshal(testReq{})
+	require.NoError(t, err)
+	_, err = nc.Request(callerBaggage(t, obs.SiteIDKey, "site-a"),
+		"chat.server.request.room.room-42.identity", data, 2*time.Second)
+	require.NoError(t, err)
+
+	bag := <-got
+	assert.Equal(t, "room-42", bag.Member(obs.RoomIDKey).Value())
+	assert.Equal(t, "site-a", bag.Member(obs.SiteIDKey).Value(),
+		"an internal hop's identity must survive a route that does not restate it")
+}
+
+// callerBaggage returns a context carrying the given key/value baggage pairs,
+// standing in for whatever a caller chose to put on the wire.
+func callerBaggage(t *testing.T, kv ...string) context.Context {
+	t.Helper()
+	require.Zero(t, len(kv)%2, "callerBaggage takes key/value pairs")
+
+	members := make([]baggage.Member, 0, len(kv)/2)
+	for i := 0; i < len(kv); i += 2 {
+		member, err := baggage.NewMember(kv[i], kv[i+1])
+		require.NoError(t, err)
+		members = append(members, member)
+	}
+	bag, err := baggage.New(members...)
+	require.NoError(t, err)
+	return baggage.ContextWithBaggage(context.Background(), bag)
+}
+
+// startTestNATSWithBaggage is startTestNATS with the production propagator pair
+// (TraceContext + Baggage), so a caller's baggage actually crosses the wire —
+// without Baggage registered, an identity-trust test would pass vacuously.
+func startTestNATSWithBaggage(t *testing.T) *o11ynats.Conn {
+	t.Helper()
+
+	opts := &natsserver.Options{Port: -1}
+	ns, err := natsserver.NewServer(opts)
+	require.NoError(t, err)
+	ns.Start()
+	require.True(t, ns.ReadyForConnections(5*time.Second), "nats server did not become ready")
+	t.Cleanup(ns.Shutdown)
+
+	nc, err := o11ynats.Connect(context.Background(), ns.ClientURL(), noop.NewTracerProvider(),
+		propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	require.NoError(t, err)
+	t.Cleanup(nc.Close)
+	return nc
+}
+
+// TestRouter_ClientFacingRouteLabelsSiteFromConfig proves the configured site
+// replaces — rather than merely drops — a forged value on a route whose subject
+// pins the site to a static token.
+func TestRouter_ClientFacingRouteLabelsSiteFromConfig(t *testing.T) {
+	initIdentityTelemetry(t)
+
+	nc := startTestNATSWithBaggage(t)
+	r := New(nc, "configured-site-test", WithSiteID("site-1"))
+	got := make(chan baggage.Baggage, 1)
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.identity",
+		func(c *Context, _ testReq) (*testResp, error) {
+			got <- baggage.FromContext(c)
+			return &testResp{Greeting: "ok"}, nil
+		})
+
+	data, err := json.Marshal(testReq{})
+	require.NoError(t, err)
+	_, err = nc.Request(callerBaggage(t, obs.SiteIDKey, "forged-site"),
+		"chat.user.alice.request.room.room-42.site-1.identity", data, 2*time.Second)
+	require.NoError(t, err)
+
+	bag := <-got
+	assert.Equal(t, "site-1", bag.Member(obs.SiteIDKey).Value(), "config, not the caller, labels the site")
 }

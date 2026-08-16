@@ -162,7 +162,7 @@ func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest)
 		}
 		return nil, fmt.Errorf("get requester: %w", err)
 	}
-	if requester.EngName == "" || requester.ChineseName == "" {
+	if requester.EngName == "" && requester.ChineseName == "" {
 		return nil, errInvalidUserData
 	}
 
@@ -266,7 +266,7 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 		}
 		return nil, fmt.Errorf("get counterpart: %w", err)
 	}
-	if roomType == model.RoomTypeDM && (other.EngName == "" || other.ChineseName == "") {
+	if roomType == model.RoomTypeDM && (other.EngName == "" && other.ChineseName == "") {
 		// botDMs counterpart is an app/bot whose users-collection record
 		// typically has empty name fields; the GetApp + Assistant.Enabled
 		// check below is the right validation for that case.
@@ -895,6 +895,12 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		return nil, errRoomIDMismatch
 	}
 
+	// 4a. Reject unknown history modes (empty = default "all"): a typo like
+	// "nonee" must not silently grant share-all.
+	if req.History.Mode != "" && req.History.Mode != model.HistoryModeNone && req.History.Mode != model.HistoryModeAll {
+		return nil, errInvalidHistoryMode
+	}
+
 	// Explicitly listed ".bot" bots are admitted (create-channel still rejects
 	// them). Each must resolve to an enabled app assistant; a bot's home site may
 	// differ from the room's — cross-site bot membership is allowed. Deduped so a
@@ -981,6 +987,23 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	req.RequesterID = sub.User.ID
 	req.RequesterAccount = sub.User.Account
 	req.Timestamp = time.Now().UTC().UnixMilli()
+
+	// History-cap inheritance: a requester whose own history is capped must not
+	// grant new members more than they can see. Stamp the requester's cap onto
+	// the canonical event for every mode: share-all adds inherit it directly,
+	// and mode "none" uses it as a clock-skew guard (the worker floors those
+	// members at the accept timestamp or this cap, whichever is later — the
+	// accept timestamp alone could predate the requester's boundary when
+	// stamped by a skewed clock). Reset first: the field is server-set and
+	// client input must never pass through.
+	req.HistorySharedSince = nil
+	var inheritedCap int64
+	if sub.HistorySharedSince != nil && !sub.HistorySharedSince.IsZero() {
+		if ms := sub.HistorySharedSince.UnixMilli(); ms > 0 {
+			req.HistorySharedSince = &ms
+			inheritedCap = ms
+		}
+	}
 	normalized, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal add-members request: %w", err)
@@ -989,8 +1012,11 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 		return nil, fmt.Errorf("publish to stream: %w", err)
 	}
 	// flow: accepted and handed the member-add off to room-worker.
+	// history_shared_since is the inherited cap stamped above (0 = uncapped) —
+	// without it a capped share-all add is indistinguishable from an uncapped one.
 	slog.Log(ctx, logctx.LevelFlow, "room-service member.add handoff", "phase", "published",
-		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID, "new_count", newCount)
+		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID, "new_count", newCount,
+		"history_mode", string(req.History.Mode), "history_shared_since", inheritedCap)
 
 	// 10. Reply accepted
 	return &model.StatusReply{Status: "accepted"}, nil
@@ -2274,7 +2300,9 @@ func (h *Handler) favoriteToggle(c *natsrouter.Context) (*model.FavoriteToggleRe
 // favorite.toggle: one sub write + one subscription-update fanout + one cross-site
 // federation event, HWM-guarded by sectionUpdatedAt. Built-in section ids are
 // rejected — their membership is derived client-side (the migration-only "teams"
-// stamp is written directly at the sub-create, not via this RPC).
+// stamp is written directly at the sub-create, not via this RPC) — EXCEPT
+// favorites, which is manually move-managed: moving into it sets
+// subscription.favorite (store.MoveSubscriptionSection mirrors the flag).
 func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*model.MoveChatResponse, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
 	var ctx context.Context = c
 	account := c.Param("account")
@@ -2284,11 +2312,12 @@ func (h *Handler) moveChat(c *natsrouter.Context, req model.MoveChatRequest) (*m
 		if *req.SectionID == "" {
 			return nil, errcode.BadRequest("sectionId is empty", errcode.WithReason(errcode.UserChatlistSectionNotFound))
 		}
-		if model.IsBuiltinSection(*req.SectionID) {
+		if model.IsBuiltinSection(*req.SectionID) && *req.SectionID != model.SectionFavorites {
 			// static built-in check only. A custom section's *existence*
 			// is not verified here (that would couple room-service to the
 			// user-service registry on every move) — orphan tolerance renders an
-			// unknown sectionId under Chats client-side.
+			// unknown sectionId under Chats client-side. Favorites is the one
+			// built-in that's a valid moveChat target (see func comment).
 			return nil, errcode.BadRequest("cannot move a chat into a built-in section", errcode.WithReason(errcode.UserChatlistBuiltinTarget))
 		}
 		if req.AfterRoomID != "" && req.BeforeRoomID != "" {

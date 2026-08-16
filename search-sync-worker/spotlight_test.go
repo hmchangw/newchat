@@ -56,6 +56,18 @@ func TestNewSpotlightSearchIndex_ZeroJoinedAtStaysZeroTime(t *testing.T) {
 	assert.True(t, doc.JoinedAt.IsZero())
 }
 
+func TestNewSpotlightSearchIndex_OriginPropagated(t *testing.T) {
+	evt := &model.InboxMemberEvent{RoomID: "r-eng", Origin: model.OriginTeams}
+	doc := newSpotlightSearchIndex("alice", evt)
+	assert.Equal(t, model.OriginTeams, doc.Origin)
+}
+
+func TestNewSpotlightSearchIndex_NormalRoomOriginEmpty(t *testing.T) {
+	evt := &model.InboxMemberEvent{RoomID: "r-eng"}
+	doc := newSpotlightSearchIndex("alice", evt)
+	assert.Equal(t, "", doc.Origin)
+}
+
 func TestSpotlightCollection_Metadata(t *testing.T) {
 	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
 
@@ -377,8 +389,17 @@ func TestSpotlightCollection_BuildAction_BulkRemove(t *testing.T) {
 }
 
 // Spotlight writes to one fixed index — no additive mapping push at startup.
-func TestSpotlightCollection_MappingUpdate_NoOp(t *testing.T) {
+func TestSpotlightCollection_MappingUpdate(t *testing.T) {
 	pattern, body := newSpotlightCollection("spotlight-site-a-v1-chat", false).MappingUpdate()
-	assert.Empty(t, pattern)
-	assert.Nil(t, body)
+	// Spotlight is a single, non-rolled index — update it directly (no version strip).
+	assert.Equal(t, "spotlight-site-a-v1-chat", pattern)
+	require.NotNil(t, body)
+
+	var parsed struct {
+		Properties map[string]any `json:"properties"`
+	}
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	assert.Contains(t, parsed.Properties, "origin",
+		"origin must be in the mapping update so SHOW_TEAMS_ROOM's filter is indexed on the existing index")
+	assert.Contains(t, parsed.Properties, "roomName", "full property set keeps the update idempotent")
 }

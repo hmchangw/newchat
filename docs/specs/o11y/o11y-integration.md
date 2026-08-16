@@ -2,7 +2,7 @@
 
 > **Status:** IN PROGRESS. This document is the design/rollout plan for adopting
 > [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y) (currently
-> pinned at **v0.9.1**) as the single observability entry point across the chat
+> pinned at **v0.11.0**) as the single observability entry point across the chat
 > platform.
 > Branch: `feat/integrate-o11y-sdk`. **Phase 0** (dependency baseline) and
 > **Phase 1** (`pkg/obs` wrapper) have landed; Phases 2–4 are pending.
@@ -154,11 +154,19 @@ integration test (§9).
 
 > **Outcome note (post-implementation):** "remove Marz32onE" means the chat repo
 > no longer imports `Marz32onE/instrumentation-go/otel-nats` **directly** — `grep`
-> over the tree is clean. As of o11y v0.9.1, `o11y/nats` wraps
-> `akira-core/instrumentation-go/otel-nats` v0.7.0 as an **indirect**
-> dependency. `pkg/natsutil.Connect` passes the SDK's resolved
-> `sdk.Toggles.Trace` through o11y's programmatic `WithTracingEnabled` option;
-> it no longer mutates process-global tracing env vars.
+> over the tree is clean. As of o11y v0.11.0, `o11y/nats` wraps
+> `akira-core/instrumentation-go/otel-nats` v0.9.1 as an **indirect**
+> dependency. `pkg/natsutil.Connect` passes `sdk.Toggles.Trace` as the
+> connection-local default; the effective state follows
+> `relay > OTEL_NATS_TRACING_ENABLED > option > module default`, with
+> `OTEL_INSTRUMENTATION_GO_TRACING_ENABLED` remaining the process-wide veto.
+> The zero-code relay path is enabled by setting
+> `OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT` before constructing the NATS
+> connection. It evaluates `otel-nats-tracing` for the module and
+> `otel-instrumentation-go-tracing` for the process-wide veto on every
+> operation, so a flag change does not require a pod restart. Invalid endpoint,
+> poll-interval, or boolean values fail connection construction rather than
+> silently selecting a fallback.
 
 **D3 — OTLP transport. → OTLP/HTTP (`:4318`).**
 `o11y` exports over HTTP; we currently use gRPC (`:4317`). Env/collector change,
@@ -192,8 +200,9 @@ type Config struct {
     OTLPHeaders    map[string]string `env:"OTEL_EXPORTER_OTLP_HEADERS"`
     PrometheusHost string            `env:"OTEL_EXPORTER_PROMETHEUS_HOST" envDefault:""`
     PrometheusPort string            `env:"OTEL_EXPORTER_PROMETHEUS_PORT" envDefault:"2112"`
-    // Head sampling is read directly by the SDK from the standard
-    // OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG — not duplicated here.
+    // Head sampling is mapped by pkg/obs from the standard
+    // OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG variables because o11y
+    // does not parse them directly.
     // Pillar toggles fall through to the SDK's O11Y_*_ENABLED env vars.
 }
 
@@ -210,6 +219,24 @@ Notes:
 - Request-ID correlation is preserved: `pkg/logctx`/`pkg/natsrouter` already add
   `request_id` as a slog attribute; `o11y`'s handler adds `traceId`/`spanId`.
   Verify both appear together in one log line in Phase 1 (package acceptance).
+- Public HTTP entry spans use a TraceContext-only propagator. Caller-controlled
+  baggage is rejected before span start; authenticated identity is rebuilt in
+  the handler. Internal NATS hops retain the SDK's composite TraceContext +
+  Baggage propagator. Third-party HTTP clients must remove baggage while
+  retaining the span context before egress.
+- **Client-facing NATS subjects get the same policy, one hop later.** A NATS
+  propagator is per-connection, so `chat.user.>` ingress cannot refuse baggage
+  at extraction the way HTTP does. Instead `pkg/natsrouter`'s identity
+  middleware calls `obs.ContextWithPublicIdentity`, which drops every key in
+  `obs.ManagedBaggageKeys()` — including ones the subject carries no trusted
+  replacement for — and zeroes the entry span attributes the SDK's OnStart
+  processor already materialized from them. A route whose subject pins the site
+  to a static token is labeled from `natsrouter.WithSiteID` (the service's own
+  config), never from the caller. Internal subjects keep the upstream hop's
+  values so a federated event stays attributed to its originating site.
+  Residual risk: a head sampler must not key on a managed attribute — the entry
+  span starts before the middleware runs, so a forged value is visible to the
+  sampling decision even though it never reaches the exported span.
 - **Metrics endpoint reconciliation:** `pkg/health` only serves `/healthz` +
   `/readyz` (never `/metrics`), so there is no collision with it. The SDK owns
   `/metrics` on `OTEL_EXPORTER_PROMETHEUS_HOST:PORT` (default `:2112`).
@@ -408,11 +435,16 @@ New env vars (defaults chosen so local dev "just works"):
 | `OTEL_EXPORTER_OTLP_HEADERS` | — | OTel standard; optional auth/routing |
 | `OTEL_EXPORTER_PROMETHEUS_HOST` | `""` (all interfaces) | OTel standard; SDK `/metrics` bind host |
 | `OTEL_EXPORTER_PROMETHEUS_PORT` | `2112` | OTel standard; SDK `/metrics` port |
-| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | per SDK | OTel standard; head sampling, read by the SDK directly |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | per SDK | OTel standard; head sampling, mapped to SDK options by `pkg/obs` |
 | `SERVICE_VERSION` | `dev` | resource attr (no OTel single-field std); from CI build tag |
 | `DEPLOY_ENV` | `development` | resource attr; `production`/`staging`/… |
 | `SERVICE_NAMESPACE` | `chat` | resource attr |
 | `O11Y_TRACE_ENABLED` / `_METRICS_` / `_LOG_` / `_PROFILING_` | per SDK | SDK-owned runtime toggles |
+| `O11Y_USER_BAGGAGE_ENABLED` | `false` | PII opt-in; materializes trusted `user.name` baggage on spans/logs |
+| `OTEL_NATS_TRACING_ENABLED` | SDK trace toggle | otel-nats module override; relay still has higher precedence |
+| `OTEL_INSTRUMENTATION_GO_FLAGS_ENDPOINT` | — | optional GO Feature Flag relay endpoint; configure before NATS wrappers are constructed |
+| `OTEL_INSTRUMENTATION_GO_FLAGS_API_KEY` | — | optional relay API key |
+| `OTEL_INSTRUMENTATION_GO_FLAGS_POLL_INTERVAL` | relay default | positive Go duration such as `60s` |
 
 Removed: the old gRPC OTLP endpoint env consumed by `otelutil`, and the retired
 data-migration `METRICS_ADDR` listener vars. `search-service` keeps
@@ -467,7 +499,8 @@ platform is pre-production for the duration of this work.
 
 - Custom domain metrics (messages/sec, fanout size, cross-site lag) using
   `obs.Meter(...)`.
-- Span enrichment with domain attributes (`room.id`, `site.id`) via
-  `obsctx`/attribute helpers.
+- Extend the current trusted-boundary identity enrichment beyond
+  `user.name`, `chat.room.id`, and `chat.site.id` only when a new bounded,
+  queryable use case justifies another baggage key.
 - Pyroscope profiling rollout beyond the trial service.
 - Dashboards/alerts (Grafana) — ops/IaC.

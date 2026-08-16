@@ -13,6 +13,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // newTestClient wires a graphClient at the given token + graph servers.
@@ -74,6 +79,51 @@ func TestCreateOnlineMeeting_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, tokenCalls, "token should be cached across calls")
 	assert.Equal(t, 2, meetingCalls)
+}
+
+func TestCreateOnlineMeeting_StripsBaggageBeforeMicrosoftEgress(t *testing.T) {
+	previous := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{},
+	))
+	t.Cleanup(func() { otel.SetTextMapPropagator(previous) })
+
+	var tokenBaggage, tokenTraceparent, graphBaggage, graphTraceparent string
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenBaggage = r.Header.Get("baggage")
+		tokenTraceparent = r.Header.Get("traceparent")
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	t.Cleanup(tokenSrv.Close)
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		graphBaggage = r.Header.Get("baggage")
+		graphTraceparent = r.Header.Get("traceparent")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(OnlineMeeting{ID: "m1", JoinURL: "https://join/1"})
+	}))
+	t.Cleanup(graphSrv.Close)
+
+	member, err := baggage.NewMember("user.name", "alice")
+	require.NoError(t, err)
+	bag, err := baggage.New(member)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), bag)
+	ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceFlags: trace.FlagsSampled,
+	}))
+
+	client := New(
+		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
+		WithTokenURL(tokenSrv.URL),
+		WithBaseURL(graphSrv.URL),
+		WithHTTPClient(&http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}),
+	)
+	_, err = client.CreateOnlineMeeting(ctx, CreateOnlineMeetingRequest{ExternalID: "room-42"})
+	require.NoError(t, err)
+	assert.Empty(t, tokenBaggage)
+	assert.Empty(t, graphBaggage)
+	assert.NotEmpty(t, tokenTraceparent, "trace correlation must survive baggage stripping")
+	assert.NotEmpty(t, graphTraceparent, "trace correlation must survive baggage stripping")
 }
 
 // TestCreateOnlineMeeting_Idempotent_SameExternalID asserts the client hits

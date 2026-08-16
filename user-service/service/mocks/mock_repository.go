@@ -12,6 +12,7 @@ package mocks
 import (
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	model "github.com/hmchangw/chat/pkg/model"
 	mongoutil "github.com/hmchangw/chat/pkg/mongoutil"
@@ -187,6 +188,21 @@ func (m *MockUserRepository) EXPECT() *MockUserRepositoryMockRecorder {
 	return m.recorder
 }
 
+// AddPriorityContact mocks base method.
+func (m *MockUserRepository) AddPriorityContact(ctx context.Context, account, contact string, limit int, at time.Time) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddPriorityContact", ctx, account, contact, limit, at)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// AddPriorityContact indicates an expected call of AddPriorityContact.
+func (mr *MockUserRepositoryMockRecorder) AddPriorityContact(ctx, account, contact, limit, at any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddPriorityContact", reflect.TypeOf((*MockUserRepository)(nil).AddPriorityContact), ctx, account, contact, limit, at)
+}
+
 // GetHRInfoByAccounts mocks base method.
 func (m *MockUserRepository) GetHRInfoByAccounts(ctx context.Context, accounts []string) (map[string]*model.SubscriptionHRInfo, error) {
 	m.ctrl.T.Helper()
@@ -202,6 +218,21 @@ func (mr *MockUserRepositoryMockRecorder) GetHRInfoByAccounts(ctx, accounts any)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetHRInfoByAccounts", reflect.TypeOf((*MockUserRepository)(nil).GetHRInfoByAccounts), ctx, accounts)
 }
 
+// GetPriorityContactUsers mocks base method.
+func (m *MockUserRepository) GetPriorityContactUsers(ctx context.Context, accounts []string) (map[string]*models.PriorityContactUser, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetPriorityContactUsers", ctx, accounts)
+	ret0, _ := ret[0].(map[string]*models.PriorityContactUser)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetPriorityContactUsers indicates an expected call of GetPriorityContactUsers.
+func (mr *MockUserRepositoryMockRecorder) GetPriorityContactUsers(ctx, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPriorityContactUsers", reflect.TypeOf((*MockUserRepository)(nil).GetPriorityContactUsers), ctx, accounts)
+}
+
 // GetUserChatlist mocks base method.
 func (m *MockUserRepository) GetUserChatlist(ctx context.Context, account string) (*model.User, error) {
 	m.ctrl.T.Helper()
@@ -215,6 +246,21 @@ func (m *MockUserRepository) GetUserChatlist(ctx context.Context, account string
 func (mr *MockUserRepositoryMockRecorder) GetUserChatlist(ctx, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserChatlist", reflect.TypeOf((*MockUserRepository)(nil).GetUserChatlist), ctx, account)
+}
+
+// GetUserPriorityContacts mocks base method.
+func (m *MockUserRepository) GetUserPriorityContacts(ctx context.Context, account string) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUserPriorityContacts", ctx, account)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUserPriorityContacts indicates an expected call of GetUserPriorityContacts.
+func (mr *MockUserRepositoryMockRecorder) GetUserPriorityContacts(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserPriorityContacts", reflect.TypeOf((*MockUserRepository)(nil).GetUserPriorityContacts), ctx, account)
 }
 
 // GetUserSettings mocks base method.
@@ -245,6 +291,21 @@ func (m *MockUserRepository) GetUserStatus(ctx context.Context, account string) 
 func (mr *MockUserRepositoryMockRecorder) GetUserStatus(ctx, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUserStatus", reflect.TypeOf((*MockUserRepository)(nil).GetUserStatus), ctx, account)
+}
+
+// RemovePriorityContact mocks base method.
+func (m *MockUserRepository) RemovePriorityContact(ctx context.Context, account, contact string, at time.Time) (*model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RemovePriorityContact", ctx, account, contact, at)
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// RemovePriorityContact indicates an expected call of RemovePriorityContact.
+func (mr *MockUserRepositoryMockRecorder) RemovePriorityContact(ctx, account, contact, at any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemovePriorityContact", reflect.TypeOf((*MockUserRepository)(nil).RemovePriorityContact), ctx, account, contact, at)
 }
 
 // SetUserStatus mocks base method.
@@ -278,18 +339,33 @@ func (mr *MockUserRepositoryMockRecorder) UpdateUserChatlist(ctx, account, state
 }
 
 // UpdateUserSettings mocks base method.
-func (m *MockUserRepository) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings) (*model.User, error) {
+func (m *MockUserRepository) UpdateUserSettings(ctx context.Context, account string, set *model.UserSettings, at time.Time) (*model.User, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateUserSettings", ctx, account, set)
+	ret := m.ctrl.Call(m, "UpdateUserSettings", ctx, account, set, at)
 	ret0, _ := ret[0].(*model.User)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // UpdateUserSettings indicates an expected call of UpdateUserSettings.
-func (mr *MockUserRepositoryMockRecorder) UpdateUserSettings(ctx, account, set any) *gomock.Call {
+func (mr *MockUserRepositoryMockRecorder) UpdateUserSettings(ctx, account, set, at any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserSettings", reflect.TypeOf((*MockUserRepository)(nil).UpdateUserSettings), ctx, account, set)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserSettings", reflect.TypeOf((*MockUserRepository)(nil).UpdateUserSettings), ctx, account, set, at)
+}
+
+// UserExists mocks base method.
+func (m *MockUserRepository) UserExists(ctx context.Context, account string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UserExists", ctx, account)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// UserExists indicates an expected call of UserExists.
+func (mr *MockUserRepositoryMockRecorder) UserExists(ctx, account any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UserExists", reflect.TypeOf((*MockUserRepository)(nil).UserExists), ctx, account)
 }
 
 // MockAppRepository is a mock of AppRepository interface.

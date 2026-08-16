@@ -6,19 +6,24 @@ services:
       context: ../..
       dockerfile: botplatform-service/deploy/Dockerfile
     pull_policy: build
-    # No host port publish: traefik fronts this at :7777 (/api/v1/password/change)
-    # and in-network callers reach it as botplatform-service:8080. Publishing host
-    # 8080 collided with auth-service and media-service, which also default to 8080.
+    # No host port and no Traefik route: the only caller is portal-service,
+    # forwarding /api/v1/login in-network via BOTPLATFORM_URL.
     environment:
       - OTEL_SERVICE_NAME=botplatform-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - PORT=8080
-      - SITE_ID=site-local
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
-      - SESSIONS_MAX_PER_ACCOUNT=100
-      - BCRYPT_COST=10
-      - DEV_MODE=true
+      - SITE_ID=${SITE_ID:-site-local}
+      # NATS_URL is `required` in config.go — without it the service exits at
+      # startup and portal's /api/v1/login forward gets a 502.
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
+      - SESSIONS_MAX_PER_ACCOUNT=${SESSIONS_MAX_PER_ACCOUNT:-100}
+      - BCRYPT_COST=${BCRYPT_COST:-10}
+      - DEV_MODE=${DEV_MODE:-true}
+    volumes:
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

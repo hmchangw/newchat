@@ -15,6 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/health"
@@ -22,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -57,7 +59,10 @@ type config struct {
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"`  // false → noopPresenceSnapshotter; set true once presence service is available
 	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`   // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
 	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
-	Mode                   stream.Pipeline         `env:"MODE,required"`                                 // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`   // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
+	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
+	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
+	Mode                   stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
@@ -194,6 +199,9 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher("notification-worker", cfg.SiteID)
+	domainMetrics := newNotificationMetrics(sdk.MeterProvider().Meter("notification-worker"))
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
 	if err != nil {
@@ -211,7 +219,10 @@ func main() {
 	subCol := db.Collection("subscriptions")
 	threadRoomCol := db.Collection("thread_rooms")
 	roomsCol := db.Collection("rooms")
-	usersCol := db.Collection("users")
+	// Settings gate push delivery, so a stale read means a user who just muted
+	// still gets notified; route to primary regardless of the client-wide
+	// preference. The other collections here tolerate replica lag and keep it.
+	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 
 	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 		valkeyutil.WithObservability(sdk),
@@ -236,7 +247,7 @@ func main() {
 	loader := &mongoMemberLoader{col: subCol, users: usersCol}
 	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -257,13 +268,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated))
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "notification-worker", Site: cfg.SiteID,
+		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
+	})
+	consumerMetrics.LoopStopped(ctx)
+	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
-
-	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, wiring.PushSendSubject, cfg.NatsMaxPayloadBytes)
+	// The broker advertises max_payload in its INFO on connect, so this is
+	// always in step with the server. An env var was a second source of truth
+	// that silently dropped batches whenever it drifted below the real limit.
+	emitter := newMobileEmitter(&jsPublisher{js: otelJS, metrics: publishMetrics}, wiring.PushSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
 
 	var presence PresenceSnapshotter = noopPresenceSnapshotter{}
 	if cfg.PresenceEnabled {
@@ -272,6 +291,7 @@ func main() {
 			cfg.SiteID,
 			cfg.PresenceBatchSize,
 			cfg.PresenceRPCTimeout,
+			publishMetrics,
 		)
 	}
 
@@ -280,17 +300,24 @@ func main() {
 		badge = newNatsBadgeClient(nc)
 	}
 
+	var settings UserSettingsSnapshotter = noopUserSettings{}
+	if cfg.UserSettingsEnabled {
+		settings = newMongoUserSettings(usersCol, cfg.UserSettingsBatchSize, cfg.UserSettingsTimeout)
+	}
+
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
-		Parent:             newHistoryParentFetcher(nc),
+		Parent:             newHistoryParentFetcher(nc, publishMetrics),
 		Presence:           presence,
+		Settings:           settings,
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
 		BadgeClient:        badge,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
+		Metrics:            domainMetrics,
 	})
 
 	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
@@ -351,20 +378,31 @@ func main() {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
+	consumerMetrics.LoopStarted(ctx)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	wg.Add(1)
 	go func() {
+		// The loop itself is counted so shutdown, which stops the iterator and
+		// then waits on wg, cannot pass through while a message Next already
+		// returned is still on its way to a worker.
+		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				consumerMetrics.LoopFailed(context.Background(), err)
 				return
 			}
 			sem <- struct{}{}
 			wg.Add(1)
-			go func() {
+			go func(msgCtx context.Context, msg jetstream.Msg) {
+				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
+				msg = tracked
+				msgCtx = tracked.Context(msgCtx)
 				defer func() {
+					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
 				}()
@@ -379,12 +417,13 @@ func main() {
 						if err := msg.Ack(); err != nil {
 							slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
 						}
+						domainMetrics.Record(handlerCtx, notifyKindPush, notifySuppressed)
 						return
 					}
 					// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
 					jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
 				})
-			}()
+			}(msgCtx, msg)
 		}
 	}()
 
@@ -403,10 +442,12 @@ func main() {
 		"valkey_addrs", cfg.ValkeyAddrs,
 		"presence_enabled", cfg.PresenceEnabled,
 		"badge_count_enabled", cfg.BadgeCountEnabled,
+		"user_settings_enabled", cfg.UserSettingsEnabled,
 	)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(_ context.Context) error {
+			consumerMetrics.LoopStopped(context.Background())
 			iter.Stop()
 			return nil
 		},
@@ -437,7 +478,7 @@ func main() {
 			invalCancel() // always release the context (idempotent)
 			return nil
 		},
-		func(_ context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },

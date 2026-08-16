@@ -170,14 +170,17 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 	store := NewMongoStore(db)
 
 	lastSeen := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Millisecond)
+	hss := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Millisecond)
 	mustInsertSub(t, db, &model.Subscription{
-		ID:           "sproj",
-		User:         model.SubscriptionUser{ID: "u9", Account: "carol", IsBot: true},
-		RoomID:       "rproj",
-		SiteID:       "site-a",
-		Roles:        []model.Role{model.RoleOwner, model.RoleMember},
-		LastSeenAt:   &lastSeen,
-		ThreadUnread: []string{"p1", "p2"},
+		ID:                 "sproj",
+		User:               model.SubscriptionUser{ID: "u9", Account: "carol", IsBot: true},
+		RoomID:             "rproj",
+		SiteID:             "site-a",
+		Roles:              []model.Role{model.RoleOwner, model.RoleMember},
+		Alert:              true,
+		ThreadUnread:       []string{"t1", "t2"},
+		LastSeenAt:         &lastSeen,
+		HistorySharedSince: &hss,
 	})
 
 	got, err := store.GetSubscription(ctx, "carol", "rproj")
@@ -189,7 +192,9 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 	assert.Equal(t, []model.Role{model.RoleOwner, model.RoleMember}, got.Roles)
 	require.NotNil(t, got.LastSeenAt)
 	assert.WithinDuration(t, lastSeen, *got.LastSeenAt, time.Second)
-	assert.Equal(t, []string{"p1", "p2"}, got.ThreadUnread)
+	assert.Equal(t, []string{"t1", "t2"}, got.ThreadUnread)
+	require.NotNil(t, got.HistorySharedSince, "historySharedSince must be in the projection (addMembers inherits the requester's cap from it)")
+	assert.WithinDuration(t, hss, *got.HistorySharedSince, time.Second)
 }
 
 func TestMongoStore_GetSubscriptionWithMembership_Integration(t *testing.T) {

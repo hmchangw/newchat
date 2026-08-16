@@ -78,7 +78,27 @@ type SubscriptionUpdateEvent struct {
 	Subscription Subscription `json:"subscription"`
 	Action       string       `json:"action"` // "added" | "removed" | "role_updated" | "mute_toggled" | "favorite_toggled" | "read"
 	RoomName     string       `json:"roomName,omitempty"`
-	Timestamp    int64        `json:"timestamp" bson:"timestamp"`
+	// The DM counterpart, resolved at publish time alongside RoomName. Mutually
+	// exclusive, "added" dm/botDM only, both nil on a lookup miss (best-effort).
+	HRInfo    *CounterpartHRInfo  `json:"hrInfo,omitempty"`
+	AppInfo   *CounterpartAppInfo `json:"appInfo,omitempty"`
+	Timestamp int64               `json:"timestamp" bson:"timestamp"`
+}
+
+// CounterpartHRInfo is the DM counterpart's HR record on a subscription.update.
+// Kept apart from MessageHRInfo so search-only fields can't widen this event.
+type CounterpartHRInfo struct {
+	Account     string `json:"account"`
+	ChineseName string `json:"chineseName,omitempty"`
+	EngName     string `json:"engName,omitempty"`
+}
+
+// CounterpartAppInfo is the botDM counterpart's app record on a subscription.update.
+// AssistantName is the bot account the app answers on.
+type CounterpartAppInfo struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	AssistantName string `json:"assistantName"`
 }
 
 // CanonicalMemberEventMuted is the only event type currently published on this stream.
@@ -112,6 +132,10 @@ type InboxMemberEvent struct {
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty"`
 	JoinedAt           int64    `json:"joinedAt,omitempty"`
 	Timestamp          int64    `json:"timestamp" bson:"timestamp"`
+	// Origin marks provenance (e.g. OriginTeams for Teams-migrated room
+	// membership); empty for natively-created rooms. Propagated into the
+	// spotlight search doc.
+	Origin string `json:"origin,omitempty"`
 }
 
 // NotificationEvent is the per-user reaction notification on chat.user.{account}.notification;
@@ -144,6 +168,7 @@ const (
 	InboxRoomRestricted              InboxEventType = "room_restricted"
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
 	InboxUserSettingsUpdated         InboxEventType = "user_settings_updated"
+	InboxUserPermissionsUpdated      InboxEventType = "user_permissions_updated"
 	InboxUserChatlistUpdated         InboxEventType = "user_chatlist_updated"
 	InboxSubscriptionSectionMoved    InboxEventType = "subscription_section_moved"
 )
@@ -154,6 +179,17 @@ type UserSettingsUpdated struct {
 	Account   string       `json:"account"   bson:"account"`
 	Settings  UserSettings `json:"settings"  bson:"settings"`
 	Timestamp int64        `json:"timestamp" bson:"timestamp"`
+}
+
+// UserPermissionsUpdated is the cross-site inbox event admin-service publishes after a
+// permission grant/revoke batch. One event carries one chunk of the batch: every account
+// in Accounts receives the same State. Receivers apply it under the per-key watermark
+// guard (State.UpdatedAt), so duplicated or reordered delivery is safe.
+type UserPermissionsUpdated struct {
+	Permission PermissionKey   `json:"permission" bson:"permission"`
+	Accounts   []string        `json:"accounts"   bson:"accounts"` // ≤ fanoutChunkSize per event
+	State      PermissionState `json:"state"      bson:"state"`
+	Timestamp  int64           `json:"timestamp"  bson:"timestamp"`
 }
 
 // SubscriptionReadEvent is InboxEvent.Payload for "subscription_read": sent room-home→user-home
@@ -237,8 +273,12 @@ type MemberAddEvent struct {
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
 	// Members carries the member.list (enrich=true) display entries; org-expanded accounts ride Accounts only.
 	// Room-scoped event only — INBOX copies omit it (remote sites re-resolve display data).
-	Members   []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`
-	Timestamp int64             `json:"timestamp"         bson:"timestamp"`
+	Members []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`
+	// Origin marks provenance (OriginTeams for a Teams-migrated room); empty for
+	// native rooms. Shared json tag with InboxMemberEvent.Origin so the Teams lane's
+	// origin survives the inbox-worker decode into this struct and stamps the sub.
+	Origin    string `json:"origin,omitempty" bson:"origin,omitempty"`
+	Timestamp int64  `json:"timestamp"        bson:"timestamp"`
 }
 
 // Participant represents a user with display name info for client rendering. DisplayName is the
@@ -275,6 +315,7 @@ const (
 	RoomEventThreadMetadataUpdated RoomEventType = "thread_metadata_updated"
 	RoomEventMessageRead           RoomEventType = "message_read"
 	RoomEventThreadMessageRead     RoomEventType = "thread_message_read"
+	RoomEventNewThreadMessage      RoomEventType = "new_thread_message"
 )
 
 // ThreadAction identifies what operation triggered a ThreadMetadataUpdatedEvent.

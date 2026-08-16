@@ -10,6 +10,8 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -22,10 +24,14 @@ const historyRequestTimeout = 2 * time.Second
 type historyParentFetcher struct {
 	nc          *o11ynats.Conn
 	chatBaseURL string
+	// metrics is injected: building a second natsmetrics.Metrics here would
+	// duplicate all nine shared instruments on a different construction path.
+	// The zero value is safe and records nothing.
+	metrics natsmetrics.Publisher
 }
 
-func newHistoryParentFetcher(nc *o11ynats.Conn, chatBaseURL string) *historyParentFetcher {
-	return &historyParentFetcher{nc: nc, chatBaseURL: chatBaseURL}
+func newHistoryParentFetcher(nc *o11ynats.Conn, chatBaseURL string, metrics natsmetrics.Publisher) *historyParentFetcher {
+	return &historyParentFetcher{nc: nc, chatBaseURL: chatBaseURL, metrics: metrics}
 }
 
 // getMessageByIDRequest mirrors history-service's GetMessageByIDRequest wire
@@ -72,9 +78,11 @@ func (f *historyParentFetcher) FetchQuotedParent(
 	}
 
 	subj := subject.MsgGet(account, roomID, siteID)
+	started := time.Now()
 	msg, err := f.nc.Request(ctx, subj, reqBytes, historyRequestTimeout)
+	f.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), err)
 	if err != nil {
-		return nil, fmt.Errorf("history request: %w", err)
+		return nil, natsutil.RequestFailure("history request", err)
 	}
 
 	// Detect the errcode error envelope first; a real Message has no top-level

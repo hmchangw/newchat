@@ -2,21 +2,33 @@ package main
 
 import (
 	"net/http"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Metrics holds the Prometheus collectors used across loadgen components.
 type Metrics struct {
-	Registry            *prometheus.Registry
-	Published           *prometheus.CounterVec
-	PublishErrors       *prometheus.CounterVec
-	E1Latency           *prometheus.HistogramVec
-	E2Latency           *prometheus.HistogramVec
-	ConsumerPending     *prometheus.GaugeVec
-	ConsumerAckPending  *prometheus.GaugeVec
-	ConsumerRedelivered *prometheus.GaugeVec
+	natsHealthMu          sync.Mutex
+	natsPoolHealth        map[string]*loadgenNATSPoolState
+	Registry              *prometheus.Registry
+	Published             *prometheus.CounterVec
+	PublishErrors         *prometheus.CounterVec
+	E1Latency             *prometheus.HistogramVec
+	E2Latency             *prometheus.HistogramVec
+	ConsumerPending       *prometheus.GaugeVec
+	ConsumerAckPending    *prometheus.GaugeVec
+	ConsumerRedelivered   *prometheus.GaugeVec
+	ConsumerUp            *prometheus.GaugeVec
+	ConsumerDelivered     *prometheus.GaugeVec
+	ConsumerAckFloor      *prometheus.GaugeVec
+	ConsumerStreamFloor   *prometheus.GaugeVec
+	ConsumerMaxDeliver    *prometheus.GaugeVec
+	ConsumerAckWait       *prometheus.GaugeVec
+	ConsumerLastActive    *prometheus.GaugeVec
+	ConsumerAckFloorStall *prometheus.GaugeVec
 
 	MemberPublished     *prometheus.CounterVec
 	MemberPublishErrors *prometheus.CounterVec
@@ -35,7 +47,41 @@ type Metrics struct {
 	SoakRPCLatency            *prometheus.HistogramVec
 	SoakVerifications         *prometheus.CounterVec
 	SoakMutationTargetMissing prometheus.Counter
-	SoakSaturation            *prometheus.CounterVec
+	SoakConfiguredRate        *prometheus.GaugeVec
+	SoakIntended              *prometheus.CounterVec
+	SoakDispatched            *prometheus.CounterVec
+	SoakSchedulerUnderrun     *prometheus.CounterVec
+	SoakLaneSaturation        *prometheus.CounterVec
+	SoakGlobalSaturation      *prometheus.CounterVec
+
+	FailureOperations            *prometheus.CounterVec
+	FailureObservations          *prometheus.CounterVec
+	FailureObservationReasons    *prometheus.CounterVec
+	FailureInflight              *prometheus.GaugeVec
+	FailureRecovered             prometheus.Counter
+	FailureInvalidations         *prometheus.CounterVec
+	FailureJournalBytes          prometheus.Gauge
+	FailureUntracked             *prometheus.CounterVec
+	FailureDropped               prometheus.Counter
+	FailureNotSent               *prometheus.CounterVec
+	FailureWALAppendDuration     prometheus.Histogram
+	FailureWALAppends            *prometheus.CounterVec
+	FailureWALFlushDuration      *prometheus.HistogramVec
+	FailureWALFlushBatchSize     *prometheus.HistogramVec
+	FailureEvidenceFlushDuration *prometheus.HistogramVec
+	FailureEvidenceRecords       *prometheus.CounterVec
+
+	NATSConnected             *prometheus.GaugeVec
+	NATSConnectionEvents      *prometheus.CounterVec
+	NATSOutageDuration        *prometheus.HistogramVec
+	NATSCurrentOutage         *prometheus.GaugeVec
+	FailureObserverUp         *prometheus.GaugeVec
+	FailureObserverConfigured *prometheus.GaugeVec
+	FailureObserverEligible   *prometheus.CounterVec
+	FailureObserverEvents     *prometheus.CounterVec
+	FailureObserverQueueDepth *prometheus.GaugeVec
+	ConsumerSampleErrors      *prometheus.CounterVec
+	RunInfo                   *prometheus.GaugeVec
 }
 
 // NewMetrics constructs a dedicated Prometheus registry with all loadgen
@@ -47,7 +93,8 @@ func NewMetrics() *Metrics {
 		0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000,
 	}
 	m := &Metrics{
-		Registry: r,
+		natsPoolHealth: make(map[string]*loadgenNATSPoolState),
+		Registry:       r,
 		Published: prometheus.NewCounterVec(
 			prometheus.CounterOpts{Name: "loadgen_published_total", Help: "Messages published by preset and phase (warmup|measured)."},
 			[]string{"preset", "phase"},
@@ -76,6 +123,38 @@ func NewMetrics() *Metrics {
 			prometheus.GaugeOpts{Name: "loadgen_consumer_redelivered", Help: "JetStream consumer num_redelivered."},
 			[]string{"stream", "durable"},
 		),
+		ConsumerUp: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_up", Help: "Whether the configured durable consumer was sampled successfully."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerDelivered: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_delivered_sequence", Help: "Latest delivered consumer sequence."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerAckFloor: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_ack_floor_sequence", Help: "Latest acknowledged consumer sequence."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerStreamFloor: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_ack_floor_stream_sequence", Help: "Latest acknowledged stream sequence."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerMaxDeliver: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_max_deliver", Help: "Configured maximum delivery attempts."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerAckWait: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_ack_wait_seconds", Help: "Configured acknowledgment wait duration."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerLastActive: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_last_active_timestamp_seconds", Help: "Timestamp of the latest consumer delivery sample."},
+			[]string{"stream", "durable"},
+		),
+		ConsumerAckFloorStall: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{Name: "loadgen_consumer_ack_floor_stall_seconds", Help: "Seconds since the ack floor last advanced while work remains pending."},
+			[]string{"stream", "durable"},
+		),
 	}
 	m.MemberPublished = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "loadgen_member_published_total", Help: "Member-add requests published by preset/phase/inject/shape."},
@@ -94,8 +173,8 @@ func NewMetrics() *Metrics {
 		[]string{"preset", "inject"},
 	)
 	m.MemberRoomSize = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{Name: "loadgen_member_room_size", Help: "Current member count per room (capacity mode only)."},
-		[]string{"room_id"},
+		prometheus.GaugeOpts{Name: "loadgen_member_room_size", Help: "Rooms currently in each bounded member-count bucket (capacity mode only)."},
+		[]string{"size_bucket"},
 	)
 	m.BotRoomPublished = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "loadgen_botroom_published_total", Help: "Bot messages published by preset/phase/size."},
@@ -155,24 +234,219 @@ func NewMetrics() *Metrics {
 			Help: "Cassandra soak mutation targets still missing after the dedicated retry policy.",
 		},
 	)
-	m.SoakSaturation = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "loadgen_soak_saturation_total",
-			Help: "Cassandra soak operations skipped because the bounded in-flight budget was full.",
-		},
+	m.SoakConfiguredRate = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_soak_configured_rate", Help: "Configured open-loop target rate by bounded soak lane."},
 		[]string{"lane"},
+	)
+	m.SoakIntended = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_intended_total", Help: "Pacing events due by bounded soak lane."},
+		[]string{"lane"},
+	)
+	m.SoakDispatched = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_dispatched_total", Help: "Pacing events dispatched by bounded soak lane."},
+		[]string{"lane"},
+	)
+	m.SoakSchedulerUnderrun = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_scheduler_underrun_total", Help: "Pacing events skipped after scheduler delay by bounded soak lane."},
+		[]string{"lane"},
+	)
+	m.SoakLaneSaturation = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_lane_saturation_total", Help: "Pacing events skipped because the lane in-flight budget was full."},
+		[]string{"lane"},
+	)
+	m.SoakGlobalSaturation = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_soak_global_saturation_total", Help: "Pacing events skipped because the global in-flight budget was full."},
+		[]string{"lane"},
+	)
+	m.FailureOperations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_operations_total",
+			Help: "Completed fault-observation operations by bounded scenario, lane, and result.",
+		},
+		[]string{"scenario", "lane", "result"},
+	)
+	m.FailureObservations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_observations_total",
+			Help: "Fault-observation results by bounded scenario, lane, observer, and result.",
+		},
+		[]string{"scenario", "lane", "observer", "result"},
+	)
+	m.FailureObservationReasons = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_observation_reasons_total",
+			Help: "Failure observations by bounded result reason.",
+		},
+		[]string{"scenario", "lane", "observer", "result", "reason"},
+	)
+	m.FailureInflight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "loadgen_failure_inflight",
+			Help: "Operations awaiting one or more fault-observation results.",
+		},
+		[]string{"scenario", "lane"},
+	)
+	m.FailureRecovered = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_recovered_operations_total",
+			Help: "Unresolved operations recovered from the persistent failure ledger.",
+		},
+	)
+	m.FailureInvalidations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_invalidations_total",
+			Help: "Conditions that invalidate fault-test evidence, by bounded reason.",
+		},
+		[]string{"reason"},
+	)
+	m.FailureJournalBytes = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "loadgen_failure_journal_bytes",
+			Help: "Current persistent failure-ledger WAL size in bytes.",
+		},
+	)
+	m.FailureUntracked = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_untracked_total",
+			Help: "Operations the ledger could not account for, by bounded reason.",
+		},
+		[]string{"reason"},
+	)
+	m.FailureDropped = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_dropped_total",
+			Help: "Recovered operations discarded at startup because the journal exceeded capacity.",
+		},
+	)
+	m.FailureNotSent = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_failure_not_sent_total", Help: "Proven local pre-publish failures by bounded reason."},
+		[]string{"scenario", "lane", "reason"},
+	)
+	m.FailureWALAppendDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_wal_append_duration_seconds",
+			Help:    "Caller-observed failure-ledger append duration; intent records include the grouped durability barrier.",
+			Buckets: []float64{0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1},
+		},
+	)
+	m.FailureWALAppends = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_wal_appends_total",
+			Help: "Failure-ledger append attempts by bounded result (success or error).",
+		},
+		[]string{"result"},
+	)
+	m.FailureWALFlushDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_wal_flush_duration_seconds",
+			Help:    "Duration of grouped failure-ledger fsync barriers by bounded result.",
+			Buckets: []float64{0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1},
+		},
+		[]string{"result"},
+	)
+	m.FailureWALFlushBatchSize = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_wal_flush_batch_size",
+			Help:    "Number of WAL records committed by each grouped durability barrier.",
+			Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256},
+		},
+		[]string{"result"},
+	)
+	m.FailureEvidenceFlushDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_evidence_flush_duration_seconds",
+			Help:    "Duration of batched recipient sidecar durability barriers.",
+			Buckets: []float64{0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1},
+		},
+		[]string{"claim", "result"},
+	)
+	m.FailureEvidenceRecords = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_evidence_records_total",
+			Help: "Recipient sidecar evidence records durably flushed by bounded kind.",
+		},
+		[]string{"kind"},
+	)
+	m.NATSConnected = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "loadgen_nats_connected",
+			Help: "Whether an instrumented loadgen NATS pool is currently connected.",
+		},
+		[]string{"pool"},
+	)
+	m.NATSConnectionEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_nats_connection_events_total",
+			Help: "Loadgen NATS connection lifecycle events.",
+		},
+		[]string{"pool", "event"},
+	)
+	m.NATSOutageDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_nats_outage_duration_seconds",
+			Help:    "Observed duration of loadgen NATS disconnections.",
+			Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300},
+		},
+		[]string{"pool"},
+	)
+	m.NATSCurrentOutage = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_nats_current_outage_seconds", Help: "Current duration of an in-progress loadgen NATS outage."},
+		[]string{"pool"},
+	)
+	m.FailureObserverUp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_failure_observer_up", Help: "Whether a required failure observer is healthy."},
+		[]string{"observer"},
+	)
+	m.FailureObserverConfigured = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_failure_observer_configured", Help: "Whether a bounded failure observer is configured for new operations."},
+		[]string{"observer"},
+	)
+	m.FailureObserverEligible = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_failure_observer_eligible_total", Help: "Operations eligible for a configured observer result."},
+		[]string{"scenario", "lane", "observer"},
+	)
+	m.FailureObserverEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_failure_observer_events_total", Help: "Normalized failure observer events."},
+		[]string{"observer", "result"},
+	)
+	m.FailureObserverQueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_failure_observer_queue_depth", Help: "Queued failure observer events."},
+		[]string{"observer"},
+	)
+	m.ConsumerSampleErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "loadgen_consumer_sample_errors_total", Help: "Configured consumer sampling failures by bounded reason."},
+		[]string{"stream", "durable", "reason"},
+	)
+	m.RunInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "loadgen_run_info", Help: "Bounded loadgen runtime metadata without a run ID."},
+		[]string{"environment", "scenario", "traffic_profile"},
 	)
 	r.MustRegister(
 		m.Published, m.PublishErrors,
 		m.E1Latency, m.E2Latency,
 		m.ConsumerPending, m.ConsumerAckPending, m.ConsumerRedelivered,
+		m.ConsumerUp, m.ConsumerDelivered, m.ConsumerAckFloor, m.ConsumerStreamFloor,
+		m.ConsumerMaxDeliver, m.ConsumerAckWait, m.ConsumerLastActive, m.ConsumerAckFloorStall,
 		m.MemberPublished, m.MemberPublishErrors,
 		m.MemberE1Latency, m.MemberE2Latency, m.MemberRoomSize,
 		m.BotRoomPublished, m.BotRoomPublishErrors,
 		m.BotRoomE2ELatency, m.BotRoomReadLatency,
 		m.SoakOperations, m.SoakRetries, m.SoakErrors,
 		m.SoakRPCLatency, m.SoakVerifications,
-		m.SoakMutationTargetMissing, m.SoakSaturation,
+		m.SoakMutationTargetMissing, m.SoakConfiguredRate, m.SoakIntended,
+		m.SoakDispatched, m.SoakSchedulerUnderrun, m.SoakLaneSaturation, m.SoakGlobalSaturation,
+		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
+		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
+		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,
+		m.FailureWALAppendDuration, m.FailureWALAppends,
+		m.FailureWALFlushDuration, m.FailureWALFlushBatchSize,
+		m.FailureEvidenceFlushDuration, m.FailureEvidenceRecords,
+		m.NATSConnected, m.NATSConnectionEvents, m.NATSOutageDuration, m.NATSCurrentOutage,
+		m.FailureObserverUp, m.FailureObserverConfigured, m.FailureObserverEligible,
+		m.FailureObserverEvents, m.FailureObserverQueueDepth,
+		m.ConsumerSampleErrors, m.RunInfo,
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return m
 }

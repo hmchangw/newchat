@@ -10,6 +10,8 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -35,10 +37,14 @@ type ParentFetcher interface {
 // GetMessageByID handler, reading the author + createdAt the fan-out needs.
 type historyParentFetcher struct {
 	nc *o11ynats.Conn
+	// metrics is injected: building a second natsmetrics.Metrics here would
+	// duplicate all nine shared instruments on a different construction path.
+	// The zero value is safe and records nothing.
+	metrics natsmetrics.Publisher
 }
 
-func newHistoryParentFetcher(nc *o11ynats.Conn) *historyParentFetcher {
-	return &historyParentFetcher{nc: nc}
+func newHistoryParentFetcher(nc *o11ynats.Conn, metrics natsmetrics.Publisher) *historyParentFetcher {
+	return &historyParentFetcher{nc: nc, metrics: metrics}
 }
 
 // getMessageByIDRequest mirrors history-service's GetMessageByIDRequest wire shape.
@@ -65,9 +71,11 @@ func (f *historyParentFetcher) FetchParent(ctx context.Context, account, roomID,
 	if err != nil {
 		return nil, fmt.Errorf("marshal GetMessageByID request: %w", err)
 	}
+	started := time.Now()
 	msg, err := f.nc.Request(ctx, subject.MsgGet(account, roomID, siteID), reqBytes, parentFetchTimeout)
+	f.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), err)
 	if err != nil {
-		return nil, fmt.Errorf("history request for parent %s: %w", messageID, err)
+		return nil, natsutil.RequestFailure(fmt.Sprintf("history request for parent %s", messageID), err)
 	}
 	// The errcode envelope has a top-level "error"; a real Message never does, so this
 	// can't false-positive. Propagate the typed remote error for accurate classification.

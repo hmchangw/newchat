@@ -315,8 +315,9 @@ var roomAppReadProjection = bson.D{
 // integration test guards drift.
 var subscriptionReadProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "u", Value: 1}, {Key: "roomId", Value: 1},
-	{Key: "siteId", Value: 1}, {Key: "roles", Value: 1},
-	{Key: "lastSeenAt", Value: 1}, {Key: "threadUnread", Value: 1},
+	{Key: "siteId", Value: 1}, {Key: "roles", Value: 1}, {Key: "alert", Value: 1},
+	{Key: "threadUnread", Value: 1}, {Key: "lastSeenAt", Value: 1},
+	{Key: "historySharedSince", Value: 1},
 }
 
 func (s *MongoStore) GetRoom(ctx context.Context, id string) (*model.Room, error) {
@@ -1142,30 +1143,42 @@ func (s *MongoStore) ToggleSubscriptionMute(ctx context.Context, roomID, account
 // ToggleSubscriptionFavorite flips favorite. $ifNull treats an absent field as
 // false so legacy docs toggle to true on first call. favoriteUpdatedAt is stamped
 // from the same instant the caller publishes as the event timestamp, keeping the
-// origin doc and every federated replica on one high-water mark.
+// origin doc and every federated replica on one high-water mark. Toggling OFF also
+// clears sectionId/sectionOrder when they were "favorites" (moveChat's manual
+// section membership follows the flag); toggling ON leaves sectionId alone.
 func (s *MongoStore) ToggleSubscriptionFavorite(ctx context.Context, roomID, account string, favoriteUpdatedAt time.Time) (*model.Subscription, error) {
+	turningOff := bson.M{"$and": bson.A{
+		bson.M{"$eq": bson.A{bson.M{"$ifNull": bson.A{"$favorite", false}}, true}},
+		bson.M{"$eq": bson.A{"$sectionId", model.SectionFavorites}},
+	}}
 	return s.findOneAndUpdateSub(ctx, roomID, account, "toggle favorite", bson.M{
 		"favorite":          bson.M{"$not": bson.A{bson.M{"$ifNull": bson.A{"$favorite", false}}}},
 		"favoriteUpdatedAt": favoriteUpdatedAt,
+		"sectionId":         bson.M{"$cond": bson.A{turningOff, "$$REMOVE", "$sectionId"}},
+		"sectionOrder":      bson.M{"$cond": bson.A{turningOff, "$$REMOVE", "$sectionOrder"}},
 	})
 }
 
 // MoveSubscriptionSection sets sectionId+sectionOrder (sectionID != nil) or clears
 // both (sectionID == nil, a remove) on one subscription, stamping sectionUpdatedAt
 // as the high-water mark. Classic update (not the $set pipeline) so a remove can
-// $unset. Returns the post-write sub or model.ErrSubscriptionNotFound (wrapped).
+// $unset. favorite is mirrored alongside: true only when sectionID == "favorites",
+// false otherwise (a remove un-favorites too) — see model.SectionFavorites.
+// Returns the post-write sub or model.ErrSubscriptionNotFound (wrapped).
 func (s *MongoStore) MoveSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, sectionUpdatedAt time.Time) (*model.Subscription, error) {
 	var update bson.M
 	if sectionID == nil {
 		update = bson.M{
-			"$set":   bson.M{"sectionUpdatedAt": sectionUpdatedAt},
+			"$set":   bson.M{"sectionUpdatedAt": sectionUpdatedAt, "favorite": false, "favoriteUpdatedAt": sectionUpdatedAt},
 			"$unset": bson.M{"sectionId": "", "sectionOrder": ""},
 		}
 	} else {
 		update = bson.M{"$set": bson.M{
-			"sectionId":        *sectionID,
-			"sectionOrder":     order,
-			"sectionUpdatedAt": sectionUpdatedAt,
+			"sectionId":         *sectionID,
+			"sectionOrder":      order,
+			"sectionUpdatedAt":  sectionUpdatedAt,
+			"favorite":          *sectionID == model.SectionFavorites,
+			"favoriteUpdatedAt": sectionUpdatedAt,
 		}}
 	}
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)

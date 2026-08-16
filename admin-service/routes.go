@@ -25,4 +25,7 @@ func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID st
 	admin.DELETE("/sessions", h.revokeAllSessions)
 	admin.DELETE("/sessions/:sessionId", h.revokeSession)
 	admin.GET("/audit", h.listAudit)
+	admin.POST("/permissions", h.createPermissions)
+	admin.GET("/permissions", h.listPermissions)
+	admin.POST("/permissions/resync", h.resyncPermissions)
 }

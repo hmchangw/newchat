@@ -69,6 +69,19 @@ func IsValidAccountToken(s string) bool {
 	return true
 }
 
+// UserPrefix is the namespace a client publishes on. Every other namespace
+// (chat.server.*, chat.room.*, chat.inbox.*, chat.outbox.*) is reachable only
+// from inside the platform.
+const UserPrefix = "chat.user."
+
+// IsClientFacing reports whether subj lives in the user-scoped namespace — the
+// subjects a browser or bot client publishes to directly. Callers use it to
+// decide whether message-supplied metadata (headers, W3C baggage) is
+// caller-controlled rather than a trusted upstream hop's.
+func IsClientFacing(subj string) bool {
+	return strings.HasPrefix(subj, UserPrefix)
+}
+
 // ParseUserRoomSubject extracts the user account and roomID from subjects
 // matching the pattern "chat.user.{account}.*.room.{roomID}.…".
 // Returns the user account, roomID, and ok=true on success. The account is
@@ -1362,6 +1375,44 @@ func UserSettingsSet(account, siteID string) string {
 
 func UserSettingsSetPattern(siteID string) string {
 	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.set", siteID)
+}
+
+// Priority-contacts subjects. Nested under settings. because the list lives at
+// settings.priorityContacts and rides the settings fanouts, but it gets its own
+// RPCs because settings.set never writes it. The concrete forms panic on a
+// wildcard account, same guard as the settings helpers.
+
+func UserPriorityContactsGet(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.priorityContacts.get", account, siteID)
+}
+
+func UserPriorityContactsGetPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.priorityContacts.get", siteID)
+}
+
+func UserPriorityContactsAdd(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.priorityContacts.add", account, siteID)
+}
+
+func UserPriorityContactsAddPattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.priorityContacts.add", siteID)
+}
+
+func UserPriorityContactsRemove(account, siteID string) string {
+	if !isValidAccountToken(account) {
+		panic("invalid account token: contains NATS wildcard characters")
+	}
+	return fmt.Sprintf("chat.user.%s.request.user.%s.settings.priorityContacts.remove", account, siteID)
+}
+
+func UserPriorityContactsRemovePattern(siteID string) string {
+	return fmt.Sprintf("chat.user.{account}.request.user.%s.settings.priorityContacts.remove", siteID)
 }
 
 // Chatlist section-definition registry subjects — get + five mutations. The

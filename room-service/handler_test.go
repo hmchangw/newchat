@@ -34,6 +34,10 @@ func ptrBool(b bool) *bool { return &b }
 // (e.g. model.Subscription.SectionId) in test literals.
 func strPtr(s string) *string { return &s }
 
+// ptrInt64 returns a pointer to v, for constructing *int64 fields
+// (e.g. model.AddMembersRequest.HistorySharedSince) in test literals.
+func ptrInt64(v int64) *int64 { return &v }
+
 // expectAllAccountsExist registers a FindExistingAccounts expectation that
 // echoes its input back — i.e. "every account being asked about exists".
 // Used by every add-member / create-channel happy-path test that doesn't
@@ -1049,6 +1053,96 @@ func TestHandler_AddMembers_CapacityShortCircuit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "accepted", resp.Status)
 	assert.True(t, published, "add must be published when the short-circuit accepts")
+}
+
+// A requester whose own history is capped must not grant more via share-all:
+// the published canonical request carries the requester's cap. Mode "none"
+// keeps flooring at the accept timestamp (no cap on the wire), and any
+// client-supplied historySharedSince is overwritten server-side.
+func TestHandler_AddMembers_HistorySharedSinceInheritance(t *testing.T) {
+	requesterHSS := time.UnixMilli(1700000000000).UTC()
+	clientForged := int64(1)
+
+	cases := []struct {
+		name       string
+		reqHistory model.HistoryConfig
+		reqHSS     *int64
+		subHSS     *time.Time
+		wantHSS    *int64
+	}{
+		{"capped requester, mode all → inherit", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, &requesterHSS, ptrInt64(1700000000000)},
+		{"capped requester, empty mode → inherit", model.HistoryConfig{}, nil, &requesterHSS, ptrInt64(1700000000000)},
+		{"uncapped requester, mode all → nil", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, nil, nil},
+		{"capped requester, mode none → cap forwarded (clock-skew guard: worker floors at max(accept ts, cap))", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, &requesterHSS, ptrInt64(1700000000000)},
+		{"client-forged value overwritten", model.HistoryConfig{Mode: model.HistoryModeAll}, &clientForged, nil, nil},
+		{"forged value + capped requester → requester's cap wins", model.HistoryConfig{Mode: model.HistoryModeAll}, &clientForged, &requesterHSS, ptrInt64(1700000000000)},
+		{"forged value + capped requester, mode none → requester's cap wins", model.HistoryConfig{Mode: model.HistoryModeNone}, &clientForged, &requesterHSS, ptrInt64(1700000000000)},
+		{"uncapped requester, mode none → nil", model.HistoryConfig{Mode: model.HistoryModeNone}, nil, nil, nil},
+		{"zero-time requester HSS not inherited", model.HistoryConfig{Mode: model.HistoryModeAll}, nil, &time.Time{}, nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl)
+
+			store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+				User:               model.SubscriptionUser{ID: "u1", Account: "alice"},
+				Roles:              []model.Role{model.RoleMember},
+				HistorySharedSince: tc.subHSS,
+			}, nil)
+			store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
+				ID: "r1", Name: "general", Type: model.RoomTypeChannel, UserCount: 3,
+			}, nil)
+			expectAllAccountsExist(store)
+
+			var publishedReq model.AddMembersRequest
+			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000,
+				publishToStream: func(_ context.Context, _ string, data []byte, _ string) error {
+					require.NoError(t, json.Unmarshal(data, &publishedReq))
+					return nil
+				},
+			}
+			req := model.AddMembersRequest{Users: []string{"bob"}, History: tc.reqHistory, HistorySharedSince: tc.reqHSS}
+
+			resp, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
+			require.NoError(t, err)
+			assert.Equal(t, "accepted", resp.Status)
+
+			if tc.wantHSS == nil {
+				assert.Nil(t, publishedReq.HistorySharedSince)
+			} else {
+				require.NotNil(t, publishedReq.HistorySharedSince)
+				assert.Equal(t, *tc.wantHSS, *publishedReq.HistorySharedSince)
+			}
+		})
+	}
+}
+
+// history.mode is a visibility control where an unknown string must not fall
+// through to the permissive share-all default — the boundary rejects it.
+func TestHandler_AddMembers_InvalidHistoryModeRejected(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", Roles: []model.Role{model.RoleOwner},
+	}, nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Name: "general", Type: model.RoomTypeChannel,
+	}, nil)
+
+	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 10,
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
+			t.Fatal("publishToStream must not be called for an invalid history.mode")
+			return nil
+		},
+	}
+	req := model.AddMembersRequest{Users: []string{"bob"}, History: model.HistoryConfig{Mode: "nonee"}}
+
+	_, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "history.mode")
 }
 
 func TestHandler_AddMembers_RestrictedOwnerAllowed(t *testing.T) {
@@ -2705,15 +2799,80 @@ func TestHandleCreateRoom_RequesterNotFound(t *testing.T) {
 	assert.True(t, errcode.HasReason(err, errcode.RoomUserNotFound), "want RoomUserNotFound, got %v", err)
 }
 
-func TestHandleCreateRoom_RequesterMissingNameFields(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockRoomStore(ctrl)
-	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u-alice", Account: "alice"}, nil)
-	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
+// TestHandleCreateRoom_RequesterNameFields covers #244: the creator check
+// rejects only when BOTH EngName and ChineseName are empty; either alone is
+// sufficient. Bot-requester exemption isn't exercised here (bots don't call
+// createRoom as requester); the DM counterpart's bot exemption is covered by
+// TestHandleCreateRoom_BotDM_AppCounterpartNoNameFields (roomType != DM skips
+// this check entirely for botDM).
+func TestHandleCreateRoom_RequesterNameFields(t *testing.T) {
+	tests := []struct {
+		name      string
+		requester *model.User
+		wantErr   bool
+	}{
+		{"engName only", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice"}, false},
+		{"chineseName only", &model.User{ID: "u-alice", Account: "alice", ChineseName: "愛麗絲"}, false},
+		{"both present", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}, false},
+		{"neither", &model.User{ID: "u-alice", Account: "alice"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl)
+			store.EXPECT().GetUser(gomock.Any(), "alice").Return(tt.requester, nil)
+			if !tt.wantErr {
+				store.EXPECT().GetUser(gomock.Any(), "bob").Return(bobUser(), nil)
+				store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
+					Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
+			}
+			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
 
-	_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Users: []string{"bob"}})
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, errInvalidUserData))
+			_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Users: []string{"bob"}})
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, errInvalidUserData))
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestHandleCreateRoom_DMCounterpartNameFields covers #244 for the DM
+// counterpart check: rejects only when BOTH fields are empty on `other`.
+func TestHandleCreateRoom_DMCounterpartNameFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		other   *model.User
+		wantErr bool
+	}{
+		{"engName only", &model.User{ID: "u-bob", Account: "bob", EngName: "Bob"}, false},
+		{"chineseName only", &model.User{ID: "u-bob", Account: "bob", ChineseName: "陳博"}, false},
+		{"both present", bobUser(), false},
+		{"neither", &model.User{ID: "u-bob", Account: "bob"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl)
+			store.EXPECT().GetUser(gomock.Any(), "alice").Return(aliceUser(), nil)
+			store.EXPECT().GetUser(gomock.Any(), "bob").Return(tt.other, nil)
+			if !tt.wantErr {
+				store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
+					Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
+			}
+			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
+
+			_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Users: []string{"bob"}})
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, errInvalidUserData))
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestHandleCreateRoom_SelfDM_Creates(t *testing.T) {
@@ -6245,6 +6404,49 @@ func TestHandler_FavoriteToggle_CorePublishFailureIsNonFatal(t *testing.T) {
 // needRebalance path: RebalanceSection renumbers every sibling in the
 // section, so moveChat must fan out one section_moved subscription.update
 // (+ cross-site federation event) per rewritten row, not just the moved one.
+// TestHandler_MoveChat_RejectsNonFavoriteBuiltin locks the moveChat gate: every
+// built-in EXCEPT favorites is still rejected before any store call.
+func TestHandler_MoveChat_RejectsNonFavoriteBuiltin(t *testing.T) {
+	for _, id := range []string{model.SectionApps, model.SectionTeams, model.SectionChats} {
+		t.Run(id, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl) // no EXPECT() calls: must reject before touching the store
+			h := &Handler{store: store, siteID: "site-a"}
+
+			sectionID := id
+			_, err := h.moveChat(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MoveChatRequest{SectionID: &sectionID})
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestHandler_MoveChat_AllowsFavorites is the mirror: "favorites" is a built-in
+// id but must pass the gate and reach the normal store path like any custom
+// section (favorite-flag mirroring itself lives in the store layer).
+func TestHandler_MoveChat_AllowsFavorites(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().
+		ComputeSectionOrder(gomock.Any(), "alice", model.SectionFavorites, "", "").
+		Return(1.0, false, nil)
+	store.EXPECT().
+		MoveSubscriptionSection(gomock.Any(), "r1", "alice", gomock.Any(), 1.0, gomock.Any()).
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", SiteID: "site-a", SectionId: strPtr(model.SectionFavorites), SectionOrder: 1, Favorite: true}, nil)
+	store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
+
+	h := &Handler{
+		store: store, siteID: "site-a",
+		publishCore: func(context.Context, string, []byte) error { return nil },
+	}
+
+	sectionID := model.SectionFavorites
+	resp, err := h.moveChat(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MoveChatRequest{SectionID: &sectionID})
+	require.NoError(t, err)
+	require.NotNil(t, resp.SectionID)
+	assert.Equal(t, model.SectionFavorites, *resp.SectionID)
+}
+
 func TestHandler_MoveChat_Rebalance_PublishesAndFederatesAllRows(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)

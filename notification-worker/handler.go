@@ -10,12 +10,15 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 )
@@ -40,18 +43,21 @@ type HandlerDeps struct {
 	Followers          ThreadFollowerLister
 	Parent             ParentFetcher // resolves a thread's parent author + createdAt from history-service
 	Presence           PresenceSnapshotter
+	Settings           UserSettingsSnapshotter // nil → noopUserSettings (pre-enforcement behaviour)
 	Hook               Vetoer
 	Emitter            Emitter
 	RoomMeta           RoomMetaGetter // nil → title falls back to sender.Account
 	BadgeClient        badgeClient    // nil (env-disabled or not wired) → badge phase skipped entirely (Phase A compat)
 	LargeRoomThreshold int
-	RecipientBatchSize int // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
+	RecipientBatchSize int                  // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
+	Metrics            *notificationMetrics // nil → built on the global meter
 }
 
 // Handler runs the per-message fan-out pipeline: exclusion filters, hook veto, EligibleForPush
-// routing, then presence-gated shouldPush — one Emitter.Emit per surviving recipient.
+// routing, then the settings- and presence-gated shouldPush — one Emitter.Emit per surviving recipient.
 type Handler struct {
-	deps HandlerDeps
+	deps    HandlerDeps
+	metrics *notificationMetrics
 }
 
 // isNotifiable reports whether a message type produces push notifications.
@@ -69,15 +75,30 @@ func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one
 	if deps.RecipientBatchSize <= 0 {
 		deps.RecipientBatchSize = defaultRecipientBatchSize
 	}
-	return &Handler{deps: deps}
+	if deps.Settings == nil {
+		deps.Settings = noopUserSettings{}
+	}
+	if deps.Metrics == nil {
+		deps.Metrics = newNotificationMetrics(otel.Meter("notification-worker"))
+	}
+	return &Handler{deps: deps, metrics: deps.Metrics}
 }
 
-func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
+func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error) {
+	outcome := notifySuppressed
+	defer func() {
+		if retErr != nil && outcome == notifySuppressed {
+			outcome = notifyFailed
+		}
+		h.metrics.Record(ctx, notifyKindPush, outcome)
+	}()
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		// Malformed payload — it will never parse on redelivery. Mark permanent so the caller Acks (drops) it instead of retrying until MaxDeliver.
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
+	ctx = obs.ContextWithIdentity(ctx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
 	// Non-created events are filtered at the broker; defensive backstop only.
 	if evt.Event != model.EventCreated && evt.Event != "" {
 		return nil
@@ -210,12 +231,18 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		return nil
 	}
 
+	// Both lookups run over the narrowed candidate set — only accounts that survived
+	// the exclusion filters, never every member of a large room.
+	// TestHandle_SettingsFetchedOnlyForSurvivingCandidates pins that narrowing.
+	// shouldPush combines the two, keyed on the sender's account for the priority pierce.
+	settings, _ := h.deps.Settings.Snapshot(ctx, accounts) // fail-open: error → empty map
 	snapshot, _ := h.deps.Presence.Snapshot(ctx, accounts) // fail-open: error → empty map
 
 	// Sort survivors so batch N has a deterministic account set across redeliveries — required for the {messageID}-b{N} Nats-Msg-Id to dedup correctly.
 	survivors := make([]string, 0, len(candidates))
 	for _, c := range candidates {
-		if !shouldPush(snapshot[c.Account]) {
+		ns := settings[c.Account]
+		if !shouldPush(snapshot[c.Account], ns, ns.isPriority(msg.UserAccount)) {
 			continue
 		}
 		survivors = append(survivors, c.Account)
@@ -268,6 +295,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 			evt.UnreadCounts = counts
 		}
 		if err := h.deps.Emitter.Emit(ctx, evt); err != nil {
+			outcome = notifyPublishFailed
 			slog.Error("emit push batch failed", "error", err, "batch", batchIdx,
 				"recipients", len(batchAccounts), "messageId", msg.ID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
@@ -277,6 +305,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	if len(emitErrs) > 0 {
 		return fmt.Errorf("emit push batches for message %s: %w", msg.ID, errors.Join(emitErrs...))
 	}
+	outcome = notifySent
 	return nil
 }
 

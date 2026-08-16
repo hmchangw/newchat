@@ -73,6 +73,12 @@ func run() error {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 	store := newStoreMongo(mc.Database(cfg.MongoDB))
+	// Bounded timeout so a hung createIndexes surfaces at startup.
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer ensureCancel()
+	if err := store.EnsureIndexes(ensureCtx); err != nil {
+		return fmt.Errorf("ensure store indexes: %w", err)
+	}
 
 	if cfg.RoomKeyGracePeriod <= 0 {
 		return fmt.Errorf("ROOM_KEY_GRACE_PERIOD must be a positive duration, got %s", cfg.RoomKeyGracePeriod)
@@ -92,7 +98,7 @@ func run() error {
 	// LOCAL sysmsg emission on create/add/remove; never federated cross-site.
 	h.sysmsgPub = jsPublishAdapter{js: js}
 
-	router := natsrouter.New(nc, "bot-room-service", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	router := natsrouter.New(nc, "bot-room-service", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency), natsrouter.WithSiteID(cfg.SiteID))
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	h.Register(router)
 
@@ -106,7 +112,7 @@ func run() error {
 	slog.Info("bot-room-service running", "site", cfg.SiteID, "peers", peers)
 	shutdown.Wait(ctx, 25*time.Second,
 		func(dctx context.Context) error { return router.Shutdown(dctx) },
-		func(_ context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(dctx context.Context) error { mongoutil.Disconnect(dctx, mc); return nil },
 		func(dctx context.Context) error { return healthStop(dctx) },
 		func(dctx context.Context) error { return obsShutdown(dctx) },

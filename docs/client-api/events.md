@@ -21,6 +21,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 4. [room.key — room encryption key delivery](#roomkey--room-encryption-key-delivery)
 5. [Room events — per-room live events](#room-events--per-room-live-events)
    - [new_message (RoomEvent)](#new_message-roomevent)
+   - [new_thread_message (RoomEvent)](#new_thread_message-roomevent)
    - [message_edited (EditRoomEvent)](#message_edited-editroomevent)
    - [message_deleted (DeleteRoomEvent)](#message_deleted-deleteroomevent)
    - [message_pinned / message_unpinned (PinStateRoomEvent)](#message_pinned--message_unpinned-pinstateroomevent)
@@ -48,7 +49,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.event.chatlist.update` | ChatlistUpdateEvent |
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
-| `chat.user.{account}.event.room` | same event types as above, per-user fan-out for DM/botDM rooms |
+| `chat.user.{account}.event.room` | same event types as above (per-user fan-out for DM/botDM rooms); **plus `new_thread_message`** — channel thread replies fan out per-subscriber on this subject, not the room subject |
 | `chat.room.{roomID}.event.member` (or `chat.local.room.{roomID}.event.member` for same-site rooms, by `crossSite`) | member_added, member_left / member_removed |
 | `chat.user.{account}.notification` | NotificationEvent (reaction only) |
 | `chat.user.presence.state.{account}` | PresenceState |
@@ -107,6 +108,8 @@ Two shapes exist — discriminated by `action`:
 | `subscription` | [Subscription](../client-api.md#subscription) | Full Subscription record for `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `section_moved` / `opened` / `read`. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](../client-api.md#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms — so clients can render the sidebar entry and store the room key from this single event. On `section_moved`, `sectionId` / `sectionOrder` carry the new placement (both absent = removed from its section). On `read`, `hasMention` and `hasGroupMention` are both `false` — reading the room clears both. |
 | `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"section_moved"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `section_moved` / `opened` / `read`. |
+| `hrInfo` | [CounterpartHRInfo](../client-api.md#counterparthrinfo) | `{account, chineseName, engName}` — the DM counterpart's HR record, so a newly created DM renders from this event alone. Sent on `added` `dm` / `botDM` when the counterpart account does **not** end in `.bot`; on a self-DM it carries the recipient's own record. Both name fields are `omitempty`. Omitted on `channel` / `discussion` rooms and on a lookup miss. |
+| `appInfo` | [CounterpartAppInfo](../client-api.md#counterpartappinfo) | `{id, name, assistantName}` — the counterpart's app record, sent on `added` `botDM` when the counterpart account ends in `.bot`. `name` is empty when the app document has none, and `roomName` then falls back to the bot account. Mutually exclusive with `hrInfo`; omitted on a lookup miss. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 ```json
@@ -136,6 +139,30 @@ Two shapes exist — discriminated by `action`:
   },
   "action": "added",
   "roomName": "engineering-announcements",
+  "timestamp": 1778054483000
+}
+```
+
+A newly created **DM** carries the counterpart's `hrInfo`; a **botDM** carries `appInfo`
+on the human member's copy (the bot's copy carries the human's `hrInfo`):
+
+```json
+{
+  "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+  "subscription": {
+    "id": "01970a4f8c2d7c9a01970a4f8c2d7c9c",
+    "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice", "isBot": false },
+    "roomId": "01970a4f8c2d7c9a01970a4f8c2d7c9b",
+    "roomType": "dm",
+    "siteId": "siteA",
+    "roles": null,
+    "name": "bob",
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": { "siteId": "siteA", "crossSite": false, "userCount": 2 }
+  },
+  "action": "added",
+  "roomName": "Bob Chan 陳大文",
+  "hrInfo": { "account": "bob", "chineseName": "陳大文", "engName": "Bob Chan" },
   "timestamp": 1778054483000
 }
 ```
@@ -183,9 +210,17 @@ Open Room (`opened`), Mark Messages Read (`read`) — see [request-reply.md](req
 
 **Subject:** `chat.user.{account}.event.settings.update`
 
-Published by user-service after every successful [settings.set](request-reply.md#settingsset)
+Published by user-service after every successful
+[settings.set](request-reply.md#settingsset),
+[settings.priorityContacts.add](request-reply.md#settingsprioritycontactsadd),
+or [settings.priorityContacts.remove](request-reply.md#settingsprioritycontactsremove)
 — ephemeral core-NATS fan-out to the caller's own connected devices, so other
-logged-in clients sync live. Best-effort: a fan-out failure does not fail the set.
+logged-in clients sync live. Best-effort: a fan-out failure does not fail the
+triggering call. `settings.priorityContacts.get` is a pure read and never
+publishes this event. Exception: a `settings.priorityContacts.add` for a
+contact already present AND the list already at the 30-entry cap skips the
+publish too (the write misses, the re-read finds the contact already there,
+and the call returns early); a duplicate add under the cap still publishes.
 
 The payload carries the **full post-update settings** — receivers replace their
 local copy, they never merge deltas. A field absent from `settings` was never
@@ -197,7 +232,7 @@ server never injects defaults).
 | Field | Type | Notes |
 |---|---|---|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | Full post-update settings; all nine fields optional. |
+| `settings` | UserSettings | Full post-update settings; all ten fields optional. |
 
 UserSettings — every field optional, present only when explicitly set:
 
@@ -212,6 +247,15 @@ UserSettings — every field optional, present only when explicitly set:
 | `showPreviewsInNotifications` | boolean |
 | `showNotificationsInCall` | boolean |
 | `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
+| `priorityContacts` | string[] |
+
+`priorityContacts` here is the **raw list of contact accounts** (`[]string`),
+not the enriched `PriorityContactItem[]` shape returned by
+[settings.priorityContacts.get](request-reply.md#settingsprioritycontactsget).
+This is deliberate: the fanout mirrors what's stored, not a display-ready
+projection. A device that needs display names (engName/chineseName/app name)
+re-issues `settings.priorityContacts.get` rather than reading them off this
+event.
 
 ```json
 {
@@ -321,11 +365,13 @@ The `type` field discriminates the event. All payloads carry `type`, `roomId`,
 
 ### new_message (RoomEvent)
 
-The live fan-out for a newly created message (plain send, thread reply, quoted send, or
-system message). Triggered by [Send Message](request-reply.md#send-message).
+The live fan-out for a newly created non-thread message (plain send, quoted send, or
+system message). Triggered by [Send Message](request-reply.md#send-message). Thread
+replies publish [`new_thread_message`](#new_thread_message-roomevent) instead.
 
-**botDM rooms receive no `new_message` fan-out** — `broadcast-worker` skips `botDM`
-room types; bots consume messages through a separate backend path.
+**botDM rooms fan out to the human member, not the bot** — `broadcast-worker` publishes the
+`RoomEvent` to each non-bot member and skips the bot account (`isBot`); the bot side consumes
+messages through a separate backend path.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -419,6 +465,59 @@ DM example (plaintext):
     "userAccount": "alice",
     "content": "morning team",
     "createdAt": "2026-05-06T07:55:00Z",
+    "sender": {
+      "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+      "account": "alice",
+      "chineseName": "愛麗絲",
+      "engName": "Alice"
+    }
+  }
+}
+```
+
+---
+
+### new_thread_message (RoomEvent)
+
+The live fan-out for a newly created thread reply. Same [RoomEvent](#new_message-roomevent)
+shape as `new_message` (see field table + `ClientMessage` above) — only `type` differs.
+Triggered by [Send Message](request-reply.md#send-message) when `threadParentMessageId`
+is set. Thread edits/deletes still publish `message_edited` / `message_deleted`; only the
+create event gets the distinct type.
+
+**Delivery differs from `new_message`.** A channel thread reply is **not** published room-wide on
+`chat.room.{roomID}.event`; it fans out **per-subscriber** on `chat.user.{account}.event.room` to the
+reply sender, the parent-message author, thread followers (anyone who has replied in the thread), and
+history-gated @-mentioned accounts. DM/botDM thread replies fan out **per member** on the same
+`chat.user.{account}.event.room` subject — the bot account is skipped (`isBot`), same as an ordinary
+`new_message` in a botDM.
+
+| Field | Type | Notes |
+|---|---|---|
+| `type` | string | Always `"new_thread_message"`. |
+
+Channel example:
+
+```json
+{
+  "type": "new_thread_message",
+  "roomId": "01970a4f8c2d7c9aQ",
+  "timestamp": 1746518100123,
+  "eventTimestamp": 1746518100100,
+  "roomName": "engineering-announcements",
+  "roomType": "channel",
+  "siteId": "siteA",
+  "userCount": 12,
+  "lastMsgAt": "2026-05-06T07:55:00Z",
+  "lastMsgId": "01970a4f8c2d7c9aQRST",
+  "message": {
+    "id": "01970a4f8c2d7c9aQRST",
+    "roomId": "01970a4f8c2d7c9aQ",
+    "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+    "userAccount": "alice",
+    "content": "replying in thread",
+    "createdAt": "2026-05-06T07:55:00Z",
+    "threadParentMessageId": "01970a4f8c2d7c9aPARENT",
     "sender": {
       "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
       "account": "alice",
@@ -636,7 +735,7 @@ independently.
 | `eventTimestamp` | number | Optional. Epoch ms (UTC). When message-worker published the canonical event. Prefer over `timestamp` for ordering. |
 | `parentMessageId` | string | The thread parent message's ID. Use to locate the message in your cache and update its badge. |
 | `replyMessageId` | string | The reply that was added or deleted. |
-| `newTcount` | number | Authoritative reply count for the parent message, capped at 99 (99 means "99 or more"). Apply directly — do not delta. |
+| `newTcount` | number | Authoritative exact reply count for the parent message. Apply directly — do not delta. |
 | `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent when `newTcount` is 0. |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 
@@ -833,7 +932,7 @@ message pipeline as a `new_message` room event; a pure org→individual upgrade 
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
-| `historySharedSince` | number | Optional. Epoch ms (UTC); present when prior history is shared with new members. |
+| `historySharedSince` | number | Optional. Epoch ms (UTC); the new members' history boundary, present when their history is restricted. For `history.mode: "none"` adds it is the add time or the requester's own boundary, whichever is later; for a share-all add by a requester whose own history is capped it is the requester's inherited boundary. Absent = unrestricted. |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 
 ---

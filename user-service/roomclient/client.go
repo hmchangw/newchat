@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -42,7 +43,7 @@ func (c *Client) roomsInfo(ctx context.Context, siteID string, roomIDs []string,
 	}
 	msg, err := c.nc.Request(ctx, subject.RoomsInfoBatch(siteID), req, roomRPCTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("rooms-info rpc: %w", err)
+		return nil, natsutil.RequestFailure("rooms-info rpc", err)
 	}
 	// Relay any remote error envelope as-is — including one carrying a code outside
 	// our closed set — so the original classification/message is never masked.
@@ -65,7 +66,7 @@ func (c *Client) GetThreadRoomInfoBatch(ctx context.Context, siteID string, thre
 	}
 	msg, err := c.nc.Request(ctx, subject.ThreadRoomInfoBatch(siteID), req, roomRPCTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("thread-room-info rpc: %w", err)
+		return nil, natsutil.RequestFailure("thread-room-info rpc", err)
 	}
 	if e, ok := errcode.Parse(msg.Data); ok {
 		return nil, e
@@ -87,7 +88,7 @@ func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account strin
 	}
 	msg, err := c.nc.Request(ctx, subject.RoomThreadReadAll(siteID), req, roomRPCTimeout)
 	if err != nil {
-		return fmt.Errorf("clear-all-thread-unread rpc: %w", err)
+		return natsutil.RequestFailure("clear-all-thread-unread rpc", err)
 	}
 	if e, ok := errcode.Parse(msg.Data); ok {
 		return e
@@ -107,7 +108,7 @@ func (c *Client) CreateDMRoom(ctx context.Context, account, otherAccount string,
 	}
 	msg, err := c.nc.Request(ctx, subject.RoomCreateDMSync(c.siteID), body, roomRPCTimeout)
 	if err != nil {
-		return model.Subscription{}, fmt.Errorf("create-dm rpc: %w", err)
+		return model.Subscription{}, natsutil.RequestFailure("create-dm rpc", err)
 	}
 	// Relay any remote error envelope as-is — including one carrying a code outside
 	// our closed set — so the original classification/message is never masked.

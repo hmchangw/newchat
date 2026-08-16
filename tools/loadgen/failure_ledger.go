@@ -1,0 +1,1867 @@
+package main
+
+import (
+	"bufio"
+	"container/heap"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"sync"
+	"time"
+)
+
+type failureObserver string
+
+const (
+	failureObserverAdmission failureObserver = "admission"
+	failureObserverHistory   failureObserver = "cassandra_history"
+)
+
+const failureObserverContractSchemaVersion = 1
+
+type failureObserverContract struct {
+	SchemaVersion            int               `json:"schemaVersion"`
+	Scenario                 string            `json:"scenario"`
+	Observers                []failureObserver `json:"observers"`
+	RecipientObserverEnabled bool              `json:"recipientObserverEnabled"`
+}
+
+func newFailureObserverContract(recipientEnabled bool) failureObserverContract {
+	observers := []failureObserver{failureObserverAdmission, failureObserverHistory}
+	if recipientEnabled {
+		observers = append(observers, failureObserverRecipient)
+	}
+	return failureObserverContract{
+		SchemaVersion: failureObserverContractSchemaVersion,
+		Scenario:      soakFailureScenario, Observers: observers,
+		RecipientObserverEnabled: recipientEnabled,
+	}
+}
+
+type failureOperationType string
+
+const failureOperationMessageCreate failureOperationType = "message_create"
+
+type failureOperationLifecycle string
+
+const (
+	failureOperationJournaled failureOperationLifecycle = "journaled"
+	failureOperationActive    failureOperationLifecycle = "active"
+)
+
+type failureEffect string
+
+const (
+	failureEffectAdmission        failureEffect = "admission"
+	failureEffectMessagePersisted failureEffect = "message_persisted"
+	failureEffectRecipientEvent   failureEffect = "recipient_event"
+)
+
+type failureCardinality struct {
+	Mode   string `json:"mode"`
+	Count  int    `json:"count"`
+	SHA256 string `json:"sha256"`
+}
+
+type failureExpectedEffect struct {
+	Effect      failureEffect       `json:"effect"`
+	Observer    failureObserver     `json:"observer"`
+	Required    bool                `json:"required"`
+	Cardinality *failureCardinality `json:"cardinality,omitempty"`
+}
+
+func messageCreateExpectedEffects(recipientCount int, recipientHash string) []failureExpectedEffect {
+	return messageCreateExpectedEffectsForObservers(true, recipientCount, recipientHash)
+}
+
+func messageCreateExpectedEffectsForObservers(
+	recipientEnabled bool,
+	recipientCount int,
+	recipientHash string,
+) []failureExpectedEffect {
+	effects := []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: failureEffectMessagePersisted, Observer: failureObserverHistory, Required: true},
+	}
+	if recipientEnabled {
+		effects = append(effects, failureExpectedEffect{
+			Effect: failureEffectRecipientEvent, Observer: failureObserverRecipient, Required: true,
+			Cardinality: &failureCardinality{Mode: "exact_set_hash", Count: recipientCount, SHA256: recipientHash},
+		})
+	}
+	return effects
+}
+
+type failureObservation string
+
+const (
+	failureObservationGood failureObservation = "good"
+	failureObservationBad  failureObservation = "bad"
+	// failureObservationUnverified records that the observer itself could not
+	// answer. It is an availability signal, never evidence of data loss.
+	failureObservationUnverified           failureObservation = "unverified"
+	failureObservationMissingAfterDeadline failureObservation = "missing_after_deadline"
+)
+
+type failureReason string
+
+const (
+	failureReasonNone                      failureReason = ""
+	failureReasonAdmissionRejected         failureReason = "admission_rejected"
+	failureReasonHistoryContentMismatch    failureReason = "history_content_mismatch"
+	failureReasonHistoryMissing            failureReason = "history_missing"
+	failureReasonRecipientDuplicate        failureReason = "recipient_duplicate"
+	failureReasonRecipientUnexpected       failureReason = "recipient_unexpected"
+	failureReasonRecipientIdentityMismatch failureReason = "recipient_identity_mismatch"
+	failureReasonRecipientMissing          failureReason = "recipient_missing"
+	failureReasonPublishLocalError         failureReason = "publish_local_error"
+)
+
+var failureReasonRegistry = map[failureReason]struct{}{
+	failureReasonNone: {}, failureReasonAdmissionRejected: {},
+	failureReasonHistoryContentMismatch: {}, failureReasonHistoryMissing: {},
+	failureReasonRecipientDuplicate: {}, failureReasonRecipientUnexpected: {},
+	failureReasonRecipientIdentityMismatch: {}, failureReasonRecipientMissing: {},
+	failureReasonPublishLocalError: {},
+}
+
+var errFailureObserverContractMismatch = errors.New("failure observer contract mismatch")
+
+type failureResult string
+
+const (
+	failureResultGood       failureResult = "good"
+	failureResultBad        failureResult = "bad"
+	failureResultUnverified failureResult = "unverified"
+	// failureResultNotSent terminates an operation whose intent was journaled
+	// but whose publish never left the process, so no side effect is expected.
+	failureResultNotSent              failureResult = "not_sent"
+	failureResultMissingAfterDeadline failureResult = "missing_after_deadline"
+)
+
+var (
+	errFailureLedgerCapacity     = errors.New("failure ledger capacity exceeded")
+	errFailureOperationNotActive = errors.New("failure operation is not active")
+)
+
+const invalidReasonCapacity = "capacity"
+
+var failureInvalidationReasonRegistry = map[string]struct{}{
+	"capacity": {}, "wal": {}, "accounting_invariant": {}, "observer_queue": {},
+	"observer_malformed": {}, "recipient_recovery": {}, "recipient_observer": {},
+	"timeline": {}, "other": {},
+	"sidecar": {},
+}
+
+var failureOperationScenarioRegistry = map[string]struct{}{
+	soakFailureScenario: {},
+}
+
+var failureOperationLaneRegistry = map[string]struct{}{
+	"message_send": {},
+}
+
+type failureOperation struct {
+	SchemaVersion      int                                    `json:"schemaVersion,omitempty"`
+	ID                 string                                 `json:"operationId"`
+	CorrelationID      string                                 `json:"correlationId,omitempty"`
+	RunID              string                                 `json:"runId,omitempty"`
+	Scenario           string                                 `json:"scenario"`
+	Lane               string                                 `json:"lane"`
+	OperationType      failureOperationType                   `json:"operationType,omitempty"`
+	StartedAt          time.Time                              `json:"startedAt"`
+	VerifyAfter        time.Time                              `json:"verifyAfter"`
+	Deadline           time.Time                              `json:"deadline"`
+	Targets            map[string]string                      `json:"targets,omitempty"`
+	Effects            []failureExpectedEffect                `json:"expectedEffects,omitempty"`
+	Expected           []failureObserver                      `json:"expected,omitempty"`
+	Attributes         map[string]string                      `json:"attributes,omitempty"`
+	Observations       map[failureObserver]failureObservation `json:"observations,omitempty"`
+	ObservationReasons map[failureObserver]failureReason      `json:"observationReasons,omitempty"`
+	FinalResult        failureResult                          `json:"finalResult,omitempty"`
+	FinalReason        failureReason                          `json:"finalReason,omitempty"`
+	EvidenceRefs       []string                               `json:"evidenceRefs,omitempty"`
+	LifecycleState     failureOperationLifecycle              `json:"lifecycleState,omitempty"`
+
+	nextVerifyAt time.Time
+	claimed      bool
+	// heapIndex is the operation's position in the ledger's verification queue,
+	// or -1 when it is not queued.
+	heapIndex int
+}
+
+type failureLedgerEvent struct {
+	SchemaVersion     int                                               `json:"schemaVersion,omitempty"`
+	Type              string                                            `json:"type"`
+	Operation         *failureOperation                                 `json:"operation,omitempty"`
+	OperationID       string                                            `json:"operationId,omitempty"`
+	Observer          failureObserver                                   `json:"observer,omitempty"`
+	Observation       failureObservation                                `json:"observation,omitempty"`
+	Reason            failureReason                                     `json:"reason,omitempty"`
+	Result            failureResult                                     `json:"result,omitempty"`
+	Results           map[failureResult]uint64                          `json:"results,omitempty"`
+	ObservationCounts map[failureObserver]map[failureObservation]uint64 `json:"observationCounts,omitempty"`
+	NotSent           []string                                          `json:"notSent,omitempty"`
+	At                time.Time                                         `json:"at"`
+}
+
+//nolint:gocritic // A value receiver preserves json.Marshaler behavior for operation values and pointers.
+func (o failureOperation) MarshalJSON() ([]byte, error) {
+	type operationAlias failureOperation
+	if o.SchemaVersion == 0 {
+		legacy := struct {
+			ID string `json:"id"`
+			operationAlias
+		}{ID: o.ID, operationAlias: operationAlias(o)}
+		legacy.operationAlias.ID = ""
+		return json.Marshal(legacy)
+	}
+	return json.Marshal(operationAlias(o))
+}
+
+func (o *failureOperation) UnmarshalJSON(data []byte) error {
+	type operationAlias failureOperation
+	var decoded struct {
+		LegacyID string `json:"id"`
+		operationAlias
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*o = failureOperation(decoded.operationAlias)
+	if o.ID == "" {
+		o.ID = decoded.LegacyID
+	}
+	return nil
+}
+
+const (
+	failureLedgerEventStarted    = "started"
+	failureLedgerEventActivated  = "activated"
+	failureLedgerEventObserved   = "observed"
+	failureLedgerEventFinalized  = "finalized"
+	failureLedgerEventCheckpoint = "checkpoint"
+	failureLedgerEventInvariant  = "accounting_invariant"
+)
+
+type failureJournal interface {
+	Replay() ([]failureLedgerEvent, error)
+	Append(*failureLedgerEvent) error
+	Compact([]failureLedgerEvent) error
+	Size() int64
+	Close() error
+}
+
+type failureLedgerConfig struct {
+	Capacity         int
+	CompactEvery     int
+	Journal          failureJournal
+	Now              func() time.Time
+	Recorder         failureLedgerRecorder
+	ObserverContract *failureObserverContract
+}
+
+type failureLedgerRecorder interface {
+	OperationStarted(*failureOperation)
+	ObservationRecorded(*failureOperation, failureObserver, failureObservation)
+	OperationFinalized(*failureOperation, failureResult)
+	Recovered(int)
+	Invalidated(string)
+	JournalSize(int64)
+}
+
+type failureLedgerSnapshot struct {
+	Active        int
+	Recovered     int
+	Dropped       int
+	InvalidReason string
+	Results       map[failureResult]uint64
+	Observations  map[failureObserver]map[failureObservation]uint64
+	JournalBytes  int64
+}
+
+type failureLedger struct {
+	mu         sync.Mutex
+	startingWG sync.WaitGroup
+
+	capacity     int
+	compactEvery int
+	journal      failureJournal
+	now          func() time.Time
+	recorder     failureLedgerRecorder
+
+	active                map[string]*failureOperation
+	starting              map[string]struct{}
+	verifyQueue           failureVerifyQueue
+	results               map[failureResult]uint64
+	observations          map[failureObserver]map[failureObservation]uint64
+	notSent               map[string]struct{}
+	notSentOrder          []string
+	recovered             int
+	dropped               int
+	invalidReason         string
+	closed                bool
+	finalizedSinceCompact int
+}
+
+// failureVerifyQueue orders unclaimed operations by their next verification
+// time so ClaimDue is O(log n) instead of scanning every in-flight operation
+// under the lock that also serializes fsync-bearing journal appends.
+type failureVerifyQueue []*failureOperation
+
+func (q failureVerifyQueue) Len() int { return len(q) }
+
+func (q failureVerifyQueue) Less(i, j int) bool {
+	return q[i].nextVerifyAt.Before(q[j].nextVerifyAt)
+}
+
+func (q failureVerifyQueue) Swap(i, j int) {
+	q[i], q[j] = q[j], q[i]
+	q[i].heapIndex = i
+	q[j].heapIndex = j
+}
+
+func (q *failureVerifyQueue) Push(item any) {
+	operation, ok := item.(*failureOperation)
+	if !ok {
+		return
+	}
+	operation.heapIndex = len(*q)
+	*q = append(*q, operation)
+}
+
+func (q *failureVerifyQueue) Pop() any {
+	old := *q
+	last := len(old) - 1
+	operation := old[last]
+	old[last] = nil
+	operation.heapIndex = -1
+	*q = old[:last]
+	return operation
+}
+
+func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
+	if cfg.Capacity <= 0 {
+		return nil, fmt.Errorf("failure ledger capacity must be greater than zero")
+	}
+	if cfg.Now == nil {
+		cfg.Now = func() time.Time { return time.Now().UTC() }
+	}
+	if cfg.CompactEvery <= 0 {
+		cfg.CompactEvery = 10000
+	}
+	ledger := &failureLedger{
+		capacity:     cfg.Capacity,
+		compactEvery: cfg.CompactEvery,
+		journal:      cfg.Journal,
+		now:          cfg.Now,
+		recorder:     cfg.Recorder,
+		active:       make(map[string]*failureOperation, cfg.Capacity),
+		starting:     make(map[string]struct{}),
+		results:      make(map[failureResult]uint64),
+		observations: make(map[failureObserver]map[failureObservation]uint64),
+		notSent:      make(map[string]struct{}),
+	}
+	if cfg.Journal == nil {
+		return ledger, nil
+	}
+	events, err := cfg.Journal.Replay()
+	if err != nil {
+		return nil, fmt.Errorf("replay failure ledger journal: %w", err)
+	}
+	if err := ledger.replay(events); err != nil {
+		return nil, err
+	}
+	if cfg.ObserverContract != nil {
+		configurer, ok := cfg.Journal.(interface {
+			ConfigureObserverContract(failureObserverContract, []failureOperation) error
+		})
+		if !ok {
+			return nil, fmt.Errorf("failure journal does not support observer contracts")
+		}
+		active := make([]failureOperation, 0, len(ledger.active))
+		for _, operation := range ledger.active {
+			active = append(active, *cloneFailureOperation(operation))
+		}
+		if err := configurer.ConfigureObserverContract(*cfg.ObserverContract, active); err != nil {
+			return nil, fmt.Errorf("validate failure observer contract; start a new SOAK_RUN_ID: %w", err)
+		}
+	}
+	if upgrade, ok := cfg.Journal.(interface{ NeedsUpgrade() bool }); ok && upgrade.NeedsUpgrade() {
+		if err := ledger.compactLocked(cfg.Now().UTC()); err != nil {
+			return nil, fmt.Errorf("upgrade legacy failure ledger journal: %w", err)
+		}
+	}
+	ledger.recovered = len(ledger.active)
+	if ledger.recorder != nil {
+		ledger.recorder.Recovered(ledger.recovered)
+		ledger.recorder.JournalSize(cfg.Journal.Size())
+		for _, operation := range ledger.active {
+			ledger.recorder.OperationStarted(cloneFailureOperation(operation))
+		}
+	}
+	return ledger, nil
+}
+
+func (l *failureLedger) Start(operation *failureOperation) error {
+	tracked := cloneFailureOperation(operation)
+	if err := validateFailureOperation(tracked); err != nil {
+		return fmt.Errorf("start failure operation: %w", err)
+	}
+	tracked.Observations = make(map[failureObserver]failureObservation)
+	tracked.ObservationReasons = make(map[failureObserver]failureReason)
+	tracked.nextVerifyAt = tracked.VerifyAfter
+
+	l.mu.Lock()
+	if err := l.ensureOpen(); err != nil {
+		l.mu.Unlock()
+		return err
+	}
+	_, active := l.active[tracked.ID]
+	_, starting := l.starting[tracked.ID]
+	if active || starting {
+		l.mu.Unlock()
+		return fmt.Errorf("failure operation %q is already active", tracked.ID)
+	}
+	if len(l.active)+len(l.starting) >= l.capacity {
+		l.invalidateLocked(invalidReasonCapacity)
+		l.mu.Unlock()
+		return fmt.Errorf("start failure operation %q: %w", tracked.ID, errFailureLedgerCapacity)
+	}
+	l.starting[tracked.ID] = struct{}{}
+	l.startingWG.Add(1)
+	l.mu.Unlock()
+
+	event := failureLedgerEvent{
+		Type: failureLedgerEventStarted, Operation: cloneFailureOperation(tracked),
+		At: l.now().UTC(),
+	}
+	var appendErr error
+	if l.journal != nil {
+		appendErr = l.journal.Append(&event)
+	}
+
+	l.mu.Lock()
+	delete(l.starting, tracked.ID)
+	defer func() {
+		l.mu.Unlock()
+		l.startingWG.Done()
+	}()
+	if appendErr != nil {
+		l.invalidateLocked("wal")
+		return fmt.Errorf("persist failure operation %q: %w", tracked.ID, appendErr)
+	}
+	if l.recorder != nil && l.journal != nil {
+		l.recorder.JournalSize(l.journal.Size())
+	}
+	l.active[tracked.ID] = tracked
+	l.enqueueLocked(tracked)
+	if l.recorder != nil {
+		l.recorder.OperationStarted(cloneFailureOperation(tracked))
+	}
+	return nil
+}
+
+func (l *failureLedger) Activate(operationID string, at time.Time) error {
+	if at.IsZero() {
+		at = l.now()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.ensureOpen(); err != nil {
+		return err
+	}
+	operation := l.active[operationID]
+	if operation == nil {
+		return fmt.Errorf("activate failure operation %q: %w", operationID, errFailureOperationNotActive)
+	}
+	if operation.LifecycleState == failureOperationActive {
+		return nil
+	}
+	if operation.LifecycleState != failureOperationJournaled {
+		return fmt.Errorf("activate failure operation %q: invalid lifecycle state %q", operationID, operation.LifecycleState)
+	}
+	event := failureLedgerEvent{
+		Type: failureLedgerEventActivated, OperationID: operationID, At: at.UTC(),
+	}
+	if err := l.appendLocked(&event); err != nil {
+		l.invalidateLocked("wal")
+		return fmt.Errorf("persist activated failure operation %q: %w", operationID, err)
+	}
+	operation.LifecycleState = failureOperationActive
+	return nil
+}
+
+// Abandon terminates an active operation with an explicit result. It exists for
+// outcomes that no observer can report, most importantly a send whose intent was
+// journaled before a publish that never left the process: without this the
+// unresolved history observer would later expire into the data-loss bucket.
+func (l *failureLedger) Abandon(
+	operationID string,
+	result failureResult,
+	at time.Time,
+) error {
+	reason := failureReasonNone
+	if result == failureResultNotSent {
+		reason = failureReasonPublishLocalError
+	}
+	return l.AbandonWithReason(operationID, result, reason, at)
+}
+
+func (l *failureLedger) AbandonWithReason(
+	operationID string,
+	result failureResult,
+	reason failureReason,
+	at time.Time,
+) error {
+	if !validFailureResult(result) {
+		return fmt.Errorf("invalid failure result %q", result)
+	}
+	if _, known := failureReasonRegistry[reason]; !known {
+		return fmt.Errorf("unsupported failure final reason %q", reason)
+	}
+	if result == failureResultBad && reason == failureReasonNone {
+		return fmt.Errorf("bad failure result requires a bounded reason")
+	}
+	if result == failureResultNotSent && reason != failureReasonPublishLocalError {
+		return fmt.Errorf("not_sent requires reason %q", failureReasonPublishLocalError)
+	}
+	if at.IsZero() {
+		at = l.now()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.ensureOpen(); err != nil {
+		return err
+	}
+	operation := l.active[operationID]
+	if operation == nil {
+		return fmt.Errorf("abandon failure operation %q: %w", operationID, errFailureOperationNotActive)
+	}
+	if result == failureResultNotSent && operation.LifecycleState == failureOperationActive {
+		return fmt.Errorf("abandon failure operation %q as not_sent: publish was attempted", operationID)
+	}
+	if err := l.finalizeLocked(operation, result, reason, at); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (l *failureLedger) Observe(
+	operationID string,
+	observer failureObserver,
+	observation failureObservation,
+	at time.Time,
+) (bool, error) {
+	return l.ObserveWithReason(
+		operationID,
+		observer,
+		observation,
+		defaultFailureReason(observer, observation),
+		at,
+	)
+}
+
+func (l *failureLedger) ObserveWithReason(
+	operationID string,
+	observer failureObserver,
+	observation failureObservation,
+	reason failureReason,
+	at time.Time,
+) (bool, error) {
+	if _, known := failureReasonRegistry[reason]; !known {
+		return false, fmt.Errorf("unsupported failure observation reason %q", reason)
+	}
+	if (observation == failureObservationBad ||
+		observation == failureObservationMissingAfterDeadline) && reason == failureReasonNone {
+		return false, fmt.Errorf("failure observation %q requires a bounded reason", observation)
+	}
+	if observation != failureObservationBad &&
+		observation != failureObservationMissingAfterDeadline &&
+		reason != failureReasonNone {
+		return false, fmt.Errorf("failure observation %q cannot use negative reason %q", observation, reason)
+	}
+	if at.IsZero() {
+		at = l.now()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.ensureOpen(); err != nil {
+		return false, err
+	}
+	operation := l.active[operationID]
+	if operation == nil {
+		if _, notSent := l.notSent[operationID]; notSent {
+			event := failureLedgerEvent{
+				Type: failureLedgerEventInvariant, OperationID: operationID,
+				Observer: observer, Observation: observation, At: at.UTC(),
+			}
+			if err := l.appendLocked(&event); err != nil {
+				l.invalidateLocked("wal")
+				return false, fmt.Errorf("persist accounting invariant for %q: %w", operationID, err)
+			}
+			l.invalidateLocked("accounting_invariant")
+			return false, fmt.Errorf("failure operation %q accounting invariant: downstream effect observed after not_sent", operationID)
+		}
+		return false, fmt.Errorf(
+			"observe failure operation %q: %w", operationID, errFailureOperationNotActive,
+		)
+	}
+	if !slices.Contains(operation.Expected, observer) {
+		return false, fmt.Errorf(
+			"failure operation %q does not expect observer %q",
+			operationID,
+			observer,
+		)
+	}
+	if !validFailureObservation(observation) {
+		return false, fmt.Errorf("invalid failure observation %q", observation)
+	}
+	if existing, exists := operation.Observations[observer]; exists {
+		if existing == observation {
+			return false, nil
+		}
+		return false, fmt.Errorf(
+			"failure operation %q observer %q is already %q",
+			operationID,
+			observer,
+			existing,
+		)
+	}
+	if at.IsZero() {
+		at = l.now()
+	}
+	event := failureLedgerEvent{
+		Type: failureLedgerEventObserved, OperationID: operationID,
+		Observer: observer, Observation: observation, Reason: reason, At: at.UTC(),
+	}
+	if err := l.appendLocked(&event); err != nil {
+		l.invalidateLocked("wal")
+		return false, fmt.Errorf("persist failure observation for %q: %w", operationID, err)
+	}
+	operation.Observations[observer] = observation
+	operation.ObservationReasons[observer] = reason
+	l.countObservationLocked(observer, observation)
+	operation.claimed = false
+	l.dequeueLocked(operation)
+	if l.recorder != nil {
+		l.recorder.ObservationRecorded(
+			cloneFailureOperation(operation), observer, observation,
+		)
+		if recorder, ok := l.recorder.(interface {
+			ObservationReasonRecorded(*failureOperation, failureObserver, failureObservation, failureReason)
+		}); ok {
+			recorder.ObservationReasonRecorded(
+				cloneFailureOperation(operation), observer, observation, reason,
+			)
+		}
+	}
+	if len(operation.Observations) != len(operation.Expected) {
+		l.enqueueLocked(operation)
+		return false, nil
+	}
+	result := failureOperationResult(operation)
+	if err := l.finalizeLocked(operation, result, failureOperationFinalReason(operation, result), at); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func defaultFailureReason(
+	observer failureObserver,
+	observation failureObservation,
+) failureReason {
+	switch {
+	case observer == failureObserverAdmission && observation == failureObservationBad:
+		return failureReasonAdmissionRejected
+	case observer == failureObserverHistory && observation == failureObservationBad:
+		return failureReasonHistoryContentMismatch
+	case observer == failureObserverHistory && observation == failureObservationMissingAfterDeadline:
+		return failureReasonHistoryMissing
+	case observer == failureObserverRecipient && observation == failureObservationBad:
+		return failureReasonRecipientIdentityMismatch
+	case observer == failureObserverRecipient && observation == failureObservationMissingAfterDeadline:
+		return failureReasonRecipientMissing
+	default:
+		return failureReasonNone
+	}
+}
+
+func (l *failureLedger) Expire(now time.Time) (int, error) {
+	if now.IsZero() {
+		now = l.now()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.ensureOpen(); err != nil {
+		return 0, err
+	}
+	finalized := 0
+	for _, operation := range l.active {
+		if now.Before(operation.Deadline) {
+			continue
+		}
+		// A claimed operation is mid-verification. Finalizing it here would
+		// discard a read-back that is about to succeed and report the message
+		// as missing; the next pass picks it up once the claim is released.
+		if operation.claimed {
+			continue
+		}
+		for _, observer := range operation.Expected {
+			if _, exists := operation.Observations[observer]; exists {
+				continue
+			}
+			event := failureLedgerEvent{
+				Type: failureLedgerEventObserved, OperationID: operation.ID,
+				Observer: observer, Observation: failureObservationUnverified,
+				At: now.UTC(),
+			}
+			if err := l.appendLocked(&event); err != nil {
+				l.invalidateLocked("wal")
+				return finalized, fmt.Errorf(
+					"persist expired failure observation for %q: %w", operation.ID, err,
+				)
+			}
+			operation.Observations[observer] = failureObservationUnverified
+			operation.ObservationReasons[observer] = failureReasonNone
+			l.countObservationLocked(observer, failureObservationUnverified)
+			if l.recorder != nil {
+				l.recorder.ObservationRecorded(
+					cloneFailureOperation(operation), observer,
+					failureObservationUnverified,
+				)
+			}
+		}
+		result := failureOperationResult(operation)
+		if err := l.finalizeLocked(
+			operation, result, failureOperationFinalReason(operation, result), now,
+		); err != nil {
+			return finalized, err
+		}
+		finalized++
+	}
+	return finalized, nil
+}
+
+func (l *failureLedger) ClaimDue(now time.Time) (failureOperation, bool) {
+	if now.IsZero() {
+		now = l.now()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.verifyQueue.Len() == 0 || now.Before(l.verifyQueue[0].nextVerifyAt) {
+		return failureOperation{}, false
+	}
+	selected, ok := heap.Pop(&l.verifyQueue).(*failureOperation)
+	if !ok {
+		return failureOperation{}, false
+	}
+	selected.claimed = true
+	return *cloneFailureOperation(selected), true
+}
+
+func (l *failureLedger) ReleaseClaim(operationID string, next time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	operation := l.active[operationID]
+	if operation == nil {
+		return fmt.Errorf(
+			"release failure operation %q: %w", operationID, errFailureOperationNotActive,
+		)
+	}
+	operation.claimed = false
+	operation.nextVerifyAt = next.UTC()
+	l.enqueueLocked(operation)
+	return nil
+}
+
+func (l *failureLedger) enqueueLocked(operation *failureOperation) {
+	if operation.heapIndex >= 0 || operation.claimed {
+		return
+	}
+	if !l.scheduleNextLocked(operation) {
+		return
+	}
+	heap.Push(&l.verifyQueue, operation)
+}
+
+func (l *failureLedger) scheduleNextLocked(operation *failureOperation) bool {
+	if slices.Contains(operation.Expected, failureObserverHistory) {
+		if _, observed := operation.Observations[failureObserverHistory]; !observed {
+			if operation.nextVerifyAt.IsZero() {
+				operation.nextVerifyAt = operation.VerifyAfter
+			}
+			return true
+		}
+	}
+	if slices.Contains(operation.Expected, failureObserverRecipient) {
+		if _, observed := operation.Observations[failureObserverRecipient]; !observed {
+			operation.nextVerifyAt = operation.Deadline
+			return true
+		}
+	}
+	for _, observer := range operation.Expected {
+		if _, observed := operation.Observations[observer]; !observed {
+			operation.nextVerifyAt = operation.Deadline
+			return true
+		}
+	}
+	return false
+}
+
+func (l *failureLedger) dequeueLocked(operation *failureOperation) {
+	if operation.heapIndex < 0 {
+		return
+	}
+	heap.Remove(&l.verifyQueue, operation.heapIndex)
+}
+
+func (l *failureLedger) Snapshot() failureLedgerSnapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	results := make(map[failureResult]uint64, len(l.results))
+	for result, count := range l.results {
+		results[result] = count
+	}
+	observations := cloneFailureObservationCounts(l.observations)
+	journalBytes := int64(0)
+	if l.journal != nil {
+		journalBytes = l.journal.Size()
+	}
+	return failureLedgerSnapshot{
+		Active: len(l.active), Recovered: l.recovered, Dropped: l.dropped,
+		InvalidReason: l.invalidReason, Results: results, Observations: observations,
+		JournalBytes: journalBytes,
+	}
+}
+
+func (l *failureLedger) Active(operationID string) (failureOperation, bool) {
+	if l == nil {
+		return failureOperation{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	operation := l.active[operationID]
+	if operation == nil {
+		return failureOperation{}, false
+	}
+	return *cloneFailureOperation(operation), true
+}
+
+func (l *failureLedger) ActiveOperations() []failureOperation {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	operationIDs := make([]string, 0, len(l.active))
+	for operationID := range l.active {
+		operationIDs = append(operationIDs, operationID)
+	}
+	slices.Sort(operationIDs)
+	operations := make([]failureOperation, 0, len(operationIDs))
+	for _, operationID := range operationIDs {
+		operations = append(operations, *cloneFailureOperation(l.active[operationID]))
+	}
+	return operations
+}
+
+func (l *failureLedger) Invalidate(reason string) {
+	if l == nil || reason == "" {
+		return
+	}
+	if _, known := failureInvalidationReasonRegistry[reason]; !known {
+		reason = "other"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.invalidateLocked(reason)
+}
+
+func (l *failureLedger) Close() error {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return nil
+	}
+	l.closed = true
+	journal := l.journal
+	l.mu.Unlock()
+	l.startingWG.Wait()
+	if journal == nil {
+		return nil
+	}
+	if err := journal.Close(); err != nil {
+		return fmt.Errorf("close failure ledger journal: %w", err)
+	}
+	return nil
+}
+
+func (l *failureLedger) finalizeLocked(
+	operation *failureOperation,
+	result failureResult,
+	reason failureReason,
+	at time.Time,
+) error {
+	event := failureLedgerEvent{
+		Type: failureLedgerEventFinalized, OperationID: operation.ID,
+		Result: result, Reason: reason, At: at.UTC(),
+	}
+	if err := l.appendLocked(&event); err != nil {
+		l.invalidateLocked("wal")
+		return fmt.Errorf("persist finalized failure operation %q: %w", operation.ID, err)
+	}
+	l.results[result]++
+	operation.FinalResult = result
+	operation.FinalReason = reason
+	if result == failureResultNotSent {
+		l.rememberNotSentLocked(operation.ID)
+	}
+	l.dequeueLocked(operation)
+	delete(l.active, operation.ID)
+	if l.recorder != nil {
+		l.recorder.OperationFinalized(cloneFailureOperation(operation), result)
+		if recorder, ok := l.recorder.(interface {
+			FinalizationReasonRecorded(*failureOperation, failureResult, failureReason)
+		}); ok {
+			recorder.FinalizationReasonRecorded(cloneFailureOperation(operation), result, reason)
+		}
+	}
+	l.finalizedSinceCompact++
+	if l.journal != nil && len(l.starting) == 0 && l.finalizedSinceCompact >= l.compactEvery {
+		if err := l.compactLocked(at); err != nil {
+			l.invalidateLocked("wal")
+			return fmt.Errorf("compact failure ledger: %w", err)
+		}
+		l.finalizedSinceCompact = 0
+	}
+	return nil
+}
+
+func (l *failureLedger) compactLocked(at time.Time) error {
+	operationIDs := make([]string, 0, len(l.active))
+	for operationID := range l.active {
+		operationIDs = append(operationIDs, operationID)
+	}
+	slices.Sort(operationIDs)
+	checkpointResults := make(map[failureResult]uint64, len(l.results))
+	for result, count := range l.results {
+		checkpointResults[result] = count
+	}
+	events := make([]failureLedgerEvent, 0, 1+len(l.active)*2)
+	events = append(events, failureLedgerEvent{
+		Type: failureLedgerEventCheckpoint, Results: checkpointResults,
+		ObservationCounts: cloneFailureObservationCounts(l.observations),
+		NotSent:           append([]string(nil), l.notSentOrder...), At: at.UTC(),
+	})
+	for _, operationID := range operationIDs {
+		operation := l.active[operationID]
+		started := cloneFailureOperation(operation)
+		started.Observations = nil
+		started.ObservationReasons = nil
+		if started.LifecycleState == failureOperationActive {
+			started.LifecycleState = failureOperationJournaled
+		}
+		events = append(events, failureLedgerEvent{
+			Type: failureLedgerEventStarted, Operation: started,
+			At: operation.StartedAt.UTC(),
+		})
+		if operation.LifecycleState == failureOperationActive {
+			events = append(events, failureLedgerEvent{
+				Type: failureLedgerEventActivated, OperationID: operation.ID, At: at.UTC(),
+			})
+		}
+		for _, observer := range operation.Expected {
+			observation, exists := operation.Observations[observer]
+			if !exists {
+				continue
+			}
+			events = append(events, failureLedgerEvent{
+				Type: failureLedgerEventObserved, OperationID: operation.ID,
+				Observer: observer, Observation: observation,
+				Reason: operation.ObservationReasons[observer], At: at.UTC(),
+			})
+		}
+	}
+	if err := l.journal.Compact(events); err != nil {
+		return err
+	}
+	if l.recorder != nil {
+		l.recorder.JournalSize(l.journal.Size())
+	}
+	return nil
+}
+
+func (l *failureLedger) appendLocked(event *failureLedgerEvent) error {
+	if l.journal == nil {
+		return nil
+	}
+	if err := l.journal.Append(event); err != nil {
+		return err
+	}
+	if l.recorder != nil {
+		l.recorder.JournalSize(l.journal.Size())
+	}
+	return nil
+}
+
+func (l *failureLedger) replay(events []failureLedgerEvent) error {
+	// A retained volume outlives any single configuration, so a journal can
+	// legitimately hold more unresolved operations than the current capacity
+	// admits. Dropping the excess degrades observation for this run; failing
+	// would crash-loop the pod with no way out.
+	dropped := make(map[string]struct{})
+	for index := range events {
+		event := &events[index]
+		switch event.Type {
+		case failureLedgerEventCheckpoint:
+			if index != 0 {
+				return fmt.Errorf("replay failure ledger event %d: checkpoint must be first", index)
+			}
+			for result, count := range event.Results {
+				if !validFailureResult(result) {
+					return fmt.Errorf("replay failure ledger event %d: invalid checkpoint result %q", index, result)
+				}
+				l.results[result] = count
+			}
+			for observer, counts := range event.ObservationCounts {
+				if _, known := failureObserverRegistry[observer]; !known {
+					return fmt.Errorf("replay failure ledger event %d: invalid checkpoint observer %q", index, observer)
+				}
+				for observation, count := range counts {
+					if !validFailureObservation(observation) {
+						return fmt.Errorf("replay failure ledger event %d: invalid checkpoint observation %q", index, observation)
+					}
+					l.countObservationByLocked(observer, observation, count)
+				}
+			}
+			for _, operationID := range event.NotSent {
+				l.rememberNotSentLocked(operationID)
+			}
+		case failureLedgerEventStarted:
+			if event.Operation == nil {
+				return fmt.Errorf("replay failure ledger event %d: started operation is missing", index)
+			}
+			operation := cloneFailureOperation(event.Operation)
+			if err := validateFailureOperation(operation); err != nil {
+				return fmt.Errorf("replay failure ledger event %d: %w", index, err)
+			}
+			if _, duplicate := l.active[operation.ID]; duplicate {
+				return fmt.Errorf("replay failure ledger event %d: operation %q is already active", index, operation.ID)
+			}
+			if len(l.active) >= l.capacity {
+				dropped[operation.ID] = struct{}{}
+				l.dropped++
+				continue
+			}
+			operation.nextVerifyAt = operation.VerifyAfter
+			operation.claimed = false
+			l.active[operation.ID] = operation
+		case failureLedgerEventActivated:
+			if _, skipped := dropped[event.OperationID]; skipped {
+				continue
+			}
+			operation := l.active[event.OperationID]
+			if operation == nil {
+				return fmt.Errorf(
+					"replay failure ledger event %d: operation %q is not active",
+					index,
+					event.OperationID,
+				)
+			}
+			if operation.LifecycleState == failureOperationActive {
+				return fmt.Errorf("replay failure ledger event %d: operation %q is already activated", index, event.OperationID)
+			}
+			operation.LifecycleState = failureOperationActive
+		case failureLedgerEventObserved:
+			if _, skipped := dropped[event.OperationID]; skipped {
+				continue
+			}
+			operation := l.active[event.OperationID]
+			if operation == nil {
+				return fmt.Errorf(
+					"replay failure ledger event %d: operation %q is not active",
+					index,
+					event.OperationID,
+				)
+			}
+			if !slices.Contains(operation.Expected, event.Observer) || !validFailureObservation(event.Observation) {
+				return fmt.Errorf("replay failure ledger event %d: invalid observation", index)
+			}
+			if existing, duplicate := operation.Observations[event.Observer]; duplicate {
+				return fmt.Errorf("replay failure ledger event %d: observer %q already recorded as %q", index, event.Observer, existing)
+			}
+			operation.Observations[event.Observer] = event.Observation
+			if _, known := failureReasonRegistry[event.Reason]; !known {
+				return fmt.Errorf("replay failure ledger event %d: invalid observation reason %q", index, event.Reason)
+			}
+			if operation.ObservationReasons == nil {
+				operation.ObservationReasons = make(map[failureObserver]failureReason)
+			}
+			operation.ObservationReasons[event.Observer] = event.Reason
+			l.countObservationLocked(event.Observer, event.Observation)
+		case failureLedgerEventFinalized:
+			if _, skipped := dropped[event.OperationID]; skipped {
+				delete(dropped, event.OperationID)
+				l.dropped--
+				continue
+			}
+			operation, exists := l.active[event.OperationID]
+			if !exists {
+				return fmt.Errorf(
+					"replay failure ledger event %d: operation %q is not active",
+					index,
+					event.OperationID,
+				)
+			}
+			if !validFailureResult(event.Result) {
+				return fmt.Errorf("replay failure ledger event %d: invalid result %q", index, event.Result)
+			}
+			l.results[event.Result]++
+			if event.Result == failureResultNotSent {
+				l.rememberNotSentLocked(operation.ID)
+			}
+			delete(l.active, event.OperationID)
+		case failureLedgerEventInvariant:
+			l.invalidateLocked("accounting_invariant")
+		default:
+			return fmt.Errorf("replay failure ledger event %d: unknown type %q", index, event.Type)
+		}
+	}
+	if l.dropped > 0 {
+		slog.Warn(
+			"failure ledger dropped recovered operations over capacity",
+			"dropped", l.dropped,
+			"capacity", l.capacity,
+		)
+		l.invalidateLocked(invalidReasonCapacity)
+	}
+	for _, operation := range l.active {
+		l.enqueueLocked(operation)
+	}
+	return nil
+}
+
+func (l *failureLedger) rememberNotSentLocked(operationID string) {
+	if operationID == "" {
+		return
+	}
+	if _, exists := l.notSent[operationID]; exists {
+		return
+	}
+	if len(l.notSentOrder) >= l.capacity {
+		oldest := l.notSentOrder[0]
+		l.notSentOrder = l.notSentOrder[1:]
+		delete(l.notSent, oldest)
+	}
+	l.notSent[operationID] = struct{}{}
+	l.notSentOrder = append(l.notSentOrder, operationID)
+}
+
+func (l *failureLedger) countObservationLocked(observer failureObserver, observation failureObservation) {
+	l.countObservationByLocked(observer, observation, 1)
+}
+
+func (l *failureLedger) countObservationByLocked(observer failureObserver, observation failureObservation, count uint64) {
+	if l.observations[observer] == nil {
+		l.observations[observer] = make(map[failureObservation]uint64)
+	}
+	l.observations[observer][observation] += count
+}
+
+func cloneFailureObservationCounts(
+	input map[failureObserver]map[failureObservation]uint64,
+) map[failureObserver]map[failureObservation]uint64 {
+	cloned := make(map[failureObserver]map[failureObservation]uint64, len(input))
+	for observer, counts := range input {
+		cloned[observer] = make(map[failureObservation]uint64, len(counts))
+		for observation, count := range counts {
+			cloned[observer][observation] = count
+		}
+	}
+	return cloned
+}
+
+func (l *failureLedger) ensureOpen() error {
+	if l.closed {
+		return fmt.Errorf("failure ledger is closed")
+	}
+	return nil
+}
+
+func (l *failureLedger) invalidateLocked(reason string) {
+	if l.invalidReason != "" {
+		return
+	}
+	l.invalidReason = reason
+	if l.recorder != nil {
+		l.recorder.Invalidated(reason)
+	}
+}
+
+func validateFailureOperation(operation *failureOperation) error {
+	if operation == nil {
+		return fmt.Errorf("failure operation is required")
+	}
+	if operation.ID == "" || operation.Scenario == "" || operation.Lane == "" {
+		return fmt.Errorf("failure operation requires ID, scenario, and lane")
+	}
+	if _, known := failureOperationScenarioRegistry[operation.Scenario]; !known {
+		return fmt.Errorf("failure operation %q has unsupported scenario %q", operation.ID, operation.Scenario)
+	}
+	if _, known := failureOperationLaneRegistry[operation.Lane]; !known {
+		return fmt.Errorf("failure operation %q has unsupported lane %q", operation.ID, operation.Lane)
+	}
+	if operation.SchemaVersion != 0 && operation.SchemaVersion != 2 {
+		return fmt.Errorf("failure operation %q has unsupported schema version %d", operation.ID, operation.SchemaVersion)
+	}
+	if operation.SchemaVersion == 2 {
+		if operation.LifecycleState != failureOperationJournaled &&
+			operation.LifecycleState != failureOperationActive {
+			return fmt.Errorf("failure operation %q has invalid lifecycle state %q", operation.ID, operation.LifecycleState)
+		}
+		if operation.RunID == "" || operation.OperationType != failureOperationMessageCreate || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
+			return fmt.Errorf("version 2 failure operation %q requires run, type, targets, and effects", operation.ID)
+		}
+		operation.Expected = make([]failureObserver, 0, len(operation.Effects))
+		seenEffects := make(map[string]struct{}, len(operation.Effects))
+		for _, effect := range operation.Effects {
+			definition, known := failureObserverRegistry[effect.Observer]
+			if !known || !slices.Contains(definition.Effects, effect.Effect) {
+				return fmt.Errorf("failure operation %q has unsupported effect %q for observer %q", operation.ID, effect.Effect, effect.Observer)
+			}
+			key := string(effect.Effect) + "\x00" + string(effect.Observer)
+			if _, duplicate := seenEffects[key]; duplicate {
+				return fmt.Errorf("failure operation %q repeats effect %q", operation.ID, effect.Effect)
+			}
+			seenEffects[key] = struct{}{}
+			if effect.Cardinality != nil && (effect.Cardinality.Mode != "exact_set_hash" || effect.Cardinality.Count <= 0 || effect.Cardinality.SHA256 == "") {
+				return fmt.Errorf("failure operation %q has invalid effect cardinality", operation.ID)
+			}
+			if effect.Required {
+				operation.Expected = append(operation.Expected, effect.Observer)
+			}
+		}
+	}
+	if operation.StartedAt.IsZero() || operation.VerifyAfter.IsZero() || operation.Deadline.IsZero() {
+		return fmt.Errorf("failure operation %q requires timestamps", operation.ID)
+	}
+	if operation.VerifyAfter.Before(operation.StartedAt) {
+		return fmt.Errorf("failure operation %q verify time precedes start", operation.ID)
+	}
+	if operation.Deadline.Before(operation.VerifyAfter) {
+		return fmt.Errorf("failure operation %q deadline precedes verification", operation.ID)
+	}
+	if len(operation.Expected) == 0 {
+		return fmt.Errorf("failure operation %q requires an observer", operation.ID)
+	}
+	seen := make(map[failureObserver]struct{}, len(operation.Expected))
+	for _, observer := range operation.Expected {
+		if observer == "" {
+			return fmt.Errorf("failure operation %q has an empty observer", operation.ID)
+		}
+		if _, duplicate := seen[observer]; duplicate {
+			return fmt.Errorf("failure operation %q repeats observer %q", operation.ID, observer)
+		}
+		seen[observer] = struct{}{}
+	}
+	if operation.Observations == nil {
+		operation.Observations = make(map[failureObserver]failureObservation)
+	}
+	operation.heapIndex = -1
+	return nil
+}
+
+func validFailureObservation(observation failureObservation) bool {
+	switch observation {
+	case failureObservationGood,
+		failureObservationBad,
+		failureObservationUnverified,
+		failureObservationMissingAfterDeadline:
+		return true
+	default:
+		return false
+	}
+}
+
+func validFailureResult(result failureResult) bool {
+	switch result {
+	case failureResultGood,
+		failureResultBad,
+		failureResultUnverified,
+		failureResultNotSent,
+		failureResultMissingAfterDeadline:
+		return true
+	default:
+		return false
+	}
+}
+
+// failureOperationResult collapses an operation's observations into one result.
+// Precedence runs from strongest evidence to weakest: a confirmed absence
+// outranks an ambiguous observation, which outranks "the observer could not
+// answer", which outranks success.
+func failureOperationResult(operation *failureOperation) failureResult {
+	result := failureResultGood
+	admissionAccepted := operation.Observations[failureObserverAdmission] == failureObservationGood
+	for observer, observation := range operation.Observations {
+		switch observation {
+		case failureObservationGood:
+		case failureObservationMissingAfterDeadline:
+			// Missing downstream evidence is a correctness failure only after
+			// admission authoritatively accepted an active publish. Otherwise the
+			// absence is ambiguous and must not hide stronger bad evidence.
+			if observer == failureObserverAdmission ||
+				operation.LifecycleState == failureOperationJournaled ||
+				!admissionAccepted {
+				if result == failureResultGood {
+					result = failureResultUnverified
+				}
+				continue
+			}
+			return failureResultMissingAfterDeadline
+		case failureObservationBad:
+			result = failureResultBad
+		case failureObservationUnverified:
+			if result == failureResultGood {
+				result = failureResultUnverified
+			}
+		}
+	}
+	return result
+}
+
+func failureOperationFinalReason(
+	operation *failureOperation,
+	result failureResult,
+) failureReason {
+	var terminalObservation failureObservation
+	switch result {
+	case failureResultBad:
+		terminalObservation = failureObservationBad
+	case failureResultMissingAfterDeadline:
+		terminalObservation = failureObservationMissingAfterDeadline
+	default:
+		return failureReasonNone
+	}
+	for _, observer := range operation.Expected {
+		if operation.Observations[observer] != terminalObservation {
+			continue
+		}
+		if reason := operation.ObservationReasons[observer]; reason != failureReasonNone {
+			return reason
+		}
+	}
+	return failureReasonNone
+}
+
+func cloneFailureOperation(operation *failureOperation) *failureOperation {
+	if operation == nil {
+		return nil
+	}
+	cloned := *operation
+	cloned.heapIndex = -1
+	cloned.Expected = append([]failureObserver(nil), operation.Expected...)
+	cloned.Effects = append([]failureExpectedEffect(nil), operation.Effects...)
+	for index := range cloned.Effects {
+		if operation.Effects[index].Cardinality != nil {
+			cardinality := *operation.Effects[index].Cardinality
+			cloned.Effects[index].Cardinality = &cardinality
+		}
+	}
+	cloned.Targets = make(map[string]string, len(operation.Targets))
+	for key, value := range operation.Targets {
+		cloned.Targets[key] = value
+	}
+	cloned.EvidenceRefs = append([]string(nil), operation.EvidenceRefs...)
+	cloned.Attributes = make(map[string]string, len(operation.Attributes))
+	for key, value := range operation.Attributes {
+		cloned.Attributes[key] = value
+	}
+	cloned.Observations = make(map[failureObserver]failureObservation, len(operation.Observations))
+	for observer, observation := range operation.Observations {
+		cloned.Observations[observer] = observation
+	}
+	cloned.ObservationReasons = make(map[failureObserver]failureReason, len(operation.ObservationReasons))
+	for observer, reason := range operation.ObservationReasons {
+		cloned.ObservationReasons[observer] = reason
+	}
+	return &cloned
+}
+
+type fileFailureWAL struct {
+	mu               sync.Mutex
+	path             string
+	file             *os.File
+	size             int64
+	legacy           bool
+	observerContract *failureObserverContract
+	syncDirectory    func(string) error
+}
+
+type failureWALHeader struct {
+	RecordType       string                   `json:"recordType"`
+	SchemaVersion    int                      `json:"schemaVersion"`
+	ObserverContract *failureObserverContract `json:"observerContract,omitempty"`
+}
+
+const failureWALSchemaVersion = 2
+
+func openFailureWAL(path string) (*fileFailureWAL, error) {
+	if path == "" {
+		return nil, fmt.Errorf("failure WAL path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("create failure WAL directory: %w", err)
+	}
+	backupPath := path + ".bak"
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		if _, backupErr := os.Stat(backupPath); backupErr == nil {
+			if err := os.Rename(backupPath, path); err != nil {
+				return nil, fmt.Errorf("restore failure WAL backup: %w", err)
+			}
+		}
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open failure WAL %q: %w", path, err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("stat failure WAL %q: %w", path, err)
+	}
+	return &fileFailureWAL{
+		path: path, file: file, size: info.Size(), syncDirectory: syncFailureWALDirectory,
+	}, nil
+}
+
+func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	file, err := os.Open(w.path)
+	if err != nil {
+		return nil, fmt.Errorf("open failure WAL for replay: %w", err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
+
+	events := make([]failureLedgerEvent, 0)
+	reader := bufio.NewReader(file)
+	line := 0
+	headerSeen := false
+	w.observerContract = nil
+	durableBytes := int64(0)
+	tornFinalRecord := false
+	for {
+		encoded, readErr := reader.ReadBytes('\n')
+		if errors.Is(readErr, io.EOF) {
+			// Append writes one JSON event and its newline in a single syscall.
+			// A final unterminated record is therefore a torn crash write and
+			// must not prevent recovery of every prior durable event.
+			tornFinalRecord = len(encoded) > 0
+			break
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read failure WAL line %d: %w", line+1, readErr)
+		}
+		line++
+		var header failureWALHeader
+		if err := json.Unmarshal(encoded, &header); err == nil && header.RecordType != "" {
+			if line != 1 || header.RecordType != "header" || header.SchemaVersion != failureWALSchemaVersion {
+				return nil, fmt.Errorf("decode failure WAL line %d: unsupported header version %d", line, header.SchemaVersion)
+			}
+			durableBytes += int64(len(encoded))
+			headerSeen = true
+			w.observerContract = cloneFailureObserverContract(header.ObserverContract)
+			continue
+		}
+		if line == 1 {
+			w.legacy = true
+		}
+		var event failureLedgerEvent
+		if err := json.Unmarshal(encoded, &event); err != nil {
+			return nil, fmt.Errorf("decode failure WAL line %d: %w", line, err)
+		}
+		switch {
+		case headerSeen && event.SchemaVersion != failureWALSchemaVersion:
+			return nil, fmt.Errorf(
+				"decode failure WAL line %d: versioned WAL requires record version %d",
+				line,
+				failureWALSchemaVersion,
+			)
+		case !headerSeen && event.SchemaVersion != 0:
+			return nil, fmt.Errorf(
+				"decode failure WAL line %d: record version %d requires a versioned header",
+				line,
+				event.SchemaVersion,
+			)
+		}
+		events = append(events, event)
+		durableBytes += int64(len(encoded))
+	}
+	if line == 0 && !headerSeen {
+		w.legacy = false
+	}
+	if err := file.Close(); err != nil {
+		return nil, fmt.Errorf("close replayed failure WAL: %w", err)
+	}
+	closed = true
+	if tornFinalRecord {
+		if err := w.file.Close(); err != nil {
+			return nil, fmt.Errorf("close failure WAL before repair: %w", err)
+		}
+		w.file = nil
+		if err := os.Truncate(w.path, durableBytes); err != nil {
+			return nil, w.reopenAfterCompactFailure(
+				fmt.Errorf("truncate torn failure WAL record: %w", err),
+			)
+		}
+		reopened, err := os.OpenFile(w.path, os.O_RDWR|os.O_APPEND, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("reopen repaired failure WAL: %w", err)
+		}
+		w.file = reopened
+		if err := w.file.Sync(); err != nil {
+			return nil, fmt.Errorf("sync repaired failure WAL: %w", err)
+		}
+		w.size = durableBytes
+	}
+	return events, nil
+}
+
+func (w *fileFailureWAL) NeedsUpgrade() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.legacy
+}
+
+func (w *fileFailureWAL) ConfigureObserverContract(
+	contract failureObserverContract,
+	active []failureOperation,
+) error {
+	if err := validateFailureObserverContract(contract); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.observerContract != nil {
+		if !equalFailureObserverContract(*w.observerContract, contract) {
+			return fmt.Errorf("%w: stored observer contract differs from current configuration", errFailureObserverContractMismatch)
+		}
+		return nil
+	}
+	for index := range active {
+		if !failureOperationMatchesObserverContract(&active[index], contract) {
+			return fmt.Errorf(
+				"%w: pending operation %q is incompatible with the current observer contract",
+				errFailureObserverContractMismatch,
+				active[index].ID,
+			)
+		}
+	}
+	w.observerContract = cloneFailureObserverContract(&contract)
+	if w.size == 0 {
+		return w.writeHeaderLocked()
+	}
+	w.legacy = true
+	return nil
+}
+
+func validateFailureObserverContract(contract failureObserverContract) error {
+	if contract.SchemaVersion != failureObserverContractSchemaVersion {
+		return fmt.Errorf("unsupported observer contract schema version %d", contract.SchemaVersion)
+	}
+	if contract.Scenario != soakFailureScenario {
+		return fmt.Errorf("observer contract scenario must be %q", soakFailureScenario)
+	}
+	if err := validateRegisteredObservers(contract.Observers); err != nil {
+		return err
+	}
+	hasRecipient := slices.Contains(contract.Observers, failureObserverRecipient)
+	if hasRecipient != contract.RecipientObserverEnabled {
+		return fmt.Errorf("recipient observer enablement does not match configured observers")
+	}
+	return nil
+}
+
+func equalFailureObserverContract(left, right failureObserverContract) bool {
+	return left.SchemaVersion == right.SchemaVersion &&
+		left.Scenario == right.Scenario &&
+		left.RecipientObserverEnabled == right.RecipientObserverEnabled &&
+		slices.Equal(left.Observers, right.Observers)
+}
+
+func cloneFailureObserverContract(contract *failureObserverContract) *failureObserverContract {
+	if contract == nil {
+		return nil
+	}
+	cloned := *contract
+	cloned.Observers = append([]failureObserver(nil), contract.Observers...)
+	return &cloned
+}
+
+func failureOperationMatchesObserverContract(
+	operation *failureOperation,
+	contract failureObserverContract,
+) bool {
+	if operation == nil || operation.Scenario != contract.Scenario {
+		return false
+	}
+	expected := append([]failureObserver(nil), operation.Expected...)
+	slices.Sort(expected)
+	configured := append([]failureObserver(nil), contract.Observers...)
+	slices.Sort(configured)
+	return slices.Equal(expected, configured)
+}
+
+func (w *fileFailureWAL) writeHeaderLocked() error {
+	header, err := json.Marshal(failureWALHeader{
+		RecordType: "header", SchemaVersion: failureWALSchemaVersion,
+		ObserverContract: cloneFailureObserverContract(w.observerContract),
+	})
+	if err != nil {
+		return fmt.Errorf("encode failure WAL header: %w", err)
+	}
+	header = append(header, '\n')
+	written, err := w.file.Write(header)
+	if err != nil {
+		return fmt.Errorf("append failure WAL header: %w", err)
+	}
+	if written != len(header) {
+		return fmt.Errorf("append failure WAL header: wrote %d of %d bytes", written, len(header))
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync failure WAL header: %w", err)
+	}
+	if err := w.syncDirectory(filepath.Dir(w.path)); err != nil {
+		return fmt.Errorf("sync failure WAL header directory: %w", err)
+	}
+	w.size += int64(written)
+	return nil
+}
+
+func (w *fileFailureWAL) Append(event *failureLedgerEvent) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.appendBufferedLocked(event); err != nil {
+		return err
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync failure WAL event: %w", err)
+	}
+	return nil
+}
+
+func (w *fileFailureWAL) AppendBuffered(event *failureLedgerEvent) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.appendBufferedLocked(event)
+}
+
+func (w *fileFailureWAL) appendBufferedLocked(event *failureLedgerEvent) error {
+	if w.file == nil {
+		return fmt.Errorf("failure WAL is closed")
+	}
+	if w.size == 0 {
+		if err := w.writeHeaderLocked(); err != nil {
+			return err
+		}
+	}
+	if event.SchemaVersion == 0 {
+		event.SchemaVersion = failureWALSchemaVersion
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode failure WAL event: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	written, err := w.file.Write(encoded)
+	if err != nil {
+		return fmt.Errorf("append failure WAL event: %w", err)
+	}
+	if written != len(encoded) {
+		return fmt.Errorf("append failure WAL event: wrote %d of %d bytes", written, len(encoded))
+	}
+	w.size += int64(written)
+	return nil
+}
+
+func (w *fileFailureWAL) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return fmt.Errorf("failure WAL is closed")
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync failure WAL event: %w", err)
+	}
+	return nil
+}
+
+func (w *fileFailureWAL) Compact(events []failureLedgerEvent) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return fmt.Errorf("failure WAL is closed")
+	}
+	temporaryPath := w.path + ".compact"
+	backupPath := w.path + ".bak"
+	temporary, err := os.OpenFile(
+		temporaryPath,
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+		0o600,
+	)
+	if err != nil {
+		return fmt.Errorf("create compacted failure WAL: %w", err)
+	}
+	closeTemporary := true
+	defer func() {
+		if closeTemporary {
+			_ = temporary.Close()
+		}
+	}()
+	var compactedSize int64
+	header, err := json.Marshal(failureWALHeader{
+		RecordType: "header", SchemaVersion: failureWALSchemaVersion,
+		ObserverContract: cloneFailureObserverContract(w.observerContract),
+	})
+	if err != nil {
+		return fmt.Errorf("encode compacted failure WAL header: %w", err)
+	}
+	header = append(header, '\n')
+	written, err := temporary.Write(header)
+	if err != nil {
+		return fmt.Errorf("write compacted failure WAL header: %w", err)
+	}
+	if written != len(header) {
+		return fmt.Errorf("write compacted failure WAL header: wrote %d of %d bytes", written, len(header))
+	}
+	compactedSize += int64(written)
+	for index := range events {
+		event := &events[index]
+		if event.SchemaVersion == 0 {
+			event.SchemaVersion = failureWALSchemaVersion
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("encode compacted failure WAL event: %w", err)
+		}
+		encoded = append(encoded, '\n')
+		written, err := temporary.Write(encoded)
+		if err != nil {
+			return fmt.Errorf("write compacted failure WAL event: %w", err)
+		}
+		if written != len(encoded) {
+			return fmt.Errorf(
+				"write compacted failure WAL event: wrote %d of %d bytes",
+				written,
+				len(encoded),
+			)
+		}
+		compactedSize += int64(written)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("sync compacted failure WAL: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close compacted failure WAL: %w", err)
+	}
+	closeTemporary = false
+
+	if err := w.file.Close(); err != nil {
+		return fmt.Errorf("close failure WAL before compaction: %w", err)
+	}
+	w.file = nil
+	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return w.reopenAfterCompactFailure(fmt.Errorf("remove stale failure WAL backup: %w", err))
+	}
+	if err := os.Rename(w.path, backupPath); err != nil {
+		return w.reopenAfterCompactFailure(fmt.Errorf("backup failure WAL: %w", err))
+	}
+	if err := os.Rename(temporaryPath, w.path); err != nil {
+		if restoreErr := os.Rename(backupPath, w.path); restoreErr != nil {
+			return fmt.Errorf(
+				"install compacted failure WAL: %w; restore backup: %v",
+				err,
+				restoreErr,
+			)
+		}
+		return w.reopenAfterCompactFailure(fmt.Errorf("install compacted failure WAL: %w", err))
+	}
+	if err := w.syncDirectory(filepath.Dir(w.path)); err != nil {
+		return w.reopenAfterCompactFailure(fmt.Errorf("sync installed failure WAL directory: %w", err))
+	}
+	file, err := os.OpenFile(w.path, os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("reopen compacted failure WAL: %w", err)
+	}
+	w.file = file
+	w.size = compactedSize
+	w.legacy = false
+	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove failure WAL backup: %w", err)
+	}
+	if err := w.syncDirectory(filepath.Dir(w.path)); err != nil {
+		return fmt.Errorf("sync failure WAL directory: %w", err)
+	}
+	return nil
+}
+
+func syncFailureWALDirectory(directory string) error {
+	if runtime.GOOS == "windows" {
+		// Windows does not support fsync on directory handles. The retained
+		// production PVC runs on Linux, where the sync below makes rename durable.
+		return nil
+	}
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		return fmt.Errorf("open directory: %w", err)
+	}
+	defer directoryFile.Close()
+	if err := directoryFile.Sync(); err != nil {
+		return fmt.Errorf("sync directory: %w", err)
+	}
+	return nil
+}
+
+func (w *fileFailureWAL) reopenAfterCompactFailure(compactErr error) error {
+	file, reopenErr := os.OpenFile(w.path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	if reopenErr == nil {
+		w.file = file
+		if info, statErr := file.Stat(); statErr == nil {
+			w.size = info.Size()
+		}
+		return compactErr
+	}
+	return fmt.Errorf("%v; reopen failure WAL: %w", compactErr, reopenErr)
+}
+
+func (w *fileFailureWAL) Size() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.size
+}
+
+func (w *fileFailureWAL) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return nil
+	}
+	if err := w.file.Close(); err != nil {
+		return fmt.Errorf("close failure WAL: %w", err)
+	}
+	w.file = nil
+	return nil
+}

@@ -155,5 +155,7 @@ func TestCORS_PreflightOptions_AllowsTracePropagationHeaders(t *testing.T) {
 	allowed := w.Header().Get("Access-Control-Allow-Headers")
 	assert.Contains(t, allowed, "traceparent")
 	assert.Contains(t, allowed, "tracestate")
+	// Preflight stays permissive; untrusted identity is dropped at extraction by
+	// obs.PublicIngressPropagator, so a rolling client is not blocked by CORS.
 	assert.Contains(t, allowed, "baggage")
 }

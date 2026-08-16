@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/baggage"
 )
 
 // Client is the Graph surface room-service depends on. Only the meetings RPC
@@ -182,6 +184,20 @@ type graphClient struct {
 
 // Option customizes the client (used in tests to point at an httptest server).
 type Option func(*graphClient)
+
+// newExternalRequestWithContext preserves cancellation and trace context while
+// removing internal W3C baggage before any Microsoft identity or Graph egress.
+// Keeping this at request construction protects every client surface even when
+// a caller supplies an instrumented HTTP transport through WithHTTPClient.
+//
+// body is handed to the stdlib untouched and is never read, logged, or attached
+// to a span here. That matters because the token callers pass a form carrying
+// client_secret — and, on the ROPC path in presence.go, username and password.
+// Nothing in this package may log a request body; .semgrep/msgraph-secrets.yml
+// enforces it.
+func newExternalRequestWithContext(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+	return http.NewRequestWithContext(baggage.ContextWithoutBaggage(ctx), method, url, body)
+}
 
 // WithHTTPClient overrides the HTTP client.
 func WithHTTPClient(c *http.Client) Option {
@@ -363,7 +379,7 @@ func (g *graphClient) accessToken(ctx context.Context) (string, error) {
 	form.Set("client_secret", g.cfg.ClientSecret)
 	form.Set("scope", graphScope)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.tokenURL, strings.NewReader(form.Encode()))
+	req, err := newExternalRequestWithContext(ctx, http.MethodPost, g.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("build token request: %w", err)
 	}
@@ -485,7 +501,7 @@ func resolveChunk(ctx context.Context, hc *http.Client, baseURL, userAgent, toke
 	q.Set("$count", "true")
 	endpoint := baseURL + "/users?" + q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("build get-users request: %w", err)
 	}
@@ -592,7 +608,7 @@ func (g *graphClient) CreateOnlineMeeting(ctx context.Context, req CreateOnlineM
 		return nil, fmt.Errorf("marshal onlineMeeting payload: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	httpReq, err := newExternalRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("build onlineMeeting request: %w", err)
 	}
@@ -683,7 +699,7 @@ func (g *graphClient) ListUsers(ctx context.Context, pageSize int, fn func([]Gra
 }
 
 func (g *graphClient) fetchUsersPage(ctx context.Context, token, endpoint string) (*usersPage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build list-users request: %w", err)
 	}

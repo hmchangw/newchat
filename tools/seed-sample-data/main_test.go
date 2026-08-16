@@ -10,7 +10,7 @@ import (
 func TestParseConfig_Defaults(t *testing.T) {
 	cfg, err := parseConfig(map[string]string{})
 	require.NoError(t, err)
-	assert.Equal(t, "mongodb://localhost:27017", cfg.MongoURI)
+	assert.Equal(t, "mongodb://localhost:27017/?directConnection=true", cfg.MongoURI)
 	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, []string{"localhost:6379"}, cfg.ValkeyAddrs)
 	assert.Empty(t, cfg.ValkeyPassword)
@@ -34,6 +34,7 @@ func TestDryRunSummary_HasAllRowCounts(t *testing.T) {
 	got := dryRunSummary()
 	for _, want := range []string{
 		"users 11",
+		"hr_employee 10",
 		"rooms 6",
 		"subscriptions 23",
 		"room_members 19",

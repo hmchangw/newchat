@@ -60,6 +60,15 @@ spec:
             {{- include "cassandra-soak.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
             {{- include "cassandra-soak.credentialsMount" . | nindent 12 }}
+            {{- if .Values.ledger.enabled }}
+            - name: failure-ledger
+              mountPath: {{ .Values.ledger.mountPath | quote }}
+            {{- end }}
       volumes:
         {{- include "cassandra-soak.credentialsVolume" . | nindent 8 }}
+        {{- if .Values.ledger.enabled }}
+        - name: failure-ledger
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-ledger" (include "cassandra-soak.fullname" .)) .Values.ledger.existingClaim | quote }}
+        {{- end }}
 {{- end }}

@@ -1,0 +1,134 @@
+<mxfile host="app.diagrams.net" modified="2026-08-10T00:00:00.000Z" agent="Codex" version="24.7.17" type="device">
+  <diagram id="nats-failure-topology" name="NATS-JetStream Failure Test Topology">
+    <mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="NATS / JetStream Failure Testing: Traffic, Fault Injection, and Outcome Validation" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1F2937;" vertex="1" parent="1">
+          <mxGeometry x="30" y="20" width="900" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Green: covered by loadgen   Yellow: partial coverage   Red: uncovered or high risk   Blue: NATS infrastructure" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=13;fontColor=#4B5563;" vertex="1" parent="1">
+          <mxGeometry x="30" y="62" width="920" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="loadgen" value="&lt;b&gt;loadgen&lt;/b&gt;&lt;br&gt;daily + soak + presence + members&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;Partial ledger: Cassandra soak message sends only; cross-site and push/search/bot observers missing&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;strokeWidth=2;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="30" y="130" width="210" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="fault" value="&lt;b&gt;External Fault Injector&lt;/b&gt;&lt;br&gt;node kill / partition / quorum loss&lt;br&gt;disk pressure / consumer delete" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;strokeWidth=2;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="30" y="280" width="210" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cluster" value="Production-like NATS supercluster (at least 3 nodes per site; JetStream replicas match production)" style="swimlane;html=1;rounded=1;startSize=34;horizontal=1;fillColor=#EAF2F8;strokeColor=#6C8EBF;strokeWidth=2;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="280" y="110" width="1310" height="690" as="geometry" />
+        </mxCell>
+
+        <mxCell id="core" value="&lt;b&gt;Core NATS&lt;/b&gt;&lt;br&gt;request/reply, client fanout, presence&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;Auto reconnect + reconnect buffer; no server PubAck&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="40" y="70" width="240" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="messages" value="&lt;b&gt;MESSAGES&lt;/b&gt;&lt;br&gt;User-message front door&lt;br&gt;&lt;font color=&quot;#2E7D32&quot;&gt;loadgen: covered&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#D5E8D4;strokeColor=#82B366;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="40" y="240" width="180" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="gatekeeper" value="&lt;b&gt;message-gatekeeper&lt;/b&gt;&lt;br&gt;validate + canonical PubAck&lt;br&gt;&lt;font color=&quot;#B71C1C&quot;&gt;Immediate Nak, MaxDeliver=5&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="270" y="235" width="200" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="canonical" value="&lt;b&gt;MESSAGES_CANONICAL&lt;/b&gt;&lt;br&gt;user / bot / Teams lanes&lt;br&gt;&lt;font color=&quot;#9A6700&quot;&gt;loadgen: partial&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#FFF2CC;strokeColor=#D6B656;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="520" y="240" width="210" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="downstream" value="&lt;b&gt;Canonical consumers&lt;/b&gt;&lt;br&gt;message-worker / broadcast-worker&lt;br&gt;notification-worker / search-sync-worker&lt;br&gt;&lt;font color=&quot;#B71C1C&quot;&gt;Mostly MaxDeliver=5; some fanout errors are swallowed&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="790" y="220" width="260" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="push" value="&lt;b&gt;PUSH streams&lt;/b&gt;&lt;br&gt;push-notification-service&lt;br&gt;&lt;font color=&quot;#B71C1C&quot;&gt;loadgen: no observer&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#F8CECC;strokeColor=#B85450;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="1100" y="240" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rooms" value="&lt;b&gt;ROOMS&lt;/b&gt;&lt;br&gt;room-service front door&lt;br&gt;&lt;font color=&quot;#2E7D32&quot;&gt;loadgen: members / daily&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#D5E8D4;strokeColor=#82B366;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="40" y="430" width="180" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="roomworker" value="&lt;b&gt;room-worker&lt;/b&gt;&lt;br&gt;Mongo mutation + events&lt;br&gt;&lt;font color=&quot;#B71C1C&quot;&gt;Some post-write publish failures are swallowed&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="270" y="425" width="200" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="outbox" value="&lt;b&gt;OUTBOX&lt;/b&gt;&lt;br&gt;outbox-worker per-peer lanes&lt;br&gt;ordered FIFO / concurrent&lt;br&gt;&lt;font color=&quot;#B71C1C&quot;&gt;loadgen: not covered; MaxDeliver=-1&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#F8CECC;strokeColor=#B85450;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="520" y="415" width="210" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="inbox" value="&lt;b&gt;Remote INBOX&lt;/b&gt;&lt;br&gt;inbox-worker + search-sync&lt;br&gt;&lt;font color=&quot;#B71C1C&quot;&gt;Immediate Nak, MaxDeliver=5; not covered&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#F8CECC;strokeColor=#B85450;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="790" y="425" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="remote" value="&lt;b&gt;Remote-site business state&lt;/b&gt;&lt;br&gt;membership / subscription / search&lt;br&gt;&lt;font color=&quot;#B71C1C&quot;&gt;Missing cross-site reconciliation&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="1070" y="425" width="200" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="special" value="&lt;b&gt;Other JetStream lanes&lt;/b&gt;&lt;br&gt;BOT / HR / MIGRATION / Teams&lt;br&gt;&lt;font color=&quot;#B71C1C&quot;&gt;loadgen: not covered&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#F8CECC;strokeColor=#B85450;strokeWidth=2;fontSize=13;" vertex="1" parent="cluster">
+          <mxGeometry x="520" y="570" width="230" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="observer" value="&lt;b&gt;Shared Outcome Validation and SLOs&lt;/b&gt;&lt;br&gt;operation ledger + missing-after-deadline | stream/consumer pending, ack floor, oldest age&lt;br&gt;Mongo/Cassandra/history/search/push/remote reconciliation | service and loadgen reconnect telemetry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;strokeWidth=2;fontSize=14;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="350" y="850" width="1030" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="gate" value="Hard gates: no silent loss; consumer loops remain active; backlog recovers within RTO; loadgen failure makes the result inconclusive" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;dashed=1;fontStyle=1;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="350" y="970" width="1030" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-load-core" value="Core publish / R/R" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#82B366;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=1;exitY=0.35;entryX=0;entryY=0.4;" edge="1" parent="1" source="loadgen" target="core">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-load-msg" value="message" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#82B366;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=1;exitY=0.7;entryX=0;entryY=0.5;" edge="1" parent="1" source="loadgen" target="messages">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-fault-cluster" value="fault injection" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#B85450;strokeWidth=3;dashed=1;labelBackgroundColor=#FFFFFF;fontStyle=1;fontSize=11;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="fault" target="cluster">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-core-msg" value="stream capture" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6C8EBF;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=0.35;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="cluster" source="core" target="messages">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-msg-gate" value="consume" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6C8EBF;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="cluster" source="messages" target="gatekeeper">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-gate-canon" value="PubAck + dedup" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#B85450;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="cluster" source="gatekeeper" target="canonical">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-canon-down" value="independent durables" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#D6B656;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="cluster" source="canonical" target="downstream">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-down-push" value="PubAck" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#D6B656;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="cluster" source="downstream" target="push">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-core-rooms" value="room R/R → publish" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6C8EBF;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=0.7;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="cluster" source="core" target="rooms">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-rooms-worker" value="consume" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#82B366;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="cluster" source="rooms" target="roomworker">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-room-outbox" value="ordered / concurrent event" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#D6B656;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="cluster" source="roomworker" target="outbox">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-out-inbox" value="remote JetStream PubAck" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#B85450;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="cluster" source="outbox" target="inbox">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-inbox-remote" value="apply / index" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#B85450;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="cluster" source="inbox" target="remote">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-special-down" value="bot / HR / Teams consumers" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#B85450;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=1;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="cluster" source="special" target="downstream">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1060" y="615" />
+              <mxPoint x="1060" y="285" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e-cluster-observer" value="metrics / advisories / business outcomes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#9673A6;strokeWidth=2;dashed=1;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=0.5;exitY=1;entryX=0.55;entryY=0;" edge="1" parent="1" source="cluster" target="observer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-load-observer" value="operation ledger + generator health" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#9673A6;strokeWidth=2;dashed=1;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="loadgen" target="observer">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="260" y="180" />
+              <mxPoint x="260" y="900" />
+              <mxPoint x="330" y="900" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

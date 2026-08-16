@@ -34,6 +34,73 @@ func TestRenderRPSReport_ReportsLastPass(t *testing.T) {
 	assert.Contains(t, out, "E1 p95") // dynamic series column header
 }
 
+// Dropped deliveries have to be visible in the report, not just in the verdict:
+// a run that trips on missing replies is diagnosed very differently from one
+// that trips on latency.
+func TestRenderRPSReport_ShowsMissingRates(t *testing.T) {
+	results := []rpsStepResult{
+		{TargetRPS: 2000, AchievedRPS: 1990, Kind: verdictTrip,
+			AttemptedOps: 10000, MissingReplies: 50, MissingBroadcasts: 120,
+			MissingReplyRate: 0.005, MissingBroadcastRate: 0.012,
+			Latencies: []seriesPercentile{{Name: "E1", Pct: Percentiles{P95: ms(20)}}},
+			Reasons:   []string{"missing broadcast rate 1.200% > 1.000%"}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, renderRPSReport(&buf, results, "messages", "medium"))
+	out := buf.String()
+
+	assert.Contains(t, out, "miss%", "table needs a missing-delivery column")
+	assert.Contains(t, out, "0.500/1.200", "reply and broadcast miss rates shown separately")
+}
+
+func TestRenderRPSReport_ShowsEventRatio(t *testing.T) {
+	results := []rpsStepResult{{
+		TargetRPS: 100, AchievedRPS: 100, Kind: verdictPass,
+		EventRatios: []eventRatioResult{{Name: "SLO-3", Good: 99, Valid: 100, Ratio: 0.99, Target: 0.99}},
+	}}
+	var buf bytes.Buffer
+	require.NoError(t, renderRPSReport(&buf, results, "login", "medium"))
+
+	out := buf.String()
+	assert.Contains(t, out, "SLO-3 good%")
+	assert.Contains(t, out, "99.000")
+}
+
+func TestWriteRPSCSV_CarriesEventRatioCounts(t *testing.T) {
+	results := []rpsStepResult{{
+		TargetRPS: 100, AchievedRPS: 100, Kind: verdictPass,
+		EventRatios: []eventRatioResult{{Name: "SLO-3", Good: 99, Valid: 100, Ratio: 0.99, Target: 0.99}},
+	}}
+	var buf bytes.Buffer
+	require.NoError(t, writeRPSCSV(&buf, results, nil))
+
+	out := buf.String()
+	assert.Contains(t, out, "SLO-3_good,SLO-3_valid,SLO-3_good_ratio,SLO-3_target")
+	assert.Contains(t, out, ",99,100,0.990000,0.990000,")
+}
+
+func TestWriteRPSCSV_CarriesMissingColumns(t *testing.T) {
+	results := []rpsStepResult{
+		{TargetRPS: 1000, AchievedRPS: 990, Kind: verdictPass,
+			AttemptedOps: 10000, MissingReplies: 7, MissingBroadcasts: 9, BroadcastEligible: 6390,
+			MissingReplyRate: 0.0007, MissingBroadcastRate: 0.0009},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, writeRPSCSV(&buf, results, nil))
+	out := buf.String()
+
+	assert.Contains(t, out, "missing_replies")
+	assert.Contains(t, out, "missing_broadcasts")
+	assert.Contains(t, out, "broadcast_eligible")
+	assert.Contains(t, out, "missing_reply_rate")
+	assert.Contains(t, out, "missing_broadcast_rate")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[1], ",7,")
+	assert.Contains(t, lines[1], ",9,")
+	assert.Contains(t, lines[1], ",6390,")
+}
+
 func TestRenderRPSReport_NoStepPassed(t *testing.T) {
 	results := []rpsStepResult{{TargetRPS: 500, Kind: verdictTrip, Reasons: []string{"E1 p95=400ms > 100ms"}}}
 	var buf bytes.Buffer

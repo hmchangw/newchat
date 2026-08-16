@@ -98,6 +98,20 @@ func (mr *MockInboxStoreMockRecorder) ApplyThreadReadAll(ctx, account, lastSeenA
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyThreadReadAll", reflect.TypeOf((*MockInboxStore)(nil).ApplyThreadReadAll), ctx, account, lastSeenAt)
 }
 
+// ApplyUserPermissions mocks base method.
+func (m *MockInboxStore) ApplyUserPermissions(ctx context.Context, permission model.PermissionKey, accounts []string, state model.PermissionState) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ApplyUserPermissions", ctx, permission, accounts, state)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ApplyUserPermissions indicates an expected call of ApplyUserPermissions.
+func (mr *MockInboxStoreMockRecorder) ApplyUserPermissions(ctx, permission, accounts, state any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyUserPermissions", reflect.TypeOf((*MockInboxStore)(nil).ApplyUserPermissions), ctx, permission, accounts, state)
+}
+
 // BulkCreateSubscriptions mocks base method.
 func (m *MockInboxStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error {
 	m.ctrl.T.Helper()

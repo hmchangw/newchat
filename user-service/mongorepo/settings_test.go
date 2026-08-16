@@ -5,6 +5,7 @@ package mongorepo
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,22 +20,32 @@ func ptrStr(s string) *string { return &s }
 func TestGetUserSettings_Integration(t *testing.T) {
 	r, db := newTestUserRepo(t)
 	ctx := context.Background()
+	now := time.Now().UTC()
 	seed(t, db, "users",
 		bson.M{"_id": "u-alice", "account": "alice", "active": true},
 		bson.M{"_id": "u-bob", "account": "bob", "active": true,
-			"settings": bson.M{"fullWidth": true, "translateMessageInto": "en-US"}},
+			"settings": bson.M{"fullWidth": true, "translateMessageInto": "en-US"},
+			"permissions": bson.M{"externalImageView": bson.M{
+				"granted":       true,
+				"effectiveFrom": now.Add(-time.Hour),
+				"expiresAt":     now.Add(time.Hour),
+				"updatedAt":     now.Add(-time.Hour),
+			}}},
 		bson.M{"_id": "u-ghost", "account": "ghost", "active": false,
 			"settings": bson.M{"fullWidth": true}},
 	)
 
-	t.Run("never-set settings come back nil", func(t *testing.T) {
+	// A matched user comes back non-nil with nil sub-documents when nothing was ever
+	// written — a nil user is reserved for "no active user" (the not-found signal).
+	t.Run("matched user with never-written sub-documents", func(t *testing.T) {
 		u, err := r.GetUserSettings(ctx, "alice")
 		require.NoError(t, err)
 		require.NotNil(t, u)
 		assert.Nil(t, u.Settings)
+		assert.Nil(t, u.Permissions)
 	})
 
-	t.Run("stored sub-document round-trips", func(t *testing.T) {
+	t.Run("both sub-documents round-trip in one read", func(t *testing.T) {
 		u, err := r.GetUserSettings(ctx, "bob")
 		require.NoError(t, err)
 		require.NotNil(t, u)
@@ -42,6 +53,12 @@ func TestGetUserSettings_Integration(t *testing.T) {
 		assert.Equal(t, ptrBool(true), u.Settings.FullWidth)
 		assert.Equal(t, ptrStr("en-US"), u.Settings.TranslateMessageInto)
 		assert.Nil(t, u.Settings.MuteAllNotifications)
+		require.NotNil(t, u.Permissions)
+		require.NotNil(t, u.Permissions.ExternalImageView)
+		assert.True(t, u.Permissions.ExternalImageView.Granted)
+		// Mongo truncates the stored bounds to ms — assert the evaluated decision,
+		// not the exact instants.
+		assert.True(t, u.Permissions.Evaluated(time.Now().UTC())[model.PermissionExternalImageView])
 	})
 
 	t.Run("inactive user dropped", func(t *testing.T) {
@@ -69,7 +86,7 @@ func TestUpdateUserSettings_PartialSet_Integration(t *testing.T) {
 	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{
 		FullWidth:            ptrBool(false),
 		TranslateMessageInto: ptrStr("ja"),
-	})
+	}, time.Now().UTC())
 	require.NoError(t, err)
 	require.NotNil(t, u)
 	require.NotNil(t, u.Settings)
@@ -84,7 +101,7 @@ func TestUpdateUserSettings_FirstSetCreatesSubDocument_Integration(t *testing.T)
 	ctx := context.Background()
 	seed(t, db, "users", bson.M{"_id": "u-alice", "account": "alice", "active": true})
 
-	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{InitialChatScrollPosition: ptrStr(model.InitialChatScrollNewest)})
+	u, err := r.UpdateUserSettings(ctx, "alice", &model.UserSettings{InitialChatScrollPosition: ptrStr(model.InitialChatScrollNewest)}, time.Now().UTC())
 	require.NoError(t, err)
 	require.NotNil(t, u)
 	require.NotNil(t, u.Settings)
@@ -97,7 +114,7 @@ func TestUpdateUserSettings_NoActiveUser_Integration(t *testing.T) {
 	ctx := context.Background()
 	seed(t, db, "users", bson.M{"_id": "u-ghost", "account": "ghost", "active": false})
 
-	u, err := r.UpdateUserSettings(ctx, "ghost", &model.UserSettings{FullWidth: ptrBool(true)})
+	u, err := r.UpdateUserSettings(ctx, "ghost", &model.UserSettings{FullWidth: ptrBool(true)}, time.Now().UTC())
 	require.NoError(t, err)
 	assert.Nil(t, u)
 }

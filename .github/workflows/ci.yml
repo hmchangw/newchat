@@ -58,11 +58,14 @@ permissions:
   contents: read
 
 env:
-  # Bumped to 1.25.12 for the July 2026 security release (govulncheck
-  # flagged a reachable crypto/tls (GO-2026-5856) stdlib advisory fixed
-  # in 1.25.12; 1.25.11 had covered the June GO-2026-5039/GO-2026-5037
-  # advisories).
-  GO_VERSION: "1.25.12"
+  # Bumped to 1.25.13 for the August 2026 security release (govulncheck
+  # flagged seven reachable stdlib advisories fixed in 1.25.13:
+  # GO-2026-6218 net/url, GO-2026-6091 html/template, GO-2026-6090
+  # crypto/tls, GO-2026-6089 net/http, GO-2026-6088 encoding/xml,
+  # GO-2026-5972 encoding/asn1, GO-2026-5026 x/net/idna via net/http).
+  # 1.25.12 had covered the July GO-2026-5856 crypto/tls advisory;
+  # 1.25.11 the June GO-2026-5039/GO-2026-5037 advisories.
+  GO_VERSION: "1.25.13"
   GOLANGCI_LINT_VERSION: "v2.11.4"
 
 jobs:

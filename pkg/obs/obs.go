@@ -15,12 +15,43 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/flywindy/o11y"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+)
+
+const (
+	// RoomIDKey and SiteIDKey are application-defined OTel attribute keys. OTel
+	// does not define generic chat-room or chat-site semantic conventions, so
+	// the chat.* namespace prevents collisions with standard keys.
+	RoomIDKey = "chat.room.id"
+	SiteIDKey = "chat.site.id"
+)
+
+// managedBaggageKeys is the single source of truth for the keys this package
+// materializes onto spans and logs. options() registers them, and public
+// ingress clears exactly this set — a key registered in one place but missing
+// from the other would be forgeable by a caller.
+var managedBaggageKeys = []string{o11y.UserNameKey, RoomIDKey, SiteIDKey}
+
+// ManagedBaggageKeys returns a copy of the baggage keys this package treats as
+// trusted identity.
+func ManagedBaggageKeys() []string {
+	return slices.Clone(managedBaggageKeys)
+}
+
+var (
+	contextAttributesEnabled atomic.Bool
+	userBaggageEnabled       atomic.Bool
 )
 
 // Config is parsed from the environment. Variable names follow OpenTelemetry
@@ -38,6 +69,10 @@ type Config struct {
 	// O11Y_*_ENABLED pillar toggles then apply. When Enabled is false those
 	// per-pillar toggles are ignored (the master switch wins).
 	Enabled bool `env:"O11Y_ENABLED" envDefault:"false"`
+	// UserBaggageEnabled is a separate PII opt-in. It controls both creating
+	// user.name baggage at trusted request boundaries and materializing it onto
+	// spans/logs. Room/site identifiers remain enabled whenever O11Y_ENABLED is.
+	UserBaggageEnabled bool `env:"O11Y_USER_BAGGAGE_ENABLED" envDefault:"false"`
 
 	// ServiceName drives service.name on every span/metric/log. It defaults to a
 	// visible placeholder rather than being required so a missing env degrades to
@@ -101,6 +136,13 @@ func (c *Config) options() []o11y.Option {
 			o11y.WithProfilingEnabled(false),
 		)
 	}
+	// Derived from managedBaggageKeys so registration and the public-ingress
+	// clear list cannot drift; user.name has its own PII opt-in option below.
+	opts = append(opts, o11y.WithBaggageAttributes(slices.DeleteFunc(
+		ManagedBaggageKeys(), func(k string) bool { return k == o11y.UserNameKey })...))
+	if c.UserBaggageEnabled {
+		opts = append(opts, o11y.WithUserBaggage())
+	}
 	opts = append(opts, c.samplerOptions()...)
 	return opts
 }
@@ -146,7 +188,22 @@ func InitWithLoggerHandler(ctx context.Context, minLevel slog.Level, wrap func(s
 	return initSDK(ctx, &minLevel, wrap)
 }
 
+// PublicIngressPropagator accepts distributed trace context at an Internet-
+// facing HTTP boundary without accepting caller-controlled W3C baggage. The
+// handler can rebuild trusted identity after authentication. Using this as the
+// server middleware's extractor is important: clearing baggage in a later Gin
+// middleware would be too late to prevent the entry span's OnStart processor
+// from materializing forged values.
+func PublicIngressPropagator() propagation.TextMapPropagator {
+	return propagation.TraceContext{}
+}
+
 func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) slog.Handler) (*o11y.SDK, func(context.Context) error, error) {
+	// Avoid retaining an earlier successful initialization's policy if a later
+	// initialization in the same process (notably a test) fails.
+	contextAttributesEnabled.Store(false)
+	userBaggageEnabled.Store(false)
+
 	cfg, err := parseConfig()
 	if err != nil {
 		return nil, nil, err
@@ -160,6 +217,8 @@ func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("init o11y sdk: %w", err)
 	}
+	contextAttributesEnabled.Store(cfg.Enabled)
+	userBaggageEnabled.Store(cfg.Enabled && cfg.UserBaggageEnabled)
 
 	otel.SetTracerProvider(sdk.TracerProvider())
 	otel.SetMeterProvider(sdk.MeterProvider())
@@ -171,4 +230,132 @@ func initSDK(ctx context.Context, minLevel *slog.Level, wrap func(slog.Handler) 
 	slog.SetDefault(logger)
 
 	return sdk, sdk.Shutdown, nil
+}
+
+// ContextWithIdentity attaches trusted request identity to ctx as W3C baggage
+// and to the current entry span. Baggage lets o11y's span processor enrich all
+// child driver spans and its slog handler enrich contextual logs; explicitly
+// setting the current span is necessary because it started before middleware
+// could authenticate or parse the identity.
+//
+// account is PII and is added only when O11Y_USER_BAGGAGE_ENABLED=true; an
+// authoritative non-empty account still removes a superseded inbound value
+// when the opt-in is off. Room and site use application-scoped keys because
+// OpenTelemetry defines no generic semantic convention for them. Empty values
+// preserve trusted baggage received from an internal hop.
+func ContextWithIdentity(ctx context.Context, account, roomID, siteID string) context.Context {
+	if !contextAttributesEnabled.Load() {
+		return ctx
+	}
+
+	if account != "" {
+		ctx = withoutBaggageAttributes(ctx, o11y.UserNameKey)
+		if userBaggageEnabled.Load() {
+			next, err := o11y.ContextWithUser(ctx, account)
+			if err != nil {
+				slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", o11y.UserNameKey, "error", err)
+			} else {
+				ctx = next
+				o11y.SetUser(ctx, account)
+			}
+		}
+	}
+	return contextWithBaggageAttributes(ctx,
+		attribute.String(RoomIDKey, roomID),
+		attribute.String(SiteIDKey, siteID),
+	)
+}
+
+// ContextWithPublicIdentity is ContextWithIdentity for a boundary a client can
+// reach directly, where inbound baggage is caller-controlled rather than a
+// trusted upstream hop's. Every managed key is dropped first — including those
+// this boundary has no trusted value for, which ContextWithIdentity would
+// otherwise leave in place — so an identifier the subject does not carry (a
+// static site token, say) cannot be supplied by the caller instead.
+//
+// This is the NATS counterpart of PublicIngressPropagator: HTTP can refuse
+// baggage at extraction, but a NATS propagator is per-connection, so the drop
+// happens on the first hop of the handler chain. Dropping also zeroes the
+// entry span's attributes, which the SDK's OnStart processor materialized from
+// the forged values before any handler ran.
+func ContextWithPublicIdentity(ctx context.Context, account, roomID, siteID string) context.Context {
+	// Sanitize unconditionally, before reading any toggle. Emission being off
+	// does not make the caller's values safe: NATS tracing can be forced on by
+	// OTEL_NATS_TRACING_ENABLED or the flag relay, carrying them to a service
+	// that does emit. Clearing here rather than leaving it to the trusted-value
+	// path also keeps this boundary's guarantee independent of what
+	// ContextWithIdentity decides — one decision, taken at ingress.
+	//
+	// This costs no more than clearing a subset would: the pass is batched, and
+	// the trusted-value path's own clear then finds nothing left to remove and
+	// skips its rebuild.
+	ctx = withoutBaggageAttributes(ctx, managedBaggageKeys...)
+	return ContextWithIdentity(ctx, account, roomID, siteID)
+}
+
+// contextWithBaggageAttributes sets each non-empty attribute as baggage and
+// materializes the accepted ones onto the current span in one write. Empty
+// values are skipped, which preserves trusted baggage from an internal hop.
+//
+// Superseded values are dropped for the whole set up front — one rebuild rather
+// than one per key — which also strengthens the fail-safe: if any replacement
+// is rejected below, no stale value survives for any key. The o11y SDK
+// validates one member per call, so only the set loop remains per-key.
+func contextWithBaggageAttributes(ctx context.Context, kvs ...attribute.KeyValue) context.Context {
+	supplied := make([]attribute.KeyValue, 0, len(kvs))
+	superseded := make([]string, 0, len(kvs))
+	for _, kv := range kvs {
+		if kv.Value.AsString() == "" {
+			continue
+		}
+		supplied = append(supplied, kv)
+		superseded = append(superseded, string(kv.Key))
+	}
+	if len(supplied) == 0 {
+		return ctx
+	}
+	ctx = withoutBaggageAttributes(ctx, superseded...)
+
+	accepted := make([]attribute.KeyValue, 0, len(supplied))
+	for _, kv := range supplied {
+		key := string(kv.Key)
+		next, err := o11y.ContextWithBaggageValue(ctx, key, kv.Value.AsString())
+		if err != nil {
+			slog.WarnContext(ctx, "telemetry identity attribute omitted", "attribute", key, "error", err)
+			continue
+		}
+		ctx = next
+		accepted = append(accepted, kv)
+	}
+	if len(accepted) > 0 {
+		trace.SpanFromContext(ctx).SetAttributes(accepted...)
+	}
+	return ctx
+}
+
+// withoutBaggageAttributes removes superseded inbound values before trusted
+// ones are set. If a replacement is rejected (for example, over the SDK size
+// limit), the old value must not survive in propagation or on the current entry
+// span. Empty span attributes are used only when OnStart already materialized a
+// value that OpenTelemetry cannot otherwise delete.
+//
+// Keys absent from the baggage are skipped, so the common case costs one map
+// lookup each and neither a baggage rebuild nor a span write.
+func withoutBaggageAttributes(ctx context.Context, keys ...string) context.Context {
+	bag := baggage.FromContext(ctx)
+	present := make([]string, 0, len(keys))
+	cleared := make([]attribute.KeyValue, 0, len(keys))
+	for _, key := range keys {
+		if bag.Member(key).Key() == "" {
+			continue
+		}
+		present = append(present, key)
+		cleared = append(cleared, attribute.String(key, ""))
+	}
+	if len(present) == 0 {
+		return ctx
+	}
+	ctx = o11y.ContextWithoutBaggageValues(ctx, present...)
+	trace.SpanFromContext(ctx).SetAttributes(cleared...)
+	return ctx
 }

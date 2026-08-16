@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"go.opentelemetry.io/otel/baggage"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/restyutil"
@@ -83,6 +85,9 @@ func (t *streamTranslator) Translate(ctx context.Context, text, targetLang strin
 // nil error) when the response is a "failed to verify jwt" auth rejection, so the
 // caller can refresh and retry.
 func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, token string) (result string, jwtFailed bool, err error) {
+	// Translation is a third-party egress. Keep the parent span but never send
+	// internal identity or room baggage to the provider.
+	ctx = baggage.ContextWithoutBaggage(ctx)
 	resp, err := t.client.R().
 		SetContext(ctx).
 		SetHeader("Accept", "text/event-stream").
@@ -99,6 +104,12 @@ func (t *streamTranslator) translateOnce(ctx context.Context, text, targetLang, 
 	body := resp.RawBody()
 	defer body.Close()
 
+	// A 429 is a rate limit — surface too_many_requests and do NOT retry (a jwt
+	// failure would; this is not that). Classified before parsing the body.
+	if resp.StatusCode() == http.StatusTooManyRequests {
+		return "", false, errcode.TooManyRequests("translation rate limited",
+			errcode.WithReason(errcode.TranslateRateLimited))
+	}
 	// A 5XX is an outage regardless of body — classify before parsing, so a 5XX
 	// carrying data/JWT-shaped content can't read as success or trigger a refresh.
 	if s := resp.StatusCode(); s >= 500 && s < 600 {

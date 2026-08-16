@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -29,7 +30,8 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, X-Request-ID, "+
+			botauth.HeaderUserID+", "+botauth.HeaderAuthToken)
 		c.Header("Access-Control-Max-Age", "300")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -54,6 +56,7 @@ func accessLogMiddleware() gin.HandlerFunc {
 			"client_ip", c.ClientIP(),
 			"media_kind", c.GetString("media_kind"),
 			"media_outcome", c.GetString("media_outcome"),
+			"bot_account", c.GetString("bot_account"),
 		)
 	}
 }

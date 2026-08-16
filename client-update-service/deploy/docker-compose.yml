@@ -1,0 +1,33 @@
+name: client-update-service
+
+services:
+  client-update-service:
+    build:
+      context: ../..
+      dockerfile: client-update-service/deploy/Dockerfile
+    # Host 8089: 8086 (upload-service), 8087 (tcard-service), 8088 (observability)
+    # are taken. Container port 8080 is unchanged.
+    ports:
+      - "8089:8080"
+    env_file:
+      - path: ../../docker-local/.env
+        required: false
+    environment:
+      - OTEL_SERVICE_NAME=client-update-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - PORT=8080
+      - SITE_ID=${SITE_ID:-site-local}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_USE_SSL=false
+      - MINIO_BUCKET=${MINIO_BUCKET:-chat-updates}
+      - CACHE_MAX_ENTRIES=4
+      - CACHE_TTL=24h
+      - CACHE_MAX_OBJECT_BYTES=536870912
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

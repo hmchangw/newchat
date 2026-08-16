@@ -13,6 +13,15 @@ func defaultSteps(workload string) string {
 	switch workload {
 	case "history", "read-receipt", "room-read", "thread-read":
 		return "200,500,1000,2000,5000"
+	case "login":
+		// Login is a low-rate journey — one per session, not per message — and
+		// each attempt costs auth-service a JWT sign. Ramping into the
+		// thousands would measure signing throughput nobody will ever need.
+		return "50,100,200,500,1000"
+	case "search":
+		// The workload model puts search at ~5 ops/user/day (R_search in
+		// docs/nats-traffic-estimation.md §4), far below the message path.
+		return "100,200,500,1000,2000"
 	default:
 		return "500,1000,2000,5000,10000"
 	}
@@ -22,20 +31,71 @@ func buildThresholds(p95, p99 time.Duration, errRate float64, pendingGrowth uint
 	return rpsThresholds{P95: p95, P99: p99, ErrorRate: errRate, PendingGrowth: pendingGrowth, RateTolerance: rateTol}
 }
 
+// sloRatioFlags holds the per-SLO bound and target flags. Each spec SLI owns
+// its own pair: they used to be read off --slo-p95/--slo-p99 and
+// --slo-error-rate, which made one flag carry two unrelated meanings — retuning
+// a report percentile silently redefined the objective, and no error budget
+// could be computed because the numbers were not the spec's.
+type sloRatioFlags struct {
+	slo3Latency, slo8Latency           *time.Duration
+	slo3Target, slo7Target, slo8Target *float64
+}
+
+// registerSLORatioFlags registers the per-SLO flags with sli-slo.md's values as
+// defaults. Split out of runMaxRPS so the defaults have a single definition
+// that a test can assert against the spec.
+func registerSLORatioFlags(fs *flag.FlagSet) *sloRatioFlags {
+	return &sloRatioFlags{
+		slo3Latency: fs.Duration("slo3-latency", time.Second, "SLO-3 (login) latency bound"),
+		slo3Target:  fs.Float64("slo3-target", 0.99, "SLO-3 (login) good-ratio target"),
+		slo7Target:  fs.Float64("slo7-target", 0.995, "SLO-7 (search availability) good-ratio target"),
+		slo8Latency: fs.Duration("slo8-latency", time.Second, "SLO-8 (search) latency bound"),
+		slo8Target:  fs.Float64("slo8-target", 0.95, "SLO-8 (search) good-ratio target"),
+	}
+}
+
+func (f *sloRatioFlags) slo3() sloRatio {
+	return sloRatio{Target: *f.slo3Target, Bound: *f.slo3Latency}
+}
+
+// slo7 carries no bound: search availability has no latency component.
+func (f *sloRatioFlags) slo7() sloRatio { return sloRatio{Target: *f.slo7Target} }
+
+func (f *sloRatioFlags) slo8() sloRatio {
+	return sloRatio{Target: *f.slo8Target, Bound: *f.slo8Latency}
+}
+
+// validateSLORatio rejects an unusable bound/target pair at parse time. The
+// verdict layer would also catch these, but only as INCONCLUSIVE — which reads
+// as a measurement fault after a full ramp, rather than the flag error it is.
+// A zero bound is allowed for ratios with no latency component (SLO-7).
+func validateSLORatio(name string, r sloRatio, wantBound bool) bool {
+	if wantBound && r.Bound <= 0 {
+		fmt.Fprintf(os.Stderr, "--%s-latency must be > 0\n", name)
+		return false
+	}
+	if r.Target <= 0 || r.Target > 1 {
+		fmt.Fprintf(os.Stderr, "--%s-target must be in (0,1]\n", name)
+		return false
+	}
+	return true
+}
+
 // runMaxRPS parses flags, builds the workload adapter, runs the ramp and prints
 // the report. Returns the process exit code.
 func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("max-rps", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|thread|history|read-receipt|room-read|thread-read")
+	workload := fs.String("workload", "messages", "messages|thread|history|read-receipt|room-read|thread-read|login|search")
 	preset := fs.String("preset", "", "preset name")
 	seed := fs.Int64("seed", 42, "RNG seed")
 	stepsFlag := fs.String("steps", "", "ascending RPS list, e.g. 500,1k,2k,5k,10k (default depends on workload)")
 	warmup := fs.Duration("warmup", 10*time.Second, "per-step warmup (samples discarded)")
 	hold := fs.Duration("hold", 30*time.Second, "per-step measurement window")
 	cooldown := fs.Duration("cooldown", 5*time.Second, "per-step settle gap")
-	sloP95 := fs.Duration("slo-p95", 100*time.Millisecond, "p95 latency SLO (all gated series)")
-	sloP99 := fs.Duration("slo-p99", 250*time.Millisecond, "p99 latency SLO (all gated series)")
+	sloP95 := fs.Duration("slo-p95", 100*time.Millisecond, "p95 latency gate (messages/thread/history/…)")
+	sloP99 := fs.Duration("slo-p99", 250*time.Millisecond, "p99 latency gate (messages/thread/history/…)")
 	sloErr := fs.Float64("slo-error-rate", 0.001, "max error rate (failed/attempted)")
+	slos := registerSLORatioFlags(fs)
 	sloPending := fs.Uint64("slo-pending-growth", 1000, "max per-durable pending growth (messages only)")
 	rateTol := fs.Float64("rate-tolerance", 0.05, "achieved-vs-target shortfall band for INCONCLUSIVE")
 	stopOnTrip := fs.Bool("stop-on-trip", true, "stop the ramp at the first TRIP")
@@ -47,7 +107,12 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	beforeModeFlag := fs.String("before-mode", "open:70,scrollback:30", "history only: before-cursor mix")
 	scrollbackPages := fs.Int("scrollback-pages", 5, "history only: pages per scrollback chain")
 	pageLimit := fs.Int("page-limit", 20, "history only: page limit")
-	requestTimeout := fs.Duration("request-timeout", 5*time.Second, "history/read-receipt/room-read: per-request timeout")
+	requestTimeout := fs.Duration("request-timeout", 5*time.Second, "history/read-receipt/room-read/thread-read/login/search: per-request timeout")
+	// login-only tunables:
+	authURL := fs.String("auth-url", "", "login only: auth-service base URL (default AUTH_URL)")
+	loginKeyPool := fs.Int("login-key-pool", 256, "login only: pre-generated NKey pool size")
+	// search-only tunable:
+	searchMixFlag := fs.String("search-mix", "messages:60,rooms:30,users:10", "search only: endpoint mix")
 	csvPath := fs.String("csv", "", "optional CSV output path")
 	_ = fs.Parse(args)
 
@@ -83,7 +148,7 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			fmt.Fprintln(os.Stderr, err.Error())
 			return 2
 		}
-		mw, clean, err := newMessagesWorkload(ctx, cfg, &p, injectMode, *seed)
+		mw, clean, err := newMessagesWorkload(ctx, cfg, &p, injectMode, *seed, resolveDrainWindow(*sloP99))
 		if err != nil {
 			slog.Error("init messages workload", "error", err)
 			return 1
@@ -100,12 +165,67 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			return 2
 		}
 		tf := BuildThreadFixtures(&p, *seed, *parentsPerRoom, cfg.SiteID)
-		tw, clean, err := newThreadWorkload(ctx, cfg, &p, &tf, *seed)
+		tw, clean, err := newThreadWorkload(ctx, cfg, &p, &tf, *seed, resolveDrainWindow(*sloP99))
 		if err != nil {
 			slog.Error("init thread workload", "error", err)
 			return 1
 		}
 		w, cleanup, presetID = tw, clean, p.Name
+	case "login":
+		p, ok := BuiltinPreset(*preset)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown preset: %s\n", *preset)
+			return 2
+		}
+		url := *authURL
+		if url == "" {
+			url = cfg.AuthURL
+		}
+		if *requestTimeout <= 0 {
+			fmt.Fprintln(os.Stderr, "--request-timeout must be > 0")
+			return 2
+		}
+		// Validated here so a bad flag exits 2 like every other flag error,
+		// rather than reaching newLoginKeyPool and exiting 1 as a runtime fault.
+		if *loginKeyPool <= 0 {
+			fmt.Fprintln(os.Stderr, "--login-key-pool must be > 0")
+			return 2
+		}
+		slo3 := slos.slo3()
+		if !validateSLORatio("slo3", slo3, true) {
+			return 2
+		}
+		lw, clean, err := newLoginWorkload(cfg, &p, *seed, url, *requestTimeout, *loginKeyPool, slo3)
+		if err != nil {
+			slog.Error("init login workload", "error", err)
+			return 1
+		}
+		w, cleanup, presetID = lw, clean, p.Name
+	case "search":
+		p, ok := BuiltinPreset(*preset)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown preset: %s\n", *preset)
+			return 2
+		}
+		searchMix, err := ParseSearchMix(*searchMixFlag)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			return 2
+		}
+		if *requestTimeout <= 0 {
+			fmt.Fprintln(os.Stderr, "--request-timeout must be > 0")
+			return 2
+		}
+		slo7, slo8 := slos.slo7(), slos.slo8()
+		if !validateSLORatio("slo7", slo7, false) || !validateSLORatio("slo8", slo8, true) {
+			return 2
+		}
+		sw, clean, err := newSearchWorkload(cfg, &p, *seed, searchMix, *requestTimeout, slo7, slo8)
+		if err != nil {
+			slog.Error("init search workload", "error", err)
+			return 1
+		}
+		w, cleanup, presetID = sw, clean, p.Name
 	case "history":
 		p, ok := BuiltinHistoryPreset(*preset)
 		if !ok {

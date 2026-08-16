@@ -13,6 +13,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -39,16 +40,18 @@ type bulkPresenceSource struct {
 	siteID    string
 	batchSize int
 	timeout   time.Duration
+	// metrics is injected; the zero value is safe and records nothing.
+	metrics natsmetrics.Publisher
 }
 
-func newBulkPresenceSource(req presenceRequester, siteID string, batchSize int, timeout time.Duration) *bulkPresenceSource {
+func newBulkPresenceSource(req presenceRequester, siteID string, batchSize int, timeout time.Duration, metrics natsmetrics.Publisher) *bulkPresenceSource {
 	if batchSize <= 0 {
 		batchSize = 512
 	}
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
-	return &bulkPresenceSource{req: req, siteID: siteID, batchSize: batchSize, timeout: timeout}
+	return &bulkPresenceSource{req: req, siteID: siteID, batchSize: batchSize, timeout: timeout, metrics: metrics}
 }
 
 func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (map[string]model.Presence, error) {
@@ -73,7 +76,9 @@ func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (m
 				slog.Warn("presence marshal failed", "error", err)
 				return
 			}
+			started := time.Now()
 			msg, err := b.req.Request(ctx, subj, data, b.timeout)
+			b.metrics.Request(ctx, natsmetrics.OperationPresenceLookup, time.Since(started), err)
 			if err != nil {
 				slog.Warn("presence rpc failed", "error", err, "chunk", len(ch))
 				return
@@ -116,14 +121,49 @@ func chunkStrings(in []string, size int) [][]string {
 	return out
 }
 
-// shouldPush returns true unless the account is explicitly DND; fail-open on missing/unknown status.
-func shouldPush(p model.Presence) bool {
+// isDND and isPresenting are stubs: deriving these two statuses belongs to the
+// presence side of the system, which has not shipped them yet. They are vars so
+// tests can supply the eventual behaviour and prove the gate ordering now.
+//
+// Deliberately NOT inferred from any status we currently receive — mapping DND
+// onto "busy" or presenting onto "in-call" would invent a contract we do not own.
+// Until the real predicates land, both return false and rule 2 of the decision
+// table is inert.
+var (
+	isDND        = func(model.Presence) bool { return false }
+	isPresenting = func(model.Presence) bool { return false }
+)
+
+// isInCall reports whether presence alone suppresses push. "busy" and "in-call"
+// are one bucket while isDND is inert: showNotificationsInCall is the only
+// user-facing control over either, so splitting them now would push to DND users.
+func isInCall(p model.Presence) bool {
 	switch p.AggregatedStatus {
 	case "busy", "in-call":
-		return false
+		return true
 	default:
+		return false
+	}
+}
+
+// shouldPush applies the priority-contact pierce, then the suppressors in the
+// issue's stated priority order. alwaysAllowPriorityNotifications is the single
+// opt-in for "priority contacts reach me anyway", so the pierce crosses all of
+// them. Unknown presence fails open.
+func shouldPush(p model.Presence, ns notifSettings, isPrioritySender bool) bool {
+	if ns.allowPriority && isPrioritySender {
 		return true
 	}
+	if ns.muteAll {
+		return false
+	}
+	if isDND(p) || isPresenting(p) {
+		return false
+	}
+	if isInCall(p) && !ns.showInCall {
+		return false
+	}
+	return true
 }
 
 type natsPresenceRequester struct {

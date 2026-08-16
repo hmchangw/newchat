@@ -34,6 +34,9 @@ func CORS() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		// baggage stays allowed so a browser already sending it under the previous
+		// contract keeps passing preflight during rollout; its contents are
+		// rejected at extraction by obs.PublicIngressPropagator, not by CORS.
 		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, traceparent, tracestate, baggage")
 		c.Header("Access-Control-Max-Age", "300")
 		if c.Request.Method == http.MethodOptions {

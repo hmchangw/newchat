@@ -301,6 +301,56 @@ func TestMessageCollection_BuildAction(t *testing.T) {
 	})
 }
 
+// Sys-messages arrive on MESSAGES-CANONICAL like any other message but are UI
+// chrome, not searchable content — every other consumer already gates on
+// IsSystemMessageType; this collection was the outlier that indexed them.
+func TestMessageCollection_BuildAction_SystemMessagesNotIndexed(t *testing.T) {
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
+
+	mkEvent := func(msgType string) []byte {
+		evt := model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				Type:      msgType,
+				Content:   "hello",
+				CreatedAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		data, _ := json.Marshal(evt)
+		return data
+	}
+
+	systemTypes := []string{
+		model.MessageTypeRoomCreated,
+		model.MessageTypeMembersAdded,
+		model.MessageTypeMemberRemoved,
+		model.MessageTypeMemberLeft,
+		model.MessageTypeRoomRenamed,
+		model.MessageTypeRoomRestricted,
+		model.MessageTypeTeamsMeetStarted,
+	}
+	for _, st := range systemTypes {
+		t.Run("system: "+st, func(t *testing.T) {
+			actions, err := coll.BuildAction(mkEvent(st))
+			require.NoError(t, err, "a system message is filtered, not an error")
+			assert.Empty(t, actions)
+		})
+	}
+
+	// A normal message has Type "" and an `important` message is client-set, not
+	// system — both stay searchable.
+	for _, keep := range []string{"", model.MessageTypeImportant} {
+		t.Run("indexed: "+keep, func(t *testing.T) {
+			actions, err := coll.BuildAction(mkEvent(keep))
+			require.NoError(t, err)
+			require.Len(t, actions, 1)
+			assert.Equal(t, "m1", actions[0].DocID)
+		})
+	}
+}
+
 func TestMessageCollection_BuildAction_SyncFromFilter(t *testing.T) {
 	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	coll := newMessageCollection("msgs-v1", "site-a", cutoff, false)
@@ -670,4 +720,41 @@ func TestMessageCollection_BuildAction_TeamsBatch_MalformedRecordDoesNotDropSibl
 	require.NoError(t, buildErr)
 	require.Len(t, actions, 1, "the malformed record must be skipped, not abort the whole batch")
 	assert.Equal(t, teamsmigrate.DeterministicMessageID("room-1", "tm-1"), actions[0].DocID)
+}
+
+func TestMessageCollection_BuildAction_TeamsBatch_SetsOrigin(t *testing.T) {
+	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	ts := time.Now().UTC()
+
+	valid, err := json.Marshal(teamsmigrate.Message{
+		ID: "tm-1", RoomID: "room-1", MessageType: "message", CreatedDateTime: ts,
+	})
+	require.NoError(t, err)
+	req := model.TeamsBatchRequest{Messages: []json.RawMessage{valid}}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	actions, buildErr := c.BuildAction(data)
+	require.NoError(t, buildErr)
+	require.Len(t, actions, 1)
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(actions[0].Doc, &doc))
+	assert.Equal(t, model.OriginTeams, doc["origin"], "Teams-migrated docs must carry origin=teams")
+}
+
+func TestBuildMessageAction_NormalPath_OmitsOrigin(t *testing.T) {
+	ts := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	evt := &model.MessageEvent{
+		Event:     model.EventCreated,
+		Message:   model.Message{ID: "msg-1", RoomID: "r1", UserID: "u1", UserAccount: "alice", CreatedAt: ts},
+		SiteID:    "site-a",
+		Timestamp: 1737964678390,
+	}
+	action := buildMessageAction(evt, "msgs-v1")
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(action.Doc, &doc))
+	_, hasOrigin := doc["origin"]
+	assert.False(t, hasOrigin, "non-Teams docs must not carry an origin field")
 }

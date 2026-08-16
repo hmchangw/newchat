@@ -13,13 +13,16 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -67,18 +70,37 @@ type Handler struct {
 	encrypt       bool
 	encoder       *roomcrypto.Encoder
 	routeMode     subject.RoomRouteMode
+	metrics       *broadcastMetrics
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode) *Handler {
+type handlerOption func(*handlerOptions)
+
+type handlerOptions struct {
+	metrics *broadcastMetrics
+}
+
+func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
+	return func(opts *handlerOptions) { opts.metrics = metrics }
+}
+
+func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
+	var opts handlerOptions
+	for _, option := range options {
+		option(&opts)
+	}
+	if opts.metrics == nil {
+		opts.metrics = newBroadcastMetrics(otel.Meter("broadcast-worker"))
+	}
 	return &Handler{
 		store:         store,
 		userStore:     userStore,
-		pub:           pub,
+		pub:           &broadcastMetricPublisher{next: pub, metrics: opts.metrics},
 		keyStore:      keyStore,
 		parentFetcher: parentFetcher,
 		encrypt:       encrypt,
 		encoder:       roomcrypto.NewEncoder(),
 		routeMode:     routeMode,
+		metrics:       opts.metrics,
 	}
 }
 
@@ -86,10 +108,13 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		// Malformed payload — it will never parse on redelivery. Mark permanent
 		// so the caller Acks (drops) it instead of retrying until MaxDeliver.
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
+	ctx = obs.ContextWithIdentity(ctx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
+	ctx = withBroadcastMetricLabels(ctx, roomUnknown, natsmetrics.EventType(evt.Event))
 
 	switch evt.Event {
 	case model.EventCreated:
@@ -124,6 +149,7 @@ func (h *Handler) HandleServerBroadcast(ctx context.Context, data []byte) {
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		return
 	}
+	ctx = obs.ContextWithIdentity(ctx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
 	switch evt.Event {
 	case model.EventThreadReplyAdded:
 		if err := h.handleThreadTCountUpdated(ctx, &evt); err != nil {
@@ -202,7 +228,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	case model.RoomTypeChannel:
 		return h.publishChannelEvent(ctx, &meta, clientMsg, evt.Timestamp, resolved.MentionAll, resolved.Participants)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
-		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts)
+		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts, model.RoomEventNewMessage)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping fan-out",
 			"type", meta.Type,
@@ -262,6 +288,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		// in the main channel, so a room-level mention badge would appear with no
 		// visible message to explain it.
 		roomEvt := buildRoomEvent(&meta, clientMsg, evt.Timestamp)
+		roomEvt.Type = model.RoomEventNewThreadMessage
 		roomEvt.MentionAll = resolved.MentionAll
 		if len(resolved.Participants) > 0 {
 			roomEvt.Mentions = resolved.Participants
@@ -276,7 +303,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		// owned by message-worker (markThreadMentions), so broadcast-worker doesn't
 		// touch subscriptions here. lastMsgAt is intentionally NOT updated (would
 		// wrongly mark hasUnread for non-participants).
-		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts)
+		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts, model.RoomEventNewThreadMessage)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping thread fan-out",
 			"type", meta.Type,
@@ -301,6 +328,10 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
+	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
+		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
+	}
+
 	edit := buildEditRoomEvent(room, evt)
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
@@ -308,6 +339,18 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		}
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
+}
+
+// badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
+// handleCreated. Additive only: SetSubscriptionMentions' filter skips
+// non-subscribers and accounts that have already read past the edit, so a
+// removed mention is never cleared and an already-read one is never re-flagged.
+func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
+	parsed := mention.Parse(msg.Content)
+	if len(parsed.Accounts) == 0 {
+		return nil
+	}
+	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
@@ -444,6 +487,8 @@ func (h *Handler) handleThreadTCountUpdated(ctx context.Context, evt *model.Mess
 
 func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, newTcount int, newTlm *time.Time,
 	parentMsgID, replyMsgID string, action model.ThreadAction, eventTimestamp int64) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomKind(room.Type), labels.eventType)
 	evt := model.ThreadMetadataUpdatedEvent{
 		Type:               model.RoomEventThreadMetadataUpdated,
 		RoomID:             room.ID,
@@ -579,6 +624,7 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 	msg := evt.Message
 	// Log-and-drop on malformed payloads: NAK would loop forever on a publisher contract violation.
 	if evt.ReactionDelta == nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		slog.ErrorContext(ctx, "reacted event missing ReactionDelta; dropping",
 			"messageID", msg.ID,
 			"roomID", msg.RoomID,
@@ -588,6 +634,7 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 		return nil
 	}
 	if msg.UpdatedAt == nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		slog.ErrorContext(ctx, "reacted event missing UpdatedAt; dropping",
 			"messageID", msg.ID,
 			"roomID", msg.RoomID,
@@ -645,6 +692,7 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 			"request_id", natsutil.RequestIDFromContext(ctx),
 		)
 	} else if pubErr := h.pub.Publish(ctx, subject.Notification(authorAccount), data); pubErr != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
 		slog.ErrorContext(ctx, "publish reaction author notification failed",
 			"error", pubErr,
 			"author", authorAccount,
@@ -661,6 +709,8 @@ func (h *Handler) handleReacted(ctx context.Context, evt *model.MessageEvent) er
 // type: channel events go to the room stream, DM/botDM events fan out per
 // non-bot member. evt must marshal to the wire payload for roomEvtType.
 func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvtType model.RoomEventType, messageID string, evt any) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomKind(room.Type), labels.eventType)
 	payload, err := sonic.Marshal(evt)
 	if err != nil {
 		return fmt.Errorf("marshal %s event: %w", roomEvtType, err)
@@ -668,14 +718,21 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 
 	switch room.Type {
 	case model.RoomTypeChannel:
+		// Record the intended audience here too: publishChannelEvent does it for
+		// new messages, and a mutation with no fanout sample would leave the
+		// channel lane blank for edit/delete/pin/react during a campaign.
+		h.metrics.Fanout(ctx, roomChannel, labels.eventType, room.UserCount)
 		return h.publishRoomEvent(ctx, room.ID, room.CrossSite, room.CrossSiteAt, payload, fmt.Sprintf("%s event (message %s)", roomEvtType, messageID))
 
 	case model.RoomTypeDM, model.RoomTypeBotDM:
+		attempted, failed := 0, 0
 		for _, account := range room.Accounts {
 			if isBot(account) {
 				continue
 			}
+			attempted++
 			if err := h.pub.Publish(ctx, subject.UserRoomEvent(account), payload); err != nil {
+				failed++
 				slog.ErrorContext(ctx, "publish DM mutation event failed",
 					"error", err,
 					"type", roomEvtType,
@@ -685,6 +742,10 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 					"request_id", natsutil.RequestIDFromContext(ctx),
 				)
 			}
+		}
+		h.metrics.Fanout(ctx, roomKind(room.Type), labels.eventType, attempted)
+		if failed > 0 {
+			natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
 		}
 		return nil
 
@@ -814,12 +875,15 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.M
 	slog.Log(ctx, logctx.LevelFlow, "broadcast fan-out", "phase", "fanout",
 		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", meta.ID,
 		"type", string(meta.Type), "delivery", "room-stream", "audience", meta.UserCount)
+	h.metrics.Fanout(ctx, roomChannel, broadcastLabels(ctx).eventType, meta.UserCount)
 	return h.publishRoomEvent(ctx, meta.ID, meta.CrossSite, meta.CrossSiteAt, payload, "channel event")
 }
 
 // publishRoomEvent fans a channel room's .event out via subject.RoomEventTargets — the
 // sanctioned path enforced by .semgrep room-subject-publish-must-route (never inline a subject).
 func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomChannel, labels.eventType)
 	now := time.Now().UTC()
 	var pubErr error
 	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
@@ -848,7 +912,9 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 		"request_id", natsutil.RequestIDFromContext(ctx), "account", account, "room_id", roomID)
 }
 
-func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string) error {
+func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string, roomEventType model.RoomEventType) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomKind(meta.Type), labels.eventType)
 	subs, err := h.store.ListSubscriptions(ctx, meta.ID)
 	if err != nil {
 		return fmt.Errorf("list subscriptions for DM room %s: %w", meta.ID, err)
@@ -871,6 +937,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 		_, hasMention := mentionSet[account]
 
 		evt := buildRoomEvent(meta, clientMsg, timestamp)
+		evt.Type = roomEventType
 		evt.HasMention = hasMention
 
 		payload, err := sonic.Marshal(evt)
@@ -895,6 +962,10 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 		debugTraceDelivered(ctx, account, meta.ID)
 	}
 	debugFlowFanout(ctx, meta.ID, string(meta.Type), "per-member", recipients, failed)
+	h.metrics.Fanout(ctx, roomKind(meta.Type), labels.eventType, recipients)
+	if failed > 0 {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
+	}
 	return nil
 }
 
@@ -948,6 +1019,9 @@ func buildClientMessage(msg *model.Message, userMap map[string]model.User) *mode
 // publish fails — partial failure is tolerated to avoid duplicate delivery to
 // accounts that already received the event on the first attempt.
 func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string, payload []byte, parentMsgID string) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomThread, labels.eventType)
+	h.metrics.Fanout(ctx, roomThread, labels.eventType, len(accounts))
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -975,7 +1049,23 @@ func (h *Handler) publishToThreadAccounts(ctx context.Context, accounts []string
 	if failCount.Load() == int64(len(accounts)) {
 		return fmt.Errorf("all %d thread account publishes failed for parent %s", len(accounts), parentMsgID)
 	}
+	if failCount.Load() > 0 {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPublishExhausted)
+	}
 	return nil
+}
+
+func roomKind(roomType model.RoomType) roomKindLabel {
+	switch roomType {
+	case model.RoomTypeChannel:
+		return roomChannel
+	case model.RoomTypeDM:
+		return roomDM
+	case model.RoomTypeBotDM:
+		return roomBotDM
+	default:
+		return roomUnknown
+	}
 }
 
 // threadFanOutAccounts builds the deduplicated fan-out recipient list for a

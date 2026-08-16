@@ -10,16 +10,16 @@ services:
       dockerfile: tcard-service/deploy/Dockerfile
     pull_policy: build
     ports:
-      - "8087:8087"
+      - "${TCARD_SERVICE_HOST_PORT:-8087}:8087"
     env_file:
       - path: ../../docker-local/.env
         required: false
     environment:
       - PORT=8087
       # Daily cache re-sync slot: 08:00 UTC+8 (layout 15:04Z07:00).
-      - TCARD_CACHE_REFRESH_AT=08:00+08:00
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - TCARD_CACHE_REFRESH_AT=${TCARD_CACHE_REFRESH_AT:-08:00+08:00}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       - OTEL_SERVICE_NAME=tcard-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
     networks:

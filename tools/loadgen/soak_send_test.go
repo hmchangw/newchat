@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -23,10 +24,11 @@ const (
 )
 
 type soakRecordingPublisher struct {
-	mu       sync.Mutex
-	subjects []string
-	payloads [][]byte
-	errors   []error
+	mu        sync.Mutex
+	subjects  []string
+	payloads  [][]byte
+	errors    []error
+	onPublish func()
 }
 
 func (p *soakRecordingPublisher) Publish(
@@ -38,6 +40,9 @@ func (p *soakRecordingPublisher) Publish(
 	defer p.mu.Unlock()
 	p.subjects = append(p.subjects, subject)
 	p.payloads = append(p.payloads, append([]byte(nil), data...))
+	if p.onPublish != nil {
+		p.onPublish()
+	}
 	if len(p.errors) == 0 {
 		return nil
 	}
@@ -143,6 +148,8 @@ func TestSoakSender_ThreadReplyUsesEligibleParentFromSameRoom(t *testing.T) {
 
 	assert.Equal(t, soakSendThreadReply, pending.Kind)
 	assert.Equal(t, parentID, pending.ThreadParentID)
+	_, readable := catalog.PickEligible("room-1", "bob", soakCatalogThreadRead)
+	assert.False(t, readable, "a pre-publish reservation must not create a readable thread")
 	_, payloads := publisher.snapshot()
 	var request model.SendMessageRequest
 	require.NoError(t, json.Unmarshal(payloads[0], &request))
@@ -156,10 +163,57 @@ func TestSoakSender_ThreadReplyUsesEligibleParentFromSameRoom(t *testing.T) {
 	require.NoError(t, err)
 	result := sender.HandleReply(subject.UserResponse("bob", soakTestRequestID), reply)
 	assert.Equal(t, soakSendReplyAccepted, result.Status)
+	_, readable = catalog.PickEligible("room-1", "bob", soakCatalogThreadRead)
+	assert.False(t, readable, "the accepted reply still needs persistence grace")
+	clock.Advance(10 * time.Second)
+	_, readable = catalog.PickEligible("room-1", "bob", soakCatalogThreadRead)
+	assert.True(t, readable)
 
 	child, ok := catalog.Get("room-1", soakTestMessageID)
 	require.True(t, ok)
 	assert.Equal(t, parentID, child.ThreadParentID)
+}
+
+func TestSoakSender_ChannelThreadReplySnapshotsExactFollowerSet(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	catalog := newSoakCatalog(8, 100, 0, clock)
+	parentID := "AAAAAAAAAAAAAAAAAAAA"
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: parentID, RoomID: "room-1", Author: "alice", Content: "parent",
+		CreatedAt: clock.Now(), ThreadReplyLimit: 4,
+	}))
+	require.True(t, catalog.Accept("room-1", parentID))
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: "BBBBBBBBBBBBBBBBBBBB", RoomID: "room-1", Author: "bob", Content: "first",
+		CreatedAt: clock.Now(), ThreadParentID: parentID,
+	}))
+	require.True(t, catalog.Accept("room-1", "BBBBBBBBBBBBBBBBBBBB"))
+
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	var started *soakPendingSend
+	gomock.InOrder(
+		lifecycle.EXPECT().Start(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			started = cloneSoakPendingSend(pending)
+			return nil
+		}),
+		lifecycle.EXPECT().Activate(gomock.Any()).Return(nil),
+	)
+	sender := newSoakSender(
+		soakSendConfig{SiteID: "site-1", ThreadShare: 1, ReplyTimeout: time.Second},
+		catalog, &soakRecordingPublisher{}, clock, rand.New(rand.NewSource(1)),
+		&soakSendIDs{messageID: func() string { return soakTestMessageID }, requestID: func() string { return soakTestRequestID }},
+		withSoakSendLifecycle(lifecycle, nil),
+	)
+	_, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-3", Account: "carol", RoomID: "room-1", RoomType: model.RoomTypeChannel,
+		Recipients: []string{"alice", "bob", "carol", "not-a-thread-follower"},
+	}, "next reply")
+	require.NoError(t, err)
+	require.NotNil(t, started)
+	assert.Equal(t, []string{"alice", "bob", "carol"}, started.Target.Recipients)
+	assert.Equal(t, recipientSetSourceThreadFollowers, started.Target.RecipientSetSource)
+	assert.True(t, started.Target.RecipientSetComplete)
+	assert.Equal(t, recipientExpectedRouteUser, started.Target.RecipientRoute)
 }
 
 func TestSoakSender_RejectedThreadReplyReleasesParentBudget(t *testing.T) {
@@ -397,7 +451,7 @@ func TestSoakSender_ThreadParentRequiresRoomGraceAndAvailableCap(t *testing.T) {
 			require.True(t, catalog.Accept(tt.parentRoom, parentID))
 			clock.Advance(tt.graceAdvance)
 			if tt.preconsume {
-				require.True(t, catalog.IncrementThreadReplies(tt.parentRoom, parentID))
+				require.True(t, catalog.ReserveThreadReply(tt.parentRoom, parentID))
 			}
 
 			sender := newTestSoakSender(
@@ -472,6 +526,192 @@ func TestSoakSender_UnmatchedReplyDoesNotTouchCatalog(t *testing.T) {
 	assert.Equal(t, soakSendReplyUnmatched, result.Status)
 }
 
+func TestSoakSender_PersistsLifecycleBeforePublishing(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	var sequence []string
+	publisher := &soakRecordingPublisher{onPublish: func() { sequence = append(sequence, "publish") }}
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	var started, activated *soakPendingSend
+	gomock.InOrder(
+		lifecycle.EXPECT().Start(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			started = cloneSoakPendingSend(pending)
+			sequence = append(sequence, "start")
+			return nil
+		}),
+		lifecycle.EXPECT().Activate(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			activated = cloneSoakPendingSend(pending)
+			sequence = append(sequence, "activate")
+			return nil
+		}),
+	)
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, clock), publisher, clock,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(lifecycle, nil),
+	)
+
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	require.NotNil(t, started)
+	require.NotNil(t, activated)
+	assert.Equal(t, pending.MessageID, started.MessageID)
+	assert.Equal(t, pending.MessageID, activated.MessageID)
+	assert.Equal(t, []string{"start", "publish", "activate"}, sequence)
+	assert.True(t, pending.Tracked)
+	subjects, _ := publisher.snapshot()
+	assert.Len(t, subjects, 1)
+}
+
+func TestSoakSender_LocalPublishFailureBecomesNotSent(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
+	publisher := &soakRecordingPublisher{errors: []error{nats.ErrConnectionClosed}}
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, nil), publisher, nil,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(tracker, nil),
+	)
+
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+
+	require.ErrorIs(t, err, nats.ErrConnectionClosed)
+	require.NotNil(t, pending)
+	snapshot := ledger.Snapshot()
+	assert.Zero(t, snapshot.Active)
+	assert.Equal(t, uint64(1), snapshot.Results[failureResultNotSent])
+	assert.Zero(t, sender.Pending(), "a definite local rejection must not expire as a second admission result")
+}
+
+func TestSoakSender_AmbiguousPublishFailureRemainsActive(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
+	publisher := &soakRecordingPublisher{errors: []error{errors.New("ambiguous publish failure")}}
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, nil), publisher, nil,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(tracker, nil),
+	)
+
+	_, err = sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+
+	require.Error(t, err)
+	operation, ok := ledger.Active(soakTestMessageID)
+	require.True(t, ok)
+	assert.Equal(t, failureOperationActive, operation.LifecycleState)
+}
+
+func TestSoakSender_LifecycleFailureKeepsTrafficFlowing(t *testing.T) {
+	wantErr := errors.New("ledger disk full")
+	publisher := &soakRecordingPublisher{}
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	lifecycle.EXPECT().Start(gomock.Any()).Return(wantErr)
+	var observed []error
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, nil), publisher, nil,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(lifecycle, func(err error) {
+			observed = append(observed, err)
+		}),
+	)
+
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err, "observation is best-effort and must not stop the workload")
+	require.NotNil(t, pending)
+	assert.False(t, pending.Tracked)
+	require.Len(t, observed, 1)
+	assert.ErrorIs(t, observed[0], wantErr)
+	subjects, _ := publisher.snapshot()
+	assert.Len(t, subjects, 1)
+	assert.Equal(t, 1, sender.Pending())
+}
+
+func TestSoakSender_ActivationFailureKeepsTrafficFlowing(t *testing.T) {
+	wantErr := errors.New("ledger activation failed")
+	publisher := &soakRecordingPublisher{}
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	var started, activated *soakPendingSend
+	gomock.InOrder(
+		lifecycle.EXPECT().Start(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			started = cloneSoakPendingSend(pending)
+			return nil
+		}),
+		lifecycle.EXPECT().Activate(gomock.Any()).DoAndReturn(func(pending *soakPendingSend) error {
+			activated = cloneSoakPendingSend(pending)
+			return wantErr
+		}),
+	)
+	var observed []error
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, nil), publisher, nil,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		}, withSoakSendLifecycle(lifecycle, func(err error) {
+			observed = append(observed, err)
+		}),
+	)
+
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.True(t, pending.Tracked)
+	require.NotNil(t, started)
+	require.NotNil(t, activated)
+	require.Len(t, observed, 1)
+	assert.ErrorIs(t, observed[0], wantErr)
+	subjects, _ := publisher.snapshot()
+	assert.Len(t, subjects, 1)
+}
+
+func TestSoakSender_ExpireResultsRetainsCorrelation(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	sender := newTestSoakSender(
+		newSoakCatalog(8, 100, 0, clock),
+		&soakRecordingPublisher{},
+		clock,
+		0,
+	)
+	_, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	clock.Advance(5 * time.Second)
+
+	results := sender.ExpireResults()
+	require.Len(t, results, 1)
+	assert.Equal(t, soakTestMessageID, results[0].MessageID)
+	assert.Equal(t, soakTestRequestID, results[0].RequestID)
+	assert.Equal(t, soakErrorTimeout, results[0].ErrorClass)
+}
+
 func newTestSoakSender(
 	catalog *soakCatalog,
 	publisher Publisher,
@@ -519,4 +759,73 @@ type fakeSoakSubscription struct {
 func (s *fakeSoakSubscription) Unsubscribe() error {
 	s.unsubscribed = true
 	return nil
+}
+
+func TestSoakSender_DiscardDropsNeverPublishedSend(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	publisher := &soakRecordingPublisher{}
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-1", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, clock), publisher, clock,
+		rand.New(rand.NewSource(1)), &soakSendIDs{
+			messageID: func() string { return soakTestMessageID },
+			requestID: func() string { return soakTestRequestID },
+		},
+	)
+	pending, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	require.Equal(t, 1, sender.Pending())
+
+	sender.Discard(pending.RequestID)
+
+	assert.Zero(t, sender.Pending())
+	clock.Advance(10 * time.Second)
+	assert.Empty(
+		t, sender.ExpireResults(),
+		"a discarded send must not be counted again at its reply deadline",
+	)
+
+	sender.Discard("unknown-request")
+	assert.Zero(t, sender.Pending())
+}
+
+func TestSoakSender_ReplyLatencyExcludesIntentJournalDelay(t *testing.T) {
+	const journalDelay = 10 * time.Millisecond
+	const replyLatency = 3 * time.Millisecond
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	catalog := newSoakCatalog(8, 100, 10*time.Second, clock)
+	publisher := &soakRecordingPublisher{}
+	sender := newTestSoakSender(catalog, publisher, clock, 0)
+
+	lifecycle := NewMocksoakSendLifecycle(gomock.NewController(t))
+	gomock.InOrder(
+		lifecycle.EXPECT().Start(gomock.Any()).DoAndReturn(func(*soakPendingSend) error {
+			// The WAL group commit holds the intent until its batch is fsynced.
+			clock.Advance(journalDelay)
+			return nil
+		}),
+		lifecycle.EXPECT().Activate(gomock.Any()).Return(nil),
+	)
+	withSoakSendLifecycle(lifecycle, func(error) {})(sender)
+
+	published, err := sender.Publish(context.Background(), soakSendTarget{
+		UserID: "u-1", Account: "alice", RoomID: "room-1",
+	}, "hello")
+	require.NoError(t, err)
+	assert.Equal(t, clock.Now(), published.PublishedAt,
+		"the reply clock starts when the publish leaves the process")
+
+	clock.Advance(replyLatency)
+	reply, err := json.Marshal(model.Message{
+		ID: soakTestMessageID, RoomID: "room-1", UserID: "u-1",
+		UserAccount: "alice", Content: "hello", CreatedAt: clock.Now(),
+	})
+	require.NoError(t, err)
+	result := sender.HandleReply(subject.UserResponse("alice", soakTestRequestID), reply)
+
+	require.Equal(t, soakSendReplyAccepted, result.Status)
+	assert.Equal(t, replyLatency, result.Latency,
+		"send latency must measure the reply, not the load generator's own intent journal wait")
 }

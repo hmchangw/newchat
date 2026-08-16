@@ -85,6 +85,14 @@ if err := h.store.Find(ctx, id); err != nil {
 }
 ```
 
+**One exception, at the NATS request/reply boundary.** `natsutil.RequestFailure`
+classifies two transport errors — `nats.ErrNoResponders` and
+`nats.ErrTimeout`/`context.DeadlineExceeded` — as `errcode.Unavailable` rather
+than letting them collapse to `internal`. They mean an upstream is down or
+unresponsive, not that this service is faulty, and a client can act on that
+difference. Every other transport error still returns a raw wrap. Call it in
+place of `fmt.Errorf` on the error returned by `nc.Request`/`RequestMsg`.
+
 ### Attaching a cause for server-side debugging
 
 ```go

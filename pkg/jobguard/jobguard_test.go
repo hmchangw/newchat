@@ -16,10 +16,12 @@ type fakeMsg struct {
 	acked    bool
 	ackCalls int
 	ackErr   error
+	marked   bool
 }
 
-func (m *fakeMsg) Subject() string { return m.subject }
-func (m *fakeMsg) Ack() error      { m.acked = true; m.ackCalls++; return m.ackErr }
+func (m *fakeMsg) Subject() string   { return m.subject }
+func (m *fakeMsg) Ack() error        { m.acked = true; m.ackCalls++; return m.ackErr }
+func (m *fakeMsg) MarkHandlerPanic() { m.marked = true }
 
 func TestGuard_NoPanic_RunsFnAndReportsFalse(t *testing.T) {
 	ran := false
@@ -43,6 +45,7 @@ func TestRun_Panic_AcksAsPoisonDrop(t *testing.T) {
 	}, "a panicking process must be recovered, not crash the worker")
 	assert.True(t, msg.acked, "panic must Ack (poison-pill drop) — a deterministic panic would otherwise crash-loop via redelivery")
 	assert.Equal(t, 1, msg.ackCalls)
+	assert.True(t, msg.marked, "panic drops must expose terminal failure evidence")
 }
 
 func TestRun_NoPanic_DoesNotAck(t *testing.T) {

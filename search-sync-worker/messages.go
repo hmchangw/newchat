@@ -190,6 +190,12 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	if !actionableEvent(evt.Event) {
 		return nil, nil
 	}
+	// Sys-messages (membership/rename) arrive on MESSAGES-CANONICAL like any
+	// other message but are UI chrome, not searchable content. Filtered before
+	// the parent lookup; `important` is client-set, not system, and stays.
+	if model.IsSystemMessageType(evt.Message.Type) {
+		return nil, nil
+	}
 	c.resolveThreadParentCreatedAt(&evt)
 	return []searchengine.BulkAction{buildMessageAction(&evt, c.indexPrefix)}, nil
 }
@@ -260,6 +266,7 @@ func (c *messageCollection) buildTeamsActions(req model.TeamsBatchRequest) []sea
 			UserAccount: id.Account,
 			Content:     teamsmigrate.BodyToContent(tm.Body),
 			CreatedAt:   tm.CreatedDateTime,
+			Origin:      model.OriginTeams,
 		}
 		body, _ := json.Marshal(doc)
 		actions = append(actions, searchengine.BulkAction{

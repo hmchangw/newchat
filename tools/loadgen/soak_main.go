@@ -10,13 +10,17 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 const (
@@ -35,17 +39,61 @@ type soakRuntimeStore interface {
 	LoadTopology(context.Context, string, string) (soakTopology, error)
 }
 
-func parseSoakArgs(args []string) (int64, error) {
+// soakDefaultPageLimit is how many messages a soak read asks for per page.
+//
+// The binding constraint is the broker's max_payload, not history-service's
+// maxPageSize (100). A read reply carries pageLimit messages, each up to
+// SOAK_PAYLOAD_MAX_BYTES — 10 KB by default, well under history-service's 20 KB
+// content cap, which this workload never reaches. At those defaults a page of
+// 15 is ~150 KB, inside the 256 KB budget; the old hardcoded 50 was ~500 KB and
+// came back as pkg/natsutil's oversize envelope instead of data.
+//
+// Because SOAK_PAYLOAD_MAX_BYTES is configurable, no constant is safe on its
+// own: validateSoakPageBudget checks the actual pair at startup.
+const soakDefaultPageLimit = 15
+
+// soakWalkRowBudget is how many clustered rows a paged walk must be able to
+// reach, independent of how the pages are sized.
+//
+// MaxPages used to be hardcoded at 100, which was a 5,000-row reach at the old
+// 50-row page. Lowering the page to fit the broker payload silently cut that to
+// 1,500: once a partition grew past it, older rows became unreachable to the
+// verifier and a mutation there would be missed or misreported as
+// target-missing. Page size is a transport constraint and walk depth is a
+// coverage requirement, so the two must not be the same number.
+const soakWalkRowBudget = 5000
+
+// soakMaxPages converts the row budget into a page count for the configured
+// page size, so a smaller page buys more pages rather than less history.
+func soakMaxPages(pageLimit int) int {
+	if pageLimit <= 0 {
+		return 1
+	}
+	return (soakWalkRowBudget + pageLimit - 1) / pageLimit
+}
+
+// soakOptions are the soak run's command-line knobs.
+type soakOptions struct {
+	Seed      int64
+	PageLimit int
+}
+
+func parseSoakArgs(args []string) (soakOptions, error) {
 	fs := flag.NewFlagSet("soak", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	seed := fs.Int64("seed", soakDefaultSeed, "RNG seed")
+	pageLimit := fs.Int("page-limit", soakDefaultPageLimit,
+		"messages requested per read page; keep it under broker max_payload / message size")
 	if err := fs.Parse(args); err != nil {
-		return 0, fmt.Errorf("parse soak arguments: %w", err)
+		return soakOptions{}, fmt.Errorf("parse soak arguments: %w", err)
 	}
 	if fs.NArg() != 0 {
-		return 0, fmt.Errorf("soak does not accept positional arguments")
+		return soakOptions{}, fmt.Errorf("soak does not accept positional arguments")
 	}
-	return *seed, nil
+	if *pageLimit <= 0 {
+		return soakOptions{}, fmt.Errorf("page-limit must be > 0, got %d", *pageLimit)
+	}
+	return soakOptions{Seed: *seed, PageLimit: *pageLimit}, nil
 }
 
 func waitForSoakWrappedDEK(
@@ -212,6 +260,11 @@ func newSoakRuntimeSelector(
 		selector.rooms[i] = topology.Rooms[i].ID
 	}
 	active := activeSoakUserIDs(topology)
+	roomTypes := make(map[string]model.RoomType, len(topology.Rooms))
+	for i := range topology.Rooms {
+		roomTypes[topology.Rooms[i].ID] = topology.Rooms[i].Type
+	}
+	recipients := soakRecipientSets(topology)
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
 		if !isActiveSoakSubscription(subscription, active) ||
@@ -223,7 +276,11 @@ func newSoakRuntimeSelector(
 			selector.members[subscription.RoomID],
 			soakSendTarget{
 				UserID: subscription.User.ID, Account: subscription.User.Account,
-				RoomID: subscription.RoomID,
+				RoomID: subscription.RoomID, RoomType: roomTypes[subscription.RoomID],
+				Recipients:           append([]string(nil), recipients[subscription.RoomID]...),
+				RecipientSetSource:   recipientSetSourceTopology,
+				RecipientSetComplete: true,
+				RecipientRoute:       recipientRouteForRoomType(roomTypes[subscription.RoomID]),
 			},
 		)
 	}
@@ -233,6 +290,35 @@ func newSoakRuntimeSelector(
 		}
 	}
 	return selector, nil
+}
+
+func recipientRouteForRoomType(roomType model.RoomType) recipientExpectedRoute {
+	if roomType == model.RoomTypeChannel {
+		return recipientExpectedRouteRoom
+	}
+	return recipientExpectedRouteUser
+}
+
+func soakRecipientSets(topology *soakTopology) map[string][]string {
+	if topology == nil {
+		return nil
+	}
+	recipients := make(map[string][]string, len(topology.Rooms))
+	// ActiveUsers bounds sender selection only. Broadcast evidence must retain
+	// every subscribed human account, including borrowed non-senders that the
+	// production broadcast worker is still required to reach.
+	for i := range topology.Subscriptions {
+		subscription := &topology.Subscriptions[i]
+		if !subscription.IsSubscribed || subscription.User.IsBot || subscription.User.Account == "" {
+			continue
+		}
+		recipients[subscription.RoomID] = append(recipients[subscription.RoomID], subscription.User.Account)
+	}
+	for roomID := range recipients {
+		slices.Sort(recipients[roomID])
+		recipients[roomID] = slices.Compact(recipients[roomID])
+	}
+	return recipients
 }
 
 func (s *soakRuntimeSelector) nextRoom() string {
@@ -293,8 +379,9 @@ func runSoakSeed(
 func runSoakWorkload(
 	ctx context.Context,
 	cfg *config,
-	seed int64,
+	opts soakOptions,
 ) int {
+	seed := opts.Seed
 	client, err := mongoutil.Connect(
 		ctx,
 		cfg.MongoURI,
@@ -319,7 +406,10 @@ func runSoakWorkload(
 		return 1
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	setSoakRunInfo(metrics, cfg.Soak.Environment)
+	defer metrics.stopNATSHealth()
+	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
 	if err != nil {
 		slog.Error("connect NATS for Cassandra soak", "error", err)
 		return 1
@@ -329,8 +419,18 @@ func runSoakWorkload(
 			slog.Error("drain Cassandra soak NATS connection", "error", err)
 		}
 	}()
+	// Fail before any load is generated: derive max_payload from the connected
+	// server's INFO so non-default brokers are neither overrun nor needlessly
+	// constrained by a local constant.
+	if err := validateSoakPageBudget(
+		opts.PageLimit,
+		cfg.Soak.PayloadMaxBytes,
+		nc.NatsConn().MaxPayload(),
+	); err != nil {
+		slog.Error("soak page budget rejected", "error", err)
+		return 2
+	}
 
-	metrics := NewMetrics()
 	metricsServer := startSoakMetricsServer(cfg.MetricsAddr, metrics)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -352,6 +452,129 @@ func runSoakWorkload(
 		collectorDuration,
 	)
 	recorders := newSoakCollectorRecorders(collector, now)
+	ledger, degradedLedger, err := openSoakFailureObservationLedger(&cfg.Soak, metrics, now)
+	if err != nil {
+		slog.Error("open Cassandra soak failure ledger", "error", err)
+		return 2
+	}
+	if degradedLedger {
+		slog.Error("durable failure ledger unavailable; continuing with invalid in-memory observation")
+	}
+	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
+		metrics.FailureDropped.Add(float64(dropped))
+	}
+	defer func() {
+		if err := ledger.Close(); err != nil {
+			slog.Error("close Cassandra soak failure ledger", "error", err)
+		}
+	}()
+	expiryCtx, stopExpiry := context.WithCancel(ctx)
+	expiryTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
+	expiryDone := make(chan struct{})
+	go func() {
+		defer close(expiryDone)
+		defer expiryTicker.Stop()
+		runSoakFailureExpiry(expiryCtx, ledger, expiryTicker.C, func(err error) {
+			slog.Error("expire Cassandra soak failure evidence", "error", err)
+		})
+	}()
+	var expiryShutdownOnce sync.Once
+	shutdownExpiry := func() {
+		expiryShutdownOnce.Do(func() {
+			stopExpiry()
+			<-expiryDone
+		})
+	}
+	defer shutdownExpiry()
+	consumerSamplerCtx, stopConsumerSamplers := context.WithCancel(context.Background())
+	var consumerSamplerWG sync.WaitGroup
+	js, jetStreamErr := jetstream.New(nc.NatsConn())
+	if jetStreamErr != nil {
+		slog.Error("initialize JetStream consumer sampling", "error", jetStreamErr)
+	} else {
+		for _, target := range soakConsumerSamplerTargets(cfg.SiteID) {
+			sampler, samplerErr := NewConsumerSampler(
+				js,
+				target.Stream,
+				target.Durable,
+				metrics,
+				time.Second,
+			)
+			if samplerErr != nil {
+				slog.Error(
+					"configure soak consumer sampler",
+					"stream", target.Stream,
+					"durable", target.Durable,
+					"error", samplerErr,
+				)
+				continue
+			}
+			consumerSamplerWG.Add(1)
+			go func() {
+				defer consumerSamplerWG.Done()
+				sampler.Run(consumerSamplerCtx)
+			}()
+		}
+	}
+	var consumerShutdownOnce sync.Once
+	shutdownConsumerSamplers := func() {
+		consumerShutdownOnce.Do(func() {
+			stopConsumerSamplers()
+			consumerSamplerWG.Wait()
+		})
+	}
+	defer shutdownConsumerSamplers()
+	observationRuntime := newSoakFailureObservationRuntime(
+		cfg.Soak.RecipientObserverEnabled,
+		ledger,
+		metrics,
+		cfg.Soak.RecipientObserverQueue,
+		cfg.Soak.LedgerDir,
+		now,
+	)
+	if cfg.Soak.RecipientObserverEnabled {
+		recipientObserver := observationRuntime.Recipient()
+		recipientSource := newPooledNATSFailureRecipientSource(
+			cfg.Soak.RecipientObserverConnections,
+			func(_ int) (failureRecipientConnection, error) {
+				connection, connectErr := connectWithCredsHealth(
+					cfg.NatsURL,
+					"loadgen-recipient-observer",
+					cfg.NatsCredsFile,
+					"recipient_observer",
+					metrics,
+					recipientObserver.health,
+				)
+				if connectErr != nil {
+					return nil, connectErr
+				}
+				return newNATSFailureRecipientConnection(connection), nil
+			},
+		)
+		if err := observationRuntime.StartRecipient(recipientSource, &topology, ledger.ActiveOperations()); err != nil {
+			ledger.Invalidate("recipient_observer")
+			slog.Error("start recipient observer", "error", err)
+		}
+	}
+	defer func() {
+		if err := observationRuntime.Close(); err != nil {
+			slog.Error("shutdown recipient observer", "error", err)
+		}
+	}()
+	trackerOptions := []soakFailureTrackerOption{
+		withSoakFailureMetrics(metrics),
+		withSoakFailureRunID(cfg.Soak.RunID),
+	}
+	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
+		trackerOptions = append(trackerOptions, withSoakFailureRecipientObserver(recipientObserver))
+	}
+	failureTracker := newSoakFailureTracker(
+		ledger,
+		cfg.Soak.PersistGrace,
+		cfg.Soak.ReconcileDeadline,
+		now,
+		trackerOptions...,
+	)
 	catalog := newSoakCatalog(
 		cfg.Soak.RecentPerRoom,
 		cfg.Soak.RecentTotal,
@@ -374,6 +597,11 @@ func runSoakWorkload(
 		nil,
 		rand.New(rand.NewSource(seed+4)),
 		nil,
+		withSoakSendLifecycle(failureTracker, func(error) {
+			// The ledger reports the reason through its own invalidation and
+			// untracked counters; logging per send would flood during an outage.
+			metrics.FailureUntracked.WithLabelValues(failureUntrackedReasonStart).Inc()
+		}),
 	)
 	sendReplies := make(chan soakSendObservation, cfg.MaxInFlight+1)
 	responseSub, err := startSoakSendResponsesWithObserver(
@@ -397,6 +625,11 @@ func runSoakWorkload(
 				Action: action, Outcome: outcome, At: now(),
 				Latency: result.Latency, ErrorClass: errorClass,
 			})
+			if result.Status != soakSendReplyUnmatched {
+				if err := failureTracker.ObserveReply(&result); err != nil {
+					slog.Error("record Cassandra soak send observation", "error", err)
+				}
+			}
 			select {
 			case sendReplies <- soakSendObservation{result: result}:
 			default:
@@ -432,9 +665,28 @@ func runSoakWorkload(
 		nil,
 		nil,
 	)
+	failureVerifier := newSoakFailureRPCVerifier(
+		cfg.SiteID,
+		rpc,
+		catalog,
+		recorders.verify,
+		now,
+	)
+	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 1)
+	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
+		reconcilerOptions = append(reconcilerOptions, withSoakFailureRecipientFinalizer(recipientObserver))
+	}
+	failureReconciler := newSoakFailureReconciler(
+		ledger,
+		failureVerifier,
+		cfg.Soak.ReconcileRetryInterval,
+		now,
+		reconcilerOptions...,
+	)
+	reconcileGate := newSoakShareGate(cfg.Soak.ReconcileReadShare)
 	warmReader := newSoakReader(
 		soakReadConfig{
-			SiteID: cfg.SiteID, PageLimit: 50, MaxPages: 100,
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
 			RequestTimeout: soakRequestTimeout,
 		},
 		&topology,
@@ -454,7 +706,7 @@ func runSoakWorkload(
 		return 1
 	}
 	reader := newSoakReader(
-		soakMeasuredReadConfig(cfg.SiteID),
+		soakMeasuredReadConfig(cfg.SiteID, opts.PageLimit),
 		&topology,
 		catalog,
 		rpc,
@@ -482,7 +734,7 @@ func runSoakWorkload(
 	)
 	verifier := newSoakVerifier(
 		&soakVerifyConfig{
-			SiteID: cfg.SiteID, PageLimit: 50, MaxPages: 100,
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
 			RequestTimeout: soakRequestTimeout,
 		},
 		catalog,
@@ -494,11 +746,16 @@ func runSoakWorkload(
 	var verificationSequence atomic.Uint64
 	actions := soakWorkloadActions{
 		Send: func(actionCtx context.Context, _ bool) error {
-			for range sender.Expire() {
-				_ = collector.Record(&soakOperationSample{
+			for _, result := range sender.ExpireResults() {
+				if err := collector.Record(&soakOperationSample{
 					Action: soakRPCSend, Outcome: soakOutcomeFailed, At: now(),
 					ErrorClass: soakErrorTimeout,
-				})
+				}); err != nil {
+					slog.Error("record expired Cassandra soak send timeout", "error", err)
+				}
+				if err := failureTracker.ObserveReply(&result); err != nil {
+					slog.Error("record expired Cassandra soak send", "error", err)
+				}
 			}
 			target, content := selector.nextSend()
 			pending, publishErr := sender.Publish(actionCtx, target, content)
@@ -513,9 +770,24 @@ func runSoakWorkload(
 				Action: action, Outcome: soakOutcomeFailed, At: now(),
 				ErrorClass: classifySoakRPCError(publishErr),
 			})
+			// Publish classifies definite local rejections as not_sent. Ambiguous
+			// failures remain active for admission timeout and downstream
+			// reconciliation.
 			return nil
 		},
 		Read: func(actionCtx context.Context, _ bool) error {
+			// Reconciliation borrows read slots so verification adds no read RPS,
+			// but it may only take its configured share: a large unresolved
+			// backlog must not stop the production-like read mix mid-fault.
+			if reconcileGate.Allow() {
+				reconciled, err := failureReconciler.Try(actionCtx)
+				if err != nil {
+					slog.Error("reconcile Cassandra soak operation", "error", err)
+				}
+				if reconciled {
+					return nil
+				}
+			}
 			_, _ = reader.ReadMixed(actionCtx, selector.nextRoom())
 			return nil
 		},
@@ -567,9 +839,16 @@ func runSoakWorkload(
 		actions,
 		nil,
 		now,
-		func() { metrics.SoakSaturation.WithLabelValues("global").Inc() },
+		nil,
+		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
 	)
 	result, runErr := workload.Run(ctx)
+	shutdownExpiry()
+	shutdownConsumerSamplers()
+	if err := observationRuntime.Close(); err != nil {
+		ledger.Invalidate("recipient_observer")
+		slog.Error("shutdown recipient observer", "error", err)
+	}
 	snapshot := collector.Snapshot(now())
 	report := BuildSoakReport(&snapshot, soakTargetRates(&cfg.Soak))
 	if err := PrintSoakReport(os.Stdout, &report); err != nil {
@@ -586,11 +865,26 @@ func runSoakWorkload(
 	return 0
 }
 
-func soakMeasuredReadConfig(siteID string) soakReadConfig {
+type soakConsumerSamplerTarget struct {
+	Stream  string
+	Durable string
+}
+
+func soakConsumerSamplerTargets(siteID string) []soakConsumerSamplerTarget {
+	canonicalStream := stream.MessagesCanonical(siteID).Name
+	return []soakConsumerSamplerTarget{
+		{Stream: stream.Messages(siteID).Name, Durable: "message-gatekeeper"},
+		{Stream: canonicalStream, Durable: "message-worker"},
+		{Stream: canonicalStream, Durable: "broadcast-worker"},
+		{Stream: canonicalStream, Durable: "notification-worker"},
+	}
+}
+
+func soakMeasuredReadConfig(siteID string, pageLimit int) soakReadConfig {
 	// Workload Model v1 defines the read rate in RPCs/second. Scheduled reads
 	// therefore fetch one page; the independent verifier owns bucket-walks.
 	return soakReadConfig{
-		SiteID: siteID, PageLimit: 50, MaxPages: 1,
+		SiteID: siteID, PageLimit: pageLimit, MaxPages: 1,
 		RequestTimeout: soakRequestTimeout,
 	}
 }

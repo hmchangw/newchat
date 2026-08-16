@@ -44,6 +44,9 @@ loadgen.newchat/run: {{ include "cassandra-soak.runSlug" . | quote }}
 {{- if ne .Values.soak.runMode "continuous" -}}
 {{- fail "soak.runMode must be continuous for the Deployment" -}}
 {{- end -}}
+{{- if and .Values.recipientObserver.enabled (not .Values.ledger.enabled) -}}
+{{- fail "ledger.enabled=true is required when recipientObserver.enabled=true" -}}
+{{- end -}}
 {{- $image := include "cassandra-soak.image" . -}}
 {{- end -}}
 

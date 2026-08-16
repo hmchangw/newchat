@@ -1,18 +1,15 @@
 name: portal-service
 
 services:
-  # The demo hr_employee enrichment rows are seeded into chat.hr_employee by the
-  # shared mongo's init hook (docker-local/mongo/init/portal-hr-employee.js),
-  # which runs once when `make deps up` first creates the mongo volume — no
-  # separate seed container. The users docs (bcrypt password + roles) are owned
-  # by chat.users and seeded by tools/seed-sample-data.
+  # The directory is chat.users left-joined with chat.hr_employee; `make seed`
+  # owns both collections.
   portal-service:
     build:
       context: ../..
       dockerfile: portal-service/deploy/Dockerfile
     pull_policy: build
     ports:
-      - "8085:8085"
+      - "${PORTAL_SERVICE_HOST_PORT:-8085}:8085"
     env_file:
       - path: ../../docker-local/.env
         required: false
@@ -22,21 +19,25 @@ services:
       - PORT=8085
       # Dev fallback: accounts absent from the directory resolve to the local site.
       - DEV_MODE=${DEV_MODE:-true}
-      - PORTAL_DEV_FALLBACK_SITE_ID=site-local
-      - PORTAL_DEV_FALLBACK_NATS_URL=ws://localhost:9222
+      - PORTAL_DEV_FALLBACK_SITE_ID=${PORTAL_DEV_FALLBACK_SITE_ID:-${SITE_ID:-site-local}}
+      - PORTAL_DEV_FALLBACK_NATS_URL=${PORTAL_DEV_FALLBACK_NATS_URL:-ws://localhost:9222}
       # Per-site URL registry (JSON): siteId -> {baseUrl, natsUrl} (see siteURL
       # in handler.go — both required, nothing else read). baseUrl is the unified
       # backend origin (`{baseUrl}/api/v1/...` via the Traefik gateway on :7777);
       # natsUrl is the site's NATS WS URL.
-      - 'PORTAL_SITE_URLS={"site-local":{"baseUrl":"http://localhost:7777","natsUrl":"ws://localhost:9222"}}'
+      # site-remote maps to the same local endpoints: `make seed` homes ivan and
+      # judy there, and an unregistered site is a 500 on /api/userInfo.
+      - 'PORTAL_SITE_URLS=${PORTAL_SITE_URLS:-{"${SITE_ID:-site-local}":{"baseUrl":"http://localhost:${GATEWAY_HOST_PORT:-7777}","natsUrl":"ws://localhost:9222"},"site-remote":{"baseUrl":"http://localhost:${GATEWAY_HOST_PORT:-7777}","natsUrl":"ws://localhost:9222"}}}'
+      # 1m, not the 2h prod default, so `make seed` lands without a restart.
+      - PORTAL_CACHE_REFRESH_INTERVAL=${PORTAL_CACHE_REFRESH_INTERVAL:-1m}
       # Single cluster-internal botplatform endpoint /api/v1/login forwards to.
-      - BOTPLATFORM_URL=http://botplatform-service:8080
+      - BOTPLATFORM_URL=${BOTPLATFORM_URL:-http://botplatform-service:8080}
       # Served to the frontend via GET /api/settings. Both required (notEmpty) —
       # the localhost OTEL URL is a dev placeholder; real value set per-deployment.
-      - PORTAL_API_VERSION=v2
-      - PORTAL_OTEL_BASE_URL=http://localhost:4318/v1
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
+      - PORTAL_API_VERSION=${PORTAL_API_VERSION:-v2}
+      - PORTAL_OTEL_BASE_URL=${PORTAL_OTEL_BASE_URL:-http://localhost:4318/v1}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
     networks:

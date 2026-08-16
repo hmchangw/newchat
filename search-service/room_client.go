@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -33,7 +34,7 @@ func (c *roomClient) GetRoomsInfo(ctx context.Context, siteID string, roomIDs []
 	}
 	msg, err := c.nc.Request(ctx, subject.RoomsInfoBatch(siteID), req, roomRPCTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("rooms-info rpc: %w", err)
+		return nil, natsutil.RequestFailure("rooms-info rpc", err)
 	}
 	if e, ok := errcode.Parse(msg.Data); ok {
 		return nil, e

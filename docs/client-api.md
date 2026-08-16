@@ -59,7 +59,7 @@ paths.
      - [`search.messages`](#searchmessages--full-text-message-search) · [Search Rooms](#search-rooms) · [Search Apps](#search-apps) · [Search Users](#search-users) · [Search Orgs](#search-orgs)
    - [3.4 user-service](#34-user-service)
      - [`me`](#me) · [`status.getByName`](#statusgetbyname) · [`profile.getByName`](#profilegetbyname) · [`status.set`](#statusset) · [`subscription.list`](#subscriptionlist) · [`subscription.getChannels`](#subscriptiongetchannels)
-     - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset)
+     - [`subscription.getDM`](#subscriptiongetdm) · [`subscription.getByRoomID`](#subscriptiongetbyroomid) · [`subscription.count`](#subscriptioncount) · [`subscription.setAppSubscription`](#subscriptionsetappsubscription) · [`apps.list`](#appslist) · [`apps.categories`](#appscategories) · [`settings.get`](#settingsget) · [`settings.set`](#settingsset) · [`settings.priorityContacts.get`](#settingsprioritycontactsget) · [`settings.priorityContacts.add`](#settingsprioritycontactsadd) · [`settings.priorityContacts.remove`](#settingsprioritycontactsremove)
      - [Chatlist Sections](#chatlist-sections)
      - [`sso.set`](#ssoset) · [`sso.refresh`](#ssorefresh)
    - [3.5 media-service](#35-media-service)
@@ -81,6 +81,8 @@ paths.
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
     - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/validate (admin)](#112-http--post-apiv1cardsvalidate-admin)
+12. [Client Update Service](#12-client-update-service)
+    - [POST /api/v1/version](#post-apiv1version) · [GET /api/v1/version/:fileName](#get-apiv1versionfilename)
 
 ---
 
@@ -243,7 +245,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "account must be a single NATS subject token (no '.', '*', '>' or whitespace)" }` — the account becomes a NATS subject token, so separator/wildcard/whitespace characters are refused. |
 | 401 | `unauthenticated` | `sso_token_expired` | `{ "code": "unauthenticated", "reason": "sso_token_expired", "error": "SSO token has expired, please re-login" }` |
 | 401 | `unauthenticated` | `invalid_sso_token` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid SSO token" }` |
-| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "session token invalid" }` — botplatform session token failed validation. |
+| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — botplatform session token failed validation. Same envelope every service returns for a rejected session token. |
 | 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — auth-service cannot reach botplatform to validate a session token. |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — the real cause is logged server-side and never sent to the client. |
 
@@ -421,13 +423,37 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 ### 2.4 HTTP — Protected file/image upload/download
 
 HTTP endpoints on `upload-service` for protected file uploads and downloads,
-proxied to/from an internal Drive. All require an OIDC-validated `ssoToken` — sent
-as the `ssoToken` header, or (for browser `<img>` downloads that cannot set headers)
-as an `ssoToken` cookie obtained from `POST /api/v1/file/setCookie` below; the header takes
-precedence. Room-scoped endpoints also require that the caller is a member (has a
-subscription) of `:roomId`. Cross-origin browsers are served credentialed CORS headers
-only when their `Origin` is in the server's `CORS_ALLOWED_ORIGINS` allowlist. Errors use
-the standard [§6](#6-error-envelope-reference) envelope `{ code, reason?, error }`.
+proxied to/from an internal Drive.
+
+**Auth — either credential is accepted:**
+
+| Caller | Credential |
+|---|---|
+| SSO user | An OIDC-validated `ssoToken`, sent as the `ssoToken` header, or (for browser `<img>` downloads that cannot set headers) as an `ssoToken` cookie obtained from `POST /api/v1/file/setCookie` below. The header takes precedence over the cookie. |
+| Bot / admin | A botplatform session token (§10.1), sent as `x-user-id` + `x-auth-token`. |
+
+Selection rules: sending **both** an `ssoToken` header and an `x-auth-token` header is
+`400 ambiguous_token`. An `x-auth-token` header takes precedence over an `ssoToken`
+**cookie** — the cookie is ambient state a browser attaches automatically, the header is
+an explicit act, so only two explicit headers are treated as a conflict.
+
+`POST /api/v1/file/setCookie` is the one exception: it is SSO-only and returns `400` to a
+session-token caller, because it exists solely to mirror an `ssoToken` into a cookie for
+browser downloads. Bots send headers on every request and need no cookie.
+
+Room-scoped endpoints also require that the caller is a member (has a subscription) of
+`:roomId` — this applies identically to bots, which hold real subscription rows.
+Cross-origin browsers are served credentialed CORS headers only when their `Origin` is in
+the server's `CORS_ALLOWED_ORIGINS` allowlist. Errors use the standard
+[§6](#6-error-envelope-reference) envelope `{ code, reason?, error }`.
+
+**Errors common to every endpoint below** (in addition to each endpoint's own):
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | `ambiguous_token` | `{ "code": "bad_request", "reason": "ambiguous_token", "error": "set exactly one of ssoToken / x-auth-token" }` |
+| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — missing, unknown, or mismatched session credential. The three cases are deliberately indistinguishable. |
+| 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — the session token could not be validated. Distinct from `401`: the credential was not rejected, it could not be checked. |
 
 #### POST /api/v1/file/setCookie
 
@@ -445,7 +471,7 @@ cannot refresh the cookie from an already-expired token.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; validated before the cookie is set. |
+| `ssoToken` | header | string | yes | OIDC-issued SSO token; validated before the cookie is set. **This endpoint is SSO-only** — a session-token caller gets `400`. |
 
 Cross-origin callers must send the request with credentials (e.g. `fetch(..., { credentials: "include" })`) and be served from an origin in `CORS_ALLOWED_ORIGINS`.
 
@@ -475,6 +501,7 @@ Uses the [§6](#6-error-envelope-reference) envelope. HTTP statuses:
 
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "setCookie requires an ssoToken; session-token callers send credentials as headers" }` — this endpoint is SSO-only. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 
 #### Triggered events — success path
@@ -502,7 +529,8 @@ success/failure in a single `200` (partial success).
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; identifies the uploader. |
+| `ssoToken` | header | string | conditional | OIDC-issued SSO token; identifies the uploader. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1); identifies a bot/admin uploader. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Target room ID; the caller must be a member. |
 | `images` | form file | file[] | yes | One or more images (`.png`/`.jpeg`/`.jpg`/`.heic`), each ≤ `MAX_IMAGE_SIZE_BYTES` (default 25 MiB); at most `MAX_IMAGES` (default 10). Repeat the field once per file. |
 
@@ -571,7 +599,8 @@ pure-HTTP endpoint — it does **not** publish a message.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; identifies the uploader. |
+| `ssoToken` | header | string | conditional | OIDC-issued SSO token; identifies the uploader. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1); identifies a bot/admin uploader. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Target room ID; the caller must be a member. |
 | `file` | form file | file | yes | The single file, ≤ `FILE_UPLOAD_MAX_FILE_SIZE` (default 100 MiB). At most `MAX_ATTACHMENTS` (default 1) parts may be sent under this field; more is rejected with `too many files`. Its MIME type must pass the server's allow/deny lists (`FILE_UPLOAD_MEDIA_TYPE_WHITELIST`/`BLACKLIST`; `image/svg+xml` is blocked by default). |
 | `description` | form field | string | no | Optional attachment description. |
@@ -638,7 +667,8 @@ or `titleLink` (file upload) returned by the upload endpoints.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Room the image belongs to; the caller must be a member. |
 | `fileId` | path | string | yes | Drive file ID (from the upload response). |
 | `drive_host` | query | string | yes | Drive base URL (from the upload response). |
@@ -685,7 +715,8 @@ calls this with the old-style path preserved in legacy messages.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Room the image belongs to; the caller must be a member. |
 | `fileId` | path | string | yes | Legacy Drive file ID (from the original message data). |
 | `drive_host` | query | string | yes | Legacy Drive base URL carried in the legacy message data. |
@@ -730,7 +761,8 @@ The response is always served as an attachment.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `fileId` | path | string | yes | Upload ID (the `uploads._id`); used for the metadata lookup. |
 | `fileName` | path | string | yes | Cosmetic — accepted but ignored; the served filename comes from the stored metadata. |
 
@@ -1074,6 +1106,42 @@ and Rename Room.
 }
 ```
 
+#### PriorityContactItem
+
+One row of a [priorityContacts.get](#settingsprioritycontactsget) /
+[priorityContacts.add](#settingsprioritycontactsadd) /
+[priorityContacts.remove](#settingsprioritycontactsremove) response. `type`
+selects which nested field is present — `user` for `"user"`, `app` for
+`"bot"` — so `user` and `app` are mutually exclusive with each other. Both are
+omitted when the account no longer resolves (no surviving user document, or a
+deleted app) — the row still carries `account` and `type`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | The contact's account. |
+| `type` | string | `"user"` or `"bot"`. |
+| `user` | [PriorityContactUser](#prioritycontactuser) | Optional. Present only when `type == "user"` and a user document still exists for the account — a deactivated user whose document survives still renders full enrichment; only an account with no document at all degrades to `account` + `type`. |
+| `app` | [PriorityContactApp](#prioritycontactapp) | Optional. Present only when `type == "bot"` and the account still resolves to an app. |
+
+#### PriorityContactUser
+
+HR-directory display fields for a `"user"`-type [PriorityContactItem](#prioritycontactitem).
+
+| Field | Type | Notes |
+|---|---|---|
+| `engName` | string | English display name. |
+| `chineseName` | string | Chinese display name. |
+| `employeeId` | string | Employee ID. |
+| `sectName` | string | Section/department name. |
+
+#### PriorityContactApp
+
+App display fields for a `"bot"`-type [PriorityContactItem](#prioritycontactitem).
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | App display name. |
+
 ### 3.1 room-service
 
 | RPC subject | Method |
@@ -1166,7 +1234,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously on val
 - `"channel name is required"` / `"channel name must be at most 100 characters"`
 - `"bots cannot be added to a channel"` / `"bot not available"` (botDM target whose assistant is disabled)
 - `user "<account>": user not found` / `org "<orgId>": invalid org` (each wrapped with the offending account/org ID)
-- `"user is missing required name fields"`
+- `"user is missing required name fields"` — rejected only when BOTH `engName` and `chineseName` are empty (either one alone is sufficient)
 - `"exceeds maximum capacity (N): would create M members"`
 
 ```json
@@ -1208,9 +1276,9 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 | `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant**, else the request is rejected (see Error response); a bot whose home site differs from the room's is allowed (cross-site bot membership). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and — because a bot can log into the chat frontend — receive the `subscription.update` event (with the room key inline under `subscription.room`) on their encoded per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores; see [§5](#5-room-encryption)). The `p_admin` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
 | `orgs` | string[] | no | Org IDs to add (expanded server-side to all org members). |
 | `channels` | array<ChannelRef> | no | Other channels to add as bulk sources. Each entry is `{ "roomId": string, "siteId": string }`. |
-| `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. |
+| `history.mode` | string | no | `"none"` or `"all"` — controls whether new members see history before they joined. **When omitted or empty, the server treats it as `"all"`** (share-all). `"all"` is capped by the **requester's own** `historySharedSince`: when the adder's history is restricted, the new members inherit the adder's boundary instead of unrestricted history (members can never see more history than whoever added them). `"none"` restricts new members to messages from the add time onward (never earlier than the adder's own boundary — the later of the two wins). Any other value is rejected with `history.mode must be "none" or "all"` (`bad_request`). |
 
-The fields `requesterId`, `requesterAccount`, and `timestamp` on the Go `AddMembersRequest` are server-set — the client should omit them.
+The fields `requesterId`, `requesterAccount`, `timestamp`, and `historySharedSince` on the Go `AddMembersRequest` are server-set — the client should omit them (any client-supplied `historySharedSince` is overwritten).
 
 ```json
 {
@@ -1235,7 +1303,7 @@ The fields `requesterId`, `requesterAccount`, and `timestamp` on the Go `AddMemb
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled; a bot whose home site differs from the room's site is admitted (cross-site bot membership is allowed). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added).
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner, unrecognized `history.mode`). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled; a bot whose home site differs from the room's site is admitted (cross-site bot membership is allowed). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -1271,6 +1339,8 @@ Shared by Add Members, Remove Member, and Update Member Role.
 | `subscription` | [Subscription](#subscription) | For `added` / `role_updated`: the full Subscription record. On `added` it additionally embeds a populated `room` object ([SubscriptionRoom](#subscriptionroom)) — `previewMessage` always omitted; `privateKey`/`keyVersion` present only for encrypted channel rooms. For `removed`: a [RemovedSubscriptionRef](#removedsubscriptionref) lean ref (see Remove Member). |
 | `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
+| `hrInfo` | [CounterpartHRInfo](#counterparthrinfo) | The DM counterpart's HR record, so the client can render the new sidebar row without a `subscription.list` refetch. Sent on `added` `dm` / `botDM` events when the counterpart account does **not** end in `.bot` — i.e. to both sides of a `dm`, and to the bot's own copy of a `botDM`. On a self-DM (note-to-self) the counterpart is the recipient, so the event carries their own record. Omitted on `channel` / `discussion` rooms and when the user lookup missed. |
+| `appInfo` | [CounterpartAppInfo](#counterpartappinfo) | The counterpart's app record, sent on `added` `botDM` events when the counterpart account ends in `.bot` — i.e. to the human member. Mutually exclusive with `hrInfo`; omitted when the app lookup missed. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is `omitempty`: set on `added` / `role_updated`, omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` the nested `room` object matches a `subscription.list` row (minus `previewMessage`), so clients can render the sidebar entry — and store the room key — from this single event. `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
@@ -1306,6 +1376,40 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 }
 ```
 
+On a newly created **DM** the event additionally carries the counterpart's `hrInfo` — everything the client needs to render the sidebar row on its own:
+
+```json
+{
+  "userId": "01970a4f8c2d7c9a01970a4f8c2d7c9a",
+  "subscription": {
+    "id": "01970a4f8c2d7c9a01970a4f8c2d7c9c",
+    "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice", "isBot": false },
+    "roomId": "01970a4f8c2d7c9a01970a4f8c2d7c9b",
+    "roomType": "dm",
+    "siteId": "siteA",
+    "roles": null,
+    "name": "bob",
+    "joinedAt": "2026-05-06T08:01:23Z",
+    "room": { "siteId": "siteA", "crossSite": false, "userCount": 2 }
+  },
+  "action": "added",
+  "roomName": "Bob Chan 陳大文",
+  "hrInfo": { "account": "bob", "chineseName": "陳大文", "engName": "Bob Chan" },
+  "timestamp": 1778054483000
+}
+```
+
+For a **botDM**, the human member's event carries `appInfo` instead (the bot's own copy of the event carries the human's `hrInfo`):
+
+```json
+{
+  "action": "added",
+  "roomName": "Helper Bot",
+  "appInfo": { "id": "01970a4f8c2d7c9aA1", "name": "Helper Bot", "assistantName": "helper.bot" },
+  "timestamp": 1778054483000
+}
+```
+
 **3.** ~~`chat.user.{newMember}.event.room.key`~~ — **no longer fired on add.** The room key is delivered inline on the `added` event above (`subscription.room.privateKey` / `keyVersion`); `room.key` events now fire only on key rotation (member removal). See [§5 Room Encryption](#5-room-encryption).
 
 **4. `chat.room.{roomID}.event.member` / `chat.local.room.{roomID}.event.member`** — a `MemberAddEvent` (`type: "member_added"`) published once whenever the room's member list actually changes: a new account joins, a genuinely new org is added, or an existing org member is upgraded to an individual membership (see the no-op note below for what does **not** fire). Routed on the room's namespace exactly like `chat.room.{roomID}.event` — pick the subject by the room's `crossSite` flag (`chat.local.room.{roomID}.event.member` when `crossSite: false`, `chat.room.{roomID}.event.member` when `crossSite: true`/unknown). Delivered to clients subscribed to the room on that namespace.
@@ -1320,13 +1424,35 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
-| `historySharedSince` | number | Optional. Epoch ms (UTC); present when prior history is shared with the new members. |
+| `historySharedSince` | number | Optional. Epoch ms (UTC); the new members' history boundary, present when their history is restricted. For `history.mode: "none"` adds it is the add time or the requester's own boundary, whichever is later; for a share-all add by a requester whose own history is capped it is the requester's inherited boundary. Absent = unrestricted. |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 
 The event carries no separate account list — member identities are in `members`. When new members actually join (or a new org is added), a `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event; a pure org→individual upgrade posts no such message.
 
 > [!NOTE]
 > **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
+
+###### CounterpartHRInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | Counterpart's account. |
+| `chineseName` | string | Counterpart's native (Chinese) name. Omitted when empty. |
+| `engName` | string | Counterpart's English name. Omitted when empty. |
+
+> Both name fields are `omitempty`, so a directory record with neither yields `{"account": "..."}` alone — and `roomName` then falls back to the account.
+>
+> Same wire shape as the search hit's [MessageHRInfo](#messagehrinfo). The key is `chineseName` here, whereas [SubscriptionHRInfo](#subscriptionhrinfo) — the `hrInfo` nested on a `subscription.list` DM row — still uses the legacy `name`.
+>
+> **This divergence is deliberate.** PR #165 scoped the `chineseName` rekey to "search response only; other payloads untouched", deliberately leaving `subscription.list` on the legacy key. New and reshaped surfaces take `chineseName`; existing ones are not rekeyed. A client must therefore **not** reuse one `hrInfo` parser across the event and the list — it would silently drop the name on one of them.
+
+###### CounterpartAppInfo
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | App ID. |
+| `name` | string | App display name. Empty string when the app document has no name — `roomName` then falls back to the bot account. |
+| `assistantName` | string | The bot account the app answers on. |
 
 ##### Triggered events — error path
 
@@ -2099,6 +2225,8 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 Synchronous RPC. `room-service` flips `Subscription.favorite` for the requester in a single atomic Mongo `FindOneAndUpdate`, replies with the resulting value, and fans out a `subscription.update` event to the user's other client sessions. Used by the client to render the per-user "favorited" sidebar section; backend treats the flag as a render hint only — no downstream behaviour (notifications, routing, retention) is gated on it.
 
+Favorites membership is also manually orderable via [Move Chat to Section](#move-chat-to-section) (`sectionId: "favorites"`) — the two RPCs stay in sync: toggling favorite **off** also clears `sectionId`/`sectionOrder` when they were `"favorites"` (toggling **on** leaves any existing `sectionId` alone); moving a chat **into** `"favorites"` sets `favorite: true`, moving it to any other section (or removing it) sets `favorite: false`. Clients keep reading membership from `favorite`, unchanged.
+
 Idempotency: this is a toggle, not a set — every successful call flips the bit. Clients must debounce the user-visible action; redelivery of the same RPC will flip back.
 
 ##### Request body
@@ -2155,7 +2283,7 @@ Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual
 
 | Field | Type | Notes |
 |---|---|---|
-| `sectionId` | string \| null | The custom section to move the chat into. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in) — the two are indistinguishable at the wire layer and handled identically. A **built-in** id (`favorites`/`apps`/`teams`/`chats`) is rejected — built-in membership is derived, not user-set. |
+| `sectionId` | string \| null | The custom section to move the chat into, or `"favorites"`. `null` (explicit JSON `null`) **or omitting the field entirely** both remove it from its section (falls back to a derived built-in, and clears `favorite` if it was set) — the two are indistinguishable at the wire layer and handled identically. The other built-in ids (`apps`/`teams`/`chats`) are rejected — their membership is derived, not user-set. `favorites` is the one built-in target: moving in sets `Subscription.favorite = true` (mirroring [Toggle Favorite](#toggle-favorite)); moving to any other section sets it `false`. |
 | `afterRoomId` | string | Optional. Place the chat just after this room within the section. Omit to append at the end. Mutually exclusive with `beforeRoomId`. |
 | `beforeRoomId` | string | Optional. Place the chat just before this room within the section (top-insertion when it is the section head). Mutually exclusive with `afterRoomId`. |
 
@@ -2175,7 +2303,7 @@ Synchronous RPC. Assigns a chat to a custom chatlist section and sets its manual
 
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
-- reason `chatlist_builtin_target` — `sectionId` is a built-in section.
+- reason `chatlist_builtin_target` — `sectionId` is a built-in section other than `favorites`.
 - reason `chatlist_section_not_found` — `sectionId` is empty.
 - `"only room members can list members"` — the user has no subscription in the room.
 
@@ -2745,7 +2873,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `card` | [MessageCard](#messagecard) | Optional. |
 | `cardAction` | [MessageCardAction](#messagecardaction) | Optional. |
 | `tshow` | boolean | Optional. Whether a thread reply is also shown in the parent room. |
-| `tcount` | number | Optional. Number of non-deleted replies on a thread parent, capped at 99; a value of 99 means "99 or more". |
+| `tcount` | number | Optional. Exact number of non-deleted replies on a thread parent. |
 | `threadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent reply in the thread. Absent if no replies or not a thread parent. |
 | `threadParentId` | string | Optional. Set when this message is a thread reply. |
 | `threadParentCreatedAt` | string | Optional. RFC 3339. |
@@ -3969,6 +4097,10 @@ See [Error envelope](#6-error-envelope-reference).
 
 **Searched fields:** one query matches message text (`content`), attachment text (`attachmentText` — every attachment's file name and description pooled into one field), and tcard data (`cardData`, the card's data document indexed verbatim as text). All terms of the query must match within a single one of these fields (`multi_match` with `AND`) — a query mixing a word from the message text with a word from a filename matches neither field and returns no hit; a query mixing a filename word with a description word DOES match, since both live in `attachmentText`.
 
+**System messages are never returned.** Server-generated room chrome (`type` of `room_created`, `members_added`, `member_removed`, `member_left`, `room_renamed`, `room_restricted`, `teams_meet_started` — see [`Message.type`](#message-schema)) is excluded from the search index, so it can never appear in `messages`. A client-set `type: "important"` message is normal user content and remains searchable.
+
+**Teams-migrated messages** are excluded when the server's `SHOW_TEAMS_ROOM` env is `false` (the default); included when `true`, **or** when the requesting account is listed in `SHOW_TEAMS_ROOM_ACCOUNTS` (a comma-separated per-account allowlist). Reversible read-time filter on the indexed `origin` field, no data change.
+
 ##### Request body
 
 ```json
@@ -4128,6 +4260,8 @@ See [Error envelope](#6-error-envelope-reference).
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
 `{siteID}` is the requester's home site; the supercluster routes the request to that site's search-service. Full-text search across rooms the requester is subscribed to. Results are served directly from the spotlight ES index (one document per `(account, room)` pair), in ES relevance order.
+
+**Teams-migrated rooms** are excluded when the server's `SHOW_TEAMS_ROOM` env is `false` (the default); included when `true`, **or** when the requesting account is listed in `SHOW_TEAMS_ROOM_ACCOUNTS` (a comma-separated per-account allowlist). Reversible read-time filter on the indexed `origin` field, no data change.
 
 ##### Request body
 
@@ -4431,7 +4565,7 @@ See [Error envelope](#6-error-envelope-reference).
 
 `user-service` exposes 19 NATS request/reply endpoints over **core NATS** (no JetStream consumers). Subjects follow the pattern `chat.user.{account}.request.user.{siteID}.<area>.<action>`, except `me`, which is a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
 
-> **Events:** [`settings.set`](#settingsset) emits [`settings.update`](#settingsupdate-event) to the caller's other devices. No other endpoint emits a client-facing event. (`status.set` and `settings.set` also trigger a server-side cross-site federation update, which is not delivered to clients.)
+> **Events:** [`settings.set`](#settingsset), [`settings.priorityContacts.add`](#settingsprioritycontactsadd), and [`settings.priorityContacts.remove`](#settingsprioritycontactsremove) each emit [`settings.update`](#settingsupdate-event) to the caller's other devices; [`settings.priorityContacts.get`](#settingsprioritycontactsget) is a pure read and emits nothing. No other endpoint emits a client-facing event. (`status.set` and the three settings-mutating endpoints above also trigger a server-side cross-site federation update, which is not delivered to clients.)
 
 | RPC subject | Method |
 |---|---|
@@ -4441,6 +4575,9 @@ See [Error envelope](#6-error-envelope-reference).
 | `chat.user.{account}.request.user.{siteID}.status.set` | [`status.set`](#statusset) |
 | `chat.user.{account}.request.user.{siteID}.settings.get` | [`settings.get`](#settingsget) |
 | `chat.user.{account}.request.user.{siteID}.settings.set` | [`settings.set`](#settingsset) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get` | [`settings.priorityContacts.get`](#settingsprioritycontactsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add` | [`settings.priorityContacts.add`](#settingsprioritycontactsadd) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove` | [`settings.priorityContacts.remove`](#settingsprioritycontactsremove) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.get` | [`chatlist.get`](#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.section.create` | [`chatlist.section.create`](#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.section.rename` | [`chatlist.section.rename`](#chatlist-sections) |
@@ -4642,7 +4779,7 @@ Same shape as `status.getByName`:
 **Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-Returns the calling user's stored settings sub-document — **exactly as stored**. The server never injects defaults: a field the user never set is absent from the reply, and **absent means the client applies its own default** (cross-client default consistency is client-owned by design). A user who never set anything gets `{}`.
+Returns the calling user's stored settings sub-document — **exactly as stored** — plus the evaluated admin-managed `permissions`. The server never injects settings defaults: a field the user never set is absent from the reply, and **absent means the client applies its own default** (cross-client default consistency is client-owned by design). A user who never set anything gets `{ "permissions": … }` and nothing else.
 
 ##### Request body
 
@@ -4650,7 +4787,7 @@ None (empty payload).
 
 ##### Success response
 
-The stored settings object. All nine fields are optional and appear only when the user has explicitly set them:
+The stored settings object plus `permissions`. All ten settings fields are optional and appear only when the user has explicitly set them; `permissions` is always present:
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -4658,25 +4795,29 @@ The stored settings object. All nine fields are optional and appear only when th
 | `themePreference` | string | Theme: `"system"` \| `"light"` \| `"dark"`. |
 | `translateMessageInto` | string | Target language tag for message translation, e.g. `"en-US"`; `""` means translation explicitly off. |
 | `messagePreviewEnabled` | boolean | Show message previews in the sidebar list. |
-| `muteAllNotifications` | boolean | Mute all notifications. |
-| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications, even when muted. |
+| `muteAllNotifications` | boolean | Mute all notifications. Enforced server-side by `notification-worker`: push delivery is suppressed for this user unless pierced — see `alwaysAllowPriorityNotifications`. |
+| `alwaysAllowPriorityNotifications` | boolean | Always allow priority-contact notifications. Enforced server-side: a message whose sender is in [`priorityContacts`](#settingsprioritycontactsadd) is pushed regardless of `muteAllNotifications` and regardless of a suppressing presence (`"busy"` / `"in-call"`) — in **any** room type, DM and channel alike, and for `.bot` senders as well as users. This setting is the only opt-in for that pierce; listing a priority contact without enabling it changes nothing. Per-room mute is not pierced. |
 | `showPreviewsInNotifications` | boolean | Show previews in notifications. |
-| `showNotificationsInCall` | boolean | Show notifications in call. |
+| `showNotificationsInCall` | boolean | Show notifications in call. Enforced server-side: when unset or `false`, push is suppressed while the user's presence is `"busy"` or `"in-call"`. A priority-contact pierce bypasses this — see `alwaysAllowPriorityNotifications`. This enforcement takes effect once presence reporting is enabled server-side; until then no status is treated as in-call, so pushes are delivered regardless of this setting. |
 | `initialChatScrollPosition` | string | Where a chat opens: `"lastRead"` \| `"newest"`. |
+| `priorityContacts` | string[] | Read-only here — raw contact accounts (not enriched), stored order. Written only by [`settings.priorityContacts.add`](#settingsprioritycontactsadd) / [`settings.priorityContacts.remove`](#settingsprioritycontactsremove), never by `settings.set`. |
+| `permissions` | map<permission key, boolean> | Evaluated admin-managed permissions; every known key is always present (`false` when never granted, expired, not yet effective, or revoked). Admin-written, read-only here — `settings.set` cannot touch it. No client event is emitted when an admin changes a permission: call `settings.get` again (e.g. on reconnect) to pick one up. |
 
 ```json
 {
   "fullWidth": true,
   "themePreference": "dark",
   "translateMessageInto": "en-US",
-  "messagePreviewEnabled": true
+  "messagePreviewEnabled": true,
+  "priorityContacts": ["alice", "helper.bot"],
+  "permissions": { "external.image.view": true }
 }
 ```
 
 Never-set user:
 
 ```json
-{}
+{ "permissions": { "external.image.view": false } }
 ```
 
 ##### Error response
@@ -4717,7 +4858,7 @@ Any non-empty subset of the nine settings fields (same types as [`settings.get`]
 
 ##### Success response
 
-The **full post-update settings** (same shape as [`settings.get`](#settingsget)) — sent fields updated, previously stored fields retained:
+The **full post-update settings** (the same ten settings fields as [`settings.get`](#settingsget), without `permissions`) — sent fields updated, previously stored fields retained:
 
 ```json
 {
@@ -4746,7 +4887,7 @@ The payload carries the **full post-update settings** (replace, don't merge):
 | Field | Type | Notes |
 |-------|------|-------|
 | `timestamp` | number | Publish time, Unix ms. |
-| `settings` | UserSettings | The full post-update settings — same nine optional fields as [`settings.get`](#settingsget). |
+| `settings` | UserSettings | The full post-update settings — the same ten optional settings fields as [`settings.get`](#settingsget), without `permissions`. |
 
 ```json
 {
@@ -4754,6 +4895,189 @@ The payload carries the **full post-update settings** (replace, don't merge):
   "settings": { "fullWidth": false, "translateMessageInto": "ja", "muteAllNotifications": true }
 }
 ```
+
+---
+
+#### settings.priorityContacts.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Returns the calling user's priority-contact list, enriched for display, in
+stored order. Capped at 30 stored entries (enforced by the mutating RPCs, not
+this one).
+
+##### Request body
+
+None (empty payload).
+
+##### Success response
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `contacts` | [PriorityContactItem](#prioritycontactitem)[] | The full enriched list, stored order. |
+
+```json
+{
+  "contacts": [
+    {
+      "account": "alice",
+      "type": "user",
+      "user": {
+        "engName": "Alice",
+        "chineseName": "愛麗絲",
+        "employeeId": "E12345",
+        "sectName": "Engineering"
+      }
+    },
+    {
+      "account": "helper.bot",
+      "type": "bot",
+      "app": { "name": "Helper Bot" }
+    }
+  ]
+}
+```
+
+A contact whose account no longer resolves (deactivated user, deleted app)
+still appears with only `account` and `type` — `user`/`app` are omitted.
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+---
+
+#### settings.priorityContacts.add
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Adds one contact to the calling user's priority-contact list and returns the
+full enriched list. **Idempotent**: re-adding a contact already on the list
+succeeds and returns the unchanged list, even when the list is already at the
+cap of 30.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `contactAccount` | string | yes | The account to add. Must be non-empty and must not equal the caller's own account. |
+
+```json
+{ "contactAccount": "helper.bot" }
+```
+
+##### Success response
+
+Same shape as [`settings.priorityContacts.get`](#settingsprioritycontactsget):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `contacts` | [PriorityContactItem](#prioritycontactitem)[] | The full enriched list, stored order, after this mutation. |
+
+```json
+{
+  "contacts": [
+    {
+      "account": "alice",
+      "type": "user",
+      "user": {
+        "engName": "Alice",
+        "chineseName": "愛麗絲",
+        "employeeId": "E12345",
+        "sectName": "Engineering"
+      }
+    },
+    {
+      "account": "helper.bot",
+      "type": "bot",
+      "app": { "name": "Helper Bot" }
+    }
+  ]
+}
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| `contactAccount` missing or empty | `bad_request` | — | `{ "code": "bad_request", "error": "contactAccount is required" }` |
+| `contactAccount` equals the caller's own account | `bad_request` | — | `{ "code": "bad_request", "error": "cannot add yourself as a priority contact" }` |
+| `contactAccount` does not resolve | `not_found` | `priority_contact_not_found` | `{ "code": "not_found", "reason": "priority_contact_not_found", "error": "priority contact not found" }` — a user account must be ACTIVE; a `.bot` account only needs its app to exist (it need not be enabled). |
+| List already at the 30-entry cap and `contactAccount` is not already on it | `forbidden` | `priority_contact_limit` | `{ "code": "forbidden", "reason": "priority_contact_limit", "error": "priority contact limit reached" }` |
+| Write missed (cap or missing caller) but a concurrent `settings.priorityContacts.remove` changed the list before the disambiguating re-read | `conflict` | — | `{ "code": "conflict", "error": "priority contacts changed concurrently, retry" }` — retry the request. |
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+**Emits:** [`settings.update`](#settingsupdate-event) to the caller's other devices, carrying the full post-update settings — including a duplicate add under the cap (the stored list is unchanged, but `settingsUpdatedAt` still bumps and both fanouts still fire). Only a duplicate add already at the 30-entry cap skips the publish. A server-side cross-site federation update also fires whenever this event does, not delivered to clients.
+
+---
+
+#### settings.priorityContacts.remove
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove`
+**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+
+Removes one contact from the calling user's priority-contact list and returns
+the full enriched list. **Idempotent**: removing a contact not on the list
+succeeds and returns the unchanged list. Unlike `add`, removing yourself is
+allowed (no self-account check), and there is no existence check on
+`contactAccount` — removing a since-deleted account is exactly the cleanup
+case this permits.
+
+##### Request body
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `contactAccount` | string | yes | The account to remove. Must be non-empty. |
+
+```json
+{ "contactAccount": "helper.bot" }
+```
+
+##### Success response
+
+Same shape as [`settings.priorityContacts.get`](#settingsprioritycontactsget):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `contacts` | [PriorityContactItem](#prioritycontactitem)[] | The full enriched list, stored order, after this mutation. |
+
+```json
+{
+  "contacts": [
+    {
+      "account": "alice",
+      "type": "user",
+      "user": {
+        "engName": "Alice",
+        "chineseName": "愛麗絲",
+        "employeeId": "E12345",
+        "sectName": "Engineering"
+      }
+    },
+    {
+      "account": "helper.bot",
+      "type": "bot",
+      "app": { "name": "Helper Bot" }
+    }
+  ]
+}
+```
+
+##### Error response
+
+| Condition | `code` | `reason` | Notes |
+|-----------|--------|----------|-------|
+| `contactAccount` missing or empty | `bad_request` | — | `{ "code": "bad_request", "error": "contactAccount is required" }` |
+| No active user doc for the caller | `not_found` | — | `{ "code": "not_found", "error": "user not found" }` |
+| Any other failure | — | — | Collapses to the generic boundary error code — see [§6 Error envelope reference](#6-error-envelope-reference). |
+
+**Emits:** [`settings.update`](#settingsupdate-event) to the caller's other devices, carrying the full post-update settings. A server-side cross-site federation update also fires, not delivered to clients.
 
 ---
 
@@ -4865,6 +5189,7 @@ Results are **paginated** by `offset`/`limit` (offset-based): the server returns
   - **List paths** (`subscription.list`, `subscription.getChannels`) and `subscription.count`: the subscription is **dropped**. Local rooms are filtered in the Mongo query; cross-site rooms are dropped after the per-site `GetRoomsInfo` lookup reveals the `Del-` name — this happens post-pagination, so a page can be shorter than `limit` (`hasMore` is computed from the database page, before the cross-site drop).
   - **Single-item lookups** (`subscription.getDM`, `subscription.getByRoomID`): the subscription is **kept with no `room` object** — the row is returned so the caller knows the subscription exists, but the deleted room is omitted.
 - **Local** rows carry the full room object (metadata + E2E key) from the `$lookup` baseline. **Cross-site** rows are fetched per remote site in parallel; if a site's RPC fails or a room isn't found, those rows are returned with **no `room` object** (the field is omitted) — the subscription still carries its own top-level `siteId`. `alert` and `hasMention` are unaffected (they come from the subscription, not the RPC).
+- **Teams-migrated rooms** (`room.origin == "teams"`, server-side only — not sent on the wire): excluded from `subscription.list`/`subscription.count` when the server's `SHOW_TEAMS_ROOM` env is `false` (the default); included when `true`, **or** when the requesting account is listed in `SHOW_TEAMS_ROOM_ACCOUNTS` (a comma-separated per-account allowlist). Reversible read-time filter, no data change.
 
 **Per-room-type record shape.** The kinds returned by `subscription.list` differ by row schema: `channel` and `dm` rows use the [Subscription](#subscription) schema (§3.0) — `dm` adds a top-level `hrInfo` — while `botDM` rows add a nested `app` object ([AppSubscription](#appsubscription), §3.0). All carry the nested [SubscriptionRoom](#subscriptionroom) (§3.0). Every field except the ones below is identical across the three types (`id`, `u`, `roomId`, `siteId`, `roles`, `joinedAt`, `muted`, `favorite`, `alert`, `hasMention`, `hasUnread`, `hasGroupMention`, the per-attribute `*UpdatedAt` timestamps, and the rest of `room`). `isSubscribed` is a **base [Subscription](#subscription) field** (boolean, optional — omitted unless stored `true`) shared by all three types, not a type-specific field. Type-specific fields:
 
@@ -5273,6 +5598,8 @@ PUT-like idempotent endpoint to subscribe or unsubscribe the calling user from a
 | `appId` missing | `bad_request` | — | `"appId required"` |
 | App not found | `not_found` | `app_not_found` | `"app not found"` |
 | App has no assistant | `bad_request` | `app_disabled` | `"app has no assistant"` |
+| room-service unreachable | `unavailable` | `no_responders` | `"create-dm rpc: no service responding"` — subscribing with no existing DM room creates a botDM room via room-service. Retryable. |
+| room-service did not answer | `unavailable` | `upstream_timeout` | `"create-dm rpc: upstream did not respond in time"` — same path, request delivered but unanswered. Retryable. |
 | Internal failure | `internal` | — | — |
 
 ---
@@ -5436,7 +5763,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `hasMention` | boolean | The user was @-mentioned in the thread. |
 | `unread` | boolean | `true` when `lastMsgAt` is newer than `lastSeenAt` (or the thread was never opened). |
 | `lastMsgAt` | number | UTC ms of the thread's last activity — the global sort key. |
-| `tcount` | number | Non-deleted reply count, capped at 99 — `99` means "99 or more". Always present; `0` also covers threads whose count was never written — migrated threads, and briefly a just-created thread whose first reply has not yet been counted. During a mixed-version rollout, rows from a not-yet-upgraded site read `0` (their leaf omits the field), and the key is absent entirely behind a not-yet-upgraded aggregator. |
+| `tcount` | number | Exact non-deleted reply count. Always present; `0` also covers threads whose count was never written — migrated threads, and briefly a just-created thread whose first reply has not yet been counted. During a mixed-version rollout, rows from a not-yet-upgraded site read `0` (their leaf omits the field), and the key is absent entirely behind a not-yet-upgraded aggregator. |
 | `parentMessage` | [Message](#message-schema) | Optional. The hydrated parent message. |
 | `lastMessage` | [Message](#message-schema) | Optional. The hydrated last reply. |
 | `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | Optional. Present **only on `dm` rows** — the counterpart's HR record, resolved from `roomName`. Omitted when the directory lookup degrades. |
@@ -5882,7 +6209,8 @@ See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code
 | `bad_request` | `unsupported_lang` | `targetLang` does not resolve to a supported language (outside the [Supported languages](#supported-languages) set, or a bare `zh` with no script/region). |
 | `unavailable` | — | Handler saturation — the concurrency cap is full; retry. |
 | `unavailable` | `upstream_unavailable` | The third-party translation backend returned a 5XX or was unreachable (transport failure). Clients should show a "translation service temporarily unavailable" message and allow a retry. |
-| `internal` | — | Other translation backend failure (e.g. malformed stream, 4XX, non-success returnCode). The raw cause is logged server-side, never returned. |
+| `too_many_requests` | `rate_limited` | The third-party translation backend rate-limited the request (HTTP 429). The service does **not** retry; clients should back off and retry later. |
+| `internal` | — | Other translation backend failure (e.g. malformed stream, other 4XX, non-success returnCode). The raw cause is logged server-side, never returned. |
 
 ```json
 {
@@ -6029,7 +6357,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 
 #### Triggered events — success path
 
-After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. **`botDM` rooms receive no `new_message` fan-out at all:** `broadcast-worker` only handles `channel` and `dm` room types, so a `botDM` falls through to the default branch and is skipped — the human participant in a `botDM` does **not** receive a `new_message` room event from this pipeline. (Bot integrations consume `botDM` messages through a separate backend path.)
+After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
 
 **1. For channel rooms — `chat.room.{roomID}.event`** (`publishChannelEvent`)
 
@@ -6037,7 +6365,7 @@ A `RoomEvent`. Recipients: every client subscribed to the room (which includes t
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | string | Always `"new_message"`. |
+| `type` | string | `"new_message"` for this room-wide channel path. A thread reply carries `"new_thread_message"` instead and is delivered per-subscriber (see [new_thread_message](client-api/events.md#new_thread_message-roomevent)). |
 | `roomId` | string | |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 | `eventTimestamp` | number | Milliseconds since Unix epoch (UTC). When message-worker published the canonical event. Omitted for legacy events. |
@@ -6165,8 +6493,12 @@ The worker filters recipients per message:
 - In rooms with more than `LARGE_ROOM_THRESHOLD` members (default 500),
   pushes only to mentioned recipients (`@user`, `@all`, `@here`).
 - Bots never receive a mobile push.
-- Presence-busy / in-call recipients are not pushed; everyone else
-  (online, offline, away, missing) receives one.
+- Presence-busy / in-call recipients are not pushed unless they set
+  `showNotificationsInCall`; everyone else (online, offline, away, missing)
+  receives one.
+- A sender in the recipient's `priorityContacts` bypasses `muteAllNotifications`
+  and presence suppression alike, but only when the recipient enabled
+  `alwaysAllowPriorityNotifications`. Per-room mute is never bypassed.
 
 ---
 
@@ -6191,7 +6523,7 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 | `roomId` | string | The room the thread lives in. |
 | `siteId` | string | |
 | `parentMessageId` | string | The thread parent message's ID. Clients use this to locate the message in their cache and update its badge. |
-| `newTcount` | number | Authoritative reply count for the parent message, capped at 99 (99 means "99 or more"). Replaces any locally-computed count — do not delta. |
+| `newTcount` | number | Authoritative exact reply count for the parent message. Replaces any locally-computed count — do not delta. |
 | `newThreadLastMsgAt` | string (ISO 8601) | Optional. Timestamp of the most recent surviving thread reply. Absent when `newTcount` is 0 (all replies deleted). |
 | `action` | string | `"reply_added"` or `"reply_deleted"`. |
 | `replyMessageId` | string | The reply that was added or deleted. |
@@ -6214,7 +6546,7 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 
 #### When it fires
 
-- **Reply added (`action: "reply_added"`):** fired when a new thread reply is successfully persisted (triggered by a `Send Message` RPC with `threadParentId` set). Published in addition to the per-subscriber `new_message` `RoomEvent` that carries the reply content.
+- **Reply added (`action: "reply_added"`):** fired when a new thread reply is successfully persisted (triggered by a `Send Message` RPC with `threadParentId` set). Published in addition to the per-subscriber `new_thread_message` `RoomEvent` that carries the reply content.
 - **Reply deleted (`action: "reply_deleted"`):** fired when a thread reply is soft-deleted (triggered by a `Delete Message` RPC). Published in addition to the `DeleteRoomEvent` that carries the delete notification.
 
 #### Client handling
@@ -6413,7 +6745,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `pin_room_too_large` | forbidden | history-service pin/unpin (non-owner/admin/bot in a room above `LARGE_ROOM_THRESHOLD`) |
 | `sso_token_expired` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token expired), `sso.refresh` (refresh failed, re-login required) |
 | `invalid_sso_token` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token fails verification) |
-| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot reach botplatform); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site) |
+| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot reach botplatform); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site); upload-service (§2.4) and media-service (§7) — a session token could not be validated against botplatform |
 | `invalid_request` | bad_request | auth-service (body parse / required field missing) |
 | `invalid_nkey` | bad_request | auth-service (natsPublicKey format) |
 | `missing_fields` | bad_request | auth-service (ssoToken/account/natsPublicKey missing); portal-service `GET /api/userInfo` (account missing); user-service `sso.set` (ssoToken/refreshToken missing) |
@@ -6423,11 +6755,25 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `app_disabled` | bad_request | user-service `subscription.setAppSubscription` (app exists but has no assistant) |
 | `subscription_not_found` | not_found | user-service `subscription.getDM` (no DM subscription exists for the account pair) |
 | `sso_token_not_found` | not_found | user-service `sso.refresh` (no token pair stored for the caller) |
+| `priority_contact_limit` | forbidden | user-service `settings.priorityContacts.add` (list already at the 30-entry cap and the contact is not already on it) |
+| `priority_contact_not_found` | not_found | user-service `settings.priorityContacts.add` (contact account does not resolve — inactive/unknown user, or app not found for a `.bot` account) |
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
-| `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
+| `no_responders` | unavailable | any request/reply RPC whose upstream subject had no subscriber (`natsutil.RequestFailure`) — the upstream service is down, not yet started, or not routed to this site. Retry. |
+| `upstream_timeout` | unavailable | any request/reply RPC delivered to the upstream but not answered within the caller's timeout (`natsutil.RequestFailure`). Retry. |
+| `invalid_token` | unauthenticated | admin-service (every `Authorization: Bearer` route — §9.11 and all `/v1/admin/…`; token missing, unknown, or session not found), botplatform-service (session token failed validation, §10); upload-service (§2.4) and media-service (§7) — `x-user-id`/`x-auth-token` missing, unknown, or disagreeing with the session (deliberately indistinguishable) |
+| `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match); media-service (§7) — avatar PUT by a session that is neither the named bot nor an admin, emoji PUT without the `admin` role, or either PUT with a session issued for another site |
+| `ambiguous_token` | bad_request | auth-service `POST /api/v1/auth` (§2.2) — both `ssoToken` and `authToken` set; upload-service (§2.4) — both an `ssoToken` header and an `x-auth-token` header set |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
 | `invalid_credentials` | unauthenticated | admin-service `POST /v1/login` (§9.10) (unknown account, wrong password, not admin, or deactivated — uniform response) |
 | `old_password_mismatch` | unauthenticated | admin-service `POST /v1/password/change` (§9.11) (`oldPassword` does not match) |
+| `unknown_permission` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13), `GET /v1/admin/permissions` (§9.14), `POST /v1/admin/permissions/resync` (§9.15) (permission key not recognized) |
+| `invalid_subject_count` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`subjectAccounts` empty), `POST /v1/admin/permissions/resync` (§9.15) (`accounts` empty) |
+| `invalid_reason` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`reason` over 1000 runes) |
+| `missing_permission_fields` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (`granted` omitted, or `applicantAccount`/`approverAccount` empty) |
+| `invalid_permission_window` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (grant only: malformed date, `effectiveFrom` after `expiresAt`, or `expiresAt` not in the future) |
+| `unexpected_permission_window` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (revoke only: `effectiveFrom`/`expiresAt` present with a non-null value; an explicit `null` counts as absent) |
+| `inactive_subject` | bad_request | admin-service `POST /v1/admin/permissions` (§9.13) (a subject account is deactivated) |
+| `unknown_accounts` | not_found | admin-service `POST /v1/admin/permissions` (§9.13) (a subject, applicant, or approver account does not exist; the lookup is company-wide, not filtered by site) |
 | `emoji_shortcode_reserved` | bad_request | media-service `PUT /api/v1/emoji/…` (shortcode collides with a built-in standard emoji) |
 | `emoji_delete_disabled` | forbidden | media-service `emoji.delete` (kill-switch `EMOJI_DELETE_ENABLED=false`, the default) |
 
@@ -6435,7 +6781,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 
 - **NATS sync replies** — on the reply subject for §3/§4 RPCs.
 - **JetStream async results** — `model.AsyncJobResult` carries the same `code` + `reason` fields when `status == "error"`, so a failed async job is surfaced the same way as a sync error.
-- **HTTP** — auth-service `POST /api/v1/auth` (§2.2), portal-service `GET /api/userInfo` (§2.3), and upload-service's image endpoints (§2.4) write the envelope as the response body with the matching HTTP status from the table above.
+- **HTTP** — auth-service `POST /api/v1/auth` (§2.2), portal-service `GET /api/userInfo` (§2.3), upload-service's file/image endpoints (§2.4), and media-service's avatar and emoji PUTs (§7) write the envelope as the response body with the matching HTTP status from the table above.
 
 ### Client branching guidance
 
@@ -6445,7 +6791,7 @@ Compute the trigger as `reason ?? code` and branch on that. Use `code` for gener
 
 ## 7. Media Service
 
-Public HTTP endpoints served by `media-service`. GET image responses (streamed custom image and generated default SVG) set `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`; redirects do not, and the upload sets `nosniff` only.
+HTTP endpoints served by `media-service` — the three GETs are public, the two PUTs require a session token (see each). GET image responses (streamed custom image and generated default SVG) set `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`; redirects do not, and the upload sets `nosniff` only.
 
 **Bot detection:** an account takes the bot avatar path if it ends in `.bot` **or** is the `p_admin` platform-admin pseudo-account. Everything else — including plain `p_` QA test accounts — is a user.
 
@@ -6527,10 +6873,9 @@ GET /api/v1/avatar/room/<dm-room-id>         → 200 (default SVG — use Endpoi
 
 ### PUT /api/v1/avatar/bot/:botName
 
-> [!WARNING]
-> **This endpoint is UNAUTHENTICATED in v1.** Anyone who can reach the service can upload or overwrite any bot's avatar. Auth is deferred until the authorization model is decided. **It MUST be network-restricted or gated before any production exposure.**
-
-**Auth:** none (v1)
+**Auth:** `x-user-id` + `x-auth-token` (botplatform session token, §10.1). The session must
+either **be** the bot named in the path (`account == :botName`) or hold the `admin` role;
+anything else is `403 not_admin`. A bot manages its own avatar; an admin manages any bot's.
 
 Uploads a custom PNG or JPEG avatar for a bot. The body is the raw image bytes; `Content-Type` declares the format.
 
@@ -6538,7 +6883,7 @@ Uploads a custom PNG or JPEG avatar for a bot. The body is the raw image bytes; 
 
 | | Notes |
 |---|---|
-| Path | `:botName` — bare bot account (stray `@…` is stripped). Must satisfy the bot pattern (ends in `.bot` or is the `p_admin` platform-admin pseudo-account). |
+| Path | `:botName` — bare bot account, matched exactly against the session's account. Do **not** prefix `@`. Must satisfy the bot pattern (ends in `.bot` or is the `p_admin` platform-admin pseudo-account). |
 | Body | Raw image bytes (PNG or JPEG). SVG and non-image payloads are rejected. |
 | `Content-Type` header | Advisory. Validation is by decoding the body — a valid PNG or JPEG is accepted regardless of the declared header; non-images are rejected. |
 | Max size | `MAX_UPLOAD_BYTES` (default 1 MiB). |
@@ -6550,9 +6895,12 @@ The service decodes the image bytes to verify they are a valid PNG or JPEG — m
 | Status | Condition |
 |---|---|
 | `200 OK` | Upload accepted and stored. Body returns the new avatar metadata (below). |
-| `400 Bad Request` | `botName` does not match the bot pattern; `Content-Type` is not `image/png` or `image/jpeg`; body is not a valid image; body exceeds `MAX_UPLOAD_BYTES`. |
+| `400 Bad Request` | `botName` does not match the bot pattern; body does not decode as a PNG or JPEG; body exceeds `MAX_UPLOAD_BYTES`. A wrong `Content-Type` alone is not rejected — the header is advisory, as the request table above states. |
+| `401 Unauthenticated` | `invalid_token` — missing, unknown, or mismatched session credential (the three are indistinguishable). |
+| `403 Forbidden` | `not_admin` — a valid session that is neither the named bot nor an admin, or one issued for another site. |
 | `404 Not Found` | No user record for `botName` — unknown bot. |
 | `409 Conflict` | Bot is owned by a different cluster. Response body names the correct domain. |
+| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against botplatform. |
 
 ##### Success response (`200`)
 
@@ -6605,7 +6953,11 @@ Serves a custom emoji image. The path no longer carries siteID: v1's FE only eve
 
 ### PUT /api/v1/emoji/:shortcode
 
-Uploads (or replaces — PUT is an upsert) a custom emoji. v1: no auth; the optional `?uploader={account}` query parameter is recorded for audit only. Values longer than 64 bytes are truncated. The upload always writes to **this** cluster's site — there is no cross-cluster upload in v1, so there is no declared-intent check to fail.
+Uploads (or replaces — PUT is an upsert) a custom emoji. The upload always writes to **this** cluster's site — there is no cross-cluster upload in v1, so there is no declared-intent check to fail.
+
+**Auth:** `x-user-id` + `x-auth-token` (botplatform session token, §10.1), **admin role required**. A shortcode is a site-wide shared name that every user on the site renders, so uploading one is an admin operation — a bot cannot overwrite an emoji for everybody. A valid non-admin session is `403 not_admin`.
+
+The `?uploader={account}` query parameter is **accepted and ignored**. The `createdBy` / `updatedBy` audit fields are taken from the authenticated session, which cannot be spoofed by a caller.
 
 #### Request
 
@@ -6618,6 +6970,9 @@ Raw image bytes as the body. PNG, JPEG, or GIF (animated GIFs are stored and ser
 | `200 OK` | Upload accepted and stored. Body returns the new emoji metadata (below). |
 | `400 Bad Request` | Malformed shortcode; body not a valid PNG/JPEG/GIF; body or dimensions over the limits. |
 | `400 Bad Request` | Reason `emoji_shortcode_reserved` — shortcode collides with a built-in standard emoji (would be permanently shadowed). |
+| `401 Unauthenticated` | `invalid_token` — missing, unknown, or mismatched session credential (the three are indistinguishable). |
+| `403 Forbidden` | `not_admin` — a valid session without the `admin` role, or one issued for another site. |
+| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against botplatform. |
 
 ##### Success response (`200`)
 
@@ -7082,7 +7437,7 @@ Returns audit entries for the admin's site, newest-first, with optional filterin
 |---|---|---|
 | `targetAccount` | string | Optional. Filter by the affected user's account. |
 | `actor` | string | Optional. Filter by actor account. |
-| `action` | string | Optional. Filter by action string (e.g. `user.create`, `session.revoke_all`). |
+| `action` | string | Optional. Filter by action string (e.g. `user.create`, `session.revoke_all`, `permission.grant`, `permission.revoke`). |
 | `page` | integer | Page number, 1-based. Defaults to `1`. |
 | `limit` | integer | Page size. Defaults to `20`. |
 
@@ -7270,6 +7625,272 @@ For a room with members homed on other sites, room-service still fans the state 
 
 `None.`
 
+### 9.13 Create / revoke permission grants
+
+**Endpoint:** `POST /v1/admin/permissions`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Records a new row in the append-only `permission_grants` ledger for one or more subject accounts — either a grant (`granted: true`) or a revocation (`granted: false`) of the same permission key in one call. Unlike its siblings this is not a `/users/:account/...`-shaped endpoint, because `subjectAccounts` is a batch. The same write also materializes the new state on each subject's user document — that snapshot, not the ledger, is what [`settings.get`](#settingsget) and `currentlyGranted` (§9.14) read; the ledger is audit history and is never rewritten. One `admin_audit` entry (`action`: `permission.grant` or `permission.revoke`, `targetAccount`: the subject, `details`: `{"permission": "<permission key>"}`) is written per subject alongside the ledger rows.
+
+After the write commits, the new state is fanned out to every other site so their copies converge. Large batches are split into chunks internally; that is transparent to callers — chunking never shows up in the request or the response, and only whole destinations appear in `syncFailures`.
+
+Dates are plain `YYYY-MM-DD` strings, interpreted under a fixed UTC+8 rule — never the caller's timezone, never the server's local timezone. There is no `timezone` field, and there never will be one for this endpoint.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `permission` | string | yes | Permission key. The only key defined today is `external.image.view`. |
+| `subjectAccounts` | string[] | yes | Accounts to grant or revoke for — non-empty, no fixed cap. Duplicates are silently deduplicated (first occurrence kept) and reported back in `duplicatesIgnored` — never rejected outright. |
+| `granted` | boolean | yes | `true` records a grant, `false` records a revocation. Required — a body that omits `granted`, or sends an explicit `granted: null`, is rejected with `400 missing_permission_fields`, not silently treated as `false`/revoke. |
+| `effectiveFrom` | string | no | Grant only — `YYYY-MM-DD`. Omitted means "effective immediately" (the write instant). Backdating is allowed. **Must be omitted when `granted` is `false`** — a revocation has no validity window. A JSON `null` is treated as absent (equivalent to omitting the field). |
+| `expiresAt` | string | when `granted` is `true` | Grant only — `YYYY-MM-DD`, the last valid day (inclusive). Stored internally as the exclusive-end instant, UTC+8 midnight the *following* day. A value equal to today is valid (the grant expires tonight); any earlier date is rejected. **Must be omitted when `granted` is `false`** — there are no permanent grants and no dated revocations. A JSON `null` is treated as absent (equivalent to omitting the field). |
+| `applicantAccount` | string | yes | Account of the person who requested the change (offline approval). Must exist; may be inactive. |
+| `approverAccount` | string | yes | Account of the person who approved the change (offline approval). Must exist; may be inactive. |
+| `reason` | string | no | Free text, ≤1000 runes (`utf8.RuneCountInString`) when present. Omitted or empty is accepted and stored as `""`. Retained permanently — this is an append-only ledger, not a mutable note. |
+
+Grant:
+
+```json
+{
+  "permission": "external.image.view",
+  "subjectAccounts": ["alice", "bob"],
+  "granted": true,
+  "effectiveFrom": "2026-09-01",
+  "expiresAt": "2026-12-31",
+  "applicantAccount": "carol",
+  "approverAccount": "dave",
+  "reason": "On-call staff must review production line photos from outside the fab."
+}
+```
+
+Revoke — `effectiveFrom`/`expiresAt` omitted (an explicit `null` is equivalent):
+
+```json
+{
+  "permission": "external.image.view",
+  "subjectAccounts": ["alice"],
+  "granted": false,
+  "applicantAccount": "carol",
+  "approverAccount": "dave",
+  "reason": "Project ended."
+}
+```
+
+#### Success response
+
+`HTTP 201`
+
+| Field | Type | Notes |
+|---|---|---|
+| `created` | integer | Number of ledger rows written — the deduplicated subject count. |
+| `duplicatesIgnored` | string[] | Subject accounts dropped as duplicates of an earlier entry in the same request. `[]`, never `null`, when there were none. |
+| `syncFailures` | string[] | Remote site IDs whose cross-site publish was not acknowledged. Omitted (not `[]`) when every destination landed. Still `201` when present — the ledger rows and this site's state were written; the listed sites may keep serving the previous decision until healed by [§9.15 resync](#915-resync-permission-fanout). |
+
+```json
+{
+  "created": 2,
+  "duplicatesIgnored": [],
+  "syncFailures": ["site-b"]
+}
+```
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | Body is not valid JSON. |
+| 400 | `bad_request` | `unknown_permission` | `permission` is not a recognized key. |
+| 400 | `bad_request` | `invalid_subject_count` | `subjectAccounts` is empty. |
+| 400 | `bad_request` | `invalid_reason` | `reason` exceeds 1000 runes. |
+| 400 | `bad_request` | `missing_permission_fields` | `granted` is omitted, or `applicantAccount`/`approverAccount` is empty. |
+| 400 | `bad_request` | `invalid_permission_window` | Grant only. `effectiveFrom`/`expiresAt` not `YYYY-MM-DD`, `effectiveFrom` after `expiresAt`, or `expiresAt`'s derived instant is not in the future (today is valid; yesterday or earlier is not). |
+| 400 | `bad_request` | `unexpected_permission_window` | Revoke only. `effectiveFrom` or `expiresAt` present with a non-null value; an explicit `null` counts as absent and is accepted. |
+| 404 | `not_found` | `unknown_accounts` | A subject, applicant, or approver account does not exist. Accounts are looked up company-wide — the lookup does not filter by `siteId`, so a subject may be homed at any site. Message names the offending accounts; `metadata.accounts` carries the same comma-joined list for programmatic display. |
+| 400 | `bad_request` | `inactive_subject` | A subject account exists but is deactivated. `applicantAccount`/`approverAccount` are exempt — a departed staff member may still be recorded as applicant or approver. Message names the offending accounts; `metadata.accounts` carries the same comma-joined list. |
+| 401 | `unauthenticated` | `invalid_token` | Token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | The batch insert is transactional — on failure, no ledger row was written and no audit entry exists. |
+
+```bash
+# Grant
+curl -X POST https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permission": "external.image.view",
+    "subjectAccounts": ["alice", "bob"],
+    "granted": true,
+    "effectiveFrom": "2026-09-01",
+    "expiresAt": "2026-12-31",
+    "applicantAccount": "carol",
+    "approverAccount": "dave",
+    "reason": "On-call staff must review production line photos from outside the fab."
+  }'
+```
+
+```bash
+# Revoke
+curl -X POST https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permission": "external.image.view",
+    "subjectAccounts": ["alice"],
+    "granted": false,
+    "applicantAccount": "carol",
+    "approverAccount": "dave",
+    "reason": "Project ended."
+  }'
+```
+
+### 9.14 List permission grants
+
+**Endpoint:** `GET /v1/admin/permissions`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Returns the permission ledger, newest-first, plus the current computed decision when the filters narrow to a single subject and permission. Backs both the terminal workflow (confirm state before writing, confirm again after) and the console's lookup pane. Company-wide — the ledger browse does not filter by `siteId`, so rows for subjects homed at any site are returned.
+
+#### Query parameters
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `subjectAccount` | string | Optional. Filter to one subject account. Omitted lists every subject. |
+| `permission` | string | Optional. Filter to one permission key. Omitted lists every permission. An unrecognized key returns `400 unknown_permission`. |
+| `page` | integer | Page number, 1-based. Defaults to `1`. |
+| `limit` | integer | Page size. Defaults to `20`, max `100`. |
+
+`subjectAccount` and `permission` combine independently, four ways: neither given returns every row; `subjectAccount` alone returns one subject's full ledger; `permission` alone returns one permission key across every subject; both given narrows to one subject's ledger for one permission. `currentlyGranted` (below) is included only in the both-given case.
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `currentlyGranted` | boolean | Present only when BOTH `subjectAccount` and `permission` were supplied — a single decision is meaningless without both. The current decision, evaluated at read time from the subject's materialized user-document state — the same evaluation path as [`settings.get`](#settingsget), so the two can never disagree. Not derived from the ledger rows below (those are audit history). Deliberately not named `granted`, which is a per-row field meaning "what this record did", not "current state". |
+| `entries` | [PermissionGrantView](#permissiongrantview)[] | The ledger, newest-first (`recordedAt` desc, `_id` desc tie-break). |
+| `total` | integer | Total matching rows across all pages. |
+
+```json
+{
+  "currentlyGranted": false,
+  "entries": [
+    {
+      "id": "0199f2c3a4b5c6d90199f2c3a4b5c6d9",
+      "permission": "external.image.view",
+      "subjectAccount": "alice",
+      "granted": false,
+      "applicantAccount": "carol",
+      "approverAccount": "dave",
+      "reason": "Project ended.",
+      "recordedBy": "p_admin_wang",
+      "recordedAt": "2026-10-15T02:03:04Z"
+    },
+    {
+      "id": "0199f2c3a4b5c6d70199f2c3a4b5c6d7",
+      "permission": "external.image.view",
+      "subjectAccount": "alice",
+      "granted": true,
+      "effectiveFrom": "2026-09-01",
+      "expiresAt": "2026-12-31",
+      "applicantAccount": "carol",
+      "approverAccount": "dave",
+      "reason": "On-call staff must review production line photos from outside the fab.",
+      "recordedBy": "p_admin_wang",
+      "recordedAt": "2026-09-01T01:00:00Z"
+    }
+  ],
+  "total": 2
+}
+```
+
+Note what this example demonstrates: the revoke row (newest, listed first) omits
+`effectiveFrom`/`expiresAt` entirely, and `currentlyGranted` reads
+`false` because the revoke is what the subject's materialized state now holds.
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `unknown_permission` | `permission` is not a recognized key. |
+| 401 | `unauthenticated` | `invalid_token` | Token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+```bash
+# Lookup
+curl -G https://admin.example.com/v1/admin/permissions \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "subjectAccount=alice" \
+  --data-urlencode "permission=external.image.view"
+```
+
+### 9.15 Resync permission fanout
+
+**Endpoint:** `POST /v1/admin/permissions/resync`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Re-delivers the **current** materialized state for the given accounts to every other site — the remediation for a `syncFailures` entry returned by §9.13. Re-delivery only: it reads each account's stored state and republishes it, and **writes nothing** — no ledger row, no `admin_audit` entry, no user-document update. Safe to call repeatedly: each delivered state carries its original write timestamp, and a destination ignores anything older than what it already holds — so a replay either rewrites the identical value or is discarded, and can never undo a newer decision.
+
+No existence or active check is performed — this endpoint syncs state, it does not validate people. An account with no stored state for the requested permission (unknown account, or never granted this permission) is silently skipped: nothing is published for it and it is not reported as an error.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `permission` | string | yes | Permission key to resync. The only key defined today is `external.image.view`. |
+| `accounts` | string[] | yes | Accounts to resync — non-empty, no fixed cap. Duplicates are silently deduplicated (first occurrence kept) and not reported. |
+
+```json
+{
+  "permission": "external.image.view",
+  "accounts": ["alice", "bob"]
+}
+```
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `syncFailures` | string[] | Remote site IDs whose republish was not acknowledged, deduplicated. Omitted (not `[]`) when every destination landed — the usual case; call again to retry. |
+
+Everything landed:
+
+```json
+{}
+```
+
+One destination still unreachable:
+
+```json
+{ "syncFailures": ["site-b"] }
+```
+
+#### Errors
+
+| Status | `code` | `reason` | Notes |
+|---|---|---|---|
+| 400 | `bad_request` | `missing_fields` | Body is not valid JSON. |
+| 400 | `bad_request` | `unknown_permission` | `permission` is not a recognized key. |
+| 400 | `bad_request` | `invalid_subject_count` | `accounts` is empty. |
+| 401 | `unauthenticated` | `invalid_token` | Token missing, unknown, or session not found. |
+| 403 | `forbidden` | `not_admin` | Valid session, but caller lacks the `admin` role or the session `siteId` does not match. |
+| 500 | `internal` | — | Failed to read the stored state; nothing was published. Cause is logged server-side only. |
+
+```bash
+# Resync the two accounts a failed grant left out of sync
+curl -X POST https://admin.example.com/v1/admin/permissions/resync \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permission": "external.image.view",
+    "accounts": ["alice", "bob"]
+  }'
+```
+
 ### UserView
 
 Projected user record returned by all admin user endpoints. The `services` / bcrypt field is never included.
@@ -7313,12 +7934,28 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `id` | string | Audit entry ID. |
 | `actorUserId` | string | Internal user ID of the admin who performed the action. |
 | `actorAccount` | string | Account of the admin. |
-| `action` | string | Action string, e.g. `user.create`, `user.update`, `user.password.set`, `session.revoke_all`, `session.revoke`. |
+| `action` | string | Action string, e.g. `user.create`, `user.update`, `user.password.set`, `session.revoke_all`, `session.revoke`, `permission.grant`, `permission.revoke`. |
 | `targetUserId` | string | Internal ID of the affected user. Omitted when not applicable. |
 | `targetAccount` | string | Account of the affected user. Omitted when not applicable. |
 | `details` | map<string, string> | Non-secret context for the action (e.g. `{"account":"bob"}`). Omitted when empty. Never contains passwords, hashes, or tokens. |
 | `siteId` | string | Site the action was performed on. |
 | `timestamp` | integer | Epoch ms (UTC) when the action occurred. |
+
+### PermissionGrantView
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Ledger row ID (32-char UUIDv7 hex). |
+| `permission` | string | Permission key this row applies to. |
+| `subjectAccount` | string | The account this row grants or revokes the permission for. |
+| `granted` | boolean | What this row did — `true` for a grant, `false` for a revocation. Historical rows are never rewritten; this is not "does the subject currently hold the permission" (see `currentlyGranted`, §9.14). |
+| `effectiveFrom` | string | `YYYY-MM-DD`, decoded back from the stored instant at UTC+8. Omitted on revoke rows (no validity window). |
+| `expiresAt` | string | `YYYY-MM-DD`, the inclusive last valid day (decoded from the stored exclusive-end instant at UTC+8, minus one day). Omitted on revoke rows. |
+| `applicantAccount` | string | Who requested the change. |
+| `approverAccount` | string | Who approved the change. |
+| `reason` | string | Free-text justification, as submitted. |
+| `recordedBy` | string | The admin account that recorded this row (from the session token). |
+| `recordedAt` | string | RFC 3339. Server clock at write time (when the decision was recorded). Independent of the validity window — a grant can be back- or future-dated via `effectiveFrom`/`expiresAt`. |
 
 ---
 
@@ -7783,3 +8420,89 @@ Ordering is judged against the in-memory cache, which is as fresh as the last re
 #### Triggered events — error path
 
 `None.`
+
+---
+
+## 12. Client Update Service
+
+Public HTTP endpoints served by `client-update-service`. Distributes client
+software-update artifacts (a `.yaml` descriptor + an executable) stored in MinIO.
+Uploads and downloads stream end-to-end; downloads are fronted by a bounded
+TTL+size in-memory cache.
+
+> [!WARNING]
+> **These endpoints are UNAUTHENTICATED in v1.** Anyone who can reach the service
+> can upload or download update artifacts. **They MUST be network-restricted
+> before any production exposure.**
+
+### POST /api/v1/version
+
+**Auth:** none (v1)
+
+Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
+and streamed straight to MinIO (no size cap). An upload of an existing file name
+overwrites it and evicts any cached copy.
+
+#### Request
+
+| Part | Type | Required | Notes |
+|---|---|---|---|
+| `configFile` | file (`.yaml`/`.yml`) | yes | Update descriptor. Stored with the part's declared `Content-Type` (fallback `application/x-yaml` when the part sends none). Rejected if empty or not `.yaml`/`.yml`. |
+| `executeFile` | file (binary) | yes | The executable. Stored with the part's declared `Content-Type` (fallback `application/octet-stream` when the part sends none). Rejected if empty. |
+
+#### Response
+
+| Status | Condition |
+|---|---|
+| `200 OK` | Both files stored. |
+| `400 Bad Request` | Missing/empty `configFile` or `executeFile`; `configFile` not `.yaml`/`.yml`; malformed multipart body. |
+| `500 Internal Server Error` | MinIO write failure. |
+
+##### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `result` | string | Always `"success"`. |
+
+```json
+{ "result": "success" }
+```
+
+### GET /api/v1/version/:fileName
+
+**Auth:** none (v1)
+
+Downloads an artifact by file name. Served from an in-memory cache when present
+(TTL `CACHE_TTL`, default 24h); on a miss the object is fetched from MinIO and
+cached if it is within `CACHE_MAX_OBJECT_BYTES` (default 512 MiB), otherwise
+streamed uncached. A re-upload of the same name busts the cache.
+
+#### Response
+
+| Status | Condition | Notes |
+|---|---|---|
+| `200 OK` | Artifact found | Streams the bytes. `Content-Type` as stored; `Content-Disposition: attachment; filename="<fileName>"`; `Content-Length` set. |
+| `400 Bad Request` | Empty or path-unsafe `fileName` (contains `/`, `\`, or `..`) | |
+| `404 Not Found` | No artifact with that name | |
+| `500 Internal Server Error` | MinIO read failure | |
+
+```
+GET /api/v1/version/app.yaml   -> 200 (application/x-yaml)
+GET /api/v1/version/app.exe    -> 200 (application/octet-stream)
+```
+
+### GET /healthz
+
+**Auth:** none
+
+Liveness probe.
+
+#### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+
+```json
+{ "status": "ok" }
+```

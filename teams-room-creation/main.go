@@ -68,7 +68,11 @@ func run() error {
 		return fmt.Errorf("nats connect: %w", err)
 	}
 	defer func() {
-		if err := nc.Drain(); err != nil {
+		// ctx is already cancelled on SIGTERM by the time this defer runs, so
+		// the drain deadline must not be derived from it.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel()
+		if err := natsutil.Drain(dctx, nc); err != nil {
 			slog.Error("nats drain", "error", err)
 		}
 	}()

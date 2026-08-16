@@ -131,8 +131,47 @@ AUTH_ACCOUNT_PUB_KEY=${ACCOUNT_PUB_KEY}
 NATS_URL=nats://nats:4222
 NATS_CREDS_FILE=/etc/nats/backend.creds
 
-# Bypass OIDC in auth-service; flip to false to test the OIDC flow.
+# Bypass OIDC; flip to false stack-wide (auth, portal, upload, botplatform,
+# chat-frontend all read this) to test the OIDC flow.
 DEV_MODE=true
+
+# Every setting in the service compose files is overridable from here — grep a
+# compose file for \${ to see a service's own knobs. The common ones:
+#
+# Published host ports (change one to dodge a conflict; the URLs follow).
+#GATEWAY_HOST_PORT=7777        # baseUrl; portal/media URLs derive from it
+#PORTAL_SERVICE_HOST_PORT=8085
+#CHAT_FRONTEND_HOST_PORT=3000
+#ADMIN_FRONTEND_HOST_PORT=3001
+#ADMIN_SERVICE_HOST_PORT=8082
+#UPLOAD_SERVICE_HOST_PORT=8086
+#TCARD_SERVICE_HOST_PORT=8087
+#SEARCH_SERVICE_HOST_PORT=19090
+#
+# Stack-wide settings.
+#SITE_ID=site-local            # also drives ES index names, buckets, site URLs
+#ALL_SITE_IDS=site-local
+# Same-site room .event lanes: global|dual|local. Compose defaults to dual
+# (both lanes); local mirrors the production end state. global breaks live
+# delivery for crossSite:false rooms — the client subscribes chat.local.room.>.
+#ROOM_SUBJECT_MODE=dual
+#MONGO_URI=mongodb://mongodb:27017
+#MONGO_DB=chat
+#CASSANDRA_HOSTS=cassandra
+#CASSANDRA_KEYSPACE=chat
+#VALKEY_ADDRS=valkey:6379
+#SEARCH_URL=http://elasticsearch:9200
+#VAULT_ADDR=http://vault:8200
+#VAULT_TOKEN=dev-only-token
+#OIDC_ISSUER_URL=http://keycloak:8080/realms/chatapp
+#OIDC_CLIENT_ID=nats-chat
+#OIDC_AUDIENCES=nats-chat
+#MINIO_ENDPOINT=minio:9000
+#MINIO_ACCESS_KEY=minioadmin
+#MINIO_SECRET_KEY=minioadmin
+#BOOTSTRAP_STREAMS=true
+#O11Y_ENABLED=true
+#PPROF_ENABLED=false
 EOF
 chmod 600 "$ENV_FILE"
 
@@ -184,12 +223,25 @@ echo ""
 echo "  # Start all third-party deps (NATS, Mongo, Cassandra, ES, Keycloak)"
 echo "  make deps-up"
 echo ""
+echo "  # Seed sample users/rooms/messages (needed to log in)"
+echo "  make seed"
+echo ""
 echo "  # Start every microservice (foreground, streams logs)"
 echo "  make up"
 echo ""
+echo "  # Start the browser UIs"
+echo "  make ui-up"
+echo ""
 echo "  ──────────────────────────────────────"
+echo "  chat-frontend:    http://localhost:3000"
+echo "  admin-frontend:   http://localhost:3001"
+echo "  API gateway:      http://localhost:7777  (baseUrl)"
+echo "  portal-service:   http://localhost:8085"
 echo "  NATS:             nats://localhost:4222"
 echo "  NATS Monitoring:  http://localhost:8222"
 echo "  NATS WebSocket:   ws://localhost:9222"
 echo "  ──────────────────────────────────────"
+echo ""
+echo "  Log in as 'alice' (no password), or 'admin' / 'AdminDev123!'."
+echo "  Full port map + troubleshooting: docker-local/README.md"
 echo ""

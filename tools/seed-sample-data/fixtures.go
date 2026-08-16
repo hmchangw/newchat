@@ -39,11 +39,8 @@ const (
 // realm in auth-service/deploy/keycloak/realm-export.json; most of the rest
 // populate rooms so member lists look realistic. u-admin is a demo
 // platform-admin account (no rooms, no HR record) so local bot/admin
-// password login has something to authenticate against end-to-end; it is
-// also seeded into portal-service's own directory (portal.users, via
-// portal-seed in portal-service/deploy/docker-compose.yml) with the same
-// account/id and roles:["admin"], since portal's login role-gate reads its
-// own directory cache, not this collection.
+// password login has something to authenticate against end-to-end. Portal's
+// login role-gate reads the roles written here.
 func BuildUsers() []model.User {
 	return []model.User{
 		{ID: "u-alice", Account: "alice", SiteID: siteLocal, SectID: "eng", SectName: "Engineering", SectTCName: "工程部", DeptID: "eng-backend", DeptName: "Backend", DeptTCName: "後端組", EngName: "Alice Engineer", ChineseName: "王小愛", EmployeeID: "E001"},
@@ -65,6 +62,32 @@ func BuildUsers() []model.User {
 			Services: model.Services{Password: model.PasswordCredentials{Bcrypt: demoAdminBcryptHash}},
 		},
 	}
+}
+
+// BuildHREmployees returns the hr_employee rows portal left-joins onto users,
+// derived from BuildUsers. Role-carrying accounts are skipped by design.
+func BuildHREmployees() []model.IEmployee {
+	users := BuildUsers()
+	out := make([]model.IEmployee, 0, len(users))
+	for i := range users {
+		u := &users[i]
+		if len(u.Roles) > 0 {
+			continue
+		}
+		out = append(out, model.IEmployee{
+			ID:             u.EmployeeID,
+			EmployeeID:     u.EmployeeID,
+			Account:        u.Account,
+			EngName:        u.EngName,
+			ChineseName:    u.ChineseName,
+			Mail:           u.Account + "@example.com",
+			MailNickname:   u.Account,
+			UserType:       "Member",
+			AccountEnabled: true,
+			SiteID:         u.SiteID,
+		})
+	}
+	return out
 }
 
 // usersByAccount indexes BuildUsers by account for fast lookup in other builders.
@@ -428,10 +451,13 @@ func BuildSubscriptions() []model.Subscription {
 				Name:         name,
 				RoomType:     r.Type,
 				IsSubscribed: true,
-				JoinedAt:     seedBaseTime,
-				HasMention:   false,
-				Alert:        true,
-				Muted:        false,
+				// Not omitempty in bson: leaving it unset writes `open: false`,
+				// which subscription.list treats as explicitly closed.
+				Open:       true,
+				JoinedAt:   seedBaseTime,
+				HasMention: false,
+				Alert:      true,
+				Muted:      false,
 			})
 		}
 	}

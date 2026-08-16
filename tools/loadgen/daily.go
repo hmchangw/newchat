@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -64,6 +65,7 @@ SLO signals evaluated over the hold window:
   - p95 latency (publish→broadcast)        threshold 500ms
   - p99 latency                            threshold 1000ms
   - error rate                             threshold 0.1%
+  - missing broadcast rate                 threshold 0.1% (same as error rate)
   - any JetStream consumer pending growth  threshold +1000
     (notification-worker exempt: push-notification delay is tolerated)
   - any service slog_errors_total increase threshold +0
@@ -257,9 +259,11 @@ type stepEnv struct {
 	scrapeServices func(ctx context.Context) (map[string]int64, error)
 	publish        publishFn // nil in stub mode → emitters no-op
 	request        requestFn // nil in stub mode → emitters no-op
-	siteID         string    // propagated from cfg / baseCfg
-	runSeed        int64     // for deterministic per-user RNG seeding
-	maxDirect      int       // direct pool cap (from cfg.MaxDirectUsers)
+	pubConn        dailyConnectionCloser
+	ownedMetrics   *Metrics
+	siteID         string // propagated from cfg / baseCfg
+	runSeed        int64  // for deterministic per-user RNG seeding
+	maxDirect      int    // direct pool cap (from cfg.MaxDirectUsers)
 	warmup         time.Duration
 	hold           time.Duration
 	cooldown       time.Duration
@@ -275,6 +279,15 @@ type stepEnv struct {
 	holdDurationNanos atomic.Int64
 	activatedCount    atomic.Int64
 	skippedCount      atomic.Int64
+}
+
+type dailyConnectionCloser interface {
+	Close()
+}
+
+type dailyMetricsServer interface {
+	Shutdown(context.Context) error
+	Close() error
 }
 
 // setHold updates the current envelope anchor. Emitters read these on every
@@ -344,9 +357,12 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 		env.presenceCollector.Reset()
 	}
 
+	holdStartedAt := time.Now()
+
 	if err := waitOrCancel(ctx, env.hold); err != nil {
 		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during hold")
 	}
+	holdEndedAt := time.Now()
 
 	endPending, endPollErr := env.pollPending(ctx)
 	if endPollErr != nil {
@@ -373,16 +389,44 @@ func runStep(ctx context.Context, env *stepEnv, n, prevN int) StepResult {
 		actionSamples[actionKind(kind).String()] = ss
 	}
 
+	// Freeze the op counters at the hold boundary, before the delivery grace.
+	// Emitters keep running through the grace, so reading them afterwards would
+	// inflate the denominators with attempts the rest of this step's numerators
+	// (missing broadcasts, latency samples) deliberately exclude — every gate
+	// scored as good/valid would read optimistically low.
+	attemptedOps := env.collector.AttemptedOps()
+	failedOps := env.collector.FailedOps()
+
+	// Emitters keep running across steps, so there is no quiet point at which
+	// every unmatched publish is a drop. Wait out the delivery grace, then score
+	// everything published up to the hold boundary.
+	//
+	// The cutoff is holdEndedAt, not now-minus-grace: a moving cutoff would
+	// permanently exclude the last grace-interval of every hold, and the
+	// collector.Reset() at the next step discards those entries, so a broadcast
+	// dropped in that window would never be counted by any step. Waiting first
+	// and then cutting at the boundary gives eligible broadcasts their full
+	// grace while still scoring the whole hold.
+	if err := waitOrCancel(ctx, deliveryGrace); err != nil {
+		return inconclusiveResult(n, startedAt, env.hold, "ctx canceled during delivery grace")
+	}
+	// holdStartedAt as the lower bound: Reset() races with a still-running
+	// emitter, so a publish recorded just after the shard was cleared keeps its
+	// warm-up timestamp and would otherwise be scored against this step.
+	broadcastEligibleOps, missingBroadcasts := env.collector.BroadcastStatsInWindow(holdStartedAt, holdEndedAt)
+
 	in := stepInputs{
 		N: n, StartedAt: startedAt, HoldDuration: env.hold,
-		EffectiveN:      int(env.activatedCount.Load()),
-		LatencySamples:  env.collector.LatencySamples(),
-		ActionSamplesMs: actionSamples,
-		AttemptedOps:    env.collector.AttemptedOps(),
-		FailedOps:       env.collector.FailedOps(),
-		ConsumerPending: pendingDeltas,
-		ServiceErrors:   svcErrors,
-		Self:            snapshotSelfMetrics(),
+		EffectiveN:           int(env.activatedCount.Load()),
+		LatencySamples:       env.collector.LatencySamplesInWindow(holdStartedAt, holdEndedAt),
+		ActionSamplesMs:      actionSamples,
+		AttemptedOps:         attemptedOps,
+		FailedOps:            failedOps,
+		BroadcastEligibleOps: int64(broadcastEligibleOps),
+		MissingBroadcasts:    int64(missingBroadcasts),
+		ConsumerPending:      pendingDeltas,
+		ServiceErrors:        svcErrors,
+		Self:                 snapshotSelfMetrics(),
 	}
 	r := evaluateStep(in, env.thresholds)
 	snapshotPresenceStats(env, &r)
@@ -630,6 +674,12 @@ func presenceFlip(env *stepEnv, u *userState, wasActive bool) {
 // stream, which is what makes regression CSV comparisons meaningful.
 const dailyRunSeed int64 = 42
 
+// deliveryGrace is how long after publish a broadcast may still arrive before
+// the send is treated as dropped. Double the 1000ms p99 threshold this
+// scenario gates on, matching drainWindow's rationale on the max-rps path: a
+// tail-latency straggler has room to land, and only genuine drops are counted.
+const deliveryGrace = 2 * time.Second
+
 //nolint:gocritic // cfg passed by value to match envFactory.Build signature
 func runDailyForTest(ctx context.Context, cfg dailyConfig, factory envFactory) ([]StepResult, error) {
 	preset, _ := BuiltinPreset(cfg.Preset)
@@ -730,6 +780,9 @@ func factoryBaseCfg(f envFactory) (*config, bool) {
 }
 
 func closePools(env *stepEnv) {
+	if env == nil {
+		return
+	}
 	if env.direct != nil {
 		env.direct.Close()
 	}
@@ -738,6 +791,12 @@ func closePools(env *stepEnv) {
 	}
 	if env.presencePool != nil {
 		env.presencePool.Close()
+	}
+	if env.pubConn != nil {
+		env.pubConn.Close()
+	}
+	if env.ownedMetrics != nil {
+		env.ownedMetrics.stopNATSHealth()
 	}
 }
 
@@ -752,11 +811,20 @@ func groupSubsByUser(subs []model.Subscription) map[string][]string {
 // prodEnvFactory wires the real NATS pools and pollers.
 type prodEnvFactory struct {
 	baseCfg *config // existing top-level loadgen config: NatsURL, etc.
+	metrics *Metrics
+}
+
+func selectDailyMetrics(metrics *Metrics) (*Metrics, bool) {
+	if metrics != nil {
+		return metrics, false
+	}
+	return NewMetrics(), true
 }
 
 //nolint:gocritic // cfg passed by value to satisfy envFactory interface
 func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
-	col := NewCollector(NewMetrics(), cfg.Preset)
+	metrics, ownsMetrics := selectDailyMetrics(f.metrics)
+	col := NewCollector(metrics, cfg.Preset)
 	direct := newDirectPool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile, col)
 	var mux *multiplexPool
 	if cfg.MultiplexPoolSize > 0 {
@@ -770,7 +838,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 
 	// Dedicated publisher connection for emitter actions. Separate from the
 	// receiver pools so a slow consumer can't backpressure publishes.
-	pubConn, err := connectWithCreds(f.baseCfg.NatsURL, "loadgen-daily-publisher", f.baseCfg.NatsCredsFile)
+	pubConn, err := connectWithCredsHealth(f.baseCfg.NatsURL, "loadgen-daily-publisher", f.baseCfg.NatsCredsFile, "daily", metrics)
 	if err != nil {
 		slog.Error("publisher connection failed; emitters will no-op", "err", err)
 		pubConn = nil
@@ -821,9 +889,20 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		jszURL = "http://nats:8222/jsz"
 	}
 
-	// Backend services don't currently expose /metrics endpoints, so the
-	// service-error scraper is a no-op until they do. Pass an empty URL map
-	// — Scrape will return an empty delta map without making any requests.
+	// The service-error verdict arm is dormant, but not for the reason this
+	// comment used to give: services DO expose /metrics now (:9090 for
+	// hand-rolled counters, :2112 for the o11y SDK). What is missing is the
+	// metric — no service in this repo emits slog_errors_total, so wiring URLs
+	// here would scrape real endpoints, find no such family, and report a
+	// permanent zero that reads as "no service errors".
+	//
+	// Unblocking it needs a uniform per-service error counter first. The
+	// natsrouter middleware in docs/load-testing/system/sli-slo.md §8 P1
+	// (rpc_server_duration_seconds{subject_pattern, errcode_category}) is the
+	// intended source; point serviceErrorCounterName at it and fill this map
+	// once it ships. scrapeErrorCounter fails with errCounterFamilyAbsent if
+	// the family is missing, so a half-done wiring surfaces instead of
+	// silently passing.
 	scraper := newServiceScraper()
 	svcURLs := map[string]string{}
 
@@ -837,7 +916,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 	if cfg.Presence {
 		presenceCollector = newPresenceCollector()
 		pp, err := newPresencePool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile,
-			cfg.PresencePublisherConns, cfg.PresenceObserverConns, presenceCollector)
+			cfg.PresencePublisherConns, cfg.PresenceObserverConns, presenceCollector, metrics)
 		if err != nil {
 			slog.Error("presence pool init failed; presence emission disabled", "err", err)
 			presencePool = nil
@@ -849,7 +928,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		}
 	}
 
-	return &stepEnv{
+	env := &stepEnv{
 		collector: col, direct: direct, multiplex: mux, users: users,
 		thresholds: defaultThresholds(),
 		pollPending: func(ctx context.Context) (map[string]int64, error) {
@@ -860,6 +939,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		},
 		publish:           publish,
 		request:           request,
+		pubConn:           pubConn,
 		siteID:            siteID,
 		maxDirect:         cfg.MaxDirectUsers,
 		mintJWT:           buildAuthMintFn(),
@@ -870,6 +950,10 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 		presenceCollector: presenceCollector,
 		presenceHeartbeat: cfg.PresenceHeartbeat,
 	}
+	if ownsMetrics {
+		env.ownedMetrics = metrics
+	}
+	return env
 }
 
 // buildAuthMintFn returns a best-effort one-time auth-service login function.
@@ -888,6 +972,35 @@ func buildAuthMintFn() func(ctx context.Context, account string) error {
 }
 
 // runDaily is the production entrypoint invoked by main.go.
+func newDailyMetricsServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+func shutdownDailyMetricsServer(ctx context.Context, server dailyMetricsServer) error {
+	if server == nil {
+		return nil
+	}
+	shutdownErr := server.Shutdown(ctx)
+	if shutdownErr == nil {
+		return nil
+	}
+	closeErr := server.Close()
+	if closeErr == nil {
+		return fmt.Errorf("shutdown daily metrics server: %w", shutdownErr)
+	}
+	return errors.Join(
+		fmt.Errorf("shutdown daily metrics server: %w", shutdownErr),
+		fmt.Errorf("force close daily metrics server: %w", closeErr),
+	)
+}
+
 func runDaily(ctx context.Context, baseCfg *config, args []string) int {
 	cfg, err := parseDailyConfig(args)
 	if err != nil {
@@ -901,7 +1014,26 @@ func runDaily(ctx context.Context, baseCfg *config, args []string) int {
 		slog.Error("daily pre-flight", "error", err)
 		return 2
 	}
-	results, err := runDailyForTest(ctx, cfg, &prodEnvFactory{baseCfg: baseCfg})
+	metrics := NewMetrics()
+	metricsAddr := baseCfg.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = ":9099"
+	}
+	metricsServer := newDailyMetricsServer(metricsAddr, metrics.Handler())
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Warn("daily metrics server stopped", "error", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownDailyMetricsServer(shutdownCtx, metricsServer); err != nil {
+			slog.Warn("shutdown daily metrics server", "error", err)
+		}
+		metrics.stopNATSHealth()
+	}()
+	results, err := runDailyForTest(ctx, cfg, &prodEnvFactory{baseCfg: baseCfg, metrics: metrics})
 	if err != nil {
 		slog.Error("daily run", "error", err)
 		return 1

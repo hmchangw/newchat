@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,7 +31,17 @@ func TestGetSettings_NeverSetReturnsEmptyObject(t *testing.T) {
 	require.NoError(t, err)
 	data, err := json.Marshal(resp)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{}`, string(data), "never-set settings must serialize as {} — no injected defaults")
+	assert.JSONEq(t, `{"permissions":{"external.image.view":false}}`, string(data),
+		"never-set settings must serialize as {} — no injected defaults; permissions is always present")
+}
+
+// A nil user is the repo's "no active user" signal; a matched user with nothing
+// stored has nil sub-documents and must NOT read as not-found.
+func TestGetSettings_NotFound(t *testing.T) {
+	svc, _, users, _, _, _, _ := newSvc(t)
+	users.EXPECT().GetUserSettings(gomock.Any(), "ghost").Return(nil, nil)
+	_, err := svc.GetSettings(ctx("ghost", "site-a"))
+	requireCode(t, err, errcode.CodeNotFound)
 }
 
 func TestGetSettings_ReturnsStoredSubDocument(t *testing.T) {
@@ -39,14 +50,41 @@ func TestGetSettings_ReturnsStoredSubDocument(t *testing.T) {
 	users.EXPECT().GetUserSettings(gomock.Any(), "alice").Return(&model.User{Settings: stored}, nil)
 	resp, err := svc.GetSettings(ctx("alice", "site-a"))
 	require.NoError(t, err)
-	assert.Equal(t, stored, resp)
+	assert.Equal(t, *stored, resp.UserSettings)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"fullWidth":true,"translateMessageInto":"en-US","permissions":{"external.image.view":false}}`,
+		string(data), "stored settings stay inlined at the top level, unchanged beside the new key")
 }
 
-func TestGetSettings_NotFound(t *testing.T) {
-	svc, _, users, _, _, _, _ := newSvc(t)
-	users.EXPECT().GetUserSettings(gomock.Any(), "ghost").Return(nil, nil)
-	_, err := svc.GetSettings(ctx("ghost", "site-a"))
-	requireCode(t, err, errcode.CodeNotFound)
+// Windows are evaluated at read time, so a snapshot flips without any cron.
+func TestGetSettings_EvaluatesPermissionsAtReadTime(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := func(granted bool, from, until time.Time) *model.UserPermissions {
+		return &model.UserPermissions{ExternalImageView: &model.PermissionState{
+			Granted: granted, EffectiveFrom: &from, ExpiresAt: &until, UpdatedAt: now,
+		}}
+	}
+	tests := []struct {
+		name  string
+		perms *model.UserPermissions
+		want  bool
+	}{
+		{"no snapshot", nil, false},
+		{"granted in window", snapshot(true, now.Add(-time.Hour), now.Add(time.Hour)), true},
+		{"expired", snapshot(true, now.Add(-2*time.Hour), now.Add(-time.Hour)), false},
+		{"not yet effective", snapshot(true, now.Add(time.Hour), now.Add(2*time.Hour)), false},
+		{"revoked", snapshot(false, now.Add(-time.Hour), now.Add(time.Hour)), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _, users, _, _, _, _ := newSvc(t)
+			users.EXPECT().GetUserSettings(gomock.Any(), "alice").Return(&model.User{Permissions: tt.perms}, nil)
+			resp, err := svc.GetSettings(ctx("alice", "site-a"))
+			require.NoError(t, err)
+			assert.Equal(t, map[model.PermissionKey]bool{model.PermissionExternalImageView: tt.want}, resp.Permissions)
+		})
+	}
 }
 
 func TestGetSettings_StoreError(t *testing.T) {
@@ -63,8 +101,8 @@ func TestSetSettings_PartialPassesOnlySentFields(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
 	expectInbox(pub)
 	updated := &model.UserSettings{FullWidth: ptrBool(true), MuteAllNotifications: ptrBool(false)}
-	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).
-		DoAndReturn(func(_ any, _ string, set *model.UserSettings) (*model.User, error) {
+	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, set *model.UserSettings, _ time.Time) (*model.User, error) {
 			require.NotNil(t, set.FullWidth)
 			assert.True(t, *set.FullWidth)
 			assert.Nil(t, set.TranslateMessageInto, "unsent fields must not reach the repo")
@@ -83,7 +121,7 @@ func TestSetSettings_PublishesFullPostUpdateSettings(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
 	expectInbox(pub)
 	updated := &model.UserSettings{FullWidth: ptrBool(true), TranslateMessageInto: ptrStr("ja")}
-	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).
+	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).
 		Return(&model.User{Settings: updated}, nil)
 	pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).
 		DoAndReturn(func(_ any, _ string, data []byte) error {
@@ -102,7 +140,7 @@ func TestSetSettings_PublishesFullPostUpdateSettings(t *testing.T) {
 func TestSetSettings_PublishFailureIsBestEffort(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
 	expectInbox(pub)
-	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).
+	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).
 		Return(&model.User{Settings: &model.UserSettings{FullWidth: ptrBool(true)}}, nil)
 	pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).
 		Return(errors.New("nats down"))
@@ -132,7 +170,7 @@ func TestSetSettings_ValidTranslateTags(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
 	expectInbox(pub)
 	for _, tag := range []string{"en", "en-US", "zh-Hant-TW", "ja", ""} { // "" = translation off
-		users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).
+		users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).
 			Return(&model.User{Settings: &model.UserSettings{TranslateMessageInto: &tag}}, nil)
 		pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).Return(nil)
 		_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{
@@ -167,7 +205,7 @@ func TestSetSettings_ValidEnums(t *testing.T) {
 		{InitialChatScrollPosition: ptrStr(model.InitialChatScrollNewest)},
 	} {
 		settings := s
-		users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).
+		users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).
 			Return(&model.User{Settings: &settings}, nil)
 		pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).Return(nil)
 		_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{UserSettings: settings})
@@ -177,7 +215,7 @@ func TestSetSettings_ValidEnums(t *testing.T) {
 
 func TestSetSettings_NotFound(t *testing.T) {
 	svc, _, users, _, _, _, _ := newSvc(t)
-	users.EXPECT().UpdateUserSettings(gomock.Any(), "ghost", gomock.Any()).Return(nil, nil)
+	users.EXPECT().UpdateUserSettings(gomock.Any(), "ghost", gomock.Any(), gomock.Any()).Return(nil, nil)
 	_, err := svc.SetSettings(ctx("ghost", "site-a"), models.SettingsSetRequest{
 		UserSettings: model.UserSettings{FullWidth: ptrBool(true)},
 	})
@@ -186,7 +224,7 @@ func TestSetSettings_NotFound(t *testing.T) {
 
 func TestSetSettings_StoreError(t *testing.T) {
 	svc, _, users, _, _, _, _ := newSvc(t)
-	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).Return(nil, errors.New("db unavailable"))
+	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).Return(nil, errors.New("db unavailable"))
 	_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{
 		UserSettings: model.UserSettings{FullWidth: ptrBool(true)},
 	})
@@ -200,7 +238,7 @@ func TestSetSettings_FansOutToOtherSitesOnly(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
 	mute := true
 	updated := &model.UserSettings{MuteAllNotifications: &mute}
-	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).Return(&model.User{Settings: updated}, nil)
+	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).Return(&model.User{Settings: updated}, nil)
 
 	var clientTS int64
 	pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).
@@ -231,9 +269,45 @@ func TestSetSettings_FansOutToOtherSitesOnly(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// One mock backs both publishers, so the two fanouts are told apart by subject.
+// They must carry the SAME timestamp: the client event and the cross-site replica
+// have to agree on ordering.
+func TestSetSettings_BothFanoutsShareOneTimestamp(t *testing.T) {
+	svc, _, users, _, _, _, pub := newSvc(t)
+
+	updated := &model.UserSettings{FullWidth: ptrBool(true)}
+	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).
+		Return(&model.User{Settings: updated}, nil)
+
+	var clientTS, inboxTS int64
+	pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, data []byte) error {
+			var evt model.SettingsUpdateEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			clientTS = evt.Timestamp
+			return nil
+		})
+	pub.EXPECT().Publish(gomock.Any(), subject.InboxExternal("site-b", model.InboxUserSettingsUpdated), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, data []byte) error {
+			var evt model.InboxEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			var payload model.UserSettingsUpdated
+			require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+			inboxTS = payload.Timestamp
+			return nil
+		})
+
+	_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{
+		UserSettings: model.UserSettings{FullWidth: ptrBool(true)},
+	})
+	require.NoError(t, err)
+	assert.NotZero(t, clientTS)
+	assert.Equal(t, clientTS, inboxTS)
+}
+
 func TestSetSettings_InboxPublishFailureIsBestEffort(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
-	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any()).
+	users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).
 		Return(&model.User{Settings: &model.UserSettings{FullWidth: ptrBool(true)}}, nil)
 	pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).Return(nil)
 	pub.EXPECT().Publish(gomock.Any(), subject.InboxExternal("site-b", model.InboxUserSettingsUpdated), gomock.Any()).

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ func TestSoakConfig_Defaults(t *testing.T) {
 	cfg := mustDefaultSoakConfig(t)
 
 	assert.Equal(t, "", cfg.RunID)
+	assert.Equal(t, "local", cfg.Environment)
 	assert.Equal(t, "duration", cfg.RunMode)
 	assert.Equal(t, 72*time.Hour, cfg.RunDuration)
 	assert.Equal(t, 30*time.Second, cfg.Warmup)
@@ -61,6 +63,7 @@ func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
 			"NATS_URL":                              "nats://example.invalid",
 			"MONGO_URI":                             "mongodb://example.invalid",
 			"SOAK_RUN_ID":                           "run-20260724",
+			"SOAK_ENVIRONMENT":                      "staging",
 			"SOAK_RUN_MODE":                         "continuous",
 			"SOAK_RUN_DURATION":                     "4h",
 			"SOAK_HEARTBEAT_INTERVAL":               "15s",
@@ -77,6 +80,7 @@ func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "run-20260724", cfg.Soak.RunID)
+	assert.Equal(t, "staging", cfg.Soak.Environment)
 	assert.Equal(t, "continuous", cfg.Soak.RunMode)
 	assert.Equal(t, 4*time.Hour, cfg.Soak.RunDuration)
 	assert.Equal(t, 15*time.Second, cfg.Soak.HeartbeatInterval)
@@ -110,6 +114,24 @@ func TestValidateSoakConfig_RequiresRunID(t *testing.T) {
 	assert.Contains(t, err.Error(), "SOAK_RUN_ID")
 }
 
+func TestValidateSoakConfig_AcceptsBoundedTestEnvironment(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.Environment = "test"
+
+	require.NoError(t, validateSoakConfig(&cfg, "chat"))
+}
+
+func TestValidateSoakConfig_RejectsUnsafeRunIDs(t *testing.T) {
+	for _, runID := range []string{"../escape", "folder/run", `folder\\run`, ".", "..", " leading", "trailing "} {
+		t.Run(runID, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			cfg.RunID = runID
+
+			assert.ErrorContains(t, validateSoakConfig(&cfg, "chat"), "SOAK_RUN_ID")
+		})
+	}
+}
+
 func TestValidateSoakTeardownConfig_IgnoresUnrelatedWorkloadSettings(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.SendRate = -1
@@ -138,6 +160,7 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 		{"reaction remove share above one", func(c *soakConfig) { c.ReactionRemoveShare = 1.01 }, "SOAK_REACTION_REMOVE_SHARE"},
 		{"channel ratio above one", func(c *soakConfig) { c.ChannelRatio = 1.01 }, "SOAK_CHANNEL_RATIO"},
 		{"unknown run mode", func(c *soakConfig) { c.RunMode = "forever-ish" }, "SOAK_RUN_MODE"},
+		{"unknown environment", func(c *soakConfig) { c.Environment = "qa-42" }, "SOAK_ENVIRONMENT"},
 		{"zero run duration", func(c *soakConfig) { c.RunDuration = 0 }, "SOAK_RUN_DURATION"},
 		{"negative warmup", func(c *soakConfig) { c.Warmup = -time.Second }, "SOAK_WARMUP"},
 		{"warmup equals duration", func(c *soakConfig) { c.Warmup = c.RunDuration }, "SOAK_WARMUP"},
@@ -276,4 +299,172 @@ func validSoakConfig(t *testing.T) soakConfig {
 	cfg.RunID = "run-a-test"
 	cfg.TeardownBatchDelay = 0
 	return cfg
+}
+
+func TestSoakConfig_RecipientObserverDefaultsDisabled(t *testing.T) {
+	cfg := mustDefaultSoakConfig(t)
+
+	assert.False(t, cfg.RecipientObserverEnabled)
+	assert.Equal(t, 8192, cfg.RecipientObserverQueue)
+	assert.Equal(t, 32, cfg.RecipientObserverConnections)
+}
+
+func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*soakConfig)
+		want   string
+	}{
+		{
+			name:   "zero capacity",
+			mutate: func(cfg *soakConfig) { cfg.LedgerCapacity = 0 },
+			want:   "SOAK_LEDGER_CAPACITY",
+		},
+		{
+			name:   "deadline does not exceed persistence grace",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileDeadline = cfg.PersistGrace },
+			want:   "SOAK_RECONCILE_DEADLINE",
+		},
+		{
+			name:   "zero retry interval",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileRetryInterval = 0 },
+			want:   "SOAK_RECONCILE_RETRY_INTERVAL",
+		},
+		{
+			name:   "zero read share",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = 0 },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+		{
+			name:   "read share claims the whole read lane",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = 1.5 },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+		{
+			name:   "read share is not a number",
+			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = math.NaN() },
+			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+		{
+			name: "recipient observer requires durable ledger",
+			mutate: func(cfg *soakConfig) {
+				cfg.RecipientObserverEnabled = true
+				cfg.LedgerDir = ""
+			},
+			want: "SOAK_LEDGER_DIR",
+		},
+		{
+			name:   "zero recipient observer queue",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverQueue = 0 },
+			want:   "SOAK_RECIPIENT_OBSERVER_QUEUE",
+		},
+		{
+			name:   "unbounded recipient observer queue",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverQueue = maxFailureRecipientObserverQueue + 1 },
+			want:   "SOAK_RECIPIENT_OBSERVER_QUEUE",
+		},
+		{
+			name:   "zero recipient observer connections",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverConnections = 0 },
+			want:   "SOAK_RECIPIENT_OBSERVER_CONNECTIONS",
+		},
+		{
+			name:   "too many recipient observer connections",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverConnections = 257 },
+			want:   "SOAK_RECIPIENT_OBSERVER_CONNECTIONS",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			tt.mutate(&cfg)
+
+			err := validateSoakConfig(&cfg, "chat")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+// The page limit is a payload knob, so its safe value depends on how large the
+// soak's own messages are — SOAK_PAYLOAD_MAX_BYTES, not history-service's 20 KB
+// content cap, which the soak never reaches. Raising the payload size without
+// lowering the page size silently reintroduces oversize replies, so the two are
+// validated together.
+func TestValidateSoakPageBudget(t *testing.T) {
+	tests := []struct {
+		name             string
+		pageLimit        int
+		maxBytes         int
+		brokerMaxPayload int64
+		wantErr          bool
+	}{
+		{
+			name:             "defaults fit the broker budget",
+			pageLimit:        soakDefaultPageLimit,
+			maxBytes:         10240,
+			brokerMaxPayload: 262144,
+		},
+		{
+			name:             "raised payload size with the default page limit overflows",
+			pageLimit:        soakDefaultPageLimit,
+			maxBytes:         64 * 1024,
+			brokerMaxPayload: 262144,
+			wantErr:          true,
+		},
+		{
+			name:             "the old hardcoded 50 overflows even at the default payload size",
+			pageLimit:        50,
+			maxBytes:         10240,
+			brokerMaxPayload: 262144,
+			wantErr:          true,
+		},
+		{
+			name:             "a small page keeps a large payload legal",
+			pageLimit:        2,
+			maxBytes:         64 * 1024,
+			brokerMaxPayload: 262144,
+		},
+		{
+			name:             "a smaller connected broker rejects the defaults",
+			pageLimit:        soakDefaultPageLimit,
+			maxBytes:         10240,
+			brokerMaxPayload: 128 * 1024,
+			wantErr:          true,
+		},
+		{
+			name:             "a larger connected broker permits a larger page",
+			pageLimit:        20,
+			maxBytes:         10240,
+			brokerMaxPayload: 512 * 1024,
+		},
+		{
+			// pageLimit*payloadMaxBytes wraps negative at these values, so a
+			// product comparison silently passes the very pair the validator
+			// exists to reject.
+			name:             "an overflowing product must not read as within budget",
+			pageLimit:        int(^uint(0) >> 1),
+			maxBytes:         2,
+			brokerMaxPayload: 262144,
+			wantErr:          true,
+		},
+		{
+			name:             "overflow with the operands reversed",
+			pageLimit:        2,
+			maxBytes:         int(^uint(0) >> 1),
+			brokerMaxPayload: 262144,
+			wantErr:          true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSoakPageBudget(tt.pageLimit, tt.maxBytes, tt.brokerMaxPayload)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "page-limit")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

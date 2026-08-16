@@ -128,7 +128,7 @@ func main() {
 	peer := NewNATSPeerPresenceClient(nc.NatsConn(), cfg.Presence.PeerTimeout)
 	handler := NewHandler(store, userDir, peer, publish, cfg.SiteID, cfg.Presence.BatchMax)
 
-	router := natsrouter.Default(nc, "user-presence-service")
+	router := natsrouter.Default(nc, "user-presence-service", natsrouter.WithSiteID(cfg.SiteID))
 	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
 	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
 	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
@@ -160,7 +160,7 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(ctx context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(_ context.Context) error { return store.Close() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },

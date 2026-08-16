@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,9 +17,13 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errtest"
+	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/principal"
 )
@@ -277,6 +282,55 @@ func TestHandleAuth_DevMode_ValidRequest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, userPub, claims.Subject)
 	assert.Contains(t, claims.Tags, "account:alice")
+}
+
+func TestHandleAuth_AuthenticatedAccountTagsHTTPEntrySpan(t *testing.T) {
+	previousTracer := otel.GetTracerProvider()
+	previousMeter := otel.GetMeterProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	previousLogger := slog.Default()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousTracer)
+		otel.SetMeterProvider(previousMeter)
+		otel.SetTextMapPropagator(previousPropagator)
+		slog.SetDefault(previousLogger)
+	})
+	t.Setenv("O11Y_ENABLED", "true")
+	t.Setenv("O11Y_TRACE_ENABLED", "false")
+	t.Setenv("O11Y_METRICS_ENABLED", "false")
+	t.Setenv("O11Y_LOG_ENABLED", "false")
+	t.Setenv("O11Y_USER_BAGGAGE_ENABLED", "true")
+	t.Setenv("OTEL_SERVICE_NAME", "auth-identity-test")
+
+	_, shutdown, err := obs.Init(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	ctx, span := tp.Tracer("test").Start(context.Background(), "POST /api/v1/auth")
+
+	signingKP, accPub := mustAccountKP(t)
+	handler := NewAuthHandler(nil, signingKP, accPub, 2*time.Hour, true)
+	router := setupRouter(t, handler)
+	body := `{"account":"alice","natsPublicKey":"` + mustUserNKey(t) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth", strings.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	span.End()
+
+	require.Equal(t, http.StatusOK, w.Code)
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	var userName string
+	for _, attr := range ended[0].Attributes() {
+		if string(attr.Key) == "user.name" {
+			userName = attr.Value.AsString()
+		}
+	}
+	assert.Equal(t, "alice", userName)
 }
 
 // TestHandleAuth_DevMode_NoToken_DoesNotValidate confirms the tokenless dev
@@ -663,7 +717,7 @@ func TestHandleAuth_SessionToken_Admin(t *testing.T) {
 func TestHandleAuth_SessionToken_InvalidToken(t *testing.T) {
 	signingKP, accPub := mustAccountKP(t)
 	userPub := mustUserNKey(t)
-	bp := &fakeBPValidator{err: errcode.Unauthenticated("session token invalid",
+	bp := &fakeBPValidator{err: errcode.Unauthenticated("invalid session token",
 		errcode.WithReason(errcode.BotplatformInvalidToken))}
 	handler := NewAuthHandler(nil, signingKP, accPub, 2*time.Hour, false, WithBotplatformValidator(bp))
 	router := setupRouter(t, handler)

@@ -1,6 +1,6 @@
 > Request/Reply and Events views of the chat client API — see also [client-api.md](../client-api.md).
 
-<!-- last synced: client-api.md @ 117da0c -->
+<!-- last synced: client-api.md @ 6b584e7 -->
 
 # Chat — Request/Reply Methods & Publish Operations
 
@@ -33,6 +33,7 @@ For connection, auth, shared schemas, and error reference, see [../client-api.md
    - [GET /api/v1/file-upload/:fileId/:fileName](#get-apiv1file-uploadfileidfilename)
    - [Media Service — avatar endpoints](#media-service--avatar-endpoints)
    - [Media Service — emoji endpoints](#media-service--emoji-endpoints)
+   - [HTTP — Client Update Service](#http--client-update-service)
 2. [HTTP — Botplatform Service](#http--botplatform-service)
 3. [HTTP — Admin Service](#http--admin-service)
 4. [room-service (§3.1)](#room-service)
@@ -88,6 +89,15 @@ and the OTEL telemetry base URL (`otelBaseUrl`). See
 
 ---
 
+> **upload-service credentials.** Every `/api/v1/file*`, `/api/v1/file-upload*` and
+> `/api/v3/rooms/*` endpoint below accepts **either** an OIDC `ssoToken` (header, or
+> cookie for `<img>` downloads) **or** a botplatform session token (`x-user-id` +
+> `x-auth-token`) for bot/admin callers — except `POST /api/v1/file/setCookie`,
+> which is SSO-only and rejects a session caller with `400`. Sending both explicit headers is
+> `400 ambiguous_token`; a session header beats an ambient `ssoToken` cookie. Room-scoped
+> endpoints still require membership, bots included. Full table in
+> [../client-api.md §2.4](../client-api.md#24-http--protected-fileimage-uploaddownload).
+
 ### POST /api/v1/file/setCookie
 
 **Endpoint:** `POST /api/v1/file/setCookie`
@@ -95,7 +105,8 @@ and the OTEL telemetry base URL (`otelBaseUrl`). See
 
 Exchanges the `ssoToken` header for an `ssoToken` cookie so the browser can load
 protected files via `<img src>` (which cannot send headers). Token is validated before
-the cookie is issued. Credentialed request; caller's `Origin` must be in the server's
+the cookie is issued. **SSO-only** — a session-token caller gets `400`; bots send
+credential headers on every request and need no cookie. Credentialed request; caller's `Origin` must be in the server's
 `CORS_ALLOWED_ORIGINS` allowlist. See
 [../client-api.md §2.4](../client-api.md#post-apiv1filesetcookie).
 
@@ -109,8 +120,8 @@ the cookie is issued. Credentialed request; caller's `Origin` must be in the ser
 **Reply:** synchronous HTTP response
 
 Uploads one or more protected inline images. `Content-Type: multipart/form-data`.
-`ssoToken` header required; caller must be a room member. Returns per-file
-success/failure in one `200`. See
+`ssoToken` header **or** `x-user-id` + `x-auth-token` required; caller must be a room
+member. Returns per-file success/failure in one `200`. See
 [../client-api.md §2.4](../client-api.md#post-apiv1fileroomsroomiduploadimages).
 
 **Emits:** `None — HTTP-only.`
@@ -125,7 +136,8 @@ success/failure in one `200`. See
 Uploads a single file (image/audio/video/document) and returns a render-ready
 [Attachment](../client-api.md#attachment) for the client to embed in a `msg.send`
 (§4) — pure HTTP, does **not** itself publish a message. `Content-Type:
-multipart/form-data`. `ssoToken` header required; caller must be a room member. See
+multipart/form-data`. `ssoToken` header **or** `x-user-id` + `x-auth-token` required;
+caller must be a room member. See
 [../client-api.md §2.4](../client-api.md#post-apiv1fileroomsroomiduploadfile).
 
 **Emits:** `None — HTTP-only.`
@@ -137,9 +149,9 @@ multipart/form-data`. `ssoToken` header required; caller must be a room member. 
 **Endpoint:** `GET /api/v1/file/rooms/:roomId/file/:fileId`
 **Reply:** synchronous HTTP response (raw file bytes, any type)
 
-Downloads a protected file (image/audio/video/document). `ssoToken` required (header,
-or the `ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>` downloads;
-header wins); caller must be a room member. `drive_host` query param required.
+Downloads a protected file (image/audio/video/document). `ssoToken` (header, or the
+`ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>` downloads; header
+wins) **or** `x-user-id` + `x-auth-token`; caller must be a room member. `drive_host` query param required.
 Called with the `relativePath` (image upload) or `titleLink` (file upload)
 returned by the upload endpoints. See
 [../client-api.md §2.4](../client-api.md#get-apiv1fileroomsroomidfilefileid).
@@ -156,9 +168,9 @@ returned by the upload endpoints. See
 Backward-compatible download for inline images in **legacy message data** (prior
 system version). Identical to `GET /api/v1/file/rooms/:roomId/file/:fileId` but
 proxied from a separate (legacy) Drive backend with its own credentials.
-`ssoToken` required (header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie`
-for browser `<img>` downloads; header wins); caller must be a room member.
-`drive_host` query param required. See
+`ssoToken` (header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie` for
+browser `<img>` downloads; header wins) **or** `x-user-id` + `x-auth-token`; caller must
+be a room member. `drive_host` query param required. See
 [../client-api.md §2.4](../client-api.md#get-apiv3roomsroomidprotected-imagefileid).
 
 **Emits:** `None — HTTP-only.`
@@ -171,9 +183,9 @@ for browser `<img>` downloads; header wins); caller must be a room member.
 **Reply:** synchronous HTTP response (raw file bytes, not JSON)
 
 Downloads a previously-uploaded file by `fileId` (resolved via the `uploads`
-collection, streamed from MinIO/S3); `fileName` is cosmetic. `ssoToken` required
-(header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>`
-downloads; header wins); caller must be a member of the file's room. See
+collection, streamed from MinIO/S3); `fileName` is cosmetic. `ssoToken` (header, or the
+`ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>` downloads; header
+wins) **or** `x-user-id` + `x-auth-token`; caller must be a member of the file's room. See
 [../client-api.md §2.4](../client-api.md#get-apiv1file-uploadfileidfilename).
 
 **Emits:** `None — HTTP-only.`
@@ -182,7 +194,9 @@ downloads; header wins); caller must be a member of the file's room. See
 
 ### Media Service — avatar endpoints
 
-Public HTTP endpoints served by `media-service` (no `ssoToken`/auth required).
+HTTP endpoints served by `media-service`. The `GET`s are public (the frontend loads
+them from `<img src>`, which cannot send headers); the `PUT` requires a botplatform
+session token (`x-user-id` + `x-auth-token`).
 Full decision logic, redirect/caching rules, and the `PUT` upload contract are in
 [../client-api.md §7](../client-api.md#7-media-service).
 
@@ -190,7 +204,7 @@ Full decision logic, redirect/caching rules, and the `PUT` upload contract are i
 |---|---|---|
 | `GET /api/v1/avatar/:accountName` | synchronous HTTP (redirect, image bytes, or default SVG) | User/bot avatar; frontend also uses this for DM/botDM room avatars. |
 | `GET /api/v1/avatar/room/:roomID` | synchronous HTTP (image bytes or default SVG) | Channel/discussion room avatar. |
-| `PUT /api/v1/avatar/bot/:botName` | synchronous HTTP | Upload a bot's custom avatar. ⚠️ Unauthenticated — must be network-restricted. |
+| `PUT /api/v1/avatar/bot/:botName` | synchronous HTTP | Upload a bot's custom avatar. Session token required; caller must be the named bot or hold `admin`, else `403 not_admin`. |
 
 **Emits:** `None — HTTP-only.`
 
@@ -198,14 +212,32 @@ Full decision logic, redirect/caching rules, and the `PUT` upload contract are i
 
 ### Media Service — emoji endpoints
 
-Public HTTP endpoints served by `media-service` (no `ssoToken`/auth required).
+HTTP endpoints served by `media-service`. The `GET` is public; the `PUT` requires a
+botplatform session token (`x-user-id` + `x-auth-token`) with the `admin` role.
 Full decision logic, limits, and response schemas are in
 [../client-api.md §7](../client-api.md#7-media-service).
 
 | Endpoint | Reply | Purpose |
 |---|---|---|
 | `GET /api/v1/emoji/:shortcode` | synchronous HTTP (image bytes, `304`, `307`, or `404`) | Serve a custom emoji image. Defaults to this cluster's site; optional lowercase `?siteid=` names a site — known remote `307`-redirects, unknown `404`. No generated default (unlike avatars). Cache-bust with `?v={etag}`. |
-| `PUT /api/v1/emoji/:shortcode` | synchronous HTTP | Upload (upsert) a custom emoji — PNG/JPEG/GIF, env-capped size/dimensions. Always writes to this cluster's site. ⚠️ Unauthenticated; optional `?uploader={account}` is audit-only. |
+| `PUT /api/v1/emoji/:shortcode` | synchronous HTTP | Upload (upsert) a custom emoji — PNG/JPEG/GIF, env-capped size/dimensions. Always writes to this cluster's site. Admin session required (a shortcode is a site-wide shared name), else `403 not_admin`; `?uploader=` is accepted and ignored — audit fields come from the session. |
+
+**Emits:** `None — HTTP-only.`
+
+---
+
+### HTTP — Client Update Service
+
+Public HTTP endpoints served by `client-update-service` (no `ssoToken`/auth in v1
+— must be network-restricted). Full request/response schemas and the download
+cache behavior are in
+[../client-api.md §12](../client-api.md#12-client-update-service).
+
+| Endpoint | Reply | Purpose |
+|---|---|---|
+| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, streamed to MinIO, no size cap). |
+| `GET /api/v1/version/:fileName` | synchronous HTTP (raw bytes) | Download an artifact by name; served from a bounded TTL+size cache, else streamed from MinIO. |
+| `GET /healthz` | synchronous HTTP | Liveness (`{"status":"ok"}`). |
 
 **Emits:** `None — HTTP-only.`
 
@@ -251,6 +283,9 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `GET /v1/admin/audit` | synchronous HTTP | List the audit log (§9.9). |
 | `POST /v1/admin/rooms/:roomId/onduty` | synchronous HTTP | Toggle a channel's on-duty state: maps the boolean onto `restricted` + `externalAccess` via room-service's restrict RPC, with `ownerAccount` required when turning on. Emits a `room_restricted` room event; no system message, so nothing is displayed (§9.12). |
 | `POST /v1/password/change` | synchronous HTTP | Logged-in admin's self-service password change (§9.11). |
+| `POST /v1/admin/permissions` | synchronous HTTP | Grant or revoke a permission for one or more subject accounts; appends to the permission ledger, materializes the new state on each subject's user doc, and fans it out to every other site (unacknowledged destinations come back as `syncFailures`), with one slim audit entry per subject (§9.13). |
+| `GET /v1/admin/permissions` | synchronous HTTP | List the permission ledger newest-first — company-wide by default, with optional independent `subjectAccount` and `permission` query filters; `currentlyGranted` (read from the materialized state) is included only when both filters are set (§9.14). |
+| `POST /v1/admin/permissions/resync` | synchronous HTTP | Re-deliver the current materialized permission state for the given accounts to every other site; writes nothing, idempotent (§9.15). |
 
 **Emits:** None directly — HTTP-only. `POST /v1/admin/rooms/:roomId/onduty` makes room-service publish [`room_restricted`](events.md#room_restricted-roomrestrictedroomevent) on `chat.room.{roomID}.event`.
 
@@ -351,7 +386,9 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 | `users` | string[] | no | Internal user IDs or accounts to add. May include `.bot` bots: each must have an enabled app assistant (a bot whose home site differs from the room's is allowed — cross-site bot membership); bots join as members, count toward `appCount`, and — since a bot can log into the chat frontend — get `subscription.update` (with the room key inline under `subscription.room`) on their encoded per-user subject (dots→underscores). The `p_admin` platform-admin pseudo-account may also be listed — admitted without app/site validation and counted toward `appCount`. Plain `p_` QA test accounts are ordinary users (`userCount`, capacity-capped). |
 | `orgs` | string[] | no | Org IDs to add (expanded to all members; never resolves bots). |
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | Bulk source channels. |
-| `history.mode` | string | no | `"none"` (default) or `"all"` — controls history visibility for new members. |
+| `history.mode` | string | no | `"none"` or `"all"` — controls whether new members see history before they joined. **When omitted or empty, the server treats it as `"all"`** (share-all). `"all"` is capped by the **requester's own** `historySharedSince`: when the adder's history is restricted, the new members inherit the adder's boundary instead of unrestricted history (members can never see more history than whoever added them). `"none"` restricts new members to messages from the add time onward (never earlier than the adder's own boundary — the later of the two wins). Any other value is rejected with `history.mode must be "none" or "all"` (`bad_request`). |
+
+The `requesterId`, `requesterAccount`, `timestamp`, and `historySharedSince` fields on the Go `AddMembersRequest` are server-set — the client should omit them (any client-supplied `historySharedSince` is overwritten).
 
 #### Success response
 
@@ -360,7 +397,8 @@ Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`)
 #### Errors
 
 Synchronous: requester not in room, room full, restricted + not owner, bot not
-available (no app record / disabled assistant), user/org not found.
+available (no app record / disabled assistant), user/org not found, unrecognized
+`history.mode` (`history.mode must be "none" or "all"`, `bad_request`).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -626,7 +664,10 @@ clients must debounce. No request body required.
 **Reply:** auto-generated `_INBOX.>` (NATS request/reply)
 
 Synchronous RPC. Flips `Subscription.favorite`. Every successful call toggles the bit —
-clients must debounce. No request body required.
+clients must debounce. No request body required. Also orderable via
+[Move Chat to Section](#move-chat-to-section) (`sectionId: "favorites"`) — the two stay in
+sync: toggling off clears `sectionId`/`sectionOrder` if they were `"favorites"`; toggling on
+leaves any existing `sectionId` alone.
 
 #### Success response
 
@@ -656,7 +697,7 @@ mirroring favorite. Full detail + read model: [Chatlist Sections](../client-api.
 
 | Field | Type | Notes |
 |---|---|---|
-| `sectionId` | string \| null | Custom section to move into; `null` or omitting the field both remove it (indistinguishable at the wire layer). A built-in id (`favorites`/`apps`/`teams`/`chats`) is rejected. |
+| `sectionId` | string \| null | Custom section to move into, or `"favorites"`; `null` or omitting the field both remove it (indistinguishable at the wire layer) and clear `favorite` too. The other built-in ids (`apps`/`teams`/`chats`) are rejected. Moving into `"favorites"` sets `Subscription.favorite = true`; moving elsewhere sets it `false`. |
 | `afterRoomId` | string | Optional. Place just after this room; omit to append. Mutually exclusive with `beforeRoomId`. |
 | `beforeRoomId` | string | Optional. Place just before this room (top-insertion at the section head). Mutually exclusive with `afterRoomId`. |
 
@@ -1298,6 +1339,10 @@ Full-text message search. Auto-scoped to rooms the user is a member of. May incl
 messages from remote sites. One query matches message text, attachment text (file
 names + descriptions, pooled into one searched field), and tcard data.
 
+System messages (`room_created`, `members_added`, `member_removed`, `member_left`,
+`room_renamed`, `room_restricted`, `teams_meet_started`) are never returned — they are
+excluded from the index. A client-set `type: "important"` message stays searchable.
+
 > **Breaking change (v2):** Response changed from `{total, results}` to `{messages, total}`.
 > The `results` field no longer exists.
 
@@ -1449,7 +1494,10 @@ See [../client-api.md §3.3](../client-api.md#search-orgs).
 
 All user-service subjects: `chat.user.{account}.request.user.{siteID}.<area>.<action>`,
 except `me` — a single-token self-lookup (`chat.user.{account}.request.user.{siteID}.me`).
-[settings.set](#settingsset) emits [settings.update](events.md#settingsupdate--user-settings-sync);
+[settings.set](#settingsset), [settings.priorityContacts.add](#settingsprioritycontactsadd), and
+[settings.priorityContacts.remove](#settingsprioritycontactsremove) each emit
+[settings.update](events.md#settingsupdate--user-settings-sync);
+[settings.priorityContacts.get](#settingsprioritycontactsget) is a pure read and emits nothing;
 no other endpoint emits a client-facing event.
 
 | RPC subject | Method |
@@ -1460,6 +1508,9 @@ no other endpoint emits a client-facing event.
 | `chat.user.{account}.request.user.{siteID}.status.set` | [status.set](#statusset) |
 | `chat.user.{account}.request.user.{siteID}.settings.get` | [settings.get](#settingsget) |
 | `chat.user.{account}.request.user.{siteID}.settings.set` | [settings.set](#settingsset) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get` | [settings.priorityContacts.get](#settingsprioritycontactsget) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add` | [settings.priorityContacts.add](#settingsprioritycontactsadd) |
+| `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove` | [settings.priorityContacts.remove](#settingsprioritycontactsremove) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.get` | [Chatlist Sections](../client-api.md#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.section.create` | [Chatlist Sections](../client-api.md#chatlist-sections) |
 | `chat.user.{account}.request.user.{siteID}.chatlist.section.rename` | [Chatlist Sections](../client-api.md#chatlist-sections) |
@@ -1573,8 +1624,9 @@ internally but is not delivered to clients.)
 
 **Subject:** `chat.user.{account}.request.user.{siteID}.settings.get`
 
-Returns the caller's stored settings **exactly as stored** — `{}` when never set.
-The server never injects defaults; **absent = the client applies its own default**.
+Returns the caller's stored settings **exactly as stored**, plus the evaluated
+admin-managed `permissions`. The server never injects settings defaults;
+**absent = the client applies its own default**.
 
 #### Request body
 
@@ -1582,7 +1634,8 @@ None (empty payload).
 
 #### Success response
 
-The stored settings object. All nine fields optional, present only when explicitly set:
+The stored settings object plus `permissions`. All ten settings fields optional,
+present only when explicitly set; `permissions` always present:
 
 | Field | Type |
 |---|---|
@@ -1595,8 +1648,10 @@ The stored settings object. All nine fields optional, present only when explicit
 | `showPreviewsInNotifications` | boolean |
 | `showNotificationsInCall` | boolean |
 | `initialChatScrollPosition` | string (`lastRead`\|`newest`) |
+| `priorityContacts` | string[] (raw accounts, read-only here — written only by `settings.priorityContacts.add`/`.remove`) |
+| `permissions` | map<permission key, boolean> (evaluated admin-managed permissions; every known key always present; read-only — `settings.set` cannot touch it) |
 
-`{ "fullWidth": true, "translateMessageInto": "en-US" }`
+`{ "fullWidth": true, "translateMessageInto": "en-US", "permissions": { "external.image.view": true } }`
 
 #### Errors
 
@@ -1615,8 +1670,9 @@ fields keep their stored value (or stay absent). At least one field required.
 
 #### Request body
 
-Any non-empty subset of the nine settings fields (same table as
-[settings.get](#settingsget)). `translateMessageInto` must be a language-tag
+Any non-empty subset of the nine writable settings fields (same table as
+[settings.get](#settingsget), minus the read-only `priorityContacts` and
+`permissions`). `translateMessageInto` must be a language-tag
 shape — hyphen-separated letter/digit subtags, leading subtag letters-only
 (e.g. `"en"`, `"en-US"`, `"zh-Hant-TW"`) — or `""` to explicitly turn
 translation off; no value whitelist.
@@ -1625,7 +1681,8 @@ translation off; no value whitelist.
 
 #### Success response
 
-The **full post-update settings** (same shape as [settings.get](#settingsget)).
+The **full post-update settings** (the same ten settings fields as
+[settings.get](#settingsget), without `permissions`).
 
 #### Errors
 
@@ -1636,6 +1693,117 @@ The **full post-update settings** (same shape as [settings.get](#settingsget)).
 caller's other devices, carrying the full post-update settings. A server-side
 cross-site federation update also fires — every other site receives the full
 settings so its notification worker can apply them — but is not delivered to clients.
+
+---
+
+### settings.priorityContacts.get
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.get`
+
+Returns the caller's priority-contact list, enriched for display, in stored
+order. Capped at 30 stored entries (enforced by the mutating RPCs).
+
+#### Request body
+
+None (empty payload).
+
+#### Success response
+
+`{ "contacts": PriorityContactItem[] }` — see
+[../client-api.md §3.0](../client-api.md#prioritycontactitem) for the row shape
+(`account`, `type`, optional `user`, optional `app`). A contact whose account
+no longer resolves keeps `account`+`type` with `user`/`app` omitted.
+
+```json
+{
+  "contacts": [
+    { "account": "alice", "type": "user", "user": { "engName": "Alice", "chineseName": "愛麗絲", "employeeId": "E12345", "sectName": "Engineering" } },
+    { "account": "helper.bot", "type": "bot", "app": { "name": "Helper Bot" } }
+  ]
+}
+```
+
+#### Errors
+
+`"user not found"` (`not_found`).
+
+**Emits:** None.
+
+---
+
+### settings.priorityContacts.add
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.add`
+
+Adds one contact to the caller's list and returns the full enriched list.
+**Idempotent**: re-adding an already-present contact succeeds and returns the
+unchanged list, even at the 30-entry cap.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `contactAccount` | string | yes | Non-empty; must not equal the caller's own account. |
+
+`{ "contactAccount": "helper.bot" }`
+
+#### Success response
+
+Same shape as [settings.priorityContacts.get](#settingsprioritycontactsget).
+
+#### Errors
+
+`"contactAccount is required"` (`bad_request`), `"cannot add yourself as a
+priority contact"` (`bad_request`), `"priority contact not found"`
+(`not_found`, reason `priority_contact_not_found` — the account doesn't
+resolve: a user must be ACTIVE, a `.bot` account only needs its app to
+exist), `"priority contact limit reached"` (`forbidden`, reason
+`priority_contact_limit` — list already at 30 and the contact isn't already
+on it), `"priority contacts changed concurrently, retry"` (`conflict`, no
+reason — a write miss couldn't be disambiguated because a concurrent
+`settings.priorityContacts.remove` changed the list before the re-read;
+retry the request), `"user not found"` (`not_found`, no reason — the
+caller's own user doc is missing).
+
+**Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to
+the caller's other devices, carrying the full post-update settings —
+including a duplicate add under the cap (list unchanged, but
+`settingsUpdatedAt` still bumps and both fanouts still fire). Only a
+duplicate add already at the cap skips the publish. A server-side cross-site
+federation update also fires whenever this event does, same as
+`settings.set`.
+
+---
+
+### settings.priorityContacts.remove
+
+**Subject:** `chat.user.{account}.request.user.{siteID}.settings.priorityContacts.remove`
+
+Removes one contact from the caller's list and returns the full enriched
+list. **Idempotent**: removing an absent contact succeeds and returns the
+unchanged list. Unlike `add`, removing yourself is allowed, and there is no
+existence check on `contactAccount`.
+
+#### Request body
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `contactAccount` | string | yes | Non-empty. |
+
+`{ "contactAccount": "helper.bot" }`
+
+#### Success response
+
+Same shape as [settings.priorityContacts.get](#settingsprioritycontactsget).
+
+#### Errors
+
+`"contactAccount is required"` (`bad_request`), `"user not found"`
+(`not_found`, no reason).
+
+**Emits:** [settings.update](events.md#settingsupdate--user-settings-sync) to
+the caller's other devices, carrying the full post-update settings. A
+server-side cross-site federation update also fires, same as `settings.set`.
 
 ---
 
@@ -1784,7 +1952,10 @@ PUT-like idempotent endpoint to subscribe or unsubscribe from a bot app.
 #### Errors
 
 `"appId required"`, `"app not found"` (`not_found`, `app_not_found`),
-`"app has no assistant"` (`bad_request`, `app_disabled`).
+`"app has no assistant"` (`bad_request`, `app_disabled`),
+`"create-dm rpc: no service responding"` (`unavailable`, `no_responders`) and
+`"create-dm rpc: upstream did not respond in time"` (`unavailable`, `upstream_timeout`)
+when room-service is unreachable while creating the botDM room — both retryable.
 
 **Emits:** None.
 
@@ -2137,7 +2308,7 @@ with a `TranslateResult`, or the standard error envelope on failure.
 
 #### Error response
 
-Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `unavailable` / `upstream_unavailable` when the third-party backend returns a 5XX or is unreachable; `internal` for other backend failures. See [../client-api.md §3.6](../client-api.md#36-translation-service).
+Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_request`) for empty `text`; `unsupported_lang` (`bad_request`) for a `targetLang` outside the set; `unavailable` under handler saturation; `unavailable` / `upstream_unavailable` when the third-party backend returns a 5XX or is unreachable; `too_many_requests` / `rate_limited` when the backend rate-limits (429, not retried); `internal` for other backend failures. See [../client-api.md §3.6](../client-api.md#36-translation-service).
 
 **Emits:** none — the reply is the only output.
 

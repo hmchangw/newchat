@@ -13,29 +13,31 @@ services:
       - OTEL_SERVICE_NAME=media-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - PORT=8080
-      - LOG_LEVEL=info
-      - SITE_ID=site-local
-      # JSON array of {siteID, domain} for cross-cluster avatar redirects. Adjust for your local setup.
-      - 'CLUSTER_DOMAINS=[{"siteID":"site-local","domain":"http://localhost:8080"}]'
-      - EMPLOYEE_PHOTO_BASE_URL=http://localhost:8081/photos
-      - MONGO_URI=mongodb://mongodb:27017
-      - MONGO_DB=chat
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
-      - MINIO_USE_SSL=false
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - SITE_ID=${SITE_ID:-site-local}
+      # JSON array of {siteID, domain} for cross-cluster avatar redirects. The
+      # domain must be the gateway that fronts /api/v1/avatar, not :8080.
+      - 'CLUSTER_DOMAINS=${CLUSTER_DOMAINS:-[{"siteID":"${SITE_ID:-site-local}","domain":"http://localhost:${GATEWAY_HOST_PORT:-7777}"},{"siteID":"site-remote","domain":"http://localhost:${GATEWAY_HOST_PORT:-7777}"}]}'
+      - EMPLOYEE_PHOTO_BASE_URL=${EMPLOYEE_PHOTO_BASE_URL:-http://localhost:8081/photos}
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_DB=${MONGO_DB:-chat}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_USE_SSL=${MINIO_USE_SSL:-false}
       - MINIO_BUCKET=avatars
-      - MAX_UPLOAD_BYTES=1048576
-      - CACHE_MAX_AGE_SECONDS=21600
-      - EID_CACHE_TTL=24h
-      - EID_CACHE_CAPACITY=120000
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - EMOJI_MAX_UPLOAD_BYTES=262144
-      - EMOJI_MAX_DIMENSION=512
-      - EMOJI_DELETE_ENABLED=true
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-1048576}
+      - CACHE_MAX_AGE_SECONDS=${CACHE_MAX_AGE_SECONDS:-21600}
+      - EID_CACHE_TTL=${EID_CACHE_TTL:-24h}
+      - EID_CACHE_CAPACITY=${EID_CACHE_CAPACITY:-120000}
+      - BOTPLATFORM_URL=${BOTPLATFORM_URL:-http://botplatform-service:8080}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - EMOJI_MAX_UPLOAD_BYTES=${EMOJI_MAX_UPLOAD_BYTES:-262144}
+      - EMOJI_MAX_DIMENSION=${EMOJI_MAX_DIMENSION:-512}
+      - EMOJI_DELETE_ENABLED=${EMOJI_DELETE_ENABLED:-true}
     volumes:
-      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

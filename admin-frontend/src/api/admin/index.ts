@@ -74,6 +74,64 @@ export interface AuditFilter {
   limit?: number
 }
 
+/** One row of the permission ledger (mirrors admin-service's `permissionGrantView`). */
+export interface PermissionGrantView {
+  id: string
+  permission: string
+  subjectAccount: string
+  granted: boolean
+  effectiveFrom?: string // "2026-09-01"
+  expiresAt?: string // "2026-12-31"
+  applicantAccount: string
+  approverAccount: string
+  reason: string
+  recordedBy: string
+  recordedAt: string
+}
+
+export interface CreatePermissionsRequest {
+  permission: string
+  subjectAccounts: string[]
+  granted: boolean
+  effectiveFrom?: string
+  expiresAt?: string
+  applicantAccount: string
+  approverAccount: string
+  reason?: string
+}
+
+/** `syncFailures` lists the sites whose whitelist sync failed — the ledger write still
+ * succeeded (201), so those sites need a `resyncPermissions` follow-up. */
+export interface CreatePermissionsResponse {
+  created: number
+  duplicatesIgnored: string[]
+  syncFailures?: string[]
+}
+
+export interface ResyncPermissionsRequest {
+  permission: string
+  accounts: string[]
+}
+
+export interface ResyncPermissionsResponse {
+  syncFailures?: string[]
+}
+
+export interface ListPermissionsResponse {
+  currentlyGranted?: boolean
+  entries: PermissionGrantView[]
+  total: number
+}
+
+/** `subjectAccount` and `permission` are independently optional and combinable; the server
+ * includes `currentlyGranted` in the response only when both are given. */
+export interface ListPermissionsParams {
+  subjectAccount?: string
+  permission?: string
+  page?: number
+  limit?: number
+}
+
 /** Raw shape of admin-service's `userView` as it appears on the wire — the
  * `omitempty` fields may be absent; `normalizeUser` fills the defaults. */
 interface UserViewWire {
@@ -224,4 +282,35 @@ export async function listAudit(
     limit: filter.limit,
   })
   return adminFetch<{ entries: AuditEntry[]; total: number }>(authToken, 'GET', `/audit${qs}`)
+}
+
+/** @throws {AsyncJobError} on a non-2xx response (e.g. `unknown_accounts`, `inactive_subject`). */
+export async function createPermissions(
+  authToken: string,
+  body: CreatePermissionsRequest,
+): Promise<CreatePermissionsResponse> {
+  return adminFetch<CreatePermissionsResponse>(authToken, 'POST', '/permissions', body)
+}
+
+/** Replays the current ledger state for `accounts` to every site's whitelist.
+ * @throws {AsyncJobError} on a non-2xx response (e.g. `unknown_accounts`). */
+export async function resyncPermissions(
+  authToken: string,
+  body: ResyncPermissionsRequest,
+): Promise<ResyncPermissionsResponse> {
+  return adminFetch<ResyncPermissionsResponse>(authToken, 'POST', '/permissions/resync', body)
+}
+
+/** @throws {AsyncJobError} on a non-2xx response. */
+export async function listPermissions(
+  authToken: string,
+  params: ListPermissionsParams = {},
+): Promise<ListPermissionsResponse> {
+  const qs = buildQuery({
+    subjectAccount: params.subjectAccount,
+    permission: params.permission,
+    page: params.page,
+    limit: params.limit,
+  })
+  return adminFetch<ListPermissionsResponse>(authToken, 'GET', `/permissions${qs}`)
 }

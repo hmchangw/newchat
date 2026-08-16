@@ -115,7 +115,7 @@ func main() {
 	readFromSecondary := mongorepo.WithReadPreference(readPref)
 
 	db := mongoClient.Database(cfg.Mongo.DB)
-	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID, readFromSecondary)
+	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID, readFromSecondary, mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts))
 	userRepo := mongorepo.NewUserRepo(db, readFromSecondary)
 	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
@@ -180,7 +180,7 @@ func main() {
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
-	var routerOpts []natsrouter.Option
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
@@ -200,7 +200,7 @@ func main() {
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(ctx context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error {
 			if valkeyClient == nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 type fakeSoakEncryptionStore struct {
@@ -49,13 +51,13 @@ func TestParseSoakArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			seed, err := parseSoakArgs(tt.args)
+			opts, err := parseSoakArgs(tt.args)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantSeed, seed)
+			assert.Equal(t, tt.wantSeed, opts.Seed)
 		})
 	}
 }
@@ -81,19 +83,28 @@ func TestWarmSoakPinnedCatalog_UsesPinnedListPath(t *testing.T) {
 }
 
 func TestSoakMeasuredReadConfig_OneScheduledReadEqualsOneRPC(t *testing.T) {
-	cfg := soakMeasuredReadConfig("site-1")
+	cfg := soakMeasuredReadConfig("site-1", soakDefaultPageLimit)
 
 	assert.Equal(t, "site-1", cfg.SiteID)
-	assert.Equal(t, 50, cfg.PageLimit)
+	assert.Equal(t, soakDefaultPageLimit, cfg.PageLimit)
 	assert.Equal(t, 1, cfg.MaxPages)
 	assert.Equal(t, soakRequestTimeout, cfg.RequestTimeout)
+}
+
+func TestSoakConsumerSamplerTargets_CoversBothMessageHops(t *testing.T) {
+	assert.Equal(t, []soakConsumerSamplerTarget{
+		{Stream: stream.Messages("site-test").Name, Durable: "message-gatekeeper"},
+		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "message-worker"},
+		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "broadcast-worker"},
+		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "notification-worker"},
+	}, soakConsumerSamplerTargets("site-test"))
 }
 
 func TestNewSoakRuntimeSelector_UsesOnlyPersistedActiveUsers(t *testing.T) {
 	cfg := validSoakConfig(t)
 	topology := soakTopology{
 		ActiveUsers: []model.User{{ID: "active-id", Account: "active"}},
-		Rooms:       []model.Room{{ID: "room-1"}},
+		Rooms:       []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
 		Subscriptions: []model.Subscription{
 			{
 				RoomID: "room-1", IsSubscribed: true,
@@ -113,6 +124,9 @@ func TestNewSoakRuntimeSelector_UsesOnlyPersistedActiveUsers(t *testing.T) {
 		target, _ := selector.nextSend()
 		assert.Equal(t, "active-id", target.UserID)
 		assert.Equal(t, "active", target.Account)
+		assert.Equal(t, recipientSetSourceTopology, target.RecipientSetSource)
+		assert.True(t, target.RecipientSetComplete)
+		assert.Equal(t, recipientExpectedRouteRoom, target.RecipientRoute)
 	}
 }
 
@@ -185,4 +199,64 @@ func TestSoakCollectorRecorders_MapComponentSamples(t *testing.T) {
 		snapshot.Verifications[soakRPCGetMessage][soakVerifyMismatch],
 	)
 	assert.Equal(t, uint64(1), snapshot.Actions[soakRPCGetMessage].Failed)
+}
+
+// The page size was hardcoded at 50 in three places. A page of 50 messages at
+// history-service's 20 KB content cap is ~1 MB, well past this deployment's
+// 256 KB max_payload, so a soak run would take oversize replies instead of
+// measuring reads. It is a flag now so an operator can match the broker.
+func TestParseSoakArgs_PageLimitDefaultsBelowTheBrokerCap(t *testing.T) {
+	opts, err := parseSoakArgs(nil)
+	require.NoError(t, err)
+	assert.Equal(t, soakDefaultPageLimit, opts.PageLimit)
+	assert.LessOrEqual(t, opts.PageLimit, 15,
+		"the default must leave headroom under a 256 KB max_payload")
+}
+
+func TestParseSoakArgs_PageLimitOverride(t *testing.T) {
+	opts, err := parseSoakArgs([]string{"-page-limit", "8"})
+	require.NoError(t, err)
+	assert.Equal(t, 8, opts.PageLimit)
+}
+
+func TestParseSoakArgs_RejectsNonPositivePageLimit(t *testing.T) {
+	_, err := parseSoakArgs([]string{"-page-limit", "0"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "page-limit")
+}
+
+func TestSoakMeasuredReadConfig_UsesTheConfiguredPageLimit(t *testing.T) {
+	cfg := soakMeasuredReadConfig("site-test", 12)
+	assert.Equal(t, 12, cfg.PageLimit)
+}
+
+// Page size is a broker-payload constraint; walk depth is a coverage
+// requirement. Tying them together meant lowering the page to fit max_payload
+// silently cut how much history the verifier could reach.
+func TestSoakMaxPages_HoldsTheRowBudgetAcrossPageSizes(t *testing.T) {
+	tests := []struct {
+		pageLimit int
+		wantPages int
+	}{
+		{soakDefaultPageLimit, 334}, // rounds up past the budget
+		{50, 100},                   // the historical pairing, unchanged
+		{1, 5000},
+		{5000, 1},
+		{10000, 1}, // a page larger than the budget still walks once
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("page-limit=%d", tt.pageLimit), func(t *testing.T) {
+			pages := soakMaxPages(tt.pageLimit)
+			assert.Equal(t, tt.wantPages, pages)
+			assert.GreaterOrEqual(t, pages*tt.pageLimit, soakWalkRowBudget,
+				"the walk must still reach the row budget")
+		})
+	}
+}
+
+// Defensive: a non-positive page limit is rejected at flag parse, but the
+// helper must not divide by zero or return a walk that cannot advance.
+func TestSoakMaxPages_NonPositivePageLimit(t *testing.T) {
+	assert.Equal(t, 1, soakMaxPages(0))
+	assert.Equal(t, 1, soakMaxPages(-5))
 }

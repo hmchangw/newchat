@@ -19,6 +19,11 @@ const (
 	soakCatalogPin          soakCatalogAction = "pin"
 	soakCatalogReaction     soakCatalogAction = "reaction"
 	soakCatalogThreadParent soakCatalogAction = "thread_parent"
+	// soakCatalogThreadRead picks a message whose thread actually exists.
+	// Deliberately not the same predicate as soakCatalogThreadParent: that one
+	// asks "can a new reply be attached here?", which is true of a message with
+	// zero replies — precisely the case that has no thread room yet.
+	soakCatalogThreadRead soakCatalogAction = "thread_read"
 )
 
 type soakClock interface {
@@ -51,13 +56,21 @@ type soakCatalogMessage struct {
 
 type soakCatalogEntry struct {
 	soakCatalogCandidate
-	acceptedAt    time.Time
-	edited        bool
-	deleted       bool
-	pinned        bool
-	reactions     map[string]map[string]struct{}
-	threadReplies int
-	globalElement *list.Element
+	acceptedAt time.Time
+	edited     bool
+	deleted    bool
+	pinned     bool
+	reactions  map[string]map[string]struct{}
+	// threadReservations cap concurrent reply publishes before their
+	// gatekeeper responses arrive. threadReplies counts only accepted replies;
+	// keeping them separate prevents a reservation from making a non-existent
+	// thread eligible for reads.
+	threadReservations      int
+	threadReplies           int
+	threadReadableAt        time.Time
+	threadFollowers         map[string]struct{}
+	threadFollowersComplete bool
+	globalElement           *list.Element
 }
 
 type soakCatalogRoom struct {
@@ -166,6 +179,10 @@ func (c *soakCatalog) AcceptAt(
 		acceptedAt:           c.clock.Now(),
 		reactions:            make(map[string]map[string]struct{}),
 	}
+	if entry.ThreadParentID == "" {
+		entry.threadFollowers = map[string]struct{}{entry.Author: {}}
+		entry.threadFollowersComplete = true
+	}
 	shard := c.shard(roomID)
 	shard.mu.Lock()
 	room := shard.room(roomID)
@@ -173,6 +190,14 @@ func (c *soakCatalog) AcceptAt(
 		shard.mu.Unlock()
 		c.globalMu.Unlock()
 		return false
+	}
+	if entry.ThreadParentID != "" {
+		if parent := room.messages[entry.ThreadParentID]; parent != nil && entry.Author != "" {
+			if parent.threadFollowers == nil {
+				parent.threadFollowers = make(map[string]struct{})
+			}
+			parent.threadFollowers[entry.Author] = struct{}{}
+		}
 	}
 	entry.globalElement = c.globalOrder.PushBack(entry)
 	room.messages[messageID] = entry
@@ -455,6 +480,15 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 		pinned:     true,
 		reactions:  make(map[string]map[string]struct{}),
 	}
+	if entry.ThreadParentID == "" {
+		entry.threadFollowers = map[string]struct{}{entry.Author: {}}
+		entry.threadFollowersComplete = false
+	} else if parent := room.messages[entry.ThreadParentID]; parent != nil && entry.Author != "" {
+		if parent.threadFollowers == nil {
+			parent.threadFollowers = make(map[string]struct{})
+		}
+		parent.threadFollowers[entry.Author] = struct{}{}
+	}
 	entry.globalElement = c.globalOrder.PushBack(entry)
 	room.messages[message.MessageID] = entry
 	room.order = append(room.order, entry)
@@ -502,25 +536,84 @@ func (c *soakCatalog) SetReaction(
 	})
 }
 
-func (c *soakCatalog) IncrementThreadReplies(roomID, messageID string) bool {
+func (c *soakCatalog) ReserveThreadReply(roomID, messageID string) bool {
 	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
 		if entry.deleted || entry.ThreadParentID != "" ||
-			entry.threadReplies >= entry.ThreadReplyLimit {
+			entry.threadReplies+entry.threadReservations >= entry.ThreadReplyLimit {
 			return false
+		}
+		entry.threadReservations++
+		return true
+	})
+}
+
+func (c *soakCatalog) ReleaseThreadReplyReservation(roomID, messageID string) bool {
+	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+		if entry.threadReservations <= 0 {
+			return false
+		}
+		entry.threadReservations--
+		return true
+	})
+}
+
+// ConfirmThreadReply converts one pending reservation into an accepted reply.
+// The first reply becomes readable only after persistGrace, giving the async
+// message-worker time to create the thread room and persist its first row.
+func (c *soakCatalog) ConfirmThreadReply(roomID, messageID string) bool {
+	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+		if entry.threadReservations <= 0 {
+			return false
+		}
+		entry.threadReservations--
+		if entry.deleted || entry.ThreadParentID != "" {
+			return false
+		}
+		if entry.threadReplies == 0 {
+			entry.threadReadableAt = c.clock.Now().Add(c.persistGrace)
 		}
 		entry.threadReplies++
 		return true
 	})
 }
 
-func (c *soakCatalog) DecrementThreadReplies(roomID, messageID string) bool {
-	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
-		if entry.threadReplies <= 0 {
-			return false
+// ThreadRecipients snapshots the recipient accounts that the broadcast worker
+// will include for a channel thread reply without mentions: the sender, parent
+// author, and authors of accepted replies that already follow the thread.
+func (c *soakCatalog) ThreadRecipients(roomID, parentID, sender string) []string {
+	recipients, _ := c.ThreadRecipientSet(roomID, parentID, sender)
+	return recipients
+}
+
+func (c *soakCatalog) ThreadRecipientSet(roomID, parentID, sender string) ([]string, bool) {
+	shard := c.shard(roomID)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	room := shard.rooms[roomID]
+	if room == nil {
+		return nil, false
+	}
+	recipients := make(map[string]struct{})
+	if sender != "" {
+		recipients[sender] = struct{}{}
+	}
+	parent := room.messages[parentID]
+	if parent == nil {
+		return nil, false
+	}
+	if len(parent.threadFollowers) == 0 && parent.Author != "" {
+		recipients[parent.Author] = struct{}{}
+	} else {
+		for account := range parent.threadFollowers {
+			recipients[account] = struct{}{}
 		}
-		entry.threadReplies--
-		return true
-	})
+	}
+	result := make([]string, 0, len(recipients))
+	for account := range recipients {
+		result = append(result, account)
+	}
+	sort.Strings(result)
+	return result, parent.threadFollowersComplete
 }
 
 func (c *soakCatalog) Size() int {
@@ -561,7 +654,17 @@ func (c *soakCatalog) eligible(
 	case soakCatalogEdit, soakCatalogDelete:
 		return entry.Author == actor
 	case soakCatalogThreadParent:
-		return entry.ThreadParentID == "" && entry.threadReplies < entry.ThreadReplyLimit
+		return entry.ThreadParentID == "" &&
+			entry.threadReplies+entry.threadReservations < entry.ThreadReplyLimit
+	case soakCatalogThreadRead:
+		// A thread room is created by message-worker when the first reply
+		// lands, so a zero-reply message has none. Reading it makes
+		// history-service log `empty thread_room_id` and short-circuit before
+		// touching the Cassandra thread partition — a fast no-op that would sit
+		// in the GetThreadMessages latency tape and pull the percentiles down.
+		// The reply budget is irrelevant here: a full thread is still readable.
+		return entry.ThreadParentID == "" && entry.threadReplies > 0 &&
+			!now.Before(entry.threadReadableAt)
 	case soakCatalogPin, soakCatalogReaction:
 		return true
 	default:

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -72,9 +73,6 @@ type SearchConfig struct {
 	RestrictedRoomsCacheTTL time.Duration `env:"RESTRICTED_ROOMS_CACHE_TTL" envDefault:"5m"`
 	RecentWindow            time.Duration `env:"RECENT_WINDOW"              envDefault:"8760h"`
 	RequestTimeout          time.Duration `env:"REQUEST_TIMEOUT"            envDefault:"10s"`
-	UserRoomIndex           string        `env:"USER_ROOM_INDEX,required"`
-	SpotlightIndex          string        `env:"SPOTLIGHT_INDEX,required"`
-	SpotlightOrgIndex       string        `env:"SPOTLIGHT_ORG_INDEX,required"`
 	HealthAddr              string        `env:"HEALTH_ADDR"                envDefault:":9090"`
 }
 
@@ -93,10 +91,37 @@ type Config struct {
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
 	UsersAPI UsersAPIConfig `envPrefix:"USERS_API_"`
 	DebugLog logctx.Config  `envPrefix:"DEBUG_LOG_"`
+	// UNPREFIXED on purpose — must match search-sync-worker / es-index-migrator
+	// exactly. On SearchConfig they would pick up envPrefix:"SEARCH_" and drift
+	// from the writer silently (wildcard read + allow_no_indices ⇒ empty hits).
+	UserRoomIndex     string `env:"USER_ROOM_INDEX,required,notEmpty"`
+	SpotlightIndex    string `env:"SPOTLIGHT_INDEX,required,notEmpty"`
+	SpotlightOrgIndex string `env:"SPOTLIGHT_ORG_INDEX,required,notEmpty"`
 	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
 	// door (ErrUnavailable) instead of piling unbounded work onto Elasticsearch/
 	// MongoDB. 0 disables the cap (unbounded spawn).
 	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+	// ShowTeamsRoom controls whether Teams-migrated rooms/messages (origin
+	// "teams") appear in search results; false hides them (reversible read-time
+	// filter — see pkg/model.OriginTeams).
+	ShowTeamsRoom bool `env:"SHOW_TEAMS_ROOM" envDefault:"false"`
+	// ShowTeamsAccounts allowlists accounts that see Teams rooms/messages even when
+	// ShowTeamsRoom is false — an ops-managed set, comma-separated.
+	ShowTeamsAccounts []string `env:"SHOW_TEAMS_ROOM_ACCOUNTS" envSeparator:","`
+}
+
+// teamsAccountSet builds a lookup set from the SHOW_TEAMS_ROOM_ACCOUNTS list, dropping blanks.
+func teamsAccountSet(accounts []string) map[string]bool {
+	if len(accounts) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(accounts))
+	for _, a := range accounts {
+		if a = strings.TrimSpace(a); a != "" {
+			set[a] = true
+		}
+	}
+	return set
 }
 
 func main() {
@@ -109,16 +134,16 @@ func main() {
 	}
 	logctx.Configure(cfg.DebugLog)
 
-	spotlightBase, _, ok := searchindex.StripVersion(cfg.Search.SpotlightIndex)
+	spotlightBase, _, ok := searchindex.StripVersion(cfg.SpotlightIndex)
 	if !ok {
-		slog.Error("invalid config", "name", "SEARCH_SPOTLIGHT_INDEX", "value", cfg.Search.SpotlightIndex, "reason", "must end with -v<N>, e.g. spotlight-site-a-v1")
+		slog.Error("invalid config", "name", "SPOTLIGHT_INDEX", "value", cfg.SpotlightIndex, "reason", "must end with -v<N>, e.g. spotlight-site-a-v1")
 		os.Exit(1)
 	}
 	spotlightReadPattern := fmt.Sprintf("%s-*", spotlightBase)
 
-	spotlightOrgBase, _, ok := searchindex.StripVersion(cfg.Search.SpotlightOrgIndex)
+	spotlightOrgBase, _, ok := searchindex.StripVersion(cfg.SpotlightOrgIndex)
 	if !ok {
-		slog.Error("invalid config", "name", "SEARCH_SPOTLIGHT_ORG_INDEX", "value", cfg.Search.SpotlightOrgIndex, "reason", "must end with -v<N>, e.g. spotlightorg-site-a-v1")
+		slog.Error("invalid config", "name", "SPOTLIGHT_ORG_INDEX", "value", cfg.SpotlightOrgIndex, "reason", "must end with -v<N>, e.g. spotlightorg-site-a-v1")
 		os.Exit(1)
 	}
 	spotlightOrgReadPattern := fmt.Sprintf("%s-*", spotlightOrgBase)
@@ -184,7 +209,7 @@ func main() {
 	)
 	usersClient := newHTTPUsersClient(usersRC, cfg.UsersAPI.Token)
 
-	store := newESStore(engine, cfg.Search.UserRoomIndex)
+	store := newESStore(engine, cfg.UserRoomIndex)
 	cache := newValkeyCache(valkey)
 	mongoStore := newMongoStore(mongoDB)
 
@@ -202,16 +227,18 @@ func main() {
 		RestrictedRoomsCacheTTL: cfg.Search.RestrictedRoomsCacheTTL,
 		RecentWindow:            cfg.Search.RecentWindow,
 		RequestTimeout:          cfg.Search.RequestTimeout,
-		UserRoomIndex:           cfg.Search.UserRoomIndex,
+		UserRoomIndex:           cfg.UserRoomIndex,
 		SpotlightReadPattern:    spotlightReadPattern,
 		SpotlightOrgReadPattern: spotlightOrgReadPattern,
+		ShowTeamsRoom:           cfg.ShowTeamsRoom,
+		ShowTeamsAccounts:       teamsAccountSet(cfg.ShowTeamsAccounts),
 	})
 	handler.room = newRoomClient(nc)
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto Elasticsearch/MongoDB.
 	// MAX_CONCURRENCY=0 disables.
-	var routerOpts []natsrouter.Option
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
@@ -262,7 +289,7 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		// Wait for in-flight handlers BEFORE nc.Drain so they can't touch torn-down deps.
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(ctx context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkey); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthServer.Shutdown(ctx) },

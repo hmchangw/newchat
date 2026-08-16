@@ -15,6 +15,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
@@ -86,12 +88,12 @@ func newOnDutyRig(t *testing.T, siteID string, reply func(model.RoomRestrictedRe
 	require.NoError(t, serverConn.Flush())
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	clientConn, err := natsutil.Connect(ctx, url, "", nil, nil, false)
+	clientConn, err := natsutil.Connect(ctx, url, "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = clientConn.NatsConn().Drain() })
 
 	cfg := Config{SiteID: siteID, BcryptCost: 4, SessionsMaxPerAccount: 100, RoomRPCTimeout: 5 * time.Second}
-	h := newHandler(store, sessions, cfg, clientConn)
+	h := newHandler(store, sessions, cfg, clientConn, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -210,13 +212,13 @@ func TestIntegration_SetRoomOnDuty_RPCTimeout(t *testing.T) {
 	require.NoError(t, deafConn.Flush())
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	clientConn, err := natsutil.Connect(ctx, url, "", nil, nil, false)
+	clientConn, err := natsutil.Connect(ctx, url, "", noop.NewTracerProvider(), propagation.TraceContext{}, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = clientConn.NatsConn().Drain() })
 
 	const rpcTimeout = 300 * time.Millisecond
 	cfg := Config{SiteID: "site-c", BcryptCost: 4, SessionsMaxPerAccount: 100, RoomRPCTimeout: rpcTimeout}
-	h := newHandler(store, sessions, cfg, clientConn)
+	h := newHandler(store, sessions, cfg, clientConn, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

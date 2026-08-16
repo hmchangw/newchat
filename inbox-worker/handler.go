@@ -88,6 +88,9 @@ type InboxStore interface {
 	// full post-update settings from the origin site, guarded by settingsUpdatedAt so an
 	// out-of-order or duplicate delivery can't regress. A missing user is a logged no-op.
 	UpdateUserSettings(ctx context.Context, account string, settings *model.UserSettings, updatedAt time.Time) error
+	// ApplyUserPermissions applies one permission state to the accounts under the
+	// per-key watermark guard. A missing user (no doc on this site) is a silent no-op.
+	ApplyUserPermissions(ctx context.Context, permission model.PermissionKey, accounts []string, state model.PermissionState) error
 	// UpdateUserChatlist replaces the local users doc's chatlist sub-document with the
 	// full post-update state from the origin site, guarded by chatlistUpdatedAt so an
 	// out-of-order or duplicate delivery can't regress. A missing user is a logged no-op.
@@ -165,6 +168,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleUserStatusUpdated(ctx, &evt)
 	case model.InboxUserSettingsUpdated:
 		return h.handleUserSettingsUpdated(ctx, &evt)
+	case model.InboxUserPermissionsUpdated:
+		return h.handleUserPermissionsUpdated(ctx, &evt)
 	case model.InboxUserChatlistUpdated:
 		return h.handleUserChatlistUpdated(ctx, &evt)
 	case model.InboxSubscriptionSectionMoved:
@@ -222,6 +227,10 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			HistorySharedSince: historySharedSince,
 			JoinedAt:           joinedAt,
 			Open:               true,
+			// Stamp provenance on the federated sub so the origin filter (which reads
+			// the sub's own origin, not the null cross-site $room.origin) can hide a
+			// Teams room from a remote member. Empty for native rooms.
+			Origin: event.Origin,
 		}
 		subs = append(subs, sub)
 	}
@@ -494,6 +503,25 @@ func (h *Handler) handleUserSettingsUpdated(ctx context.Context, evt *model.Inbo
 	}
 	if err := h.store.UpdateUserSettings(ctx, e.Account, &e.Settings, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update user settings for %q: %w", e.Account, err)
+	}
+	return nil
+}
+
+// handleUserPermissionsUpdated applies one chunk of an admin permission batch. A missing
+// user doc is a silent no-op (store-level guard), matching the other user events.
+func (h *Handler) handleUserPermissionsUpdated(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.UserPermissionsUpdated
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal user_permissions_updated payload: %w", err)
+	}
+	if _, ok := model.PermissionFieldName(e.Permission); !ok {
+		// A future permission key reaching a not-yet-upgraded site: retrying cannot
+		// succeed and must not poison the consumer — warn and Ack.
+		slog.WarnContext(ctx, "unknown permission key in user_permissions_updated", "permission", string(e.Permission))
+		return nil
+	}
+	if err := h.store.ApplyUserPermissions(ctx, e.Permission, e.Accounts, e.State); err != nil {
+		return fmt.Errorf("apply user permissions: %w", err)
 	}
 	return nil
 }

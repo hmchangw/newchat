@@ -34,10 +34,14 @@ services:
       # profiling.
       # - PPROF_ADDR=:6060
       - BOTTLENECK_PROM_URL=http://prometheus:9090
+      # auth-service base URL for `max-rps --workload=login`. Unused by every
+      # other workload, which connects to NATS with the creds file above.
+      - AUTH_URL=${AUTH_URL:-http://auth-service:8080}
       # Cassandra Run A. SOAK_RUN_ID must be supplied when bringing up the
       # overlay; all remaining values use the conservative binary defaults
       # unless overridden here.
       - SOAK_RUN_ID=${SOAK_RUN_ID:-}
+      - SOAK_ENVIRONMENT=${SOAK_ENVIRONMENT:-local}
       - SOAK_RUN_DURATION=${SOAK_RUN_DURATION:-72h}
       - SOAK_WARMUP=${SOAK_WARMUP:-30s}
       - SOAK_SEND_RATE=${SOAK_SEND_RATE:-100}
@@ -67,10 +71,19 @@ services:
       - SOAK_RETRY_MAX_BACKOFF=${SOAK_RETRY_MAX_BACKOFF:-5s}
       - SOAK_RECENT_PER_ROOM=${SOAK_RECENT_PER_ROOM:-128}
       - SOAK_RECENT_TOTAL=${SOAK_RECENT_TOTAL:-200000}
+      - SOAK_LEDGER_DIR=/var/lib/loadgen/ledger
+      - SOAK_LEDGER_CAPACITY=${SOAK_LEDGER_CAPACITY:-200000}
+      - SOAK_RECONCILE_DEADLINE=${SOAK_RECONCILE_DEADLINE:-10m}
+      - SOAK_RECONCILE_RETRY_INTERVAL=${SOAK_RECONCILE_RETRY_INTERVAL:-1s}
+      - SOAK_RECONCILE_READ_SHARE=${SOAK_RECONCILE_READ_SHARE:-0.5}
+      - SOAK_RECIPIENT_OBSERVER_ENABLED=${SOAK_RECIPIENT_OBSERVER_ENABLED:-false}
+      - SOAK_RECIPIENT_OBSERVER_QUEUE=${SOAK_RECIPIENT_OBSERVER_QUEUE:-8192}
+      - SOAK_RECIPIENT_OBSERVER_CONNECTIONS=${SOAK_RECIPIENT_OBSERVER_CONNECTIONS:-32}
       - SOAK_CASSANDRA_CLEANUP=${SOAK_CASSANDRA_CLEANUP:-none}
       - SOAK_CONFIRM_KEYSPACE=${SOAK_CONFIRM_KEYSPACE:-}
     volumes:
       - ../../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - loadgen-ledger:/var/lib/loadgen/ledger
     ports:
       - "9099:9099"
     entrypoint: ["sleep", "infinity"]
@@ -104,14 +117,41 @@ services:
     networks:
       - chat-local
 
+  # Polls the deps NATS server's monitoring endpoint (:8222) and re-exposes
+  # JetStream state as Prometheus metrics. `-jsz=all` turns on the consumer-level
+  # detail (num_pending, num_ack_pending, num_redelivered) that shows whether a
+  # worker is falling behind during a run. No container_name and no host port
+  # binding, so this can coexist with tools/observability's exporter.
+  #
+  # No healthcheck: this minimal image ships no HTTP client (no wget, no curl),
+  # so the probe that used to live here could never pass and the container never
+  # turned healthy — which stalled the whole dashboards profile behind
+  # Prometheus's `condition: service_healthy`. Adding a client just to probe is
+  # not worth it: Prometheus does not need a target up at startup, it marks an
+  # unreachable one down and retries on the next scrape. Hence
+  # `service_started` on the dependency below.
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:0.16.0
+    profiles: [dashboards]
+    command: ["-port=7777", "-jsz=all", "http://chat-local-nats:8222"]
+    networks:
+      - chat-local
+
   prometheus:
     image: prom/prometheus:v2.55.0
     profiles: [dashboards]
+    # Local-dev only: Docker SD reads /var/run/docker.sock (root-owned) to
+    # discover the :2112 SDK endpoints. Run as root so no host chmod is needed.
+    # This stack already runs privileged (cAdvisor).
+    user: "0:0"
     depends_on:
       cadvisor:
         condition: service_healthy
+      nats-exporter:
+        condition: service_started
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Docker SD for :2112 targets
     ports:
       - "9090:9090"
     networks:
@@ -135,3 +175,6 @@ services:
 networks:
   chat-local:
     external: true
+
+volumes:
+  loadgen-ledger:

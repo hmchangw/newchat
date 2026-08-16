@@ -9,19 +9,19 @@ services:
     environment:
       - OTEL_SERVICE_NAME=outbox-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      - NATS_URL=nats://nats:4222
-      - NATS_CREDS_FILE=/etc/nats/backend.creds
-      - SITE_ID=site-local
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - SITE_ID=${SITE_ID:-site-local}
       # Federation peers (same convention as user-service). One per-destination
       # FIFO membership consumer is created per remote peer; single-site dev has
       # none, so this lists only the local site.
-      - ALL_SITE_IDS=site-local
+      - ALL_SITE_IDS=${ALL_SITE_IDS:-${SITE_ID:-site-local}}
       # Dev-only pprof profiling on the health port (off by default).
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       # outbox-worker owns the OUTBOX stream; create it against a fresh dev NATS.
-      - BOOTSTRAP_STREAMS=true
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
     volumes:
-      - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

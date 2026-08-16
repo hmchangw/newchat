@@ -10,14 +10,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -947,6 +951,67 @@ func TestHandleUpdated_EncryptedChannel_EncryptsContent(t *testing.T) {
 	assert.Equal(t, "secret edit", plaintext)
 }
 
+func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
+	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+
+	// The worker forwards every parsed mention to SetSubscriptionMentions; the
+	// additive / no-re-badge / skip-non-subscriber properties are enforced by the
+	// store filter (read-guard) and covered by TestSetSubscriptionMentions_ReadGuard_Integration.
+	tests := []struct {
+		name            string
+		content         string
+		wantSetMentions []string // nil = SetSubscriptionMentions must not be called
+	}{
+		{
+			name:            "edit adds a mention",
+			content:         "hey @bob check this",
+			wantSetMentions: []string{"bob"},
+		},
+		{
+			name:    "no mentions badges nobody",
+			content: "no mentions here anymore",
+		},
+		{
+			name:            "every parsed mention is forwarded to the store",
+			content:         "hey @alice and @bob",
+			wantSetMentions: []string{"alice", "bob"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+
+			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+			if tc.wantSetMentions != nil {
+				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.InAnyOrder(tc.wantSetMentions), edited).Return(nil)
+			}
+
+			evt := model.MessageEvent{
+				Event:     model.EventUpdated,
+				SiteID:    "site-a",
+				Timestamp: edited.UnixMilli(),
+				Message: model.Message{
+					ID: "msg-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+					Content:   tc.content,
+					CreatedAt: edited.Add(-time.Hour),
+					EditedAt:  &edited, UpdatedAt: &edited,
+				},
+			}
+			data, err := json.Marshal(&evt)
+			require.NoError(t, err)
+
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+			require.Len(t, pub.records, 1, "edit must still fan out regardless of mention badging")
+		})
+	}
+}
+
 func TestHandleUpdated_MissingEditedAt_ReturnsError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -1582,9 +1647,13 @@ func TestHandleReacted_MissingDelta_LogsAndDrops(t *testing.T) {
 	data, _ := json.Marshal(&evt)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
-	err := h.HandleMessage(context.Background(), data)
+	var err error
+	terminal := terminalCountFor(t, "invalid_payload", func(ctx context.Context) {
+		err = h.HandleMessage(ctx, data)
+	})
 	require.NoError(t, err, "malformed event must be acked, not NAK-ed")
 	assert.Empty(t, pub.records)
+	assert.Equal(t, int64(1), terminal, "a permanently dropped malformed event must leave terminal evidence")
 }
 
 // TestHandleReacted_MissingUpdatedAt_LogsAndDrops mirrors the missing-
@@ -1611,9 +1680,13 @@ func TestHandleReacted_MissingUpdatedAt_LogsAndDrops(t *testing.T) {
 	data, _ := json.Marshal(&evt)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
-	err := h.HandleMessage(context.Background(), data)
+	var err error
+	terminal := terminalCountFor(t, "invalid_payload", func(ctx context.Context) {
+		err = h.HandleMessage(ctx, data)
+	})
 	require.NoError(t, err, "malformed event must be acked, not NAK-ed")
 	assert.Empty(t, pub.records)
+	assert.Equal(t, int64(1), terminal, "a permanently dropped malformed event must leave terminal evidence")
 }
 
 // findPublishRecord returns the first record whose subject matches, or nil.
@@ -2357,7 +2430,7 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 		subjects[r.subject] = true
 		var roomEvt model.RoomEvent
 		require.NoError(t, json.Unmarshal(r.data, &roomEvt))
-		assert.Equal(t, model.RoomEventNewMessage, roomEvt.Type)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "thread reply must publish new_thread_message, not new_message")
 		assert.Positive(t, roomEvt.Timestamp, "Timestamp must be the broadcast-worker publish time")
 		assert.Equal(t, msgTime.UnixMilli(), roomEvt.EventTimestamp)
 	}
@@ -2490,9 +2563,50 @@ func TestHandleThreadCreated_DMRoom_FansOutToAllMembers(t *testing.T) {
 	subjects := map[string]bool{}
 	for _, r := range pub.records {
 		subjects[r.subject] = true
+		roomEvt := decodeRoomEvent(t, r.data)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "DM thread reply must publish new_thread_message, not new_message")
 	}
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+}
+
+func TestHandleThreadCreated_BotDMRoom_EmitsNewThreadMessage(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 11, 0, 0, 0, time.UTC)
+
+	// botDM thread replies fan out per member — the human member gets the event,
+	// the bot account is skipped (same as an ordinary botDM new_message). The
+	// production branch handles RoomTypeBotDM too.
+	botDMRoom := &model.Room{ID: "dm-1", Type: model.RoomTypeBotDM, SiteID: "site-a", UserCount: 2}
+	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(botDMRoom), nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    "site-a",
+		Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "thread reply in botDM", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-dm", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.NotEmpty(t, pub.records, "botDM thread reply fans out per member")
+	for _, r := range pub.records {
+		roomEvt := decodeRoomEvent(t, r.data)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type, "botDM thread reply must publish new_thread_message")
+	}
 }
 
 func TestHandleThreadCreated_DMRoom_WithMention_NoSubscriptionWrite(t *testing.T) {
@@ -3238,4 +3352,46 @@ func TestHandleCreated_AdvanceSenderLastSeen_FailureSwallowed(t *testing.T) {
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), makeMessageEvent("room-1", "hello", msgTime)))
+}
+
+// stubJSMsg is the minimum jetstream.Msg surface Consumer.Track needs to build
+// a tracked delivery in a unit test. The drop paths under test Ack via the
+// tracked wrapper, so the disposition methods only need to succeed.
+type stubJSMsg struct {
+	subject string
+	data    []byte
+}
+
+func (s stubJSMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{NumDelivered: 1}, nil
+}
+func (s stubJSMsg) Data() []byte                     { return s.data }
+func (s stubJSMsg) Headers() nats.Header             { return nats.Header{} }
+func (s stubJSMsg) Subject() string                  { return s.subject }
+func (s stubJSMsg) Reply() string                    { return "" }
+func (s stubJSMsg) Ack() error                       { return nil }
+func (s stubJSMsg) DoubleAck(context.Context) error  { return nil }
+func (s stubJSMsg) Nak() error                       { return nil }
+func (s stubJSMsg) NakWithDelay(time.Duration) error { return nil }
+func (s stubJSMsg) InProgress() error                { return nil }
+func (s stubJSMsg) Term() error                      { return nil }
+func (s stubJSMsg) TermWithReason(string) error      { return nil }
+
+// terminalCountFor runs fn under a tracked delivery and returns how many
+// terminal failures it recorded for reason. A log-and-drop path returns nil, so
+// the counter is the only evidence the message was permanently discarded.
+func terminalCountFor(t *testing.T, reason string, fn func(context.Context)) int64 {
+	t.Helper()
+	m, reader := newTestBroadcastMetrics(t)
+	consumer := m.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: "broadcast-worker", Site: "s1",
+		Stream: "MESSAGES-CANONICAL-s1", Consumer: "broadcast-worker",
+	})
+	tracked := consumer.Track(context.Background(), stubJSMsg{subject: "chat.msg.canonical.s1.created"}, natsmetrics.EventCreated, 5)
+	fn(tracked.Context(context.Background()))
+	tracked.Finish(context.Background())
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	return sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": reason})
 }

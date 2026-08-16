@@ -240,7 +240,7 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.New(nc, "room-worker")
+	router := natsrouter.New(nc, "room-worker", natsrouter.WithSiteID(cfg.SiteID))
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
@@ -309,7 +309,7 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(ctx context.Context) error { return nc.Drain() },
+		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return keyStore.Close() },
 		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },

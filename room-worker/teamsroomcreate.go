@@ -256,13 +256,27 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		SiteID:    h.siteID,
 		Accounts:  accounts,
 		Timestamp: acceptedAt.UnixMilli(),
+		Origin:    model.OriginTeams,
 	}
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		return fmt.Errorf("marshal membership event: %w", err)
 	}
+	// Envelope for the internal lane only — outbox.Publish builds its own below.
+	// Timestamp is acceptedAt, not time.Now(): it becomes the ES external doc
+	// version, and wall-clock would let a redelivered older event outrank a newer one.
+	internalData, err := json.Marshal(model.InboxEvent{
+		Type:       eventType,
+		SiteID:     h.siteID,
+		DestSiteID: h.siteID,
+		Payload:    payload,
+		Timestamp:  acceptedAt.UnixMilli(),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal internal inbox envelope: %w", err)
+	}
 	seed := fmt.Sprintf("%s:%s:%d", room.ID, eventType, acceptedAt.UnixMilli())
-	if err := h.publish(ctx, subject.InboxInternal(h.siteID, eventType), payload, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, eventType), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
 		return fmt.Errorf("local inbox publish: %w", err)
 	}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/bytedance/sonic"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
 // publisher is the narrow sync-publish surface mobileEmitter needs; sync semantics let the
@@ -56,14 +58,29 @@ func (e *mobileEmitter) Emit(ctx context.Context, evt model.PushNotificationEven
 	return nil
 }
 
+// clampPayloadCap narrows the broker's advertised max_payload to int without
+// an unchecked conversion (gosec G115). A non-positive value disables the
+// pre-flight guard, matching the emitter's existing `> 0` check.
+func clampPayloadCap(n int64) int {
+	if n <= 0 {
+		return 0
+	}
+	if n > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(n)
+}
+
 // jsPublisher adapts o11y/nats JetStream to the publisher interface by discarding the PubAck.
 type jsPublisher struct {
 	js interface {
 		PublishMsg(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 	}
+	metrics natsmetrics.Publisher
 }
 
 func (p *jsPublisher) PublishMsg(ctx context.Context, msg *nats.Msg) error {
 	_, err := p.js.PublishMsg(ctx, msg)
+	p.metrics.Attempt(ctx, natsmetrics.DestinationPush, natsmetrics.OperationPushPublish, err)
 	return err
 }

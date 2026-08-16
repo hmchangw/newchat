@@ -2,6 +2,7 @@ package natsutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,11 +10,28 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
-const defaultReconnectWait = 2 * time.Second
+const (
+	defaultReconnectWait = 2 * time.Second
+	// defaultDrainTimeout bounds the subscription-drain phase. Worst case is
+	// this plus drainConnection's internal FlushTimeout(5s) = 15s.
+	//
+	// shutdown.Wait creates ONE context for the whole shutdown and runs the
+	// hooks sequentially over it (pkg/shutdown/shutdown.go:21-32), so this
+	// budget is shared, not per-hook: a 15s worst-case drain leaves ~10s of
+	// the 25s for every remaining hook (DB disconnects, HTTP shutdown, o11y
+	// flush), which are sub-second in practice. A drain that actually needs
+	// longer than 10s means a wedged handler — a finding to surface, not a
+	// wait to extend.
+	//
+	// The library default is 30s (nats.DefaultDrainTimeout), larger than the
+	// entire shutdown budget, so it could never be the timeout that fires.
+	defaultDrainTimeout = 10 * time.Second
+)
 
 // Connect opens a NATS connection with sensible reconnect defaults.
 // The NATS client name is taken from the HOSTNAME env var (pod name in
@@ -28,10 +46,27 @@ const defaultReconnectWait = 2 * time.Second
 //
 // tp, prop, and tracingEnabled are wired into the underlying o11y/nats layer.
 // Production callers should pass sdk.TracerProvider(), sdk.Propagator, and
-// sdk.Toggles.Trace from the same obs.Init result. Using the resolved SDK toggle
-// selects o11y/nats' direct path when tracing is disabled, avoiding wrapper and
-// propagation overhead without re-parsing environment variables here.
+// sdk.Toggles.Trace from the same obs.Init result. This value is the
+// connection-local default; otel-nats v0.9 resolves relay > environment >
+// option > module default, so OTEL_NATS_TRACING_ENABLED or a configured relay
+// can override it in either direction. With no higher-precedence source, false
+// selects the direct path without tracing or propagation overhead.
 func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, opts ...nats.Option) (*o11ynats.Conn, error) {
+	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, nil, opts...)
+}
+
+// ConnectWithMetrics opens a NATS connection and records its bounded lifecycle
+// metrics. It is intentionally opt-in so a focused failure campaign does not
+// expand instrumentation to every natsutil caller.
+func ConnectWithMetrics(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, meterProvider metric.MeterProvider, opts ...nats.Option) (*o11ynats.Conn, error) {
+	var metrics *connMetrics
+	if meterProvider != nil {
+		metrics = newConnMetrics(meterProvider.Meter(connMetricsScope))
+	}
+	return connect(ctx, url, credsFile, tp, prop, tracingEnabled, metrics, opts...)
+}
+
+func connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider, prop propagation.TextMapPropagator, tracingEnabled bool, metrics *connMetrics, opts ...nats.Option) (*o11ynats.Conn, error) {
 	if credsFile != "" {
 		if _, err := os.Stat(credsFile); err != nil {
 			return nil, fmt.Errorf("nats creds file %q: %w", credsFile, err)
@@ -40,20 +75,30 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 
 	name := os.Getenv("HOSTNAME")
 	log := slog.With("component", "nats", "name", name)
+	connState := metrics.Connection()
 	baseOpts := []nats.Option{
 		nats.Name(name),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(defaultReconnectWait),
+		nats.DrainTimeout(defaultDrainTimeout),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			connState.Disconnected(ctx, err)
 			log.Warn("nats disconnected", "error", err)
 		}),
 		nats.ReconnectHandler(func(c *nats.Conn) {
+			connState.Reconnected(ctx)
 			log.Info("nats reconnected", "url", c.ConnectedUrl())
 		}),
 		nats.ClosedHandler(func(_ *nats.Conn) {
+			connState.Closed(ctx)
 			log.Warn("nats connection closed")
 		}),
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			connState.AsyncError(ctx, err)
+			if errors.Is(err, nats.ErrSlowConsumer) {
+				logSlowConsumer(log, sub)
+				return
+			}
 			log.Error("nats async error", "error", err)
 		}),
 	}
@@ -75,5 +120,8 @@ func Connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 	if err != nil {
 		return nil, fmt.Errorf("connect nats: %w", err)
 	}
+	// The library fires no callback for the first successful connect, so the
+	// gauge would stay at zero until the first disconnect without this.
+	connState.Connected(ctx)
 	return conn, nil
 }

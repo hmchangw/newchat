@@ -129,6 +129,45 @@ describe('RoomEventsProvider', () => {
     )
   })
 
+  it('loadHistory routes to the room home site for a cross-site room, not the user home site', async () => {
+    // User is logged in on site-B; the room lives on site-A. History must be
+    // fetched from the room's home site (site-A), or history-service on site-B
+    // replies "room not found".
+    const rooms = [{ id: 'a', name: 'x', type: 'channel', siteId: 'site-A', userCount: 2, lastMsgAt: null }]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.includes('.msg.history')) return Promise.resolve({ messages: [] })
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request, user: { account: 'alice', siteId: 'site-B' } })
+
+    function Trigger() {
+      const { loadHistory } = useRoomEvents('a')
+      const { summaries } = useRoomSummaries()
+      return (
+        <div>
+          <button onClick={() => loadHistory()}>load</button>
+          <div data-testid="count">{summaries.length}</div>
+        </div>
+      )
+    }
+
+    render(wrap(<Trigger />, nats))
+    // Wait for the bootstrap summary to land so loadHistory sees the room's siteId.
+    await waitFor(() => expect(screen.getByTestId('count').textContent).toBe('1'))
+    await act(async () => {
+      screen.getByText('load').click()
+    })
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith('chat.user.alice.request.room.a.site-A.msg.history', { limit: 50 }),
+    )
+    // Never routed to the user's own home site.
+    const historyCalls = request.mock.calls.filter(([subject]) => subject.includes('.msg.history'))
+    expect(historyCalls.every(([subject]) => !subject.includes('.site-B.'))).toBe(true)
+  })
+
   it('loadHistory surfaces historyError on failure', async () => {
     const request = vi.fn().mockImplementation((subject) => {
       if (subject.includes('.msg.history')) return Promise.reject(new Error('boom'))
@@ -1271,90 +1310,76 @@ describe('useSidebarSections', () => {
     )
   }
 
-  it('returns three sections in fixed order', async () => {
+  it('derives Favorites / Apps / Chats from the subscription flags', async () => {
+    // Chatlist v2 read model: the favorite bucket stamps favorite → Favorites;
+    // botDM → Apps; plain rooms → Chats. Empty built-ins (Teams here) are
+    // hidden; Chats always renders.
     const nats = bootstrapNats({ buckets: { favoriteIds: ['f1'], appIds: ['a1'], channelDmIds: ['c1'] } })
     render(wrap(<SectionsProbe />, nats))
-    await waitFor(() =>
-      expect(screen.getByTestId('section-channelDm').textContent).toContain('c1')
-    )
+    await waitFor(() => expect(screen.getByTestId('section-chats').textContent).toContain('c1'))
+    expect(screen.getByTestId('section-favorites').textContent).toContain('f1')
+    expect(screen.getByTestId('section-apps').textContent).toContain('a1')
     const items = screen.getAllByRole('listitem').map((li) => li.getAttribute('data-testid'))
-    expect(items).toEqual(['section-favorite', 'section-apps', 'section-channelDm'])
+    expect(items).toEqual(['section-favorites', 'section-apps', 'section-chats'])
   })
 
-  it('puts favorited rooms in Favorite (favorite > apps > channelDm exclusivity)', async () => {
-    // a1 appears in all three bucket lists — partition exclusivity
-    // (favorite > apps > channelDm) lands it under Favorite only.
+  it('a favorited room lands in Favorites, not Apps/Chats', async () => {
+    // a1 appears in all three buckets; the favorite stamp makes favorite win.
     const nats = bootstrapNats({
       buckets: { favoriteIds: ['f1', 'a1'], appIds: ['a1'], channelDmIds: ['c1', 'a1'] },
     })
     render(wrap(<SectionsProbe />, nats))
-    await waitFor(() =>
-      expect(screen.getByTestId('section-favorite').textContent).toContain('a1')
-    )
-    expect(screen.getByTestId('section-favorite').textContent).toContain('f1')
-    expect(screen.getByTestId('section-apps').textContent).not.toContain('a1')
-    expect(screen.getByTestId('section-channelDm').textContent).not.toContain('a1')
+    await waitFor(() => expect(screen.getByTestId('section-favorites').textContent).toContain('a1'))
+    expect(screen.getByTestId('section-favorites').textContent).toContain('f1')
+    // a1 is the only app → Apps is empty and hidden. Chats still holds c1 but
+    // not a1 (favorite wins).
+    expect(screen.queryByTestId('section-apps')).toBeNull()
+    expect(screen.getByTestId('section-chats').textContent).toContain('c1')
+    expect(screen.getByTestId('section-chats').textContent).not.toContain('a1')
   })
 
-  it('puts apps in Apps (apps > channelDm exclusivity)', async () => {
+  it('bot rooms land in Apps, plain rooms in Chats', async () => {
     const nats = bootstrapNats({
       buckets: { favoriteIds: [], appIds: ['a1'], channelDmIds: ['a1', 'c1'] },
     })
     render(wrap(<SectionsProbe />, nats))
     await waitFor(() => expect(screen.getByTestId('section-apps').textContent).toContain('a1'))
-    expect(screen.getByTestId('section-channelDm').textContent).not.toContain('a1')
-    expect(screen.getByTestId('section-channelDm').textContent).toContain('c1')
+    expect(screen.getByTestId('section-chats').textContent).not.toContain('a1')
+    expect(screen.getByTestId('section-chats').textContent).toContain('c1')
   })
 
   it('only renders rooms that appear in at least one bucket RPC', async () => {
-    // With listRooms gone, summaries are derived entirely from the
-    // three subscription RPCs — a room that isn't in any of them
-    // simply doesn't exist in state.
     const nats = bootstrapNats({
       buckets: { favoriteIds: ['f1'], appIds: ['a1'], channelDmIds: ['c1'] },
     })
     render(wrap(<SectionsProbe />, nats))
-    await waitFor(() =>
-      expect(screen.getByTestId('section-channelDm').textContent).toContain('c1')
-    )
-    expect(screen.getByTestId('section-favorite').textContent).not.toContain('u1')
-    expect(screen.getByTestId('section-apps').textContent).not.toContain('u1')
-    expect(screen.getByTestId('section-channelDm').textContent).not.toContain('u1')
+    await waitFor(() => expect(screen.getByTestId('section-chats').textContent).toContain('c1'))
+    expect(screen.queryByTestId('section-chats').textContent).not.toContain('u1')
+    expect(screen.queryByTestId('section-favorites').textContent).not.toContain('u1')
   })
 
-  it('renders all three section headers empty when every bucket RPC returns nothing', async () => {
-    // Cold-start path with zero subscriptions: the user has no rooms
-    // at all. All three sections render empty (RoomList shows the
-    // "No rooms" placeholder via section.note presence is handled in
-    // RoomList tests).
+  it('renders only the (always-present) Chats section when every bucket is empty', async () => {
     const nats = bootstrapNats({
       buckets: { favoriteIds: [], appIds: [], channelDmIds: [] },
     })
     render(wrap(<SectionsProbe />, nats))
-    // Wait for the bootstrap to settle.
     await waitFor(() => expect(nats.request).toHaveBeenCalledTimes(3))
-    expect(screen.getByTestId('section-favorite').textContent).toBe('Favorite: ')
-    expect(screen.getByTestId('section-apps').textContent).toBe('Apps: ')
-    expect(screen.getByTestId('section-channelDm').textContent).toBe('Channels and DMs: ')
+    // Empty built-ins are hidden; Chats always shows (empty).
+    const items = screen.getAllByRole('listitem').map((li) => li.getAttribute('data-testid'))
+    expect(items).toEqual(['section-chats'])
+    expect(screen.getByTestId('section-chats').textContent).toBe('Chats: ')
   })
 
-  it('preserves summaries recency order within each section', async () => {
-    // bootstrapNats builds lastMsgAt from each ID's first-char code,
-    // so c1 / f1 / a1 / u1 get distinct timestamps. Within
-    // channelDm — three rooms — the order is desc by lastMsgAt.
+  it('places all plain rooms in Chats', async () => {
     const nats = bootstrapNats({
       buckets: { favoriteIds: [], appIds: [], channelDmIds: ['f1', 'c1', 'u1'] },
     })
     render(wrap(<SectionsProbe />, nats))
-    await waitFor(() =>
-      expect(screen.getByTestId('section-channelDm').textContent).toContain('c1')
-    )
-    // We don't pin the exact order here (sortByLastMsgDesc is already
-    // covered by its own reducer tests); just assert all three rendered.
-    const channelDm = screen.getByTestId('section-channelDm').textContent
-    expect(channelDm).toContain('f1')
-    expect(channelDm).toContain('c1')
-    expect(channelDm).toContain('u1')
+    await waitFor(() => expect(screen.getByTestId('section-chats').textContent).toContain('c1'))
+    const chats = screen.getByTestId('section-chats').textContent
+    expect(chats).toContain('f1')
+    expect(chats).toContain('c1')
+    expect(chats).toContain('u1')
   })
 
   it('exposes subscription name and hrInfo on each room (sub IS the room)', async () => {
@@ -1386,7 +1411,7 @@ describe('useSidebarSections', () => {
 
     function MergeProbe() {
       const sections = useSidebarSections()
-      const channelDm = sections.find((s) => s.key === 'channelDm')
+      const channelDm = sections.find((s) => s.key === 'chats')
       return (
         <ul>
           {channelDm.rooms.map((r) => (

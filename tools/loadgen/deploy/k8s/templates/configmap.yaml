@@ -15,6 +15,7 @@ data:
   METRICS_ADDR: {{ printf ":%d" (.Values.metrics.port | int) | quote }}
   MAX_IN_FLIGHT: {{ .Values.soak.maxInFlight | quote }}
   SOAK_RUN_ID: {{ .Values.runId | quote }}
+  SOAK_ENVIRONMENT: {{ .Values.soak.environment | quote }}
   SOAK_RUN_MODE: {{ .Values.soak.runMode | quote }}
   SOAK_RUN_DURATION: "0s"
   SOAK_WARMUP: {{ .Values.soak.warmup | quote }}
@@ -48,6 +49,14 @@ data:
   SOAK_RETRY_MAX_BACKOFF: {{ .Values.soak.retryMaxBackoff | quote }}
   SOAK_RECENT_PER_ROOM: {{ .Values.soak.recentPerRoom | quote }}
   SOAK_RECENT_TOTAL: {{ .Values.soak.recentTotal | quote }}
+  SOAK_LEDGER_DIR: {{ ternary .Values.ledger.mountPath "" .Values.ledger.enabled | quote }}
+  SOAK_LEDGER_CAPACITY: {{ .Values.ledger.capacity | quote }}
+  SOAK_RECONCILE_DEADLINE: {{ .Values.ledger.reconcileDeadline | quote }}
+  SOAK_RECONCILE_RETRY_INTERVAL: {{ .Values.ledger.reconcileRetryInterval | quote }}
+  SOAK_RECONCILE_READ_SHARE: {{ .Values.ledger.reconcileReadShare | quote }}
+  SOAK_RECIPIENT_OBSERVER_ENABLED: {{ .Values.recipientObserver.enabled | quote }}
+  SOAK_RECIPIENT_OBSERVER_QUEUE: {{ .Values.recipientObserver.queue | quote }}
+  SOAK_RECIPIENT_OBSERVER_CONNECTIONS: {{ .Values.recipientObserver.connections | quote }}
   SOAK_CASSANDRA_CLEANUP: {{ .Values.cassandra.cleanup | quote }}
   SOAK_CONFIRM_KEYSPACE: {{ .Values.cassandra.confirmKeyspace | quote }}
   SOAK_TEARDOWN_BATCH_ROOMS: {{ .Values.teardown.batchRooms | quote }}

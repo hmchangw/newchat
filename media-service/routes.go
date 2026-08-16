@@ -1,13 +1,21 @@
 package main
 
-import "github.com/gin-gonic/gin"
+import (
+	"github.com/gin-gonic/gin"
 
-func registerRoutes(r *gin.Engine, h *handler) {
+	"github.com/hmchangw/chat/pkg/botauth"
+)
+
+// registerRoutes wires the public reads plus the two session-gated writes.
+// GETs stay public: the frontend loads them from <img src>.
+func registerRoutes(r *gin.Engine, h *handler, sessions botauth.TokenValidator, siteID string) {
 	r.GET("/healthz", h.HandleHealth)
 	r.GET("/api/v1/avatar/room/:roomID", h.HandleRoomAvatar)
 	r.GET("/api/v1/avatar/:accountName", h.HandleAccountAvatar)
-	r.PUT("/api/v1/avatar/bot/:botName", h.HandleBotUpload) // no auth (§7a.4)
 	r.GET("/api/v1/drive.members", h.HandleDriveMembers)
 	r.GET("/api/v1/emoji/:shortcode", h.HandleEmojiGet)
-	r.PUT("/api/v1/emoji/:shortcode", h.HandleEmojiUpload) // no auth; ?uploader= is audit-only
+
+	auth := requireSession(sessions, siteID)
+	r.PUT("/api/v1/avatar/bot/:botName", auth, requireBotSelfOrAdmin(), h.HandleBotUpload)
+	r.PUT("/api/v1/emoji/:shortcode", auth, requireAdmin(), h.HandleEmojiUpload)
 }

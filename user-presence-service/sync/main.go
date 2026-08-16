@@ -103,7 +103,14 @@ func run() error {
 		return fmt.Errorf("nats connect: %w", err)
 	}
 	defer func() {
-		if err := nc.Drain(); err != nil {
+		// ctx carries the run deadline (context.WithTimeout at the top of run) and
+		// can already be Done when this defer executes, so the drain deadline must
+		// not derive from it. Unlike teams-room-creation this binary installs no
+		// signal handler — the expiry that matters here is RunTimeout elapsing
+		// during the run.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel()
+		if err := natsutil.Drain(dctx, nc); err != nil {
 			slog.Warn("nats drain", "error", err)
 		}
 	}()
