@@ -8,9 +8,8 @@ import (
 // ErrNoCurrentKey is returned by Rotate when no current key exists for the room.
 var ErrNoCurrentKey = errors.New("no current key")
 
-// ErrRoomNotFound is returned by Set/SetWithVersion when no room document
-// exists to attach the key to. A room key is a field of its room document, so
-// the room must already exist before a key can be written.
+// ErrRoomNotFound is returned by Set when no room document exists: a key is a
+// field of its room, so the room must exist first.
 var ErrRoomNotFound = errors.New("room not found")
 
 // RoomKeyPair holds the 32-byte room secret used directly as the AES-256-GCM key by roomcrypto.
@@ -27,16 +26,14 @@ type VersionedKeyPair struct {
 // RoomKeyStore defines storage operations for room encryption secrets.
 type RoomKeyStore interface {
 	Set(ctx context.Context, roomID string, pair RoomKeyPair) (int, error)
-	// SetWithVersion overwrites the current key for roomID with pair stamped at the
-	// caller-supplied version. Intended for the rotate fallback path where a room
-	// has no current key yet but a specific version must be adopted so on-wire
-	// message envelopes match the version clients hold. Does not touch the
-	// previous-key slot.
+	// SetWithVersion stamps pair at an explicit version for the rotate fallback.
 	SetWithVersion(ctx context.Context, roomID string, pair RoomKeyPair, version int) error
 	Get(ctx context.Context, roomID string) (*VersionedKeyPair, error)
 	GetMany(ctx context.Context, roomIDs []string) (map[string]*VersionedKeyPair, error)
 	GetByVersion(ctx context.Context, roomID string, version int) (*RoomKeyPair, error)
 	Rotate(ctx context.Context, roomID string, newPair RoomKeyPair) (int, error)
 	Delete(ctx context.Context, roomID string) error
+	// EnsureIndexes creates the indexes this store owns. Idempotent.
+	EnsureIndexes(ctx context.Context) error
 	Close() error
 }
