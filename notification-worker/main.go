@@ -57,10 +57,9 @@ type config struct {
 	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
-	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"`  // false → noopPresenceSnapshotter; set true once presence service is available
-	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`   // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
-	NatsMaxPayloadBytes    int                     `env:"NATS_MAX_PAYLOAD_BYTES"    envDefault:"262144"` // must match broker max_payload; emitter rejects any batch exceeding this
-	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`   // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
+	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
+	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
+	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
 	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
 	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
 	Mode                   stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
@@ -70,19 +69,12 @@ type config struct {
 	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
-// mongoMemberLoader loads a room's member list from the subscriptions
-// collection and enriches each member with their HOME site from the users
-// collection (one batch $in query per room per cache fill — amortized by the
-// roomsubcache TTL, not per event). Subscription.siteId is deliberately NOT
-// read: it is the ROOM's home site (docs/client-api.md, Subscription schema),
-// identical for every member at the room's own site, and routing badge RPCs by
-// it sent every count to the local user-service (and created badge:{account}
-// Valkey sets at a site whose clear hooks never fire).
-//
-// NOTE: this revises the original "notification-worker does no users-collection
-// lookups" contract (docs/notification-worker-downstream-contracts.md §3) —
-// consciously, and only at cache-fill time, to route badge RPCs to each
-// recipient's home site.
+// mongoMemberLoader loads a room's member list and stamps each member's HOME
+// site from the users collection (one batch $in per cache fill). Not
+// Subscription.siteId — that is the ROOM's home site, which would misroute
+// badge RPCs. This deliberately revises the "no users-collection lookups"
+// contract (docs/notification-worker-downstream-contracts.md §3), cache-fill
+// time only.
 type mongoMemberLoader struct {
 	col   *mongo.Collection // subscriptions
 	users *mongo.Collection // users — home-site (siteId) lookup

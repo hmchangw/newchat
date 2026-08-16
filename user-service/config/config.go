@@ -64,11 +64,9 @@ type Config struct {
 	// the push pipeline (the UI renders the cap as "N-1+", e.g. 10 → "9+").
 	BadgeCountCap int `env:"BADGE_COUNT_CAP" envDefault:"10"`
 	// BadgeCountCacheFirst serves subscription.count (unread=true) from the
-	// Valkey badge set on freshness-marker hit. Rollout gate: flip to true only
-	// after ALL badge writers (room-service, inbox-worker, user-service,
-	// notification-worker path) run the marker-aware pkg/badgecache — an old
-	// writer's set-only ClearAll would leave a stale marker reading as "fresh
-	// zero" for up to the badge TTL.
+	// Valkey badge set on freshness-marker hit. Flip to true only after every
+	// badge writer runs the marker-aware pkg/badgecache — an old writer's
+	// set-only ClearAll leaves a stale "fresh zero" marker for up to the TTL.
 	BadgeCountCacheFirst bool        `env:"BADGE_COUNT_CACHE_FIRST" envDefault:"false"`
 	Mongo                MongoConfig `envPrefix:"MONGO_"`
 	NATS                 NATSConfig  `envPrefix:"NATS_"`

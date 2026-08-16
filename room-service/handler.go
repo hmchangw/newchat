@@ -32,11 +32,9 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// badgeCache is the consumer-defined interface for the thread-unread badge's
-// Valkey accelerator (pkg/badgecache.Cache satisfies it). Nil when Valkey is
-// not configured (VALKEY_ADDRS empty) — every call site guards with a nil
-// check, matching the dekProvisioner/graphClient optional-dependency pattern,
-// so a disabled cache is a silent no-op.
+// badgeCache is the badge cache's Valkey accelerator (pkg/badgecache.Cache
+// satisfies it). Nil when VALKEY_ADDRS is unset — call sites nil-check, so a
+// disabled cache is a silent no-op.
 type badgeCache interface {
 	ClearRoom(ctx context.Context, account, roomID string)
 	ClearAll(ctx context.Context, account string)
@@ -52,9 +50,8 @@ type Handler struct {
 	// still covers remote sites and pre-rollout rooms). Injected as a field
 	// rather than a constructor arg to avoid churning every NewHandler caller.
 	dekProvisioner DEKProvisioner
-	// badge is the thread-unread badge cache accelerator; nil disables the
-	// best-effort ClearRoom/ClearAll hooks on the read paths (VALKEY_ADDRS
-	// unset). Injected as a field post-construction, mirroring dekProvisioner.
+	// badge is the badge cache; nil (VALKEY_ADDRS unset) disables the
+	// invalidation hooks. Injected post-construction, mirroring dekProvisioner.
 	badge                    badgeCache
 	memberListClient         MemberListClient
 	msgReader                MessageReader
@@ -1387,11 +1384,9 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil, err
 	}
 
-	// Best-effort badge invalidation: reading the room decreases the account's
-	// unread-room set, so drop the whole set (freshness marker included) and
-	// let the next count/push recompute from Mongo — no thread-state guard
-	// needed. Home-local readers only; a cross-site reader's home replica is
-	// invalidated by inbox-worker once the federated subscription_read lands.
+	// A read shrinks the unread set — drop it and recompute on next count.
+	// Home-local only; inbox-worker clears cross-site replicas when the
+	// federated subscription_read lands.
 	if userSiteID == h.siteID && h.badge != nil {
 		h.badge.ClearAll(ctx, account)
 	}
@@ -1691,11 +1686,9 @@ func (h *Handler) messageThreadRead(c *natsrouter.Context, req model.MessageThre
 		return nil, err
 	}
 
-	// Best-effort badge invalidation: a thread read decreases the account's
-	// unread-room set, so drop the whole set (freshness marker included) — no
-	// drained guard needed; the next count/push recomputes from Mongo.
-	// Home-local readers only; a cross-site reader's home replica is
-	// invalidated by inbox-worker once the federated thread_read lands.
+	// A thread read shrinks the unread set — drop it and recompute on next
+	// count. Home-local only; inbox-worker clears cross-site replicas when the
+	// federated thread_read lands.
 	if userSiteID == h.siteID && h.badge != nil {
 		h.badge.ClearAll(ctx, account)
 	}
@@ -1774,9 +1767,8 @@ func (h *Handler) clearAllThreadRead(c *natsrouter.Context, req model.RoomThread
 		return nil, err
 	}
 
-	// Best-effort badge cache clear: only for the home-local account — a
-	// cross-site account's home replica is cleared by inbox-worker once the
-	// federated thread_read_all event lands.
+	// Home-local only; inbox-worker clears cross-site replicas when the
+	// federated thread_read_all lands.
 	if homeSite == h.siteID && h.badge != nil {
 		h.badge.ClearAll(ctx, account)
 	}
@@ -2212,11 +2204,9 @@ func (h *Handler) muteToggle(c *natsrouter.Context) (*model.MuteToggleResponse, 
 	if err != nil {
 		return nil, fmt.Errorf("get user siteId: %w", err)
 	}
-	// Best-effort badge invalidation (home-local actor; inbox-worker handles
-	// cross-site replicas via the federated event): muting is an exact removal,
-	// so the set stays a fresh materialization; unmuting needs an unread check
-	// we don't do inline, so drop the set and let the next count/push recompute
-	// — the room re-enters iff unread.
+	// Mute is an exact removal (set stays fresh); unmute drops the set so the
+	// next recompute re-adds the room iff unread. Home-local only; inbox-worker
+	// handles cross-site replicas.
 	if userSiteID == h.siteID && h.badge != nil {
 		if sub.Muted {
 			h.badge.ClearRoom(ctx, account, roomID)

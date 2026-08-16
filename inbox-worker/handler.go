@@ -15,6 +15,8 @@ import (
 )
 
 // InboxStore abstracts the data store operations needed by the inbox worker.
+//
+//go:generate mockgen -destination=mock_store_test.go -package=main . InboxStore
 type InboxStore interface {
 	CreateSubscription(ctx context.Context, sub *model.Subscription) error
 	BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error
@@ -42,10 +44,9 @@ type InboxStore interface {
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead advances the home-replica ThreadSubscription read state
-	// (lastSeenAt, updatedAt, hasMention=false) under a $lt guard, and — gated
-	// on that guard matching — $pulls parentMessageID from the subscription's
-	// threadUnread. A per-ID pull commutes with thread_unread_added's $addToSet
-	// for other threads; empty parentMessageID (legacy event) skips the pull.
+	// under a $lt guard and, when the guard matches, $pulls parentMessageID
+	// from the subscription's threadUnread (per-ID pull commutes with other
+	// threads' $addToSet; empty parentMessageID skips the pull).
 	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account, parentMessageID string, lastSeenAt time.Time) error
 	// ApplyThreadReadAll is the federated "mark all threads read" bulk clear on the
 	// user's home replica: it advances every one of account's thread subscriptions
@@ -104,10 +105,9 @@ type InboxStore interface {
 	UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error
 }
 
-// badgeCache is the consumer-defined interface for the thread-unread badge's
-// Valkey accelerator (pkg/badgecache.Cache satisfies it). Nil when Valkey is
-// not configured (VALKEY_ADDRS empty) — every call site guards with a nil
-// check, so a disabled cache is a silent no-op.
+// badgeCache is the badge cache's Valkey accelerator (pkg/badgecache.Cache
+// satisfies it). Nil when VALKEY_ADDRS is unset — call sites nil-check, so a
+// disabled cache is a silent no-op.
 type badgeCache interface {
 	ClearRoom(ctx context.Context, account, roomID string)
 	ClearAll(ctx context.Context, account string)
@@ -116,10 +116,8 @@ type badgeCache interface {
 // Handler processes cross-site InboxEvent messages; replicates only subscription/room metadata, never room keys.
 type Handler struct {
 	store InboxStore
-	// badge is the thread-unread badge cache accelerator; nil disables the
-	// best-effort ClearRoom/ClearAll hooks on the federated read paths
-	// (VALKEY_ADDRS unset). Injected as a field post-construction so the many
-	// existing NewHandler(store) call sites are unaffected.
+	// badge is the badge cache; nil (VALKEY_ADDRS unset) disables the
+	// invalidation hooks. Injected post-construction.
 	badge badgeCache
 }
 
@@ -278,8 +276,7 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	if err := h.store.DeleteThreadSubscriptions(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete thread subscriptions for room %s: %w", memberEvt.RoomID, err)
 	}
-	// Best-effort badge cache clear: a removed member can no longer see the
-	// room, so its badge entry (if any) is stale.
+	// A removed member's badge entry for this room is stale.
 	if h.badge != nil {
 		for _, account := range memberEvt.Accounts {
 			h.badge.ClearRoom(ctx, account, memberEvt.RoomID)
@@ -337,9 +334,7 @@ func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.InboxEv
 	if err := h.store.UpdateSubscriptionRead(ctx, e.RoomID, e.Account, lastSeenAt, e.Alert); err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", e.Account, e.RoomID, err)
 	}
-	// Best-effort badge invalidation: a read decreases the unread-room set —
-	// drop it wholesale (freshness marker included); the next count/push
-	// recomputes from Mongo.
+	// A read shrinks the unread set — drop it and recompute on next count.
 	if h.badge != nil {
 		h.badge.ClearAll(ctx, e.Account)
 	}
@@ -355,10 +350,8 @@ func (h *Handler) handleSubscriptionMuteToggled(ctx context.Context, evt *model.
 	if err := h.store.UpdateSubscriptionMute(ctx, e.RoomID, e.Account, e.Muted, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription mute for %q in room %q: %w", e.Account, e.RoomID, err)
 	}
-	// Best-effort badge invalidation on the home replica: muting is an exact
-	// removal (set stays a fresh materialization); unmuting needs an unread
-	// check we don't do inline, so drop the set — the next count/push
-	// recomputes and re-includes the room iff unread.
+	// Mute is an exact removal (set stays fresh); unmute drops the set so the
+	// next recompute re-adds the room iff unread.
 	if h.badge != nil {
 		if e.Muted {
 			h.badge.ClearRoom(ctx, e.Account, e.RoomID)
@@ -419,10 +412,9 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 		return fmt.Errorf("apply thread read (thread %q, account %q): %w",
 			e.ThreadRoomID, e.Account, err)
 	}
-	// Best-effort badge invalidation: a thread read decreases the unread-room
-	// set — drop it wholesale (freshness marker included); the next count/push
-	// recomputes from Mongo, which also absorbs stale/redelivered events and
-	// racing thread_unread_added writes without any post-state check.
+	// A thread read shrinks the unread set — drop it and recompute on next
+	// count; the recompute also absorbs stale/redelivered events and racing
+	// thread_unread_added writes.
 	if h.badge != nil {
 		h.badge.ClearAll(ctx, e.Account)
 	}
@@ -438,8 +430,7 @@ func (h *Handler) handleThreadReadAll(ctx context.Context, evt *model.InboxEvent
 	if err := h.store.ApplyThreadReadAll(ctx, e.Account, lastSeenAt); err != nil {
 		return fmt.Errorf("apply thread read all (account %q): %w", e.Account, err)
 	}
-	// Best-effort badge cache clear: this is the home replica's bulk dismiss,
-	// so ClearAll always applies (no per-room/per-site guard needed here).
+	// Bulk dismiss on the home replica — ClearAll always applies.
 	if h.badge != nil {
 		h.badge.ClearAll(ctx, e.Account)
 	}

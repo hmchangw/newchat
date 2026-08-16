@@ -84,14 +84,12 @@ type config struct {
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 	// RoomSubjectMode: same-site room .event namespace — global (default) | dual | local. See pkg/subject.RoomRouteMode.
 	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
-	// ValkeyAddrs seeds the Valkey cluster backing the thread-unread badge
-	// accelerator (pkg/badgecache); empty disables it (the read-path clear
-	// hooks become no-ops — Phase A deploys need no Valkey).
+	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
+	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
 	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
 	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
-	// BadgeCacheTTL bounds how long an account's badge unread-room set survives
-	// without a BumpBatch/Seed/Reseed refresh. Keep identical across the badge
-	// cache's writers (user-service, room-service, inbox-worker).
+	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
+	// Keep identical across all badge-cache writers.
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
@@ -266,9 +264,8 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	// Empty VALKEY_ADDRS disables the badge cache: the message.read/thread.read
-	// clear hooks become no-ops (nil-checked in handler.go), matching the
-	// dekProvisioner optional-dependency pattern (dev-safe default).
+	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
+	// no-ops (nil-checked in handler.go).
 	var badge badgeCache
 	var valkeyClient *redis.ClusterClient
 	if len(cfg.ValkeyAddrs) > 0 {
@@ -276,9 +273,8 @@ func main() {
 			Addrs:    cfg.ValkeyAddrs,
 			Password: cfg.ValkeyPassword,
 		})
-		// o11yredis.Wrap mutates valkeyClient in place to add tracing+metrics —
-		// mirrors pkg/valkeyutil's instrumentCluster so the badge cache's Valkey
-		// calls are observable like every other instrumented client in the repo.
+		// o11yredis.Wrap adds tracing+metrics in place, mirroring
+		// pkg/valkeyutil's instrumentCluster.
 		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
 			slog.Error("instrument valkey client failed", "error", err)
 			os.Exit(1)

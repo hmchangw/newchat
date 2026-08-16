@@ -169,12 +169,11 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	}
 
 	// Two audiences fall out of the member pipeline:
-	// - badgeAccounts: everyone whose unread state this message changes — past
-	//   the sender/muted/restricted/thread-scope filters. Their badge sets must
-	//   be bumped even when they won't be pushed (hook-vetoed, ineligible,
-	//   busy), or their cached counts go stale between reads.
-	// - candidates → survivors: the push recipients, additionally filtered by
-	//   hook veto, EligibleForPush, and presence.
+	// - badgeAccounts: everyone whose unread state changes (past the
+	//   sender/muted/restricted/thread-scope filters) — bumped even when not
+	//   pushed, or cached counts go stale.
+	// - candidates → survivors: push recipients, further filtered by hook
+	//   veto, EligibleForPush, and presence.
 	candidates := make([]roomsubcache.Member, 0, len(members))
 	accounts := make([]string, 0, len(members))
 	badgeAccounts := make([]string, 0, len(members))
@@ -249,10 +248,8 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	}
 	sort.Strings(survivors)
 
-	// Badge phase: one concurrent RPC per home site over the FULL badge
-	// audience (bumps must land even for members who won't be pushed), merged
-	// into one map; only each batch's survivor accounts ride the payload. Nil
-	// BadgeClient (env-disabled or not wired) skips this entirely — Phase A compat.
+	// Badge phase runs over the FULL badge audience (bumps must land even for
+	// members who won't be pushed); only survivors ride the push payload.
 	unreadCounts := h.fetchUnreadCounts(ctx, msg.RoomID, badgeAccounts, siteByAccount)
 	if len(survivors) == 0 {
 		return nil
@@ -309,25 +306,18 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	return nil
 }
 
-// fetchUnreadCounts groups the badge audience — every member whose unread
-// state the message changed, push-eligible or not — by home site
-// (siteByAccount, fed from Member.HomeSiteID — the member's home site per the
-// users collection, NOT the room's site) and issues one badge.count.batch RPC
-// per site concurrently,
-// merging the results into a single account → count map. A nil BadgeClient
-// (env-disabled or not wired) is a no-op (Phase A compat). A survivor with an
-// unknown home site (empty HomeSiteID — the account is missing from the users
-// collection, or a stale pre-upgrade cache entry) is skipped: it degrades to no
-// badge count rather than blocking or misrouting the RPC. A per-site RPC failure
-// is logged and that site's accounts are simply absent from the result — it must
-// never fail the push.
-func (h *Handler) fetchUnreadCounts(ctx context.Context, roomID string, survivors []string, siteByAccount map[string]string) map[string]int {
+// fetchUnreadCounts groups the badge audience by home site (Member.HomeSiteID,
+// not the room's site) and issues one badge.count.batch RPC per site
+// concurrently, merged into one account → count map. Fail-open throughout: nil
+// BadgeClient is a no-op, an unknown home site skips the account, and a
+// per-site RPC failure just leaves that site's accounts out of the result.
+func (h *Handler) fetchUnreadCounts(ctx context.Context, roomID string, accounts []string, siteByAccount map[string]string) map[string]int {
 	if h.deps.BadgeClient == nil {
 		return nil
 	}
 
 	bySite := make(map[string][]string)
-	for _, account := range survivors {
+	for _, account := range accounts {
 		siteID := siteByAccount[account]
 		if siteID == "" {
 			continue
@@ -340,7 +330,7 @@ func (h *Handler) fetchUnreadCounts(ctx context.Context, roomID string, survivor
 
 	var (
 		mu     sync.Mutex
-		merged = make(map[string]int, len(survivors))
+		merged = make(map[string]int, len(accounts))
 		g      errgroup.Group
 	)
 	for siteID, siteAccounts := range bySite {

@@ -640,20 +640,13 @@ func (h *Handler) markThreadMentions(ctx context.Context, msg *model.Message, th
 }
 
 // fanOutThreadUnread marks the reply's parent thread unread for every
-// follower except the sender: one local UpdateMany, plus one
-// thread_unread_added outbox event per remote home site so each follower's
-// origin-site replica converges. recipients may contain the sender and
-// duplicates (the caller concatenates two independently-deduped lists); both
-// are stripped here before any write.
+// follower except the sender: one local UpdateMany plus one
+// thread_unread_added outbox event per remote home site. recipients may
+// contain the sender and duplicates; both are stripped before any write.
 //
-// msgID is this reply's own message ID and MUST be part of the outbox dedup
-// key (mirrors publishThreadSubInboxIfRemote's dedup seed in this file):
-// threadUnread is cleared by reads, so two distinct replies to the same
-// thread with the same remote audience are NOT redundant — a read between
-// them means the second reply is a genuinely new unread event. Keying only
-// on (parentMessageID, site, accounts) would let JetStream's Nats-Msg-Id
-// dedup window silently swallow that second reply's publish whenever it
-// lands within the window, permanently losing the recipient's badge.
+// msgID must be part of the outbox dedup key: reads clear threadUnread, so a
+// second reply after a read is a genuinely new unread event — keying only on
+// (parentMessageID, site) would let the Nats-Msg-Id dedup window swallow it.
 func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageID, msgID, sender string, recipients []string) error {
 	accounts := make([]string, 0, len(recipients))
 	seen := map[string]struct{}{sender: {}}

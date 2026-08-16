@@ -554,11 +554,9 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 		}
 		return &models.CountResponse{Count: total}, nil
 	}
-	// Unread path: the total is not needed — only the unread set matters.
-	// Cache-first (gated): serve the badge set's size on freshness-marker hit —
-	// reads/mutes invalidate it wholesale and every message bumps it, so a hit
-	// is current. Miss/stale falls through to the Mongo compute, whose Reseed
-	// below rewrites the set and its marker.
+	// Cache-first (gated): serve the badge set's size on freshness-marker hit;
+	// miss/stale falls through to the Mongo compute, whose Reseed rewrites the
+	// set and marker.
 	if s.badgeCacheFirst {
 		if n, fresh := s.badge.Count(c, account); fresh {
 			return &models.CountResponse{Count: n}, nil
@@ -568,22 +566,17 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 	if err != nil {
 		return nil, err
 	}
-	// Best-effort reconciliation: refresh the badge accelerator from the Mongo
-	// source of truth. Fail-open (badgeCache.Reseed never errors) and does not
-	// block the reply — same goroutine, after the count is already computed.
+	// Best-effort reconciliation from the Mongo source of truth (fail-open).
 	s.badge.Reseed(c, account, ids)
 	return &models.CountResponse{Count: len(ids)}, nil
 }
 
-// unreadRooms returns the IDs of the account's active rooms with unread activity. A
-// room contributes once iff its messages are unread OR its subscription carries >=1
-// unread followed thread (Subscription.ThreadUnread — federated onto the home-replica
-// sub by message-worker/inbox-worker, so it is always complete locally and no thread
-// RPC is needed). Message-level unread needs the room's lastMsgAt: LOCAL subs carry it
-// on the $lookup baseline, CROSS-SITE subs fetch it via the per-site GetRoomsMeta RPC
-// (which also reveals not-found/soft-deleted rooms, excluded entirely — their stale
-// ThreadUnread must not count either). Everything degrades best-effort — an
-// unreachable site is skipped rather than nuking the result.
+// unreadRooms returns the account's active room IDs with unread activity: a
+// room counts iff its messages are unread or its subscription carries an
+// unread followed thread (ThreadUnread is federated home, so no thread RPC).
+// Local subs read lastMsgAt from the $lookup; cross-site subs fetch it via
+// per-site GetRoomsMeta (not-found/soft-deleted rooms are excluded entirely).
+// Best-effort — an unreachable site is skipped, not fatal.
 func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]string, error) {
 	subs, err := s.subs.GetActiveSubscriptions(c, account, s.maxSubs)
 	if err != nil {

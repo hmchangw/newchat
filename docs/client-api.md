@@ -5546,7 +5546,7 @@ Returns the count of active subscriptions, optionally filtered to unread rooms o
 
 **Threads:** a room also counts as unread if it has at least one unread followed thread, even when its own messages are all read — at most **+1 per room** (existence, not a per-thread count). Muted rooms are excluded (as with room-level unread), and only rooms within the fetched active-subscription page are considered. Thread-unread state (`Subscription.ThreadUnread`, a list of unread thread parent-message IDs) is already carried on the subscription document fetched for the room-level pass — federated onto the account's home-replica sub for both local and cross-site rooms — so this phase needs no additional RPC and cannot degrade independently of the room-level pass.
 
-**Caching:** when the server-side badge cache is enabled, the unread count may be served from the account's maintained unread-room set (invalidated on every read, thread-read, and mute change; bumped on every message) instead of being recomputed — same response schema, same accuracy envelope as the badge counts carried on push notifications.
+**Caching:** when the server-side badge cache is enabled, the unread count may be served from the account's maintained unread-room set (invalidated on every read, thread-read, and mute change; bumped on every message) instead of being recomputed — same response schema and staleness bounds as the badge counts carried on push notifications (this count is not capped for display, unlike push counts).
 
 ##### Error response
 

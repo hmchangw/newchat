@@ -23,6 +23,8 @@ services:
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
+      # Valkey cluster backing the badge cache; empty disables it.
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - MAX_ROOM_SIZE=${MAX_ROOM_SIZE:-1000}
       - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-500}
       # Room keys live in the MongoDB rooms collection; this grace window keeps a

@@ -1,9 +1,7 @@
-// Package badgecache provides a per-user Valkey SET of unread room IDs used to
-// materialize the thread-unread badge, paired with a freshness marker
-// (MarkerKey) that records "this set is accurate; missing/empty set = zero
-// unread". A best-effort, fail-open accelerator whose contents are always
-// recoverable from MongoDB (the source of truth) via Reseed, so a cache miss,
-// eviction, or Valkey error degrades the badge rather than corrupting it.
+// Package badgecache is a per-user Valkey SET of unread room IDs backing the
+// badge count, plus a freshness marker (MarkerKey): marker present means the
+// set is accurate and a missing/empty set means zero unread. Fail-open — the
+// contents are always recoverable from Mongo via Reseed.
 package badgecache
 
 import (
@@ -14,19 +12,14 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// DefaultMaxCount is the default cap applied in Go to every count
-// BumpBatch/Seed return — the badge UI never needs to distinguish "10 unread
-// rooms" from "50 unread rooms", and capping keeps SCARD's cost bounded from
-// the caller's view. Overridable per deploy via New's maxCount param
-// (user-service exposes it as BADGE_COUNT_CAP).
+// DefaultMaxCount caps every count BumpBatch/Seed return (the UI renders the
+// cap as "9+"). Override via New's maxCount (BADGE_COUNT_CAP).
 const DefaultMaxCount = 10
 
-// bumpScript adds a single room to an account's unread set and refreshes both
-// TTLs. It is a miss (no writes at all) only when NEITHER the set nor the
-// freshness marker exists — a live marker with no set is the fresh all-read
-// state, so the SADD creates the set (count 1) instead of forcing a reseed.
-// KEYS[1]=set key, KEYS[2]=marker key. ARGV[1]=roomID, ARGV[2]=ttlSeconds.
-// Returns -1 on miss, else SCARD after SADD+EXPIRE.
+// bumpScript SADDs one room and refreshes both TTLs. Miss (-1, no writes)
+// only when neither set nor marker exists; a marker-only fresh all-read state
+// is a hit that creates the set. KEYS=[set, marker], ARGV=[roomID, ttlSec];
+// returns SCARD on hit.
 var bumpScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[1]) == 0 and redis.call('EXISTS', KEYS[2]) == 0 then
   return -1
@@ -37,10 +30,8 @@ redis.call('SET', KEYS[2], '1', 'EX', ARGV[2])
 return redis.call('SCARD', KEYS[1])
 `)
 
-// seedScript creates (or extends) an unread set from a batch of room IDs,
-// refreshes its TTL, and stamps the freshness marker. KEYS[1]=set key,
-// KEYS[2]=marker key. ARGV[1]=ttlSeconds, ARGV[2..]=roomIDs (may be absent).
-// Returns SCARD after SADD+EXPIRE.
+// seedScript creates/extends the set, refreshes its TTL, and stamps the
+// marker. KEYS=[set, marker], ARGV=[ttlSec, roomIDs...]; returns SCARD.
 var seedScript = redis.NewScript(`
 if #ARGV > 1 then
   redis.call('SADD', KEYS[1], unpack(ARGV, 2))
@@ -50,11 +41,9 @@ redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
 return redis.call('SCARD', KEYS[1])
 `)
 
-// reseedScript replaces an unread set wholesale: delete, then (if any room IDs
-// were given) recreate from scratch and refresh the TTL — and stamp the
-// freshness marker either way, so an empty reseed records "fresh, zero unread"
-// rather than leaving no trace. KEYS[1]=set key, KEYS[2]=marker key.
-// ARGV[1]=ttlSeconds, ARGV[2..]=roomIDs (may be absent).
+// reseedScript replaces the set wholesale (DEL, then SADD if any IDs) and
+// stamps the marker either way — an empty reseed records "fresh, zero unread".
+// KEYS=[set, marker], ARGV=[ttlSec, roomIDs...].
 var reseedScript = redis.NewScript(`
 redis.call('DEL', KEYS[1])
 if #ARGV > 1 then
@@ -72,11 +61,9 @@ type Cache struct {
 	maxCount int
 }
 
-// New builds a Cache. ttl bounds how long an account's unread-room set
-// survives without a BumpBatch/Seed/Reseed refresh, so a crashed/missed clear
-// self-heals rather than sticking forever. maxCount caps every count
-// BumpBatch/Seed return; a non-positive value falls back to DefaultMaxCount
-// (fail-open — a misconfigured cap must not zero every badge).
+// New builds a Cache. ttl bounds how long a set survives without a refresh
+// (missed clears self-heal); maxCount caps returned counts, non-positive
+// falls back to DefaultMaxCount so a misconfig can't zero every badge.
 func New(rdb redis.UniversalClient, ttl time.Duration, maxCount int) *Cache {
 	if maxCount <= 0 {
 		maxCount = DefaultMaxCount
@@ -91,10 +78,9 @@ func Key(account string) string {
 	return "badge:{" + account + "}"
 }
 
-// MarkerKey returns the freshness-marker key for account. Marker exists ⇒ the
-// set is an accurate materialization of the account's unread rooms, where a
-// missing/empty set means zero unread. Same {account} hash tag as Key so
-// scripts and multi-key DELs can address both keys on one slot.
+// MarkerKey returns the freshness-marker key: marker present ⇒ the set is
+// accurate (missing/empty set = zero unread). Same {account} hash tag as Key
+// so scripts and multi-key DELs stay on one slot.
 func MarkerKey(account string) string {
 	return "badge:fresh:{" + account + "}"
 }
@@ -105,15 +91,10 @@ func scriptKeys(account string) []string {
 	return []string{Key(account), MarkerKey(account)}
 }
 
-// BumpBatch adds one triggering roomID to many accounts' unread sets (TTLs
-// refreshed) in a single pipeline — grouped ~1 round trip per cluster node
-// instead of one per account. The result maps each account that HIT (set or
-// freshness marker existed; SADD+EXPIRE applied) to its post-add set size,
-// capped; accounts that missed (no state at all) or errored are simply
-// absent — fail-open, so callers seed those from the source of truth.
-// NOSCRIPT failures (empty script cache on a fresh node) are re-run as one
-// pipelined EVAL pass, which also re-caches the script's SHA for subsequent
-// batches.
+// BumpBatch adds roomID to many accounts' unread sets in one pipeline. The
+// result maps each hit account to its capped post-add size; misses and errors
+// are absent (callers seed those from Mongo). NOSCRIPT commands are re-run as
+// a second pipelined EVAL pass.
 func (c *Cache) BumpBatch(ctx context.Context, accounts []string, roomID string) map[string]int {
 	counts := make(map[string]int, len(accounts))
 	if len(accounts) == 0 {
@@ -127,8 +108,7 @@ func (c *Cache) BumpBatch(ctx context.Context, accounts []string, roomID string)
 		}
 		return nil
 	}); err != nil {
-		// Logged once for visibility; the per-command errors below decide each
-		// account's outcome individually.
+		// Logged once; per-command errors below decide each account's outcome.
 		slog.WarnContext(ctx, "badgecache bump batch failed", "room_id", roomID, "accounts", len(accounts), "error", err)
 	}
 	var retry []int // indexes whose EVALSHA hit NOSCRIPT
@@ -148,8 +128,7 @@ func (c *Cache) BumpBatch(ctx context.Context, accounts []string, roomID string)
 	if len(retry) == 0 {
 		return counts
 	}
-	// Second pipelined pass with the full script source — bounded extra rounds
-	// per node instead of one round trip per affected account.
+	// Second pipelined pass with the full script source.
 	retryCmds := make([]*redis.Cmd, len(retry))
 	if _, err := c.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		for j, i := range retry {
@@ -167,10 +146,9 @@ func (c *Cache) BumpBatch(ctx context.Context, accounts []string, roomID string)
 	return counts
 }
 
-// Seed creates (or extends) account's unread set from roomIDs plus
-// triggerRoomID (deduplicated; an empty triggerRoomID is skipped), refreshes
-// the TTL, and returns the resulting size, capped. ok=false on any Valkey
-// error (fail-open, after one warn log).
+// Seed creates or extends account's set from roomIDs plus triggerRoomID
+// (deduplicated, empty skipped) and returns the capped size. ok=false on any
+// Valkey error (fail-open).
 func (c *Cache) Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (count int, ok bool) {
 	argv := seedArgs(c.ttl, roomIDs, triggerRoomID)
 	n, err := seedScript.Run(ctx, c.rdb, scriptKeys(account), argv...).Int64()
@@ -181,31 +159,26 @@ func (c *Cache) Seed(ctx context.Context, account string, roomIDs []string, trig
 	return c.capCount(n), true
 }
 
-// ClearRoom removes roomID from account's unread set — an exact removal, so
-// the freshness marker survives and the set stays a served materialization.
-// Fail-open: a missing key or any Valkey error is a silent no-op after one
-// warn log.
+// ClearRoom removes roomID from account's set. Exact removal — the freshness
+// marker survives. Fail-open on Valkey errors.
 func (c *Cache) ClearRoom(ctx context.Context, account, roomID string) {
 	if err := c.rdb.SRem(ctx, Key(account), roomID).Err(); err != nil {
 		slog.WarnContext(ctx, "badgecache clear room failed", "account", account, "room_id", roomID, "error", err)
 	}
 }
 
-// ClearAll deletes account's entire unread set AND its freshness marker (same
-// slot, one DEL) — the wholesale invalidation used by reads/unmutes; the next
-// count or push recomputes from Mongo. Fail-open: a missing key or any Valkey
-// error is a silent no-op after one warn log.
+// ClearAll deletes account's set and freshness marker (same slot, one DEL) —
+// wholesale invalidation for reads/unmutes; the next count recomputes from
+// Mongo. Fail-open on Valkey errors.
 func (c *Cache) ClearAll(ctx context.Context, account string) {
 	if err := c.rdb.Del(ctx, Key(account), MarkerKey(account)).Err(); err != nil {
 		slog.WarnContext(ctx, "badgecache clear all failed", "account", account, "error", err)
 	}
 }
 
-// Count returns the account's unread-room count from the cache. fresh=false
-// means the freshness marker is absent or Valkey errored — the caller must
-// recompute from Mongo (fail-open). fresh=true with n=0 is the legitimate
-// all-read state. n is UNCAPPED (the display cap applies only to Bump/Seed
-// returns).
+// Count returns the cached unread-room count, uncapped. fresh=false (marker
+// absent or Valkey error) means the caller must recompute from Mongo;
+// fresh=true with n=0 is the legitimate all-read state.
 func (c *Cache) Count(ctx context.Context, account string) (n int, fresh bool) {
 	var existsCmd, scardCmd *redis.IntCmd
 	if _, err := c.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -222,11 +195,9 @@ func (c *Cache) Count(ctx context.Context, account string) (n int, fresh bool) {
 	return int(scardCmd.Val()), true
 }
 
-// Reseed replaces account's unread set wholesale with roomIDs (delete, then
-// recreate and refresh the TTL) and stamps the freshness marker — the
-// reconciliation path driven by Mongo, the source of truth. An empty roomIDs
-// records the fresh zero-unread state (set deleted, marker live). Fail-open:
-// any Valkey error is a silent no-op after one warn log.
+// Reseed replaces account's set wholesale with roomIDs and stamps the marker
+// — the Mongo-driven reconciliation path. Empty roomIDs records fresh zero
+// unread. Fail-open on Valkey errors.
 func (c *Cache) Reseed(ctx context.Context, account string, roomIDs []string) {
 	argv := make([]interface{}, 0, len(roomIDs)+1)
 	argv = append(argv, ttlSeconds(c.ttl))

@@ -205,12 +205,10 @@ type SubscriptionReadEvent struct {
 	Timestamp int64 `json:"timestamp"  bson:"timestamp"`
 }
 
-// ThreadReadEvent is the InboxEvent.Payload for type "thread_read". The
-// destination advances the home-replica ThreadSubscription read state under a
-// $lt guard, then $pulls ParentMessageID from the home-replica
-// Subscription.threadUnread — an operation, not a snapshot, so it commutes
-// with concurrent thread_unread_added merges for other threads. RoomID rides
-// here because the destination InboxEvent carries no room context of its own.
+// ThreadReadEvent is the InboxEvent.Payload for "thread_read": the destination
+// advances the home-replica ThreadSubscription under a $lt guard, then $pulls
+// ParentMessageID from Subscription.threadUnread — an operation, not a
+// snapshot, so it commutes with concurrent thread_unread_added merges.
 type ThreadReadEvent struct {
 	Account      string `json:"account"`
 	RoomID       string `json:"roomId"`

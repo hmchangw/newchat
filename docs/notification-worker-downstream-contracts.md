@@ -91,9 +91,9 @@ without a separate round trip.
   absence as "zero unread"; fall back to the locally-cached badge value and
   let it refresh on next app open.
 - **Gate:** populated by default (notification-worker's `BADGE_COUNT_RPC_ENABLED`, default `true`); set `false` to disable
-  (default `false`, see §3). When disabled, `BadgeClient` is nil and the badge
+  (see §3). When disabled, `BadgeClient` is nil and the badge
   phase is skipped entirely — `unreadCounts` never appears on the wire.
-- **Fetch path:** per push, the worker groups survivors by home site and issues
+- **Fetch path:** per push, the worker groups the badge audience by home site and issues
   one `badge.count.batch` RPC per site concurrently, merging replies into one
   map before per-batch filtering (`notification-worker/handler.go`,
   `fetchUnreadCounts`).

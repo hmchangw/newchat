@@ -87,8 +87,8 @@ type PresenceClient interface {
 // badgeCache is the consumer-defined interface for the thread-unread badge's
 // Valkey accelerator (pkg/badgecache.Cache satisfies it; a disabled/no-op
 // implementation is wired when Valkey is not configured). Only
-// BumpBatch/Seed/Reseed are consumed here — ClearRoom/ClearAll belong to
-// other event handlers.
+// BumpBatch/Seed/Reseed/Count are consumed here — ClearRoom/ClearAll belong
+// to other event handlers.
 type badgeCache interface {
 	// BumpBatch pipelines the per-account bump; accounts absent from the result
 	// missed (or errored) and must be seeded from the source of truth.

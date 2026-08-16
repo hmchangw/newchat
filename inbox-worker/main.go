@@ -45,14 +45,12 @@ type config struct {
 	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
-	// ValkeyAddrs seeds the Valkey cluster backing the thread-unread badge
-	// accelerator (pkg/badgecache); empty disables it (the federated read-path
-	// clear hooks become no-ops — Phase A deploys need no Valkey).
+	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
+	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
 	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
 	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
-	// BadgeCacheTTL bounds how long an account's badge unread-room set survives
-	// without a BumpBatch/Seed/Reseed refresh. Keep identical across the badge
-	// cache's writers (user-service, room-service, inbox-worker).
+	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
+	// Keep identical across all badge-cache writers.
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 }
 
@@ -574,10 +572,9 @@ func threadReadUpdate(lastSeenAt time.Time) bson.M {
 }
 
 // ApplyThreadRead advances the home-replica ThreadSubscription under the $lt
-// guard, then — only when that guarded update actually matched a doc — mirrors
-// newThreadUnread onto the home-replica Subscription. The MatchedCount gate
-// protects the Subscription overwrite from a stale/duplicate event the same way
-// it protects the ThreadSubscription write.
+// guard, then — only when that guarded update matched — $pulls parentMessageID
+// from the Subscription's threadUnread. The MatchedCount gate keeps a
+// stale/duplicate event from touching the Subscription.
 func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account, parentMessageID string, lastSeenAt time.Time) error {
 	filter := threadReadGuard(bson.M{"threadRoomId": threadRoomID, "userAccount": account}, lastSeenAt)
 	tsRes, err := s.threadSubCol.UpdateOne(ctx, filter, threadReadUpdate(lastSeenAt))
@@ -590,8 +587,7 @@ func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoo
 		return nil
 	}
 
-	// $pull only this thread's ID — never overwrites unrelated IDs, so it
-	// commutes with concurrent thread_unread_added $addToSet merges.
+	// Per-ID $pull commutes with concurrent thread_unread_added $addToSets.
 	if _, err := s.subCol.UpdateOne(ctx,
 		bson.M{"roomId": roomID, "u.account": account},
 		bson.M{"$pull": bson.M{"threadUnread": parentMessageID}},
@@ -602,10 +598,9 @@ func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoo
 }
 
 // ApplyThreadReadAll is the home-replica bulk clear for the federated
-// thread_read_all event. It advances every one of account's thread subscriptions
-// to lastSeenAt under a per-doc $lt guard (so a genuinely newer read is never
-// regressed), and clears threadUnread on every subscription that still has
-// unread threads. Missing docs are a no-op (the mark-all dismiss is best-effort).
+// thread_read_all event: advance all of account's thread subscriptions under a
+// per-doc $lt guard and $unset threadUnread on every subscription that has
+// unread threads. Missing docs are a no-op.
 func (s *mongoInboxStore) ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error {
 	filter := threadReadGuard(bson.M{"userAccount": account}, lastSeenAt)
 	if _, err := s.threadSubCol.UpdateMany(ctx, filter, threadReadUpdate(lastSeenAt)); err != nil {
@@ -708,9 +703,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Empty VALKEY_ADDRS disables the badge cache: the federated read-path
-	// clear hooks become no-ops (nil-checked in handler.go), matching
-	// room-service's identical optional-dependency wiring (dev-safe default).
+	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
+	// no-ops (nil-checked in handler.go).
 	var badge badgeCache
 	var valkeyClient *redis.ClusterClient
 	if len(cfg.ValkeyAddrs) > 0 {
@@ -718,9 +712,8 @@ func main() {
 			Addrs:    cfg.ValkeyAddrs,
 			Password: cfg.ValkeyPassword,
 		})
-		// o11yredis.Wrap mutates valkeyClient in place to add tracing+metrics —
-		// mirrors pkg/valkeyutil's instrumentCluster so the badge cache's Valkey
-		// calls are observable like every other instrumented client in the repo.
+		// o11yredis.Wrap adds tracing+metrics in place, mirroring
+		// pkg/valkeyutil's instrumentCluster.
 		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
 			slog.Error("instrument valkey client failed", "error", err)
 			os.Exit(1)
