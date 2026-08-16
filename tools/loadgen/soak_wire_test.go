@@ -518,16 +518,39 @@ func TestSoakUserReadRequests_MatchUserServiceJSON(t *testing.T) {
 }
 
 // The page request serves apps.list, subscription.getChannels and thread.list,
-// which each declare their own limit/offset pair. Only the keys have to agree.
+// which each declare their own paging fields. Only the keys have to agree.
+//
+// thread.list carries a cursor rather than an offset, so its case is the body
+// the lane actually sends it — limit alone. Pairing it with an offset would
+// assert a field model.ThreadListRequest does not have.
 func TestSoakUserPageRequest_MatchesEveryPagedReader(t *testing.T) {
-	soakJSON, err := json.Marshal(soakUserPageRequest{Limit: 20, Offset: 40})
-	require.NoError(t, err)
-
-	appsJSON, err := json.Marshal(usermodels.AppsListRequest{Limit: 20, Offset: 40})
-	require.NoError(t, err)
-	assert.JSONEq(t, string(appsJSON), string(soakJSON))
-
-	channelsJSON, err := json.Marshal(usermodels.GetChannelsRequest{Limit: 20, Offset: 40})
-	require.NoError(t, err)
-	assert.JSONEq(t, string(channelsJSON), string(soakJSON))
+	for _, testCase := range []struct {
+		name string
+		soak soakUserPageRequest
+		real any
+	}{
+		{
+			name: "apps list",
+			soak: soakUserPageRequest{Limit: 20, Offset: 40},
+			real: usermodels.AppsListRequest{Limit: 20, Offset: 40},
+		},
+		{
+			name: "subscription channels",
+			soak: soakUserPageRequest{Limit: 20, Offset: 40},
+			real: usermodels.GetChannelsRequest{Limit: 20, Offset: 40},
+		},
+		{
+			name: "thread list",
+			soak: soakUserPageRequest{Limit: 20},
+			real: model.ThreadListRequest{Limit: 20},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			soakJSON, err := json.Marshal(testCase.soak)
+			require.NoError(t, err)
+			realJSON, err := json.Marshal(testCase.real)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(realJSON), string(soakJSON))
+		})
+	}
 }
