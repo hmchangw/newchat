@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
 // Router manages NATS subscriptions with pattern-based routing and middleware.
@@ -24,7 +26,9 @@ type Router struct {
 	middleware []HandlerFunc
 	// siteID labels client-facing requests whose subject pins the site to a
 	// static token, leaving no {siteID} param. Configured by WithSiteID.
-	siteID string
+	siteID  string
+	metrics natsmetrics.Publisher
+	reply   responder
 
 	// sem gates handler concurrency: every handler invocation acquires a
 	// slot before running and releases it on return. cap(sem) is the
@@ -82,6 +86,13 @@ func WithSiteID(siteID string) Option {
 	return func(r *Router) { r.siteID = siteID }
 }
 
+// WithMetrics enables bounded request/reply and response-publish metrics at
+// the router boundary. It is opt-in so existing routers retain their current
+// behavior until a service supplies its telemetry identity.
+func WithMetrics(metrics natsmetrics.Publisher) Option {
+	return func(r *Router) { r.metrics = metrics }
+}
+
 // New creates a Router with the given NATS connection and queue group.
 // By default, the router spawns handlers unboundedly (no admission
 // control). Use WithMaxConcurrency to opt into a concurrency cap.
@@ -93,7 +104,19 @@ func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	for _, opt := range opts {
 		opt(r)
 	}
+	r.reply = routerResponder{nc: nc, metrics: r.metrics}
 	return r
+}
+
+type routerResponder struct {
+	nc      *o11ynats.Conn
+	metrics natsmetrics.Publisher
+}
+
+func (r routerResponder) Respond(ctx context.Context, msg *nats.Msg, data []byte) error {
+	err := r.nc.Respond(ctx, msg, data)
+	r.metrics.Attempt(ctx, natsmetrics.DestinationClientResponse, natsmetrics.OperationClientResponse, err)
+	return err
 }
 
 // Default returns a Router pre-configured with the recommended middleware
@@ -134,7 +157,7 @@ func (r *Router) replyBusy(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 	// Admission rejection is operational, not a request failure; ReplyQuiet skips Classify.
-	if err := r.nc.Respond(ctx, msg, errnats.MarshalQuiet(errcode.Unavailable("service busy"))); err != nil {
+	if err := r.reply.Respond(ctx, msg, errnats.MarshalQuiet(errcode.Unavailable("service busy"))); err != nil {
 		slog.ErrorContext(ctx, "error reply failed", "error", err, "subject", msg.Subject)
 	}
 }
@@ -187,15 +210,19 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 	all = append(all, handlers...)
 
 	natsHandler := func(msgCtx context.Context, m *nats.Msg) {
+		started := time.Now()
+		operation := natsmetrics.RequestOperationFromSubject(m.Subject)
 		// Stopping gate: reject before admit so Shutdown's contract holds
 		// even if a callback fires mid-drain or after Shutdown's ctx expired.
 		if r.stopping.Load() {
 			r.replyBusy(msgCtx, m)
+			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
 			return
 		}
 		admitted, release := r.admit()
 		if !admitted {
 			r.replyBusy(msgCtx, m)
+			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
 			return
 		}
 		r.wg.Add(1)
@@ -209,8 +236,14 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 			// panic somehow escapes it. Either way, the process survives
 			// and the deferred semaphore/WG cleanup (registered earlier in
 			// this goroutine; runs after this defer in LIFO order) still fires.
+			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all, r.reply)
+			defer releaseContext(c)
+			defer func() {
+				r.metrics.HandledRequest(msgCtx, operation, time.Since(started), c.requestResult)
+			}()
 			defer func() {
 				if rec := recover(); rec != nil {
+					c.requestResult = natsmetrics.RequestInternal
 					// Warn, not Error: a hit here means Recovery middleware
 					// is misconfigured or absent (Recovery would have caught
 					// it earlier and produced a structured ErrInternal
@@ -223,14 +256,12 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 						"stack", string(debug.Stack()))
 					if m.Reply != "" {
 						// Already logged via the Warn above; ReplyQuiet avoids a second line.
-						if err := r.nc.Respond(msgCtx, m, errnats.MarshalQuiet(errcode.Internal("internal error"))); err != nil {
+						if err := r.reply.Respond(msgCtx, m, errnats.MarshalQuiet(errcode.Internal("internal error"))); err != nil {
 							slog.ErrorContext(msgCtx, "error reply failed", "error", err, "subject", m.Subject)
 						}
 					}
 				}
 			}()
-			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all, r.nc)
-			defer releaseContext(c)
 			c.Next()
 		}()
 	}
