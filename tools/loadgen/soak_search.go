@@ -21,6 +21,12 @@ const (
 	soakSearchIndexFound   soakSearchIndexResult = "found"
 	soakSearchIndexMissing soakSearchIndexResult = "missing"
 	soakSearchIndexUnknown soakSearchIndexResult = "unknown"
+	// soakSearchIndexTooEarly is distinct from unknown on purpose. It says the
+	// answer is not due yet, which lets the reconciler reschedule to the settle
+	// boundary instead of re-asking every retry interval — at the default
+	// rates, polling through a 30s settle window would spend several times the
+	// entire reconciliation budget on queries that cannot succeed.
+	soakSearchIndexTooEarly soakSearchIndexResult = "too_early"
 )
 
 type soakSearchConfig struct {
@@ -150,7 +156,7 @@ func (r *soakSearchReader) IndexedAt(
 			fmt.Errorf("search index probe requires an account, room and message")
 	}
 	if r.now().UTC().Sub(publishedAt.UTC()) < r.cfg.Settle {
-		return soakSearchIndexUnknown, nil
+		return soakSearchIndexTooEarly, nil
 	}
 
 	var response model.SearchMessagesResponse
@@ -270,4 +276,18 @@ func (p *soakSearchIndexProbe) Indexed(
 	return p.reader.IndexedAt(
 		ctx, account, roomID, messageID, message.Content, operation.StartedAt,
 	)
+}
+
+// SettleBoundary is the earliest time an index probe for a message published at
+// publishedAt can produce a usable answer. The reconciler reschedules a
+// too-early operation to exactly this point.
+func (r *soakSearchReader) SettleBoundary(publishedAt time.Time) time.Time {
+	return publishedAt.UTC().Add(r.cfg.Settle)
+}
+
+func (p *soakSearchIndexProbe) SettleBoundary(publishedAt time.Time) time.Time {
+	if p == nil || p.reader == nil {
+		return publishedAt
+	}
+	return p.reader.SettleBoundary(publishedAt)
 }

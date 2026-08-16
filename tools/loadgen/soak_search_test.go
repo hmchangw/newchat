@@ -109,7 +109,7 @@ func TestSoakSearchReader_IndexProbeWaitsOutTheSettleWindow(t *testing.T) {
 	)
 
 	require.NoError(t, err)
-	assert.Equal(t, soakSearchIndexUnknown, result)
+	assert.Equal(t, soakSearchIndexTooEarly, result)
 	assert.Empty(t, transport.subjects, "no query is issued before the settle window elapses")
 	assert.Empty(t, recorder.samples)
 }
@@ -257,4 +257,24 @@ func TestMessageCreateExpectedEffects_AddsTheIndexEffectOnlyWhenEnabled(t *testi
 		}
 	}
 	assert.True(t, found)
+}
+
+// Inside the settle window the probe must say so explicitly rather than
+// reporting a generic unknown. The reconciler reschedules a too-early
+// operation to the settle boundary; treating it as unknown would re-ask every
+// retry interval and burn the whole reconciliation budget on queries that
+// cannot succeed yet.
+func TestSoakSearchReader_IndexProbeReportsTooEarlyDistinctly(t *testing.T) {
+	publishedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	now := publishedAt.Add(30 * time.Second)
+	transport := &soakRoomOpsTransport{reply: []byte(`{"messages":[]}`)}
+	reader, _ := newSoakSearchFixture(t, transport, 8, func() time.Time { return now })
+
+	result, err := reader.IndexedAt(
+		context.Background(), "user-a", "room-1", "m1", "hello soak", publishedAt,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, soakSearchIndexTooEarly, result)
+	assert.Empty(t, transport.subjects)
 }

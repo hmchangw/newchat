@@ -318,6 +318,9 @@ func validateSoakRoomLaneConfig(cfg *soakConfig) error {
 	if err := validateSoakPresenceConfig(cfg); err != nil {
 		return err
 	}
+	if err := validateSoakSearchConfig(cfg); err != nil {
+		return err
+	}
 
 	// Room and member reconciliation borrows room-read slots, so the read lane
 	// must retire mutations at least as fast as they are produced. Below that
@@ -437,4 +440,41 @@ func logSoakAssumptions(cfg *soakConfig) {
 		"i12MessagesPerActiveUserPerDay", messagesPerActiveUserPerDay,
 		"i12Derived", i12Derived,
 	)
+}
+
+// validateSoakSearchConfig guards the two ways search observation can be
+// configured into uselessness.
+//
+// The observer adds a second reconcile step to every admitted message, drawn
+// from the same read-lane share the history step already uses. Below capacity
+// the unresolved backlog grows without bound and every message eventually
+// expires unverified — the run would report a search problem it created itself.
+func validateSoakSearchConfig(cfg *soakConfig) error {
+	if !cfg.SearchObserverEnabled {
+		return nil
+	}
+	if cfg.SearchSettle <= 0 {
+		return fmt.Errorf("SOAK_SEARCH_SETTLE must be greater than zero")
+	}
+	if cfg.SearchSettle >= cfg.ReconcileDeadline {
+		return fmt.Errorf(
+			"SOAK_SEARCH_SETTLE %s must be shorter than SOAK_RECONCILE_DEADLINE %s, "+
+				"or the index probe never gets an answer before the deadline",
+			cfg.SearchSettle, cfg.ReconcileDeadline,
+		)
+	}
+	// One step for the history observer, one for the search observer.
+	const reconcileStepsPerMessage = 2
+	capacity := cfg.ReadRate * cfg.ReconcileReadShare
+	required := cfg.SendRate * reconcileStepsPerMessage
+	if cfg.SendRate > 0 && capacity < required {
+		return fmt.Errorf(
+			"SOAK_SEARCH_OBSERVER_ENABLED needs %.3f reconcile operations/s at "+
+				"SOAK_SEND_RATE %.3f, but SOAK_READ_RATE %.3f at "+
+				"SOAK_RECONCILE_READ_SHARE %.3f supplies only %.3f; "+
+				"raise SOAK_READ_RATE or lower SOAK_SEND_RATE",
+			required, cfg.SendRate, cfg.ReadRate, cfg.ReconcileReadShare, capacity,
+		)
+	}
+	return nil
 }

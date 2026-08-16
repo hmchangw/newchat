@@ -662,3 +662,48 @@ func TestValidateSoakConfig_PresenceBoundsAreSkippedWhenDisabled(t *testing.T) {
 
 	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
 }
+
+func TestValidateSoakConfig_SearchObserverNeedsReconciliationCapacity(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SearchObserverEnabled = true
+	cfg.SendRate = 100
+	cfg.ReadRate = 700
+	cfg.ReconcileReadShare = 0.5
+
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace),
+		"two reconcile steps per message fit inside 350 slots/s at 100 msg/s")
+
+	// Each admitted message now needs a history step and a search step, so the
+	// budget has to cover both.
+	cfg.ReadRate = 200
+
+	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_SEARCH_OBSERVER_ENABLED")
+}
+
+// With the observer off the message lane needs one reconcile step per message,
+// so the tighter budget is fine. The check must not fire when it does not apply.
+func TestValidateSoakConfig_SearchCapacityCheckOnlyAppliesWhenEnabled(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SearchObserverEnabled = false
+	cfg.SendRate = 100
+	cfg.ReadRate = 200
+	cfg.ReconcileReadShare = 0.5
+
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}
+
+// The settle window must fit inside the reconciliation deadline, or every
+// message resolves unverified for lack of time to answer.
+func TestValidateSoakConfig_SearchSettleMustFitTheDeadline(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SearchObserverEnabled = true
+	cfg.SearchSettle = cfg.ReconcileDeadline
+
+	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_SEARCH_SETTLE")
+}

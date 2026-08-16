@@ -300,9 +300,23 @@ Three outcomes, deliberately distinct:
 | Probe answer | Result |
 |---|---|
 | Message among the hits | `good` |
-| Inside the settle window | not yet resolved; re-asked later |
+| Inside the settle window | rescheduled to the settle boundary, no query sent |
 | search-service answered without it, past the deadline | `missing_after_deadline` |
 | search-service unreachable, past the deadline | `unverified` |
+| Still too early at the deadline | `unverified` |
+
+"Too early" is a distinct answer from "unknown" on purpose. The operation is
+rescheduled to exactly the settle boundary rather than re-asked every retry
+interval: at the default rates, polling through a 30 s settle window would cost
+roughly `SOAK_SEND_RATE x 20` reconcile slots per second against a budget of
+`SOAK_READ_RATE x SOAK_RECONCILE_READ_SHARE`, several times over — the
+reconciliation backlog would grow without bound and the run would report a
+search problem it had created itself.
+
+Startup refuses a configuration where that cannot work: the observer adds a
+second reconcile step to every admitted message, so `SOAK_READ_RATE x
+SOAK_RECONCILE_READ_SHARE` must be at least `2 x SOAK_SEND_RATE`, and
+`SOAK_SEARCH_SETTLE` must be shorter than `SOAK_RECONCILE_DEADLINE`.
 
 An outage proves nothing about the message, so an unreachable search-service is
 never a loss claim.

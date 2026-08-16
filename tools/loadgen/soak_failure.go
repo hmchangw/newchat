@@ -532,6 +532,9 @@ type soakFailureRecipientFinalizer interface {
 // reconciler depends only on the question it asks.
 type soakFailureSearchIndexProbe interface {
 	Indexed(context.Context, *failureOperation) (soakSearchIndexResult, error)
+	// SettleBoundary is when a too-early operation can first produce a usable
+	// answer, so it is rescheduled there rather than polled meanwhile.
+	SettleBoundary(publishedAt time.Time) time.Time
 }
 
 func withSoakFailureSearchIndexProbe(
@@ -690,16 +693,27 @@ func (r *soakFailureReconciler) observeSearchIndex(
 	if probeErr == nil && result == soakSearchIndexFound {
 		return r.observeAs(operation.ID, failureObserverSearchIndex, failureObservationGood, now)
 	}
-	// Not yet indexed inside the settle window, or the probe could not run:
-	// leave it claimable so a later pass can ask again.
 	if now.Before(operation.Deadline) {
-		if err := r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval)); err != nil {
+		// A too-early operation is rescheduled to the settle boundary, not the
+		// retry interval. Polling through the settle window would spend several
+		// times the whole reconciliation budget on queries that cannot succeed,
+		// starving the lanes that share it.
+		retryAt := now.Add(r.retryInterval)
+		if result == soakSearchIndexTooEarly && r.searchIndex != nil {
+			if boundary := r.searchIndex.SettleBoundary(operation.StartedAt); boundary.After(retryAt) {
+				retryAt = boundary
+			}
+		}
+		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
 			return err
 		}
 		return nil
 	}
 	observation := failureObservationMissingAfterDeadline
-	if probeErr != nil || result == soakSearchIndexUnknown {
+	if probeErr != nil || result != soakSearchIndexMissing {
+		// Only a healthy search-service that answered without the message is
+		// loss. Too-early at the deadline means the settle window outlived it,
+		// which is a configuration problem, not evidence.
 		observation = failureObservationUnverified
 	}
 	return r.observeAs(operation.ID, failureObserverSearchIndex, observation, now)

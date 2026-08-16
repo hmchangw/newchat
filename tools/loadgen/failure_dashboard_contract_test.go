@@ -184,12 +184,15 @@ func TestFailureObservationDeploymentContract_UsesIndependentRecipientObserverVa
 }
 
 func TestFailureObservationScope_FormalCampaignArtifactsAreAbsent(t *testing.T) {
+	// Scoped to loadgen's own files. The root Makefile used to be checked here
+	// too, which made this package's tests depend on a file whose content has
+	// nothing to do with loadgen's behaviour — a false alarm waiting for an
+	// unrelated edit.
 	paths := []string{
 		"soak_config.go",
 		"soak_main.go",
 		"deploy/docker-compose.yml",
 		"README.md",
-		"../../Makefile",
 	}
 	for _, path := range paths {
 		encoded, err := os.ReadFile(path)
