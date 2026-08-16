@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -21,12 +22,27 @@ const historyRequestTimeout = 2 * time.Second
 // read-receipt lookup through it lets room-service drop its direct Cassandra
 // dependency entirely.
 type historyMessageReader struct {
-	nc     *o11ynats.Conn
-	siteID string
+	nc      *o11ynats.Conn
+	siteID  string
+	metrics requestRecorder
 }
 
-func newHistoryMessageReader(nc *o11ynats.Conn, siteID string) *historyMessageReader {
-	return &historyMessageReader{nc: nc, siteID: siteID}
+type historyReaderOption func(*historyMessageReader)
+
+func withHistoryRequestRecorder(metrics requestRecorder) historyReaderOption {
+	return func(r *historyMessageReader) { r.metrics = metrics }
+}
+
+func withHistoryMetrics(metrics natsmetrics.Publisher) historyReaderOption {
+	return withHistoryRequestRecorder(metrics)
+}
+
+func newHistoryMessageReader(nc *o11ynats.Conn, siteID string, opts ...historyReaderOption) *historyMessageReader {
+	r := &historyMessageReader{nc: nc, siteID: siteID}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // getMessageByIDRequest mirrors history-service's GetMessageByIDRequest wire
@@ -42,12 +58,18 @@ type getMessageByIDRequest struct {
 // errcode.Unavailable so read receipts fail soft instead of erroring hard.
 func (r *historyMessageReader) GetMessageReadMeta(
 	ctx context.Context, account, roomID, messageID string,
-) (MessageReadMeta, bool, error) {
+) (meta MessageReadMeta, found bool, resultErr error) {
 	reqBytes, err := json.Marshal(getMessageByIDRequest{MessageID: messageID})
 	if err != nil {
 		return MessageReadMeta{}, false, fmt.Errorf("marshal get-message request: %w", err)
 	}
 
+	started := time.Now()
+	defer func() {
+		if r.metrics != nil {
+			r.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), resultErr)
+		}
+	}()
 	msg, err := r.nc.Request(ctx, subject.MsgGet(account, roomID, r.siteID), reqBytes, historyRequestTimeout)
 	if err != nil {
 		return MessageReadMeta{}, false, errcode.Unavailable("read receipts are temporarily unavailable",

@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -34,6 +35,7 @@ type config struct {
 	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
 	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
 	Mode              string                  `env:"MODE"            envDefault:"default"`
+	ServiceName       string                  `env:"OTEL_SERVICE_NAME" envDefault:"unknown-service"`
 	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
 	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
@@ -122,7 +124,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -159,7 +164,7 @@ func main() {
 		slog.Info("room-meta L2 invalidation enabled")
 	}
 
-	keySender := roomkeysender.NewSender(nc.NatsConn())
+	keySender := roomkeysender.NewSender(nc.NatsConn(), roomkeysender.WithMetrics(publishMetrics))
 
 	// Eager at-rest DEK provisioning for synchronously-created DM rooms (the
 	// serverCreateDM path bypasses room-service's create-room flow). nil when
@@ -210,15 +215,20 @@ func main() {
 	}
 	handler := NewHandler(store, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		msg := natsutil.NewMsg(ctx, subj, data)
+		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
 		if msgID == "" {
 			// Ephemeral client-delivery — core NATS, not persisted.
-			if err := nc.PublishMsg(ctx, msg); err != nil {
+			err := nc.PublishMsg(ctx, msg)
+			publishMetrics.Attempt(ctx, destination, operation, err)
+			if err != nil {
 				return fmt.Errorf("publish to %q: %w", subj, err)
 			}
 			return nil
 		}
 		// JetStream-backed (MESSAGES-CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
-		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
+		_, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
+		publishMetrics.Attempt(ctx, destination, operation, err)
+		if err != nil {
 			return fmt.Errorf("publish to %q: %w", subj, err)
 		}
 		return nil
@@ -231,7 +241,11 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("marshal user identity fanout: %w", err)
 		}
-		if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subject.OrgSyncUsersUpsert(cfg.SiteID), data)); err != nil {
+		subj := subject.OrgSyncUsersUpsert(cfg.SiteID)
+		_, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
+		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+		publishMetrics.Attempt(ctx, destination, operation, err)
+		if err != nil {
 			return fmt.Errorf("publish user identity fanout: %w", err)
 		}
 		return nil
@@ -240,14 +254,20 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.New(nc, "room-worker", natsrouter.WithSiteID(cfg.SiteID))
+	router := natsrouter.New(nc, "room-worker", natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode))
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Stream: streamCfg.Name, Consumer: consumerCfg.Durable,
+	})
+	consumerMetrics.LoopStopped(ctx)
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -258,25 +278,35 @@ func main() {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
+	consumerMetrics.LoopStarted(ctx)
 
+	wg.Add(1)
 	go func() {
+		// The loop itself is counted so shutdown, which stops the iterator and
+		// then waits on wg, cannot pass through while a message Next already
+		// returned is still on its way to a worker.
+		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				consumerMetrics.LoopFailed(context.Background(), err)
 				return
 			}
 			sem <- struct{}{}
 			wg.Add(1)
-			go func() {
+			go func(msgCtx context.Context, msg jetstream.Msg) {
+				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.RoomEventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
+				msgCtx = tracked.Context(msgCtx)
 				// runJobWithRecovery contains handler panics (it Acks — drops — the
 				// poison message) so this async goroutine, which runs outside
 				// natsrouter's recovery middleware, can't crash the worker.
 				defer func() {
+					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
 				}()
-				runJobWithRecovery(msgCtx, handler, msg)
-			}()
+				runJobWithRecovery(msgCtx, handler, tracked)
+			}(msgCtx, msg)
 		}
 	}()
 
@@ -295,6 +325,10 @@ func main() {
 	// emitted during NATS drain, mongo disconnect, and keyStore close.
 	hooks := []func(ctx context.Context) error{
 		func(ctx context.Context) error {
+			// Mark the loop down before stopping the iterator: the Next error that
+			// Stop provokes is a clean shutdown, and LoopFailed only reports a
+			// terminal cause while the loop still reads as up.
+			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
 			return nil
 		},

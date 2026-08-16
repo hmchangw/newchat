@@ -52,12 +52,18 @@ const (
 	EventThreadReplyAdded EventType = "thread_reply_added"
 	EventSend             EventType = "send"
 	EventTeamsBatch       EventType = "teams_batch"
+	EventRoomCreate       EventType = "room_create"
+	EventMemberAdd        EventType = "member_add"
+	EventMemberRemove     EventType = "member_remove"
+	EventRoomRename       EventType = "room_rename"
+	EventMemberMuted      EventType = "member_muted"
 	EventUnknown          EventType = "unknown"
 )
 
 var allEventTypes = []EventType{
 	EventCreated, EventUpdated, EventDeleted, EventPinned, EventUnpinned,
 	EventReacted, EventThreadReplyAdded, EventSend, EventTeamsBatch, EventUnknown,
+	EventRoomCreate, EventMemberAdd, EventMemberRemove, EventRoomRename, EventMemberMuted,
 }
 
 type PublishOutcome string
@@ -95,6 +101,25 @@ var allTerminalReasons = []TerminalReason{
 	TerminalStreamUnavailable, TerminalInvalidPayload, TerminalInternal,
 }
 
+type RequestResult string
+
+const (
+	RequestSuccess         RequestResult = "success"
+	RequestBadRequest      RequestResult = "bad_request"
+	RequestUnauthenticated RequestResult = "unauthenticated"
+	RequestForbidden       RequestResult = "forbidden"
+	RequestNotFound        RequestResult = "not_found"
+	RequestConflict        RequestResult = "conflict"
+	RequestTooManyRequests RequestResult = "too_many_requests"
+	RequestUnavailable     RequestResult = "unavailable"
+	RequestInternal        RequestResult = "internal"
+)
+
+var allRequestResults = []RequestResult{
+	RequestSuccess, RequestBadRequest, RequestUnauthenticated, RequestForbidden,
+	RequestNotFound, RequestConflict, RequestTooManyRequests, RequestUnavailable, RequestInternal,
+}
+
 type DestinationKind string
 
 const (
@@ -104,6 +129,9 @@ const (
 	DestinationPush           DestinationKind = "push"
 	DestinationOutbox         DestinationKind = "outbox"
 	DestinationInbox          DestinationKind = "inbox"
+	DestinationRoomCanonical  DestinationKind = "room_canonical"
+	DestinationRoomEvent      DestinationKind = "room_event"
+	DestinationMemberEvent    DestinationKind = "member_event"
 	DestinationClientResponse DestinationKind = "client_response"
 	DestinationUserSync       DestinationKind = "user_sync"
 	DestinationUnknown        DestinationKind = "unknown"
@@ -111,7 +139,8 @@ const (
 
 var allDestinations = []DestinationKind{
 	DestinationCanonical, DestinationRecipientEvent, DestinationNotification, DestinationPush,
-	DestinationOutbox, DestinationInbox, DestinationClientResponse, DestinationUserSync, DestinationUnknown,
+	DestinationOutbox, DestinationInbox, DestinationRoomCanonical, DestinationRoomEvent,
+	DestinationMemberEvent, DestinationClientResponse, DestinationUserSync, DestinationUnknown,
 }
 
 type Operation string
@@ -126,13 +155,26 @@ const (
 	OperationPresenceLookup      Operation = "presence_lookup"
 	OperationThreadTCount        Operation = "thread_tcount"
 	OperationTeamsUserUpsert     Operation = "teams_user_upsert"
+	OperationHistoryRead         Operation = "history_read"
+	OperationHistoryMutation     Operation = "history_mutation"
+	OperationRoomRead            Operation = "room_read"
+	OperationRoomMutation        Operation = "room_mutation"
+	OperationMemberRead          Operation = "member_read"
+	OperationMemberMutation      Operation = "member_mutation"
+	OperationTeamsRoom           Operation = "teams_room"
+	OperationRoomPublish         Operation = "room_publish"
+	OperationMemberPublish       Operation = "member_publish"
+	OperationOutboxPublish       Operation = "outbox_publish"
 	OperationUnknown             Operation = "unknown"
 )
 
 var allOperations = []Operation{
 	OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
 	OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
-	OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert, OperationUnknown,
+	OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
+	OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
+	OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
+	OperationMemberPublish, OperationOutboxPublish, OperationUnknown,
 }
 
 // Metrics owns the shared instruments. Instrument-creation failures fall back
@@ -147,6 +189,8 @@ type Metrics struct {
 	terminalFailures   metric.Int64Counter
 	requests           metric.Int64Counter
 	requestDuration    metric.Float64Histogram
+	handledRequests    metric.Int64Counter
+	handlerDuration    metric.Float64Histogram
 }
 
 // NewFromProvider builds the shared instruments on this package's own scope.
@@ -197,7 +241,15 @@ func New(meter metric.Meter) *Metrics {
 	if err != nil {
 		requestDuration, _ = noopMeter.Float64Histogram("chat.nats.request.duration")
 	}
-	return &Metrics{loop: loop, messages: messages, redeliveries: redeliveries, processingDuration: processing, publishAttempts: publishAttempts, publishRetries: publishRetries, terminalFailures: terminal, requests: requests, requestDuration: requestDuration}
+	handledRequests, err := meter.Int64Counter("chat.nats.request.handled", metric.WithDescription("Inbound NATS request/reply handler results."))
+	if err != nil {
+		handledRequests, _ = noopMeter.Int64Counter("chat.nats.request.handled")
+	}
+	handlerDuration, err := meter.Float64Histogram("chat.nats.request.handler.duration", metric.WithDescription("Inbound NATS request/reply handler duration."), metric.WithUnit("s"), latency)
+	if err != nil {
+		handlerDuration, _ = noopMeter.Float64Histogram("chat.nats.request.handler.duration")
+	}
+	return &Metrics{loop: loop, messages: messages, redeliveries: redeliveries, processingDuration: processing, publishAttempts: publishAttempts, publishRetries: publishRetries, terminalFailures: terminal, requests: requests, requestDuration: requestDuration, handledRequests: handledRequests, handlerDuration: handlerDuration}
 }
 
 type ConsumerConfig struct {
@@ -233,6 +285,11 @@ type retryKey struct {
 type requestKey struct {
 	operation Operation
 	outcome   PublishOutcome
+}
+
+type handledRequestKey struct {
+	operation Operation
+	result    RequestResult
 }
 
 type Consumer struct {
@@ -303,7 +360,7 @@ func (c *Consumer) LoopFailed(ctx context.Context, err error) {
 	}
 	reason := TerminalInternal
 	switch {
-	case errors.Is(err, jetstream.ErrConsumerDeleted):
+	case errors.Is(err, jetstream.ErrConsumerDeleted), errors.Is(err, jetstream.ErrConsumerNotFound):
 		reason = TerminalConsumerDeleted
 	case errors.Is(err, jetstream.ErrStreamNotFound), errors.Is(err, jetstream.ErrNoStreamResponse),
 		errors.Is(err, jetstream.ErrConnectionClosed), errors.Is(err, nats.ErrConnectionClosed),
@@ -444,6 +501,7 @@ type Publisher struct {
 	attempt map[publishKey]metric.MeasurementOption
 	retry   map[retryKey]metric.MeasurementOption
 	request map[requestKey]metric.MeasurementOption
+	handled map[handledRequestKey]metric.MeasurementOption
 }
 
 func (m *Metrics) Publisher(serviceName, site string) Publisher {
@@ -458,6 +516,7 @@ func (m *Metrics) Publisher(serviceName, site string) Publisher {
 		attempt: make(map[publishKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)*len(allPublishOutcomes)),
 		retry:   make(map[retryKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)),
 		request: make(map[requestKey]metric.MeasurementOption, len(allOperations)*len(allPublishOutcomes)),
+		handled: make(map[handledRequestKey]metric.MeasurementOption, len(allOperations)*len(allRequestResults)),
 	}
 	for _, destination := range allDestinations {
 		dst := attribute.String("destination_kind", string(destination))
@@ -473,6 +532,9 @@ func (m *Metrics) Publisher(serviceName, site string) Publisher {
 		op := attribute.String("operation", string(operation))
 		for _, outcome := range allPublishOutcomes {
 			p.request[requestKey{operation, outcome}] = build(op, attribute.String("outcome", string(outcome)))
+		}
+		for _, result := range allRequestResults {
+			p.handled[handledRequestKey{operation, result}] = build(op, attribute.String("result", string(result)))
 		}
 	}
 	return p
@@ -514,9 +576,22 @@ func (p Publisher) Request(ctx context.Context, operation Operation, duration ti
 	p.metrics.requestDuration.Record(ctx, duration.Seconds(), opt)
 }
 
+// HandledRequest records one inbound request/reply handler result. Both labels
+// are normalized against closed enums; subjects and error strings are never
+// attributes.
+func (p Publisher) HandledRequest(ctx context.Context, operation Operation, duration time.Duration, result RequestResult) {
+	if p.metrics == nil {
+		return
+	}
+	opt := p.handled[handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)}]
+	p.metrics.handledRequests.Add(ctx, 1, opt)
+	p.metrics.handlerDuration.Record(ctx, duration.Seconds(), opt)
+}
+
 func NormalizeEventType(value string) EventType {
 	switch EventType(value) {
-	case EventCreated, EventUpdated, EventDeleted, EventPinned, EventUnpinned, EventReacted, EventThreadReplyAdded, EventSend, EventTeamsBatch:
+	case EventCreated, EventUpdated, EventDeleted, EventPinned, EventUnpinned, EventReacted, EventThreadReplyAdded, EventSend, EventTeamsBatch,
+		EventRoomCreate, EventMemberAdd, EventMemberRemove, EventRoomRename, EventMemberMuted:
 		return EventType(value)
 	default:
 		return EventUnknown
@@ -525,7 +600,9 @@ func NormalizeEventType(value string) EventType {
 
 func normalizeDestination(destination DestinationKind) DestinationKind {
 	switch destination {
-	case DestinationCanonical, DestinationRecipientEvent, DestinationNotification, DestinationPush, DestinationOutbox, DestinationInbox, DestinationClientResponse, DestinationUserSync:
+	case DestinationCanonical, DestinationRecipientEvent, DestinationNotification, DestinationPush,
+		DestinationOutbox, DestinationInbox, DestinationRoomCanonical, DestinationRoomEvent,
+		DestinationMemberEvent, DestinationClientResponse, DestinationUserSync:
 		return destination
 	default:
 		return DestinationUnknown
@@ -534,10 +611,25 @@ func normalizeDestination(destination DestinationKind) DestinationKind {
 
 func normalizeOperation(operation Operation) Operation {
 	switch operation {
-	case OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish, OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage, OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert:
+	case OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
+		OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
+		OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
+		OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
+		OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
+		OperationMemberPublish, OperationOutboxPublish:
 		return operation
 	default:
 		return OperationUnknown
+	}
+}
+
+func normalizeRequestResult(result RequestResult) RequestResult {
+	switch result {
+	case RequestSuccess, RequestBadRequest, RequestUnauthenticated, RequestForbidden,
+		RequestNotFound, RequestConflict, RequestTooManyRequests, RequestUnavailable, RequestInternal:
+		return result
+	default:
+		return RequestInternal
 	}
 }
 

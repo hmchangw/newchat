@@ -50,6 +50,7 @@ type NATSConfig struct {
 
 // Config is the top-level configuration for the history-service.
 type Config struct {
+	ServiceName             string          `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	SiteID                  string          `env:"SITE_ID"                    envDefault:"site-local"`
 	HealthAddr              string          `env:"HEALTH_ADDR"                envDefault:":8081"`
 	PProfEnabled            bool            `env:"PPROF_ENABLED" envDefault:"false"`

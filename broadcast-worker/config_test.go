@@ -43,6 +43,15 @@ func TestConfig_Mode(t *testing.T) {
 	}
 }
 
+func TestConfig_ServiceName(t *testing.T) {
+	t.Setenv("MODE", "bot")
+	t.Setenv("OTEL_SERVICE_NAME", "bot-broadcast-worker")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, "bot-broadcast-worker", cfg.ServiceName)
+}
+
 func TestConfig_RoomSubjectMode(t *testing.T) {
 	t.Setenv("MODE", "user")
 
@@ -80,4 +89,17 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 			require.Equal(t, tc.want, mode)
 		})
 	}
+}
+
+// An unset OTEL_SERVICE_NAME must fall back to the documented default rather
+// than an empty label: service_name is the dimension every NATS metric family
+// is joined through, and an empty one silently orphans the series.
+func TestConfig_ServiceNameDefaultsWhenUnset(t *testing.T) {
+	t.Setenv("MODE", "bot")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	require.NoError(t, os.Unsetenv("OTEL_SERVICE_NAME"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, "unknown-service", cfg.ServiceName)
 }

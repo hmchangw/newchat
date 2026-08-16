@@ -13,12 +13,11 @@ import (
 type notifyKind string
 
 const (
-	notifyKindPush         notifyKind = "push"
-	notifyKindNotification notifyKind = "notification"
-	notifyKindUnknown      notifyKind = "unknown"
+	notifyKindPush    notifyKind = "push"
+	notifyKindUnknown notifyKind = "unknown"
 )
 
-var allNotifyKinds = []notifyKind{notifyKindPush, notifyKindNotification, notifyKindUnknown}
+var allNotifyKinds = []notifyKind{notifyKindPush, notifyKindUnknown}
 
 type notifyResult string
 
