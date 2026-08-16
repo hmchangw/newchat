@@ -368,7 +368,7 @@ type failureLedger struct {
 
 	active                map[string]*failureOperation
 	starting              map[string]struct{}
-	verifyQueue           failureVerifyQueue
+	verifyQueues          map[string]*failureVerifyQueue
 	results               map[failureResult]uint64
 	observations          map[failureObserver]map[failureObservation]uint64
 	notSent               map[string]struct{}
@@ -434,6 +434,7 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 		recorder:     cfg.Recorder,
 		active:       make(map[string]*failureOperation, cfg.Capacity),
 		starting:     make(map[string]struct{}),
+		verifyQueues: make(map[string]*failureVerifyQueue),
 		results:      make(map[failureResult]uint64),
 		observations: make(map[failureObserver]map[failureObservation]uint64),
 		notSent:      make(map[string]struct{}),
@@ -820,15 +821,46 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 }
 
 func (l *failureLedger) ClaimDue(now time.Time) (failureOperation, bool) {
+	return l.claimDue(now, nil)
+}
+
+// ClaimDueLanes restricts a claim to the given lanes. Each lane is reconciled
+// by the observer that understands its effects, so a lane-blind claim would
+// hand a room mutation to the message-history verifier and vice versa.
+func (l *failureLedger) ClaimDueLanes(now time.Time, lanes []string) (failureOperation, bool) {
+	if len(lanes) == 0 {
+		return failureOperation{}, false
+	}
+	return l.claimDue(now, lanes)
+}
+
+func (l *failureLedger) claimDue(now time.Time, lanes []string) (failureOperation, bool) {
 	if now.IsZero() {
 		now = l.now()
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.verifyQueue.Len() == 0 || now.Before(l.verifyQueue[0].nextVerifyAt) {
+	if lanes == nil {
+		lanes = make([]string, 0, len(l.verifyQueues))
+		for lane := range l.verifyQueues {
+			lanes = append(lanes, lane)
+		}
+		slices.Sort(lanes)
+	}
+	var earliest *failureVerifyQueue
+	for _, lane := range lanes {
+		queue := l.verifyQueues[lane]
+		if queue == nil || queue.Len() == 0 || now.Before((*queue)[0].nextVerifyAt) {
+			continue
+		}
+		if earliest == nil || (*queue)[0].nextVerifyAt.Before((*earliest)[0].nextVerifyAt) {
+			earliest = queue
+		}
+	}
+	if earliest == nil {
 		return failureOperation{}, false
 	}
-	selected, ok := heap.Pop(&l.verifyQueue).(*failureOperation)
+	selected, ok := heap.Pop(earliest).(*failureOperation)
 	if !ok {
 		return failureOperation{}, false
 	}
@@ -858,21 +890,27 @@ func (l *failureLedger) enqueueLocked(operation *failureOperation) {
 	if !l.scheduleNextLocked(operation) {
 		return
 	}
-	heap.Push(&l.verifyQueue, operation)
+	queue := l.verifyQueues[operation.Lane]
+	if queue == nil {
+		queue = &failureVerifyQueue{}
+		l.verifyQueues[operation.Lane] = queue
+	}
+	heap.Push(queue, operation)
 }
 
+// scheduleNextLocked decides when an operation becomes claimable again. A
+// query observer polls from its verify time so a converged effect is seen
+// early; an event observer has nothing to poll, so it waits for the deadline
+// and is resolved from what arrived by then.
 func (l *failureLedger) scheduleNextLocked(operation *failureOperation) bool {
-	if slices.Contains(operation.Expected, failureObserverHistory) {
-		if _, observed := operation.Observations[failureObserverHistory]; !observed {
+	for _, observer := range operation.Expected {
+		if _, observed := operation.Observations[observer]; observed {
+			continue
+		}
+		if failureObserverRegistry[observer].Mode == failureObserverQuery {
 			if operation.nextVerifyAt.IsZero() {
 				operation.nextVerifyAt = operation.VerifyAfter
 			}
-			return true
-		}
-	}
-	if slices.Contains(operation.Expected, failureObserverRecipient) {
-		if _, observed := operation.Observations[failureObserverRecipient]; !observed {
-			operation.nextVerifyAt = operation.Deadline
 			return true
 		}
 	}
@@ -886,10 +924,11 @@ func (l *failureLedger) scheduleNextLocked(operation *failureOperation) bool {
 }
 
 func (l *failureLedger) dequeueLocked(operation *failureOperation) {
-	if operation.heapIndex < 0 {
+	queue := l.verifyQueues[operation.Lane]
+	if operation.heapIndex < 0 || queue == nil {
 		return
 	}
-	heap.Remove(&l.verifyQueue, operation.heapIndex)
+	heap.Remove(queue, operation.heapIndex)
 }
 
 func (l *failureLedger) Snapshot() failureLedgerSnapshot {

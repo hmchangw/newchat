@@ -503,3 +503,53 @@ func soakRoomRenameName(base string, sequence int) string {
 	}
 	return base + suffix
 }
+
+// RoomName returns the last name the pool saw confirmed for a room, which the
+// rename observer uses to tell "the rename did not land" from a name nobody
+// asked for.
+func (p *soakRoomStatePool) RoomName(roomID string) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	room, ok := p.byID[roomID]
+	if !ok {
+		return "", false
+	}
+	return room.baseName, true
+}
+
+// AnyOwner returns one owner account, used to address rooms the create lane
+// made rather than the seed.
+func (p *soakRoomStatePool) AnyOwner() (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.rooms) == 0 {
+		return "", false
+	}
+	return p.rooms[0].owner, true
+}
+
+// CreateRoomMembers returns a requester and the members a new room should start
+// with. Members come from candidate rings rather than the reserved cycle, so a
+// created room never disturbs the add/remove pairing of an existing one.
+func (p *soakRoomStatePool) CreateRoomMembers(size int) (string, []string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.rooms) == 0 || size < 1 {
+		return "", nil, false
+	}
+	room := p.rooms[p.rng.Intn(len(p.rooms))]
+	if room.owner == "" || len(room.available) == 0 {
+		return "", nil, false
+	}
+	members := make([]string, 0, size)
+	for i := 0; i < len(room.available) && len(members) < size; i++ {
+		if room.available[i] == room.owner {
+			continue
+		}
+		members = append(members, room.available[i])
+	}
+	if len(members) == 0 {
+		return "", nil, false
+	}
+	return room.owner, members, true
+}

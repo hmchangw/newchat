@@ -368,3 +368,76 @@ func TestValidateFailureOperation_RejectsUnknownOperationType(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported type")
 }
+
+func TestFailureLedger_ClaimDueLanesKeepsLanesSeparate(t *testing.T) {
+	now := time.Date(2026, 8, 16, 6, 0, 0, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 4, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, ledger.Start(&failureOperation{
+		SchemaVersion: 2, ID: "message-1", RunID: "run-1",
+		Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
+		OperationType: failureOperationMessageCreate, LifecycleState: failureOperationJournaled,
+		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+		Targets: map[string]string{"messageId": "message-1"},
+		Effects: messageCreateExpectedEffectsForObservers(false, 0, ""),
+	}))
+	require.NoError(t, ledger.Start(&failureOperation{
+		SchemaVersion: 2, ID: "member-1", RunID: "run-1",
+		Scenario: soakFailureScenario, Lane: soakFailureLaneMemberMutation,
+		OperationType: failureOperationMemberAdd, LifecycleState: failureOperationJournaled,
+		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+		Targets: map[string]string{"roomId": "room-1"},
+		Effects: memberMutationExpectedEffects(),
+	}))
+
+	claimed, ok := ledger.ClaimDueLanes(now, []string{soakFailureLaneMemberMutation})
+	require.True(t, ok)
+	assert.Equal(t, "member-1", claimed.ID,
+		"a lane-scoped claim must never hand an operation to the wrong verifier")
+
+	_, ok = ledger.ClaimDueLanes(now, []string{soakFailureLaneMemberMutation})
+	assert.False(t, ok)
+
+	remaining, ok := ledger.ClaimDue(now)
+	require.True(t, ok)
+	assert.Equal(t, "message-1", remaining.ID)
+}
+
+func TestFailureLedger_ClaimDueLanesRejectsAnEmptyLaneSet(t *testing.T) {
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+
+	_, ok := ledger.ClaimDueLanes(time.Now(), nil)
+
+	assert.False(t, ok)
+}
+
+func TestFailureLedger_RoomLaneIsClaimableFromItsVerifyTime(t *testing.T) {
+	now := time.Date(2026, 8, 16, 6, 0, 0, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 2, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(&failureOperation{
+		SchemaVersion: 2, ID: "member-1", RunID: "run-1",
+		Scenario: soakFailureScenario, Lane: soakFailureLaneMemberMutation,
+		OperationType: failureOperationMemberAdd, LifecycleState: failureOperationJournaled,
+		StartedAt: now, VerifyAfter: now.Add(10 * time.Second),
+		Deadline: now.Add(10 * time.Minute),
+		Targets:  map[string]string{"roomId": "room-1"},
+		Effects:  memberMutationExpectedEffects(),
+	}))
+
+	_, ok := ledger.ClaimDueLanes(now.Add(time.Second), []string{soakFailureLaneMemberMutation})
+	assert.False(t, ok, "the persist grace has not elapsed yet")
+
+	claimed, ok := ledger.ClaimDueLanes(
+		now.Add(11*time.Second), []string{soakFailureLaneMemberMutation},
+	)
+	require.True(t, ok)
+	assert.Equal(t, "member-1", claimed.ID,
+		"a query observer must poll from its verify time, not wait for the deadline")
+}
