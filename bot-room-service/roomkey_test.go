@@ -12,10 +12,9 @@ import (
 // package's existing fakeStore/captureOutbox/fakeSysmsgPub test doubles
 // (bot-room-service has no gomock/mockgen infrastructure).
 type fakeKeyStore struct {
-	SetFn            func(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
-	GetFn            func(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
-	RotateFn         func(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair) (int, error)
-	SetWithVersionFn func(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair, version int) error
+	SetFn    func(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
+	GetFn    func(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
+	RotateFn func(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair) (int, error)
 }
 
 func (f *fakeKeyStore) Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error) {
@@ -40,13 +39,6 @@ func (f *fakeKeyStore) Rotate(ctx context.Context, roomID string, newPair roomke
 		return f.RotateFn(ctx, roomID, newPair)
 	}
 	return 2, nil
-}
-
-func (f *fakeKeyStore) SetWithVersion(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair, version int) error {
-	if f.SetWithVersionFn != nil {
-		return f.SetWithVersionFn(ctx, roomID, newPair, version)
-	}
-	return nil
 }
 
 // fakePublisher captures roomkeysender publishes (subject + payload) for assertions.

@@ -6320,53 +6320,167 @@ func TestHandler_ProcessAddMembers_HasAnyRoomMembersError_FailsClosed(t *testing
 // TestRequireDedupRequestID retired — the strict X-Request-ID gate now lives in
 // pkg/natsrouter.RequireRequestID (see TestRequireRequestID_* there).
 
-// TestHandler_RotateAndFanOut_ErrNoCurrentKey_UsesPredictedVersion pins the
-// contract that when Rotate returns ErrNoCurrentKey (Valkey lost the key between
-// Get and Rotate), the fallback calls SetWithVersion at predictedVersion
-// (currentPair.Version+1) rather than Set (which would stamp v0), preventing the
-// version mismatch that would render the next encrypted message undecryptable.
-func TestHandler_RotateAndFanOut_ErrNoCurrentKey_UsesPredictedVersion(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockKeys := NewMockRoomKeyStore(ctrl)
+// keyEventRecorder captures published RoomKeyEvents; fanOutKey is concurrent, hence the mutex.
+type keyEventRecorder struct {
+	mu     sync.Mutex
+	events []model.RoomKeyEvent
+}
 
-	// currentPair simulates the key the handler fetched before calling rotateAndFanOut.
-	currentPair := &roomkeystore.VersionedKeyPair{
-		Version: 4,
-		KeyPair: roomkeystore.RoomKeyPair{
-			PrivateKey: bytes.Repeat([]byte{0xAA}, 32),
-		},
+func (r *keyEventRecorder) Publish(_ string, data []byte) error {
+	var evt model.RoomKeyEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return err
 	}
-	// predictedVersion = currentPair.Version + 1 = 5
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, evt)
+	return nil
+}
 
-	// Step 1: Rotate fails with ErrNoCurrentKey — Valkey lost the current key
-	// between Get (which returned currentPair) and Rotate.
-	gomock.InOrder(
-		mockKeys.EXPECT().
-			Rotate(gomock.Any(), "test-room", gomock.Any()).
-			Return(0, roomkeystore.ErrNoCurrentKey),
-		// Step 2: fallback must write at predictedVersion=5, NOT at v0 via Set.
-		// If the bug were present (Set called instead), gomock would raise
-		// "unexpected call to Set" because Set is not expected here.
-		mockKeys.EXPECT().
-			SetWithVersion(gomock.Any(), "test-room", gomock.Any(), 5).
-			Return(nil),
-	)
+func (r *keyEventRecorder) captured() []model.RoomKeyEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]model.RoomKeyEvent(nil), r.events...)
+}
 
+// newRotateTestHandler wires a Handler to mockKeys and a recording key sender.
+func newRotateTestHandler(t *testing.T, ctrl *gomock.Controller, mockKeys *MockRoomKeyStore) (*Handler, *keyEventRecorder) {
+	t.Helper()
+	rec := &keyEventRecorder{}
 	h := &Handler{
 		store:     NewMockSubscriptionStore(ctrl),
 		siteID:    "site-a",
 		keyStore:  mockKeys,
-		keySender: testKeySender,
+		keySender: roomkeysender.NewSender(rec),
 		publish: func(_ context.Context, _ string, _ []byte, _ string) error {
 			return nil
 		},
 	}
+	return h, rec
+}
 
-	// Call rotateAndFanOut directly — it is unexported but lives in package main,
-	// so the test (same package) can call it without test infrastructure.
-	// Pass an empty survivors slice: no fan-out side effects needed for this test.
-	err := h.rotateAndFanOut(context.Background(), "test-room", currentPair, nil)
-	require.NoError(t, err)
+func TestHandler_RotateAndFanOut_FansOutStoreAssignedVersion(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	// The store assigns 7, not the predicted 6: fanning out 6 would label these
+	// bytes with a version the store gave to a different key.
+	var committed []byte
+	mockKeys.EXPECT().
+		Rotate(gomock.Any(), "test-room", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (int, error) {
+			committed = pair.PrivateKey
+			return 7, nil
+		})
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 5,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.NoError(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+
+	events := rec.captured()
+	require.Len(t, events, 1)
+	assert.Equal(t, 7, events[0].Version,
+		"fan-out must carry the version the store assigned, never current+1")
+	require.NotEmpty(t, committed)
+	assert.Equal(t, committed, events[0].PrivateKey,
+		"survivors must receive exactly the bytes the store committed")
+}
+
+func TestHandler_RotateAndFanOut_ErrNoCurrentKey_AdoptsSetVersion(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	// Key vanished between Get and Rotate: Set at v0 is correct, but it is
+	// last-write-wins, so fan out the read-back — here deliberately other bytes.
+	winner := bytes.Repeat([]byte{0xBB}, 32)
+	var setPriv []byte
+	gomock.InOrder(
+		mockKeys.EXPECT().
+			Rotate(gomock.Any(), "test-room", gomock.Any()).
+			Return(0, roomkeystore.ErrNoCurrentKey),
+		mockKeys.EXPECT().
+			Set(gomock.Any(), "test-room", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (int, error) {
+				setPriv = pair.PrivateKey
+				return 0, nil
+			}),
+		mockKeys.EXPECT().
+			Get(gomock.Any(), "test-room").
+			Return(&roomkeystore.VersionedKeyPair{
+				Version: 0,
+				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: winner},
+			}, nil),
+	)
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 4,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.NoError(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+
+	events := rec.captured()
+	require.Len(t, events, 1)
+	assert.Equal(t, 0, events[0].Version, "the Set fallback adopts version 0")
+	assert.Equal(t, winner, events[0].PrivateKey,
+		"the Set leg must fan out the store's read-back bytes, not the locally generated pair")
+	require.NotEmpty(t, setPriv)
+	assert.NotEqual(t, setPriv, events[0].PrivateKey,
+		"the locally generated pair lost the race and must never reach survivors")
+}
+
+// A failed or empty read-back means the committed bytes are unknown, and handing
+// survivors an unconfirmed key is the failure this ordering exists to prevent.
+func TestHandler_RotateAndFanOut_SetReadBackFailure_FansOutNothing(t *testing.T) {
+	cases := []struct {
+		name    string
+		pair    *roomkeystore.VersionedKeyPair
+		getErr  error
+		wantMsg string
+	}{
+		{name: "get errors", getErr: errors.New("mongo down"), wantMsg: "read back stored room key"},
+		{name: "get returns nil", pair: nil, wantMsg: "read back stored room key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			mockKeys := NewMockRoomKeyStore(ctrl)
+			gomock.InOrder(
+				mockKeys.EXPECT().Set(gomock.Any(), "test-room", gomock.Any()).Return(0, nil),
+				mockKeys.EXPECT().Get(gomock.Any(), "test-room").Return(tc.pair, tc.getErr),
+			)
+
+			h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+
+			err := h.rotateAndFanOut(context.Background(), "test-room", nil, []string{"alice"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantMsg)
+			assert.Empty(t, rec.captured(), "an unconfirmed key must never reach survivors")
+		})
+	}
+}
+
+func TestHandler_RotateAndFanOut_StoreFailureFansOutNothing(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	mockKeys.EXPECT().
+		Rotate(gomock.Any(), "test-room", gomock.Any()).
+		Return(0, errors.New("mongo down"))
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 5,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.Error(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+	assert.Empty(t, rec.captured(), "a failed rotation must not hand survivors a phantom key")
 }
 
 // Dept-first tiebreak: on overlap (org membership reachable via both sect and

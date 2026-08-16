@@ -101,14 +101,6 @@ func (s *mongoStore) Set(ctx context.Context, roomID string, pair RoomKeyPair) (
 	return 0, nil
 }
 
-// SetWithVersion overwrites the current key slot with pair stamped at version.
-func (s *mongoStore) SetWithVersion(ctx context.Context, roomID string, pair RoomKeyPair, version int) error {
-	if err := s.setCurrent(ctx, roomID, pair.PrivateKey, version); err != nil {
-		return fmt.Errorf("set room key with version %d: %w", version, err)
-	}
-	return nil
-}
-
 // Get returns the room's current key, or (nil, nil) when the room or its key is absent.
 func (s *mongoStore) Get(ctx context.Context, roomID string) (*VersionedKeyPair, error) {
 	var doc roomKeyDoc

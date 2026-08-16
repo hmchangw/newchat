@@ -67,10 +67,6 @@ func (stubRoomKeyStore) Set(_ context.Context, _ string, _ roomkeystore.RoomKeyP
 	return 0, nil
 }
 
-func (stubRoomKeyStore) SetWithVersion(_ context.Context, _ string, _ roomkeystore.RoomKeyPair, _ int) error {
-	return nil
-}
-
 func (stubRoomKeyStore) Rotate(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
 	return 1, nil
 }

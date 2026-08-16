@@ -11,10 +11,8 @@
 //
 // # Lifecycle
 //
-// A room key is a field of its room, so it cannot exist without the room. Set and
-// SetWithVersion return ErrRoomNotFound when no room document exists; the room
-// must be created first (room-worker provisions the key immediately after
-// inserting the room document). Delete unsets the encKey sub-document.
+// A room key is a field of its room, so Set returns ErrRoomNotFound when the room
+// does not exist yet. Delete unsets the encKey sub-document.
 //
 // # Concurrency
 //
