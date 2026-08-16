@@ -155,6 +155,7 @@ func TestHistoryService_LoadHistory_Success(t *testing.T) {
 	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
 	require.NoError(t, err)
 	assert.Len(t, resp.Messages, 4)
+	assert.False(t, resp.HasNext)
 }
 
 func TestHistoryService_LoadHistory_StoreError(t *testing.T) {
@@ -207,6 +208,7 @@ func TestHistoryService_LoadHistory_NoHSS(t *testing.T) {
 	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
 	require.NoError(t, err)
 	assert.Len(t, resp.Messages, 3)
+	assert.False(t, resp.HasNext)
 }
 
 func TestHistoryService_LoadHistory_WithBeforeTimestamp(t *testing.T) {
@@ -227,6 +229,39 @@ func TestHistoryService_LoadHistory_WithBeforeTimestamp(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, resp.Messages, 2)
+}
+
+func TestHistoryService_LoadHistory_HasNextTrue_AccessWindowed(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	messages := []models.Message{
+		{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)},
+		{MessageID: "m0", RoomID: "r1", CreatedAt: joinTime.Add(time.Minute)},
+	}
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).Return(makePage(messages, true), nil)
+
+	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	assert.True(t, resp.HasNext)
+}
+
+func TestHistoryService_LoadHistory_HasNextTrue_OpenWalk(t *testing.T) {
+	svc, msgs, subs, _, _ := newService(t)
+	c := testContext()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+
+	messages := []models.Message{
+		{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)},
+	}
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(makePage(messages, true), nil)
+
+	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	assert.True(t, resp.HasNext)
 }
 
 func TestHistoryService_LoadHistory_ReturnsMinUserLastSeenAt(t *testing.T) {

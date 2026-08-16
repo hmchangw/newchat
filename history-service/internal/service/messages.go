@@ -95,6 +95,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 	setDecodedAttachments(c, page.Data)
 	return &models.LoadHistoryResponse{
 		Messages:          page.Data,
+		HasNext:           page.HasNext,
 		MinUserLastSeenAt: minMs,
 	}, nil
 }
