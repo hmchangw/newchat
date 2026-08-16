@@ -29,7 +29,7 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 	walPath := filepath.Join(evidenceDirectory, "run.wal")
 	wal, err := openFailureWAL(walPath)
 	require.NoError(t, err)
-	contract := newFailureObserverContract(true)
+	contract := newFailureObserverContract(true, false)
 	ledger, err := newFailureLedger(failureLedgerConfig{
 		Capacity: 4, Journal: wal, Now: func() time.Time { return now },
 		ObserverContract: &contract,

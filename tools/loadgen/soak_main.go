@@ -573,6 +573,9 @@ func runSoakWorkload(
 	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
 		trackerOptions = append(trackerOptions, withSoakFailureRecipientObserver(recipientObserver))
 	}
+	trackerOptions = append(
+		trackerOptions, withSoakFailureSearchObserver(cfg.Soak.SearchObserverEnabled),
+	)
 	failureTracker := newSoakFailureTracker(
 		ledger,
 		cfg.Soak.PersistGrace,
@@ -677,7 +680,25 @@ func runSoakWorkload(
 		recorders.verify,
 		now,
 	)
-	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 1)
+	searchReader, searchReaderErr := newSoakSearchReader(
+		soakSearchConfig{
+			SiteID: cfg.SiteID, PageSize: opts.PageLimit,
+			RequestTimeout: soakRequestTimeout, Settle: cfg.Soak.SearchSettle,
+		},
+		&topology, rpc, recorders.read,
+		rand.New(rand.NewSource(seed+13)),
+		now,
+	)
+	if searchReaderErr != nil {
+		slog.Error("build Cassandra soak search reader", "error", searchReaderErr)
+		return 1
+	}
+	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 2)
+	if cfg.Soak.SearchObserverEnabled {
+		reconcilerOptions = append(reconcilerOptions, withSoakFailureSearchIndexProbe(
+			newSoakSearchIndexProbe(searchReader, catalog),
+		))
+	}
 	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
 		reconcilerOptions = append(reconcilerOptions, withSoakFailureRecipientFinalizer(recipientObserver))
 	}
@@ -953,6 +974,12 @@ func runSoakWorkload(
 			}
 			return nil
 		},
+		SearchRead: func(actionCtx context.Context, _ bool) error {
+			if err := searchReader.ReadMixed(actionCtx); err != nil {
+				slog.Error("run Cassandra soak search read", "error", err)
+			}
+			return nil
+		},
 		RoomCreate: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomCreate(actionCtx); err != nil {
 				slog.Error("run Cassandra soak room create", "error", err)
@@ -1166,6 +1193,8 @@ func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
 		soakRPCReadReceiptList:  cfg.RoomReadRate * 0.10,
 		soakRPCMessageRead:      cfg.ReadReceiptRate,
 		soakRPCPresenceQuery:    cfg.PresenceRate * cfg.PresenceQueryShare,
+		soakRPCSearchMessages:   cfg.SearchReadRate * 0.7,
+		soakRPCSearchRooms:      cfg.SearchReadRate * 0.3,
 	}
 	// The user lane dispatches uniformly across its reads, so each carries an
 	// equal share of the configured rate.

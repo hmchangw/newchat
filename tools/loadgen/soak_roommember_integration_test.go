@@ -71,7 +71,7 @@ func (h *soakRoomMemberEvidenceHarness) openLedger(t *testing.T, epoch string) *
 	t.Helper()
 	wal, err := openFailureWAL(failureWALPath(h.ledgerDir, "run-1", epoch))
 	require.NoError(t, err)
-	contract := newFailureObserverContract(false)
+	contract := newFailureObserverContract(false, false)
 	ledger, err := newFailureLedger(failureLedgerConfig{
 		Capacity: 8, Journal: wal, Now: func() time.Time { return h.now },
 		ObserverContract: &contract,

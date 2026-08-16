@@ -104,6 +104,9 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_ROOM_MUTATION_RATE` | `1` | Rename and mute toggles per second, alternating |
 | `SOAK_ROOM_READ_RATE` | `20` | Room reads per second; also funds reconciliation |
 | `SOAK_USER_READ_RATE` | `10` | user-service reads per second, split evenly across its reads |
+| `SOAK_SEARCH_READ_RATE` | `5` | search-service reads per second |
+| `SOAK_SEARCH_OBSERVER_ENABLED` | `false` | Opt in to search-index observation |
+| `SOAK_SEARCH_SETTLE` | `30s` | Grace before the index probe asks about a message |
 | `SOAK_ROOM_CREATE_RATE` | `0.05` | Room creations per second until the budget is spent |
 | `SOAK_ROOM_CREATE_BUDGET` | `2000` | Total rooms the create lane may add in one run |
 | `SOAK_ROOM_CREATE_SIZE` | `5` | Members a created room starts with |
@@ -138,6 +141,7 @@ and no extra phase.
 | `read_receipt` | `message_read` | `admission` + `room_state` |
 | `room_read` | member list, rooms-info batch, subscription list, read receipts | none |
 | `user_read` | 14 user-service reads, dispatched uniformly | none |
+| `search_read` | message and room search | none |
 | `presence` | hello / ping / activity / bye, batch query | none |
 
 `room_read` is read-only. A read has no expected side effect to reconcile, so
@@ -281,6 +285,39 @@ Backlog is not a complete loss signal on its own. `search-sync-worker` Acks and
 drops a message whose payload fails to decode or build an action, so that class
 of loss leaves the consumer at zero pending — only the `search_index` observer
 sees it.
+
+### Search-index observation
+
+`search-sync-worker` Acks and drops a message whose payload it cannot decode or
+turn into a bulk action. That loss leaves its consumer at zero pending, no Nak
+and no redelivery — it is invisible from JetStream by construction. The only
+way to see it is to ask the query side, which is what the `search_index`
+observer does: after `SOAK_SEARCH_SETTLE`, it searches the message's own room
+and checks whether the message ID is among the hits.
+
+Three outcomes, deliberately distinct:
+
+| Probe answer | Result |
+|---|---|
+| Message among the hits | `good` |
+| Inside the settle window | not yet resolved; re-asked later |
+| search-service answered without it, past the deadline | `missing_after_deadline` |
+| search-service unreachable, past the deadline | `unverified` |
+
+An outage proves nothing about the message, so an unreachable search-service is
+never a loss claim.
+
+The probe takes its query term from the in-process message catalog, not the
+WAL: the ledger deliberately never stores a message body, and search-service
+has no lookup by message ID. A message recovered from the WAL after a pod
+replacement therefore has no term to query with and resolves `unverified` — the
+same stance recovered recipient operations already take, and the honest one,
+since the pre-restart evidence cannot be reconstructed.
+
+The observer is **opt-in** via `SOAK_SEARCH_OBSERVER_ENABLED`. With it off the
+observer contract is byte-identical to one built before the observer existed,
+so an existing `SOAK_LEDGER_EPOCH` stays valid. Turning it on changes the
+contract and requires a new epoch.
 
 ### Ledger epoch
 

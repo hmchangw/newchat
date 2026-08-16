@@ -123,7 +123,9 @@ func openSoakFailureLedger(
 		return nil, fmt.Errorf("soak configuration is required")
 	}
 	var journal failureJournal
-	contract := newFailureObserverContract(cfg.RecipientObserverEnabled)
+	contract := newFailureObserverContract(
+		cfg.RecipientObserverEnabled, cfg.SearchObserverEnabled,
+	)
 	if cfg.LedgerDir != "" {
 		wal, err := openFailureWAL(failureWALPath(cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch))
 		if err != nil {
@@ -186,6 +188,13 @@ type soakFailureTracker struct {
 	metrics      *Metrics
 	runID        string
 	recipient    *failureRecipientObserver
+	// searchIndexed is set when the search-index observer is enabled, which
+	// makes every admitted message additionally require an index hit.
+	searchIndexed bool
+}
+
+func withSoakFailureSearchObserver(enabled bool) soakFailureTrackerOption {
+	return func(tracker *soakFailureTracker) { tracker.searchIndexed = enabled }
 }
 
 type soakFailureTrackerOption func(*soakFailureTracker)
@@ -299,6 +308,7 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 		Targets:  map[string]string{"messageId": pending.MessageID, "roomId": pending.Target.RoomID},
 		Effects: messageCreateExpectedEffectsForObservers(
 			t.recipient != nil,
+			t.searchIndexed,
 			len(recipients),
 			hex.EncodeToString(recipientHash[:]),
 		),
@@ -510,10 +520,24 @@ type soakFailureReconciler struct {
 	retryInterval time.Duration
 	now           func() time.Time
 	recipient     soakFailureRecipientFinalizer
+	searchIndex   soakFailureSearchIndexProbe
 }
 
 type soakFailureRecipientFinalizer interface {
 	Finalize(string, time.Time, time.Time) recipientEvidenceResult
+}
+
+// soakFailureSearchIndexProbe answers whether one admitted message reached the
+// search index. Defined here rather than with the search reader so the
+// reconciler depends only on the question it asks.
+type soakFailureSearchIndexProbe interface {
+	Indexed(context.Context, *failureOperation) (soakSearchIndexResult, error)
+}
+
+func withSoakFailureSearchIndexProbe(
+	probe soakFailureSearchIndexProbe,
+) soakFailureReconcilerOption {
+	return func(reconciler *soakFailureReconciler) { reconciler.searchIndex = probe }
 }
 
 type soakFailureReconcilerOption func(*soakFailureReconciler)
@@ -592,6 +616,10 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 			}
 			return true, nil
 		}
+		if _, searchObserved := operation.Observations[failureObserverSearchIndex]; !searchObserved &&
+			slices.Contains(operation.Expected, failureObserverSearchIndex) {
+			return true, r.observeSearchIndex(ctx, &operation, now)
+		}
 		for _, observer := range operation.Expected {
 			if _, observed := operation.Observations[observer]; observed {
 				continue
@@ -638,6 +666,56 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		observation = failureObservationBad
 	}
 	return true, r.observe(operation.ID, observation, now)
+}
+
+// observeSearchIndex asks the query side whether the message reached the index.
+//
+// Three outcomes, deliberately distinct. A hit is good. An unreachable
+// search-service proves nothing and stays claimable until the deadline, then
+// resolves unverified — reporting missing there would turn every dependency
+// outage longer than the deadline into a data-loss claim. Only an answer from a
+// healthy search-service that does not contain the message, past the deadline,
+// is loss; and it is only loss because admission already recorded good, which
+// the ledger enforces.
+func (r *soakFailureReconciler) observeSearchIndex(
+	ctx context.Context,
+	operation *failureOperation,
+	now time.Time,
+) error {
+	result := soakSearchIndexUnknown
+	var probeErr error
+	if r.searchIndex != nil {
+		result, probeErr = r.searchIndex.Indexed(ctx, operation)
+	}
+	if probeErr == nil && result == soakSearchIndexFound {
+		return r.observeAs(operation.ID, failureObserverSearchIndex, failureObservationGood, now)
+	}
+	// Not yet indexed inside the settle window, or the probe could not run:
+	// leave it claimable so a later pass can ask again.
+	if now.Before(operation.Deadline) {
+		if err := r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval)); err != nil {
+			return err
+		}
+		return nil
+	}
+	observation := failureObservationMissingAfterDeadline
+	if probeErr != nil || result == soakSearchIndexUnknown {
+		observation = failureObservationUnverified
+	}
+	return r.observeAs(operation.ID, failureObserverSearchIndex, observation, now)
+}
+
+func (r *soakFailureReconciler) observeAs(
+	operationID string,
+	observer failureObserver,
+	observation failureObservation,
+	now time.Time,
+) error {
+	if _, err := r.ledger.Observe(operationID, observer, observation, now); err != nil {
+		_ = r.ledger.ReleaseClaim(operationID, now.Add(r.retryInterval))
+		return fmt.Errorf("record soak %s observation: %w", observer, err)
+	}
+	return nil
 }
 
 func (r *soakFailureReconciler) observe(

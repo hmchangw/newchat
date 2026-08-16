@@ -47,6 +47,13 @@ ledger:
   reconcileReadShare: 0.5
   roomReconcileReadShare: 0.5
 
+# Search-index observation is additive: with it off the ledger contract is
+# identical to one built before the observer existed, so an existing
+# ledger.epoch stays valid. Turning it on changes the contract — bump
+# ledger.epoch in the same change.
+searchObserver:
+  enabled: false
+
 recipientObserver:
   enabled: false
   queue: 8192
@@ -89,6 +96,8 @@ soak:
   roomMutationRate: "1"
   roomReadRate: "20"
   userReadRate: "10"
+  searchReadRate: "5"
+  searchSettle: 30s
   roomCreateRate: "0.05"
   roomCreateBudget: "2000"
   roomCreateSize: "5"

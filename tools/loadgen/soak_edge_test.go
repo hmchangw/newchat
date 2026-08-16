@@ -173,7 +173,19 @@ func TestNewSoakWorkload_AppliesSafeDefaults(t *testing.T) {
 	assert.NotNil(t, workload.dispatch)
 	assert.NotNil(t, workload.now)
 	assert.NotNil(t, workload.onSaturation)
-	assert.Len(t, workload.lanes(), 13)
+	// A named set rather than a count: it says which lane went missing, and a
+	// new lane has to be added here deliberately rather than by bumping a
+	// number that carries no meaning.
+	names := make([]string, 0, len(workload.lanes()))
+	for _, lane := range workload.lanes() {
+		names = append(names, lane.name)
+	}
+	assert.ElementsMatch(t, []string{
+		"send", "read", "mutation", "reaction", "pinned_list", "verify",
+		soakFailureLaneMemberMutation, soakFailureLaneRoomMutation,
+		"room_read", "user_read", "search_read",
+		soakFailureLaneRoomCreate, soakFailureLaneReadReceipt, "presence",
+	}, names)
 }
 
 func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {

@@ -16,6 +16,12 @@ const failureObserverRecipient failureObserver = "recipient_broadcast"
 // source is down, even though the other one already proved the effect.
 const failureObserverRoomState failureObserver = "room_state"
 
+// failureObserverSearchIndex answers whether a message reached the search
+// index. It exists because search-sync-worker Acks and drops a message it
+// cannot decode or turn into an action, so that loss leaves the consumer at
+// zero pending and is invisible from JetStream. Only the query side sees it.
+const failureObserverSearchIndex failureObserver = "search_index"
+
 const failureObserverHealthIntervalLimit = 4096
 
 type failureObserverMode string
@@ -44,6 +50,11 @@ var failureObserverRegistry = map[failureObserver]failureObserverDefinition{
 			failureEffectSubscriptionMute, failureEffectRoomCreated,
 			failureEffectSubscriptionRead,
 		},
+		FinalReconciliation: true,
+	},
+	failureObserverSearchIndex: {
+		Name: failureObserverSearchIndex, Mode: failureObserverQuery,
+		Effects:             []failureEffect{failureEffectMessageIndexed},
 		FinalReconciliation: true,
 	},
 }

@@ -46,6 +46,12 @@ const (
 	soakRPCReadReceiptList  soakRPCAction = "read_receipt_list"
 	soakRPCPresenceQuery    soakRPCAction = "presence_query"
 
+	soakRPCSearchMessages soakRPCAction = "search_messages"
+	soakRPCSearchRooms    soakRPCAction = "search_rooms"
+	// soakRPCSearchIndexProbe is the evidence query, kept on its own label so
+	// its latency and error rate never blend into the read lane's.
+	soakRPCSearchIndexProbe soakRPCAction = "search_index_probe"
+
 	// The user-service read lane. Every one of these is read-only, so they
 	// carry latency and outcome only and never enter the evidence ledger.
 	soakRPCUserMe                  soakRPCAction = "user_me"
@@ -85,7 +91,8 @@ func validSoakRPCAction(action soakRPCAction) bool {
 		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename,
 		soakRPCMuteToggle, soakRPCRoomCreate, soakRPCMemberList,
 		soakRPCRoomsInfo, soakRPCSubscriptionList, soakRPCRoomStateRead,
-		soakRPCMessageRead, soakRPCReadReceiptList, soakRPCPresenceQuery:
+		soakRPCMessageRead, soakRPCReadReceiptList, soakRPCPresenceQuery,
+		soakRPCSearchMessages, soakRPCSearchRooms, soakRPCSearchIndexProbe:
 		return true
 	default:
 		return slices.Contains(soakUserReadActions, action)

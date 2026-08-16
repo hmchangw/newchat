@@ -37,10 +37,17 @@ type failureObserverContract struct {
 	RecipientObserverEnabled bool                         `json:"recipientObserverEnabled"`
 }
 
-func newFailureObserverContract(recipientEnabled bool) failureObserverContract {
+// newFailureObserverContract builds the contract the WAL header stores. Both
+// optional observers are additive: with each disabled the contract is identical
+// to one built without them ever existing, so enabling search observation is
+// the only thing that requires a new ledger epoch.
+func newFailureObserverContract(recipientEnabled, searchEnabled bool) failureObserverContract {
 	messageObservers := []failureObserver{failureObserverAdmission, failureObserverHistory}
 	if recipientEnabled {
 		messageObservers = append(messageObservers, failureObserverRecipient)
+	}
+	if searchEnabled {
+		messageObservers = append(messageObservers, failureObserverSearchIndex)
 	}
 	roomObservers := []failureObserver{failureObserverAdmission, failureObserverRoomState}
 	observers := []failureObserver{
@@ -48,6 +55,9 @@ func newFailureObserverContract(recipientEnabled bool) failureObserverContract {
 	}
 	if recipientEnabled {
 		observers = append(observers, failureObserverRecipient)
+	}
+	if searchEnabled {
+		observers = append(observers, failureObserverSearchIndex)
 	}
 	slices.Sort(observers)
 	return failureObserverContract{
@@ -101,6 +111,7 @@ const (
 	failureEffectSubscriptionMute failureEffect = "subscription_mute"
 	failureEffectRoomCreated      failureEffect = "room_created"
 	failureEffectSubscriptionRead failureEffect = "subscription_read"
+	failureEffectMessageIndexed   failureEffect = "message_indexed"
 )
 
 type failureCardinality struct {
@@ -117,11 +128,12 @@ type failureExpectedEffect struct {
 }
 
 func messageCreateExpectedEffects(recipientCount int, recipientHash string) []failureExpectedEffect {
-	return messageCreateExpectedEffectsForObservers(true, recipientCount, recipientHash)
+	return messageCreateExpectedEffectsForObservers(true, false, recipientCount, recipientHash)
 }
 
 func messageCreateExpectedEffectsForObservers(
 	recipientEnabled bool,
+	searchEnabled bool,
 	recipientCount int,
 	recipientHash string,
 ) []failureExpectedEffect {
@@ -133,6 +145,12 @@ func messageCreateExpectedEffectsForObservers(
 		effects = append(effects, failureExpectedEffect{
 			Effect: failureEffectRecipientEvent, Observer: failureObserverRecipient, Required: true,
 			Cardinality: &failureCardinality{Mode: "exact_set_hash", Count: recipientCount, SHA256: recipientHash},
+		})
+	}
+	if searchEnabled {
+		effects = append(effects, failureExpectedEffect{
+			Effect: failureEffectMessageIndexed, Observer: failureObserverSearchIndex,
+			Required: true,
 		})
 	}
 	return effects

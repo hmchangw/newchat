@@ -13,6 +13,7 @@
     "metrics",
     "ledger",
     "recipientObserver",
+    "searchObserver",
     "seed",
     "soak",
     "teardown"
@@ -123,6 +124,14 @@
         "roomReconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
       }
     },
+    "searchObserver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"}
+      }
+    },
     "recipientObserver": {
       "type": "object",
       "additionalProperties": false,
@@ -184,6 +193,8 @@
         "roomMutationRate",
         "roomReadRate",
         "userReadRate",
+        "searchReadRate",
+        "searchSettle",
         "roomCreateRate",
         "roomCreateBudget",
         "roomCreateSize",
@@ -244,6 +255,8 @@
         "roomMutationRate": {"type": "string", "minLength": 1},
         "roomReadRate": {"type": "string", "minLength": 1},
         "userReadRate": {"type": "string", "minLength": 1},
+        "searchReadRate": {"type": "string", "minLength": 1},
+        "searchSettle": {"type": "string", "minLength": 1},
         "roomCreateRate": {"type": "string", "minLength": 1},
         "roomCreateBudget": {"type": "string", "minLength": 1},
         "roomCreateSize": {"type": "string", "minLength": 1},

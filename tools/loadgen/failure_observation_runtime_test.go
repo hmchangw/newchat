@@ -137,7 +137,7 @@ func TestFailureObservationRuntime_EarlierEpochJournalIsRetainedNotReplayed(t *t
 		OperationType: failureOperationMessageCreate, LifecycleState: failureOperationJournaled,
 		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
 		Targets: map[string]string{"messageId": "message-1"},
-		Effects: messageCreateExpectedEffectsForObservers(false, 0, ""),
+		Effects: messageCreateExpectedEffectsForObservers(false, false, 0, ""),
 	}))
 	require.NoError(t, ledger.Close())
 

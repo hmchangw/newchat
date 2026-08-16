@@ -21,6 +21,7 @@ type soakWorkloadActions struct {
 	RoomMutation   soakWorkloadAction
 	RoomRead       soakWorkloadAction
 	UserRead       soakWorkloadAction
+	SearchRead     soakWorkloadAction
 	RoomCreate     soakWorkloadAction
 	ReadReceipt    soakWorkloadAction
 	Presence       soakWorkloadAction
@@ -42,6 +43,7 @@ type soakWorkloadConfig struct {
 	RoomMutationRate   float64
 	RoomReadRate       float64
 	UserReadRate       float64
+	SearchReadRate     float64
 	RoomCreateRate     float64
 	ReadReceiptRate    float64
 	PresenceRate       float64
@@ -71,6 +73,7 @@ func soakWorkloadConfigFrom(cfg *soakConfig, maxInFlight int) *soakWorkloadConfi
 		RoomMutationRate:   cfg.RoomMutationRate,
 		RoomReadRate:       cfg.RoomReadRate,
 		UserReadRate:       cfg.UserReadRate,
+		SearchReadRate:     cfg.SearchReadRate,
 		RoomCreateRate:     cfg.RoomCreateRate,
 		ReadReceiptRate:    cfg.ReadReceiptRate,
 		PresenceRate:       cfg.PresenceRate,
@@ -423,6 +426,7 @@ func (w *soakWorkload) lanes() []soakLane {
 		},
 		{name: "room_read", rate: w.cfg.RoomReadRate, action: w.actions.RoomRead},
 		{name: "user_read", rate: w.cfg.UserReadRate, action: w.actions.UserRead},
+		{name: "search_read", rate: w.cfg.SearchReadRate, action: w.actions.SearchRead},
 		{
 			name: soakFailureLaneRoomCreate, rate: w.cfg.RoomCreateRate,
 			action: w.actions.RoomCreate,

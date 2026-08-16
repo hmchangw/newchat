@@ -388,6 +388,33 @@
     },
     {
       "type": "timeseries",
+      "title": "Search index evidence",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 104
+      },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(loadgen_failure_observations_total{scenario=\"message_soak\", observer=\"search_index\"}[5m]))",
+          "legendFormat": "index {{result}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (outcome) (rate(loadgen_soak_operations_total{action=\"search_index_probe\"}[5m]))",
+          "legendFormat": "probe {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "expr": "loadgen_failure_observer_up{observer=\"search_index\"}",
+          "legendFormat": "observer up",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
       "title": "Sampled consumer health",
       "gridPos": {
         "h": 8,

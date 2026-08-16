@@ -256,7 +256,7 @@ func (j *failingFailureJournal) Size() int64                           { return 
 func (j *failingFailureJournal) Close() error                          { return nil }
 
 func TestFailureObserverContract_DeclaresPerLaneObservers(t *testing.T) {
-	contract := newFailureObserverContract(false)
+	contract := newFailureObserverContract(false, false)
 
 	assert.Equal(t, 2, contract.SchemaVersion)
 	assert.Equal(t, []failureObserver{failureObserverAdmission, failureObserverHistory},
@@ -271,7 +271,7 @@ func TestFailureObserverContract_DeclaresPerLaneObservers(t *testing.T) {
 }
 
 func TestFailureObserverContract_RecipientOnlyAffectsMessageLane(t *testing.T) {
-	contract := newFailureObserverContract(true)
+	contract := newFailureObserverContract(true, false)
 
 	assert.Contains(t, contract.Lanes[soakFailureLaneMessageSend], failureObserverRecipient)
 	assert.NotContains(t, contract.Lanes[soakFailureLaneMemberMutation], failureObserverRecipient)
@@ -279,7 +279,7 @@ func TestFailureObserverContract_RecipientOnlyAffectsMessageLane(t *testing.T) {
 }
 
 func TestFailureOperationMatchesObserverContract_UsesOperationLane(t *testing.T) {
-	contract := newFailureObserverContract(false)
+	contract := newFailureObserverContract(false, false)
 	operation := failureOperation{
 		Scenario: soakFailureScenario,
 		Lane:     soakFailureLaneMemberMutation,
@@ -382,7 +382,7 @@ func TestFailureLedger_ClaimDueLanesKeepsLanesSeparate(t *testing.T) {
 		OperationType: failureOperationMessageCreate, LifecycleState: failureOperationJournaled,
 		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
 		Targets: map[string]string{"messageId": "message-1"},
-		Effects: messageCreateExpectedEffectsForObservers(false, 0, ""),
+		Effects: messageCreateExpectedEffectsForObservers(false, false, 0, ""),
 	}))
 	require.NoError(t, ledger.Start(&failureOperation{
 		SchemaVersion: 2, ID: "member-1", RunID: "run-1",
