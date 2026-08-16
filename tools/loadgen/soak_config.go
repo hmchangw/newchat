@@ -61,6 +61,7 @@ type soakConfig struct {
 	RecentPerRoom                int           `env:"RECENT_PER_ROOM"                  envDefault:"128"`
 	RecentTotal                  int           `env:"RECENT_TOTAL"                     envDefault:"200000"`
 	LedgerDir                    string        `env:"LEDGER_DIR"                       envDefault:""`
+	LedgerEpoch                  string        `env:"LEDGER_EPOCH"                     envDefault:"v1"`
 	LedgerCapacity               int           `env:"LEDGER_CAPACITY"                  envDefault:"200000"`
 	ReconcileDeadline            time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
 	ReconcileRetryInterval       time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
@@ -190,6 +191,10 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if cfg.LedgerCapacity <= 0 {
 		return fmt.Errorf("SOAK_LEDGER_CAPACITY must be greater than zero")
+	}
+	if !failureRunIDPattern.MatchString(cfg.LedgerEpoch) ||
+		cfg.LedgerEpoch == "." || cfg.LedgerEpoch == ".." {
+		return fmt.Errorf("SOAK_LEDGER_EPOCH must be a filename-safe identifier")
 	}
 	if cfg.ReconcileDeadline <= cfg.PersistGrace {
 		return fmt.Errorf("SOAK_RECONCILE_DEADLINE must be greater than SOAK_PERSIST_GRACE")

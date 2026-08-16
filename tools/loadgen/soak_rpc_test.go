@@ -381,3 +381,15 @@ func TestValidSoakErrorClass_AgreesWithTheReportedSet(t *testing.T) {
 			"%q is reported but rejected by validation", class)
 	}
 }
+
+func TestValidSoakRPCAction_AcceptsRoomAndMemberActions(t *testing.T) {
+	for _, action := range []soakRPCAction{
+		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename, soakRPCMuteToggle,
+		soakRPCRoomCreate, soakRPCMemberList, soakRPCRoomsInfo,
+		soakRPCSubscriptionList, soakRPCRoomStateRead,
+	} {
+		t.Run(string(action), func(t *testing.T) {
+			assert.True(t, validSoakRPCAction(action))
+		})
+	}
+}

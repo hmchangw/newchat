@@ -31,6 +31,16 @@ const (
 	soakRPCReadBack    soakRPCAction = "read_back"
 	soakRPCMarkRead    soakRPCAction = "mark_read"
 	soakRPCScroll      soakRPCAction = "scroll_history"
+
+	soakRPCMemberAdd        soakRPCAction = "member_add"
+	soakRPCMemberRemove     soakRPCAction = "member_remove"
+	soakRPCRoomRename       soakRPCAction = "room_rename"
+	soakRPCMuteToggle       soakRPCAction = "mute_toggle"
+	soakRPCRoomCreate       soakRPCAction = "room_create"
+	soakRPCMemberList       soakRPCAction = "member_list"
+	soakRPCRoomsInfo        soakRPCAction = "rooms_info"
+	soakRPCSubscriptionList soakRPCAction = "subscription_list"
+	soakRPCRoomStateRead    soakRPCAction = "room_state_read"
 )
 
 func validSoakRPCAction(action soakRPCAction) bool {
@@ -38,7 +48,10 @@ func validSoakRPCAction(action soakRPCAction) bool {
 	case soakRPCSend, soakRPCThreadReply, soakRPCLoadHistory, soakRPCLoadNext,
 		soakRPCGetThread, soakRPCGetMessage, soakRPCReact, soakRPCEdit,
 		soakRPCDelete, soakRPCPin, soakRPCUnpin, soakRPCPinnedList,
-		soakRPCReadBack, soakRPCMarkRead, soakRPCScroll:
+		soakRPCReadBack, soakRPCMarkRead, soakRPCScroll,
+		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename,
+		soakRPCMuteToggle, soakRPCRoomCreate, soakRPCMemberList,
+		soakRPCRoomsInfo, soakRPCSubscriptionList, soakRPCRoomStateRead:
 		return true
 	default:
 		return false

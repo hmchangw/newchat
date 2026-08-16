@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,6 +21,10 @@ const (
 	soakFailureScenario                   = "message_soak"
 	soakFailureTrafficProfile             = "cassandra-soak-v1"
 	soakFailureLaneMessageSend            = "message_send"
+	soakFailureLaneMemberMutation         = "member_mutation"
+	soakFailureLaneRoomMutation           = "room_mutation"
+	soakFailureLaneRoomCreate             = "room_create"
+	soakFailureDefaultLedgerEpoch         = "v1"
 	soakFailureAttributeRoomID            = "room_id"
 	soakFailureAttributeAccount           = "account"
 	soakFailureAttributeContentSHA256     = "content_sha256"
@@ -70,6 +75,44 @@ func runSoakFailureExpiry(
 	}
 }
 
+// failureWALPath separates the two identities the journal name used to
+// conflate: the run ID owns the seeded topology, the epoch owns the evidence
+// journal. Bumping the epoch starts a fresh journal on an unchanged topology,
+// so a contract change no longer forces a re-seed.
+func failureWALPath(dir, runID, epoch string) string {
+	if epoch == "" {
+		epoch = soakFailureDefaultLedgerEpoch
+	}
+	return filepath.Join(dir, runID+"."+epoch+".wal")
+}
+
+// recordAbandonedFailureJournals counts retained journals from earlier epochs of
+// this run. They stay on disk as evidence but belong to an incompatible
+// contract and are never replayed, so the boundary has to be visible rather
+// than silent.
+func recordAbandonedFailureJournals(metrics *Metrics, dir, runID, epoch string) {
+	if metrics == nil {
+		return
+	}
+	active := failureWALPath(dir, runID, epoch)
+	matches, err := filepath.Glob(filepath.Join(dir, runID+"*.wal"))
+	if err != nil {
+		slog.Error("scan retained failure journals", "runId", runID, "error", err)
+		return
+	}
+	abandoned := 0
+	for _, match := range matches {
+		if match != active {
+			abandoned++
+		}
+	}
+	metrics.FailureAbandonedJournals.Set(float64(abandoned))
+	if abandoned > 0 {
+		slog.Warn("retained failure journals from earlier epochs are not replayed",
+			"runId", runID, "epoch", epoch, "abandoned", abandoned)
+	}
+}
+
 func openSoakFailureLedger(
 	cfg *soakConfig,
 	metrics *Metrics,
@@ -81,10 +124,11 @@ func openSoakFailureLedger(
 	var journal failureJournal
 	contract := newFailureObserverContract(cfg.RecipientObserverEnabled)
 	if cfg.LedgerDir != "" {
-		wal, err := openFailureWAL(filepath.Join(cfg.LedgerDir, cfg.RunID+".wal"))
+		wal, err := openFailureWAL(failureWALPath(cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch))
 		if err != nil {
 			return nil, err
 		}
+		recordAbandonedFailureJournals(metrics, cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch)
 		journal = newFailureJournalMetrics(
 			newFailureJournalGroupCommit(
 				wal,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,30 +24,61 @@ const (
 	failureObserverHistory   failureObserver = "cassandra_history"
 )
 
-const failureObserverContractSchemaVersion = 1
+// failureObserverContractSchemaVersion is 2 because the contract became
+// per-lane: version 1 declared one observer set for the whole scenario, which
+// no longer describes a run whose lanes require different observers.
+const failureObserverContractSchemaVersion = 2
 
 type failureObserverContract struct {
-	SchemaVersion            int               `json:"schemaVersion"`
-	Scenario                 string            `json:"scenario"`
-	Observers                []failureObserver `json:"observers"`
-	RecipientObserverEnabled bool              `json:"recipientObserverEnabled"`
+	SchemaVersion            int                          `json:"schemaVersion"`
+	Scenario                 string                       `json:"scenario"`
+	Observers                []failureObserver            `json:"observers"`
+	Lanes                    map[string][]failureObserver `json:"lanes"`
+	RecipientObserverEnabled bool                         `json:"recipientObserverEnabled"`
 }
 
 func newFailureObserverContract(recipientEnabled bool) failureObserverContract {
-	observers := []failureObserver{failureObserverAdmission, failureObserverHistory}
+	messageObservers := []failureObserver{failureObserverAdmission, failureObserverHistory}
+	if recipientEnabled {
+		messageObservers = append(messageObservers, failureObserverRecipient)
+	}
+	roomObservers := []failureObserver{failureObserverAdmission, failureObserverRoomState}
+	observers := []failureObserver{
+		failureObserverAdmission, failureObserverHistory, failureObserverRoomState,
+	}
 	if recipientEnabled {
 		observers = append(observers, failureObserverRecipient)
 	}
+	slices.Sort(observers)
 	return failureObserverContract{
 		SchemaVersion: failureObserverContractSchemaVersion,
 		Scenario:      soakFailureScenario, Observers: observers,
+		Lanes: map[string][]failureObserver{
+			soakFailureLaneMessageSend:    messageObservers,
+			soakFailureLaneMemberMutation: slices.Clone(roomObservers),
+			soakFailureLaneRoomMutation:   slices.Clone(roomObservers),
+			soakFailureLaneRoomCreate:     slices.Clone(roomObservers),
+		},
 		RecipientObserverEnabled: recipientEnabled,
 	}
 }
 
 type failureOperationType string
 
-const failureOperationMessageCreate failureOperationType = "message_create"
+const (
+	failureOperationMessageCreate failureOperationType = "message_create"
+	failureOperationMemberAdd     failureOperationType = "member_add"
+	failureOperationMemberRemove  failureOperationType = "member_remove"
+	failureOperationRoomRename    failureOperationType = "room_rename"
+	failureOperationMuteToggle    failureOperationType = "mute_toggle"
+	failureOperationRoomCreate    failureOperationType = "room_create"
+)
+
+var failureOperationTypeRegistry = map[failureOperationType]struct{}{
+	failureOperationMessageCreate: {}, failureOperationMemberAdd: {},
+	failureOperationMemberRemove: {}, failureOperationRoomRename: {},
+	failureOperationMuteToggle: {}, failureOperationRoomCreate: {},
+}
 
 type failureOperationLifecycle string
 
@@ -61,6 +93,10 @@ const (
 	failureEffectAdmission        failureEffect = "admission"
 	failureEffectMessagePersisted failureEffect = "message_persisted"
 	failureEffectRecipientEvent   failureEffect = "recipient_event"
+	failureEffectMemberState      failureEffect = "member_state"
+	failureEffectRoomName         failureEffect = "room_name"
+	failureEffectSubscriptionMute failureEffect = "subscription_mute"
+	failureEffectRoomCreated      failureEffect = "room_created"
 )
 
 type failureCardinality struct {
@@ -98,6 +134,31 @@ func messageCreateExpectedEffectsForObservers(
 	return effects
 }
 
+func memberMutationExpectedEffects() []failureExpectedEffect {
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: failureEffectMemberState, Observer: failureObserverRoomState, Required: true},
+	}
+}
+
+func roomMutationExpectedEffects(operationType failureOperationType) []failureExpectedEffect {
+	effect := failureEffectRoomName
+	if operationType == failureOperationMuteToggle {
+		effect = failureEffectSubscriptionMute
+	}
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: effect, Observer: failureObserverRoomState, Required: true},
+	}
+}
+
+func roomCreateExpectedEffects() []failureExpectedEffect {
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: failureEffectRoomCreated, Observer: failureObserverRoomState, Required: true},
+	}
+}
+
 type failureObservation string
 
 const (
@@ -121,6 +182,10 @@ const (
 	failureReasonRecipientIdentityMismatch failureReason = "recipient_identity_mismatch"
 	failureReasonRecipientMissing          failureReason = "recipient_missing"
 	failureReasonPublishLocalError         failureReason = "publish_local_error"
+	failureReasonMemberStateMismatch       failureReason = "member_state_mismatch"
+	failureReasonRoomNameMismatch          failureReason = "room_name_mismatch"
+	failureReasonMuteStateMismatch         failureReason = "mute_state_mismatch"
+	failureReasonRoomStateMissing          failureReason = "room_state_missing"
 )
 
 var failureReasonRegistry = map[failureReason]struct{}{
@@ -128,7 +193,9 @@ var failureReasonRegistry = map[failureReason]struct{}{
 	failureReasonHistoryContentMismatch: {}, failureReasonHistoryMissing: {},
 	failureReasonRecipientDuplicate: {}, failureReasonRecipientUnexpected: {},
 	failureReasonRecipientIdentityMismatch: {}, failureReasonRecipientMissing: {},
-	failureReasonPublishLocalError: {},
+	failureReasonPublishLocalError: {}, failureReasonMemberStateMismatch: {},
+	failureReasonRoomNameMismatch: {}, failureReasonMuteStateMismatch: {},
+	failureReasonRoomStateMissing: {},
 }
 
 var errFailureObserverContractMismatch = errors.New("failure observer contract mismatch")
@@ -164,7 +231,10 @@ var failureOperationScenarioRegistry = map[string]struct{}{
 }
 
 var failureOperationLaneRegistry = map[string]struct{}{
-	"message_send": {},
+	soakFailureLaneMessageSend:    {},
+	soakFailureLaneMemberMutation: {},
+	soakFailureLaneRoomMutation:   {},
+	soakFailureLaneRoomCreate:     {},
 }
 
 type failureOperation struct {
@@ -1226,7 +1296,10 @@ func validateFailureOperation(operation *failureOperation) error {
 			operation.LifecycleState != failureOperationActive {
 			return fmt.Errorf("failure operation %q has invalid lifecycle state %q", operation.ID, operation.LifecycleState)
 		}
-		if operation.RunID == "" || operation.OperationType != failureOperationMessageCreate || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
+		if _, known := failureOperationTypeRegistry[operation.OperationType]; !known {
+			return fmt.Errorf("version 2 failure operation %q has unsupported type %q", operation.ID, operation.OperationType)
+		}
+		if operation.RunID == "" || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
 			return fmt.Errorf("version 2 failure operation %q requires run, type, targets, and effects", operation.ID)
 		}
 		operation.Expected = make([]failureObserver, 0, len(operation.Effects))
@@ -1588,7 +1661,23 @@ func validateFailureObserverContract(contract failureObserverContract) error {
 	if err := validateRegisteredObservers(contract.Observers); err != nil {
 		return err
 	}
-	hasRecipient := slices.Contains(contract.Observers, failureObserverRecipient)
+	if len(contract.Lanes) == 0 {
+		return fmt.Errorf("observer contract must declare at least one lane")
+	}
+	for lane, observers := range contract.Lanes {
+		if _, known := failureOperationLaneRegistry[lane]; !known {
+			return fmt.Errorf("observer contract declares unsupported lane %q", lane)
+		}
+		if len(observers) == 0 {
+			return fmt.Errorf("observer contract lane %q declares no observer", lane)
+		}
+		if err := validateRegisteredObservers(observers); err != nil {
+			return fmt.Errorf("observer contract lane %q: %w", lane, err)
+		}
+	}
+	// Recipient observation only applies to the message lane, so its enablement
+	// flag is checked there rather than against the scenario-wide union.
+	hasRecipient := slices.Contains(contract.Lanes[soakFailureLaneMessageSend], failureObserverRecipient)
 	if hasRecipient != contract.RecipientObserverEnabled {
 		return fmt.Errorf("recipient observer enablement does not match configured observers")
 	}
@@ -1599,7 +1688,8 @@ func equalFailureObserverContract(left, right failureObserverContract) bool {
 	return left.SchemaVersion == right.SchemaVersion &&
 		left.Scenario == right.Scenario &&
 		left.RecipientObserverEnabled == right.RecipientObserverEnabled &&
-		slices.Equal(left.Observers, right.Observers)
+		slices.Equal(left.Observers, right.Observers) &&
+		maps.EqualFunc(left.Lanes, right.Lanes, slices.Equal)
 }
 
 func cloneFailureObserverContract(contract *failureObserverContract) *failureObserverContract {
@@ -1607,7 +1697,13 @@ func cloneFailureObserverContract(contract *failureObserverContract) *failureObs
 		return nil
 	}
 	cloned := *contract
-	cloned.Observers = append([]failureObserver(nil), contract.Observers...)
+	cloned.Observers = slices.Clone(contract.Observers)
+	if contract.Lanes != nil {
+		cloned.Lanes = make(map[string][]failureObserver, len(contract.Lanes))
+		for lane, observers := range contract.Lanes {
+			cloned.Lanes[lane] = slices.Clone(observers)
+		}
+	}
 	return &cloned
 }
 
@@ -1618,11 +1714,15 @@ func failureOperationMatchesObserverContract(
 	if operation == nil || operation.Scenario != contract.Scenario {
 		return false
 	}
-	expected := append([]failureObserver(nil), operation.Expected...)
+	configured, known := contract.Lanes[operation.Lane]
+	if !known {
+		return false
+	}
+	expected := slices.Clone(operation.Expected)
 	slices.Sort(expected)
-	configured := append([]failureObserver(nil), contract.Observers...)
-	slices.Sort(configured)
-	return slices.Equal(expected, configured)
+	laneObservers := slices.Clone(configured)
+	slices.Sort(laneObservers)
+	return slices.Equal(expected, laneObservers)
 }
 
 func (w *fileFailureWAL) writeHeaderLocked() error {

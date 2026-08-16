@@ -54,6 +54,13 @@ type Metrics struct {
 	SoakLaneSaturation        *prometheus.CounterVec
 	SoakGlobalSaturation      *prometheus.CounterVec
 
+	SoakRoomCandidates            *prometheus.GaugeVec
+	SoakRoomQuarantineProbes      *prometheus.CounterVec
+	SoakRoomPoolExhausted         *prometheus.CounterVec
+	SoakRoomPoolDegraded          prometheus.Gauge
+	SoakRoomCreateBudgetRemaining prometheus.Gauge
+	SoakRoomStateSources          *prometheus.CounterVec
+
 	FailureOperations            *prometheus.CounterVec
 	FailureObservations          *prometheus.CounterVec
 	FailureObservationReasons    *prometheus.CounterVec
@@ -70,6 +77,7 @@ type Metrics struct {
 	FailureWALFlushBatchSize     *prometheus.HistogramVec
 	FailureEvidenceFlushDuration *prometheus.HistogramVec
 	FailureEvidenceRecords       *prometheus.CounterVec
+	FailureAbandonedJournals     prometheus.Gauge
 
 	NATSConnected             *prometheus.GaugeVec
 	NATSConnectionEvents      *prometheus.CounterVec
@@ -258,6 +266,46 @@ func NewMetrics() *Metrics {
 		prometheus.CounterOpts{Name: "loadgen_soak_global_saturation_total", Help: "Pacing events skipped because the global in-flight budget was full."},
 		[]string{"lane"},
 	)
+	m.SoakRoomCandidates = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "loadgen_soak_room_candidates",
+			Help: "Member candidates by bounded lifecycle state.",
+		},
+		[]string{"state"},
+	)
+	m.SoakRoomQuarantineProbes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_room_quarantine_probes_total",
+			Help: "Quarantined member candidate re-probes by bounded result.",
+		},
+		[]string{"result"},
+	)
+	m.SoakRoomPoolExhausted = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_room_pool_exhausted_total",
+			Help: "Room and member mutations skipped for lack of a usable target, by bounded reason.",
+		},
+		[]string{"reason"},
+	)
+	m.SoakRoomPoolDegraded = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "loadgen_soak_room_pool_degraded",
+			Help: "Whether the member candidate pool is currently degraded. Reversible: it clears when the pool recovers.",
+		},
+	)
+	m.SoakRoomCreateBudgetRemaining = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "loadgen_soak_room_create_budget_remaining",
+			Help: "Rooms the create lane may still add before it stops for this run.",
+		},
+	)
+	m.SoakRoomStateSources = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_room_state_source_total",
+			Help: "Room-state observer source outcomes by bounded source and result.",
+		},
+		[]string{"source", "result"},
+	)
 	m.FailureOperations = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_operations_total",
@@ -367,6 +415,12 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"kind"},
 	)
+	m.FailureAbandonedJournals = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "loadgen_failure_abandoned_journals",
+			Help: "Retained failure journals for this run ID that belong to an earlier ledger epoch and are never replayed.",
+		},
+	)
 	m.NATSConnected = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "loadgen_nats_connected",
@@ -435,12 +489,15 @@ func NewMetrics() *Metrics {
 		m.SoakRPCLatency, m.SoakVerifications,
 		m.SoakMutationTargetMissing, m.SoakConfiguredRate, m.SoakIntended,
 		m.SoakDispatched, m.SoakSchedulerUnderrun, m.SoakLaneSaturation, m.SoakGlobalSaturation,
+		m.SoakRoomCandidates, m.SoakRoomQuarantineProbes, m.SoakRoomPoolExhausted,
+		m.SoakRoomPoolDegraded, m.SoakRoomCreateBudgetRemaining, m.SoakRoomStateSources,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
 		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,
 		m.FailureWALAppendDuration, m.FailureWALAppends,
 		m.FailureWALFlushDuration, m.FailureWALFlushBatchSize,
 		m.FailureEvidenceFlushDuration, m.FailureEvidenceRecords,
+		m.FailureAbandonedJournals,
 		m.NATSConnected, m.NATSConnectionEvents, m.NATSOutageDuration, m.NATSCurrentOutage,
 		m.FailureObserverUp, m.FailureObserverConfigured, m.FailureObserverEligible,
 		m.FailureObserverEvents, m.FailureObserverQueueDepth,

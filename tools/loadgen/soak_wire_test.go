@@ -246,3 +246,119 @@ func TestSoakWireRequests_OmitOptionalFieldsLikeHistoryService(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"limit":25}`, string(body))
 }
+
+func TestSoakAddMembersRequest_MatchesModelContract(t *testing.T) {
+	encoded, err := json.Marshal(soakAddMembersRequest{RoomID: "r1", Users: []string{"u1"}})
+	require.NoError(t, err)
+
+	var decoded model.AddMembersRequest
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, "r1", decoded.RoomID)
+	assert.Equal(t, []string{"u1"}, decoded.Users)
+}
+
+func TestSoakRemoveMemberRequest_MatchesModelContract(t *testing.T) {
+	encoded, err := json.Marshal(soakRemoveMemberRequest{RoomID: "r1", Account: "u1"})
+	require.NoError(t, err)
+
+	var decoded model.RemoveMemberRequest
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, "r1", decoded.RoomID)
+	assert.Equal(t, "u1", decoded.Account)
+}
+
+func TestSoakRoomRenameRequest_MatchesModelContract(t *testing.T) {
+	encoded, err := json.Marshal(soakRoomRenameRequest{NewName: "soak-room-r1"})
+	require.NoError(t, err)
+
+	var decoded model.RoomRenameRequest
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, "soak-room-r1", decoded.NewName)
+}
+
+func TestSoakCreateRoomRequest_MatchesModelContract(t *testing.T) {
+	encoded, err := json.Marshal(soakCreateRoomRequest{Name: "soak-room", Users: []string{"u1", "u2"}})
+	require.NoError(t, err)
+
+	var decoded model.CreateRoomRequest
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, "soak-room", decoded.Name)
+	assert.Equal(t, []string{"u1", "u2"}, decoded.Users)
+}
+
+func TestSoakCreateRoomReply_DecodesRoomServiceReply(t *testing.T) {
+	encoded, err := json.Marshal(model.CreateRoomReply{
+		Status: model.CreateRoomReplyAccepted, RoomID: "room-1",
+		RoomType: string(model.RoomTypeChannel),
+	})
+	require.NoError(t, err)
+
+	var decoded soakCreateRoomReply
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, "accepted", decoded.Status)
+	assert.Equal(t, "room-1", decoded.RoomID)
+	assert.Equal(t, "channel", decoded.RoomType)
+}
+
+func TestSoakMuteToggleReply_DecodesRoomServiceReply(t *testing.T) {
+	encoded, err := json.Marshal(model.MuteToggleResponse{Status: "ok", Muted: true})
+	require.NoError(t, err)
+
+	var decoded soakMuteToggleReply
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.True(t, decoded.Muted)
+}
+
+func TestSoakListMembersResponse_DecodesRoomServiceReply(t *testing.T) {
+	encoded, err := json.Marshal(model.ListRoomMembersResponse{
+		Members: []model.RoomMember{{
+			ID: "m1", RoomID: "r1",
+			Member: model.RoomMemberEntry{ID: "u1", Type: model.RoomMemberIndividual, Account: "user-1"},
+		}},
+	})
+	require.NoError(t, err)
+
+	var decoded soakListMembersResponse
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.Len(t, decoded.Members, 1)
+	assert.Equal(t, "r1", decoded.Members[0].RoomID)
+	assert.Equal(t, "user-1", decoded.Members[0].Member.Account)
+}
+
+func TestSoakRoomsInfo_MatchesModelContract(t *testing.T) {
+	encoded, err := json.Marshal(soakRoomsInfoRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	var decodedRequest model.RoomsInfoBatchRequest
+	require.NoError(t, json.Unmarshal(encoded, &decodedRequest))
+	assert.Equal(t, []string{"r1"}, decodedRequest.RoomIDs)
+
+	encodedResponse, err := json.Marshal(model.RoomsInfoBatchResponse{
+		Rooms: []model.RoomInfo{{RoomID: "r1", Found: true, Name: "soak-channel", UserCount: 3}},
+	})
+	require.NoError(t, err)
+	var decodedResponse soakRoomsInfoResponse
+	require.NoError(t, json.Unmarshal(encodedResponse, &decodedResponse))
+	require.Len(t, decodedResponse.Rooms, 1)
+	assert.True(t, decodedResponse.Rooms[0].Found)
+	assert.Equal(t, "soak-channel", decodedResponse.Rooms[0].Name)
+}
+
+func TestSoakSubscriptionListResponse_DecodesUserServiceReply(t *testing.T) {
+	encoded := []byte(`{"subscriptions":[{"roomId":"r1","muted":true}],"hasMore":false}`)
+
+	var decoded soakSubscriptionListResponse
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.Len(t, decoded.Subscriptions, 1)
+	assert.Equal(t, "r1", decoded.Subscriptions[0].RoomID)
+	assert.True(t, decoded.Subscriptions[0].Muted)
+}
+
+func TestSoakStatusReply_DecodesRoomServiceAcceptance(t *testing.T) {
+	encoded, err := json.Marshal(model.StatusWithRequestReply{Status: "accepted", RequestID: "req-1"})
+	require.NoError(t, err)
+
+	var decoded soakStatusReply
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, "accepted", decoded.Status)
+	assert.Equal(t, "req-1", decoded.RequestID)
+}

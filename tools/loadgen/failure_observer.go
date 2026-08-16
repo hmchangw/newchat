@@ -9,6 +9,13 @@ import (
 
 const failureObserverRecipient failureObserver = "recipient_broadcast"
 
+// failureObserverRoomState reconciles room and member final state. It is one
+// observer with two sources — the room-service RPC and an authoritative
+// MongoDB primary read — because both answer the same question about the same
+// effect; splitting them would make an operation unverified whenever either
+// source is down, even though the other one already proved the effect.
+const failureObserverRoomState failureObserver = "room_state"
+
 const failureObserverHealthIntervalLimit = 4096
 
 type failureObserverMode string
@@ -30,6 +37,14 @@ var failureObserverRegistry = map[failureObserver]failureObserverDefinition{
 	failureObserverAdmission: {Name: failureObserverAdmission, Mode: failureObserverEvent, Effects: []failureEffect{failureEffectAdmission}},
 	failureObserverHistory:   {Name: failureObserverHistory, Mode: failureObserverQuery, Effects: []failureEffect{failureEffectMessagePersisted}, FinalReconciliation: true},
 	failureObserverRecipient: {Name: failureObserverRecipient, Mode: failureObserverEvent, Effects: []failureEffect{failureEffectRecipientEvent}, FinalReconciliation: true},
+	failureObserverRoomState: {
+		Name: failureObserverRoomState, Mode: failureObserverQuery,
+		Effects: []failureEffect{
+			failureEffectMemberState, failureEffectRoomName,
+			failureEffectSubscriptionMute, failureEffectRoomCreated,
+		},
+		FinalReconciliation: true,
+	},
 }
 
 func validateRegisteredObservers(observers []failureObserver) error {

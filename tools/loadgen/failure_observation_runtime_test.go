@@ -51,7 +51,7 @@ func TestFailureObservationRuntime_LegacyWALAdoptsCompatibleContract(t *testing.
 	cfg := validSoakConfig(t)
 	cfg.LedgerDir = t.TempDir()
 	cfg.RecipientObserverEnabled = false
-	path := filepath.Join(cfg.LedgerDir, cfg.RunID+".wal")
+	path := failureWALPath(cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch)
 	legacy := `{"type":"started","operation":{"id":"legacy-1","scenario":"message_soak","lane":"message_send","startedAt":"2026-08-15T01:02:03Z","verifyAfter":"2026-08-15T01:02:03Z","deadline":"2026-08-15T01:03:03Z","expected":["admission","cassandra_history"]},"at":"2026-08-15T01:02:03Z"}` + "\n"
 	require.NoError(t, os.WriteFile(path, []byte(legacy), 0o600))
 
@@ -69,7 +69,7 @@ func TestFailureObservationRuntime_LegacyPendingOperationRejectsNewRecipientMode
 	cfg := validSoakConfig(t)
 	cfg.LedgerDir = t.TempDir()
 	cfg.RecipientObserverEnabled = true
-	path := filepath.Join(cfg.LedgerDir, cfg.RunID+".wal")
+	path := failureWALPath(cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch)
 	legacy := `{"type":"started","operation":{"id":"legacy-1","scenario":"message_soak","lane":"message_send","startedAt":"2026-08-15T01:02:03Z","verifyAfter":"2026-08-15T01:02:03Z","deadline":"2026-08-15T01:03:03Z","expected":["admission","cassandra_history"]},"at":"2026-08-15T01:02:03Z"}` + "\n"
 	require.NoError(t, os.WriteFile(path, []byte(legacy), 0o600))
 
@@ -120,4 +120,66 @@ func TestFailureObservationRuntime_WALFailureFallsBackWithoutStoppingTraffic(t *
 	require.NotNil(t, ledger)
 	assert.True(t, degraded)
 	assert.Equal(t, "wal", ledger.Snapshot().InvalidReason)
+}
+
+func TestFailureObservationRuntime_EarlierEpochJournalIsRetainedNotReplayed(t *testing.T) {
+	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
+	cfg := validSoakConfig(t)
+	cfg.LedgerDir = t.TempDir()
+	cfg.LedgerEpoch = "v1"
+	metrics := NewMetrics()
+
+	ledger, err := openSoakFailureLedger(&cfg, metrics, func() time.Time { return now })
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(&failureOperation{
+		SchemaVersion: 2, ID: "message-1", RunID: cfg.RunID,
+		Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
+		OperationType: failureOperationMessageCreate, LifecycleState: failureOperationJournaled,
+		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+		Targets: map[string]string{"messageId": "message-1"},
+		Effects: messageCreateExpectedEffectsForObservers(false, 0, ""),
+	}))
+	require.NoError(t, ledger.Close())
+
+	// A contract change is deployed as a new epoch rather than a new run ID, so
+	// the topology stays seeded while the incompatible journal is left alone.
+	cfg.LedgerEpoch = "v2"
+	upgradedMetrics := NewMetrics()
+	upgraded, err := openSoakFailureLedger(&cfg, upgradedMetrics, func() time.Time { return now })
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+
+	assert.Equal(t, 0, upgraded.Snapshot().Recovered,
+		"an earlier epoch's operations must not be replayed under a new contract")
+	assert.Equal(t, float64(1), testutil.ToFloat64(upgradedMetrics.FailureAbandonedJournals))
+	assert.FileExists(t, failureWALPath(cfg.LedgerDir, cfg.RunID, "v1"),
+		"the earlier journal is retained evidence and must not be deleted")
+}
+
+func TestFailureObservationRuntime_SameEpochRecoversUnresolvedOperations(t *testing.T) {
+	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
+	cfg := validSoakConfig(t)
+	cfg.LedgerDir = t.TempDir()
+	metrics := NewMetrics()
+
+	ledger, err := openSoakFailureLedger(&cfg, metrics, func() time.Time { return now })
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(&failureOperation{
+		SchemaVersion: 2, ID: "member-1", RunID: cfg.RunID,
+		Scenario: soakFailureScenario, Lane: soakFailureLaneMemberMutation,
+		OperationType: failureOperationMemberAdd, LifecycleState: failureOperationJournaled,
+		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+		Targets: map[string]string{"roomId": "room-1", "account": "user-9"},
+		Effects: memberMutationExpectedEffects(),
+	}))
+	require.NoError(t, ledger.Close())
+
+	recovered, err := openSoakFailureLedger(&cfg, NewMetrics(), func() time.Time { return now })
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recovered.Close()) })
+
+	assert.Equal(t, 1, recovered.Snapshot().Recovered)
+	operation, ok := recovered.Active("member-1")
+	require.True(t, ok)
+	assert.Equal(t, failureOperationMemberAdd, operation.OperationType)
 }
