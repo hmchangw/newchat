@@ -16,6 +16,13 @@ func (r *failureLedgerPromRecorder) OperationStarted(operation *failureOperation
 		operation.Scenario,
 		operation.Lane,
 	).Inc()
+	for _, observer := range operation.Expected {
+		r.metrics.FailureObserverEligible.WithLabelValues(
+			operation.Scenario,
+			operation.Lane,
+			string(observer),
+		).Inc()
+	}
 }
 
 func (r *failureLedgerPromRecorder) ObservationRecorded(
@@ -34,6 +41,24 @@ func (r *failureLedgerPromRecorder) ObservationRecorded(
 	).Inc()
 }
 
+func (r *failureLedgerPromRecorder) ObservationReasonRecorded(
+	operation *failureOperation,
+	observer failureObserver,
+	observation failureObservation,
+	reason failureReason,
+) {
+	if r == nil || r.metrics == nil || operation == nil || reason == failureReasonNone {
+		return
+	}
+	r.metrics.FailureObservationReasons.WithLabelValues(
+		operation.Scenario,
+		operation.Lane,
+		string(observer),
+		string(observation),
+		string(reason),
+	).Inc()
+}
+
 func (r *failureLedgerPromRecorder) OperationFinalized(
 	operation *failureOperation,
 	result failureResult,
@@ -49,6 +74,22 @@ func (r *failureLedgerPromRecorder) OperationFinalized(
 		operation.Scenario,
 		operation.Lane,
 		string(result),
+	).Inc()
+}
+
+func (r *failureLedgerPromRecorder) FinalizationReasonRecorded(
+	operation *failureOperation,
+	result failureResult,
+	reason failureReason,
+) {
+	if r == nil || r.metrics == nil || operation == nil ||
+		result != failureResultNotSent || reason == failureReasonNone {
+		return
+	}
+	r.metrics.FailureNotSent.WithLabelValues(
+		operation.Scenario,
+		operation.Lane,
+		string(reason),
 	).Inc()
 }
 

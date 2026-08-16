@@ -10,13 +10,17 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/stream"
 )
 
 const (
@@ -256,6 +260,11 @@ func newSoakRuntimeSelector(
 		selector.rooms[i] = topology.Rooms[i].ID
 	}
 	active := activeSoakUserIDs(topology)
+	roomTypes := make(map[string]model.RoomType, len(topology.Rooms))
+	for i := range topology.Rooms {
+		roomTypes[topology.Rooms[i].ID] = topology.Rooms[i].Type
+	}
+	recipients := soakRecipientSets(topology)
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
 		if !isActiveSoakSubscription(subscription, active) ||
@@ -267,7 +276,11 @@ func newSoakRuntimeSelector(
 			selector.members[subscription.RoomID],
 			soakSendTarget{
 				UserID: subscription.User.ID, Account: subscription.User.Account,
-				RoomID: subscription.RoomID,
+				RoomID: subscription.RoomID, RoomType: roomTypes[subscription.RoomID],
+				Recipients:           append([]string(nil), recipients[subscription.RoomID]...),
+				RecipientSetSource:   recipientSetSourceTopology,
+				RecipientSetComplete: true,
+				RecipientRoute:       recipientRouteForRoomType(roomTypes[subscription.RoomID]),
 			},
 		)
 	}
@@ -277,6 +290,35 @@ func newSoakRuntimeSelector(
 		}
 	}
 	return selector, nil
+}
+
+func recipientRouteForRoomType(roomType model.RoomType) recipientExpectedRoute {
+	if roomType == model.RoomTypeChannel {
+		return recipientExpectedRouteRoom
+	}
+	return recipientExpectedRouteUser
+}
+
+func soakRecipientSets(topology *soakTopology) map[string][]string {
+	if topology == nil {
+		return nil
+	}
+	recipients := make(map[string][]string, len(topology.Rooms))
+	// ActiveUsers bounds sender selection only. Broadcast evidence must retain
+	// every subscribed human account, including borrowed non-senders that the
+	// production broadcast worker is still required to reach.
+	for i := range topology.Subscriptions {
+		subscription := &topology.Subscriptions[i]
+		if !subscription.IsSubscribed || subscription.User.IsBot || subscription.User.Account == "" {
+			continue
+		}
+		recipients[subscription.RoomID] = append(recipients[subscription.RoomID], subscription.User.Account)
+	}
+	for roomID := range recipients {
+		slices.Sort(recipients[roomID])
+		recipients[roomID] = slices.Compact(recipients[roomID])
+	}
+	return recipients
 }
 
 func (s *soakRuntimeSelector) nextRoom() string {
@@ -365,6 +407,8 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
+	setSoakRunInfo(metrics, cfg.Soak.Environment)
+	defer metrics.stopNATSHealth()
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
 	if err != nil {
 		slog.Error("connect NATS for Cassandra soak", "error", err)
@@ -408,10 +452,13 @@ func runSoakWorkload(
 		collectorDuration,
 	)
 	recorders := newSoakCollectorRecorders(collector, now)
-	ledger, err := openSoakFailureLedger(&cfg.Soak, metrics, now)
+	ledger, degradedLedger, err := openSoakFailureObservationLedger(&cfg.Soak, metrics, now)
 	if err != nil {
 		slog.Error("open Cassandra soak failure ledger", "error", err)
-		return 1
+		return 2
+	}
+	if degradedLedger {
+		slog.Error("durable failure ledger unavailable; continuing with invalid in-memory observation")
 	}
 	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
 		metrics.FailureDropped.Add(float64(dropped))
@@ -421,12 +468,112 @@ func runSoakWorkload(
 			slog.Error("close Cassandra soak failure ledger", "error", err)
 		}
 	}()
+	expiryCtx, stopExpiry := context.WithCancel(ctx)
+	expiryTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
+	expiryDone := make(chan struct{})
+	go func() {
+		defer close(expiryDone)
+		defer expiryTicker.Stop()
+		runSoakFailureExpiry(expiryCtx, ledger, expiryTicker.C, func(err error) {
+			slog.Error("expire Cassandra soak failure evidence", "error", err)
+		})
+	}()
+	var expiryShutdownOnce sync.Once
+	shutdownExpiry := func() {
+		expiryShutdownOnce.Do(func() {
+			stopExpiry()
+			<-expiryDone
+		})
+	}
+	defer shutdownExpiry()
+	consumerSamplerCtx, stopConsumerSamplers := context.WithCancel(context.Background())
+	var consumerSamplerWG sync.WaitGroup
+	js, jetStreamErr := jetstream.New(nc.NatsConn())
+	if jetStreamErr != nil {
+		slog.Error("initialize JetStream consumer sampling", "error", jetStreamErr)
+	} else {
+		for _, target := range soakConsumerSamplerTargets(cfg.SiteID) {
+			sampler, samplerErr := NewConsumerSampler(
+				js,
+				target.Stream,
+				target.Durable,
+				metrics,
+				time.Second,
+			)
+			if samplerErr != nil {
+				slog.Error(
+					"configure soak consumer sampler",
+					"stream", target.Stream,
+					"durable", target.Durable,
+					"error", samplerErr,
+				)
+				continue
+			}
+			consumerSamplerWG.Add(1)
+			go func() {
+				defer consumerSamplerWG.Done()
+				sampler.Run(consumerSamplerCtx)
+			}()
+		}
+	}
+	var consumerShutdownOnce sync.Once
+	shutdownConsumerSamplers := func() {
+		consumerShutdownOnce.Do(func() {
+			stopConsumerSamplers()
+			consumerSamplerWG.Wait()
+		})
+	}
+	defer shutdownConsumerSamplers()
+	observationRuntime := newSoakFailureObservationRuntime(
+		cfg.Soak.RecipientObserverEnabled,
+		ledger,
+		metrics,
+		cfg.Soak.RecipientObserverQueue,
+		cfg.Soak.LedgerDir,
+		now,
+	)
+	if cfg.Soak.RecipientObserverEnabled {
+		recipientObserver := observationRuntime.Recipient()
+		recipientSource := newPooledNATSFailureRecipientSource(
+			cfg.Soak.RecipientObserverConnections,
+			func(_ int) (failureRecipientConnection, error) {
+				connection, connectErr := connectWithCredsHealth(
+					cfg.NatsURL,
+					"loadgen-recipient-observer",
+					cfg.NatsCredsFile,
+					"recipient_observer",
+					metrics,
+					recipientObserver.health,
+				)
+				if connectErr != nil {
+					return nil, connectErr
+				}
+				return newNATSFailureRecipientConnection(connection), nil
+			},
+		)
+		if err := observationRuntime.StartRecipient(recipientSource, &topology, ledger.ActiveOperations()); err != nil {
+			ledger.Invalidate("recipient_observer")
+			slog.Error("start recipient observer", "error", err)
+		}
+	}
+	defer func() {
+		if err := observationRuntime.Close(); err != nil {
+			slog.Error("shutdown recipient observer", "error", err)
+		}
+	}()
+	trackerOptions := []soakFailureTrackerOption{
+		withSoakFailureMetrics(metrics),
+		withSoakFailureRunID(cfg.Soak.RunID),
+	}
+	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
+		trackerOptions = append(trackerOptions, withSoakFailureRecipientObserver(recipientObserver))
+	}
 	failureTracker := newSoakFailureTracker(
 		ledger,
 		cfg.Soak.PersistGrace,
 		cfg.Soak.ReconcileDeadline,
 		now,
-		withSoakFailureMetrics(metrics),
+		trackerOptions...,
 	)
 	catalog := newSoakCatalog(
 		cfg.Soak.RecentPerRoom,
@@ -525,11 +672,16 @@ func runSoakWorkload(
 		recorders.verify,
 		now,
 	)
+	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 1)
+	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
+		reconcilerOptions = append(reconcilerOptions, withSoakFailureRecipientFinalizer(recipientObserver))
+	}
 	failureReconciler := newSoakFailureReconciler(
 		ledger,
 		failureVerifier,
 		cfg.Soak.ReconcileRetryInterval,
 		now,
+		reconcilerOptions...,
 	)
 	reconcileGate := newSoakShareGate(cfg.Soak.ReconcileReadShare)
 	warmReader := newSoakReader(
@@ -605,9 +757,6 @@ func runSoakWorkload(
 					slog.Error("record expired Cassandra soak send", "error", err)
 				}
 			}
-			if _, err := ledger.Expire(now()); err != nil {
-				slog.Error("expire Cassandra soak failure operations", "error", err)
-			}
 			target, content := selector.nextSend()
 			pending, publishErr := sender.Publish(actionCtx, target, content)
 			if publishErr == nil {
@@ -621,19 +770,9 @@ func runSoakWorkload(
 				Action: action, Outcome: soakOutcomeFailed, At: now(),
 				ErrorClass: classifySoakRPCError(publishErr),
 			})
-			// The publish never left the process, so no downstream side effect
-			// is expected and no reply can arrive. Closing the operation keeps
-			// it out of the data-loss bucket that an unresolved history observer
-			// would land in; dropping the pending entry keeps the failed send
-			// from being counted again at its reply deadline.
-			if pending != nil {
-				sender.Discard(pending.RequestID)
-				if pending.Tracked {
-					if err := failureTracker.AbandonUnsent(pending); err != nil {
-						slog.Error("abandon unsent Cassandra soak send", "error", err)
-					}
-				}
-			}
+			// Publish classifies definite local rejections as not_sent. Ambiguous
+			// failures remain active for admission timeout and downstream
+			// reconciliation.
 			return nil
 		},
 		Read: func(actionCtx context.Context, _ bool) error {
@@ -700,9 +839,16 @@ func runSoakWorkload(
 		actions,
 		nil,
 		now,
-		func() { metrics.SoakSaturation.WithLabelValues("global").Inc() },
+		nil,
+		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
 	)
 	result, runErr := workload.Run(ctx)
+	shutdownExpiry()
+	shutdownConsumerSamplers()
+	if err := observationRuntime.Close(); err != nil {
+		ledger.Invalidate("recipient_observer")
+		slog.Error("shutdown recipient observer", "error", err)
+	}
 	snapshot := collector.Snapshot(now())
 	report := BuildSoakReport(&snapshot, soakTargetRates(&cfg.Soak))
 	if err := PrintSoakReport(os.Stdout, &report); err != nil {
@@ -717,6 +863,21 @@ func runSoakWorkload(
 		return 1
 	}
 	return 0
+}
+
+type soakConsumerSamplerTarget struct {
+	Stream  string
+	Durable string
+}
+
+func soakConsumerSamplerTargets(siteID string) []soakConsumerSamplerTarget {
+	canonicalStream := stream.MessagesCanonical(siteID).Name
+	return []soakConsumerSamplerTarget{
+		{Stream: stream.Messages(siteID).Name, Durable: "message-gatekeeper"},
+		{Stream: canonicalStream, Durable: "message-worker"},
+		{Stream: canonicalStream, Durable: "broadcast-worker"},
+		{Stream: canonicalStream, Durable: "notification-worker"},
+	}
 }
 
 func soakMeasuredReadConfig(siteID string, pageLimit int) soakReadConfig {

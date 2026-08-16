@@ -13,7 +13,7 @@ stopped freely without perturbing the migration — no durable state, no acks
 that matter, no writes. Like `data-migration/`, it is **deletable** once the
 source is retired.
 
-```
+```text
                     ┌────────────────────────── tools/cdc-verify ──────────────────────────┐
 MIGRATION-OPLOG ────▶ watcher (ephemeral consumer, deliver-new) ─▶ verifier engine ─▶ results store (ring buffers)
    {siteID}     ────▶ stats poller (StreamInfo + consumer lag)  ──────────────┐             │
@@ -72,6 +72,8 @@ SITE_ID=site1 \
 NATS_URL=nats://localhost:4222 \
 SOURCE_MONGO_URI=mongodb://localhost:27017 \
 TARGET_MONGO_URI=mongodb://localhost:27018 \
+CASSANDRA_HOSTS=localhost:9042 \
+CASSANDRA_KEYSPACE=chat \
 MAPPING_FILE=tools/cdc-verify/mapping.example.json \
 ./bin/cdc-verify
 ```
@@ -151,7 +153,7 @@ mismatch → match as the pipeline catches up, and it freezes there.
 One check per observed event (one table row), deduplicated per key while
 pending:
 
-```
+```text
 event observed ──▶ PENDING ── poll compare every VERIFY_POLL (default 2s) ──▶ MATCHED  (frozen — never re-checked)
                      │                                                   └──▶ FAILED   (VERIFY_TIMEOUT elapsed, default 60s;
                      │                                                        moved to failures table with field-level diff)
@@ -278,6 +280,7 @@ transformers, then tuned per environment.
 | `SOURCE_MONGO_URI` | yes | — | Source Mongo connection string |
 | `SOURCE_MONGO_USERNAME` / `SOURCE_MONGO_PASSWORD` | no | `""` | Source Mongo auth |
 | `SOURCE_DB` | no | `rocketchat` | Source database name |
+| `SOURCE_READ_PREFERENCE` | no | `primary` | Source Mongo read preference (`primary`, `primaryPreferred`, `secondary`, `secondaryPreferred`, `nearest`). Default `primary` — a stale secondary would report convergence lag that isn't there |
 | `TARGET_MONGO_URI` | yes | — | Destination Mongo connection string |
 | `TARGET_MONGO_USERNAME` / `TARGET_MONGO_PASSWORD` | no | `""` | Target Mongo auth |
 | `TARGET_DB` | no | `chat` | Destination database name |

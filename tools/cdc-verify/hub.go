@@ -57,20 +57,24 @@ func (h *hub) broadcastStats(s StreamStats) { h.broadcast(sseEvent{Kind: "stats"
 //nolint:gocritic // see broadcastStats
 func (h *hub) broadcastResult(r CheckResult) { h.broadcast(sseEvent{Kind: "result", Data: r}) }
 
-// broadcast never blocks: a slow viewer loses intermediate frames, and the
-// next /api/state reload or SSE frame catches it up.
+// broadcast never blocks: a viewer that can't drain its buffer is disconnected
+// (channel closed, handler returns) — the browser's EventSource reconnects and
+// refetches full state on open, so nothing goes silently stale.
 func (h *hub) broadcast(ev sseEvent) {
 	b, err := json.Marshal(ev)
 	if err != nil {
 		slog.Error("marshal sse event", "error", err)
 		return
 	}
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for _, ch := range h.clients {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for id, ch := range h.clients {
 		select {
 		case ch <- b:
 		default:
+			slog.Warn("disconnecting slow sse client", "client", id)
+			close(ch)
+			delete(h.clients, id)
 		}
 	}
 }

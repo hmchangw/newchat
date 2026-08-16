@@ -47,10 +47,10 @@ type presencePool struct {
 
 // newPresencePool dials pubN publisher conns and obsN observer conns, and
 // subscribes every observer conn to chat.user.presence.state.*.
-func newPresencePool(url, credsFile string, pubN, obsN int, c *presenceCollector) (*presencePool, error) {
+func newPresencePool(url, credsFile string, pubN, obsN int, c *presenceCollector, metrics *Metrics) (*presencePool, error) {
 	p := &presencePool{collector: c}
 	for i := 0; i < pubN; i++ {
-		nc, err := connectWithCreds(url, fmt.Sprintf("loadgen-presence-pub-%d", i), credsFile)
+		nc, err := connectWithCredsHealth(url, fmt.Sprintf("loadgen-presence-pub-%d", i), credsFile, "presence_publish", metrics)
 		if err != nil {
 			p.Close()
 			return nil, fmt.Errorf("presence publisher conn %d: %w", i, err)
@@ -59,7 +59,7 @@ func newPresencePool(url, credsFile string, pubN, obsN int, c *presenceCollector
 	}
 	wildcard := subject.PresenceState("*")
 	for i := 0; i < obsN; i++ {
-		nc, err := connectWithCreds(url, fmt.Sprintf("loadgen-presence-obs-%d", i), credsFile)
+		nc, err := connectWithCredsHealth(url, fmt.Sprintf("loadgen-presence-obs-%d", i), credsFile, "presence_observer", metrics)
 		if err != nil {
 			p.Close()
 			return nil, fmt.Errorf("presence observer conn %d: %w", i, err)

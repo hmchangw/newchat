@@ -41,7 +41,9 @@ func buildSelect(table string, key map[string]any, cols []string) (string, []any
 		conds = append(conds, k+" = ?")
 		args = append(args, key[k])
 	}
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s", //nolint:gocritic
+	// LIMIT 2: one row proves presence, a second proves ambiguity — reading
+	// further rows of a wide partition buys nothing.
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s LIMIT 2", //nolint:gocritic
 		colList, table, strings.Join(conds, " AND "))
 	return q, args, nil
 }

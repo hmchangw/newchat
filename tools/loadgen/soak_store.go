@@ -21,7 +21,7 @@ const (
 	soakOwnershipChunkSize  = 2000
 )
 
-//go:generate mockgen -destination=mock_soak_store_test.go -package=main . soakSeedStore,soakLifecycleStore
+//go:generate mockgen -destination=mock_soak_store_test.go -package=main . soakSeedStore,soakLifecycleStore,soakSendLifecycle
 
 type soakSeedStore interface {
 	FindManifest(ctx context.Context, runID string) (*soakManifest, error)

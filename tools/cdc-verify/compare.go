@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // getPath walks a dot-path through nested map[string]any. No array indexing.
@@ -91,6 +92,65 @@ func isZeroValue(v any) bool {
 	}
 }
 
+// diffValueMaxString caps one diff value's string length: a diff is a pointer
+// at a mismatch, not a document dump, and rows are retained + broadcast as JSON.
+const diffValueMaxString = 2048
+
+// sanitizeDiffValue makes a value safe to retain and JSON-encode in a diff:
+// non-string map keys are stringified (json.Marshal rejects e.g. map[bool]T
+// from a driver), []byte becomes string, and huge strings are truncated.
+func sanitizeDiffValue(v any) any {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case string:
+		return truncDiffString(t)
+	case []byte:
+		return truncDiffString(string(t))
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, vv := range t {
+			out[truncDiffString(k)] = sanitizeDiffValue(vv)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, vv := range t {
+			out[i] = sanitizeDiffValue(vv)
+		}
+		return out
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		out := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			out[truncDiffString(fmt.Sprint(iter.Key().Interface()))] = sanitizeDiffValue(iter.Value().Interface())
+		}
+		return out
+	case reflect.Slice, reflect.Array:
+		out := make([]any, rv.Len())
+		for i := range out {
+			out[i] = sanitizeDiffValue(rv.Index(i).Interface())
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func truncDiffString(s string) string {
+	if len(s) <= diffValueMaxString {
+		return s
+	}
+	cut := diffValueMaxString
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…(truncated)"
+}
+
 // FieldDiff is one mismatched field in a failed sub-check.
 type FieldDiff struct {
 	SourcePath string `json:"sourcePath"`
@@ -116,7 +176,9 @@ func diffFields(src, dst map[string]any, pairs []fieldPair, reg transformRegistr
 		anyPresent := false
 		for _, sp := range p.SourcePaths {
 			v, ok := getPath(src, sp)
-			if ok {
+			// An explicit BSON null counts as absent: transformers drop null
+			// fields, so the dest legitimately holds nothing for them.
+			if ok && v != nil {
 				anyPresent = true
 			}
 			args = append(args, v)
@@ -130,7 +192,7 @@ func diffFields(src, dst map[string]any, pairs []fieldPair, reg transformRegistr
 			switch {
 			case !destZero:
 				diffs = append(diffs, FieldDiff{SourcePath: strings.Join(p.SourcePaths, ","),
-					DestField: p.DestField, Want: nil, Got: got, Cause: "absent in source, present in dest"})
+					DestField: p.DestField, Want: nil, Got: sanitizeDiffValue(got), Cause: "absent in source, present in dest"})
 			case p.Required:
 				diffs = append(diffs, FieldDiff{SourcePath: strings.Join(p.SourcePaths, ","),
 					DestField: p.DestField, Cause: "required field absent on both sides"})
@@ -146,7 +208,7 @@ func diffFields(src, dst map[string]any, pairs []fieldPair, reg transformRegistr
 		}
 		if !valuesEqual(want, got) {
 			diffs = append(diffs, FieldDiff{SourcePath: strings.Join(p.SourcePaths, ","),
-				DestField: p.DestField, Want: want, Got: got})
+				DestField: p.DestField, Want: sanitizeDiffValue(want), Got: sanitizeDiffValue(got)})
 		}
 	}
 	return diffs
@@ -165,7 +227,8 @@ func diffVerbatim(src, dst map[string]any, ignore []string) []FieldDiff {
 		}
 		got, ok := getPath(dst, k)
 		if !ok || !valuesEqual(want, got) {
-			diffs = append(diffs, FieldDiff{SourcePath: k, DestField: k, Want: want, Got: got})
+			diffs = append(diffs, FieldDiff{SourcePath: k, DestField: k,
+				Want: sanitizeDiffValue(want), Got: sanitizeDiffValue(got)})
 		}
 	}
 	for k, got := range dst {
@@ -173,7 +236,7 @@ func diffVerbatim(src, dst map[string]any, ignore []string) []FieldDiff {
 			continue
 		}
 		if _, ok := src[k]; !ok {
-			diffs = append(diffs, FieldDiff{DestField: k, Got: got, Cause: "present only in dest"})
+			diffs = append(diffs, FieldDiff{DestField: k, Got: sanitizeDiffValue(got), Cause: "present only in dest"})
 		}
 	}
 	return diffs

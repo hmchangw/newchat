@@ -1,188 +1,108 @@
 # Loadgen Failure Observation Runtime
 
-This document describes the failure-observation capability implemented by the
-continuous Cassandra soak workload. It extends the existing
-`seed -> soak -> stopped -> teardown` lifecycle; it is not a separate fault
-orchestration mode.
+The Cassandra soak workload provides continuous, durable observation. It does
+not inject faults, schedule campaign phases, or calculate a Go-side verdict.
+Operators select fault and recovery windows at dashboard query time while the
+same open-loop traffic mix continues through baseline, disruption, and
+recovery.
 
-## Execution Model
+## Durable message observation
 
-Loadgen does not inject faults and does not change its traffic profile when a
-fault starts. The soak Deployment continuously generates its configured
-production-like mix. An operator or an external chaos controller restarts
-pods, removes a leader, or injects a network fault independently. Grafana
-annotations or the chaos system's timestamps identify the fault window.
+Before each message publish attempt, loadgen appends a versioned WAL intent and
+waits for its grouped fsync durability barrier. Concurrent intents may share a
+barrier for up to 10 milliseconds. Non-intent lifecycle records use the same
+bounded group-commit writer and are fsynced by the next barrier, the 10 ms
+flush timer, compaction, or shutdown. After the publish attempt begins, the operation is active even if the
+NATS client returns an error because the downstream outcome is ambiguous.
+`not_sent` is reserved for a proven local pre-publish failure and uses the
+bounded reason `publish_local_error`.
 
-```text
-seed Job
-  -> soak Deployment and warm-up
-  -> stable baseline
-  -> external fault while the same traffic continues
-  -> automatic service recovery and backlog drain
-  -> stopped
-  -> evidence retention
-  -> approved teardown
-```
+Every admitted message requires independent admission and Cassandra-history
+effects. When `SOAK_RECIPIENT_OBSERVER_ENABLED=true`, newly admitted messages
+also require an account-attributed recipient event for every subscribed human
+recipient. Disabled recipient observation creates no recipient effect and no
+recipient `unverified` result.
 
-The Helm `phase` value continues to mean deployment lifecycle
-(`seed|soak|stopped|teardown`). It is not a fault phase and it does not label
-hot-path metrics.
+Recipient expectations retain a bounded route (`room` or `user`), set source,
+and completeness flag in the WAL. The room observer treats one global and one
+local copy of the same logical room event as one delivery; a repeated copy on
+the same route remains duplicate evidence. Locally tracked thread followers
+survive recent-message eviction. An externally discovered thread parent has an
+incomplete follower set, so absence and unexpected-recipient claims are
+`unverified` rather than false violations.
 
-## Implemented Vertical Slice
+Ordinary expected recipient deliveries remain in bounded memory and are not
+fsynced individually. Exact anomalies are durably recorded when observed;
+authoritative missing-recipient sets and terminal `unverified` markers are
+flushed as batches. Every positive result has a completed sidecar barrier before
+it can be recorded in the ledger. A failed barrier downgrades the result to `unverified`,
+marks the observer down, and invalidates the evidence interval. Durable positive
+sidecars are replayed after restart; ordinary recovered recipient operations
+without such evidence remain `unverified` because pre-restart observer-health
+coverage cannot be reconstructed.
 
-The first durable operation lane covers user message sends through the real
-service path:
+Terminal results are `good`, `bad`, `unverified`, `not_sent`, and
+`missing_after_deadline`. `bad` and authoritative absence retain bounded
+reasons such as `admission_rejected`, `history_content_mismatch`,
+`history_missing`, `recipient_duplicate`, `recipient_unexpected`,
+`recipient_identity_mismatch`, and `recipient_missing`. Exact identifiers stay
+in the WAL or retained recipient journals, never Prometheus labels.
 
-```text
-loadgen
-  -> message-gatekeeper admission reply
-  -> MESSAGES_CANONICAL JetStream delivery
-  -> message-worker Cassandra write
-  -> history-service GetMessageByID reconciliation
-```
+The WAL header stores the observer contract. A restart must use the same
+configured observer set and recipient enablement. A mismatch fails startup with
+an instruction to use a new `SOAK_RUN_ID`; it never silently reinterprets
+pending operations. A headerless or contract-less legacy WAL is adopted only
+when every pending operation matches the current contract, then atomically
+upgraded.
 
-Before publishing a message, loadgen durably records an intent containing the
-message ID, request ID, room, account, timestamps, and a SHA-256 content hash.
-Plaintext message content is not written to the ledger. Admission and history
-read-back are independent observations, so a reply timeout followed by a
-successful read-back remains an availability failure without being
-misreported as data loss.
+## Traffic independence
 
-Only a generated message operation successfully admitted to the ledger is
-`eligible` for terminal accounting. Its terminal result is one of:
-
-- `good`: admission and persisted history both match;
-- `bad`: an observation explicitly failed or the persisted record mismatched;
-- `unverified`: the history reader itself was unavailable through the deadline,
-  so absence was never confirmed;
-- `not_sent`: the publish never left the loadgen process, so no downstream side
-  effect is expected;
-- `missing_after_deadline`: the record was confirmed absent at the configured
-  reconciliation deadline.
-
-`unverified` and `not_sent` are availability signals. Only
-`missing_after_deadline` is a data-loss claim, and it is recorded solely when
-history-service answered and the message was not there — a history-service or
-Cassandra outage that outlasts the deadline yields `unverified`.
-
-Where observations disagree, the strongest evidence wins:
-`missing_after_deadline` > `bad` > `unverified` > `good`.
-
-The invariant for a completed interval is:
+The workload remains open-loop. Each pacing event has exactly one outcome:
 
 ```text
-ledger_admitted = good + bad + unverified + not_sent + missing_after_deadline
+intended = dispatched
+         + scheduler_underrun
+         + lane_saturation
+         + global_saturation
 ```
 
-`eligible` is the non-terminal state of a ledger-admitted operation, not a
-sixth result. Sends that continue after ledger admission or observation fails
-are counted separately in `loadgen_failure_untracked_total`. Operations dropped
-while replaying a WAL that exceeds the configured capacity are counted in
-`loadgen_failure_dropped_total`. Neither count belongs on the right-hand side
-of the invariant; either count invalidates the affected observation interval
-and prevents a conclusive PASS.
+The configured target is a gauge and is not substituted for the exact intended
+counter. Downstream latency never reduces the configured target or introduces
+backpressure; overload is reported as lane/global saturation. Reconciliation
+borrows at most `SOAK_RECONCILE_READ_SHARE` from the existing read lane and does
+not add an unbudgeted reader.
 
-## Reconciliation Traffic
+Ledger capacity, WAL, observer, and queue failures degrade evidence but do not
+stop safe traffic. The single-replica `Deployment` uses `Recreate` with a
+retained `ReadWriteOnce` PVC, so unresolved operations resume after replacement.
 
-Reconciliation does not create an unbudgeted reader. A due operation consumes
-one slot from the existing soak read lane. When no operation is due, that slot
-runs the existing mixed history read. The default 700 reads/s therefore
-contains the 100 message read-backs/s rather than silently becoming 800
-reads/s.
-
-Reconciliation may claim at most `SOAK_RECONCILE_READ_SHARE` of the read lane
-(default half). A fault window can leave far more unresolved operations than
-the read lane retires per second, and without the cap reconciliation would take
-every slot and stop the production-like read mix exactly when it matters. The
-remaining share always runs the mixed read.
-
-A missing record or transient history RPC failure is retried on later read
-slots until `SOAK_RECONCILE_DEADLINE`. The default is ten minutes. Operators
-must set the deadline beyond the longest planned fault plus recovery window.
-
-## Durable Ledger and Restart Recovery
-
-The in-memory ledger is the active correlation index. Its append-only WAL is
-stored on a loadgen-only PVC and is authoritative for unresolved operations.
-It is never stored in NATS, MongoDB, or Cassandra because those systems are
-the fault targets.
-
-The WAL provides:
-
-- durable intent before publish;
-- `fsync` on every state transition;
-- recovery of unresolved operations after pod replacement;
-- repair of an unterminated final record left by a process crash;
-- crash-safe compaction to the active set after every 10,000 completed
-  operations;
-- bounded in-memory capacity with explicit invalidation on overflow or WAL
-  failure.
-
-Ledger admission is best-effort with respect to the workload. If the ledger
-refuses an intent — capacity reached, WAL write failure — the send still goes
-out and the run continues with degraded observation, surfaced through
-`loadgen_failure_untracked_total{reason="start"}` and
-`loadgen_failure_invalidations_total`. Stopping traffic to protect the
-bookkeeping would defeat the purpose of the test.
-
-The same applies at startup: a retained PVC can hold more unresolved operations
-than the current `SOAK_LEDGER_CAPACITY` admits, for example after a capacity
-reduction or an `existingClaim` reuse. Recovery drops the excess, counts it in
-`loadgen_failure_dropped_total`, and marks the ledger invalidated rather than
-failing startup and crash-looping the pod.
-
-The Helm chart remains a single-replica Deployment with `Recreate`. A
-StatefulSet is not required for one writer. The run-specific PVC is mounted at
-`/var/lib/loadgen/ledger` and has both Helm keep and Argo CD no-prune
-annotations so `phase=stopped` preserves evidence. PVC removal is a separate,
-explicit operator action after evidence retention.
-
-An OOM or pod restart still makes traffic/SLO conclusions for the affected
-interval inconclusive because offered load and latency observation stopped.
-WAL recovery permits data-integrity reconciliation to continue; it does not
-turn the interrupted performance interval into a pass.
+WAL and sidecar performance are directly observable through
+`loadgen_failure_wal_append_duration_seconds`,
+`loadgen_failure_wal_flush_duration_seconds`,
+`loadgen_failure_wal_flush_batch_size`,
+`loadgen_failure_wal_appends_total`,
+`loadgen_failure_evidence_flush_duration_seconds`, and
+`loadgen_failure_evidence_records_total`. Rising WAL flush latency together
+with falling dispatch ratio or lane/global saturation identifies evidence I/O
+as a loadgen bottleneck. Sidecar flush errors or latency are independent from
+the recipient callback queue and invalidate positive absence claims.
 
 ## Configuration
 
-| Environment variable | Helm value | Default | Purpose |
-|---|---|---:|---|
-| `SOAK_LEDGER_DIR` | `ledger.mountPath` | empty in the binary; enabled by the Chart | Persistent ledger directory |
-| `SOAK_LEDGER_CAPACITY` | `ledger.capacity` | 200,000 | Maximum unresolved in-memory operations |
-| `SOAK_RECONCILE_DEADLINE` | `ledger.reconcileDeadline` | 10m | Final missing-data deadline |
-| `SOAK_RECONCILE_RETRY_INTERVAL` | `ledger.reconcileRetryInterval` | 1s | Earliest retry after missing/transient read-back |
-| `SOAK_RECONCILE_READ_SHARE` | `ledger.reconcileReadShare` | 0.5 | Maximum fraction of the read lane reconciliation may claim |
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `SOAK_LEDGER_DIR` | empty | Persistent WAL and recipient-journal directory |
+| `SOAK_LEDGER_CAPACITY` | `200000` | Maximum unresolved in-memory operations |
+| `SOAK_RECONCILE_DEADLINE` | `10m` | Authoritative absence deadline |
+| `SOAK_RECONCILE_RETRY_INTERVAL` | `1s` | Earliest history retry |
+| `SOAK_RECONCILE_READ_SHARE` | `0.5` | Maximum read-lane reconciliation share |
+| `SOAK_RECIPIENT_OBSERVER_ENABLED` | `false` | Opt in to exact recipient observation |
+| `SOAK_RECIPIENT_OBSERVER_QUEUE` | `8192` | Bounded recipient callback queue |
+| `SOAK_RECIPIENT_OBSERVER_CONNECTIONS` | `32` | Bounded account-attributed NATS connection pool |
 
-The Chart defaults to a 20 GiB `ReadWriteOnce` PVC. `ledger.existingClaim`
-selects an operator-managed claim. Docker Compose uses the
-`loadgen-ledger` named volume.
+Helm exposes the same opt-in as
+`recipientObserver.enabled|queue|connections`. Queue and connection bounds are
+validated even while disabled.
 
-## Metrics
-
-| Metric | Meaning |
-|---|---|
-| `loadgen_failure_operations_total{scenario,lane,result}` | Terminal operation outcomes |
-| `loadgen_failure_observations_total{scenario,lane,observer,result}` | Admission and Cassandra history observations |
-| `loadgen_failure_inflight{scenario,lane}` | Operations awaiting an observation |
-| `loadgen_failure_recovered_operations_total` | Unresolved operations loaded from WAL after restart |
-| `loadgen_failure_invalidations_total{reason}` | Ledger capacity or WAL failures that invalidate evidence |
-| `loadgen_failure_untracked_total{reason}` | Sends the ledger could not account for, by `start`, `observe`, or `abandon` |
-| `loadgen_failure_dropped_total` | Recovered operations discarded because the WAL exceeded the configured capacity |
-| `loadgen_failure_journal_bytes` | Current compacted WAL size |
-| `loadgen_nats_connected{pool}` | Instrumented loadgen pool's current NATS connection state |
-| `loadgen_nats_connection_events_total{pool,event}` | Connect, disconnect, reconnect, close, and async-error events |
-| `loadgen_nats_outage_duration_seconds{pool}` | Client-observed disconnect duration |
-| `go_*`, `process_*` | Loadgen runtime and process health |
-
-Operation IDs, message IDs, room IDs, and run IDs are not hot-path metric
-labels. Individual unresolved records remain in the WAL; Prometheus receives
-only bounded labels.
-
-## Current Boundary
-
-This version is deployable in place of the existing Cassandra soak harness,
-but the durable ledger currently covers the user-message admission-to-history
-vertical slice. Existing edit, delete, reaction, pin, thread, and history
-workloads continue to emit their existing aggregate and sampled verification
-metrics. Real bot persistence, migration, MongoDB final-state reconciliation,
-federation, and complete JetStream durable/exhaustion observation remain
-separate gaps in the subsystem plans.
+The dashboard interpretation contract is defined in
+[`failure-testing/dashboard-evidence-contract.md`](failure-testing/dashboard-evidence-contract.md).

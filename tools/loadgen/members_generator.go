@@ -12,6 +12,19 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
+func memberRoomSizeBucket(size int) string {
+	switch {
+	case size < 100:
+		return "lt_100"
+	case size < 500:
+		return "100_499"
+	case size < 1000:
+		return "500_999"
+	default:
+		return "gte_1000"
+	}
+}
+
 // SustainedMembersConfig is the parameter bundle for an open-loop members
 // generator.
 type SustainedMembersConfig struct {
@@ -307,6 +320,8 @@ type CapacityMembersGenerator struct {
 	presetLabel string
 	injectLabel string
 	shapeLabel  string
+	finalMu     sync.Mutex
+	finalSizes  map[string]int
 }
 
 // NewCapacityMembersGenerator creates a new capacity-mode generator.
@@ -316,7 +331,19 @@ func NewCapacityMembersGenerator(cfg *CapacityMembersConfig) *CapacityMembersGen
 		presetLabel: cfg.Preset.Name,
 		injectLabel: string(cfg.Inject),
 		shapeLabel:  string(cfg.Shape),
+		finalSizes:  make(map[string]int, len(cfg.Fixtures.Rooms)),
 	}
+}
+
+// FinalSizes returns the last confirmed membership size for each room.
+func (g *CapacityMembersGenerator) FinalSizes() map[string]int {
+	g.finalMu.Lock()
+	defer g.finalMu.Unlock()
+	result := make(map[string]int, len(g.finalSizes))
+	for roomID, size := range g.finalSizes {
+		result[roomID] = size
+	}
+	return result
 }
 
 // Run runs each room until TargetSize or pool exhaustion. Returns nil when
@@ -357,6 +384,13 @@ func (g *CapacityMembersGenerator) Run(ctx context.Context) error {
 
 func (g *CapacityMembersGenerator) runRoom(ctx context.Context, room *model.Room, ack <-chan struct{}) {
 	size := g.cfg.Preset.BaselineSize
+	bucket := memberRoomSizeBucket(size)
+	g.cfg.Metrics.MemberRoomSize.WithLabelValues(bucket).Inc()
+	defer func() {
+		g.finalMu.Lock()
+		g.finalSizes[room.ID] = size
+		g.finalMu.Unlock()
+	}()
 	pool := append([]string(nil), g.cfg.Pools[room.ID]...)
 	owner := g.cfg.Owners[room.ID]
 
@@ -403,7 +437,14 @@ func (g *CapacityMembersGenerator) runRoom(ctx context.Context, room *model.Room
 		select {
 		case <-ack:
 			size += g.cfg.UsersPerAdd
-			g.cfg.Metrics.MemberRoomSize.WithLabelValues(room.ID).Set(float64(size))
+			// The gauge counts rooms per bucket. Writing the size itself would make
+			// every room in a bucket share one series, reporting whichever room
+			// updated last instead of the distribution.
+			if next := memberRoomSizeBucket(size); next != bucket {
+				g.cfg.Metrics.MemberRoomSize.WithLabelValues(bucket).Dec()
+				g.cfg.Metrics.MemberRoomSize.WithLabelValues(next).Inc()
+				bucket = next
+			}
 		case <-time.After(g.cfg.E2Timeout):
 			g.cfg.Metrics.MemberPublishErrors.WithLabelValues("timeout").Inc()
 			return
