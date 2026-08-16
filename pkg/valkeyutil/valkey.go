@@ -78,6 +78,22 @@ func WrapClusterClient(c *redis.ClusterClient) Client {
 	return &clusterClient{c: c}
 }
 
+// Cluster exposes the underlying *redis.ClusterClient behind a Client, or nil
+// if the Client did not come from ConnectCluster/WrapClusterClient.
+//
+// It exists for the few callers needing commands outside the Client interface
+// — a keyspace walk (SCAN + MEMORY USAGE) is the motivating case. Widening
+// Client instead would force every implementation and test fake in the repo to
+// grow methods it has no use for, so the escape hatch is narrower than the
+// interface change it replaces. Prefer the Client interface everywhere else.
+func Cluster(client Client) *redis.ClusterClient {
+	cc, ok := client.(*clusterClient)
+	if !ok {
+		return nil
+	}
+	return cc.c
+}
+
 // Disconnect closes the client and logs any failure at ERROR.
 func Disconnect(client Client) {
 	if client == nil {
