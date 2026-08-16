@@ -175,6 +175,51 @@ func (r *soakRoomReader) RoomState(
 	return response, err
 }
 
+// RoomInfoFor reads one room's metadata through the production RPC path.
+func (r *soakRoomReader) RoomInfoFor(ctx context.Context, roomID string) (soakRoomInfo, error) {
+	if roomID == "" {
+		return soakRoomInfo{}, fmt.Errorf("room info read requires a room")
+	}
+	var response soakRoomsInfoResponse
+	err := r.call(ctx, soakRPCRequest{
+		Action:  soakRPCRoomStateRead,
+		Subject: subject.RoomsInfoBatchSubscribe(r.cfg.SiteID),
+		Body:    soakRoomsInfoRequest{RoomIDs: []string{roomID}},
+		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+	}, &response, func(sample *soakReadSample) {
+		sample.Messages = len(response.Rooms)
+	})
+	if err != nil {
+		return soakRoomInfo{}, err
+	}
+	for i := range response.Rooms {
+		if response.Rooms[i].RoomID == roomID {
+			return response.Rooms[i], nil
+		}
+	}
+	return soakRoomInfo{RoomID: roomID}, nil
+}
+
+// SubscriptionsFor reads one account's subscriptions through the production RPC
+// path so the mute state can be checked the way a client would see it.
+func (r *soakRoomReader) SubscriptionsFor(
+	ctx context.Context,
+	account string,
+) (soakSubscriptionListResponse, error) {
+	var response soakSubscriptionListResponse
+	if account == "" {
+		return response, fmt.Errorf("subscription read requires an account")
+	}
+	err := r.call(ctx, soakRPCRequest{
+		Action:  soakRPCRoomStateRead,
+		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
+		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+	}, &response, func(sample *soakReadSample) {
+		sample.Messages = len(response.Subscriptions)
+	})
+	return response, err
+}
+
 // Account returns the account the reader addresses a room as, so the observer
 // asks room-service with an identity that is actually a member.
 func (r *soakRoomReader) Account(roomID string) (string, bool) {

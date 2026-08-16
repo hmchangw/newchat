@@ -4,14 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 const (
@@ -761,4 +765,173 @@ type soakOwnershipChunk struct {
 	ID        string   `bson:"_id"`
 	SoakRunID string   `bson:"soakRunId"`
 	RoomIDs   []string `bson:"roomIds"`
+}
+
+// soakRoomStateStore is the authoritative final-state source for the room and
+// member lanes. Its reads are the tiebreaker that turns "room-service did not
+// return it" into a defensible absence claim.
+type soakRoomStateStore interface {
+	RoomName(ctx context.Context, roomID string) (string, bool, error)
+	IsRoomMember(ctx context.Context, roomID, account string) (bool, error)
+	SubscriptionMuted(ctx context.Context, roomID, account string) (muted bool, found bool, err error)
+	AppendOwnedRooms(ctx context.Context, runID string, roomIDs []string) error
+}
+
+var _ soakRoomStateStore = (*mongoSoakStore)(nil)
+
+// primary routes a read at the replica-set primary. The shared soak client
+// connects with SecondaryPreferred, and a lagging secondary would report a
+// completed write as missing — turning replication lag into a false data-loss
+// claim during exactly the failures this run is measuring.
+func (s *mongoSoakStore) primary(name string) *mongo.Collection {
+	return mongoutil.CollectionWithReadPreference(s.db.Collection(name), readpref.Primary())
+}
+
+func (s *mongoSoakStore) RoomName(ctx context.Context, roomID string) (string, bool, error) {
+	if roomID == "" {
+		return "", false, fmt.Errorf("read soak room name requires a room ID")
+	}
+	var document struct {
+		Name string `bson:"name"`
+	}
+	err := s.primary("rooms").FindOne(
+		ctx,
+		bson.D{{Key: "_id", Value: roomID}},
+		options.FindOne().SetProjection(bson.D{
+			{Key: "_id", Value: 0},
+			{Key: "name", Value: 1},
+		}),
+	).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read soak room name for %q: %w", roomID, err)
+	}
+	return document.Name, true, nil
+}
+
+func (s *mongoSoakStore) IsRoomMember(
+	ctx context.Context,
+	roomID, account string,
+) (bool, error) {
+	if roomID == "" || account == "" {
+		return false, fmt.Errorf("read soak room membership requires a room ID and account")
+	}
+	err := s.primary("room_members").FindOne(
+		ctx,
+		bson.D{
+			{Key: "rid", Value: roomID},
+			{Key: "member.account", Value: account},
+		},
+		options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}}),
+	).Err()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read soak room membership for %q: %w", roomID, err)
+	}
+	return true, nil
+}
+
+func (s *mongoSoakStore) SubscriptionMuted(
+	ctx context.Context,
+	roomID, account string,
+) (bool, bool, error) {
+	if roomID == "" || account == "" {
+		return false, false, fmt.Errorf("read soak mute state requires a room ID and account")
+	}
+	var document struct {
+		Muted bool `bson:"muted"`
+	}
+	err := s.primary("subscriptions").FindOne(
+		ctx,
+		bson.D{
+			{Key: "roomId", Value: roomID},
+			{Key: "u.account", Value: account},
+		},
+		options.FindOne().SetProjection(bson.D{
+			{Key: "_id", Value: 0},
+			{Key: "muted", Value: 1},
+		}),
+	).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read soak mute state for %q: %w", roomID, err)
+	}
+	return document.Muted, true, nil
+}
+
+// AppendOwnedRooms takes ownership of rooms created during the run. Teardown
+// only deletes rooms carrying this run's marker and only reaches rooms listed
+// in an ownership chunk, so both are needed or the create lane would leave its
+// rooms behind forever.
+func (s *mongoSoakStore) AppendOwnedRooms(
+	ctx context.Context,
+	runID string,
+	roomIDs []string,
+) error {
+	if runID == "" {
+		return fmt.Errorf("append owned soak rooms requires a run ID")
+	}
+	if len(roomIDs) == 0 {
+		return nil
+	}
+	if _, err := s.db.Collection("rooms").UpdateMany(
+		ctx,
+		bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: roomIDs}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "soakRunId", Value: runID}}}},
+	); err != nil {
+		return fmt.Errorf("mark rooms owned by soak run %q: %w", runID, err)
+	}
+
+	next, err := s.nextOwnershipChunkIndex(ctx, runID)
+	if err != nil {
+		return err
+	}
+	collection := s.db.Collection(soakOwnershipCollection)
+	docs := make([]any, 0, (len(roomIDs)+soakOwnershipChunkSize-1)/soakOwnershipChunkSize)
+	for start := 0; start < len(roomIDs); start += soakOwnershipChunkSize {
+		end := min(start+soakOwnershipChunkSize, len(roomIDs))
+		docs = append(docs, soakOwnershipChunk{
+			ID:        fmt.Sprintf("%s:%06d", runID, next),
+			SoakRunID: runID,
+			RoomIDs:   append([]string(nil), roomIDs[start:end]...),
+		})
+		next++
+	}
+	if err := insertSoakBatches(ctx, collection, docs); err != nil {
+		return fmt.Errorf("append ownership chunks for run %q: %w", runID, err)
+	}
+	return nil
+}
+
+// nextOwnershipChunkIndex keeps appended chunk IDs sorting after existing ones
+// so the teardown pager's strictly-advancing cursor still reaches them.
+func (s *mongoSoakStore) nextOwnershipChunkIndex(
+	ctx context.Context,
+	runID string,
+) (int, error) {
+	var chunk soakOwnershipChunk
+	err := s.db.Collection(soakOwnershipCollection).FindOne(
+		ctx,
+		soakOwnershipIDFilter(runID, ""),
+		options.FindOne().
+			SetProjection(bson.D{{Key: "_id", Value: 1}}).
+			SetSort(bson.D{{Key: "_id", Value: -1}}),
+	).Decode(&chunk)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read latest ownership chunk for run %q: %w", runID, err)
+	}
+	index, parseErr := strconv.Atoi(strings.TrimPrefix(chunk.ID, runID+":"))
+	if parseErr != nil {
+		return 0, fmt.Errorf("parse ownership chunk index %q: %w", chunk.ID, parseErr)
+	}
+	return index + 1, nil
 }
