@@ -53,6 +53,34 @@ or queue failures remain visible while production-shaped traffic continues.
 Dashboard query time defines the fault window and evaluates evidence validity,
 impact, and correctness as independent dimensions.
 
+## Upgrading an existing release
+
+**Allocate a new `runId`.** The observer contract and the scenario label changed,
+so a WAL written by an earlier image is rejected on replay. The pod does not
+crash: it falls back to an in-memory ledger and marks the whole run's evidence
+invalid (`loadgen_failure_invalidations_total{reason="wal"}`), which is easy to
+miss. The WAL file is named after the run ID, so a new ID starts a clean journal.
+
+**Check the run ID format.** `SOAK_RUN_ID` is now validated against
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. A non-conforming ID exits with status 2 at
+startup instead of running with a degraded journal.
+
+**Set `soak.environment`.** Allowed values are `local`, `test`, `staging`, and
+`production`. It defaults to `local`, which is valid but mislabels
+`loadgen_run_info` on any shared dashboard.
+
+**Update dashboards before the first run.** Three series changed:
+
+| Before | After |
+|---|---|
+| `loadgen_soak_saturation_total` | `loadgen_soak_lane_saturation_total` and `loadgen_soak_global_saturation_total` |
+| `loadgen_member_room_size{room_id}` | `loadgen_member_room_size{size_bucket}` |
+| `scenario="cassandra_soak"` | `scenario="message_soak"` |
+
+The retained PVC needs no resizing. At `sendRate=100` and a ten-minute
+reconcile deadline the WAL holds roughly 68 MB, peaking near 220 MB while a
+compaction keeps the current, temporary, and backup files together.
+
 ## Required release inputs
 
 Create one values file per run in the deployment configuration repository.
