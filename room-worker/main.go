@@ -59,6 +59,9 @@ type config struct {
 	// Grace window during which a rotated-out previous key remains valid for decrypt.
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
 
+	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
+	RoomKeyRetiredTTL time.Duration `env:"ROOM_KEY_RETIRED_TTL" envDefault:"20m"`
+
 	// MemberCountReconcileTTL bounds how often the add-member hot path runs a
 	// full O(room) recompute of userCount/appCount. Between recomputes the
 	// counts are maintained incrementally ($inc by the actual delta); a full
@@ -104,11 +107,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cfg.RoomKeyGracePeriod <= 0 {
-		slog.Error("ROOM_KEY_GRACE_PERIOD must be a positive duration",
-			"room_key_grace_period", cfg.RoomKeyGracePeriod)
-		os.Exit(1)
-	}
 	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
 	if err != nil {
 		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
@@ -149,7 +147,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	keyStore := roomkeystore.NewMongoStore(mongoClient.Database(cfg.MongoDB).Collection("rooms"), cfg.RoomKeyGracePeriod)
+	keyStore, err := roomkeystore.OpenMongo(ctx, mongoClient.Database(cfg.MongoDB), cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL)
+	if err != nil {
+		slog.Error("open room key store failed", "error", err)
+		os.Exit(1)
+	}
 
 	var metaValkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {

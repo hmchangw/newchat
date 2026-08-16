@@ -44,11 +44,13 @@ type config struct {
 	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference routes the store's display/list reads to secondaries; the
 	// client stays on primary for authz/dedup/read-after-write.
-	MongoReadPreference      string          `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
-	MaxRoomSize              int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
-	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
-	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
-	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	MongoReadPreference string        `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	MaxRoomSize         int           `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
+	MaxBatchSize        int           `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
+	MemberListTimeout   time.Duration `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
+	RoomKeyGracePeriod  time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
+	RoomKeyRetiredTTL        time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"`
 	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
@@ -184,12 +186,11 @@ func main() {
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 
-	if cfg.RoomKeyGracePeriod <= 0 {
-		slog.Error("ROOM_KEY_GRACE_PERIOD must be a positive duration",
-			"room_key_grace_period", cfg.RoomKeyGracePeriod)
+	keyStore, err := roomkeystore.OpenMongo(ctx, db, cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL)
+	if err != nil {
+		slog.Error("open room key store failed", "error", err)
 		os.Exit(1)
 	}
-	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), cfg.RoomKeyGracePeriod)
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
