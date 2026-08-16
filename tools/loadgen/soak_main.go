@@ -769,6 +769,8 @@ func runSoakWorkload(
 		rand.New(rand.NewSource(seed+9)),
 		now,
 	)
+	// The read-receipt read needs a real message ID, which only the catalog has.
+	roomReader.SetMessageSource(catalog)
 	roomStateHealth := newFailureObserverHealth(failureObserverRoomState, now())
 	roomVerifier := newSoakRoomStateVerifier(roomReader, store, metrics, roomStateHealth, now)
 	roomLanes := newSoakRoomLanes(
@@ -997,13 +999,29 @@ type soakConsumerSamplerTarget struct {
 	Durable string
 }
 
+// soakConsumerSamplerTargets lists every durable the lanes feed. A consumer
+// with traffic and no sampler is a blind spot precisely where a fault window
+// needs backlog evidence, so the room and member lanes' downstream consumers on
+// ROOMS and INBOX belong here alongside the message hops.
 func soakConsumerSamplerTargets(siteID string) []soakConsumerSamplerTarget {
 	canonicalStream := stream.MessagesCanonical(siteID).Name
+	roomsStream := stream.Rooms(siteID).Name
+	inboxStream := stream.Inbox(siteID).Name
 	return []soakConsumerSamplerTarget{
 		{Stream: stream.Messages(siteID).Name, Durable: "message-gatekeeper"},
 		{Stream: canonicalStream, Durable: "message-worker"},
 		{Stream: canonicalStream, Durable: "broadcast-worker"},
 		{Stream: canonicalStream, Durable: "notification-worker"},
+		// search-sync-worker indexes messages off the same canonical stream.
+		{Stream: canonicalStream, Durable: "message-sync"},
+		{Stream: roomsStream, Durable: "room-worker"},
+		// notification-worker runs a second consumer that invalidates its cache
+		// on mute events, which the room mutation lane drives.
+		{Stream: roomsStream, Durable: "notification-worker-room-event-invalidate"},
+		// Both search-sync collections index subscription lifecycle events off
+		// the INBOX internal lane that the member mutation lane produces.
+		{Stream: inboxStream, Durable: "spotlight-sync"},
+		{Stream: inboxStream, Durable: "user-room-sync"},
 	}
 }
 

@@ -16,6 +16,13 @@ type soakRoomReadConfig struct {
 	RequestTimeout time.Duration
 }
 
+// soakRoomMessageSource supplies a persisted message the read-receipt read can
+// ask about. The message catalog satisfies it; the interface lives here so the
+// reader depends on the one method it needs.
+type soakRoomMessageSource interface {
+	PickAnyEligible(roomID string, action soakCatalogAction) (soakCatalogMessage, bool)
+}
+
 // soakRoomReader drives the read-only room lane and serves the point lookups
 // the room-state observer needs. Reads carry no correctness ledger: a read has
 // no expected side effect to reconcile, only latency and an outcome.
@@ -31,6 +38,15 @@ type soakRoomReader struct {
 	rooms    []string
 	accounts map[string]string
 	created  []string
+	messages soakRoomMessageSource
+}
+
+// SetMessageSource wires the message catalog in after construction, because the
+// catalog is built alongside the message lanes rather than the room pool.
+func (r *soakRoomReader) SetMessageSource(messages soakRoomMessageSource) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.messages = messages
 }
 
 func newSoakRoomReader(
@@ -88,7 +104,7 @@ func (r *soakRoomReader) ReadMixed(ctx context.Context) error {
 	roll := r.rng.Float64()
 	r.mu.Unlock()
 	switch {
-	case roll < 0.5:
+	case roll < 0.45:
 		roomID, account, ok := r.pickRoom()
 		if !ok {
 			r.recordSkip(soakRPCMemberList)
@@ -96,11 +112,46 @@ func (r *soakRoomReader) ReadMixed(ctx context.Context) error {
 		}
 		_, err := r.ListMembers(ctx, roomID, account)
 		return err
-	case roll < 0.8:
+	case roll < 0.72:
 		return r.RoomsInfo(ctx)
-	default:
+	case roll < 0.9:
 		return r.SubscriptionList(ctx)
+	default:
+		return r.ReadReceipts(ctx)
 	}
+}
+
+// ReadReceipts asks who has read one persisted message. It needs a real message
+// ID, so it is the one room read that depends on the message catalog; without
+// one it degrades to a skip rather than measuring a rejected request.
+func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
+	roomID, account, ok := r.pickRoom()
+	if !ok {
+		r.recordSkip(soakRPCReadReceiptList)
+		return nil
+	}
+	r.mu.Lock()
+	messages := r.messages
+	r.mu.Unlock()
+	if messages == nil {
+		r.recordSkip(soakRPCReadReceiptList)
+		return nil
+	}
+	message, found := messages.PickAnyEligible(roomID, soakCatalogReadReceipt)
+	if !found || message.ID == "" {
+		r.recordSkip(soakRPCReadReceiptList)
+		return nil
+	}
+
+	var response soakReadReceiptResponse
+	return r.call(ctx, soakRPCRequest{
+		Action:  soakRPCReadReceiptList,
+		Subject: subject.MessageReadReceipt(account, roomID, r.cfg.SiteID),
+		Body:    soakReadReceiptRequest{MessageID: message.ID},
+		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+	}, &response, func(sample *soakReadSample) {
+		sample.Messages = len(response.Readers)
+	})
 }
 
 func (r *soakRoomReader) ListMembers(

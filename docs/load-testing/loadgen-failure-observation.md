@@ -135,7 +135,7 @@ and no extra phase.
 | `room_mutation` | `room_rename`, `mute_toggle` | `admission` + `room_state` |
 | `room_create` | `room_create` | `admission` + `room_state` |
 | `read_receipt` | `message_read` | `admission` + `room_state` |
-| `room_read` | member list, rooms-info batch, subscription list | none |
+| `room_read` | member list, rooms-info batch, subscription list, read receipts | none |
 | `presence` | hello / ping / activity / bye, batch query | none |
 
 `room_read` is read-only. A read has no expected side effect to reconcile, so
@@ -252,6 +252,33 @@ disagreement there is legal rather than a fault:
 Outcomes land in `loadgen_soak_presence_checks_total{result}`; the announced
 population is reported as `loadgen_soak_presence_connections`. Accounts and
 connection IDs stay out of labels.
+
+### Sampled consumers
+
+The soak polls `ConsumerInfo` for every durable its lanes feed, so a backlog
+building behind any lane is visible without reading NATS directly:
+
+| Stream | Durable | Fed by |
+|---|---|---|
+| `MESSAGES` | `message-gatekeeper` | send |
+| `MESSAGES-CANONICAL` | `message-worker`, `broadcast-worker`, `notification-worker`, `message-sync` | send |
+| `ROOMS` | `room-worker` | member, rename, create |
+| `ROOMS` | `notification-worker-room-event-invalidate` | mute |
+| `INBOX` | `spotlight-sync`, `user-room-sync` | member |
+
+Stream and durable are Prometheus labels, so both are allowlisted and a typo
+fails at construction rather than minting an unbounded label.
+
+A consumer that is not deployed is a **reversible** condition, never a ledger
+invalidation: the sampler sets `loadgen_consumer_up` to 0 and counts a bounded
+`loadgen_consumer_sample_errors_total{reason}`. Treat a window where a required
+consumer reports `up == 0` as inconclusive for the lanes that feed it, and
+nothing more.
+
+Backlog is not a complete loss signal on its own. `search-sync-worker` Acks and
+drops a message whose payload fails to decode or build an action, so that class
+of loss leaves the consumer at zero pending — only the `search_index` observer
+sees it.
 
 ### Ledger epoch
 

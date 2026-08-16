@@ -73,10 +73,45 @@ func TestNewConsumerSampler_AcceptsBoundedMessageSoakTargets(t *testing.T) {
 		{stream: "MESSAGES-CANONICAL-site-local", durable: "message-worker"},
 		{stream: "MESSAGES-CANONICAL-site-local", durable: "broadcast-worker"},
 		{stream: "MESSAGES-CANONICAL-site-local", durable: "notification-worker"},
+		{stream: "MESSAGES-CANONICAL-site-local", durable: "message-sync"},
+		{stream: "ROOMS-site-local", durable: "room-worker"},
+		{
+			stream:  "ROOMS-site-local",
+			durable: "notification-worker-room-event-invalidate",
+		},
+		{stream: "INBOX-site-local", durable: "spotlight-sync"},
+		{stream: "INBOX-site-local", durable: "user-room-sync"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.stream+"/"+tt.durable, func(t *testing.T) {
 			_, err := NewConsumerSampler(nil, tt.stream, tt.durable, NewMetrics(), time.Second)
+			require.NoError(t, err)
+		})
+	}
+}
+
+// The stream and durable are Prometheus labels, so both stay allowlisted. A
+// typo must fail at construction rather than mint an unbounded label.
+func TestNewConsumerSampler_RejectsUnknownBoundedLabels(t *testing.T) {
+	_, err := NewConsumerSampler(
+		nil, "INBOX-site-local", "not-a-real-worker", NewMetrics(), time.Second,
+	)
+	require.Error(t, err)
+
+	_, err = NewConsumerSampler(
+		nil, "PUSH-NOTIFICATION-site-local", "message-sync", NewMetrics(), time.Second,
+	)
+	require.Error(t, err)
+}
+
+// Every target the soak wires up must survive construction, or the lane it
+// belongs to runs with no backlog evidence.
+func TestNewConsumerSampler_AcceptsEverySoakTarget(t *testing.T) {
+	for _, target := range soakConsumerSamplerTargets("site-local") {
+		t.Run(target.Stream+"/"+target.Durable, func(t *testing.T) {
+			_, err := NewConsumerSampler(
+				nil, target.Stream, target.Durable, NewMetrics(), time.Second,
+			)
 			require.NoError(t, err)
 		})
 	}

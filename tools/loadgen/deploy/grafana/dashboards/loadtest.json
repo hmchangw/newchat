@@ -388,6 +388,28 @@
     },
     {
       "type": "timeseries",
+      "title": "Sampled consumer health",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 96
+      },
+      "targets": [
+        {
+          "expr": "loadgen_consumer_up",
+          "legendFormat": "{{durable}} up",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (durable, reason) (rate(loadgen_consumer_sample_errors_total[5m]))",
+          "legendFormat": "{{durable}} {{reason}} errors/s",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
       "title": "Presence signals and verification",
       "gridPos": {
         "h": 8,

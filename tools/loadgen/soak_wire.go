@@ -208,6 +208,19 @@ type soakSubscriptionRow struct {
 	LastSeenAt *time.Time `json:"lastSeenAt,omitempty"`
 }
 
+type soakReadReceiptRequest struct {
+	MessageID string `json:"messageId"`
+}
+
+type soakReadReceiptReader struct {
+	UserID  string `json:"userId"`
+	Account string `json:"account"`
+}
+
+type soakReadReceiptResponse struct {
+	Readers []soakReadReceiptReader `json:"readers"`
+}
+
 type soakSubscriptionListResponse struct {
 	Subscriptions []soakSubscriptionRow `json:"subscriptions"`
 	HasMore       bool                  `json:"hasMore"`

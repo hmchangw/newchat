@@ -91,13 +91,40 @@ func TestSoakMeasuredReadConfig_OneScheduledReadEqualsOneRPC(t *testing.T) {
 	assert.Equal(t, soakRequestTimeout, cfg.RequestTimeout)
 }
 
-func TestSoakConsumerSamplerTargets_CoversBothMessageHops(t *testing.T) {
+func TestSoakConsumerSamplerTargets_CoversEveryConsumerTheLanesFeed(t *testing.T) {
 	assert.Equal(t, []soakConsumerSamplerTarget{
 		{Stream: stream.Messages("site-test").Name, Durable: "message-gatekeeper"},
 		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "message-worker"},
 		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "broadcast-worker"},
 		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "notification-worker"},
+		{Stream: stream.MessagesCanonical("site-test").Name, Durable: "message-sync"},
+		{Stream: stream.Rooms("site-test").Name, Durable: "room-worker"},
+		{
+			Stream:  stream.Rooms("site-test").Name,
+			Durable: "notification-worker-room-event-invalidate",
+		},
+		{Stream: stream.Inbox("site-test").Name, Durable: "spotlight-sync"},
+		{Stream: stream.Inbox("site-test").Name, Durable: "user-room-sync"},
 	}, soakConsumerSamplerTargets("site-test"))
+}
+
+// The room and member lanes publish into ROOMS and INBOX. A consumer with real
+// traffic and no sampler is a blind spot exactly where a fault window needs
+// backlog evidence, so every stream the lanes feed must appear here.
+func TestSoakConsumerSamplerTargets_SampleEveryStreamTheLanesPublishTo(t *testing.T) {
+	sampled := map[string]bool{}
+	for _, target := range soakConsumerSamplerTargets("site-test") {
+		sampled[target.Stream] = true
+	}
+
+	for _, streamName := range []string{
+		stream.Messages("site-test").Name,
+		stream.MessagesCanonical("site-test").Name,
+		stream.Rooms("site-test").Name,
+		stream.Inbox("site-test").Name,
+	} {
+		assert.True(t, sampled[streamName], "stream=%s", streamName)
+	}
 }
 
 func TestNewSoakRuntimeSelector_UsesOnlyPersistedActiveUsers(t *testing.T) {

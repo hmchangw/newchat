@@ -245,3 +245,104 @@ func TestSoakRoomReader_RequiresAnRPCClient(t *testing.T) {
 
 	require.Error(t, err)
 }
+
+// soakRoomMessageStub stands in for the catalog when the read-receipt read
+// needs a persisted message to ask about.
+type soakRoomMessageStub struct {
+	message soakCatalogMessage
+	found   bool
+	rooms   []string
+	actions []soakCatalogAction
+}
+
+func (s *soakRoomMessageStub) PickAnyEligible(
+	roomID string,
+	action soakCatalogAction,
+) (soakCatalogMessage, bool) {
+	s.rooms = append(s.rooms, roomID)
+	s.actions = append(s.actions, action)
+	return s.message, s.found
+}
+
+func TestSoakRoomReader_ReadReceiptsUsesTheRoomMessageSubject(t *testing.T) {
+	transport := &soakRoomOpsTransport{
+		reply: []byte(`{"readers":[{"userId":"u1","account":"user-a0"}]}`),
+	}
+	reader, _, recorder := newSoakRoomReadFixture(t, transport, 11)
+	messages := &soakRoomMessageStub{
+		message: soakCatalogMessage{
+			soakCatalogCandidate: soakCatalogCandidate{ID: "msg-1", RoomID: "room-1"},
+		}, found: true,
+	}
+	reader.SetMessageSource(messages)
+
+	err := reader.ReadReceipts(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, transport.subjects, 1)
+	assert.True(t, strings.HasSuffix(transport.subjects[0], ".message.read-receipt"),
+		"subject=%s", transport.subjects[0])
+	assert.Contains(t, transport.subjects[0], "room-1")
+	require.Len(t, recorder.samples, 1)
+	assert.Equal(t, soakRPCReadReceiptList, recorder.samples[0].Action)
+	assert.Equal(t, 1, recorder.samples[0].Messages, "the reader count is the payload size")
+	assert.Equal(t, []soakCatalogAction{soakCatalogReadReceipt}, messages.actions)
+}
+
+// A room with no persisted message yet is a skip, not an error: asking for
+// receipts on a message that does not exist would only measure a 400.
+func TestSoakRoomReader_ReadReceiptsSkipsWhenNoMessageIsEligible(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"readers":[]}`)}
+	reader, _, recorder := newSoakRoomReadFixture(t, transport, 12)
+	reader.SetMessageSource(&soakRoomMessageStub{found: false})
+
+	err := reader.ReadReceipts(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, transport.subjects)
+	require.Len(t, recorder.samples, 1)
+	assert.Equal(t, soakRPCReadReceiptList, recorder.samples[0].Action)
+	assert.True(t, recorder.samples[0].Skipped)
+}
+
+// Without a message source wired the read is inert rather than panicking, so a
+// configuration that omits the catalog degrades to the other room reads.
+func TestSoakRoomReader_ReadReceiptsSkipsWithoutAMessageSource(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"readers":[]}`)}
+	reader, _, recorder := newSoakRoomReadFixture(t, transport, 13)
+
+	err := reader.ReadReceipts(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, transport.subjects)
+	require.Len(t, recorder.samples, 1)
+	assert.True(t, recorder.samples[0].Skipped)
+}
+
+// Every bounded action label must correspond to traffic the soak actually
+// sends; an allowlisted-but-undispatched label reads as coverage it does not
+// have.
+func TestSoakRoomReader_ReadMixedEventuallyDispatchesEveryRoomReadAction(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"members":[],"rooms":[],"subscriptions":[],"readers":[]}`)}
+	reader, _, recorder := newSoakRoomReadFixture(t, transport, 7)
+	reader.SetMessageSource(&soakRoomMessageStub{
+		message: soakCatalogMessage{
+			soakCatalogCandidate: soakCatalogCandidate{ID: "msg-1", RoomID: "room-1"},
+		}, found: true,
+	})
+
+	for range 400 {
+		require.NoError(t, reader.ReadMixed(context.Background()))
+	}
+
+	seen := map[soakRPCAction]bool{}
+	for i := range recorder.samples {
+		seen[recorder.samples[i].Action] = true
+	}
+	for _, action := range []soakRPCAction{
+		soakRPCMemberList, soakRPCRoomsInfo, soakRPCSubscriptionList,
+		soakRPCReadReceiptList,
+	} {
+		assert.True(t, seen[action], "action=%s", action)
+	}
+}

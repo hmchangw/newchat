@@ -137,7 +137,8 @@ configured traffic profile. See
 The same run also drives room and member traffic: `member_mutation` cycles
 paired add/remove operations over a reusable per-room candidate ring,
 `room_mutation` alternates renames and mute toggles over a fixed room pool,
-`room_read` covers member list, rooms-info batch, and subscription list, and
+`room_read` covers member list, rooms-info batch, subscription list and read
+receipts, and
 `room_create` adds rooms at a low rate until `SOAK_ROOM_CREATE_BUDGET` is
 spent. Every mutation is journaled before it is sent and reconciled through the
 room-service RPC with a MongoDB primary read as the authoritative arbiter.
