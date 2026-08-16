@@ -43,6 +43,14 @@ type soakConfig struct {
 	ReactionRemoveShare          float64       `env:"REACTION_REMOVE_SHARE"           envDefault:"0.20"`
 	PinnedListRate               float64       `env:"PINNED_LIST_RATE"                 envDefault:"1"`
 	VerifyRate                   float64       `env:"VERIFY_RATE"                      envDefault:"1"`
+	MemberMutationRate           float64       `env:"MEMBER_MUTATION_RATE"             envDefault:"2"`
+	RoomMutationRate             float64       `env:"ROOM_MUTATION_RATE"               envDefault:"1"`
+	RoomReadRate                 float64       `env:"ROOM_READ_RATE"                   envDefault:"20"`
+	RoomCreateRate               float64       `env:"ROOM_CREATE_RATE"                 envDefault:"0.05"`
+	RoomCreateBudget             int           `env:"ROOM_CREATE_BUDGET"               envDefault:"2000"`
+	RoomCreateSize               int           `env:"ROOM_CREATE_SIZE"                 envDefault:"5"`
+	RoomReconcileReadShare       float64       `env:"ROOM_RECONCILE_READ_SHARE"        envDefault:"0.5"`
+	MemberQuarantineMax          int           `env:"MEMBER_QUARANTINE_MAX"            envDefault:"10000"`
 	MaxUsers                     int           `env:"MAX_USERS"                        envDefault:"20000"`
 	ActiveUsers                  int           `env:"ACTIVE_USERS"                     envDefault:"2000"`
 	RoomCount                    int           `env:"ROOM_COUNT"                       envDefault:"10000"`
@@ -152,6 +160,10 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 		{"SOAK_REACTION_RATE", cfg.ReactionRate},
 		{"SOAK_PINNED_LIST_RATE", cfg.PinnedListRate},
 		{"SOAK_VERIFY_RATE", cfg.VerifyRate},
+		{"SOAK_MEMBER_MUTATION_RATE", cfg.MemberMutationRate},
+		{"SOAK_ROOM_MUTATION_RATE", cfg.RoomMutationRate},
+		{"SOAK_ROOM_READ_RATE", cfg.RoomReadRate},
+		{"SOAK_ROOM_CREATE_RATE", cfg.RoomCreateRate},
 	} {
 		if err := validateNonNegativeRate(rate.name, rate.value); err != nil {
 			return err
@@ -205,6 +217,9 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if !isFinite(cfg.ReconcileReadShare) ||
 		cfg.ReconcileReadShare <= 0 || cfg.ReconcileReadShare > 1 {
 		return fmt.Errorf("SOAK_RECONCILE_READ_SHARE must be greater than zero and at most 1")
+	}
+	if err := validateSoakRoomLaneConfig(cfg); err != nil {
+		return err
 	}
 	if cfg.RecipientObserverEnabled && strings.TrimSpace(cfg.LedgerDir) == "" {
 		return fmt.Errorf("SOAK_LEDGER_DIR is required when SOAK_RECIPIENT_OBSERVER_ENABLED=true")
@@ -266,6 +281,43 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 		return err
 	}
 
+	return nil
+}
+
+func validateSoakRoomLaneConfig(cfg *soakConfig) error {
+	if !isFinite(cfg.RoomReconcileReadShare) ||
+		cfg.RoomReconcileReadShare <= 0 || cfg.RoomReconcileReadShare > 1 {
+		return fmt.Errorf(
+			"SOAK_ROOM_RECONCILE_READ_SHARE must be greater than zero and at most 1",
+		)
+	}
+	if cfg.RoomCreateBudget < 0 {
+		return fmt.Errorf("SOAK_ROOM_CREATE_BUDGET must be non-negative")
+	}
+	if cfg.RoomCreateSize < 2 || cfg.RoomCreateSize > 50 {
+		return fmt.Errorf("SOAK_ROOM_CREATE_SIZE must be between 2 and 50")
+	}
+	if cfg.MemberQuarantineMax <= 0 || cfg.MemberQuarantineMax > 1000000 {
+		return fmt.Errorf("SOAK_MEMBER_QUARANTINE_MAX must be between 1 and 1000000")
+	}
+
+	// Room and member reconciliation borrows room-read slots, so the read lane
+	// must retire mutations at least as fast as they are produced. Below that
+	// the unresolved backlog grows without bound and every mutation eventually
+	// expires unverified — a run that can conclude nothing.
+	mutationRate := cfg.MemberMutationRate + cfg.RoomMutationRate + cfg.RoomCreateRate
+	if mutationRate <= 0 {
+		return nil
+	}
+	reconcileCapacity := cfg.RoomReadRate * cfg.RoomReconcileReadShare
+	if reconcileCapacity < mutationRate {
+		return fmt.Errorf(
+			"SOAK_ROOM_READ_RATE %.3f at SOAK_ROOM_RECONCILE_READ_SHARE %.3f reconciles %.3f "+
+				"operations/s, below the %.3f operations/s the room and member mutation lanes "+
+				"produce; raise SOAK_ROOM_READ_RATE or lower the mutation rates",
+			cfg.RoomReadRate, cfg.RoomReconcileReadShare, reconcileCapacity, mutationRate,
+		)
+	}
 	return nil
 }
 

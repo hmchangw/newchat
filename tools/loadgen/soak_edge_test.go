@@ -167,13 +167,13 @@ func TestSoakLifecycle_WrapsStoreFailures(t *testing.T) {
 }
 
 func TestNewSoakWorkload_AppliesSafeDefaults(t *testing.T) {
-	workload := newSoakWorkload(nil, nil, soakWorkloadActions{}, nil, nil, nil)
+	workload := newSoakWorkload(nil, nil, &soakWorkloadActions{}, nil, nil, nil)
 
 	assert.Equal(t, 256, workload.cfg.MaxInFlight)
 	assert.NotNil(t, workload.dispatch)
 	assert.NotNil(t, workload.now)
 	assert.NotNil(t, workload.onSaturation)
-	assert.Len(t, workload.lanes(), 6)
+	assert.Len(t, workload.lanes(), 10)
 }
 
 func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {
@@ -181,7 +181,7 @@ func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {
 	newSoakWorkload(
 		&workloadConfig,
 		nil,
-		soakWorkloadActions{},
+		&soakWorkloadActions{},
 		nil,
 		nil,
 		nil,

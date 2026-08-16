@@ -468,3 +468,108 @@ func TestValidateSoakPageBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestSoakConfig_RoomLaneDefaults(t *testing.T) {
+	cfg := validSoakConfig(t)
+
+	assert.InDelta(t, 2.0, cfg.MemberMutationRate, 0.0001)
+	assert.InDelta(t, 1.0, cfg.RoomMutationRate, 0.0001)
+	assert.InDelta(t, 20.0, cfg.RoomReadRate, 0.0001)
+	assert.InDelta(t, 0.05, cfg.RoomCreateRate, 0.0001)
+	assert.Equal(t, 2000, cfg.RoomCreateBudget)
+	assert.Equal(t, 5, cfg.RoomCreateSize)
+	assert.InDelta(t, 0.5, cfg.RoomReconcileReadShare, 0.0001)
+	assert.Equal(t, 10000, cfg.MemberQuarantineMax)
+	assert.Equal(t, "v1", cfg.LedgerEpoch)
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}
+
+func TestValidateSoakConfig_RoomLaneBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*soakConfig)
+		want   string
+	}{
+		{
+			name:   "negative member mutation rate",
+			mutate: func(cfg *soakConfig) { cfg.MemberMutationRate = -1 },
+			want:   "SOAK_MEMBER_MUTATION_RATE",
+		},
+		{
+			name:   "negative room mutation rate",
+			mutate: func(cfg *soakConfig) { cfg.RoomMutationRate = -1 },
+			want:   "SOAK_ROOM_MUTATION_RATE",
+		},
+		{
+			name:   "negative room read rate",
+			mutate: func(cfg *soakConfig) { cfg.RoomReadRate = -1 },
+			want:   "SOAK_ROOM_READ_RATE",
+		},
+		{
+			name:   "negative room create rate",
+			mutate: func(cfg *soakConfig) { cfg.RoomCreateRate = -1 },
+			want:   "SOAK_ROOM_CREATE_RATE",
+		},
+		{
+			name:   "share above one",
+			mutate: func(cfg *soakConfig) { cfg.RoomReconcileReadShare = 1.5 },
+			want:   "SOAK_ROOM_RECONCILE_READ_SHARE",
+		},
+		{
+			name:   "negative create budget",
+			mutate: func(cfg *soakConfig) { cfg.RoomCreateBudget = -1 },
+			want:   "SOAK_ROOM_CREATE_BUDGET",
+		},
+		{
+			name:   "create size below two",
+			mutate: func(cfg *soakConfig) { cfg.RoomCreateSize = 1 },
+			want:   "SOAK_ROOM_CREATE_SIZE",
+		},
+		{
+			name:   "zero quarantine capacity",
+			mutate: func(cfg *soakConfig) { cfg.MemberQuarantineMax = 0 },
+			want:   "SOAK_MEMBER_QUARANTINE_MAX",
+		},
+		{
+			name:   "unsafe ledger epoch",
+			mutate: func(cfg *soakConfig) { cfg.LedgerEpoch = "../escape" },
+			want:   "SOAK_LEDGER_EPOCH",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			tt.mutate(&cfg)
+
+			err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestValidateSoakConfig_RejectsUnderprovisionedRoomReconciliation(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MemberMutationRate = 5
+	cfg.RoomMutationRate = 5
+	cfg.RoomReadRate = 4
+	cfg.RoomReconcileReadShare = 0.5
+
+	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_ROOM_READ_RATE")
+	assert.Contains(t, err.Error(), "below")
+}
+
+func TestValidateSoakConfig_AllowsDisabledRoomLanes(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MemberMutationRate = 0
+	cfg.RoomMutationRate = 0
+	cfg.RoomCreateRate = 0
+	cfg.RoomReadRate = 0
+
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}

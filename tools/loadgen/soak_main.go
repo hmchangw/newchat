@@ -52,6 +52,11 @@ type soakRuntimeStore interface {
 // own: validateSoakPageBudget checks the actual pair at startup.
 const soakDefaultPageLimit = 15
 
+// soakRoomInfoBatchSize is how many rooms a room-read batch asks about. It is
+// far below the payload budget a message page needs, since a room record is
+// metadata rather than message bodies.
+const soakRoomInfoBatchSize = 20
+
 // soakWalkRowBudget is how many clustered rows a paged walk must be able to
 // reach, independent of how the pages are sized.
 //
@@ -743,6 +748,46 @@ func runSoakWorkload(
 		now,
 	)
 
+	roomPool, err := newSoakRoomStatePool(
+		&topology,
+		cfg.Soak.MemberQuarantineMax,
+		metrics,
+		rand.New(rand.NewSource(seed+8)),
+	)
+	if err != nil {
+		slog.Error("prepare soak room state pool", "error", err)
+		return 1
+	}
+	roomReader := newSoakRoomReader(
+		soakRoomReadConfig{
+			SiteID: cfg.SiteID, BatchSize: soakRoomInfoBatchSize,
+			RequestTimeout: soakRequestTimeout,
+		},
+		roomPool,
+		rpc,
+		recorders.read,
+		rand.New(rand.NewSource(seed+9)),
+		now,
+	)
+	roomStateHealth := newFailureObserverHealth(failureObserverRoomState, now())
+	roomVerifier := newSoakRoomStateVerifier(roomReader, store, metrics, roomStateHealth, now)
+	roomLanes := newSoakRoomLanes(
+		soakRoomLaneConfig{
+			RunID: cfg.Soak.RunID, PersistGrace: cfg.Soak.PersistGrace,
+			Deadline: cfg.Soak.ReconcileDeadline, RetryInterval: cfg.Soak.ReconcileRetryInterval,
+			RoomCreateBudget: cfg.Soak.RoomCreateBudget, CreateRoomSize: cfg.Soak.RoomCreateSize,
+		},
+		roomPool,
+		newSoakRoomMutator(cfg.SiteID, rpc, soakRequestTimeout, now),
+		ledger,
+		roomReader,
+		store,
+		metrics,
+		recorders.mutation,
+		now,
+	)
+	roomReconcileGate := newSoakShareGate(cfg.Soak.RoomReconcileReadShare)
+
 	var verificationSequence atomic.Uint64
 	actions := soakWorkloadActions{
 		Send: func(actionCtx context.Context, _ bool) error {
@@ -823,6 +868,49 @@ func runSoakWorkload(
 			verifier.Sample(actionCtx, roomID)
 			return nil
 		},
+		MemberMutation: func(actionCtx context.Context, _ bool) error {
+			if err := roomLanes.MemberMutation(actionCtx); err != nil {
+				slog.Error("run Cassandra soak member mutation", "error", err)
+			}
+			return nil
+		},
+		RoomMutation: func(actionCtx context.Context, _ bool) error {
+			if err := roomLanes.RoomMutation(actionCtx); err != nil {
+				slog.Error("run Cassandra soak room mutation", "error", err)
+			}
+			return nil
+		},
+		RoomRead: func(actionCtx context.Context, _ bool) error {
+			// Room and member reconciliation borrows read slots so verification
+			// adds no unbudgeted request rate, capped by its share so a
+			// fault-time backlog cannot starve the room read mix.
+			if roomReconcileGate.Allow() {
+				reconciled, err := roomLanes.Reconcile(actionCtx, roomVerifier)
+				if err != nil {
+					slog.Error("reconcile Cassandra soak room operation", "error", err)
+				}
+				if reconciled {
+					return nil
+				}
+				probed, probeErr := roomLanes.ProbeQuarantine(actionCtx, roomVerifier)
+				if probeErr != nil {
+					slog.Error("probe quarantined soak member candidate", "error", probeErr)
+				}
+				if probed {
+					return nil
+				}
+			}
+			if err := roomReader.ReadMixed(actionCtx); err != nil {
+				slog.Error("run Cassandra soak room read", "error", err)
+			}
+			return nil
+		},
+		RoomCreate: func(actionCtx context.Context, _ bool) error {
+			if err := roomLanes.RoomCreate(actionCtx); err != nil {
+				slog.Error("run Cassandra soak room create", "error", err)
+			}
+			return nil
+		},
 	}
 	workload := newSoakWorkload(
 		&soakWorkloadConfig{
@@ -836,7 +924,7 @@ func runSoakWorkload(
 			VerifyRate:     cfg.Soak.VerifyRate, MaxInFlight: cfg.MaxInFlight,
 		},
 		store,
-		actions,
+		&actions,
 		nil,
 		now,
 		nil,
@@ -998,6 +1086,16 @@ func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
 		soakRPCReact:       cfg.ReactionRate,
 		soakRPCPinnedList:  cfg.PinnedListRate,
 		soakRPCReadBack:    cfg.VerifyRate,
+		// The room mutation lane alternates rename and mute, so each shape gets
+		// half of the configured rate.
+		soakRPCMemberAdd:        cfg.MemberMutationRate / 2,
+		soakRPCMemberRemove:     cfg.MemberMutationRate / 2,
+		soakRPCRoomRename:       cfg.RoomMutationRate / 2,
+		soakRPCMuteToggle:       cfg.RoomMutationRate / 2,
+		soakRPCRoomCreate:       cfg.RoomCreateRate,
+		soakRPCMemberList:       cfg.RoomReadRate * 0.5,
+		soakRPCRoomsInfo:        cfg.RoomReadRate * 0.3,
+		soakRPCSubscriptionList: cfg.RoomReadRate * 0.2,
 	}
 }
 
