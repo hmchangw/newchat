@@ -316,7 +316,7 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 	if err := json.Unmarshal(data, &response); err != nil {
 		s.rejectPending(pending)
 		result.Status = soakSendReplyMalformed
-		result.ErrorClass = soakErrorDecode
+		result.ErrorClass = soakErrorResponseDecode
 		return result
 	}
 	if !matchingSoakSendReply(pending, &response) {

@@ -177,7 +177,7 @@ func TestSoakVerifier_ResultClassesRemainDistinct(t *testing.T) {
 			replies:   []soakRPCFakeReply{{data: []byte(`{`)}},
 			attempts:  1,
 			wantClass: soakVerifyMalformed,
-			wantRPC:   soakErrorDecode,
+			wantRPC:   soakErrorResponseDecode,
 		},
 		{
 			name: "retryable exhausted",
