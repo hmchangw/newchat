@@ -148,7 +148,11 @@ process is recorded as `not_sent`.
 `read_receipt` marks rooms as read. The subscription cursor only moves forward,
 so the lane journals the previously confirmed cursor as a baseline and the
 observer compares two server-written timestamps — loadgen's clock never enters
-the verdict. `presence` publishes hello/ping/activity/bye and periodically
+the verdict. `user_read` covers user-service's read surface — me, profile, settings,
+status, chatlist, priority contacts, apps, the four subscription reads, and the
+two thread reads — dispatched uniformly rather than weighted like a real
+client, so each path gets enough samples in a fault window to be
+interpretable. `presence` publishes hello/ping/activity/bye and periodically
 re-queries presence-service in batches. It is intentionally outside the ledger:
 core NATS publishes are buffered during an outage, so only the query answer is
 evidence, and comparison is suppressed while a signal is still settling

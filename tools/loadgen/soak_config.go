@@ -52,6 +52,7 @@ type soakConfig struct {
 	RoomReconcileReadShare       float64       `env:"ROOM_RECONCILE_READ_SHARE"        envDefault:"0.5"`
 	MemberQuarantineMax          int           `env:"MEMBER_QUARANTINE_MAX"            envDefault:"10000"`
 	ReadReceiptRate              float64       `env:"READ_RECEIPT_RATE"                envDefault:"5"`
+	UserReadRate                 float64       `env:"USER_READ_RATE"                   envDefault:"10"`
 	PresenceRate                 float64       `env:"PRESENCE_RATE"                    envDefault:"30"`
 	PresenceConnections          int           `env:"PRESENCE_CONNECTIONS"             envDefault:"2000"`
 	PresenceQueryShare           float64       `env:"PRESENCE_QUERY_SHARE"             envDefault:"0.1"`
@@ -172,6 +173,7 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 		{"SOAK_ROOM_READ_RATE", cfg.RoomReadRate},
 		{"SOAK_ROOM_CREATE_RATE", cfg.RoomCreateRate},
 		{"SOAK_READ_RECEIPT_RATE", cfg.ReadReceiptRate},
+		{"SOAK_USER_READ_RATE", cfg.UserReadRate},
 		{"SOAK_PRESENCE_RATE", cfg.PresenceRate},
 	} {
 		if err := validateNonNegativeRate(rate.name, rate.value); err != nil {

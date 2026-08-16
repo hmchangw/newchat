@@ -103,6 +103,7 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_MEMBER_MUTATION_RATE` | `2` | Member add/remove cycles per second |
 | `SOAK_ROOM_MUTATION_RATE` | `1` | Rename and mute toggles per second, alternating |
 | `SOAK_ROOM_READ_RATE` | `20` | Room reads per second; also funds reconciliation |
+| `SOAK_USER_READ_RATE` | `10` | user-service reads per second, split evenly across its reads |
 | `SOAK_ROOM_CREATE_RATE` | `0.05` | Room creations per second until the budget is spent |
 | `SOAK_ROOM_CREATE_BUDGET` | `2000` | Total rooms the create lane may add in one run |
 | `SOAK_ROOM_CREATE_SIZE` | `5` | Members a created room starts with |
@@ -136,6 +137,7 @@ and no extra phase.
 | `room_create` | `room_create` | `admission` + `room_state` |
 | `read_receipt` | `message_read` | `admission` + `room_state` |
 | `room_read` | member list, rooms-info batch, subscription list, read receipts | none |
+| `user_read` | 14 user-service reads, dispatched uniformly | none |
 | `presence` | hello / ping / activity / bye, batch query | none |
 
 `room_read` is read-only. A read has no expected side effect to reconcile, so

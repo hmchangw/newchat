@@ -771,6 +771,19 @@ func runSoakWorkload(
 	)
 	// The read-receipt read needs a real message ID, which only the catalog has.
 	roomReader.SetMessageSource(catalog)
+	userReader, userReaderErr := newSoakUserReader(
+		soakUserReadConfig{
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit,
+			RequestTimeout: soakRequestTimeout,
+		},
+		&topology, rpc, recorders.read,
+		rand.New(rand.NewSource(seed+11)),
+		now,
+	)
+	if userReaderErr != nil {
+		slog.Error("build Cassandra soak user reader", "error", userReaderErr)
+		return 1
+	}
 	roomStateHealth := newFailureObserverHealth(failureObserverRoomState, now())
 	roomVerifier := newSoakRoomStateVerifier(roomReader, store, metrics, roomStateHealth, now)
 	roomLanes := newSoakRoomLanes(
@@ -934,6 +947,12 @@ func runSoakWorkload(
 			}
 			return nil
 		},
+		UserRead: func(actionCtx context.Context, _ bool) error {
+			if err := userReader.ReadMixed(actionCtx); err != nil {
+				slog.Error("run Cassandra soak user read", "error", err)
+			}
+			return nil
+		},
 		RoomCreate: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomCreate(actionCtx); err != nil {
 				slog.Error("run Cassandra soak room create", "error", err)
@@ -954,16 +973,7 @@ func runSoakWorkload(
 		},
 	}
 	workload := newSoakWorkload(
-		&soakWorkloadConfig{
-			RunID: cfg.Soak.RunID, Duration: cfg.Soak.RunDuration,
-			Continuous:        cfg.Soak.RunMode == soakRunModeContinuous,
-			HeartbeatInterval: cfg.Soak.HeartbeatInterval,
-			Warmup:            cfg.Soak.Warmup, SendRate: cfg.Soak.SendRate,
-			ReadRate: cfg.Soak.ReadRate, MutationRate: cfg.Soak.MutationRate,
-			ReactionRate:   cfg.Soak.ReactionRate,
-			PinnedListRate: cfg.Soak.PinnedListRate,
-			VerifyRate:     cfg.Soak.VerifyRate, MaxInFlight: cfg.MaxInFlight,
-		},
+		soakWorkloadConfigFrom(&cfg.Soak, cfg.MaxInFlight),
 		store,
 		&actions,
 		nil,
@@ -1134,7 +1144,7 @@ func startSoakMetricsServer(addr string, metrics *Metrics) *http.Server {
 }
 
 func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
-	return map[soakRPCAction]float64{
+	rates := map[soakRPCAction]float64{
 		soakRPCSend:        cfg.SendRate * (1 - cfg.ThreadShare),
 		soakRPCThreadReply: cfg.SendRate * cfg.ThreadShare,
 		soakRPCLoadHistory: cfg.ReadRate * 0.75,
@@ -1150,12 +1160,20 @@ func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
 		soakRPCRoomRename:       cfg.RoomMutationRate / 2,
 		soakRPCMuteToggle:       cfg.RoomMutationRate / 2,
 		soakRPCRoomCreate:       cfg.RoomCreateRate,
-		soakRPCMemberList:       cfg.RoomReadRate * 0.5,
-		soakRPCRoomsInfo:        cfg.RoomReadRate * 0.3,
-		soakRPCSubscriptionList: cfg.RoomReadRate * 0.2,
+		soakRPCMemberList:       cfg.RoomReadRate * 0.45,
+		soakRPCRoomsInfo:        cfg.RoomReadRate * 0.27,
+		soakRPCSubscriptionList: cfg.RoomReadRate * 0.18,
+		soakRPCReadReceiptList:  cfg.RoomReadRate * 0.10,
 		soakRPCMessageRead:      cfg.ReadReceiptRate,
 		soakRPCPresenceQuery:    cfg.PresenceRate * cfg.PresenceQueryShare,
 	}
+	// The user lane dispatches uniformly across its reads, so each carries an
+	// equal share of the configured rate.
+	share := cfg.UserReadRate / float64(len(soakUserReadActions))
+	for _, action := range soakUserReadActions {
+		rates[action] = share
+	}
+	return rates
 }
 
 var _ soakRuntimeStore = (*mongoSoakStore)(nil)

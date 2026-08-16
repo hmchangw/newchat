@@ -35,6 +35,7 @@ data:
   SOAK_MEMBER_MUTATION_RATE: {{ .Values.soak.memberMutationRate | quote }}
   SOAK_ROOM_MUTATION_RATE: {{ .Values.soak.roomMutationRate | quote }}
   SOAK_ROOM_READ_RATE: {{ .Values.soak.roomReadRate | quote }}
+  SOAK_USER_READ_RATE: {{ .Values.soak.userReadRate | quote }}
   SOAK_ROOM_CREATE_RATE: {{ .Values.soak.roomCreateRate | quote }}
   SOAK_ROOM_CREATE_BUDGET: {{ .Values.soak.roomCreateBudget | quote }}
   SOAK_ROOM_CREATE_SIZE: {{ .Values.soak.roomCreateSize | quote }}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -44,7 +45,36 @@ const (
 	soakRPCMessageRead      soakRPCAction = "message_read"
 	soakRPCReadReceiptList  soakRPCAction = "read_receipt_list"
 	soakRPCPresenceQuery    soakRPCAction = "presence_query"
+
+	// The user-service read lane. Every one of these is read-only, so they
+	// carry latency and outcome only and never enter the evidence ledger.
+	soakRPCUserMe                  soakRPCAction = "user_me"
+	soakRPCUserProfileGet          soakRPCAction = "user_profile_get"
+	soakRPCUserStatusGet           soakRPCAction = "user_status_get"
+	soakRPCUserSettingsGet         soakRPCAction = "user_settings_get"
+	soakRPCUserChatlistGet         soakRPCAction = "user_chatlist_get"
+	soakRPCUserPriorityContacts    soakRPCAction = "user_priority_contacts"
+	soakRPCUserAppsList            soakRPCAction = "user_apps_list"
+	soakRPCUserAppsCategories      soakRPCAction = "user_apps_categories"
+	soakRPCUserSubscriptionCount   soakRPCAction = "user_subscription_count"
+	soakRPCUserSubscriptionByRoom  soakRPCAction = "user_subscription_by_room"
+	soakRPCUserSubscriptionChannel soakRPCAction = "user_subscription_channels"
+	soakRPCUserSubscriptionDM      soakRPCAction = "user_subscription_dm"
+	soakRPCUserThreadList          soakRPCAction = "user_thread_list"
+	soakRPCUserThreadUnread        soakRPCAction = "user_thread_unread"
 )
+
+// soakUserReadActions is every action the user-service read lane dispatches. It
+// is the single source for both the allowlist and the lane's own dispatch
+// table, so an action can never be allowlisted without being sent.
+var soakUserReadActions = []soakRPCAction{
+	soakRPCUserMe, soakRPCUserProfileGet, soakRPCUserStatusGet,
+	soakRPCUserSettingsGet, soakRPCUserChatlistGet, soakRPCUserPriorityContacts,
+	soakRPCUserAppsList, soakRPCUserAppsCategories,
+	soakRPCUserSubscriptionCount, soakRPCUserSubscriptionByRoom,
+	soakRPCUserSubscriptionChannel, soakRPCUserSubscriptionDM,
+	soakRPCUserThreadList, soakRPCUserThreadUnread,
+}
 
 func validSoakRPCAction(action soakRPCAction) bool {
 	switch action {
@@ -58,7 +88,7 @@ func validSoakRPCAction(action soakRPCAction) bool {
 		soakRPCMessageRead, soakRPCReadReceiptList, soakRPCPresenceQuery:
 		return true
 	default:
-		return false
+		return slices.Contains(soakUserReadActions, action)
 	}
 }
 

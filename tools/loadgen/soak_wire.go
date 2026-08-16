@@ -225,3 +225,92 @@ type soakSubscriptionListResponse struct {
 	Subscriptions []soakSubscriptionRow `json:"subscriptions"`
 	HasMore       bool                  `json:"hasMore"`
 }
+
+// user-service read carriers. Each decodes only the fields the read lane
+// samples; user-service returns more, and the lane deliberately does not
+// assert on payload content it has no expectation for.
+
+type soakUserNameRequest struct {
+	Name string `json:"name"`
+}
+
+type soakUserAccountNameRequest struct {
+	AccountName string `json:"accountName"`
+}
+
+type soakUserRoomRequest struct {
+	RoomID string `json:"roomId"`
+}
+
+type soakUserPageRequest struct {
+	Limit  int `json:"limit,omitempty"`
+	Offset int `json:"offset,omitempty"`
+}
+
+type soakUserCountRequest struct {
+	Unread *bool `json:"unread,omitempty"`
+}
+
+type soakUserEmptyRequest struct{}
+
+type soakUserMeResponse struct {
+	Account string `json:"account"`
+}
+
+type soakUserStatusResponse struct {
+	Account string `json:"account"`
+}
+
+type soakUserSettingsResponse struct {
+	Settings map[string]any `json:"settings"`
+}
+
+type soakUserChatlistSection struct {
+	ID string `json:"id"`
+}
+
+type soakUserChatlistResponse struct {
+	Sections []soakUserChatlistSection `json:"sections"`
+}
+
+type soakUserPriorityContactsResponse struct {
+	Contacts []soakUserContact `json:"contacts"`
+}
+
+type soakUserContact struct {
+	Account string `json:"account"`
+}
+
+type soakUserApp struct {
+	ID string `json:"id"`
+}
+
+type soakUserAppsResponse struct {
+	Apps    []soakUserApp `json:"apps"`
+	HasMore bool          `json:"hasMore"`
+}
+
+type soakUserAppCategoriesResponse struct {
+	Categories []string `json:"categories"`
+}
+
+type soakUserCountResponse struct {
+	Count int `json:"count"`
+}
+
+type soakUserDMResponse struct {
+	Subscription soakSubscriptionRow `json:"subscription"`
+}
+
+type soakUserThread struct {
+	ThreadRoomID string `json:"threadRoomId"`
+}
+
+type soakUserThreadListResponse struct {
+	Threads []soakUserThread `json:"threads"`
+	Cursor  string           `json:"cursor,omitempty"`
+}
+
+type soakUserThreadUnreadResponse struct {
+	HasUnread bool `json:"hasUnread"`
+}

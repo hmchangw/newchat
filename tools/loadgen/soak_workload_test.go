@@ -690,3 +690,63 @@ func TestSoakWorkload_RunsPresenceAndReadReceiptLanes(t *testing.T) {
 		assert.Equal(t, int64(1), value.(*atomic.Int64).Load())
 	}
 }
+
+// Every lane rate configured by the environment must reach the workload. A lane
+// whose rate stays zero is skipped outright by lanes(), so a field missing from
+// this mapping is a lane that silently never runs — the traffic looks
+// configured, the dashboard shows a configured target, and nothing is sent.
+func TestSoakWorkloadConfigFrom_CarriesEveryLaneRate(t *testing.T) {
+	cfg := soakConfig{
+		RunID: "run-1", RunMode: soakRunModeContinuous,
+		SendRate: 1, ReadRate: 2, MutationRate: 3, ReactionRate: 4,
+		PinnedListRate: 5, VerifyRate: 6, MemberMutationRate: 7,
+		RoomMutationRate: 8, RoomReadRate: 9, UserReadRate: 10,
+		RoomCreateRate: 11, ReadReceiptRate: 12, PresenceRate: 13,
+	}
+
+	workloadCfg := soakWorkloadConfigFrom(&cfg, 256)
+
+	assert.InDelta(t, 1.0, workloadCfg.SendRate, 0.0001)
+	assert.InDelta(t, 2.0, workloadCfg.ReadRate, 0.0001)
+	assert.InDelta(t, 3.0, workloadCfg.MutationRate, 0.0001)
+	assert.InDelta(t, 4.0, workloadCfg.ReactionRate, 0.0001)
+	assert.InDelta(t, 5.0, workloadCfg.PinnedListRate, 0.0001)
+	assert.InDelta(t, 6.0, workloadCfg.VerifyRate, 0.0001)
+	assert.InDelta(t, 7.0, workloadCfg.MemberMutationRate, 0.0001)
+	assert.InDelta(t, 8.0, workloadCfg.RoomMutationRate, 0.0001)
+	assert.InDelta(t, 9.0, workloadCfg.RoomReadRate, 0.0001)
+	assert.InDelta(t, 10.0, workloadCfg.UserReadRate, 0.0001)
+	assert.InDelta(t, 11.0, workloadCfg.RoomCreateRate, 0.0001)
+	assert.InDelta(t, 12.0, workloadCfg.ReadReceiptRate, 0.0001)
+	assert.InDelta(t, 13.0, workloadCfg.PresenceRate, 0.0001)
+	assert.Equal(t, 256, workloadCfg.MaxInFlight)
+	assert.True(t, workloadCfg.Continuous)
+}
+
+// The structural guard: with every configured rate non-zero, every lane must be
+// enabled. This catches a newly added lane whose rate was never mapped through,
+// without needing the assertion above to be updated by hand.
+func TestSoakWorkloadConfigFrom_EnablesEveryLane(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.UserReadRate = 10
+
+	workload := newSoakWorkload(
+		soakWorkloadConfigFrom(&cfg, 256), nil, allSoakWorkloadActions(), nil, nil, nil,
+	)
+
+	for _, lane := range workload.lanes() {
+		assert.Positive(t, lane.rate, "lane=%s has no configured rate", lane.name)
+	}
+}
+
+// allSoakWorkloadActions fills every action slot so lanes() reports the lane as
+// runnable and the assertion above is about rates alone.
+func allSoakWorkloadActions() *soakWorkloadActions {
+	noop := func(context.Context, bool) error { return nil }
+	return &soakWorkloadActions{
+		Send: noop, Read: noop, Mutation: noop, Reaction: noop,
+		PinnedList: noop, Verify: noop, MemberMutation: noop,
+		RoomMutation: noop, RoomRead: noop, UserRead: noop,
+		RoomCreate: noop, ReadReceipt: noop, Presence: noop,
+	}
+}

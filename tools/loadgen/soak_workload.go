@@ -20,6 +20,7 @@ type soakWorkloadActions struct {
 	MemberMutation soakWorkloadAction
 	RoomMutation   soakWorkloadAction
 	RoomRead       soakWorkloadAction
+	UserRead       soakWorkloadAction
 	RoomCreate     soakWorkloadAction
 	ReadReceipt    soakWorkloadAction
 	Presence       soakWorkloadAction
@@ -40,11 +41,41 @@ type soakWorkloadConfig struct {
 	MemberMutationRate float64
 	RoomMutationRate   float64
 	RoomReadRate       float64
+	UserReadRate       float64
 	RoomCreateRate     float64
 	ReadReceiptRate    float64
 	PresenceRate       float64
 	MaxInFlight        int
 	StopOnActionError  bool
+}
+
+// soakWorkloadConfigFrom maps the parsed environment onto the workload's lane
+// rates. It exists as a named function rather than an inline literal because a
+// lane whose rate is never mapped through is skipped by lanes() and sends
+// nothing, while still reporting a configured target — a silent hole that only
+// a test over this mapping can catch.
+func soakWorkloadConfigFrom(cfg *soakConfig, maxInFlight int) *soakWorkloadConfig {
+	return &soakWorkloadConfig{
+		RunID:              cfg.RunID,
+		Duration:           cfg.RunDuration,
+		Continuous:         cfg.RunMode == soakRunModeContinuous,
+		Warmup:             cfg.Warmup,
+		HeartbeatInterval:  cfg.HeartbeatInterval,
+		SendRate:           cfg.SendRate,
+		ReadRate:           cfg.ReadRate,
+		MutationRate:       cfg.MutationRate,
+		ReactionRate:       cfg.ReactionRate,
+		PinnedListRate:     cfg.PinnedListRate,
+		VerifyRate:         cfg.VerifyRate,
+		MemberMutationRate: cfg.MemberMutationRate,
+		RoomMutationRate:   cfg.RoomMutationRate,
+		RoomReadRate:       cfg.RoomReadRate,
+		UserReadRate:       cfg.UserReadRate,
+		RoomCreateRate:     cfg.RoomCreateRate,
+		ReadReceiptRate:    cfg.ReadReceiptRate,
+		PresenceRate:       cfg.PresenceRate,
+		MaxInFlight:        maxInFlight,
+	}
 }
 
 type soakCompletion string
@@ -391,6 +422,7 @@ func (w *soakWorkload) lanes() []soakLane {
 			action: w.actions.RoomMutation,
 		},
 		{name: "room_read", rate: w.cfg.RoomReadRate, action: w.actions.RoomRead},
+		{name: "user_read", rate: w.cfg.UserReadRate, action: w.actions.UserRead},
 		{
 			name: soakFailureLaneRoomCreate, rate: w.cfg.RoomCreateRate,
 			action: w.actions.RoomCreate,
