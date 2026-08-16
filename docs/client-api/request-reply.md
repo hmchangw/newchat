@@ -976,6 +976,7 @@ Message schema: see [../client-api.md § Message schema](../client-api.md#messag
 | Field | Type | Notes |
 |---|---|---|
 | `messages` | Message[] | Most-recent first. |
+| `hasNext` | boolean | `true` if older messages exist. |
 | `minUserLastSeenAt` | number | Optional. UTC ms. The room's strict read floor — present only when every member has read. |
 
 **Emits:** None — reply only.

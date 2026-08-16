@@ -3040,6 +3040,7 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
 | Field | Type | Notes |
 |---|---|---|
 | `messages` | array<Message> | Most-recent first. See [Message schema](#message-schema). |
+| `hasNext` | boolean | `true` if older messages exist beyond this page — fetch the next page with `before` = the oldest returned message's `createdAt`. `false` once the caller's history boundary (room start, history floor, or access window) is reached. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
 
 ```json
@@ -3057,6 +3058,7 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
       "msg": "morning team"
     }
   ],
+  "hasNext": true,
   "minUserLastSeenAt": 1746518100000
 }
 ```
