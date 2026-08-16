@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	usermodels "github.com/hmchangw/chat/user-service/models"
 )
 
 func TestSoakWireRequests_MatchHistoryServiceJSON(t *testing.T) {
@@ -361,4 +362,172 @@ func TestSoakStatusReply_DecodesRoomServiceAcceptance(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 	assert.Equal(t, "accepted", decoded.Status)
 	assert.Equal(t, "req-1", decoded.RequestID)
+}
+
+// The user-service read carriers are decoded from replies the soak run never
+// asserts on, so a wrong key is invisible at runtime: it either reports every
+// read as an error the service never made, or reports a full page as empty.
+// These marshal the real reply types and decode the carrier from that output.
+func TestSoakUserReadCarriers_DecodeUserServiceReplies(t *testing.T) {
+	t.Run("apps categories are objects", func(t *testing.T) {
+		encoded, err := json.Marshal(usermodels.AppCategoriesResponse{
+			Categories: []usermodels.AppCategory{{ID: "cat-1", Name: "Ops", SiteID: "site-a"}},
+		})
+		require.NoError(t, err)
+
+		var decoded soakUserAppCategoriesResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded),
+			"decoding a category object as a string would fail every apps.categories read")
+		require.Len(t, decoded.Categories, 1)
+		assert.Equal(t, "cat-1", decoded.Categories[0].ID)
+	})
+
+	t.Run("thread list pages under items", func(t *testing.T) {
+		encoded, err := json.Marshal(model.ThreadListResponse{
+			Items:      []model.ThreadListItem{{ThreadRoomID: "thread-1"}},
+			NextCursor: "cursor-1", HasNext: true,
+		})
+		require.NoError(t, err)
+
+		var decoded soakUserThreadListResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		require.Len(t, decoded.Items, 1, "a page read through the wrong key looks empty")
+		assert.Equal(t, "thread-1", decoded.Items[0].ThreadRoomID)
+		assert.Equal(t, "cursor-1", decoded.NextCursor)
+		assert.True(t, decoded.HasNext)
+	})
+
+	t.Run("thread unread badge", func(t *testing.T) {
+		encoded, err := json.Marshal(model.ThreadUnreadSummaryResponse{Unread: true})
+		require.NoError(t, err)
+
+		var decoded soakUserThreadUnreadResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		assert.True(t, decoded.Unread)
+	})
+
+	t.Run("settings carry the evaluated permissions", func(t *testing.T) {
+		encoded, err := json.Marshal(usermodels.SettingsGetResponse{
+			Permissions: map[model.PermissionKey]bool{"canPost": true},
+		})
+		require.NoError(t, err)
+
+		var decoded soakUserSettingsResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		assert.True(t, decoded.Permissions["canPost"])
+	})
+
+	t.Run("apps list", func(t *testing.T) {
+		encoded, err := json.Marshal(usermodels.AppsListResponse{
+			Apps:    []usermodels.AppListItem{{App: model.App{ID: "app-1"}}},
+			HasMore: true,
+		})
+		require.NoError(t, err)
+
+		var decoded soakUserAppsResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		require.Len(t, decoded.Apps, 1)
+		assert.Equal(t, "app-1", decoded.Apps[0].ID)
+		assert.True(t, decoded.HasMore)
+	})
+
+	t.Run("me and status share the flat account field", func(t *testing.T) {
+		encoded, err := json.Marshal(usermodels.MeResponse{
+			UserStatusView: usermodels.UserStatusView{Account: "alice"},
+			Presence:       model.StatusOnline,
+		})
+		require.NoError(t, err)
+
+		var decoded soakUserMeResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		assert.Equal(t, "alice", decoded.Account)
+	})
+
+	t.Run("priority contacts", func(t *testing.T) {
+		encoded, err := json.Marshal(usermodels.PriorityContactsResponse{
+			Contacts: []usermodels.PriorityContactItem{{Account: "bob", Type: "user"}},
+		})
+		require.NoError(t, err)
+
+		var decoded soakUserPriorityContactsResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		require.Len(t, decoded.Contacts, 1)
+		assert.Equal(t, "bob", decoded.Contacts[0].Account)
+	})
+
+	t.Run("chatlist sections", func(t *testing.T) {
+		encoded, err := json.Marshal(model.ChatlistState{
+			Sections: []model.ChatlistSection{{ID: "favorites", Name: "Favorites"}},
+		})
+		require.NoError(t, err)
+
+		var decoded soakUserChatlistResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		require.Len(t, decoded.Sections, 1)
+		assert.Equal(t, "favorites", decoded.Sections[0].ID)
+	})
+
+	t.Run("subscription count", func(t *testing.T) {
+		encoded, err := json.Marshal(usermodels.CountResponse{Count: 7})
+		require.NoError(t, err)
+
+		var decoded soakUserCountResponse
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		assert.Equal(t, 7, decoded.Count)
+	})
+}
+
+// The request bodies are sent, so a wrong key is worse than a wrong reply key:
+// the server falls back to its default and the lane silently stops asking what
+// it thinks it is asking.
+func TestSoakUserReadRequests_MatchUserServiceJSON(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		soak any
+		real any
+	}{
+		{
+			name: "get by name",
+			soak: soakUserNameRequest{Name: "alice"},
+			real: usermodels.StatusGetByNameRequest{Name: "alice"},
+		},
+		{
+			name: "get dm",
+			soak: soakUserAccountNameRequest{AccountName: "bob"},
+			real: usermodels.GetDMRequest{AccountName: "bob"},
+		},
+		{
+			name: "get by room",
+			soak: soakUserRoomRequest{RoomID: "room-1"},
+			real: usermodels.GetByRoomIDRequest{RoomID: "room-1"},
+		},
+		{
+			name: "subscription count",
+			soak: soakUserCountRequest{},
+			real: usermodels.CountRequest{},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			soakJSON, err := json.Marshal(testCase.soak)
+			require.NoError(t, err)
+			realJSON, err := json.Marshal(testCase.real)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(realJSON), string(soakJSON))
+		})
+	}
+}
+
+// The page request serves apps.list, subscription.getChannels and thread.list,
+// which each declare their own limit/offset pair. Only the keys have to agree.
+func TestSoakUserPageRequest_MatchesEveryPagedReader(t *testing.T) {
+	soakJSON, err := json.Marshal(soakUserPageRequest{Limit: 20, Offset: 40})
+	require.NoError(t, err)
+
+	appsJSON, err := json.Marshal(usermodels.AppsListRequest{Limit: 20, Offset: 40})
+	require.NoError(t, err)
+	assert.JSONEq(t, string(appsJSON), string(soakJSON))
+
+	channelsJSON, err := json.Marshal(usermodels.GetChannelsRequest{Limit: 20, Offset: 40})
+	require.NoError(t, err)
+	assert.JSONEq(t, string(channelsJSON), string(soakJSON))
 }

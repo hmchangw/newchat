@@ -429,7 +429,10 @@ In `tools/loadgen/soak_failure.go` `openSoakFailureLedger` (`:84`), replace the 
 	if cfg.LedgerDir != "" {
 		wal, err := openFailureWAL(failureWALPath(cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf(
+				"open soak failure WAL for run %q epoch %q: %w",
+				cfg.RunID, cfg.LedgerEpoch, err,
+			)
 		}
 		recordAbandonedFailureJournals(metrics, cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch)
 		...
@@ -1990,7 +1993,7 @@ Append to `docs/load-testing/loadgen-failure-observation.md`:
 - a "Room and Member Lanes" section listing the four lanes, their operation types, and the per-lane observer sets;
 - the `room_state` observer's two sources and the authoritative-source rule, stating explicitly that a MongoDB read uses the primary because the shared client is `secondaryPreferred`;
 - the rule that `missing_after_deadline` requires an accepted admission;
-- the candidate ring, quarantine, and the statement that quarantine overflow is a reversible traffic degradation, never a ledger invalidation, with the gate operators should use instead (`dispatched < 90% of configured` over the window ⇒ that window is INCONCLUSIVE for that lane only);
+- the candidate ring, quarantine, and the statement that quarantine overflow is a reversible traffic degradation, never a ledger invalidation, with the gate operators should use instead (`loadgen_soak_lane_attempts_total{outcome="sent"} < 90% of configured` over the window ⇒ that window is INCONCLUSIVE for that lane only — `dispatched` counts scheduler slots and stays flat when a lane finds no target, so it cannot express this);
 - the `room_create` budget and the fact that created rooms are registered into run ownership so teardown removes them, and receive read traffic only;
 - the `SOAK_LEDGER_EPOCH` contract: `runId` owns the topology, `epoch` owns the journal; bump the epoch on any image upgrade that changes the ledger contract; older journals are retained, never replayed, and surfaced by `loadgen_failure_abandoned_journals`; treat one reconcile deadline either side of an epoch switch as INCONCLUSIVE;
 - the new configuration table rows and the new metric table rows.

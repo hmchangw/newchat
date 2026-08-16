@@ -271,7 +271,7 @@ func (r *soakUserReader) ThreadList(ctx context.Context) error {
 		Body:    soakUserPageRequest{Limit: r.cfg.PageLimit},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Threads)
+		sample.Messages = len(response.Items)
 	})
 }
 
@@ -294,19 +294,21 @@ func (r *soakUserReader) pickAccount() string {
 
 // pickAccountPair returns a requester and a distinct target. With a single
 // account the pair collapses to itself, which the read handlers still answer.
+//
+// The retries are bounded rather than looped until distinct: a topology whose
+// accounts are all the same string would otherwise spin forever holding the
+// pool mutex, and a pair that collapses is a weaker sample, not a broken one.
 func (r *soakUserReader) pickAccountPair() (string, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	requester := r.accounts[r.rng.Intn(len(r.accounts))]
-	if len(r.accounts) == 1 {
-		return requester, requester
-	}
-	for {
+	for range 8 {
 		target := r.accounts[r.rng.Intn(len(r.accounts))]
 		if target != requester {
 			return requester, target
 		}
 	}
+	return requester, requester
 }
 
 func (r *soakUserReader) pickRoom() (string, bool) {

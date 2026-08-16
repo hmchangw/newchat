@@ -39,11 +39,15 @@ const (
 //
 // The store settles disagreements: room-service returning nothing can mean the
 // read path is degraded, while a primary read that finds the state proves the
-// write landed. Only agreement, or an unreachable store, may produce an
-// absence claim.
+// write landed. Only the store may produce an absence claim, and an unreachable
+// store produces none at all — the result stays unknown and the operation is
+// re-probed, because "we could not look" is not evidence of loss. The one thing
+// the RPC settles alone is a positive: if room-service already shows the effect,
+// the write landed.
 type soakRoomStateVerifier struct {
 	reader  *soakRoomReader
 	store   soakRoomStateStore
+	siteID  string
 	metrics *Metrics
 	health  *failureObserverHealth
 	now     func() time.Time
@@ -52,6 +56,7 @@ type soakRoomStateVerifier struct {
 func newSoakRoomStateVerifier(
 	reader *soakRoomReader,
 	store soakRoomStateStore,
+	siteID string,
 	metrics *Metrics,
 	health *failureObserverHealth,
 	now func() time.Time,
@@ -60,7 +65,8 @@ func newSoakRoomStateVerifier(
 		now = time.Now
 	}
 	return &soakRoomStateVerifier{
-		reader: reader, store: store, metrics: metrics, health: health, now: now,
+		reader: reader, store: store, siteID: siteID,
+		metrics: metrics, health: health, now: now,
 	}
 }
 
@@ -162,9 +168,13 @@ func (v *soakRoomStateVerifier) verifyRename(
 			fmt.Errorf("failure operation %q has no expected room name", operation.ID)
 	}
 
+	// The verifier accepts a nil reader, so every RPC source is guarded: without
+	// it a store-only verifier panics instead of falling back to the store.
 	rpc := soakRoomStateUnknown
-	if info, err := v.reader.RoomInfoFor(ctx, roomID); err == nil {
-		rpc = classifySoakRoomName(info.Found, info.Name, expected, previous)
+	if v.reader != nil {
+		if info, err := v.reader.RoomInfoFor(ctx, roomID); err == nil {
+			rpc = classifySoakRoomName(info.Found, info.Name, expected, previous)
+		}
 	}
 	v.countSource(soakRoomStateSourceRPC, rpc)
 
@@ -195,17 +205,19 @@ func (v *soakRoomStateVerifier) verifyMute(
 	expectMuted := operation.Attributes[soakFailureAttributeExpectedMuted] == "true"
 
 	rpc := soakRoomStateUnknown
-	if response, err := v.reader.SubscriptionsFor(ctx, account); err == nil {
-		rpc = soakRoomStateMismatch
-		for i := range response.Subscriptions {
-			if response.Subscriptions[i].RoomID != roomID {
-				continue
+	if v.reader != nil {
+		if response, err := v.reader.SubscriptionsFor(ctx, account); err == nil {
+			rpc = soakRoomStateMismatch
+			for i := range response.Subscriptions {
+				if response.Subscriptions[i].RoomID != roomID {
+					continue
+				}
+				rpc = soakRoomStateAbsent
+				if response.Subscriptions[i].Muted == expectMuted {
+					rpc = soakRoomStateMatched
+				}
+				break
 			}
-			rpc = soakRoomStateAbsent
-			if response.Subscriptions[i].Muted == expectMuted {
-				rpc = soakRoomStateMatched
-			}
-			break
 		}
 	}
 	v.countSource(soakRoomStateSourceRPC, rpc)
@@ -247,7 +259,7 @@ func (v *soakRoomStateVerifier) verifyCreated(
 	v.countSource(soakRoomStateSourceRPC, soakRoomStateUnknown)
 
 	authoritative := soakRoomStateUnknown
-	roomID, found, err := v.store.RoomIDByName(ctx, roomName)
+	roomID, found, err := v.store.RoomIDByName(ctx, v.siteID, roomName)
 	switch {
 	case err != nil:
 		v.setHealth(false, "room_read")
@@ -283,16 +295,18 @@ func (v *soakRoomStateVerifier) verifyRead(
 	}
 
 	rpc := soakRoomStateUnknown
-	if response, err := v.reader.SubscriptionsFor(ctx, account); err == nil {
-		rpc = soakRoomStateMismatch
-		for i := range response.Subscriptions {
-			if response.Subscriptions[i].RoomID != roomID {
-				continue
+	if v.reader != nil {
+		if response, err := v.reader.SubscriptionsFor(ctx, account); err == nil {
+			rpc = soakRoomStateMismatch
+			for i := range response.Subscriptions {
+				if response.Subscriptions[i].RoomID != roomID {
+					continue
+				}
+				rpc = classifySoakReadCursor(
+					response.Subscriptions[i].LastSeenAt, baseline, hasBaseline,
+				)
+				break
 			}
-			rpc = classifySoakReadCursor(
-				response.Subscriptions[i].LastSeenAt, baseline, hasBaseline,
-			)
-			break
 		}
 	}
 	v.countSource(soakRoomStateSourceRPC, rpc)

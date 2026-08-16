@@ -57,12 +57,13 @@ func newSoakRoomLaneFixture(t *testing.T, reply []byte, requestErr error) *soakR
 	fixture.pool = pool
 	fixture.ledger = ledger
 	fixture.verifier = newSoakRoomStateVerifier(
-		reader, fixture.store, fixture.metrics,
+		reader, fixture.store, "site-a", fixture.metrics,
 		newFailureObserverHealth(failureObserverRoomState, fixture.now), now,
 	)
 	fixture.lanes = newSoakRoomLanes(
 		soakRoomLaneConfig{
-			RunID: "run-1", PersistGrace: time.Second, Deadline: time.Minute,
+			RunID: "run-1", SiteID: "site-a",
+			PersistGrace: time.Second, Deadline: time.Minute,
 			RetryInterval: time.Second, RoomCreateBudget: 2, CreateRoomSize: 2,
 		},
 		pool, newSoakRoomMutator("site-a", rpc, time.Second, now), ledger,
@@ -149,6 +150,37 @@ func TestSoakRoomLanes_LedgerRefusalSkipsTheRequest(t *testing.T) {
 		"an unjournaled room mutation must never be sent")
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		fixture.metrics.FailureUntracked.WithLabelValues(failureUntrackedReasonStart)))
+	assert.Equal(t, float64(0), testutil.ToFloat64(
+		fixture.metrics.SoakLaneAttempts.WithLabelValues(
+			soakFailureLaneMemberMutation, soakLaneAttemptSent,
+		)),
+		"a refused mutation is not offered load")
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		fixture.metrics.SoakLaneAttempts.WithLabelValues(
+			soakFailureLaneMemberMutation, soakLaneAttemptRefused,
+		)))
+}
+
+// The traffic-validity gate reads sent alone, so each way a slot can pass
+// without a request has to land on its own outcome rather than on sent.
+func TestSoakRoomLanes_CountsLaneAttemptsByOutcome(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		fixture.metrics.SoakLaneAttempts.WithLabelValues(
+			soakFailureLaneMemberMutation, soakLaneAttemptSent,
+		)))
+
+	// Every room now holds a member lease, so the next slot finds no target.
+	for range 8 {
+		require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+	}
+	assert.Positive(t, testutil.ToFloat64(
+		fixture.metrics.SoakLaneAttempts.WithLabelValues(
+			soakFailureLaneMemberMutation, soakLaneAttemptNoTarget,
+		)),
+		"an exhausted pool must not look like offered load")
 }
 
 func TestSoakRoomLanes_ReconcileConfirmsAppliedState(t *testing.T) {
@@ -487,9 +519,8 @@ func TestSoakRoomLanes_MuteProbeResolvesTheParkedPair(t *testing.T) {
 	require.NoError(t, probeErr)
 	assert.True(t, probed)
 	intent, ok := soakNextMuteIntentFor(t, fixture.pool, "user-a0")
-	if ok {
-		assert.False(t, intent.TargetMuted, "the probe found it muted, so the next toggle unmutes")
-	}
+	require.True(t, ok, "a resolved probe must return the pair to the pool")
+	assert.False(t, intent.TargetMuted, "the probe found it muted, so the next toggle unmutes")
 }
 
 func TestSoakRoomLanes_MuteProbeKeepsAnUnknownSubscription(t *testing.T) {

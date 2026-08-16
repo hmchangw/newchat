@@ -98,12 +98,13 @@ func (h *soakRoomMemberEvidenceHarness) lanes(
 		h.pool, rpc, &soakRoomReadRecorder{}, rand.New(rand.NewSource(2)), now,
 	)
 	verifier := newSoakRoomStateVerifier(
-		reader, h.store, h.metrics,
+		reader, h.store, "site-a", h.metrics,
 		newFailureObserverHealth(failureObserverRoomState, h.now), now,
 	)
 	lanes := newSoakRoomLanes(
 		soakRoomLaneConfig{
-			RunID: "run-1", PersistGrace: time.Millisecond, Deadline: time.Minute,
+			RunID: "run-1", SiteID: "site-a",
+			PersistGrace: time.Millisecond, Deadline: time.Minute,
 			RetryInterval: time.Millisecond, RoomCreateBudget: 1, CreateRoomSize: 2,
 		},
 		h.pool, newSoakRoomMutator("site-a", rpc, time.Second, now), ledger,

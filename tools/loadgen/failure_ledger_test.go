@@ -11,6 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// messageCreateExpectedEffects is the fully-enabled observer set. Production
+// always derives the set from the runtime observer flags, so this shorthand
+// exists only for tests that do not exercise those flags.
+func messageCreateExpectedEffects(recipientCount int, recipientHash string) []failureExpectedEffect {
+	return messageCreateExpectedEffectsForObservers(true, false, recipientCount, recipientHash)
+}
+
 func TestFailureLedger_FinalizesOnlyAfterEveryObservation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{
@@ -301,12 +308,6 @@ func TestFailureWALPath_SeparatesRunAndEpoch(t *testing.T) {
 
 func TestFailureLedger_StartsRoomLaneOperations(t *testing.T) {
 	now := time.Date(2026, 8, 16, 4, 5, 6, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
-		Capacity: 4,
-		Now:      func() time.Time { return now },
-	})
-	require.NoError(t, err)
-
 	for _, testCase := range []struct {
 		name          string
 		lane          string
@@ -333,6 +334,12 @@ func TestFailureLedger_StartsRoomLaneOperations(t *testing.T) {
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			ledger, err := newFailureLedger(failureLedgerConfig{
+				Capacity: 4,
+				Now:      func() time.Time { return now },
+			})
+			require.NoError(t, err)
+
 			operation := &failureOperation{
 				SchemaVersion: 2, ID: "operation-" + string(testCase.operationType),
 				RunID: "run-1", Scenario: soakFailureScenario, Lane: testCase.lane,

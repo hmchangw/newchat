@@ -96,7 +96,7 @@ func recordAbandonedFailureJournals(metrics *Metrics, dir, runID, epoch string) 
 		return
 	}
 	active := failureWALPath(dir, runID, epoch)
-	matches, err := filepath.Glob(filepath.Join(dir, runID+"*.wal"))
+	matches, err := filepath.Glob(filepath.Join(dir, runID+".*.wal"))
 	if err != nil {
 		slog.Error("scan retained failure journals", "runId", runID, "error", err)
 		return
@@ -129,7 +129,10 @@ func openSoakFailureLedger(
 	if cfg.LedgerDir != "" {
 		wal, err := openFailureWAL(failureWALPath(cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf(
+				"open soak failure WAL for run %q epoch %q: %w",
+				cfg.RunID, cfg.LedgerEpoch, err,
+			)
 		}
 		recordAbandonedFailureJournals(metrics, cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch)
 		journal = newFailureJournalMetrics(
@@ -705,7 +708,9 @@ func (r *soakFailureReconciler) observeSearchIndex(
 			}
 		}
 		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
-			return err
+			return fmt.Errorf(
+				"reschedule soak search index probe for %q: %w", operation.ID, err,
+			)
 		}
 		return nil
 	}

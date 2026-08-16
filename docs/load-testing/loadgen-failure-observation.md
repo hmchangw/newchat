@@ -157,8 +157,11 @@ Room and member effects are reconciled through one observer with two sources:
 
 The store settles disagreements. room-service returning nothing can mean its
 read path is degraded, while a primary read that finds the state proves the
-write landed, so an absence claim requires the authoritative source to agree or
-to be unreachable. Reads are explicitly routed at the primary because the
+write landed, so an absence claim requires the authoritative source to agree.
+An unreachable primary produces no claim at all: the probe stays `unverified`
+and is re-run, because "we could not look" is not evidence of loss. The one
+thing the RPC can settle alone is a positive — if room-service already shows
+the effect, the write landed. Reads are explicitly routed at the primary because the
 shared soak client connects with `SecondaryPreferred`; a lagging secondary
 would otherwise report a completed write as missing and turn replication lag
 into a false data-loss claim during exactly the failures being measured.
@@ -207,7 +210,9 @@ that lane only.
 Use the attempts counter, **not** `loadgen_soak_dispatched_total`: dispatched
 counts scheduler slots and holds the pacing identity `intended = dispatched +
 scheduler_underrun + lane_saturation + global_saturation`, so a lane that found
-no usable target still consumes one and looks fully loaded.
+no usable target still consumes one and looks fully loaded. The two non-`sent`
+outcomes name the two ways a slot passes without a request: `no_target` for an
+exhausted pool, `refused` for a mutation the ledger declined.
 
 ### Room creation budget
 
@@ -377,7 +382,7 @@ and every mutation eventually expires unverified.
 | `loadgen_soak_room_pool_degraded` | Reversible candidate-pool degradation flag |
 | `loadgen_soak_room_create_budget_remaining` | Rooms the create lane may still add |
 | `loadgen_soak_room_state_source_total{source,result}` | Room-state observer outcomes per source |
-| `loadgen_soak_lane_attempts_total{lane,outcome}` | Lane slots that produced a request vs found no target |
+| `loadgen_soak_lane_attempts_total{lane,outcome}` | Lane slots by outcome: `sent`, `no_target`, `refused` |
 | `loadgen_soak_presence_signals_total{signal}` | Presence signals published, by kind |
 | `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
 | `loadgen_soak_presence_connections` | Connections the lane currently claims online |

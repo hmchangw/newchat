@@ -61,6 +61,7 @@ func newSoakPresenceFixture(t *testing.T, queryShare float64, reply []byte) *soa
 		metrics:   NewMetrics(),
 		now:       time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
 	}
+	t.Cleanup(fixture.metrics.stopNATSHealth)
 	topology := soakRoomStateTestTopology(3)
 	lane, err := newSoakPresenceLane(
 		soakPresenceConfig{

@@ -127,10 +127,6 @@ type failureExpectedEffect struct {
 	Cardinality *failureCardinality `json:"cardinality,omitempty"`
 }
 
-func messageCreateExpectedEffects(recipientCount int, recipientHash string) []failureExpectedEffect {
-	return messageCreateExpectedEffectsForObservers(true, false, recipientCount, recipientHash)
-}
-
 func messageCreateExpectedEffectsForObservers(
 	recipientEnabled bool,
 	searchEnabled bool,

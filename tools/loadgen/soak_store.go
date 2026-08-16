@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -331,8 +332,16 @@ func (s *mongoSoakStore) LoadTopology(
 		if _, duplicate := seen[user.ID]; duplicate {
 			continue
 		}
+		// Index through the map result: a subscription user with an ID but no
+		// account never enters usersByID, and appending the zero value would put
+		// an empty account in the candidate ring — every member_add against it
+		// is rejected and lands in the ledger as a real failure.
+		candidate, known := usersByID[user.ID]
+		if !known {
+			continue
+		}
 		seen[user.ID] = struct{}{}
-		borrowedUsers = append(borrowedUsers, usersByID[user.ID])
+		borrowedUsers = append(borrowedUsers, candidate)
 	}
 	if len(borrowedUsers) == 0 {
 		return soakTopology{}, fmt.Errorf(
@@ -802,19 +811,7 @@ type soakOwnershipChunk struct {
 	RoomIDs   []string `bson:"roomIds"`
 }
 
-// soakRoomStateStore is the authoritative final-state source for the room and
-// member lanes. Its reads are the tiebreaker that turns "room-service did not
-// return it" into a defensible absence claim.
-type soakRoomStateStore interface {
-	RoomName(ctx context.Context, roomID string) (string, bool, error)
-	IsRoomMember(ctx context.Context, roomID, account string) (bool, error)
-	SubscriptionMuted(ctx context.Context, roomID, account string) (muted bool, found bool, err error)
-	SubscriptionLastSeen(ctx context.Context, roomID, account string) (lastSeenAt time.Time, found bool, err error)
-	RoomIDByName(ctx context.Context, name string) (roomID string, found bool, err error)
-	CountCreatedRooms(ctx context.Context, runID string) (int, error)
-	AppendOwnedRooms(ctx context.Context, runID string, roomIDs []string) error
-}
-
+// soakRoomStateStore is declared by its consumers in soak_roommember.go.
 var _ soakRoomStateStore = (*mongoSoakStore)(nil)
 
 // primary routes a read at the replica-set primary. The shared soak client
@@ -862,17 +859,20 @@ func (s *mongoSoakStore) CountCreatedRooms(ctx context.Context, runID string) (i
 // reply was lost.
 func (s *mongoSoakStore) RoomIDByName(
 	ctx context.Context,
-	name string,
+	siteID, name string,
 ) (string, bool, error) {
-	if name == "" {
-		return "", false, fmt.Errorf("resolve soak room by name requires a name")
+	if siteID == "" || name == "" {
+		return "", false, fmt.Errorf("resolve soak room by name requires a site and name")
 	}
 	var document struct {
 		ID string `bson:"_id"`
 	}
 	err := s.primary("rooms").FindOne(
 		ctx,
-		bson.D{{Key: "name", Value: name}},
+		bson.D{
+			{Key: "name", Value: name},
+			{Key: "siteId", Value: siteID},
+		},
 		options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}}),
 	).Decode(&document)
 	if errors.Is(err, mongo.ErrNoDocuments) {
@@ -1019,12 +1019,30 @@ func (s *mongoSoakStore) AppendOwnedRooms(
 	// by its run ID, while a chunk entry for an unmarked room is invisible to
 	// teardown's per-room ownership check. The caller counts the failure as
 	// untracked so the leak is reported rather than silent.
-	if _, err := s.db.Collection("rooms").UpdateMany(
+	// Only claim a room that is unowned or already ours. Teardown deletes every
+	// room carrying this run's marker, so overwriting another run's marker would
+	// enlist its rooms for deletion.
+	marked, err := s.db.Collection("rooms").UpdateMany(
 		ctx,
-		bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: roomIDs}}}},
+		bson.D{
+			{Key: "_id", Value: bson.D{{Key: "$in", Value: roomIDs}}},
+			{Key: "$or", Value: bson.A{
+				bson.D{{Key: "soakRunId", Value: bson.D{{Key: "$exists", Value: false}}}},
+				bson.D{{Key: "soakRunId", Value: runID}},
+			}},
+		},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "soakRunId", Value: runID}}}},
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("mark rooms owned by soak run %q: %w", runID, err)
+	}
+	// The guard cannot fire for a room this run just created, so a short match is
+	// an anomaly worth naming. The chunk is still written: teardown re-checks
+	// ownership per room, so listing an unclaimed room is inert, while dropping
+	// the chunk would strand the rooms that were marked.
+	if int(marked.MatchedCount) < len(roomIDs) {
+		slog.Warn("some created rooms could not be claimed by this soak run",
+			"runId", runID, "requested", len(roomIDs), "matched", marked.MatchedCount)
 	}
 
 	collection := s.db.Collection(soakOwnershipCollection)
@@ -1077,8 +1095,12 @@ func (s *mongoSoakStore) nextOwnershipChunkIndex(
 	ctx context.Context,
 	runID string,
 ) (int, error) {
+	// The index has to come from the primary. A lagging secondary returns a
+	// stale highest chunk, so every retry recomputes the same taken index and
+	// the insert loop exhausts its attempts against contention that is not
+	// there — leaving the created room outside teardown's reach.
 	var chunk soakOwnershipChunk
-	err := s.db.Collection(soakOwnershipCollection).FindOne(
+	err := s.primary(soakOwnershipCollection).FindOne(
 		ctx,
 		soakOwnershipIDFilter(runID, ""),
 		options.FindOne().

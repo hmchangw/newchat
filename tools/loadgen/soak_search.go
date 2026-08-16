@@ -88,9 +88,14 @@ func newSoakSearchReader(
 
 	reader := &soakSearchReader{
 		cfg: cfg, rpc: rpc, recorder: recorder, now: now, rng: rng,
-		// Terms the seeded payloads actually contain, so the read lane
-		// measures a query that matches rather than an empty-result fast path.
-		terms: []string{"soak", "message", "the", "room"},
+		// Tokens the seeded room names carry (soak-{runId}-channel-NNNNNN), so
+		// room search returns real hits. Message bodies are generated filler —
+		// one repeated character, no word boundaries — so message search matches
+		// nothing by construction and measures the request path and an empty
+		// result set. That is the lane's purpose here: it exists to show whether
+		// search-service still answers during a fault, and the recorded result
+		// count makes the empty set visible rather than implied.
+		terms: []string{"soak", "channel"},
 	}
 	for i := range topology.ActiveUsers {
 		if account := topology.ActiveUsers[i].Account; account != "" {

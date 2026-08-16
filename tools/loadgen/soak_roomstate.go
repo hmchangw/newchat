@@ -137,6 +137,8 @@ type soakRoomStatePool struct {
 	byID          map[string]*soakRoomState
 	memberCursor  int
 	renameCursor  int
+	muteCursor    int
+	readCursor    int
 	quarantine    []soakRoomProbe
 	inProbe       int
 	quarantineMax int
@@ -431,8 +433,11 @@ func (p *soakRoomStatePool) SettleRename(intent soakRenameIntent, result failure
 func (p *soakRoomStatePool) NextMuteIntent() (soakMuteIntent, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// The room cursor is this lane's own: sharing memberCursor would leave the
+	// scan pinned to one room whenever the member lane is idle, so every toggle
+	// would land on the first room that still has a free account.
 	for roomOffset := range p.rooms {
-		room := p.rooms[(p.memberCursor+roomOffset)%len(p.rooms)]
+		room := p.rooms[(p.muteCursor+roomOffset)%len(p.rooms)]
 		for accountOffset := range room.muteAccounts {
 			account := room.muteAccounts[(room.muteCursor+accountOffset)%len(room.muteAccounts)]
 			state := room.mute[account]
@@ -444,6 +449,7 @@ func (p *soakRoomStatePool) NextMuteIntent() (soakMuteIntent, bool) {
 			}
 			room.muteLeases[account] = struct{}{}
 			room.muteCursor = (room.muteCursor + accountOffset + 1) % len(room.muteAccounts)
+			p.muteCursor = (p.muteCursor + roomOffset + 1) % len(p.rooms)
 			return soakMuteIntent{
 				RoomID: room.id, Account: account, TargetMuted: !state.muted,
 			}, true
@@ -486,7 +492,7 @@ func (p *soakRoomStatePool) NextReadIntent() (soakReadIntent, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for roomOffset := range p.rooms {
-		room := p.rooms[(p.memberCursor+roomOffset)%len(p.rooms)]
+		room := p.rooms[(p.readCursor+roomOffset)%len(p.rooms)]
 		for accountOffset := range room.muteAccounts {
 			account := room.muteAccounts[(room.readCursor+accountOffset)%len(room.muteAccounts)]
 			if _, leased := room.readLeases[account]; leased {
@@ -494,6 +500,7 @@ func (p *soakRoomStatePool) NextReadIntent() (soakReadIntent, bool) {
 			}
 			room.readLeases[account] = struct{}{}
 			room.readCursor = (room.readCursor + accountOffset + 1) % len(room.muteAccounts)
+			p.readCursor = (p.readCursor + roomOffset + 1) % len(p.rooms)
 			state := room.read[account]
 			return soakReadIntent{
 				RoomID: room.id, Account: account,

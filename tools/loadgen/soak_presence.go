@@ -176,6 +176,11 @@ func (l *soakPresenceLane) Signal(ctx context.Context) error {
 // Verify queries a batch of connections and compares the reported status with
 // what the lane last sent.
 func (l *soakPresenceLane) Verify(ctx context.Context) error {
+	// The constructor does not require an RPC client and publish already guards
+	// its pool, so guard here too rather than panicking on the query path.
+	if l.rpc == nil {
+		return fmt.Errorf("soak presence lane requires an RPC client")
+	}
 	accounts, expectations := l.verifiableBatch()
 	if len(accounts) == 0 {
 		l.countCheck(soakPresenceCheckSkipped, 1)

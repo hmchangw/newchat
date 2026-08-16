@@ -506,6 +506,7 @@ func TestCountCreatedRooms_ExcludesTheSeededPopulation(t *testing.T) {
 		{Key: "_id", Value: "room-created-1"},
 		{Key: "soakRunId", Value: cfg.RunID},
 		{Key: "name", Value: soakCreatedRoomPrefix(cfg.RunID) + "abc"},
+		{Key: "siteId", Value: "site-a"},
 	})
 	require.NoError(t, err)
 
@@ -513,7 +514,7 @@ func TestCountCreatedRooms_ExcludesTheSeededPopulation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, created)
 
-	roomID, found, err := store.RoomIDByName(ctx, soakCreatedRoomPrefix(cfg.RunID)+"abc")
+	roomID, found, err := store.RoomIDByName(ctx, "site-a", soakCreatedRoomPrefix(cfg.RunID)+"abc")
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, "room-created-1", roomID)

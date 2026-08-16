@@ -77,7 +77,7 @@ func TestSoakUserReader_EachReadTargetsItsOwnSubject(t *testing.T) {
 			name: "settings", call: (*soakUserReader).Settings,
 			action:  soakRPCUserSettingsGet,
 			subject: func(a string) string { return subject.UserSettingsGet(a, "site-a") },
-			reply:   `{"settings":{}}`,
+			reply:   `{"permissions":{"canPost":true}}`,
 		},
 		{
 			name: "chatlist", call: (*soakUserReader).Chatlist,
@@ -101,7 +101,7 @@ func TestSoakUserReader_EachReadTargetsItsOwnSubject(t *testing.T) {
 			name: "apps categories", call: (*soakUserReader).AppsCategories,
 			action:  soakRPCUserAppsCategories,
 			subject: func(a string) string { return subject.UserAppsCategories(a, "site-a") },
-			reply:   `{"categories":["chat"]}`,
+			reply:   `{"categories":[{"id":"chat","name":"Chat","siteId":"site-a"}]}`,
 		},
 		{
 			name: "subscription count", call: (*soakUserReader).SubscriptionCount,
@@ -131,13 +131,13 @@ func TestSoakUserReader_EachReadTargetsItsOwnSubject(t *testing.T) {
 			name: "thread list", call: (*soakUserReader).ThreadList,
 			action:  soakRPCUserThreadList,
 			subject: func(a string) string { return subject.UserThreadList(a, "site-a") },
-			reply:   `{"threads":[{"threadRoomId":"t1"}]}`,
+			reply:   `{"items":[{"threadRoomId":"t1"}],"hasNext":false}`,
 		},
 		{
 			name: "thread unread", call: (*soakUserReader).ThreadUnread,
 			action:  soakRPCUserThreadUnread,
 			subject: func(a string) string { return subject.UserThreadUnreadSummary(a, "site-a") },
-			reply:   `{"hasUnread":true}`,
+			reply:   `{"unread":true,"unreadDirectMessage":false,"unreadMention":false}`,
 		},
 	}
 

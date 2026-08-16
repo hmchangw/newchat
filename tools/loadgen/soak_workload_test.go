@@ -747,6 +747,7 @@ func allSoakWorkloadActions() *soakWorkloadActions {
 		Send: noop, Read: noop, Mutation: noop, Reaction: noop,
 		PinnedList: noop, Verify: noop, MemberMutation: noop,
 		RoomMutation: noop, RoomRead: noop, UserRead: noop,
-		RoomCreate: noop, ReadReceipt: noop, Presence: noop,
+		SearchRead: noop, RoomCreate: noop, ReadReceipt: noop,
+		Presence: noop,
 	}
 }

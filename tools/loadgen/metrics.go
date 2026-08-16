@@ -313,7 +313,7 @@ func NewMetrics() *Metrics {
 	m.SoakLaneAttempts = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_soak_lane_attempts_total",
-			Help: "Lane slots by whether they produced a request. loadgen_soak_dispatched_total counts scheduler slots, which a lane with no usable target still consumes; only this distinguishes offered load from a lane idling on an exhausted pool.",
+			Help: "Lane slots by outcome (sent, no_target, refused). loadgen_soak_dispatched_total counts scheduler slots, which a lane with no usable target still consumes; only this distinguishes offered load from a lane idling on an exhausted pool or one whose mutations the ledger is refusing.",
 		},
 		[]string{"lane", "outcome"},
 	)

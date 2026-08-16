@@ -45,6 +45,7 @@ func (s *soakRoomStateStoreStub) CountCreatedRooms(context.Context, string) (int
 func (s *soakRoomStateStoreStub) RoomIDByName(
 	context.Context,
 	string,
+	string,
 ) (string, bool, error) {
 	return s.byName, s.byNameOK, s.byNameErr
 }
@@ -89,7 +90,7 @@ func newSoakRoomVerifyFixture(
 		nil,
 	)
 	health := newFailureObserverHealth(failureObserverRoomState, time.Now())
-	return newSoakRoomStateVerifier(reader, store, metrics, health, nil), metrics
+	return newSoakRoomStateVerifier(reader, store, "site-a", metrics, health, nil), metrics
 }
 
 func soakMemberOperation(add bool) *failureOperation {
@@ -409,7 +410,7 @@ func TestSoakRoomStateVerifier_RejectsIncompleteOperations(t *testing.T) {
 }
 
 func TestSoakRoomStateVerifier_RejectsMissingStore(t *testing.T) {
-	verifier := newSoakRoomStateVerifier(nil, nil, nil, nil, nil)
+	verifier := newSoakRoomStateVerifier(nil, nil, "site-a", nil, nil, nil)
 
 	_, _, err := verifier.Verify(context.Background(), soakMemberOperation(true))
 
@@ -456,7 +457,7 @@ func TestSoakRoomStateVerifier_WorksWithoutMetricsOrHealth(t *testing.T) {
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
 		&soakRoomReadRecorder{}, rand.New(rand.NewSource(20)), nil,
 	)
-	verifier := newSoakRoomStateVerifier(reader, &soakRoomStateStoreStub{}, nil, nil, nil)
+	verifier := newSoakRoomStateVerifier(reader, &soakRoomStateStoreStub{}, "site-a", nil, nil, nil)
 
 	assert.NotPanics(t, func() {
 		_, _, err := verifier.Verify(context.Background(), soakMemberOperation(false))

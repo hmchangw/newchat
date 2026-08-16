@@ -15,11 +15,26 @@ import (
 
 type soakRoomLaneConfig struct {
 	RunID            string
+	SiteID           string
 	PersistGrace     time.Duration
 	Deadline         time.Duration
 	RetryInterval    time.Duration
 	RoomCreateBudget int
 	CreateRoomSize   int
+}
+
+// soakRoomStateStore is the authoritative final-state source for the room and
+// member lanes. Its reads are the tiebreaker that turns "room-service did not
+// return it" into a defensible absence claim. It is declared here, with the
+// lanes and the verifier that consume it, rather than beside mongoSoakStore.
+type soakRoomStateStore interface {
+	RoomName(ctx context.Context, roomID string) (string, bool, error)
+	IsRoomMember(ctx context.Context, roomID, account string) (bool, error)
+	SubscriptionMuted(ctx context.Context, roomID, account string) (muted bool, found bool, err error)
+	SubscriptionLastSeen(ctx context.Context, roomID, account string) (lastSeenAt time.Time, found bool, err error)
+	RoomIDByName(ctx context.Context, siteID, name string) (roomID string, found bool, err error)
+	CountCreatedRooms(ctx context.Context, runID string) (int, error)
+	AppendOwnedRooms(ctx context.Context, runID string, roomIDs []string) error
 }
 
 // soakRoomPending remembers which pool reservation a ledger operation came
@@ -59,6 +74,15 @@ type soakRoomLanes struct {
 	budget     int
 	renameTurn bool
 }
+
+// Outcomes of loadgen_soak_lane_attempts_total. Only soakLaneAttemptSent is
+// offered load; the other two are the two distinct ways a scheduler slot can
+// pass without a request leaving the process.
+const (
+	soakLaneAttemptSent     = "sent"
+	soakLaneAttemptNoTarget = "no_target"
+	soakLaneAttemptRefused  = "refused"
+)
 
 var soakRoomLaneNames = []string{
 	soakFailureLaneMemberMutation,
@@ -182,11 +206,10 @@ func (l *soakRoomLanes) SpendCreateBudget(spent int) {
 func (l *soakRoomLanes) MemberMutation(ctx context.Context) error {
 	intent, ok := l.pool.NextMemberIntent()
 	if !ok {
-		l.countAttempt(soakFailureLaneMemberMutation, false)
+		l.countAttempt(soakFailureLaneMemberMutation, soakLaneAttemptNoTarget)
 		l.countExhausted(soakRoomPoolReasonNoCandidate)
 		return nil
 	}
-	l.countAttempt(soakFailureLaneMemberMutation, true)
 	expectMember := "false"
 	if intent.Add {
 		expectMember = "true"
@@ -231,10 +254,9 @@ func (l *soakRoomLanes) RoomMutation(ctx context.Context) error {
 func (l *soakRoomLanes) rename(ctx context.Context) error {
 	intent, ok := l.pool.NextRenameIntent()
 	if !ok {
-		l.countAttempt(soakFailureLaneRoomMutation, false)
+		l.countAttempt(soakFailureLaneRoomMutation, soakLaneAttemptNoTarget)
 		return nil
 	}
-	l.countAttempt(soakFailureLaneRoomMutation, true)
 	// An unknown previous name is passed through as empty on purpose: asserting
 	// a stale one would let the observer call a merely lost rename a name nobody
 	// asked for, reporting corruption that never happened.
@@ -264,10 +286,9 @@ func (l *soakRoomLanes) rename(ctx context.Context) error {
 func (l *soakRoomLanes) muteToggle(ctx context.Context) error {
 	intent, ok := l.pool.NextMuteIntent()
 	if !ok {
-		l.countAttempt(soakFailureLaneRoomMutation, false)
+		l.countAttempt(soakFailureLaneRoomMutation, soakLaneAttemptNoTarget)
 		return nil
 	}
-	l.countAttempt(soakFailureLaneRoomMutation, true)
 	expectMuted := "false"
 	if intent.TargetMuted {
 		expectMuted = "true"
@@ -300,10 +321,9 @@ func (l *soakRoomLanes) muteToggle(ctx context.Context) error {
 func (l *soakRoomLanes) ReadReceipt(ctx context.Context) error {
 	intent, ok := l.pool.NextReadIntent()
 	if !ok {
-		l.countAttempt(soakFailureLaneReadReceipt, false)
+		l.countAttempt(soakFailureLaneReadReceipt, soakLaneAttemptNoTarget)
 		return nil
 	}
-	l.countAttempt(soakFailureLaneReadReceipt, true)
 	attributes := map[string]string{
 		soakFailureAttributeTargetAccount: intent.Account,
 		soakFailureAttributeRequester:     intent.Account,
@@ -335,18 +355,17 @@ func (l *soakRoomLanes) ReadReceipt(ctx context.Context) error {
 // other room and member lanes keep running.
 func (l *soakRoomLanes) RoomCreate(ctx context.Context) error {
 	if !l.takeCreateBudget() {
-		l.countAttempt(soakFailureLaneRoomCreate, false)
+		l.countAttempt(soakFailureLaneRoomCreate, soakLaneAttemptNoTarget)
 		l.countExhausted("create_budget")
 		return nil
 	}
 	requester, members, ok := l.pool.CreateRoomMembers(l.cfg.CreateRoomSize)
 	if !ok {
 		l.releaseCreateBudget()
-		l.countAttempt(soakFailureLaneRoomCreate, false)
+		l.countAttempt(soakFailureLaneRoomCreate, soakLaneAttemptNoTarget)
 		l.countExhausted(soakRoomPoolReasonNoCandidate)
 		return nil
 	}
-	l.countAttempt(soakFailureLaneRoomCreate, true)
 	// The room ID is server-generated, so the name is the only identifier that
 	// exists before the request. Journaling it first is what makes a lost reply
 	// recoverable: the room may already exist, and the name is how a later pass
@@ -494,11 +513,16 @@ func (l *soakRoomLanes) newOperation(
 func (l *soakRoomLanes) journal(operation *failureOperation, pending *soakRoomPending) bool {
 	if err := l.ledger.Start(operation); err != nil {
 		l.countUntracked(failureUntrackedReasonStart)
+		l.countAttempt(operation.Lane, soakLaneAttemptRefused)
 		return false
 	}
 	l.mu.Lock()
 	l.pending[operation.ID] = *pending
 	l.mu.Unlock()
+	// Counted here rather than at the top of the lane: the request is only sent
+	// once the ledger has accepted the intent, so counting it earlier would let a
+	// refusing ledger keep the lane looking fully loaded.
+	l.countAttempt(operation.Lane, soakLaneAttemptSent)
 	return true
 }
 
@@ -617,7 +641,7 @@ func (l *soakRoomLanes) finishCreate(roomName string, result failureResult) {
 	// The ID is resolved from the name rather than remembered from the reply,
 	// so a room whose reply was lost is still claimable — including by a
 	// replacement process, whose in-memory reservation is gone.
-	roomID, found, err := l.store.RoomIDByName(ctx, roomName)
+	roomID, found, err := l.store.RoomIDByName(ctx, l.cfg.SiteID, roomName)
 	if err != nil || !found || roomID == "" {
 		slog.Warn("created soak room could not be resolved for ownership",
 			"runId", l.cfg.RunID, "roomName", roomName, "error", err)
@@ -717,17 +741,15 @@ func (l *soakRoomLanes) countExhausted(reason string) {
 	l.metrics.SoakRoomPoolExhausted.WithLabelValues(reason).Inc()
 }
 
-// countAttempt separates a lane slot that produced a request from one that
-// found no usable target. loadgen_soak_dispatched_total counts scheduler slots
-// and is consumed either way, so without this a lane whose pool is exhausted
-// still looks like it is offering its configured load.
-func (l *soakRoomLanes) countAttempt(lane string, sent bool) {
+// countAttempt separates a lane slot that produced a request from one that did
+// not, and says why it did not. loadgen_soak_dispatched_total counts scheduler
+// slots and is consumed either way, so without this a lane whose pool is
+// exhausted — or whose mutations the ledger is refusing — still looks like it is
+// offering its configured load. Only sent is offered load: a refused mutation is
+// never sent, because untracked room state cannot be reconciled afterwards.
+func (l *soakRoomLanes) countAttempt(lane, outcome string) {
 	if l.metrics == nil {
 		return
-	}
-	outcome := "no_target"
-	if sent {
-		outcome = "sent"
 	}
 	l.metrics.SoakLaneAttempts.WithLabelValues(lane, outcome).Inc()
 }

@@ -806,11 +806,12 @@ func runSoakWorkload(
 		return 1
 	}
 	roomStateHealth := newFailureObserverHealth(failureObserverRoomState, now())
-	roomVerifier := newSoakRoomStateVerifier(roomReader, store, metrics, roomStateHealth, now)
+	roomVerifier := newSoakRoomStateVerifier(roomReader, store, cfg.SiteID, metrics, roomStateHealth, now)
 	roomLanes := newSoakRoomLanes(
 		soakRoomLaneConfig{
-			RunID: cfg.Soak.RunID, PersistGrace: cfg.Soak.PersistGrace,
-			Deadline: cfg.Soak.ReconcileDeadline, RetryInterval: cfg.Soak.ReconcileRetryInterval,
+			RunID: cfg.Soak.RunID, SiteID: cfg.SiteID,
+			PersistGrace: cfg.Soak.PersistGrace,
+			Deadline:     cfg.Soak.ReconcileDeadline, RetryInterval: cfg.Soak.ReconcileRetryInterval,
 			RoomCreateBudget: cfg.Soak.RoomCreateBudget, CreateRoomSize: cfg.Soak.RoomCreateSize,
 		},
 		roomPool,
@@ -835,11 +836,16 @@ func runSoakWorkload(
 			slog.Info("recovered in-flight soak room creates", "count", inFlight)
 		}
 	}
-	if created, countErr := store.CountCreatedRooms(ctx, cfg.Soak.RunID); countErr != nil {
-		slog.Error("count rooms this soak run already created", "error", countErr)
-	} else {
-		roomLanes.SpendCreateBudget(created)
+	// An unknown count cannot be treated as zero: the lane would restart with the
+	// whole allowance and the per-run cap would become per-process, which is the
+	// unbounded MongoDB growth the budget exists to prevent.
+	created, countErr := store.CountCreatedRooms(ctx, cfg.Soak.RunID)
+	if countErr != nil {
+		slog.Error("count rooms this soak run already created",
+			"runId", cfg.Soak.RunID, "error", countErr)
+		return 1
 	}
+	roomLanes.SpendCreateBudget(created)
 	roomReconcileGate := newSoakShareGate(cfg.Soak.RoomReconcileReadShare)
 
 	presenceLane, err := newSoakPresenceLane(

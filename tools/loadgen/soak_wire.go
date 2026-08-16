@@ -261,8 +261,11 @@ type soakUserStatusResponse struct {
 	Account string `json:"account"`
 }
 
+// soakUserSettingsResponse mirrors user-service's SettingsGetResponse, which
+// inlines the user's settings and adds the evaluated permissions. Only the
+// permissions map is decoded — it is the one key the reply always carries.
 type soakUserSettingsResponse struct {
-	Settings map[string]any `json:"settings"`
+	Permissions map[string]bool `json:"permissions"`
 }
 
 type soakUserChatlistSection struct {
@@ -290,8 +293,15 @@ type soakUserAppsResponse struct {
 	HasMore bool          `json:"hasMore"`
 }
 
+// soakUserAppCategory mirrors user-service's AppCategory. The categories are
+// objects, not names: decoding them as strings fails outright and would report
+// every apps.categories read as an error the service never made.
+type soakUserAppCategory struct {
+	ID string `json:"id"`
+}
+
 type soakUserAppCategoriesResponse struct {
-	Categories []string `json:"categories"`
+	Categories []soakUserAppCategory `json:"categories"`
 }
 
 type soakUserCountResponse struct {
@@ -306,11 +316,17 @@ type soakUserThread struct {
 	ThreadRoomID string `json:"threadRoomId"`
 }
 
+// soakUserThreadListResponse mirrors model.ThreadListResponse. The page is
+// "items", not "threads": reading the wrong key decodes cleanly and silently
+// reports every thread-list read as returning nothing.
 type soakUserThreadListResponse struct {
-	Threads []soakUserThread `json:"threads"`
-	Cursor  string           `json:"cursor,omitempty"`
+	Items            []soakUserThread `json:"items"`
+	NextCursor       string           `json:"nextCursor,omitempty"`
+	HasNext          bool             `json:"hasNext"`
+	UnavailableSites []string         `json:"unavailableSites,omitempty"`
 }
 
 type soakUserThreadUnreadResponse struct {
-	HasUnread bool `json:"hasUnread"`
+	Unread           bool     `json:"unread"`
+	UnavailableSites []string `json:"unavailableSites,omitempty"`
 }
