@@ -37,6 +37,40 @@ func TestSoakCatalog_PublishDoesNotAdmitUntilGatekeeperAccepts(t *testing.T) {
 	assert.Equal(t, clock.Now().Add(-10*time.Second), got.AcceptedAt)
 }
 
+func TestSoakCatalog_ThreadRecipientSetSurvivesReplyEviction(t *testing.T) {
+	catalog := newSoakCatalog(2, 100, 0, nil)
+	for _, candidate := range []soakCatalogCandidate{
+		{ID: "parent", RoomID: "room-1", Author: "alice", Content: "parent"},
+		{ID: "reply", RoomID: "room-1", Author: "bob", Content: "reply", ThreadParentID: "parent"},
+	} {
+		require.NoError(t, catalog.TrackPublished(&candidate))
+		require.True(t, catalog.Accept(candidate.RoomID, candidate.ID))
+	}
+	require.True(t, catalog.SetPinned("room-1", "parent", true))
+	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+		ID: "other", RoomID: "room-1", Author: "dave", Content: "other",
+	}))
+	require.True(t, catalog.Accept("room-1", "other"))
+
+	recipients, complete := catalog.ThreadRecipientSet("room-1", "parent", "carol")
+
+	assert.Equal(t, []string{"alice", "bob", "carol"}, recipients)
+	assert.True(t, complete)
+}
+
+func TestSoakCatalog_ExternallyObservedParentHasIncompleteFollowerSet(t *testing.T) {
+	catalog := newSoakCatalog(8, 100, 0, nil)
+	require.True(t, catalog.ObservePinned(&soakWireMessage{
+		RoomID: "room-1", MessageID: "parent",
+		Sender: cassandra.Participant{Account: "alice"},
+	}))
+
+	recipients, complete := catalog.ThreadRecipientSet("room-1", "parent", "carol")
+
+	assert.Equal(t, []string{"alice", "carol"}, recipients)
+	assert.False(t, complete)
+}
+
 func TestSoakCatalog_RejectRemovesPendingPublish(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0))
 	catalog := newSoakCatalog(8, 100, 0, clock)

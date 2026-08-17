@@ -30,6 +30,7 @@ func newMeSvc(t *testing.T) (*UserService, *mocks.MockUserRepository, *mocks.Moc
 		presence,
 		mocks.NewMockEventPublisher(ctrl),
 		mocks.NewMockEventPublisher(ctrl),
+		&fakeBadgeCache{},
 		nil, nil, nil,
 		cfg,
 	)

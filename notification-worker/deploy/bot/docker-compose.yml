@@ -28,6 +28,7 @@ services:
       - ROOM_META_CACHE_SIZE=${ROOM_META_CACHE_SIZE:-10000}
       - ROOM_META_CACHE_TTL=${ROOM_META_CACHE_TTL:-2m}
       - PRESENCE_RPC_ENABLED=${PRESENCE_RPC_ENABLED:-false}
+      - BADGE_COUNT_RPC_ENABLED=${BADGE_COUNT_RPC_ENABLED:-true}
       # Same gate as user mode — bot-authored messages fan out to human members,
       # so a .bot priority contact pierces mute only if this runs here too.
       - USER_SETTINGS_ENABLED=${USER_SETTINGS_ENABLED:-true}

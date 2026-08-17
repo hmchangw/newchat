@@ -34,9 +34,8 @@ func (h *handler) HandleEmojiList(c *natsrouter.Context) (*model.EmojiListRespon
 	return &model.EmojiListResponse{Emojis: entries}, nil
 }
 
-// HandleEmojiDelete removes one custom emoji. Anyone may delete (v1); the
-// authenticated caller comes from the JWT-enforced {account} subject token.
-// Gated by the EMOJI_DELETE_ENABLED kill-switch (default off).
+// HandleEmojiDelete removes one custom emoji; the caller is the JWT-enforced {account}.
+// Anyone may delete (v1), unlike the admin-gated upload; EMOJI_DELETE_ENABLED, default off.
 func (h *handler) HandleEmojiDelete(c *natsrouter.Context, req model.EmojiDeleteRequest) (*model.EmojiDeleteResponse, error) {
 	if !h.cfg.EmojiDeleteEnabled {
 		return nil, errcode.Forbidden("emoji delete is disabled",

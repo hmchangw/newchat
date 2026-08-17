@@ -17,20 +17,25 @@ func TestBootstrapStreams_Disabled(t *testing.T) {
 }
 
 // fakeJetStream embeds a nil jetstream.JetStream (unimplemented methods panic)
-// and overrides only CreateOrUpdateStream — all the enabled path uses.
+// and overrides only Stream + CreateStream — all the enabled path uses.
 type fakeJetStream struct {
 	jetstream.JetStream
-	created []jetstream.StreamConfig
-	err     error
+	streamErr error // Stream lookup result; nil = stream exists
+	created   []jetstream.StreamConfig
+	createErr error
 }
 
-func (f *fakeJetStream) CreateOrUpdateStream(_ context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error) { //nolint:gocritic // hugeParam: cfg is passed by value to satisfy jetstream.StreamManager
+func (f *fakeJetStream) Stream(_ context.Context, _ string) (jetstream.Stream, error) {
+	return nil, f.streamErr
+}
+
+func (f *fakeJetStream) CreateStream(_ context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error) { //nolint:gocritic // hugeParam: cfg is passed by value to satisfy jetstream.StreamManager
 	f.created = append(f.created, cfg)
-	return nil, f.err
+	return nil, f.createErr
 }
 
 func TestBootstrapStreams_EnabledCreatesSchemaOnly(t *testing.T) {
-	fjs := &fakeJetStream{}
+	fjs := &fakeJetStream{streamErr: jetstream.ErrStreamNotFound}
 	err := bootstrapStreams(context.Background(), fjs, "site1", true)
 	require.NoError(t, err)
 
@@ -42,8 +47,25 @@ func TestBootstrapStreams_EnabledCreatesSchemaOnly(t *testing.T) {
 	assert.Nil(t, got.Sources)
 }
 
+// An existing stream is left alone: create-only bootstrap must never rewrite
+// the config of a stream the real pipeline (oplog-connector/ops) owns.
+func TestBootstrapStreams_ExistingStreamUntouched(t *testing.T) {
+	fjs := &fakeJetStream{streamErr: nil}
+	err := bootstrapStreams(context.Background(), fjs, "site1", true)
+	require.NoError(t, err)
+	assert.Empty(t, fjs.created, "no create/update call for an existing stream")
+}
+
+func TestBootstrapStreams_LookupError(t *testing.T) {
+	fjs := &fakeJetStream{streamErr: errors.New("nats down")}
+	err := bootstrapStreams(context.Background(), fjs, "site1", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "check MIGRATION-OPLOG stream")
+	assert.Empty(t, fjs.created)
+}
+
 func TestBootstrapStreams_EnabledCreateError(t *testing.T) {
-	fjs := &fakeJetStream{err: errors.New("boom")}
+	fjs := &fakeJetStream{streamErr: jetstream.ErrStreamNotFound, createErr: errors.New("boom")}
 	err := bootstrapStreams(context.Background(), fjs, "site1", true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "create MIGRATION-OPLOG stream")

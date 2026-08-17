@@ -97,3 +97,9 @@ func TestOpenInConcurrentEventTypes(t *testing.T) {
 		"subscription_opened must ride the concurrent lane")
 	assert.NotContains(t, OrderedEventTypes, model.InboxSubscriptionOpened)
 }
+
+func TestThreadUnreadAddedIsConcurrent(t *testing.T) {
+	assert.Contains(t, ConcurrentEventTypes, model.InboxThreadUnreadAdded,
+		"thread_unread_added is order-insensitive (inbox-worker $addToSet-merges it) so it rides the concurrent lane")
+	assert.NotContains(t, OrderedEventTypes, model.InboxThreadUnreadAdded)
+}

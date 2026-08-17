@@ -520,6 +520,21 @@ func (mr *MockRoomClientMockRecorder) GetRoomsInfo(ctx, siteID, roomIDs any) *go
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomsInfo", reflect.TypeOf((*MockRoomClient)(nil).GetRoomsInfo), ctx, siteID, roomIDs)
 }
 
+// GetRoomsMeta mocks base method.
+func (m *MockRoomClient) GetRoomsMeta(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetRoomsMeta", ctx, siteID, roomIDs)
+	ret0, _ := ret[0].([]model.RoomInfo)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetRoomsMeta indicates an expected call of GetRoomsMeta.
+func (mr *MockRoomClientMockRecorder) GetRoomsMeta(ctx, siteID, roomIDs any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomsMeta", reflect.TypeOf((*MockRoomClient)(nil).GetRoomsMeta), ctx, siteID, roomIDs)
+}
+
 // GetThreadRoomInfoBatch mocks base method.
 func (m *MockRoomClient) GetThreadRoomInfoBatch(ctx context.Context, siteID string, threadRoomIDs []string) ([]model.ThreadRoomInfo, error) {
 	m.ctrl.T.Helper()
@@ -703,21 +718,6 @@ func (m *MockThreadSubscriptionRepository) ListByAccount(ctx context.Context, ac
 func (mr *MockThreadSubscriptionRepositoryMockRecorder) ListByAccount(ctx, account any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListByAccount", reflect.TypeOf((*MockThreadSubscriptionRepository)(nil).ListByAccount), ctx, account)
-}
-
-// ListByAccountInRooms mocks base method.
-func (m *MockThreadSubscriptionRepository) ListByAccountInRooms(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListByAccountInRooms", ctx, account, roomIDs)
-	ret0, _ := ret[0].([]model.ThreadUnreadRow)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ListByAccountInRooms indicates an expected call of ListByAccountInRooms.
-func (mr *MockThreadSubscriptionRepositoryMockRecorder) ListByAccountInRooms(ctx, account, roomIDs any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListByAccountInRooms", reflect.TypeOf((*MockThreadSubscriptionRepository)(nil).ListByAccountInRooms), ctx, account, roomIDs)
 }
 
 // MockSSOTokenRepository is a mock of SSOTokenRepository interface.

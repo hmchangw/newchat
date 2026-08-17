@@ -19,7 +19,7 @@ cassandra:
   keyspace: chat
   cleanup: none
   confirmKeyspace: chat
-  messageBucketHours: 72
+  messageBucketHours: 360
 
 seed:
   activeDeadlineSeconds: 1800
@@ -32,6 +32,7 @@ seed:
       memory: 1Gi
 
 soak:
+  environment: local
   warmup: 2s
   heartbeatInterval: 5s
   heartbeatStaleAfter: 20s

@@ -1128,6 +1128,15 @@ func TestRoomThreadReadAll(t *testing.T) {
 		subject.RoomThreadReadAllSubscribe("site-a"))
 }
 
+func TestBadgeCountBatch(t *testing.T) {
+	assert.Equal(t,
+		"chat.server.request.user.site-a.badge.count.batch",
+		subject.BadgeCountBatch("site-a"))
+	assert.Equal(t,
+		subject.BadgeCountBatch("site-a"),
+		subject.BadgeCountBatchPattern("site-a"))
+}
+
 func TestThreadRoomInfoBatch(t *testing.T) {
 	assert.Equal(t,
 		"chat.server.request.room.site-a.thread.info.batch",

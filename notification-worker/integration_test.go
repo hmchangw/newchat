@@ -32,11 +32,12 @@ func TestNotificationWorker_CacheBackedFanOut(t *testing.T) {
 	ctx := context.Background()
 	subCol := db.Collection("subscriptions")
 	threadRoomCol := db.Collection("thread_rooms")
+	usersCol := db.Collection("users")
 
 	seedSubscriptions(t, ctx, subCol)
 
 	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
-	loader := &mongoMemberLoader{col: subCol}
+	loader := &mongoMemberLoader{col: subCol, users: usersCol}
 	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
 
 	nc, err := nats.Connect(natsURL)
@@ -213,7 +214,7 @@ func TestMongoMemberLoader_Load_HistorySharedSince(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	loader := &mongoMemberLoader{col: col}
+	loader := &mongoMemberLoader{col: col, users: db.Collection("users")}
 	got, err := loader.Load(ctx, "rX")
 	require.NoError(t, err)
 	require.Len(t, got, 2)
@@ -237,6 +238,130 @@ func TestMongoMemberLoader_Load_HistorySharedSince(t *testing.T) {
 	assert.Equal(t, "botty", botty.ID)
 	assert.True(t, botty.IsBot, "nested u.isBot maps to flat IsBot")
 	assert.Nil(t, botty.HistorySharedSince, "full-access member must have nil HistorySharedSince")
+}
+
+// TestMongoMemberLoader_Load_HomeSiteFromUsers is the production-shaped
+// regression test for the badge-RPC routing bug: every subscription document
+// carries the ROOM's home site in siteId (that is what room-worker writes —
+// docs/client-api.md, Subscription schema), so at the room's own site the
+// field is identical for all members and useless for routing. The loader must
+// resolve each member's HOME site from the users collection instead, and leave
+// HomeSiteID empty (degrade) for accounts missing from users.
+func TestMongoMemberLoader_Load_HomeSiteFromUsers(t *testing.T) {
+	db := testutil.MongoDB(t, "notification_worker_homesite")
+	ctx := context.Background()
+	subCol := db.Collection("subscriptions")
+	usersCol := db.Collection("users")
+
+	// Room rH is homed at site-a: production stamps siteId=site-a on EVERY
+	// member's subscription, regardless of where the member is homed.
+	_, err := subCol.InsertMany(ctx, []any{
+		model.Subscription{ID: "h1", RoomID: "rH", SiteID: "site-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}},
+		model.Subscription{ID: "h2", RoomID: "rH", SiteID: "site-a", User: model.SubscriptionUser{ID: "u-bob", Account: "bob"}},
+		model.Subscription{ID: "h3", RoomID: "rH", SiteID: "site-a", User: model.SubscriptionUser{ID: "u-carol", Account: "carol"}},
+	})
+	require.NoError(t, err)
+	// Home sites live on the users collection: alice is local, bob is homed at
+	// site-b; carol has no users doc at all (degrade case).
+	_, err = usersCol.InsertMany(ctx, []any{
+		model.User{ID: "u-alice", Account: "alice", SiteID: "site-a"},
+		model.User{ID: "u-bob", Account: "bob", SiteID: "site-b"},
+	})
+	require.NoError(t, err)
+
+	loader := &mongoMemberLoader{col: subCol, users: usersCol}
+	got, err := loader.Load(ctx, "rH")
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+
+	byAccount := make(map[string]roomsubcache.Member, len(got))
+	for _, m := range got {
+		byAccount[m.Account] = m
+	}
+	assert.Equal(t, "site-a", byAccount["alice"].HomeSiteID, "local member's home site from users.siteId")
+	assert.Equal(t, "site-b", byAccount["bob"].HomeSiteID,
+		"cross-site member's home site must come from users.siteId, not the subscription's (room) siteId")
+	assert.Empty(t, byAccount["carol"].HomeSiteID, "account missing from users degrades to empty HomeSiteID")
+}
+
+// TestNotificationWorker_BadgeRPCs_GroupByUsersHomeSite drives the full
+// fill-then-group path with production-shaped data: subscriptions all carry
+// the room's siteId, the users collection carries the divergent home sites,
+// and the badge.count.batch RPCs must group by users.siteId — one RPC per
+// home site with exactly that site's accounts, the users-less member skipped.
+func TestNotificationWorker_BadgeRPCs_GroupByUsersHomeSite(t *testing.T) {
+	db := testutil.MongoDB(t, "notification_worker_badge_group")
+	valkeyClient := testutil.SharedValkeyCluster(t)
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+
+	ctx := context.Background()
+	subCol := db.Collection("subscriptions")
+	usersCol := db.Collection("users")
+
+	// Room rB homed at site-a: every subscription stamps siteId=site-a.
+	_, err := subCol.InsertMany(ctx, []any{
+		model.Subscription{ID: "b1", RoomID: "rB", SiteID: "site-a", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}},
+		model.Subscription{ID: "b2", RoomID: "rB", SiteID: "site-a", User: model.SubscriptionUser{ID: "u-bob", Account: "bob"}},
+		model.Subscription{ID: "b3", RoomID: "rB", SiteID: "site-a", User: model.SubscriptionUser{ID: "u-carol", Account: "carol"}},
+		model.Subscription{ID: "b4", RoomID: "rB", SiteID: "site-a", User: model.SubscriptionUser{ID: "u-dave", Account: "dave"}},
+		model.Subscription{ID: "b5", RoomID: "rB", SiteID: "site-a", User: model.SubscriptionUser{ID: "u-eve", Account: "eve"}},
+	})
+	require.NoError(t, err)
+	// alice (the sender) and bob are homed locally; carol + dave at site-b;
+	// eve is missing from users entirely (skipped from badge RPCs, still pushed).
+	_, err = usersCol.InsertMany(ctx, []any{
+		model.User{ID: "u-alice", Account: "alice", SiteID: "site-a"},
+		model.User{ID: "u-bob", Account: "bob", SiteID: "site-a"},
+		model.User{ID: "u-carol", Account: "carol", SiteID: "site-b"},
+		model.User{ID: "u-dave", Account: "dave", SiteID: "site-b"},
+	})
+	require.NoError(t, err)
+
+	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
+	loader := &mongoMemberLoader{col: subCol, users: usersCol}
+	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{
+		"site-a": {"bob": 2},
+		"site-b": {"carol": 5, "dave": 9},
+	}}
+	emit := &recordingEmitter{}
+	handler := NewHandler(HandlerDeps{
+		Members:            lookup,
+		Followers:          newMongoThreadFollowers(db.Collection("thread_rooms")),
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		BadgeClient:        badge,
+		LargeRoomThreshold: 500,
+	})
+
+	evt := model.MessageEvent{
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "mB1", RoomID: "rB", UserID: "u-alice", UserAccount: "alice",
+			Content: "hello", CreatedAt: time.Now(),
+		},
+	}
+	data, _ := json.Marshal(evt)
+	require.NoError(t, handler.HandleMessage(ctx, data))
+
+	siteACalls := badge.callsFor("site-a")
+	require.Len(t, siteACalls, 1, "exactly one badge RPC to site-a")
+	assert.Equal(t, []string{"bob"}, siteACalls[0].accounts, "site-a RPC carries only the locally-homed survivor")
+	assert.Equal(t, "rB", siteACalls[0].roomID)
+
+	siteBCalls := badge.callsFor("site-b")
+	require.Len(t, siteBCalls, 1, "exactly one badge RPC to site-b")
+	assert.ElementsMatch(t, []string{"carol", "dave"}, siteBCalls[0].accounts,
+		"site-b RPC carries exactly the site-b-homed survivors")
+
+	require.Len(t, badge.calls, 2, "no RPC for eve (missing from users) and none keyed by the room's siteId alone")
+
+	require.Len(t, emit.emitted, 1)
+	assert.ElementsMatch(t, []string{"bob", "carol", "dave", "eve"}, emit.emitted[0].Accounts,
+		"every non-sender member is still pushed, including the users-less one")
+	assert.Equal(t, map[string]int{"bob": 2, "carol": 5, "dave": 9}, emit.emitted[0].UnreadCounts)
 }
 
 func seedUserSettings(t *testing.T, ctx context.Context, col *mongo.Collection) {

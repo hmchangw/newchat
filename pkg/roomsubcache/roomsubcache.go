@@ -43,6 +43,17 @@ type Member struct {
 	IsBot              bool           `json:"isBot,omitempty"`
 	Muted              bool           `json:"muted,omitempty"`
 	HistorySharedSince *int64         `json:"historySharedSince,omitempty"`
+	// HomeSiteID is the member's HOME site, resolved from the users collection
+	// (users.siteId) by the loader at cache-fill time. It is deliberately NOT
+	// model.Subscription.SiteID — that field is the ROOM's home site (see
+	// docs/client-api.md, Subscription schema), which at the room's own site is
+	// identical for every member and useless for routing. notification-worker
+	// groups survivors by HomeSiteID for the per-site badge-count RPC. Empty
+	// when the account is missing from the users collection — such members
+	// degrade (no badge count); cacheKeySchemaVersion was bumped to v3 so
+	// pre-fix entries (whose siteId carried the room's site) miss instead of
+	// misrouting the RPC forever.
+	HomeSiteID string `json:"homeSiteId,omitempty"`
 }
 
 // Cache stores and retrieves a room's member list.
@@ -91,6 +102,10 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 	return c
 }
 
+// cacheKey delegates to the registry. The Member-wire-shape schema version
+// that namespaces these keys lives with the builder in pkg/cachekeys, because
+// the version segment is part of the literal pattern the keyspace scanner
+// classifies on — see cachekeys.RoomSubs for the bump rule.
 func cacheKey(roomID string) string {
 	return cachekeys.RoomSubs(roomID)
 }

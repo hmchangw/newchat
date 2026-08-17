@@ -1837,25 +1837,31 @@ func TestHandler_sendReply(t *testing.T) {
 // ---- HandleJetStreamMsg coverage ----
 
 type fakeJSMsg struct {
-	subject string
-	data    []byte
-	headers nats.Header
-	acked   bool
-	naked   bool
+	subject      string
+	data         []byte
+	headers      nats.Header
+	numDelivered uint64
+	acked        bool
+	naked        bool
 }
 
-func (m *fakeJSMsg) Metadata() (*jetstream.MsgMetadata, error) { return nil, nil }
-func (m *fakeJSMsg) Data() []byte                              { return m.data }
-func (m *fakeJSMsg) Headers() nats.Header                      { return m.headers }
-func (m *fakeJSMsg) Subject() string                           { return m.subject }
-func (m *fakeJSMsg) Reply() string                             { return "" }
-func (m *fakeJSMsg) Ack() error                                { m.acked = true; return nil }
-func (m *fakeJSMsg) DoubleAck(context.Context) error           { m.acked = true; return nil }
-func (m *fakeJSMsg) Nak() error                                { m.naked = true; return nil }
-func (m *fakeJSMsg) NakWithDelay(time.Duration) error          { m.naked = true; return nil }
-func (m *fakeJSMsg) InProgress() error                         { return nil }
-func (m *fakeJSMsg) Term() error                               { return nil }
-func (m *fakeJSMsg) TermWithReason(string) error               { return nil }
+func (m *fakeJSMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	if m.numDelivered == 0 {
+		return nil, nil
+	}
+	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
+}
+func (m *fakeJSMsg) Data() []byte                     { return m.data }
+func (m *fakeJSMsg) Headers() nats.Header             { return m.headers }
+func (m *fakeJSMsg) Subject() string                  { return m.subject }
+func (m *fakeJSMsg) Reply() string                    { return "" }
+func (m *fakeJSMsg) Ack() error                       { m.acked = true; return nil }
+func (m *fakeJSMsg) DoubleAck(context.Context) error  { m.acked = true; return nil }
+func (m *fakeJSMsg) Nak() error                       { m.naked = true; return nil }
+func (m *fakeJSMsg) NakWithDelay(time.Duration) error { m.naked = true; return nil }
+func (m *fakeJSMsg) InProgress() error                { return nil }
+func (m *fakeJSMsg) Term() error                      { return nil }
+func (m *fakeJSMsg) TermWithReason(string) error      { return nil }
 
 // Malformed body Acks (not retryable) and sends a bad_request reply if the
 // subject parsed cleanly.

@@ -26,7 +26,9 @@ type roomClient struct {
 func newRoomClient(nc *o11ynats.Conn) *roomClient { return &roomClient{nc: nc} }
 
 func (c *roomClient) GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error) {
-	req, err := json.Marshal(model.RoomsInfoBatchRequest{RoomIDs: roomIDs})
+	// Search enrichment reads only Found/Name — skip the remote's per-room E2E
+	// key lookup.
+	req, err := json.Marshal(model.RoomsInfoBatchRequest{RoomIDs: roomIDs, SkipKeys: true})
 	if err != nil {
 		return nil, fmt.Errorf("marshal rooms-info request: %w", err)
 	}

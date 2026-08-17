@@ -225,7 +225,7 @@ func TestNewMetrics_RegistersMemberCollectors(t *testing.T) {
 	m.MemberPublishErrors.WithLabelValues("publish").Inc()
 	m.MemberE1Latency.WithLabelValues("p", "frontdoor").Observe(0.001)
 	m.MemberE2Latency.WithLabelValues("p", "frontdoor").Observe(0.001)
-	m.MemberRoomSize.WithLabelValues("room-x").Set(1)
+	m.MemberRoomSize.WithLabelValues("lt_100").Set(1)
 
 	mfs, err := m.Registry.Gather()
 	require.NoError(t, err)

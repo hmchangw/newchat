@@ -78,9 +78,17 @@ var (
 	// roomSubs is deliberately un-hash-tagged, unlike roomMeta. The two are
 	// therefore in different cluster slots for the same room. Preserved as-is:
 	// this package documents the keyspace, it does not migrate it.
+	//
+	// The "v3" segment is pkg/roomsubcache's Member-wire-shape schema version:
+	// bump it whenever a Member field changes such that an old cached entry
+	// would silently decode with a zero-valued new field forever (Valkey has
+	// no schema check), so stale-shape entries miss and repopulate from Mongo.
+	// It lives here because it is part of the literal pattern Classify matches
+	// on. Bumping it strands the previous version's keys in the unclassified
+	// bucket until their TTL expires — expected, and short-lived.
 	roomSubs = Keyspace{
-		Name: "roomsubs", Prefix: "room:", Suffix: ":subs", Variable: true,
-		Sample: "room:r1:subs",
+		Name: "roomsubs", Prefix: "room:v3:", Suffix: ":subs", Variable: true,
+		Sample: "room:v3:r1:subs",
 	}
 	presenceConns = Keyspace{
 		Name: "presence.conns", Prefix: "presence:{", Suffix: "}:conns", Variable: true,

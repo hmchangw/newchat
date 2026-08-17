@@ -15,20 +15,25 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
 func TestSoakFailureTracker_StartsDurableMessageOperation(t *testing.T) {
+	assert.Equal(t, "message_soak", soakFailureScenario)
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
+	observer := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
 	tracker := newSoakFailureTracker(
 		ledger, 10*time.Second, time.Minute, func() time.Time { return now },
+		withSoakFailureRunID("run-1"),
+		withSoakFailureRecipientObserver(observer),
 	)
 
 	require.NoError(t, tracker.Start(&soakPendingSend{
 		Kind: soakSendTopLevel, MessageID: "message-1", RequestID: "request-1",
-		Target:  soakSendTarget{Account: "alice", RoomID: "room-1"},
+		Target:  soakSendTarget{Account: "alice", RoomID: "room-1", RoomType: model.RoomTypeChannel, Recipients: []string{"alice", "bob"}},
 		Content: "secret message", PublishedAt: now,
 	}))
 
@@ -38,7 +43,140 @@ func TestSoakFailureTracker_StartsDurableMessageOperation(t *testing.T) {
 	assert.Equal(t, "room-1", operation.Attributes[soakFailureAttributeRoomID])
 	assert.Equal(t, "alice", operation.Attributes[soakFailureAttributeAccount])
 	assert.NotEmpty(t, operation.Attributes[soakFailureAttributeContentSHA256])
+	assert.Equal(t, string(recipientExpectedRouteRoom), operation.Attributes[soakFailureAttributeRecipientRoute])
 	assert.NotContains(t, operation.Attributes, "content")
+	assert.Equal(t, 2, operation.SchemaVersion)
+	assert.Equal(t, "run-1", operation.RunID)
+	assert.Equal(t, soakFailureScenario, operation.Scenario)
+	assert.Equal(t, failureOperationMessageCreate, operation.OperationType)
+	assert.Equal(t, "message-1", operation.Targets["messageId"])
+	assert.Equal(t, []failureObserver{failureObserverAdmission, failureObserverHistory, failureObserverRecipient}, operation.Expected)
+	assert.Len(t, operation.Effects, 3)
+}
+
+func TestSoakFailureExpiryLoop_FinalizesPastDeadline(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1,
+		Now:      func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(testFailureOperation("message-1", now)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ticks := make(chan time.Time, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSoakFailureExpiry(ctx, ledger, ticks, nil)
+	}()
+	ticks <- now.Add(2 * time.Minute)
+
+	require.Eventually(t, func() bool {
+		snapshot := ledger.Snapshot()
+		return snapshot.Active == 0 && snapshot.Results[failureResultUnverified] == 1
+	}, time.Second, time.Millisecond)
+	cancel()
+	<-done
+}
+
+func TestSoakFailureExpiryLoop_ReportsPersistenceFailureAndStopsOnCancel(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	journal := &failingFailureJournal{err: errors.New("disk full")}
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 1,
+		Now:      func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(testFailureOperation("message-1", now)))
+	ledger.journal = journal
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ticks := make(chan time.Time, 1)
+	errorsSeen := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSoakFailureExpiry(ctx, ledger, ticks, func(err error) { errorsSeen <- err })
+	}()
+	ticks <- now.Add(2 * time.Minute)
+	require.ErrorContains(t, <-errorsSeen, "expire failure operations")
+	cancel()
+	<-done
+}
+
+func TestSoakFailureTracker_ForgetsRecipientExpectationWhenLedgerRejectsStart(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(testFailureOperation("occupied", now)))
+	observer := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, time.Minute, func() time.Time { return now },
+		withSoakFailureRecipientObserver(observer),
+	)
+	pending := testSoakFailurePending(now)
+	pending.Target.Recipients = []string{"alice"}
+
+	require.Error(t, tracker.Start(pending))
+	assert.False(t, observer.evidence.Observe(pending.MessageID, "alice"))
+}
+
+func TestSoakFailureTracker_RegistersRecipientExpectation(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	observer := newFailureRecipientObserver(ledger, NewMetrics(), 2, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, time.Minute, func() time.Time { return now },
+		withSoakFailureRecipientObserver(observer),
+	)
+	pending := testSoakFailurePending(now)
+	pending.Target.Recipients = []string{"alice", "bob"}
+	require.NoError(t, tracker.Start(pending))
+	assert.True(t, observer.evidence.Observe("message-1", "alice"))
+	assert.False(t, observer.evidence.Complete("message-1"))
+}
+
+func TestSoakFailureTracker_PersistsRecipientExpectationSemantics(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	observer := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, time.Minute, func() time.Time { return now },
+		withSoakFailureRecipientObserver(observer),
+	)
+	pending := testSoakFailurePending(now)
+	pending.Kind = soakSendThreadReply
+	pending.Target.RoomType = model.RoomTypeChannel
+	pending.Target.Recipients = []string{"alice", "bob"}
+	pending.Target.RecipientSetSource = recipientSetSourceThreadFollowers
+	pending.Target.RecipientSetComplete = true
+	pending.Target.RecipientRoute = recipientExpectedRouteUser
+
+	require.NoError(t, tracker.Start(pending))
+	operation, ok := ledger.Active(pending.MessageID)
+	require.True(t, ok)
+	assert.Equal(t, string(recipientSetSourceThreadFollowers), operation.Attributes[soakFailureAttributeRecipientSource])
+	assert.Equal(t, "true", operation.Attributes[soakFailureAttributeRecipientComplete])
+	assert.Equal(t, string(recipientExpectedRouteUser), operation.Attributes[soakFailureAttributeRecipientRoute])
+}
+
+func TestSoakFailureTracker_DisabledRecipientObserverOmitsExactSetFromWAL(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
+	pending := testSoakFailurePending(now)
+	pending.Target.Recipients = []string{"alice", "bob"}
+
+	require.NoError(t, tracker.Start(pending))
+	operation, ok := ledger.Active(pending.MessageID)
+	require.True(t, ok)
+	assert.NotContains(t, operation.Attributes, "expected_recipients")
+	assert.NotContains(t, operation.Attributes, soakFailureAttributeRecipientEvent)
 }
 
 func TestSoakOpenFailureLedger_PersistentRecovery(t *testing.T) {
@@ -93,7 +231,9 @@ func TestSoakFailureReconciler_AcceptedAndPersistedIsGood(t *testing.T) {
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
 		Status: soakSendReplyAccepted, MessageID: "message-1",
 	}))
@@ -112,6 +252,76 @@ func TestSoakFailureReconciler_AcceptedAndPersistedIsGood(t *testing.T) {
 	assert.Equal(t, uint64(1), snapshot.Results[failureResultGood])
 }
 
+func TestSoakFailureReconciler_FinalizesRecipientAtDeadlineWithoutRepeatingHistoryQuery(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	recipientObserver := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, 10*time.Second, func() time.Time { return now },
+		withSoakFailureRecipientObserver(recipientObserver),
+	)
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
+	_, err = ledger.Observe("message-1", failureObserverAdmission, failureObservationGood, now)
+	require.NoError(t, err)
+	_, err = ledger.Observe("message-1", failureObserverHistory, failureObservationGood, now)
+	require.NoError(t, err)
+
+	finalizer := &fakeSoakRecipientFinalizer{result: recipientEvidenceResult{
+		Observation: failureObservationMissingAfterDeadline,
+		Missing:     []string{"bob"},
+	}}
+	reconciler := newSoakFailureReconciler(
+		ledger, &fakeSoakFailureVerifier{err: errors.New("must not query")}, time.Second,
+		func() time.Time { return now }, withSoakFailureRecipientFinalizer(finalizer),
+	)
+	ran, err := reconciler.Try(context.Background())
+	require.NoError(t, err)
+	assert.False(t, ran)
+	now = now.Add(10 * time.Second)
+	ran, err = reconciler.Try(context.Background())
+	require.NoError(t, err)
+	assert.True(t, ran)
+	assert.Equal(t, 1, finalizer.calls)
+	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultMissingAfterDeadline])
+}
+
+func TestSoakFailureReconciler_UnverifiedRecipientDoesNotUseNegativeReason(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	recipientObserver := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, 10*time.Second, func() time.Time { return now },
+		withSoakFailureRecipientObserver(recipientObserver),
+	)
+	pending := testSoakFailurePending(now)
+	pending.Target.Recipients = []string{"alice", "bob"}
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
+	_, err = ledger.Observe("message-1", failureObserverAdmission, failureObservationGood, now)
+	require.NoError(t, err)
+	_, err = ledger.Observe("message-1", failureObserverHistory, failureObservationGood, now)
+	require.NoError(t, err)
+
+	finalizer := &fakeSoakRecipientFinalizer{result: recipientEvidenceResult{
+		Observation: failureObservationUnverified,
+		Missing:     []string{"bob"},
+	}}
+	reconciler := newSoakFailureReconciler(
+		ledger, &fakeSoakFailureVerifier{err: errors.New("must not query")}, time.Second,
+		func() time.Time { return now }, withSoakFailureRecipientFinalizer(finalizer),
+	)
+	now = now.Add(10 * time.Second)
+
+	ran, err := reconciler.Try(context.Background())
+	require.NoError(t, err)
+	assert.True(t, ran)
+	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultUnverified])
+}
+
 func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
@@ -119,7 +329,9 @@ func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
 		Status: soakSendReplyRejected, MessageID: "message-1",
 		ErrorClass: soakErrorTimeout,
@@ -134,7 +346,35 @@ func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t
 	ran, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
-	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultBad])
+	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultUnverified])
+}
+
+func TestSoakFailureTracker_ActivatesDurableIntent(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	journal := &memoryFailureJournal{}
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1, Journal: journal})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+
+	require.NoError(t, tracker.Activate(pending))
+
+	operation, ok := ledger.Active(pending.MessageID)
+	require.True(t, ok)
+	assert.Equal(t, failureOperationActive, operation.LifecycleState)
+	require.Len(t, journal.events, 2)
+	assert.Equal(t, failureLedgerEventActivated, journal.events[1].Type)
+}
+
+func TestSoakFailureTracker_ActivateRejectsInvalidInputs(t *testing.T) {
+	assert.Error(t, (*soakFailureTracker)(nil).Activate(nil))
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(ledger, 0, time.Minute, time.Now)
+	assert.Error(t, tracker.Activate(nil))
+	assert.Error(t, tracker.Activate(&soakPendingSend{}))
+	assert.Error(t, tracker.Activate(&soakPendingSend{MessageID: "unknown"}))
 }
 
 func TestSoakFailureReconciler_RetriesMissingUntilDeadline(t *testing.T) {
@@ -144,7 +384,9 @@ func TestSoakFailureReconciler_RetriesMissingUntilDeadline(t *testing.T) {
 	tracker := newSoakFailureTracker(
 		ledger, 0, 10*time.Second, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
 		Status: soakSendReplyAccepted, MessageID: "message-1",
 	}))
@@ -181,7 +423,9 @@ func TestSoakFailureReconciler_RPCFailureReleasesClaim(t *testing.T) {
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	verifier := &fakeSoakFailureVerifier{err: errors.New("NATS unavailable")}
 	reconciler := newSoakFailureReconciler(
 		ledger, verifier, time.Second, func() time.Time { return now },
@@ -204,7 +448,9 @@ func TestSoakFailureReconciler_MismatchRetriesUntilDeadlineThenFails(t *testing.
 	tracker := newSoakFailureTracker(
 		ledger, 0, 10*time.Second, func() time.Time { return now },
 	)
-	require.NoError(t, tracker.Start(testSoakFailurePending(now)))
+	pending := testSoakFailurePending(now)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
 	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
 		Status: soakSendReplyAccepted, MessageID: "message-1",
 	}))
@@ -457,6 +703,16 @@ func testSoakFailurePending(now time.Time) *soakPendingSend {
 type fakeSoakFailureVerifier struct {
 	results []soakFailureHistoryResult
 	err     error
+}
+
+type fakeSoakRecipientFinalizer struct {
+	result recipientEvidenceResult
+	calls  int
+}
+
+func (f *fakeSoakRecipientFinalizer) Finalize(string, time.Time, time.Time) recipientEvidenceResult {
+	f.calls++
+	return f.result
 }
 
 func (v *fakeSoakFailureVerifier) Verify(

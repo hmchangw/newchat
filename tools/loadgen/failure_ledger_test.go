@@ -20,7 +20,7 @@ func TestFailureLedger_FinalizesOnlyAfterEveryObservation(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, ledger.Start(&failureOperation{
-		ID: "message-1", Scenario: "cassandra_soak", Lane: "message_send",
+		ID: "message-1", Scenario: soakFailureScenario, Lane: "message_send",
 		StartedAt: now, VerifyAfter: now.Add(10 * time.Second),
 		Deadline: now.Add(time.Minute),
 		Expected: []failureObserver{failureObserverAdmission, failureObserverHistory},
@@ -44,7 +44,7 @@ func TestFailureLedger_FinalizesOnlyAfterEveryObservation(t *testing.T) {
 	assert.Equal(t, uint64(1), snapshot.Results[failureResultGood])
 }
 
-func TestFailureLedger_BadObservationDoesNotHideMissingSideEffect(t *testing.T) {
+func TestFailureLedger_RejectedAdmissionDoesNotBecomeMissingSideEffect(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{
 		Capacity: 1,
@@ -52,7 +52,7 @@ func TestFailureLedger_BadObservationDoesNotHideMissingSideEffect(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(&failureOperation{
-		ID: "ambiguous-message", Scenario: "cassandra_soak", Lane: "message_send",
+		ID: "ambiguous-message", Scenario: soakFailureScenario, Lane: "message_send",
 		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
 		Expected: []failureObserver{failureObserverAdmission, failureObserverHistory},
 	}))
@@ -67,7 +67,7 @@ func TestFailureLedger_BadObservationDoesNotHideMissingSideEffect(t *testing.T) 
 	require.Equal(t, 1, finalized)
 	assert.Equal(
 		t, uint64(1),
-		ledger.Snapshot().Results[failureResultMissingAfterDeadline],
+		ledger.Snapshot().Results[failureResultBad],
 	)
 }
 
@@ -79,7 +79,7 @@ func TestFailureLedger_ClaimsDueOperationOnceUntilReleased(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(&failureOperation{
-		ID: "message-1", Scenario: "cassandra_soak", Lane: "message_send",
+		ID: "message-1", Scenario: soakFailureScenario, Lane: "message_send",
 		StartedAt: now, VerifyAfter: now.Add(10 * time.Second),
 		Deadline: now.Add(time.Minute),
 		Expected: []failureObserver{failureObserverAdmission, failureObserverHistory},
@@ -238,7 +238,7 @@ func TestFailureWAL_ReplayIgnoresTornFinalRecord(t *testing.T) {
 
 func testFailureOperation(id string, now time.Time) *failureOperation {
 	return &failureOperation{
-		ID: id, Scenario: "cassandra_soak", Lane: "message_send",
+		ID: id, Scenario: soakFailureScenario, Lane: "message_send",
 		StartedAt: now, VerifyAfter: now.Add(10 * time.Second),
 		Deadline: now.Add(time.Minute),
 		Expected: []failureObserver{failureObserverAdmission, failureObserverHistory},

@@ -58,7 +58,8 @@ for future siblings (`.silent`, `.priority`) without restructuring the stream.
     "alsoSendToChannel": false
   },
   "roomId": "r123",
-  "timestamp": 1700000000000
+  "timestamp": 1700000000000,
+  "unreadCounts": { "alice": 3, "carol": 9 }
 }
 ```
 
@@ -71,6 +72,92 @@ Field notes:
 - **`data.type`** is the short room type: `"c"` channel, `"d"` DM/botDM, `"p"` discussion.
 - **`data.sender`** is a `Participant` carrying `account`, `userId`, and `displayName`. **`displayName` is pre-composed by `message-gatekeeper`** at canonical-message write time via `pkg/displayfmt.CombineWithFallback(engName, chineseName, account)` (same helper already used by `room-worker/sysmsg.go`, `room-service/store_mongo.go`, and reaction rendering — one source of truth for display formatting across the system). The composition happens once per message regardless of downstream consumer count and never on the push hot path; push-service renders `sender.displayName` verbatim. Empty `displayName` (legacy in-flight canonical messages predating the field) falls back to `sender.account` in `notification-worker`. `engName` / `chineseName` are deliberately not propagated on the push event since the composed string is the only render-time input.
 - **`timestamp`** is event publish time (UnixMilli); **`data.pushTime`** is the RFC3339 domain send time. They are distinct fields.
+- **`unreadCounts`** (optional) is per-recipient badge counts stamped at notify time — see § Badge counts below. Omitted entirely (not an empty object) when the badge phase is disabled or produced no counts for this batch.
+
+### Badge counts (`unreadCounts`)
+
+`PushNotificationEvent.UnreadCounts` (`map[string]int`, `json:"unreadCounts,omitempty"`, `pkg/model/push.go`)
+rides along with the push so the push-service/client can render the app badge
+without a separate round trip.
+
+- **Shape:** `account → count`, restricted per event to the accounts in that
+  event's `accounts` batch (each batch carries only its own recipients' counts).
+- **Cap:** count is the number of distinct unread rooms for that account,
+  capped at **10** by default (`BADGE_COUNT_CAP` on user-service; the client
+  renders the capped value as `"9+"`).
+- **Absence semantics:** an account **missing** from the map means its count
+  could not be computed this time (its home-site RPC failed, timed out, or the
+  phase is disabled) — the push is still delivered. Clients should not treat
+  absence as "zero unread"; fall back to the locally-cached badge value and
+  let it refresh on next app open.
+- **Gate:** populated by default (notification-worker's `BADGE_COUNT_RPC_ENABLED`, default `true`); set `false` to disable
+  (see §3). When disabled, `BadgeClient` is nil and the badge
+  phase is skipped entirely — `unreadCounts` never appears on the wire.
+- **Fetch path:** per push, the worker groups the badge audience by home site and issues
+  one `badge.count.batch` RPC per site concurrently, merging replies into one
+  map before per-batch filtering (`notification-worker/handler.go`,
+  `fetchUnreadCounts`).
+- **Home-site resolution:** a member's home site is read from the **users**
+  collection (`users.siteId`) by the member-cache loader at cache-fill time —
+  one batch `$in` query per room per `ROOMSUBCACHE_TTL`, cached on
+  `roomsubcache.Member.HomeSiteID`. `Subscription.siteId` is deliberately not
+  used: it is the **room's** home site, identical for every member at the
+  room's own site, and would route every RPC locally. A member missing from
+  the users collection degrades (no RPC on its behalf, push still delivered).
+
+#### `badge.count.batch` RPC (user-service)
+
+| Property | Value |
+|---|---|
+| Subject | `chat.server.request.user.{siteID}.badge.count.batch` |
+| Pattern | NATS request/reply, server-to-server (`chat.server.*` — no client JWT can subscribe) |
+| Caller | `notification-worker`, one request per survivor home site per push (§ above) |
+| Callee | `user-service` (`BadgeCountBatch`, backed by `pkg/badgecache`) |
+
+Request / reply (`pkg/model/subscription.go`):
+
+```json
+// request
+{ "roomId": "r123", "accounts": ["alice", "bob"] }
+
+// reply
+{ "counts": { "alice": 3, "bob": 9 } }
+```
+
+- **`roomId`** is the room whose message triggered the notification —
+  `user-service` SADDs it into the account's unread-room set atomically with
+  reading the set's size, so the triggering room is always reflected even on
+  a cache miss.
+- **`counts`** maps account → unread-room count, capped (`BADGE_COUNT_CAP`,
+  default 10). An account
+  absent from `counts` means its count could not be computed (see the
+  degrade path below); the caller logs and drops it rather than failing.
+- Per-account degrade path, in order: cache hit (`BumpBatch`, one pipelined
+  Valkey `SADD`+`SCARD` round per cluster node for the whole batch)
+  → cache miss (`Seed` from Mongo + cross-site room RPCs, unioned with the
+  trigger room) → cache down entirely (`cappedUnion`, computed without Valkey).
+  Only a hard per-account error (e.g. Mongo failure while reseeding) drops the
+  account from the response.
+- On timeout / no responder / a remote `errcode` envelope, `notification-worker`
+  treats that whole site's batch as failed; that site's accounts are simply
+  absent from `UnreadCounts` — see § Badge counts absence semantics above. A
+  badge-count failure never NAKs or delays the push.
+
+**Accuracy model:** the triggering room is exact at notify time — the RPC's
+`SADD` is atomic with the size read. The set is maintained on both edges:
+every message bumps the **full badge audience** (all members past the
+sender/muted/restricted/thread-scope filters — including members who won't be
+pushed), and every read / thread-read / unmute drops the account's whole set
+(plus its `badge:fresh` marker) so the next count or push recomputes from
+Mongo; a mute and a member-removal remove exactly that room. Residual drift
+(a missed bump, a drop racing a concurrent bump) is bounded by the next
+read-driven recompute, reseed-on-`subscription.count`, and the set's TTL
+(`BADGE_CACHE_TTL`, default 24h, identical across its writers) — failure
+direction is undercount-until-recompute, never a stuck overcount.
+`subscription.count` (unread=true) may itself be served from this set when
+user-service's `BADGE_COUNT_CACHE_FIRST` is enabled — flip it to true only
+after all badge writers run the marker-aware `pkg/badgecache`, or an old
+writer's set-only clear can leave a marker reading as a stale "fresh zero".
 
 ### Payload decoding
 
@@ -303,9 +390,15 @@ Required before a production rollout:
 
    `message-gatekeeper` owns the sender display-name resolution; configure its
    `USER_CACHE_SIZE` / `USER_CACHE_TTL` (defaults 10000 / 5m) there.
-   `notification-worker` does **no** users-collection lookups under this design.
+   `notification-worker`'s only users-collection read is the member-cache
+   loader's batched home-site lookup (one `$in` query per room per
+   `ROOMSUBCACHE_TTL` — see §1 Badge counts, Home-site resolution); it never
+   reads users per event or per recipient. This consciously revises the
+   original "no users-collection lookups" contract: badge RPCs must route to
+   each recipient's home site, and only the users collection knows it.
    - `INDEX_ENSURE_TIMEOUT` (default `2m`)
    - `PRESENCE_RPC_ENABLED` (default `false`), `PRESENCE_BATCH_SIZE` (`512`), `PRESENCE_RPC_TIMEOUT` (`2s`)
+   - `BADGE_COUNT_RPC_ENABLED` (default `true`) — gates the `badge.count.batch` RPC to each recipient's home-site `user-service`; set `false` to disable badge stamping (see §1 Badge counts)
 
 ---
 

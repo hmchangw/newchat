@@ -128,6 +128,7 @@ type SoakCollector struct {
 	bounded        bool
 
 	warmupAttempted       uint64
+	warmupActions         map[soakRPCAction]uint64
 	actions               map[soakRPCAction]*soakActionAccumulator
 	errors                map[soakRPCAction]map[soakErrorClass]uint64
 	verifications         map[soakRPCAction]map[soakVerifyClass]uint64
@@ -148,6 +149,7 @@ func NewSoakCollector(
 		midpoint:      warmupDeadline.Add(measuredDuration / 2),
 		bounded:       duration > 0,
 		actions:       make(map[soakRPCAction]*soakActionAccumulator),
+		warmupActions: make(map[soakRPCAction]uint64),
 		errors:        make(map[soakRPCAction]map[soakErrorClass]uint64),
 		verifications: make(map[soakRPCAction]map[soakVerifyClass]uint64),
 	}
@@ -174,6 +176,7 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 	c.mu.Lock()
 	if phase == "warmup" {
 		c.warmupAttempted++
+		c.warmupActions[sample.Action]++
 	} else {
 		accumulator := c.actions[sample.Action]
 		if accumulator == nil {
@@ -309,6 +312,7 @@ type soakCollectorSnapshot struct {
 	Verifications         map[soakRPCAction]map[soakVerifyClass]uint64
 	Total                 soakActionStats
 	WarmupAttempted       uint64
+	WarmupActions         map[soakRPCAction]uint64
 	MutationTargetMissing uint64
 	MeasuredDuration      time.Duration
 }
@@ -326,8 +330,12 @@ func (c *SoakCollector) Snapshot(now time.Time) soakCollectorSnapshot {
 		Errors:                cloneSoakErrors(c.errors),
 		Verifications:         cloneSoakVerifications(c.verifications),
 		WarmupAttempted:       c.warmupAttempted,
+		WarmupActions:         make(map[soakRPCAction]uint64, len(c.warmupActions)),
 		MutationTargetMissing: c.mutationTargetMissing,
 		MeasuredDuration:      measuredDuration,
+	}
+	for action, attempted := range c.warmupActions {
+		snapshot.WarmupActions[action] = attempted
 	}
 	for action, accumulator := range c.actions {
 		stats := snapshotSoakAction(accumulator, measuredDuration)

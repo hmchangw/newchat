@@ -68,7 +68,6 @@ export interface Subscription {
   joinedAt: string
   lastSeenAt?: string
   hasMention: boolean
-  threadUnread?: string[]
   alert: boolean
   /** Whether the user favorited the room. Drives the derived Favorites
    *  section. Optional on the wire (absent = false). */

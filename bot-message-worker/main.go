@@ -34,7 +34,7 @@ type config struct {
 	CassandraPassword string `env:"CASSANDRA_PASSWORD"`
 	CassandraNumConns int    `env:"CASSANDRA_NUM_CONNS" envDefault:"4"`
 
-	MessageBucketHours int `env:"MESSAGE_BUCKET_HOURS" envDefault:"72"`
+	MessageBucketHours int `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
 
 	MaxWorkers int `env:"MAX_WORKERS" envDefault:"100"`
 	MaxDeliver int `env:"MAX_DELIVER" envDefault:"5"`

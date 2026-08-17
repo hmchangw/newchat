@@ -72,7 +72,7 @@ type config struct {
 	CassandraKeyspace  string `env:"CASSANDRA_KEYSPACE"     envDefault:"chat"`
 	CassandraUsername  string `env:"CASSANDRA_USERNAME"     envDefault:""`
 	CassandraPassword  string `env:"CASSANDRA_PASSWORD"     envDefault:""`
-	MessageBucketHours int    `env:"MESSAGE_BUCKET_HOURS"   envDefault:"72"`
+	MessageBucketHours int    `env:"MESSAGE_BUCKET_HOURS"   envDefault:"360"`
 
 	// NATS monitoring endpoint used by the `daily` subcommand to poll
 	// JetStream consumer pending counts. Defaults to the docker-compose
@@ -581,7 +581,9 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	defer metrics.stopNATSHealth()
+	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "members", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -592,7 +594,6 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 		return 1
 	}
 
-	metrics := NewMetrics()
 	metricsSrv := &http.Server{
 		Addr:              cfg.MetricsAddr,
 		Handler:           metrics.Handler(),
@@ -650,7 +651,11 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 
 	samplerCtx, cancelSamplers := context.WithCancel(ctx)
 	defer cancelSamplers()
-	sampler := NewConsumerSampler(js, stream.Rooms(cfg.SiteID).Name, "room-worker", metrics, time.Second)
+	sampler, err := NewConsumerSampler(js, stream.Rooms(cfg.SiteID).Name, "room-worker", metrics, time.Second)
+	if err != nil {
+		slog.Error("configure consumer sampler", "error", err)
+		return 1
+	}
 	var samplerWG sync.WaitGroup
 	samplerWG.Add(1)
 	go func() {
@@ -810,7 +815,9 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	defer metrics.stopNATSHealth()
+	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "members", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -821,7 +828,6 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 		return 1
 	}
 
-	metrics := NewMetrics()
 	metricsSrv := &http.Server{
 		Addr:              cfg.MetricsAddr,
 		Handler:           metrics.Handler(),
@@ -911,22 +917,8 @@ func runMembersCapacity(ctx context.Context, cfg *config, args []string) int {
 	cancelShut()
 	_ = nc.Drain()
 
-	finals := map[string]int{}
+	finals := gen.FinalSizes()
 	mfs, _ := metrics.Registry.Gather()
-	for _, mf := range mfs {
-		if mf.GetName() != "loadgen_member_room_size" {
-			continue
-		}
-		for _, mt := range mf.GetMetric() {
-			var rid string
-			for _, l := range mt.GetLabel() {
-				if l.GetName() == "room_id" {
-					rid = l.GetValue()
-				}
-			}
-			finals[rid] = int(mt.GetGauge().GetValue())
-		}
-	}
 	pubErrs := int(gatheredCounterValue(mfs, "loadgen_member_publish_errors_total", "reason", "publish"))
 	timeouts := int(gatheredCounterValue(mfs, "loadgen_member_publish_errors_total", "reason", "timeout"))
 
@@ -1029,7 +1021,9 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 		return 2
 	}
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	defer metrics.stopNATSHealth()
+	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "general", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -1040,7 +1034,6 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 		return 1
 	}
 
-	metrics := NewMetrics()
 	metricsSrv := &http.Server{
 		Addr:              cfg.MetricsAddr,
 		Handler:           metrics.Handler(),
@@ -1126,9 +1119,14 @@ func runRun(ctx context.Context, cfg *config, args []string) int {
 	canonical := stream.MessagesCanonical(cfg.SiteID)
 	samplerCtx, cancelSamplers := context.WithCancel(ctx)
 	defer cancelSamplers()
-	samplers := []*ConsumerSampler{
-		NewConsumerSampler(js, canonical.Name, "message-worker", metrics, 1*time.Second),
-		NewConsumerSampler(js, canonical.Name, "broadcast-worker", metrics, 1*time.Second),
+	samplers := make([]*ConsumerSampler, 0, 2)
+	for _, durable := range []string{"message-worker", "broadcast-worker"} {
+		sampler, samplerErr := NewConsumerSampler(js, canonical.Name, durable, metrics, time.Second)
+		if samplerErr != nil {
+			slog.Error("configure consumer sampler", "durable", durable, "error", samplerErr)
+			return 1
+		}
+		samplers = append(samplers, sampler)
 	}
 	var samplerWG sync.WaitGroup
 	for _, s := range samplers {
@@ -1401,7 +1399,9 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 
 	_, layout := BuildBotRoomFixtures(&p, *seed, cfg.SiteID)
 
-	nc, err := dialNATS(cfg.NatsURL, cfg.NatsCredsFile)
+	metrics := NewMetrics()
+	defer metrics.stopNATSHealth()
+	nc, err := dialNATSPoolWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, "general", metrics, nil)
 	if err != nil {
 		slog.Error("nats connect", "error", err)
 		return 1
@@ -1412,7 +1412,6 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 		return 1
 	}
 
-	metrics := NewMetrics()
 	metricsSrv := &http.Server{Addr: cfg.MetricsAddr, Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -1454,7 +1453,11 @@ func runMaxRoomSize(ctx context.Context, cfg *config, args []string) int {
 	defer cancelSamplers()
 	var samplerWG sync.WaitGroup
 	for _, d := range botRoomGatedDurables {
-		s := NewConsumerSampler(js, canonical.Name, d, metrics, time.Second)
+		s, samplerErr := NewConsumerSampler(js, canonical.Name, d, metrics, time.Second)
+		if samplerErr != nil {
+			slog.Error("configure consumer sampler", "durable", d, "error", samplerErr)
+			return 1
+		}
 		samplerWG.Add(1)
 		go func(s *ConsumerSampler) {
 			defer samplerWG.Done()

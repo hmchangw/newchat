@@ -101,7 +101,7 @@ func (s *HistoryService) resolveRoomTimes(
 	}
 
 	// A merged hint+Mongo pair can be internally inconsistent (created > last): refetch from
-	// Mongo when a hint was involved; if still inverted the room is genuinely empty — normalise.
+	// Mongo when a hint was involved; if still inverted with a real lastMsgAt, normalise.
 	if created.After(*last) {
 		if metaLast || metaCreated {
 			l, c, gerr := s.rooms.GetRoomTimes(ctx, roomID)
@@ -111,8 +111,12 @@ func (s *HistoryService) resolveRoomTimes(
 			last = &l
 			created = &c
 		}
-		// Empty room or hint-refetch still inconsistent — collapse the range.
-		if created.After(*last) {
+		// Still inverted with a real lastMsgAt — corrupt pair; collapse the
+		// range. A zero lastMsgAt stays zero: "not recorded" means UNKNOWN,
+		// not "empty room" — the room may hold messages (legacy docs, failed
+		// lastMsgAt update); callers treat zero as unknown (LoadHistory skips
+		// its before-cap, walkBounds ceilings at now+skew).
+		if !last.IsZero() && created.After(*last) {
 			last = created
 		}
 	}

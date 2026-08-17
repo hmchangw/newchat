@@ -14,12 +14,14 @@ import (
 
 	o11ygin "github.com/flywindy/o11y/gin"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -93,7 +95,9 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	registerRoutes(r, h)
+	sessions := botauth.NewValidator(
+		restyutil.New("", restyutil.WithTimeout(5*time.Second), restyutil.WithMaxIdleConns(32)), cfg.BotplatformURL)
+	registerRoutes(r, h, sessions, cfg.SiteID)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
@@ -220,4 +224,96 @@ func TestDiffVerbatim(t *testing.T) {
 	diffs = diffVerbatim(src, dst, []string{"_updatedAt", "n"})
 	assert.Len(t, diffs, 1)
 	assert.Equal(t, "extra", diffs[0].DestField)
+}
+
+// An explicit BSON null in the source counts as absent — transformers drop
+// null fields, so a zero/absent dest must match instead of diffing nil vs "".
+func TestDiffFields_ExplicitNullCountsAsAbsent(t *testing.T) {
+	reg := newTransformRegistry(msgbucket.New(72 * time.Hour))
+	src := map[string]any{"f": nil}
+
+	tests := []struct {
+		name      string
+		dst       map[string]any
+		required  bool
+		wantDiffs int
+		wantCause string
+	}{
+		{"null source vs absent dest", map[string]any{}, false, 0, ""},
+		{"null source vs empty-string dest", map[string]any{"field": ""}, false, 0, ""},
+		{"null source vs zero-int dest", map[string]any{"field": 0}, false, 0, ""},
+		{"null source vs present dest", map[string]any{"field": "x"}, false, 1, "absent in source, present in dest"},
+		{"required null source vs zero dest", map[string]any{"field": ""}, true, 1, "required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pairs := []fieldPair{{SourcePaths: []string{"f"}, DestField: "field", Required: tt.required}}
+			diffs := diffFields(src, tt.dst, pairs, reg)
+			require.Len(t, diffs, tt.wantDiffs)
+			if tt.wantCause != "" {
+				assert.Contains(t, diffs[0].Cause, tt.wantCause)
+			}
+		})
+	}
+}
+
+func TestSanitizeDiffValue(t *testing.T) {
+	tests := []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"nil passes through", nil, nil},
+		{"scalar passes through", int64(7), int64(7)},
+		{"short string passes through", "hi", "hi"},
+		{"bytes become string", []byte("raw"), "raw"},
+		{"non-string map keys stringified", map[bool]string{true: "x"}, map[string]any{"true": "x"}},
+		{"nested map sanitized", map[string]any{"m": map[int]int{1: 2}}, map[string]any{"m": map[string]any{"1": int(2)}}},
+		{"slice elements sanitized", []any{map[bool]bool{false: true}}, []any{map[string]any{"false": true}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeDiffValue(tt.in)
+			assert.Equal(t, tt.want, got)
+			_, err := json.Marshal(got)
+			assert.NoError(t, err, "sanitized value must be JSON-encodable")
+		})
+	}
+
+	t.Run("huge string truncated", func(t *testing.T) {
+		got, ok := sanitizeDiffValue(strings.Repeat("a", 10*diffValueMaxString)).(string)
+		require.True(t, ok)
+		assert.LessOrEqual(t, len(got), diffValueMaxString+len("…(truncated)"))
+		assert.True(t, strings.HasSuffix(got, "…(truncated)"))
+	})
+
+	t.Run("truncation never splits a rune", func(t *testing.T) {
+		s := strings.Repeat("é", diffValueMaxString) // 2-byte rune straddles the cap
+		got, ok := sanitizeDiffValue(s).(string)
+		require.True(t, ok)
+		assert.True(t, utf8.ValidString(got), "no split UTF-8 sequence at the cut point")
+	})
+}
+
+// Diff values must be safe to hold and broadcast: json.Marshal of a stored
+// diff can never fail, whatever driver types the lookup returned.
+func TestDiffFields_ValuesAreJSONSafe(t *testing.T) {
+	reg := newTransformRegistry(msgbucket.New(72 * time.Hour))
+	src := map[string]any{"f": "want"}
+	dst := map[string]any{"field": map[bool]string{true: "x"}}
+
+	diffs := diffFields(src, dst, []fieldPair{{SourcePaths: []string{"f"}, DestField: "field"}}, reg)
+	require.Len(t, diffs, 1)
+	_, err := json.Marshal(diffs)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"true": "x"}, diffs[0].Got)
+}
+
+func TestDiffVerbatim_ValuesAreJSONSafe(t *testing.T) {
+	src := map[string]any{"reactions": map[bool]string{true: "x"}}
+	dst := map[string]any{}
+	diffs := diffVerbatim(src, dst, nil)
+	require.Len(t, diffs, 1)
+	_, err := json.Marshal(diffs)
+	require.NoError(t, err)
 }

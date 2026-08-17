@@ -18,7 +18,7 @@ func TestBuilders_ExactStrings(t *testing.T) {
 		want string
 	}{
 		{"room meta", RoomMeta("r123"), "room:{r123}:meta"},
-		{"room subs", RoomSubs("r123"), "room:r123:subs"},
+		{"room subs", RoomSubs("r123"), "room:v3:r123:subs"},
 		{"presence conns", PresenceConns("alice"), "presence:{alice}:conns"},
 		{"presence manual", PresenceManual("alice"), "presence:{alice}:manual"},
 		{"presence status", PresenceStatus("alice"), "presence:{alice}:status"},
@@ -42,7 +42,7 @@ func TestBuilders_ExactStrings(t *testing.T) {
 // Callers are responsible for rejecting empty IDs upstream.
 func TestBuilders_EmptyArgument(t *testing.T) {
 	assert.Equal(t, "room:{}:meta", RoomMeta(""))
-	assert.Equal(t, "room::subs", RoomSubs(""))
+	assert.Equal(t, "room:v3::subs", RoomSubs(""))
 	assert.Equal(t, "idem:", BotIdempotency(""))
 }
 
@@ -82,7 +82,7 @@ func TestClassify(t *testing.T) {
 // roomsubcache does not, so both live under a "room:" prefix.
 func TestClassify_HashTaggedAndUntaggedRoomKeysDoNotCollide(t *testing.T) {
 	assert.Equal(t, "roommeta", Classify("room:{r1}:meta"))
-	assert.Equal(t, "roomsubs", Classify("room:r1:subs"))
+	assert.Equal(t, "roomsubs", Classify("room:v3:r1:subs"))
 	assert.NotEqual(t, Classify(RoomMeta("r1")), Classify(RoomSubs("r1")))
 }
 
