@@ -54,11 +54,13 @@ type RoomKeyStore interface {
 
 // Room is the projection of a rooms doc bot-room-service reads and writes.
 type Room struct {
-	ID           string
-	Type         string
-	Name         string
-	Topic        string
-	SiteID       string
+	ID     string
+	Type   string
+	Name   string
+	Topic  string
+	SiteID string
+	// LastMsgAt rides cross-site member_added; see model.MemberAddEvent.
+	LastMsgAt    *time.Time
 	CreatedAt    time.Time
 	Owner        *Participant
 	CreatedByBot string
