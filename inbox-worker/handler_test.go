@@ -121,12 +121,62 @@ type stubInboxStore struct {
 	chatlistUpdates       []userChatlistUpdate
 	sectionMoves          []sectionMove
 	permissionsApplies    []permissionsApply
+	remoteRoomActivity    []remoteRoomActivity
+	remoteRoomActivityErr error
+	roomSubscribed        map[string]bool
+	deletedRemoteRooms    []string
+	hasRoomSubErr         error
 }
 
 type permissionsApply struct {
 	permission model.PermissionKey
 	accounts   []string
 	state      model.PermissionState
+}
+
+type remoteRoomActivity struct {
+	roomID    string
+	siteID    string
+	lastMsgAt time.Time
+}
+
+func (s *stubInboxStore) DeleteRemoteRoomActivity(_ context.Context, roomID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.roomSubscribed, roomID)
+	kept := s.remoteRoomActivity[:0]
+	for _, r := range s.remoteRoomActivity {
+		if r.roomID != roomID {
+			kept = append(kept, r)
+		}
+	}
+	s.remoteRoomActivity = kept
+	s.deletedRemoteRooms = append(s.deletedRemoteRooms, roomID)
+	return nil
+}
+
+func (s *stubInboxStore) HasRoomSubscription(_ context.Context, roomID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasRoomSubErr != nil {
+		return false, s.hasRoomSubErr
+	}
+	for i := range s.bulkSubscriptions {
+		if s.bulkSubscriptions[i].RoomID == roomID {
+			return true, nil
+		}
+	}
+	return s.roomSubscribed[roomID], nil
+}
+
+func (s *stubInboxStore) UpsertRemoteRoomActivity(_ context.Context, roomID, siteID string, lastMsgAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.remoteRoomActivityErr != nil {
+		return s.remoteRoomActivityErr
+	}
+	s.remoteRoomActivity = append(s.remoteRoomActivity, remoteRoomActivity{roomID: roomID, siteID: siteID, lastMsgAt: lastMsgAt})
+	return nil
 }
 
 type userChatlistUpdate struct {
@@ -1938,6 +1988,107 @@ func TestHandleMemberAdded_BulkCreate_NonDuplicateError_ReturnsError(t *testing.
 	err := h.HandleEvent(context.Background(), evtData)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bulk create subscriptions")
+}
+
+// memberAddedEventData builds the wire bytes for a cross-site member_added on
+// room r1, owned by site-A. lastMsgAt nil = a room that has never had a message.
+func memberAddedEventData(t *testing.T, lastMsgAt *int64) []byte {
+	t.Helper()
+	change := model.MemberAddEvent{
+		Type: "member_added", RoomID: "r1", RoomType: model.RoomTypeChannel,
+		Accounts: []string{"bob"}, SiteID: "site-A", JoinedAt: 1, Timestamp: 1,
+		LastMsgAt: lastMsgAt,
+	}
+	changeData, err := json.Marshal(change)
+	require.NoError(t, err)
+	evtData, err := json.Marshal(model.InboxEvent{Type: "member_added", SiteID: "site-A", DestSiteID: "site-B", Payload: changeData})
+	require.NoError(t, err)
+	return evtData
+}
+
+func TestHandleRoomActivity(t *testing.T) {
+	at := int64(1740000000000)
+	payload := func(roomID string, lastMsgAt int64) []byte {
+		b, err := json.Marshal(model.RoomActivityEvent{RoomID: roomID, SiteID: "site-A", LastMsgAt: lastMsgAt, Timestamp: at})
+		require.NoError(t, err)
+		return b
+	}
+
+	t.Run("applies when this site holds a subscription", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.NoError(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r1", at)))
+
+		require.Len(t, store.remoteRoomActivity, 1)
+		assert.Equal(t, "r1", store.remoteRoomActivity[0].roomID)
+		assert.Equal(t, "site-A", store.remoteRoomActivity[0].siteID)
+		assert.Equal(t, time.UnixMilli(at).UTC(), store.remoteRoomActivity[0].lastMsgAt)
+	})
+
+	t.Run("drops rooms this site has no member in", func(t *testing.T) {
+		// The refresh is broadcast to every peer, so without this guard each site
+		// would accrue a row for every cross-site room in the deployment.
+		store := &stubInboxStore{}
+		require.NoError(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r-elsewhere", at)))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+
+	t.Run("rejects a malformed payload", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.Error(t, NewHandler(store).HandleRoomActivity(context.Background(), []byte("{")))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+
+	t.Run("rejects an event with no position to apply", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.Error(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r1", 0)))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+}
+
+func TestHandleMemberAdded_SeedsRemoteRoomActivity(t *testing.T) {
+	at := int64(1740000000000)
+	bob := []model.User{{ID: "u_bob", Account: "bob", SiteID: "site-B"}}
+
+	tests := []struct {
+		name     string
+		users    []model.User
+		lastMsg  *int64
+		seedErr  error
+		wantErr  bool
+		wantRows int
+		wantSubs int
+	}{
+		{name: "seeds the ordering row", users: bob, lastMsg: &at, wantRows: 1, wantSubs: 1},
+		{name: "no activity yet, nothing to seed", users: bob, lastMsg: nil, wantRows: 0, wantSubs: 1},
+		// Seeding before the missing-user return would leave a row for a room
+		// this site has no subscriber for, and nothing ever deletes it.
+		{name: "unknown user leaves no orphan row", users: nil, lastMsg: &at, wantErr: true, wantRows: 0, wantSubs: 0},
+		// The subscription is the correctness-critical write, so a failed
+		// ordering row must not Nak the event and re-run subscription creation.
+		{name: "seed failure does not fail the event", users: bob, lastMsg: &at, seedErr: fmt.Errorf("connection refused"), wantRows: 0, wantSubs: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubInboxStore{users: tt.users, remoteRoomActivityErr: tt.seedErr}
+			h := NewHandler(store)
+
+			err := h.HandleEvent(context.Background(), memberAddedEventData(t, tt.lastMsg))
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Len(t, store.remoteRoomActivity, tt.wantRows)
+			assert.Len(t, store.bulkSubscriptions, tt.wantSubs)
+			if tt.wantRows > 0 {
+				assert.Equal(t, "r1", store.remoteRoomActivity[0].roomID)
+				assert.Equal(t, "site-A", store.remoteRoomActivity[0].siteID, "the room's home site, not the destination")
+				assert.Equal(t, time.UnixMilli(at).UTC(), store.remoteRoomActivity[0].lastMsgAt)
+			}
+		})
+	}
 }
 
 func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
