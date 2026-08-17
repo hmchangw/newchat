@@ -1034,6 +1034,7 @@ func TestRemoteSites(t *testing.T) {
 		{"filters out self and blank entries", []string{"", "site-a", "site-b", "site-c"}, "site-a", []string{"site-b", "site-c"}},
 		{"empty AllSiteIDs → nil", nil, "site-a", nil},
 		{"only self → nil", []string{"site-a"}, "site-a", nil},
+		{"a repeated peer gets ONE lane, first-occurrence order kept", []string{"site-c", "site-b", "site-c", "site-a", "site-b"}, "site-a", []string{"site-c", "site-b"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

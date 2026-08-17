@@ -318,7 +318,7 @@ type fanoutBatch struct {
 // aggregated per destination and never abort the fanout. Returns the destinations whose
 // publish was not acknowledged (nil when all landed).
 func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.PermissionKey, batches []fanoutBatch) []string {
-	dests := remoteSites(h.cfg.AllSiteIDs, h.cfg.SiteID)
+	dests := h.remoteDests
 	if h.publishInbox == nil || len(dests) == 0 {
 		return nil
 	}
@@ -344,7 +344,7 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 			if err != nil {
 				// Cannot serialize the event at all: every destination is out of sync.
 				slog.ErrorContext(ctx, "marshal user permissions event", "error", err)
-				return dests
+				return slices.Clone(dests)
 			}
 			chunks = append(chunks, payload)
 		}
@@ -403,10 +403,13 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 	return failures
 }
 
-// remoteSites filters allSiteIDs down to real remote destinations.
+// remoteSites filters allSiteIDs down to real remote destinations: no self, no blanks,
+// no repeats — a peer listed twice in ALL_SITE_IDS would otherwise get a second lane,
+// a duplicate publish, and a duplicate syncFailures entry.
 func remoteSites(allSiteIDs []string, self string) []string {
 	var out []string
-	for _, dest := range allSiteIDs {
+	deduped, _ := dedupPreserveOrder(allSiteIDs)
+	for _, dest := range deduped {
 		if dest != "" && dest != self {
 			out = append(out, dest)
 		}

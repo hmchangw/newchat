@@ -27,6 +27,9 @@ type Handler struct {
 	cfg          Config
 	roomRPC      roomRequester
 	publishInbox func(ctx context.Context, subj string, data []byte) error
+	// remoteDests is remoteSites(cfg.AllSiteIDs, cfg.SiteID), computed once — the
+	// config never changes after startup, so no request needs to re-derive it.
+	remoteDests []string
 }
 
 // newHandler constructs a Handler with the given stores, config, room RPC, and
@@ -35,7 +38,10 @@ type Handler struct {
 // dereferencing it. A nil publishInbox is tolerated the same way — fanout
 // no-ops in tests that don't exercise it.
 func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester, publishInbox func(ctx context.Context, subj string, data []byte) error) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
-	return &Handler{store: store, sessions: sessions, cfg: cfg, roomRPC: rpc, publishInbox: publishInbox}
+	return &Handler{
+		store: store, sessions: sessions, cfg: cfg, roomRPC: rpc, publishInbox: publishInbox,
+		remoteDests: remoteSites(cfg.AllSiteIDs, cfg.SiteID),
+	}
 }
 
 // nowMillis returns the current UTC time in unix milliseconds. Injected as a
