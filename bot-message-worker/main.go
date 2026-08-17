@@ -39,12 +39,13 @@ type config struct {
 	MaxWorkers int                     `env:"MAX_WORKERS" envDefault:"100"`
 	Consumer   stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 
-	MongoURI      string `env:"MONGO_URI"`
-	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME"`
-	MongoPassword string `env:"MONGO_PASSWORD"`
-	Atrest        atrest.Config
-	Vault         atrest.VaultConfig `envPrefix:"VAULT_"`
+	MongoURI           string        `env:"MONGO_URI"`
+	MongoDB            string        `env:"MONGO_DB"       envDefault:"chat"`
+	MongoUsername      string        `env:"MONGO_USERNAME"`
+	MongoPassword      string        `env:"MONGO_PASSWORD"`
+	MongoSelectTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	Atrest             atrest.Config
+	Vault              atrest.VaultConfig `envPrefix:"VAULT_"`
 
 	HealthAddr   string          `env:"HEALTH_ADDR"   envDefault:":8081"`
 	PProfEnabled bool            `env:"PPROF_ENABLED" envDefault:"false"`
@@ -98,7 +99,9 @@ func run() error {
 		if cfg.MongoURI == "" {
 			return fmt.Errorf("ATREST_ENABLED=true requires MONGO_URI for the DEK collection")
 		}
-		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+			mongoutil.WithObservability(sdk),
+			mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 		if err != nil {
 			return fmt.Errorf("connect mongo: %w", err)
 		}

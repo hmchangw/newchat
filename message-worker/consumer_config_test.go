@@ -24,7 +24,8 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 1000, cc.MaxAckPending)
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 		assert.Equal(t, 30*time.Second, cc.AckWait)
-		assert.Equal(t, 5, cc.MaxDeliver)
+		assert.Equal(t, stream.OutageRetryMaxDeliver, cc.MaxDeliver,
+			"a consumer left at the package default gets the outage budget, not ~2.6 minutes")
 		assert.Equal(t, 512, cc.MaxWaiting)
 		assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)
 	})

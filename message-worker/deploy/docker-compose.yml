@@ -19,10 +19,14 @@ services:
       - CASSANDRA_KEYSPACE=${CASSANDRA_KEYSPACE:-chat}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}
+      # Shared Valkey cluster fronts the at-rest DEK L2 so the Cassandra write
+      # path survives a Mongo outage. Empty disables the tier (fail-open).
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       # In-process user cache (pkg/userstore.Cache, shared with message-gatekeeper
       # and broadcast-worker). Defaults: 10000 entries, 5m TTL.
       - USER_CACHE_SIZE=${USER_CACHE_SIZE:-10000}
       - USER_CACHE_TTL=${USER_CACHE_TTL:-5m}
+      - USER_L2_TTL=${USER_L2_TTL:-90m}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}

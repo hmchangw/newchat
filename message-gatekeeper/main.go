@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -44,9 +45,14 @@ type config struct {
 	RoomMetaCacheTTL   time.Duration           `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
 	ValkeyAddrs        []string                `env:"VALKEY_ADDRS"               envSeparator:","`
 	ValkeyPassword     string                  `env:"VALKEY_PASSWORD"            envDefault:""`
-	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"15m"`
+	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"90m"`
+	SubL2TTL           time.Duration           `env:"GATEKEEPER_SUB_L2_TTL"        envDefault:"90m"`
+	MongoBreakerFails  int                     `env:"GATEKEEPER_MONGO_BREAKER_FAILS"    envDefault:"5"`
+	MongoBreakerCool   time.Duration           `env:"GATEKEEPER_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
+	MongoSelectTimeout time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT"   envDefault:"2s"`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
+	UserL2TTL          time.Duration           `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
 	HealthAddr         string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
 	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string                  `env:"METRICS_ADDR"               envDefault:":9090"`
@@ -98,27 +104,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		// A stopped Mongo must error rather than block: this handler gates every
+		// send, and the driver default (30s) dwarfs any useful budget.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 
-	var metaValkey valkeyutil.Client
+	var valkeyClient valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkeyClient, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk),
 			valkeyutil.WithRequireParentSpan(true),
 		)
 		if err != nil {
-			slog.Error("valkey connect (room-meta L2) failed", "error", err)
+			slog.Error("valkey connect failed", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
+		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2TTL, "user_ttl", cfg.UserL2TTL)
 	}
 
-	mongoStore := NewMongoStore(db, metaValkey, cfg.RoomMetaL2TTL)
+	// Separate instances so a warm room-meta L2 hit can't reset the subscription
+	// breaker's failure count. Each reports under its own name, so the two health
+	// signals stay distinguishable on the shared gauge.
+	subBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "subscription"))
+	metaBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "roommeta"),
+		circuitbreaker.WithFailurePredicate(MetaBreakerFailure))
+	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2TTL, cfg.SubL2TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
 		slog.Error("init room meta cache failed", "error", err)
@@ -129,8 +147,14 @@ func main() {
 		slog.Error("init subscription cache failed", "error", err)
 		os.Exit(1)
 	}
-	users, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
+	// Fenced inside the cache, not outside it: an open breaker must still serve
+	// warm entries. Unfenced, the display-name lookup pays a server-selection
+	// timeout on every send for as long as Mongo is down.
+	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "user"),
+		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
+	users, err := userstore.Resilient(db.Collection("users"), userBreaker,
+		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user meta cache failed", "error", err)
 		os.Exit(1)
@@ -139,6 +163,7 @@ func main() {
 		"sub_cache_size", cfg.SubCacheSize, "sub_cache_ttl", cfg.SubCacheTTL,
 		"room_meta_cache_size", cfg.RoomMetaCacheSize, "room_meta_cache_ttl", cfg.RoomMetaCacheTTL,
 		"user_cache_size", cfg.UserCacheSize, "user_cache_ttl", cfg.UserCacheTTL,
+		"sub_l2_ttl", cfg.SubL2TTL,
 	)
 	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 		ack, err := js.PublishMsg(ctx, msg, opts...)
@@ -224,7 +249,7 @@ func main() {
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
-		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
