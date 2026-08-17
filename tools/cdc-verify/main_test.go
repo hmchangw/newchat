@@ -31,6 +31,7 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 2*time.Second, cfg.VerifyPoll)
 	assert.Equal(t, 60*time.Second, cfg.VerifyTimeout)
 	assert.Equal(t, 32, cfg.MaxChecks)
+	assert.Equal(t, 10000, cfg.MaxPending)
 	assert.Equal(t, 100, cfg.SamplePercent)
 	assert.Equal(t, 200, cfg.RecentCap)
 	assert.Equal(t, 1000, cfg.FailedCap)
@@ -67,6 +68,8 @@ func TestConfig_Validate(t *testing.T) {
 		{"zero poll", func(c *config) { c.VerifyPoll = 0 }, "VERIFY_POLL"},
 		{"timeout below poll", func(c *config) { c.VerifyTimeout = time.Second }, "VERIFY_TIMEOUT"},
 		{"zero max checks", func(c *config) { c.MaxChecks = 0 }, "MAX_CHECKS"},
+		{"negative max pending", func(c *config) { c.MaxPending = -1 }, "MAX_PENDING"},
+		{"zero max pending is unbounded", func(c *config) { c.MaxPending = 0 }, ""},
 		{"negative max checks", func(c *config) { c.MaxChecks = -1 }, "MAX_CHECKS"},
 		{"zero recent cap", func(c *config) { c.RecentCap = 0 }, "RECENT_CAP"},
 		{"zero failed cap", func(c *config) { c.FailedCap = 0 }, "RECENT_CAP and FAILED_CAP"},

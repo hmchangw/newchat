@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 )
 
@@ -29,18 +30,25 @@ type handler struct {
 	results     stateProvider
 	stats       statsProvider
 	recentCap   int
+	failedCap   int
 	pairs       []TargetPair
 	inspector   docInspector
 	conn        ConnInfo
 	mappingJSON []byte // the validated mapping file as loaded at startup
 }
 
-func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap int,
+func newHandler(hub *hub, results stateProvider, stats statsProvider, recentCap, failedCap int,
 	pairs []TargetPair, inspector docInspector, conn *ConnInfo, mappingJSON []byte,
 ) *handler {
-	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap,
+	return &handler{hub: hub, results: results, stats: stats, recentCap: recentCap, failedCap: failedCap,
 		pairs: pairs, inspector: inspector, conn: *conn, mappingJSON: mappingJSON}
 }
+
+// uriUserinfo matches "scheme://userinfo@" so credentials embedded in a driver
+// error's connection string never reach the server log either.
+var uriUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@`)
+
+func scrubLogValue(s string) string { return uriUserinfo.ReplaceAllString(s, "$1***@") }
 
 // mapping serves the startup-validated mapping file verbatim.
 func (h *handler) mapping(w http.ResponseWriter, _ *http.Request) {
@@ -66,8 +74,8 @@ func (h *handler) inspect(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		// Generic body only — a store error can carry URIs/hosts the browser
-		// must never see; the detail goes to the server log.
-		slog.Error("inspect failed", "collection", collection, "error", err)
+		// must never see; the scrubbed detail goes to the server log.
+		slog.Error("inspect failed", "collection", collection, "error", scrubLogValue(err.Error()))
 		http.Error(w, "inspect failed; see server log", http.StatusInternalServerError)
 		return
 	}
@@ -86,6 +94,7 @@ func (h *handler) state(w http.ResponseWriter, _ *http.Request) {
 		"failures":  failures,
 		"counters":  counters,
 		"recentCap": h.recentCap,
+		"failedCap": h.failedCap,
 		"pairs":     h.pairs,
 		"connInfo":  h.conn,
 	})

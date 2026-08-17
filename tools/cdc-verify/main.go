@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -54,6 +55,7 @@ type config struct {
 	VerifyPoll         time.Duration   `env:"VERIFY_POLL" envDefault:"2s"`
 	VerifyTimeout      time.Duration   `env:"VERIFY_TIMEOUT" envDefault:"60s"`
 	MaxChecks          int             `env:"MAX_CHECKS" envDefault:"32"`
+	MaxPending         int             `env:"MAX_PENDING" envDefault:"10000"`
 	SamplePercent      int             `env:"SAMPLE_PERCENT" envDefault:"100"`
 	RecentCap          int             `env:"RECENT_CAP" envDefault:"200"`
 	FailedCap          int             `env:"FAILED_CAP" envDefault:"1000"`
@@ -73,6 +75,9 @@ func (c *config) validate() error {
 	}
 	if c.MaxChecks <= 0 {
 		return fmt.Errorf("MAX_CHECKS must be positive, got %d", c.MaxChecks)
+	}
+	if c.MaxPending < 0 {
+		return fmt.Errorf("MAX_PENDING must be >= 0 (0 = unbounded), got %d", c.MaxPending)
 	}
 	if c.RecentCap <= 0 || c.FailedCap <= 0 {
 		return fmt.Errorf("RECENT_CAP and FAILED_CAP must be positive")
@@ -201,7 +206,7 @@ func main() {
 		newMongoStore(tgtClient.Database(cfg.TargetDB)),
 		cass, reg, results, verifierConfig{
 			Poll: cfg.VerifyPoll, Timeout: cfg.VerifyTimeout,
-			MaxChecks: cfg.MaxChecks, SamplePercent: cfg.SamplePercent,
+			MaxChecks: cfg.MaxChecks, MaxPending: cfg.MaxPending, SamplePercent: cfg.SamplePercent,
 		})
 
 	var startAt time.Time
@@ -210,13 +215,18 @@ func main() {
 	}
 	filter := subject.MigrationOplogWildcard(cfg.SiteID)
 	w := newWatcher(js, streamName, filter, startAt, v)
+	var watcherFailed atomic.Bool
 	go func() {
 		if err := w.Run(ctx); err != nil {
 			// A dead feed makes the dashboard lie; die loudly — but through the
 			// signal path so shutdown.Wait still drains connections cleanly.
+			// watcherFailed keeps the exit status non-zero so supervisors that
+			// restart only failed processes bring the verifier back.
+			watcherFailed.Store(true)
 			slog.Error("watcher stopped; shutting down", "error", err)
-			if p, perr := os.FindProcess(os.Getpid()); perr == nil {
-				_ = p.Signal(syscall.SIGTERM)
+			p, perr := os.FindProcess(os.Getpid())
+			if perr != nil || p.Signal(syscall.SIGTERM) != nil {
+				os.Exit(1) // no graceful path left — better dead than a lying dashboard
 			}
 		}
 	}()
@@ -236,7 +246,7 @@ func main() {
 
 	// --- HTTP ---
 	conn := buildConnInfo(&cfg, streamName, mapping.NeedsCassandra())
-	h := newHandler(sseHub, results, poller, cfg.RecentCap, mapping.TargetPairs(), v, &conn, rawMapping)
+	h := newHandler(sseHub, results, poller, cfg.RecentCap, cfg.FailedCap, mapping.TargetPairs(), v, &conn, rawMapping)
 	mux := http.NewServeMux()
 	h.registerRoutes(mux)
 	srv := &http.Server{
@@ -269,4 +279,7 @@ func main() {
 			return nil
 		},
 	)
+	if watcherFailed.Load() {
+		os.Exit(1) // graceful drain done; still report the watcher failure upward
+	}
 }

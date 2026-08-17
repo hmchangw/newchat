@@ -294,6 +294,7 @@ transformers, then tuned per environment.
 | `VERIFY_POLL` | no | `2s` | Check polling cadence |
 | `VERIFY_TIMEOUT` | no | `60s` | Deadline before a pending check fails |
 | `MAX_CHECKS` | no | `32` | Concurrent check worker budget |
+| `MAX_PENDING` | no | `10000` | Total enrolled checks (queued behind `MAX_CHECKS` included); past the cap, new-key events shed as skipped `overload`. `0` = unbounded |
 | `SAMPLE_PERCENT` | no | `100` | Per-event sampling after skip-classification (0-100) |
 | `RECENT_CAP` | no | `200` | Recent-results ring buffer size |
 | `FAILED_CAP` | no | `1000` | Failures table cap (oldest evicted, counted) |

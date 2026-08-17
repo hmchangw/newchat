@@ -386,7 +386,7 @@
 
   var TERMINAL = { matched: true, failed: true, skipped: true, superseded: true };
   var FEED_CAP = 100;
-  var FAILURES_CAP = 1000; // client-side retention; matches the server's FAILED_CAP default
+  var FAILURES_CAP = 1000; // replaced by the server's FAILED_CAP on state load
   var PAIR_CAP = 50;
 
   // pairKey(source, alias) -> {pair, rows: Map<id, r>, order: [ids newest first]}
@@ -808,6 +808,7 @@
 
   // ── state application ──
   function applyInitialState(data) {
+    if (data.failedCap > 0) FAILURES_CAP = data.failedCap;
     initPairs(data.pairs || []);
 
     var recent = data.recent || [];
@@ -1129,11 +1130,32 @@
     openInspect(inspectParam.slice(0, sep), inspectParam.slice(sep + 1));
   }
 
+  // While a state reload is in flight, live SSE frames are buffered and
+  // replayed after the snapshot applies — a slow /api/state response can
+  // never overwrite a newer incremental update.
+  var pendingFrames = null; // non-null => reload in flight
+  var reloadAgain = false;
+
+  function applyFrame(ev) {
+    if (ev.kind === 'stats') renderStats(ev.data || {});
+    else if (ev.kind === 'result') upsertResult(ev.data || {});
+  }
+
   function loadState() {
+    if (pendingFrames) { reloadAgain = true; return; }
+    pendingFrames = [];
     fetch('/api/state')
       .then(function (resp) { return resp.json(); })
-      .then(applyInitialState)
+      .then(function (data) {
+        applyInitialState(data);
+        var buffered = pendingFrames;
+        pendingFrames = null;
+        buffered.forEach(applyFrame);
+        if (reloadAgain) { reloadAgain = false; loadState(); }
+      })
       .catch(function (err) {
+        pendingFrames = null;
+        reloadAgain = false;
         var errBanner = document.getElementById('error-banner');
         errBanner.hidden = false;
         errBanner.textContent = 'Failed to load state: ' + err;
@@ -1142,18 +1164,15 @@
   loadState();
 
   var es = new EventSource('/api/events');
-  var esFirstOpen = true;
-  // A reconnect (network blip, or the hub dropped us as a slow client) means
-  // frames were missed — refetch full state instead of trusting the tail.
-  es.onopen = function () {
-    if (esFirstOpen) { esFirstOpen = false; return; }
-    loadState();
-  };
+  // Resync on every open — the first included, closing the gap between the
+  // initial snapshot and SSE registration — and on every reconnect (network
+  // blip, or the hub dropped us as a slow client).
+  es.onopen = function () { loadState(); };
   es.onmessage = function (msg) {
     var ev;
     try { ev = JSON.parse(msg.data); } catch (e) { return; }
-    if (ev.kind === 'stats') renderStats(ev.data || {});
-    else if (ev.kind === 'result') upsertResult(ev.data || {});
+    if (pendingFrames) { pendingFrames.push(ev); return; }
+    applyFrame(ev);
   };
 })();
 </script>

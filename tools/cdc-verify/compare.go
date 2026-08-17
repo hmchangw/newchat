@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -92,52 +94,99 @@ func isZeroValue(v any) bool {
 	}
 }
 
-// diffValueMaxString caps one diff value's string length: a diff is a pointer
-// at a mismatch, not a document dump, and rows are retained + broadcast as JSON.
-const diffValueMaxString = 2048
+// A diff is a pointer at a mismatch, not a document dump — rows are retained
+// and broadcast as JSON, so every axis of a value is bounded: string length,
+// container elements, and nesting depth.
+const (
+	diffValueMaxString = 2048
+	diffValueMaxElems  = 64
+	diffValueMaxDepth  = 8
+)
 
 // sanitizeDiffValue makes a value safe to retain and JSON-encode in a diff:
 // non-string map keys are stringified (json.Marshal rejects e.g. map[bool]T
-// from a driver), []byte becomes string, and huge strings are truncated.
-func sanitizeDiffValue(v any) any {
+// from a driver), non-finite floats become strings (json.Marshal rejects NaN
+// and ±Inf), []byte becomes string, and strings/containers/depth are bounded.
+func sanitizeDiffValue(v any) any { return sanitizeDiffDepth(v, 0) }
+
+func sanitizeDiffDepth(v any, depth int) any {
 	switch t := v.(type) {
 	case nil:
 		return nil
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return fmt.Sprint(t)
+		}
+		return t
+	case float32:
+		if f := float64(t); math.IsNaN(f) || math.IsInf(f, 0) {
+			return fmt.Sprint(t)
+		}
+		return t
 	case string:
 		return truncDiffString(t)
 	case []byte:
 		return truncDiffString(string(t))
 	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, vv := range t {
-			out[truncDiffString(k)] = sanitizeDiffValue(vv)
+		if depth >= diffValueMaxDepth {
+			return truncDiffString(fmt.Sprint(t))
+		}
+		out := make(map[string]any, min(len(t), diffValueMaxElems+1))
+		for i, k := range sortedMapKeys(t) {
+			if i >= diffValueMaxElems {
+				out["…"] = fmt.Sprintf("(%d more entries truncated)", len(t)-diffValueMaxElems)
+				break
+			}
+			out[truncDiffString(k)] = sanitizeDiffDepth(t[k], depth+1)
 		}
 		return out
 	case []any:
-		out := make([]any, len(t))
-		for i, vv := range t {
-			out[i] = sanitizeDiffValue(vv)
-		}
-		return out
+		return sanitizeDiffSlice(len(t), func(i int) any { return t[i] }, depth)
+	}
+	if depth >= diffValueMaxDepth {
+		return truncDiffString(fmt.Sprint(v))
 	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
 	case reflect.Map:
-		out := make(map[string]any, rv.Len())
+		keys := make([]string, 0, rv.Len())
+		vals := make(map[string]any, rv.Len())
 		iter := rv.MapRange()
 		for iter.Next() {
-			out[truncDiffString(fmt.Sprint(iter.Key().Interface()))] = sanitizeDiffValue(iter.Value().Interface())
+			k := truncDiffString(fmt.Sprint(iter.Key().Interface()))
+			keys = append(keys, k)
+			vals[k] = iter.Value().Interface()
+		}
+		sort.Strings(keys)
+		out := make(map[string]any, min(len(keys), diffValueMaxElems+1))
+		for i, k := range keys {
+			if i >= diffValueMaxElems {
+				out["…"] = fmt.Sprintf("(%d more entries truncated)", len(keys)-diffValueMaxElems)
+				break
+			}
+			out[k] = sanitizeDiffDepth(vals[k], depth+1)
 		}
 		return out
 	case reflect.Slice, reflect.Array:
-		out := make([]any, rv.Len())
-		for i := range out {
-			out[i] = sanitizeDiffValue(rv.Index(i).Interface())
-		}
-		return out
+		return sanitizeDiffSlice(rv.Len(), func(i int) any { return rv.Index(i).Interface() }, depth)
 	default:
 		return v
 	}
+}
+
+func sanitizeDiffSlice(n int, at func(int) any, depth int) any {
+	if depth >= diffValueMaxDepth {
+		return fmt.Sprintf("(list of %d elements truncated at depth cap)", n)
+	}
+	kept := min(n, diffValueMaxElems)
+	out := make([]any, 0, kept+1)
+	for i := 0; i < kept; i++ {
+		out = append(out, sanitizeDiffDepth(at(i), depth+1))
+	}
+	if n > kept {
+		out = append(out, fmt.Sprintf("…(%d more elements truncated)", n-kept))
+	}
+	return out
 }
 
 func truncDiffString(s string) string {

@@ -134,7 +134,7 @@ func TestDemoHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read mapping.example.json: %v", err)
 	}
-	h := newHandler(hub, results, demoStats{}, 200, demoPairs(), demoInspector{}, &conn, rawMapping)
+	h := newHandler(hub, results, demoStats{}, 200, 1000, demoPairs(), demoInspector{}, &conn, rawMapping)
 	mux := http.NewServeMux()
 	h.registerRoutes(mux)
 	ln, err := net.Listen("tcp", ":8091")

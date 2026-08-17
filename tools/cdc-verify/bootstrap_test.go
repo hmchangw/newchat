@@ -64,6 +64,15 @@ func TestBootstrapStreams_LookupError(t *testing.T) {
 	assert.Empty(t, fjs.created)
 }
 
+// Two bootstrappers (or bootstrap racing the real pipeline) can both see
+// not-found; the loser's create collides — that's the create-only end state,
+// not a startup failure.
+func TestBootstrapStreams_CreateRaceLosingIsSuccess(t *testing.T) {
+	fjs := &fakeJetStream{streamErr: jetstream.ErrStreamNotFound, createErr: jetstream.ErrStreamNameAlreadyInUse}
+	err := bootstrapStreams(context.Background(), fjs, "site1", true)
+	require.NoError(t, err)
+}
+
 func TestBootstrapStreams_EnabledCreateError(t *testing.T) {
 	fjs := &fakeJetStream{streamErr: jetstream.ErrStreamNotFound, createErr: errors.New("boom")}
 	err := bootstrapStreams(context.Background(), fjs, "site1", true)

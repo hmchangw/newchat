@@ -36,6 +36,11 @@ func bootstrapStreams(ctx context.Context, js jetstream.JetStream, siteID string
 		Name:     cfg.Name,
 		Subjects: cfg.Subjects,
 	}); err != nil {
+		// Losing a check-then-create race (another bootstrapper or the real
+		// pipeline created it in between) IS the create-only end state.
+		if errors.Is(err, jetstream.ErrStreamNameAlreadyInUse) {
+			return nil
+		}
 		return fmt.Errorf("create MIGRATION-OPLOG stream: %w", err)
 	}
 	return nil

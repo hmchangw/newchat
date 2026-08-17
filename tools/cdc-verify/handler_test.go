@@ -52,7 +52,7 @@ var testMappingJSON = []byte(`{"sources":[{"collection":"rocketchat_room",` +
 func testServer(t *testing.T) (*httptest.Server, *hub) {
 	t.Helper()
 	h := newHub()
-	handler := newHandler(h, fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{}, ptrConnInfo(), testMappingJSON)
+	handler := newHandler(h, fakeState{}, fakeStats{}, 200, 1000, testPairs, fakeInspector{}, ptrConnInfo(), testMappingJSON)
 	mux := http.NewServeMux()
 	handler.registerRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -79,6 +79,7 @@ func TestAPIState(t *testing.T) {
 		Failures  []CheckResult `json:"failures"`
 		Counters  Counters      `json:"counters"`
 		RecentCap int           `json:"recentCap"`
+		FailedCap int           `json:"failedCap"`
 		Pairs     []TargetPair  `json:"pairs"`
 		ConnInfo  ConnInfo      `json:"connInfo"`
 	}
@@ -88,6 +89,7 @@ func TestAPIState(t *testing.T) {
 	require.Len(t, body.Failures, 1)
 	assert.Equal(t, uint64(2), body.Counters.Checked)
 	assert.Equal(t, 200, body.RecentCap)
+	assert.Equal(t, 1000, body.FailedCap)
 	assert.Equal(t, testPairs, body.Pairs)
 	assert.Equal(t, "site1", body.ConnInfo.SiteID)
 	assert.Equal(t, "mongodb://***@s:27017", body.ConnInfo.SourceMongo.URI)
@@ -156,7 +158,7 @@ func (n *noFlushWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (n *noFlushWriter) WriteHeader(status int)      { n.status = status }
 
 func TestEventsHandler_StreamingUnsupported(t *testing.T) {
-	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200, testPairs, fakeInspector{}, ptrConnInfo(), testMappingJSON)
+	h := newHandler(newHub(), fakeState{}, fakeStats{}, 200, 1000, testPairs, fakeInspector{}, ptrConnInfo(), testMappingJSON)
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	w := &noFlushWriter{}
 	h.events(w, req)
@@ -253,6 +255,26 @@ func TestAPIInspect_InternalErrorBodyIsGeneric(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(body), "internal-host-9")
 	assert.Contains(t, string(body), "inspect failed")
+}
+
+// The server log must not retain credentials either: URI userinfo inside a
+// store error is scrubbed before logging.
+func TestScrubLogValue(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"mongo uri with creds", "dial mongodb://user:s3cret@host:27017: refused", "dial mongodb://***@host:27017: refused"},
+		{"nats token", "connect nats://t0ken@nats:4222 failed", "connect nats://***@nats:4222 failed"},
+		{"no credentials untouched", "context deadline exceeded", "context deadline exceeded"},
+		{"plain uri untouched", "dial mongodb://host:27017: refused", "dial mongodb://host:27017: refused"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, scrubLogValue(tt.in))
+		})
+	}
 }
 
 func TestAPIMapping(t *testing.T) {

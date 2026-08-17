@@ -931,6 +931,32 @@ func TestVerifier_SkipEventSupersedesPending(t *testing.T) {
 	})
 }
 
+// MAX_PENDING bounds the total enrolled checks (queued goroutines included):
+// past the cap, new keys shed as skipped "overload"; an existing key still
+// supersedes in place since replacement doesn't grow the backlog.
+func TestVerifier_OverloadShedsNewChecks(t *testing.T) {
+	v, src, tgt, cass, results := testVerifier(t,
+		verifierConfig{Poll: time.Second, Timeout: 60 * time.Second, MaxChecks: 1, MaxPending: 1, SamplePercent: 100})
+	src.EXPECT().FindByID(gomock.Any(), gomock.Any(), gomock.Any()).Return(srcDoc(), nil).AnyTimes()
+	tgt.EXPECT().FindOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errNotFound).AnyTimes()
+	cass.EXPECT().SelectOne(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errNotFound).AnyTimes()
+	v.sleep = func(ctx context.Context, _ time.Duration) bool {
+		<-ctx.Done()
+		return false
+	}
+
+	v.Submit(insertEvent("m1")) // fills the single MAX_PENDING slot
+	waitState(t, results, "m1", StatePending)
+
+	v.Submit(insertEvent("m2")) // new key over the cap -> shed
+	r := waitState(t, results, "m2", StateSkipped)
+	assert.Equal(t, "overload", r.SkipReason)
+
+	v.Submit(insertEvent("m1")) // same key replaces, never sheds
+	waitState(t, results, "m1", StateSuperseded)
+	v.Shutdown(context.Background())
+}
+
 func TestVerifier_SubmitUndecodable(t *testing.T) {
 	v, _, _, _, results := testVerifier(t, verifierConfig{Poll: time.Second, Timeout: time.Second, MaxChecks: 4, SamplePercent: 100})
 	v.SubmitUndecodable("rocketchat_message", "insert")

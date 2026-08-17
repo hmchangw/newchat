@@ -431,3 +431,37 @@ func TestInspect_CassandraStructKeyedMap(t *testing.T) {
 	assert.Equal(t, "hi", got.Targets[0].Doc["body"])
 	assert.NotContains(t, got.Targets[0].Doc, "reactions", "unrepresentable column is omitted")
 }
+
+// TestWatcher_ConsumerClosureSurfacesError covers the non-cancel exit path:
+// when the stream disappears underneath the ordered consumer, Run must return
+// the closed-unexpectedly error (main turns it into a shutdown) — not park.
+func TestWatcher_ConsumerClosureSurfacesError(t *testing.T) {
+	nc, err := nats.Connect(testutil.NATS(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nc.Drain() })
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	siteID := testSiteID(t)
+	streamCfg := stream.MigrationOplog(siteID)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: streamCfg.Name, Subjects: streamCfg.Subjects})
+	require.NoError(t, err)
+
+	w := newWatcher(js, streamCfg.Name, subject.MigrationOplogWildcard(siteID), time.Time{}, &captureSubmitter{})
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+	require.Eventually(t, w.Live, 10*time.Second, 20*time.Millisecond)
+
+	require.NoError(t, js.DeleteStream(ctx, streamCfg.Name))
+
+	select {
+	case err := <-runErr:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "closed unexpectedly")
+		assert.False(t, w.Live(), "a dead consume loop must not report live")
+	case <-time.After(45 * time.Second):
+		t.Fatal("watcher did not observe the consumer closure")
+	}
+}

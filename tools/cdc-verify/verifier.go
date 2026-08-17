@@ -18,6 +18,7 @@ type verifierConfig struct {
 	Poll          time.Duration
 	Timeout       time.Duration
 	MaxChecks     int
+	MaxPending    int // total enrolled checks (queued included); 0 = unbounded
 	SamplePercent int
 }
 
@@ -269,14 +270,21 @@ func (v *verifier) Submit(ev CDCEvent) {
 	ctx, cancel := context.WithTimeout(v.baseCtx, v.cfg.Timeout)
 	h := &checkHandle{cancel: cancel}
 	key := pendingKey(ev.Collection, ev.DocID)
-	prev, started := v.beginCheck(key, h)
-	if !started {
+	prev, verdict := v.beginCheck(key, h)
+	switch verdict {
+	case enrollClosed:
 		cancel() // shutting down: the check never starts, so it records nothing
+		return
+	case enrollOverload:
+		// MAX_PENDING backlog is full and this is a new key: shed visibly
+		// instead of stacking another goroutine behind the semaphore.
+		cancel()
+		row.Targets = nil
+		v.skip(&row, "overload", nowMs)
 		return
 	}
 	if prev != nil {
-		prev.superseded.Store(true) // must precede cancel: the woken check reads it
-		prev.cancel()
+		prev.cancel() // beginCheck already marked it superseded under the lock
 	}
 	v.results.Upsert(row)
 
@@ -308,30 +316,49 @@ func (v *verifier) skip(row *CheckResult, reason string, nowMs int64) {
 
 // supersedeKey cancels any pending check on key as superseded: a newer event
 // on the doc — even one this verifier skips — makes the old target stale.
+// The mark happens under v.mu, the same lock finish() publishes under.
 func (v *verifier) supersedeKey(key string) {
 	v.mu.Lock()
 	prev := v.pending[key]
-	v.mu.Unlock()
 	if prev != nil {
 		prev.superseded.Store(true)
+	}
+	v.mu.Unlock()
+	if prev != nil {
 		prev.cancel()
 	}
 }
 
 func pendingKey(collection, docID string) string { return collection + "\x00" + docID }
 
-// beginCheck installs h as key's active check, returning the displaced predecessor; false once shutting down.
-// Held under the Shutdown mutex so wg.Add precedes wg.Wait and supersede order matches Submit order.
-func (v *verifier) beginCheck(key string, h *checkHandle) (*checkHandle, bool) {
+type enrollVerdict int
+
+const (
+	enrollOK enrollVerdict = iota
+	enrollClosed
+	enrollOverload
+)
+
+// beginCheck installs h as key's active check, returning the displaced predecessor.
+// Held under the Shutdown mutex so wg.Add precedes wg.Wait; the predecessor's
+// superseded mark also happens here, under the same lock finish() publishes
+// under, so a terminal state can never be published after displacement.
+func (v *verifier) beginCheck(key string, h *checkHandle) (*checkHandle, enrollVerdict) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
-		return nil, false
+		return nil, enrollClosed
 	}
 	prev := v.pending[key]
+	if prev == nil && v.cfg.MaxPending > 0 && len(v.pending) >= v.cfg.MaxPending {
+		return nil, enrollOverload // replacement never sheds: it doesn't grow the backlog
+	}
+	if prev != nil {
+		prev.superseded.Store(true)
+	}
 	v.pending[key] = h
 	v.wg.Add(1)
-	return prev, true
+	return prev, enrollOK
 }
 
 // unregisterPending drops h unless a newer check has already replaced it.
@@ -629,9 +656,13 @@ func snapshotTargets(states []targetState, withDiffs bool) []TargetResult {
 	return out
 }
 
-// finish publishes the terminal state; a supersede that raced the terminal
-// transition wins, so the row never shows matched/failed for a stale target.
+// finish publishes the terminal state. Deciding and publishing happen under
+// v.mu — the lock beginCheck/supersedeKey mark supersession under — so either
+// the supersede lands first (and wins here), or this terminal publish completes
+// before the newer event displaces the check; never a stale terminal after.
 func (v *verifier) finish(h *checkHandle, row *CheckResult, state CheckState, states []targetState) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if h.superseded.Load() {
 		state = StateSuperseded
 	}

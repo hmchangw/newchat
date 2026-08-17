@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -292,6 +294,72 @@ func TestSanitizeDiffValue(t *testing.T) {
 		got, ok := sanitizeDiffValue(s).(string)
 		require.True(t, ok)
 		assert.True(t, utf8.ValidString(got), "no split UTF-8 sequence at the cut point")
+	})
+}
+
+// BSON permits non-finite doubles; encoding/json rejects them, which would
+// silently kill the SSE frame — the sanitizer must stringify them.
+func TestSanitizeDiffValue_NonFiniteFloats(t *testing.T) {
+	tests := []struct {
+		name string
+		in   any
+	}{
+		{"NaN", math.NaN()},
+		{"positive infinity", math.Inf(1)},
+		{"negative infinity", math.Inf(-1)},
+		{"float32 NaN", float32(math.NaN())},
+		{"nested in map", map[string]any{"v": math.Inf(1)}},
+		{"nested in slice", []any{math.NaN()}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeDiffValue(tt.in)
+			_, err := json.Marshal(got)
+			assert.NoError(t, err, "sanitized non-finite value must be JSON-encodable")
+		})
+	}
+
+	t.Run("finite floats pass through unchanged", func(t *testing.T) {
+		assert.Equal(t, 1.5, sanitizeDiffValue(1.5))
+		assert.Equal(t, float32(2.5), sanitizeDiffValue(float32(2.5)))
+	})
+}
+
+// A diff points at a mismatch — it must not retain a near-16MiB BSON container.
+func TestSanitizeDiffValue_CapsContainers(t *testing.T) {
+	t.Run("long slice truncated", func(t *testing.T) {
+		big := make([]any, 500)
+		for i := range big {
+			big[i] = i
+		}
+		got, ok := sanitizeDiffValue(big).([]any)
+		require.True(t, ok)
+		assert.LessOrEqual(t, len(got), diffValueMaxElems+1, "elements capped plus a truncation marker")
+		_, err := json.Marshal(got)
+		assert.NoError(t, err)
+	})
+
+	t.Run("large map truncated", func(t *testing.T) {
+		big := map[string]any{}
+		for i := 0; i < 500; i++ {
+			big[fmt.Sprintf("k%03d", i)] = i
+		}
+		got, ok := sanitizeDiffValue(big).(map[string]any)
+		require.True(t, ok)
+		assert.LessOrEqual(t, len(got), diffValueMaxElems+1)
+		_, err := json.Marshal(got)
+		assert.NoError(t, err)
+	})
+
+	t.Run("deep nesting flattened at the depth cap", func(t *testing.T) {
+		deep := any("leaf")
+		for i := 0; i < 3*diffValueMaxDepth; i++ {
+			deep = map[string]any{"d": deep}
+		}
+		got := sanitizeDiffValue(deep)
+		b, err := json.Marshal(got)
+		require.NoError(t, err)
+		assert.Less(t, len(b), 64*diffValueMaxDepth, "depth cap keeps the encoded diff small")
 	})
 }
 
