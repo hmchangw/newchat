@@ -167,6 +167,9 @@ type RoomKeyStore interface {
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
 	// Set writes a fresh keypair at version 0 — used when seeding a brand-new room.
 	Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
+	// SetIfAbsent installs pair at version 0 only when no current key exists and
+	// returns the key the room then holds, so racing rotation fallbacks converge.
+	SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error)
 	// Rotate atomically increments version and writes newPair as current.
 	Rotate(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair) (int, error)
 }

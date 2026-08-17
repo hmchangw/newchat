@@ -12,13 +12,11 @@ import (
 
 // fakeCommitter records call counts so tests can assert which legs of the protocol ran.
 type fakeCommitter struct {
-	rotateFn func(ctx context.Context, roomID string, newPair RoomKeyPair) (int, error)
-	setFn    func(ctx context.Context, roomID string, pair RoomKeyPair) (int, error)
-	getFn    func(ctx context.Context, roomID string) (*VersionedKeyPair, error)
+	rotateFn      func(ctx context.Context, roomID string, newPair RoomKeyPair) (int, error)
+	setIfAbsentFn func(ctx context.Context, roomID string, pair RoomKeyPair) (*VersionedKeyPair, error)
 
-	rotateCalls int
-	setCalls    int
-	getCalls    int
+	rotateCalls      int
+	setIfAbsentCalls int
 }
 
 func (f *fakeCommitter) Rotate(ctx context.Context, roomID string, newPair RoomKeyPair) (int, error) {
@@ -29,26 +27,18 @@ func (f *fakeCommitter) Rotate(ctx context.Context, roomID string, newPair RoomK
 	return f.rotateFn(ctx, roomID, newPair)
 }
 
-func (f *fakeCommitter) Set(ctx context.Context, roomID string, pair RoomKeyPair) (int, error) {
-	f.setCalls++
-	if f.setFn == nil {
-		return 0, errors.New("unexpected Set")
+func (f *fakeCommitter) SetIfAbsent(ctx context.Context, roomID string, pair RoomKeyPair) (*VersionedKeyPair, error) {
+	f.setIfAbsentCalls++
+	if f.setIfAbsentFn == nil {
+		return nil, errors.New("unexpected SetIfAbsent")
 	}
-	return f.setFn(ctx, roomID, pair)
-}
-
-func (f *fakeCommitter) Get(ctx context.Context, roomID string) (*VersionedKeyPair, error) {
-	f.getCalls++
-	if f.getFn == nil {
-		return nil, errors.New("unexpected Get")
-	}
-	return f.getFn(ctx, roomID)
+	return f.setIfAbsentFn(ctx, roomID, pair)
 }
 
 func newKey(b byte) RoomKeyPair { return RoomKeyPair{PrivateKey: bytes.Repeat([]byte{b}, 32)} }
 
 // A successful Rotate is authoritative: its post-image bound the version to these bytes.
-func TestCommitRotation_RotateSuccess_NoReadBack(t *testing.T) {
+func TestCommitRotation_RotateSuccess_NoFallback(t *testing.T) {
 	newPair := newKey(0xAA)
 	store := &fakeCommitter{
 		rotateFn: func(_ context.Context, _ string, got RoomKeyPair) (int, error) {
@@ -64,46 +54,66 @@ func TestCommitRotation_RotateSuccess_NoReadBack(t *testing.T) {
 	assert.Equal(t, 6, committed.Version)
 	assert.Equal(t, newPair.PrivateKey, committed.KeyPair.PrivateKey)
 	assert.Equal(t, 1, store.rotateCalls)
-	assert.Zero(t, store.setCalls, "a successful Rotate must not fall back to Set")
-	assert.Zero(t, store.getCalls, "Rotate's post-image is authoritative without a re-read")
+	assert.Zero(t, store.setIfAbsentCalls, "a successful Rotate must not fall back to SetIfAbsent")
 }
 
-// Key vanished between Get and Rotate: fall back to Set, then re-read (last-write-wins).
-func TestCommitRotation_RotateNoCurrentKey_FallsBackToSetThenGet(t *testing.T) {
-	settled := &VersionedKeyPair{Version: 0, KeyPair: newKey(0xBB)}
+// Key vanished between Get and Rotate: fall back to the atomic set-if-absent.
+func TestCommitRotation_RotateNoCurrentKey_FallsBackToSetIfAbsent(t *testing.T) {
+	newPair := newKey(0xCC)
+	settled := &VersionedKeyPair{Version: 0, KeyPair: newPair}
 	store := &fakeCommitter{
 		rotateFn: func(_ context.Context, _ string, _ RoomKeyPair) (int, error) {
 			return 0, ErrNoCurrentKey
 		},
-		setFn: func(_ context.Context, _ string, _ RoomKeyPair) (int, error) { return 0, nil },
-		getFn: func(_ context.Context, _ string) (*VersionedKeyPair, error) { return settled, nil },
+		setIfAbsentFn: func(_ context.Context, _ string, got RoomKeyPair) (*VersionedKeyPair, error) {
+			assert.Equal(t, newPair.PrivateKey, got.PrivateKey)
+			return settled, nil
+		},
 	}
-	newPair := newKey(0xCC)
 
 	committed, err := CommitRotation(context.Background(), store, "r1",
 		&VersionedKeyPair{Version: 3, KeyPair: newKey(0x22)}, &newPair)
 	require.NoError(t, err)
-	assert.Same(t, settled, committed, "the read-back pair is what callers must fan out")
+	assert.Same(t, settled, committed, "the post-image pair is what callers must fan out")
 	assert.Equal(t, 1, store.rotateCalls)
-	assert.Equal(t, 1, store.setCalls)
-	assert.Equal(t, 1, store.getCalls)
+	assert.Equal(t, 1, store.setIfAbsentCalls)
 }
 
-// A room with no current key at all skips Rotate entirely and adopts v0 via Set.
-func TestCommitRotation_NilCurrentPair_SetsThenReadsBack(t *testing.T) {
-	settled := &VersionedKeyPair{Version: 0, KeyPair: newKey(0xDD)}
-	store := &fakeCommitter{
-		setFn: func(_ context.Context, _ string, _ RoomKeyPair) (int, error) { return 0, nil },
-		getFn: func(_ context.Context, _ string) (*VersionedKeyPair, error) { return settled, nil },
-	}
+// A room with no current key at all skips Rotate entirely and adopts v0.
+func TestCommitRotation_NilCurrentPair_SetsIfAbsent(t *testing.T) {
 	newPair := newKey(0xEE)
+	settled := &VersionedKeyPair{Version: 0, KeyPair: newPair}
+	store := &fakeCommitter{
+		setIfAbsentFn: func(_ context.Context, _ string, _ RoomKeyPair) (*VersionedKeyPair, error) {
+			return settled, nil
+		},
+	}
 
 	committed, err := CommitRotation(context.Background(), store, "r1", nil, &newPair)
 	require.NoError(t, err)
 	assert.Same(t, settled, committed)
 	assert.Zero(t, store.rotateCalls, "no current key means there is nothing to rotate")
-	assert.Equal(t, 1, store.setCalls)
-	assert.Equal(t, 1, store.getCalls)
+	assert.Equal(t, 1, store.setIfAbsentCalls)
+}
+
+// The regression guard: a loser of the set-if-absent race must fan out the
+// WINNER's bytes, never its own, or two clients hold different keys under v0.
+func TestCommitRotation_LostSetIfAbsentRace_ReturnsWinnersPair(t *testing.T) {
+	localPair := newKey(0x77)
+	winner := &VersionedKeyPair{Version: 0, KeyPair: newKey(0x88)}
+	store := &fakeCommitter{
+		setIfAbsentFn: func(_ context.Context, _ string, _ RoomKeyPair) (*VersionedKeyPair, error) {
+			return winner, nil
+		},
+	}
+
+	committed, err := CommitRotation(context.Background(), store, "r1", nil, &localPair)
+	require.NoError(t, err)
+	require.NotNil(t, committed)
+	assert.Equal(t, winner.KeyPair.PrivateKey, committed.KeyPair.PrivateKey,
+		"the loser must converge on the winner's key, not fan out its own under the same version")
+	assert.NotEqual(t, localPair.PrivateKey, committed.KeyPair.PrivateKey)
+	assert.Equal(t, 0, committed.Version)
 }
 
 func TestCommitRotation_RotateError_ReturnsNoPair(t *testing.T) {
@@ -119,13 +129,13 @@ func TestCommitRotation_RotateError_ReturnsNoPair(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, committed, "a failed commit must never hand back a pair")
 	assert.Contains(t, err.Error(), "rotate room key")
-	assert.Zero(t, store.setCalls, "a non-ErrNoCurrentKey Rotate failure must not fall through to Set")
+	assert.Zero(t, store.setIfAbsentCalls, "a non-ErrNoCurrentKey Rotate failure must not fall through")
 }
 
-func TestCommitRotation_SetError_ReturnsNoPair(t *testing.T) {
+func TestCommitRotation_SetIfAbsentError_ReturnsNoPair(t *testing.T) {
 	store := &fakeCommitter{
-		setFn: func(_ context.Context, _ string, _ RoomKeyPair) (int, error) {
-			return 0, errors.New("mongo down")
+		setIfAbsentFn: func(_ context.Context, _ string, _ RoomKeyPair) (*VersionedKeyPair, error) {
+			return nil, errors.New("mongo down")
 		},
 	}
 	newPair := newKey(0x03)
@@ -134,36 +144,25 @@ func TestCommitRotation_SetError_ReturnsNoPair(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, committed)
 	assert.Contains(t, err.Error(), "store room key")
-	assert.Zero(t, store.getCalls, "a failed Set must not be read back")
+	assert.Equal(t, 1, store.setIfAbsentCalls)
 }
 
-// The read-back is what makes the Set leg trustworthy, so its failure fails the commit.
-func TestCommitRotation_GetAfterSetError_ReturnsNoPair(t *testing.T) {
+// A room deleted underneath the fallback surfaces as a failed commit, not a nil pair.
+func TestCommitRotation_SetIfAbsentRoomGone_ReturnsNoPair(t *testing.T) {
 	store := &fakeCommitter{
-		setFn: func(_ context.Context, _ string, _ RoomKeyPair) (int, error) { return 0, nil },
-		getFn: func(_ context.Context, _ string) (*VersionedKeyPair, error) {
-			return nil, errors.New("mongo down")
+		rotateFn: func(_ context.Context, _ string, _ RoomKeyPair) (int, error) {
+			return 0, ErrNoCurrentKey
 		},
-	}
-	newPair := newKey(0x04)
-
-	committed, err := CommitRotation(context.Background(), store, "r1", nil, &newPair)
-	require.Error(t, err)
-	assert.Nil(t, committed)
-	assert.Contains(t, err.Error(), "read back stored room key")
-}
-
-// (nil, nil) means the key was deleted underneath us — a failed commit, as ErrNoCurrentKey.
-func TestCommitRotation_GetAfterSetReturnsNilPair_ReturnsNoPair(t *testing.T) {
-	store := &fakeCommitter{
-		setFn: func(_ context.Context, _ string, _ RoomKeyPair) (int, error) { return 0, nil },
-		getFn: func(_ context.Context, _ string) (*VersionedKeyPair, error) { return nil, nil },
+		setIfAbsentFn: func(_ context.Context, _ string, _ RoomKeyPair) (*VersionedKeyPair, error) {
+			return nil, ErrRoomNotFound
+		},
 	}
 	newPair := newKey(0x05)
 
-	committed, err := CommitRotation(context.Background(), store, "r1", nil, &newPair)
+	committed, err := CommitRotation(context.Background(), store, "r1",
+		&VersionedKeyPair{Version: 2, KeyPair: newKey(0x06)}, &newPair)
 	require.Error(t, err)
 	assert.Nil(t, committed)
-	assert.ErrorIs(t, err, ErrNoCurrentKey)
-	assert.Contains(t, err.Error(), "read back stored room key")
+	assert.ErrorIs(t, err, ErrRoomNotFound)
+	assert.Contains(t, err.Error(), "store room key")
 }
