@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -59,6 +60,22 @@ type mongoInboxStore struct {
 // does replicate whole rooms here, so a migrated room can hold both and a
 // reader spanning the two must prefer rooms.
 const remoteRoomsCollection = "remote_rooms"
+
+// HasRoomSubscription reports whether any subscription for roomID exists here.
+// Served by the (roomId, u.account) unique index as a prefix scan; projected to
+// _id and capped at one doc since only existence matters.
+func (s *mongoInboxStore) HasRoomSubscription(ctx context.Context, roomID string) (bool, error) {
+	err := s.subCol.FindOne(ctx, bson.M{"roomId": roomID},
+		options.FindOne().SetProjection(bson.M{"_id": 1})).Err()
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, mongo.ErrNoDocuments):
+		return false, nil
+	default:
+		return false, fmt.Errorf("check room subscription %q: %w", roomID, err)
+	}
+}
 
 // UpsertRemoteRoomActivity advances a remote room's position under $max, so
 // out-of-order delivery can never regress it. $setOnInsert carries the
@@ -717,6 +734,23 @@ func main() {
 
 	handler := NewHandler(store)
 
+	// Core-NATS queue subscriber for the cross-site room-activity refresh. Not on
+	// INBOX by design: the signal is coalesced, idempotent and $max-guarded, so it
+	// needs no persistence or ordering, and keeping it off the stream stops a
+	// high-rate hint competing for retention with membership events that do need
+	// both. Fire-and-forget — a failure self-heals on the room's next message.
+	activitySub, err := nc.QueueSubscribe(ctx, subject.RoomActivity(cfg.SiteID), "inbox-worker",
+		func(msgCtx context.Context, msg *nats.Msg) {
+			actCtx, _ := natsutil.StampRequestID(msgCtx, msg.Header, msg.Subject)
+			if err := handler.HandleRoomActivity(actCtx, msg.Data); err != nil {
+				slog.WarnContext(actCtx, "apply room activity refresh failed", "error", err)
+			}
+		})
+	if err != nil {
+		slog.Error("subscribe room-activity failed", "error", err)
+		os.Exit(1)
+	}
+
 	// Two-lane pull pattern over the single INBOX external consumer:
 	//
 	//   - Membership events (member_added/member_removed) run on ONE
@@ -832,6 +866,8 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
+		// Unsubscribe before the drain so no refresh arrives after the store closes.
+		func(_ context.Context) error { return activitySub.Unsubscribe() },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },

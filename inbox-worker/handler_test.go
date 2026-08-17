@@ -109,6 +109,8 @@ type stubInboxStore struct {
 	permissionsApplies    []permissionsApply
 	remoteRoomActivity    []remoteRoomActivity
 	remoteRoomActivityErr error
+	roomSubscribed        map[string]bool
+	hasRoomSubErr         error
 }
 
 type permissionsApply struct {
@@ -121,6 +123,20 @@ type remoteRoomActivity struct {
 	roomID    string
 	siteID    string
 	lastMsgAt time.Time
+}
+
+func (s *stubInboxStore) HasRoomSubscription(_ context.Context, roomID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasRoomSubErr != nil {
+		return false, s.hasRoomSubErr
+	}
+	for i := range s.bulkSubscriptions {
+		if s.bulkSubscriptions[i].RoomID == roomID {
+			return true, nil
+		}
+	}
+	return s.roomSubscribed[roomID], nil
 }
 
 func (s *stubInboxStore) UpsertRemoteRoomActivity(_ context.Context, roomID, siteID string, lastMsgAt time.Time) error {
@@ -1709,6 +1725,45 @@ func memberAddedEventData(t *testing.T, lastMsgAt *int64) []byte {
 	evtData, err := json.Marshal(model.InboxEvent{Type: "member_added", SiteID: "site-A", DestSiteID: "site-B", Payload: changeData})
 	require.NoError(t, err)
 	return evtData
+}
+
+func TestHandleRoomActivity(t *testing.T) {
+	at := int64(1740000000000)
+	payload := func(roomID string, lastMsgAt int64) []byte {
+		b, err := json.Marshal(model.RoomActivityEvent{RoomID: roomID, SiteID: "site-A", LastMsgAt: lastMsgAt, Timestamp: at})
+		require.NoError(t, err)
+		return b
+	}
+
+	t.Run("applies when this site holds a subscription", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.NoError(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r1", at)))
+
+		require.Len(t, store.remoteRoomActivity, 1)
+		assert.Equal(t, "r1", store.remoteRoomActivity[0].roomID)
+		assert.Equal(t, "site-A", store.remoteRoomActivity[0].siteID)
+		assert.Equal(t, time.UnixMilli(at).UTC(), store.remoteRoomActivity[0].lastMsgAt)
+	})
+
+	t.Run("drops rooms this site has no member in", func(t *testing.T) {
+		// The refresh is broadcast to every peer, so without this guard each site
+		// would accrue a row for every cross-site room in the deployment.
+		store := &stubInboxStore{}
+		require.NoError(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r-elsewhere", at)))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+
+	t.Run("rejects a malformed payload", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.Error(t, NewHandler(store).HandleRoomActivity(context.Background(), []byte("{")))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+
+	t.Run("rejects an event with no position to apply", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.Error(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r1", 0)))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
 }
 
 func TestHandleMemberAdded_SeedsRemoteRoomActivity(t *testing.T) {

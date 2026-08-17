@@ -29,6 +29,10 @@ type InboxStore interface {
 	// unordered transport. Until it lands member_added is the only writer, so a
 	// dropped write is NOT self-healing.
 	UpsertRemoteRoomActivity(ctx context.Context, roomID, siteID string, lastMsgAt time.Time) error
+	// HasRoomSubscription reports whether this site holds any subscription for
+	// roomID. The activity refresh is broadcast to every peer, so this is what
+	// stops a site accumulating ordering rows for rooms none of its users are in.
+	HasRoomSubscription(ctx context.Context, roomID string) (bool, error)
 	// UpdateSubscriptionRoles applies roles guarded by rolesUpdatedAt (the source
 	// event's publish time): older/duplicate events are silent no-ops. A
 	// genuinely missing subscription still returns an error so the event is
@@ -110,6 +114,35 @@ type Handler struct {
 // NewHandler creates a Handler with the given store.
 func NewHandler(store InboxStore) *Handler {
 	return &Handler{store: store}
+}
+
+// HandleRoomActivity applies a core-NATS activity refresh for a room owned by
+// another site. Dropped when this site holds no subscription for the room: the
+// refresh is broadcast to every peer, and a row here would otherwise be an
+// orphan nothing deletes.
+//
+// Errors are returned for logging only — there is no ack on this lane, and the
+// $max guard makes the next refresh idempotent, so a loss self-heals on the
+// room's next message.
+func (h *Handler) HandleRoomActivity(ctx context.Context, data []byte) error {
+	var evt model.RoomActivityEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return fmt.Errorf("unmarshal room activity event: %w", err)
+	}
+	if evt.RoomID == "" || evt.LastMsgAt <= 0 {
+		return fmt.Errorf("room activity event missing roomId or lastMsgAt")
+	}
+	subscribed, err := h.store.HasRoomSubscription(ctx, evt.RoomID)
+	if err != nil {
+		return fmt.Errorf("check room subscription: %w", err)
+	}
+	if !subscribed {
+		return nil
+	}
+	if err := h.store.UpsertRemoteRoomActivity(ctx, evt.RoomID, evt.SiteID, time.UnixMilli(evt.LastMsgAt).UTC()); err != nil {
+		return fmt.Errorf("apply room activity: %w", err)
+	}
+	return nil
 }
 
 // HandleEvent processes a single JetStream message payload.
