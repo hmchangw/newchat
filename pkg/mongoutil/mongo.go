@@ -59,15 +59,29 @@ func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string,
 		runCleanup(cleanup)
 		return nil, fmt.Errorf("mongo connect: %w", err)
 	}
-	if err := client.Ping(ctx, nil); err != nil {
-		_ = client.Disconnect(context.Background())
-		runCleanup(cleanup)
-		return nil, fmt.Errorf("mongo ping: %w", err)
+	// mongo.Connect above did not talk to MongoDB — it only built a client.
+	// This ping is the one thing that proves the database is reachable, which
+	// is why skipping it is what lets a service start during an outage. See
+	// WithLazyConnect for who should skip it and why.
+	if cfg.lazy {
+		// Without the ping, Connect can no longer fail because MongoDB is down.
+		// The only errors left are local ones, like a malformed URI, so callers
+		// that exit on a Connect error are still right to do so.
+		//
+		// WARN rather than Info: we have not checked that MongoDB is actually
+		// there, which is worth seeing in the log when a service looks unhealthy.
+		slog.Warn("MongoDB client created without startup ping (lazy connect)", "uri", sanitizeURI(uri))
+	} else {
+		if err := client.Ping(ctx, nil); err != nil {
+			_ = client.Disconnect(context.Background())
+			runCleanup(cleanup)
+			return nil, fmt.Errorf("mongo ping: %w", err)
+		}
+		slog.Info("connected to MongoDB", "uri", sanitizeURI(uri))
 	}
 	if cleanup != nil {
 		cleanups.Store(client, cleanup)
 	}
-	slog.Info("connected to MongoDB", "uri", sanitizeURI(uri))
 	return client, nil
 }
 
