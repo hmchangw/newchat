@@ -38,8 +38,12 @@ var (
 
 // RoomKeyStore is the narrow room-key surface bot-room-service needs.
 type RoomKeyStore interface {
-	// Set writes a fresh keypair at version 0 — the rotate fallback when no current key exists.
+	// Set writes a fresh keypair at version 0 — used when seeding a brand-new room.
 	Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
+
+	// SetIfAbsent is the rotate fallback when no current key exists: it installs pair
+	// at version 0 only if the slot is free and returns the key the room then holds.
+	SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error)
 
 	// Get returns the room's current key pair, or roomkeystore.ErrNoCurrentKey if the room has no key (legacy/broken room).
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)

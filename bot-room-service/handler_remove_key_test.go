@@ -132,29 +132,24 @@ func removeKeyStore() *fakeStore {
 	}
 }
 
-// A keyless channel adopts a fresh key via Set and fans out the store's read-back,
-// not the local pair: Set is last-write-wins at v0, so a racing Set can land last.
+// A keyless channel adopts a fresh key via SetIfAbsent and fans out its post-image,
+// not the local pair: a racing fallback may have installed v0 first.
 func TestHandleRemove_NoCurrentKey_SetsNewKeyAndFansOut(t *testing.T) {
 	store := removeKeyStore()
 	winner := []byte("winning-key-bytes-01234567890123")
 	var setRoomID string
-	var setPair roomkeystore.RoomKeyPair
-	var setDone bool
+	var offeredPair roomkeystore.RoomKeyPair
 	keyStore := &fakeKeyStore{
 		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
-			if !setDone {
-				return nil, roomkeystore.ErrNoCurrentKey
-			}
+			return nil, roomkeystore.ErrNoCurrentKey
+		},
+		SetIfAbsentFn: func(_ context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+			setRoomID = roomID
+			offeredPair = pair
 			return &roomkeystore.VersionedKeyPair{
-				Version: 1,
+				Version: 0,
 				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: winner},
 			}, nil
-		},
-		SetFn: func(_ context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error) {
-			setRoomID = roomID
-			setPair = pair
-			setDone = true
-			return 1, nil
 		},
 		RotateFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
 			t.Fatal("Rotate must not be called on the no-current-key legacy path")
@@ -169,40 +164,34 @@ func TestHandleRemove_NoCurrentKey_SetsNewKeyAndFansOut(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"bob-id"}, resp.Removed.UserIDs)
 	assert.Equal(t, "r1", setRoomID, "new key stored under the room's ID")
-	assert.NotEmpty(t, setPair.PrivateKey)
-	require.Len(t, pub.payloads, 1, "survivors get the Set fallback's committed version")
+	assert.NotEmpty(t, offeredPair.PrivateKey)
+	require.Len(t, pub.payloads, 1, "survivors get the fallback's committed version")
 	var evt model.RoomKeyEvent
 	require.NoError(t, json.Unmarshal(pub.payloads[0], &evt))
-	assert.Equal(t, 1, evt.Version, "fan-out uses the read-back version")
+	assert.Equal(t, 0, evt.Version, "fan-out uses the post-image version")
 	assert.Equal(t, winner, evt.PrivateKey,
-		"the Set leg must fan out the store's read-back bytes, not the locally generated pair")
-	assert.NotEqual(t, setPair.PrivateKey, evt.PrivateKey,
+		"the fallback must fan out the store's post-image bytes, not the locally generated pair")
+	assert.NotEqual(t, offeredPair.PrivateKey, evt.PrivateKey,
 		"the locally generated pair lost the race and must never reach survivors")
 }
 
-// Without a confirmed read-back the committed bytes are unknown: fan out nothing.
-func TestHandleRemove_SetReadBackFails_FansOutNothing(t *testing.T) {
+// Without an authoritative post-image the committed bytes are unknown: fan out nothing.
+func TestHandleRemove_SetIfAbsentFails_FansOutNothing(t *testing.T) {
 	cases := []struct {
-		name   string
-		pair   *roomkeystore.VersionedKeyPair
-		getErr error
+		name string
+		err  error
 	}{
-		{name: "read-back errors", getErr: errors.New("mongo down")},
-		{name: "read-back returns nil", pair: nil},
+		{name: "store errors", err: errors.New("mongo down")},
+		{name: "room gone", err: roomkeystore.ErrRoomNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var setDone bool
 			keyStore := &fakeKeyStore{
 				GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
-					if !setDone {
-						return nil, roomkeystore.ErrNoCurrentKey
-					}
-					return tc.pair, tc.getErr
+					return nil, roomkeystore.ErrNoCurrentKey
 				},
-				SetFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
-					setDone = true
-					return 0, nil
+				SetIfAbsentFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+					return nil, tc.err
 				},
 			}
 			pub := &fakePublisher{}
@@ -212,38 +201,32 @@ func TestHandleRemove_SetReadBackFails_FansOutNothing(t *testing.T) {
 
 			_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "read back stored room key")
+			assert.Contains(t, err.Error(), "store room key")
 			assert.Empty(t, pub.payloads, "an unconfirmed key must never reach survivors")
 		})
 	}
 }
 
-// Nothing is fanned out when Rotate reports ErrNoCurrentKey, so plain Set at v0 is correct.
-func TestHandleRemove_RotateNoCurrentKey_FallsBackToSet(t *testing.T) {
+// Rotate reporting ErrNoCurrentKey falls back to the atomic v0 install.
+func TestHandleRemove_RotateNoCurrentKey_FallsBackToSetIfAbsent(t *testing.T) {
 	var setCalled bool
 	var setPriv []byte
 	store := removeKeyStore()
 	keyStore := &fakeKeyStore{
 		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
-			if !setCalled {
-				return &roomkeystore.VersionedKeyPair{
-					Version: 4,
-					KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("old-key-bytes-0123456789012345")},
-				}, nil
-			}
-			// Post-Set read-back: the store settled on exactly what Set wrote.
 			return &roomkeystore.VersionedKeyPair{
-				Version: 0,
-				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: setPriv},
+				Version: 4,
+				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("old-key-bytes-0123456789012345")},
 			}, nil
 		},
 		RotateFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
 			return 0, roomkeystore.ErrNoCurrentKey
 		},
-		SetFn: func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (int, error) {
+		// This caller wins the race, so the post-image carries its own bytes.
+		SetIfAbsentFn: func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
 			setCalled = true
 			setPriv = pair.PrivateKey
-			return 0, nil
+			return &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: pair}, nil
 		},
 	}
 	var order []string
@@ -254,13 +237,13 @@ func TestHandleRemove_RotateNoCurrentKey_FallsBackToSet(t *testing.T) {
 	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
 	require.NoError(t, err)
 
-	assert.True(t, setCalled, "the ErrNoCurrentKey fallback must adopt a fresh key via Set")
+	assert.True(t, setCalled, "the ErrNoCurrentKey fallback must adopt a fresh key via SetIfAbsent")
 	require.Len(t, pub.payloads, 1)
 	var evt model.RoomKeyEvent
 	require.NoError(t, json.Unmarshal(pub.payloads[0], &evt))
-	assert.Equal(t, 0, evt.Version, "the Set fallback adopts version 0")
+	assert.Equal(t, 0, evt.Version, "the fallback adopts version 0")
 	assert.Equal(t, setPriv, evt.PrivateKey,
-		"survivors receive exactly the bytes the read-back confirmed")
+		"survivors receive exactly the bytes the post-image confirmed")
 }
 
 // TestHandleRemove_RotateOtherError_FailsHandler: any Rotate error other than

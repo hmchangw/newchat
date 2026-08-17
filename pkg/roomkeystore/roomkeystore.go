@@ -26,6 +26,9 @@ type VersionedKeyPair struct {
 // RoomKeyStore defines storage operations for room encryption secrets.
 type RoomKeyStore interface {
 	Set(ctx context.Context, roomID string, pair RoomKeyPair) (int, error)
+	// SetIfAbsent installs pair at version 0 only when the room has no current key,
+	// and returns whichever key the room holds afterwards. Never returns (nil, nil).
+	SetIfAbsent(ctx context.Context, roomID string, pair RoomKeyPair) (*VersionedKeyPair, error)
 	Get(ctx context.Context, roomID string) (*VersionedKeyPair, error)
 	GetMany(ctx context.Context, roomIDs []string) (map[string]*VersionedKeyPair, error)
 	GetByVersion(ctx context.Context, roomID string, version int) (*RoomKeyPair, error)

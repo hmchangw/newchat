@@ -101,6 +101,42 @@ func (s *mongoStore) Set(ctx context.Context, roomID string, pair RoomKeyPair) (
 	return 0, nil
 }
 
+// SetIfAbsent installs pair as the room's current key at version 0 only when the
+// room has no current key, and returns whichever key the room holds afterwards —
+// the caller's own when it won the race, the winner's when it lost, so competing
+// callers converge on one v0 key. Returns ErrRoomNotFound if no room document
+// exists; never returns (nil, nil).
+func (s *mongoStore) SetIfAbsent(ctx context.Context, roomID string, pair RoomKeyPair) (*VersionedKeyPair, error) {
+	var doc roomKeyDoc
+	err := s.col.FindOneAndUpdate(ctx,
+		bson.M{"_id": roomID, "encKey.priv": bson.M{"$exists": false}},
+		bson.M{"$set": bson.M{"encKey.priv": pair.PrivateKey, "encKey.ver": 0}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After).SetProjection(encKeyProjection),
+	).Decode(&doc)
+	if err == nil {
+		if doc.EncKey == nil {
+			return nil, fmt.Errorf("set room key if absent: missing key after update")
+		}
+		vp, decErr := doc.EncKey.versioned()
+		if decErr != nil {
+			return nil, fmt.Errorf("set room key if absent: %w", decErr)
+		}
+		return vp, nil
+	}
+	if !errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, fmt.Errorf("set room key if absent: %w", err)
+	}
+	// No match: either a racer installed a key first, or the room does not exist.
+	existing, getErr := s.Get(ctx, roomID)
+	if getErr != nil {
+		return nil, fmt.Errorf("set room key if absent: read current key: %w", getErr)
+	}
+	if existing == nil {
+		return nil, fmt.Errorf("set room key if absent: %w", ErrRoomNotFound)
+	}
+	return existing, nil
+}
+
 // Get returns the room's current key, or (nil, nil) when the room or its key is absent.
 func (s *mongoStore) Get(ctx context.Context, roomID string) (*VersionedKeyPair, error) {
 	var doc roomKeyDoc

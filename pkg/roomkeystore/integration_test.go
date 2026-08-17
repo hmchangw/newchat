@@ -70,6 +70,74 @@ func TestMongoStore_Integration_SetRoomNotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrRoomNotFound), "Set on a missing room must return ErrRoomNotFound")
 }
 
+func TestMongoStore_Integration_SetIfAbsentRoomNotFound(t *testing.T) {
+	store, _ := setupMongo(t, time.Hour)
+
+	got, err := store.SetIfAbsent(context.Background(), "ghost-room",
+		RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x07}, 32)})
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.True(t, errors.Is(err, ErrRoomNotFound), "SetIfAbsent on a missing room must return ErrRoomNotFound")
+}
+
+func TestMongoStore_Integration_SetIfAbsentKeepsExistingKey(t *testing.T) {
+	store, col := setupMongo(t, time.Hour)
+	ctx := context.Background()
+	insertRoom(t, col, "room-occupied")
+
+	installed := bytes.Repeat([]byte{0x41}, 32)
+	_, err := store.Set(ctx, "room-occupied", RoomKeyPair{PrivateKey: installed})
+	require.NoError(t, err)
+
+	got, err := store.SetIfAbsent(ctx, "room-occupied", RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x42}, 32)})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 0, got.Version)
+	assert.Equal(t, installed, got.KeyPair.PrivateKey, "an occupied slot must be reported back, not overwritten")
+
+	held, err := store.Get(ctx, "room-occupied")
+	require.NoError(t, err)
+	require.NotNil(t, held)
+	assert.Equal(t, installed, held.KeyPair.PrivateKey)
+}
+
+// The regression guard for the v0 split-brain: concurrent fallbacks on a keyless
+// room must all report the single key the document ends up holding.
+func TestMongoStore_Integration_SetIfAbsentConcurrentCallersConverge(t *testing.T) {
+	store, col := setupMongo(t, time.Hour)
+	ctx := context.Background()
+	insertRoom(t, col, "room-race")
+
+	const callers = 8
+	results := make([]*VersionedKeyPair, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = store.SetIfAbsent(ctx, "room-race",
+				RoomKeyPair{PrivateKey: bytes.Repeat([]byte{byte(0x50 + i)}, 32)})
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	held, err := store.Get(ctx, "room-race")
+	require.NoError(t, err)
+	require.NotNil(t, held)
+
+	for i := range callers {
+		require.NoError(t, errs[i], "caller %d", i)
+		require.NotNil(t, results[i], "caller %d must never get (nil, nil)", i)
+		assert.Equal(t, 0, results[i].Version, "caller %d", i)
+		assert.Equal(t, held.KeyPair.PrivateKey, results[i].KeyPair.PrivateKey,
+			"caller %d must return the key the room holds, not its own candidate", i)
+	}
+}
+
 func TestMongoStore_Integration_MissingKey(t *testing.T) {
 	store, col := setupMongo(t, time.Hour)
 	ctx := context.Background()

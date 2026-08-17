@@ -18,7 +18,9 @@
 //
 // Rotate runs as a single aggregation-pipeline update against one document, so
 // the current-to-previous transition and version bump are atomic; no concurrent
-// reader observes a partially-rotated key. Set and Get are not otherwise
+// reader observes a partially-rotated key. SetIfAbsent is likewise a single
+// conditional update whose post-image lets racing callers converge on one v0 key,
+// which plain Set (last-write-wins) cannot do. Set and Get are not otherwise
 // coordinated; readers see Set's write atomically once the update completes.
 //
 // # Federation

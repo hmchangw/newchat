@@ -6390,30 +6390,27 @@ func TestHandler_RotateAndFanOut_FansOutStoreAssignedVersion(t *testing.T) {
 		"survivors must receive exactly the bytes the store committed")
 }
 
-func TestHandler_RotateAndFanOut_ErrNoCurrentKey_AdoptsSetVersion(t *testing.T) {
+func TestHandler_RotateAndFanOut_ErrNoCurrentKey_AdoptsSetIfAbsentVersion(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockKeys := NewMockRoomKeyStore(ctrl)
 
-	// Key vanished between Get and Rotate: Set at v0 is correct, but it is
-	// last-write-wins, so fan out the read-back — here deliberately other bytes.
+	// Key vanished between Get and Rotate: the v0 fallback lost the set-if-absent
+	// race here, so the winner's bytes — not the local pair — must reach survivors.
 	winner := bytes.Repeat([]byte{0xBB}, 32)
-	var setPriv []byte
+	var offeredPriv []byte
 	gomock.InOrder(
 		mockKeys.EXPECT().
 			Rotate(gomock.Any(), "test-room", gomock.Any()).
 			Return(0, roomkeystore.ErrNoCurrentKey),
 		mockKeys.EXPECT().
-			Set(gomock.Any(), "test-room", gomock.Any()).
-			DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (int, error) {
-				setPriv = pair.PrivateKey
-				return 0, nil
+			SetIfAbsent(gomock.Any(), "test-room", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+				offeredPriv = pair.PrivateKey
+				return &roomkeystore.VersionedKeyPair{
+					Version: 0,
+					KeyPair: roomkeystore.RoomKeyPair{PrivateKey: winner},
+				}, nil
 			}),
-		mockKeys.EXPECT().
-			Get(gomock.Any(), "test-room").
-			Return(&roomkeystore.VersionedKeyPair{
-				Version: 0,
-				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: winner},
-			}, nil),
 	)
 
 	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
@@ -6426,34 +6423,30 @@ func TestHandler_RotateAndFanOut_ErrNoCurrentKey_AdoptsSetVersion(t *testing.T) 
 
 	events := rec.captured()
 	require.Len(t, events, 1)
-	assert.Equal(t, 0, events[0].Version, "the Set fallback adopts version 0")
+	assert.Equal(t, 0, events[0].Version, "the set-if-absent fallback adopts version 0")
 	assert.Equal(t, winner, events[0].PrivateKey,
-		"the Set leg must fan out the store's read-back bytes, not the locally generated pair")
-	require.NotEmpty(t, setPriv)
-	assert.NotEqual(t, setPriv, events[0].PrivateKey,
+		"the fallback must fan out the store's post-image bytes, not the locally generated pair")
+	require.NotEmpty(t, offeredPriv)
+	assert.NotEqual(t, offeredPriv, events[0].PrivateKey,
 		"the locally generated pair lost the race and must never reach survivors")
 }
 
-// A failed or empty read-back means the committed bytes are unknown, and handing
+// Without an authoritative post-image the committed bytes are unknown, and handing
 // survivors an unconfirmed key is the failure this ordering exists to prevent.
-func TestHandler_RotateAndFanOut_SetReadBackFailure_FansOutNothing(t *testing.T) {
+func TestHandler_RotateAndFanOut_SetIfAbsentFailure_FansOutNothing(t *testing.T) {
 	cases := []struct {
 		name    string
-		pair    *roomkeystore.VersionedKeyPair
-		getErr  error
+		err     error
 		wantMsg string
 	}{
-		{name: "get errors", getErr: errors.New("mongo down"), wantMsg: "read back stored room key"},
-		{name: "get returns nil", pair: nil, wantMsg: "read back stored room key"},
+		{name: "store errors", err: errors.New("mongo down"), wantMsg: "store room key"},
+		{name: "room gone", err: roomkeystore.ErrRoomNotFound, wantMsg: "store room key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			mockKeys := NewMockRoomKeyStore(ctrl)
-			gomock.InOrder(
-				mockKeys.EXPECT().Set(gomock.Any(), "test-room", gomock.Any()).Return(0, nil),
-				mockKeys.EXPECT().Get(gomock.Any(), "test-room").Return(tc.pair, tc.getErr),
-			)
+			mockKeys.EXPECT().SetIfAbsent(gomock.Any(), "test-room", gomock.Any()).Return(nil, tc.err)
 
 			h, rec := newRotateTestHandler(t, ctrl, mockKeys)
 
