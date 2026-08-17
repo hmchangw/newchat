@@ -279,7 +279,12 @@ func (r *soakRoomReader) SubscriptionFor(
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Subscriptions)
 	})
-	return response, err
+	if err != nil {
+		// Two verifiers share this call, so the transport error alone does not
+		// say which room's state could not be read.
+		return response, fmt.Errorf("read subscription for room %q: %w", roomID, err)
+	}
+	return response, nil
 }
 
 // Account returns the account the reader addresses a room as, so the observer

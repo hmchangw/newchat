@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -68,7 +69,7 @@ func handlerBodyRequirements(t *testing.T, root string) map[string]bool {
 	requirements := make(map[string]bool)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("walk %q while scanning registrations: %w", path, err)
 		}
 		if entry.IsDir() {
 			if skipDirs[entry.Name()] {
@@ -81,7 +82,7 @@ func handlerBodyRequirements(t *testing.T, root string) map[string]bool {
 		}
 		source, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return readErr
+			return fmt.Errorf("read %q while scanning registrations: %w", path, readErr)
 		}
 		for _, match := range soakRegistrationPattern.FindAllStringSubmatch(string(source), -1) {
 			// A subject registered both ways anywhere in the repo is treated as

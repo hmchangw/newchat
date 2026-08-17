@@ -218,6 +218,42 @@ func TestSoakUserReader_SubscriptionDMTargetsAKnownDMPeer(t *testing.T) {
 	}
 }
 
+// A left room keeps its subscription row with isSubscribed=false. Pairing on it
+// names a counterpart who no longer shares the room, so the read is answered
+// with a legitimate empty result — the exact "measures nothing" outcome the
+// index exists to avoid. The room pool already filters on this; the pair index
+// has to agree with it.
+func TestSoakUserReader_RoomPairsIgnoreUnsubscribedMemberships(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
+	reader, err := newSoakUserReader(
+		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+		&soakTopology{
+			ActiveUsers: []model.User{
+				{ID: "u1", Account: "user-a"},
+				{ID: "u2", Account: "user-b"},
+			},
+			Rooms: []model.Room{{ID: "dm-1", Type: model.RoomTypeDM}},
+			Subscriptions: []model.Subscription{
+				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
+				// user-b left: the row survives with isSubscribed=false.
+				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: false,
+					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
+			},
+		},
+		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+		&soakRoomReadRecorder{},
+		rand.New(rand.NewSource(3)),
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, reader.SubscriptionDM(context.Background()))
+
+	assert.Empty(t, transport.subjects,
+		"a room with one live member cannot name a counterpart; the lane must skip")
+}
+
 // The user lane addresses 2000 active accounts by design. DM rooms are seeded
 // active↔active and active↔borrowed, so indexing every participant as a
 // requester would silently start issuing reads as borrowed accounts no other
