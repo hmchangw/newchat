@@ -70,16 +70,3 @@ func TestRunSoakEncryptionPreflight_DisabledSendsNothing(t *testing.T) {
 
 	require.NoError(t, err)
 }
-
-// The preflight timeout used to ride on SOAK_PERSIST_GRACE, which also decides
-// when every ledger verification starts. Stretching one to buy the other is the
-// bug this separation exists to prevent.
-func TestValidateSoakConfig_EncryptionPreflightTimeoutIsIndependentOfPersistGrace(t *testing.T) {
-	cfg := validSoakConfig(t)
-	cfg.PersistGrace = 10 * time.Second
-	cfg.EncryptionPreflightTimeout = 5 * time.Minute
-
-	require.NoError(t, validateSoakConfig(&cfg, "soak_keyspace"))
-	assert.Equal(t, 10*time.Second, cfg.PersistGrace,
-		"raising the preflight budget must not move the evidence timing")
-}

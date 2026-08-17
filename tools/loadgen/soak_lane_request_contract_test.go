@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand"
-	"strings"
 	"testing"
 	"time"
 
@@ -43,18 +42,44 @@ func TestSoakRoomReader_SubscriptionListSendsAnAcceptedListType(t *testing.T) {
 		"user-service rejects any other type; got %q", listType)
 }
 
-func TestSoakRoomReader_SubscriptionsForSendsAnAcceptedListType(t *testing.T) {
-	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+// The room-state observer needs one room's subscription, not a page of the
+// account's rooms. subscription.list is paged (SUBSCRIPTION_DEFAULT_LIMIT), and
+// the verifiers treat "room not in the response" as a mismatch — the impossible
+// state — so a room that merely fell off the page would be recorded as evidence
+// of corruption. The by-room lookup answers 0-or-1 with no page to fall off.
+func TestSoakRoomReader_SubscriptionForIsARoomScopedPointLookup(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[],"total":0}`)}
 	reader, _, _ := newSoakRoomReadFixture(t, transport, 1)
 
-	_, err := reader.SubscriptionsFor(context.Background(), "user-a0")
+	_, err := reader.SubscriptionFor(context.Background(), "user-a0", "room-1")
 	require.NoError(t, err)
+
+	require.Len(t, transport.subjects, 1)
+	assert.Equal(t,
+		subject.UserSubscriptionGetByRoomID("user-a0", "site-a"),
+		transport.subjects[0],
+		"a paged list cannot distinguish an absent room from a paged-out one")
+	require.Len(t, transport.bodies, 1)
+	body := decodeSoakRequestBody(t, transport.bodies[0])
+	assert.Equal(t, "room-1", body["roomId"])
+}
+
+func TestSoakUserReader_SubscriptionChannelsAsksForACoMember(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+	reader, _ := newSoakUserReadFixture(t, transport, 1)
+
+	require.NoError(t, reader.SubscriptionChannels(context.Background()))
 
 	require.Len(t, transport.bodies, 1)
 	body := decodeSoakRequestBody(t, transport.bodies[0])
-	listType, _ := body["type"].(string)
-	assert.True(t, soakValidSubscriptionListTypes[listType],
-		"the room-state observer's RPC source is rejected without a type; got %q", listType)
+	contains, _ := body["membersContain"].(string)
+	require.NotEmpty(t, contains)
+	// user-service dedupes membersContain with the requester before matching, so
+	// naming the requester collapses the intersection to a single account and
+	// every channel they belong to matches. The query then measures nothing the
+	// plain subscription list does not already cover.
+	assert.NotContains(t, transport.subjects[0], contains,
+		"membersContain must be a different account than the requester")
 }
 
 func TestSoakRoomReader_ReadReceiptsAsksAsTheMessageAuthor(t *testing.T) {
@@ -94,20 +119,6 @@ func (s *soakStubMessageSource) PickAnyEligible(
 	message := s.message
 	message.RoomID = roomID
 	return message, true
-}
-
-func TestSoakUserReader_SubscriptionChannelsSendsExactlyOneMemberSelector(t *testing.T) {
-	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
-	reader, _ := newSoakUserReadFixture(t, transport, 1)
-
-	require.NoError(t, reader.SubscriptionChannels(context.Background()))
-
-	require.Len(t, transport.bodies, 1)
-	body := decodeSoakRequestBody(t, transport.bodies[0])
-	contains, _ := body["membersContain"].(string)
-	names, _ := body["accountNames"].([]any)
-	assert.NotEqual(t, contains != "", len(names) > 0,
-		"user-service requires exactly one of membersContain / accountNames, got %v", body)
 }
 
 // newSoakUserReadDMFixture builds a topology with one DM room whose two
@@ -159,16 +170,56 @@ func TestSoakUserReader_SubscriptionDMTargetsAKnownDMPeer(t *testing.T) {
 	}
 
 	require.Len(t, transport.subjects, 20)
+	// Compared as whole (subject, target) pairs rather than by substring: an
+	// account name that is a prefix of another would make a Contains check pass
+	// on the wrong requester.
+	valid := map[string]string{
+		subject.UserSubscriptionGetDM("user-a", "site-a"): "user-b",
+		subject.UserSubscriptionGetDM("user-b", "site-a"): "user-a",
+	}
 	for i, requestSubject := range transport.subjects {
 		body := decodeSoakRequestBody(t, transport.bodies[i])
-		target, _ := body["accountName"].(string)
-		requester := "user-a"
-		peer := "user-b"
-		if strings.Contains(requestSubject, "user-b") {
-			requester, peer = "user-b", "user-a"
-		}
-		assert.Equal(t, subject.UserSubscriptionGetDM(requester, "site-a"), requestSubject)
-		assert.Equal(t, peer, target,
+		peer, known := valid[requestSubject]
+		require.True(t, known, "unexpected requester in %q", requestSubject)
+		assert.Equal(t, peer, body["accountName"],
 			"a pair with no DM is a guaranteed not-found, so the lane must pick a real peer")
+	}
+}
+
+// The user lane addresses 2000 active accounts by design. DM rooms are seeded
+// active↔active and active↔borrowed, so indexing every participant as a
+// requester would silently start issuing reads as borrowed accounts no other
+// lane touches — a change in what the lane measures that nothing would flag.
+func TestSoakUserReader_SubscriptionDMAsksFromTheActiveSide(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
+	reader, err := newSoakUserReader(
+		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+		&soakTopology{
+			ActiveUsers: []model.User{{ID: "u1", Account: "user-a"}},
+			Rooms:       []model.Room{{ID: "dm-1", Type: model.RoomTypeDM}},
+			Subscriptions: []model.Subscription{
+				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
+				// Borrowed, never an active account.
+				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u9", Account: "borrowed-z"}},
+			},
+		},
+		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+		&soakRoomReadRecorder{},
+		rand.New(rand.NewSource(5)),
+		nil,
+	)
+	require.NoError(t, err)
+
+	for range 10 {
+		require.NoError(t, reader.SubscriptionDM(context.Background()))
+	}
+
+	require.Len(t, transport.subjects, 10)
+	for i, requestSubject := range transport.subjects {
+		assert.Equal(t, subject.UserSubscriptionGetDM("user-a", "site-a"), requestSubject)
+		assert.Equal(t, "borrowed-z",
+			decodeSoakRequestBody(t, transport.bodies[i])["accountName"])
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -653,8 +654,9 @@ func runSoakWorkload(
 	if err := runSoakEncryptionPreflight(
 		ctx,
 		soakEncryptionPreflightConfig{
-			Enabled: cfg.Soak.EncryptionPreflight,
-			Timeout: cfg.Soak.EncryptionPreflightTimeout,
+			Enabled:  cfg.Soak.EncryptionPreflight,
+			Timeout:  cfg.Soak.EncryptionPreflightTimeout,
+			Verified: metrics.SoakEncryptionPreflight,
 		},
 		store,
 		sender,
@@ -1137,6 +1139,10 @@ func warmSoakPinnedCatalog(
 type soakEncryptionPreflightConfig struct {
 	Enabled bool
 	Timeout time.Duration
+	// Verified is set to 1 when the check passed and 0 when it was skipped, so
+	// the run's own metrics say whether at-rest encryption was ever proven. A
+	// warning at t=0 of a multi-day run is not a durable record.
+	Verified prometheus.Gauge
 }
 
 func runSoakEncryptionPreflight(
@@ -1147,9 +1153,10 @@ func runSoakEncryptionPreflight(
 	selector *soakRuntimeSelector,
 	replies <-chan soakSendObservation,
 ) error {
+	if cfg.Verified != nil {
+		cfg.Verified.Set(0)
+	}
 	if !cfg.Enabled {
-		// Loud, and on the run's own record: a report from this run cannot be
-		// read as evidence that messages were encrypted at rest.
 		slog.Warn(
 			"Cassandra soak encryption preflight skipped by configuration",
 			"encryptionPreflight", false,
@@ -1188,6 +1195,9 @@ func runSoakEncryptionPreflight(
 				soakEncryptionPollPeriod,
 			); err != nil {
 				return err
+			}
+			if cfg.Verified != nil {
+				cfg.Verified.Set(1)
 			}
 			slog.Info(
 				"Cassandra soak encryption preflight passed",

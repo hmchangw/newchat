@@ -59,6 +59,7 @@ type Metrics struct {
 	SoakRoomPoolExhausted         *prometheus.CounterVec
 	SoakRoomPoolDegraded          prometheus.Gauge
 	SoakRoomCreateBudgetRemaining prometheus.Gauge
+	SoakEncryptionPreflight       prometheus.Gauge
 	SoakRoomStateSources          *prometheus.CounterVec
 	SoakLaneAttempts              *prometheus.CounterVec
 	SoakPresenceSignals           *prometheus.CounterVec
@@ -303,6 +304,12 @@ func NewMetrics() *Metrics {
 			Help: "Rooms the create lane may still add before it stops for this run.",
 		},
 	)
+	m.SoakEncryptionPreflight = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "loadgen_soak_encryption_preflight",
+			Help: "1 when this run verified that a message reached Cassandra encrypted and wrapped the room DEK, 0 when the check was skipped by configuration. A run reporting 0 is not evidence about at-rest encryption.",
+		},
+	)
 	m.SoakRoomStateSources = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_soak_room_state_source_total",
@@ -523,6 +530,7 @@ func NewMetrics() *Metrics {
 		m.SoakDispatched, m.SoakSchedulerUnderrun, m.SoakLaneSaturation, m.SoakGlobalSaturation,
 		m.SoakRoomCandidates, m.SoakRoomQuarantineProbes, m.SoakRoomPoolExhausted,
 		m.SoakRoomPoolDegraded, m.SoakRoomCreateBudgetRemaining, m.SoakRoomStateSources,
+		m.SoakEncryptionPreflight,
 		m.SoakLaneAttempts,
 		m.SoakPresenceSignals, m.SoakPresenceChecks, m.SoakPresenceConnections,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,

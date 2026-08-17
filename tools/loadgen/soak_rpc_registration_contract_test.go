@@ -17,12 +17,29 @@ import (
 // decodes a body; `RegisterNoBody` does not. A call site that omits Body against
 // a Register-ed subject sends `null`, which unmarshals cleanly into the zero
 // value and is then refused by the handler's own validation — so the lane fails
-// 100% of the time while every wire-shape test still passes. Comparing the call
-// sites against the real registrations is the only check that catches it.
+// 100% of the time while every wire-shape test still passes.
+//
+// Scope, stated plainly: this checks that a body is PRESENT, not that its shape
+// satisfies the handler. Of the four lanes whose repair prompted it, that covers
+// the two that sent no body at all; getChannels sent the wrong fields and the
+// read-receipt lane sent the right body from the wrong identity, and neither
+// would be caught here. Those need their own assertions, which live in
+// soak_lane_request_contract_test.go.
+//
+// The requirements map is keyed by subject builder and unioned across the repo,
+// taking body-required as the stricter reading. A future service registering a
+// body-decoding handler on a builder some soak lane calls bodyless will
+// therefore fail this test from a package that did not change — which is the
+// intended direction: that combination is a real defect in the soak lane.
 
 var (
+	// The router argument is [\w.]+ because services register on both a local
+	// `r` and a field like `h.router`; the builder is captured whole and its
+	// optional "Pattern" suffix trimmed in Go, because not every registration
+	// uses a Pattern-suffixed builder — subject.RoomsInfoBatchSubscribe is
+	// registered directly, and requiring the suffix skipped it silently.
 	soakRegistrationPattern = regexp.MustCompile(
-		`natsrouter\.(Register|RegisterNoBody)\(\s*\w+\s*,\s*subject\.(\w+)Pattern\(`,
+		`natsrouter\.(Register|RegisterNoBody)\(\s*[\w.]+\s*,\s*subject\.(\w+)\(`,
 	)
 	soakRequestLiteralPattern = regexp.MustCompile(`soakRPCRequest\{`)
 	soakRequestSubjectPattern = regexp.MustCompile(`Subject:\s*subject\.(\w+)\(`)
@@ -69,7 +86,8 @@ func handlerBodyRequirements(t *testing.T, root string) map[string]bool {
 		for _, match := range soakRegistrationPattern.FindAllStringSubmatch(string(source), -1) {
 			// A subject registered both ways anywhere in the repo is treated as
 			// body-required, the stricter reading.
-			requirements[match[2]] = requirements[match[2]] || match[1] == "Register"
+			builder := strings.TrimSuffix(match[2], "Pattern")
+			requirements[builder] = requirements[builder] || match[1] == "Register"
 		}
 		return nil
 	})
@@ -139,8 +157,23 @@ func matchSoakBraces(text string, start int) (string, bool) {
 	return "", false
 }
 
+// soakRegistrationAnchors are builders the scan must keep resolving. A count-
+// based guard cannot tell "the mapping still works" from "one builder quietly
+// stopped matching after a rename or a wrapper helper"; naming the two that
+// have already regressed this way makes that failure loud.
+var soakRegistrationAnchors = []string{
+	"UserSubscriptionList",    // Pattern-suffixed registration
+	"RoomsInfoBatchSubscribe", // registered without a Pattern suffix
+}
+
 func TestSoakRPCCallSites_CarryABodyWhenTheHandlerDecodesOne(t *testing.T) {
 	requirements := handlerBodyRequirements(t, repoRoot(t))
+	for _, anchor := range soakRegistrationAnchors {
+		requiresBody, known := requirements[anchor]
+		require.True(t, known, "subject.%s no longer resolves; the scan regressed", anchor)
+		require.True(t, requiresBody,
+			"subject.%s is registered with natsrouter.Register but read as bodyless", anchor)
+	}
 	sites := soakRequestCallSites(t)
 
 	checked := 0

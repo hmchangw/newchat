@@ -226,13 +226,15 @@ func TestSoakRoomReader_RoomInfoForSurfacesTransportFailures(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestSoakRoomReader_SubscriptionsForRejectsAnEmptyAccount(t *testing.T) {
+func TestSoakRoomReader_SubscriptionForRejectsAnEmptyAccountOrRoom(t *testing.T) {
 	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
 	reader, _, _ := newSoakRoomReadFixture(t, transport, 15)
 
-	_, err := reader.SubscriptionsFor(context.Background(), "")
-
+	_, err := reader.SubscriptionFor(context.Background(), "", "room-1")
 	require.Error(t, err)
+
+	_, err = reader.SubscriptionFor(context.Background(), "user-a0", "")
+	require.Error(t, err, "an unscoped lookup would answer about the wrong room")
 }
 
 func TestSoakRoomReader_RequiresAnRPCClient(t *testing.T) {

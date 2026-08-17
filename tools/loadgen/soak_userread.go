@@ -91,15 +91,32 @@ func newSoakUserReader(
 	for i := range topology.Rooms {
 		reader.rooms = append(reader.rooms, topology.Rooms[i].ID)
 	}
-	reader.dmPairs = soakUserDMPairs(topology)
+	reader.dmPairs = soakUserDMPairs(topology, reader.accounts)
 	reader.reads = soakUserReads()
 	return reader, nil
 }
 
-// soakUserDMPairs indexes the topology's DM rooms as both directions of each
-// participant pair. A DM room is always exactly two accounts, so anything else
-// is a malformed room and is left out rather than guessed at.
-func soakUserDMPairs(topology *soakTopology) []soakUserDMPair {
+// soakUserDMPairs indexes the topology's DM rooms as the directions whose
+// requester is one of the lane's active accounts. A DM room is always exactly
+// two accounts, so anything else is a malformed room and is left out rather
+// than guessed at.
+//
+// Restricting the requester keeps the lane addressing the same ~2k accounts as
+// every other user read. DM rooms are seeded active↔active and active↔borrowed,
+// so at least one side always qualifies and no room is lost; indexing both
+// sides would instead have this one read issuing traffic as borrowed accounts
+// nothing else touches, quietly changing what the lane measures.
+//
+// Ordering follows topology.Rooms so a given seed draws the same sequence for a
+// given topology. It is not stable across the seed and restart paths: those
+// build Rooms in different orders, so a replacement process draws a different
+// sequence than the process it replaced. That is acceptable for a read lane
+// with no evidence to reconcile — it is recorded here so nobody relies on more.
+func soakUserDMPairs(topology *soakTopology, accounts []string) []soakUserDMPair {
+	active := make(map[string]struct{}, len(accounts))
+	for _, account := range accounts {
+		active[account] = struct{}{}
+	}
 	members := make(map[string][]string)
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
@@ -111,18 +128,20 @@ func soakUserDMPairs(topology *soakTopology) []soakUserDMPair {
 			members[subscription.RoomID], subscription.User.Account,
 		)
 	}
-	// Room order, not map order, so a replacement process draws from the same
-	// sequence for a given seed.
 	pairs := make([]soakUserDMPair, 0, len(members)*2)
 	for i := range topology.Rooms {
-		accounts := members[topology.Rooms[i].ID]
-		if len(accounts) != 2 || accounts[0] == accounts[1] {
+		participants := members[topology.Rooms[i].ID]
+		if len(participants) != 2 || participants[0] == participants[1] {
 			continue
 		}
-		pairs = append(pairs,
-			soakUserDMPair{Requester: accounts[0], Peer: accounts[1]},
-			soakUserDMPair{Requester: accounts[1], Peer: accounts[0]},
-		)
+		for side, requester := range participants {
+			if _, ok := active[requester]; !ok {
+				continue
+			}
+			pairs = append(pairs, soakUserDMPair{
+				Requester: requester, Peer: participants[1-side],
+			})
+		}
 	}
 	return pairs
 }
@@ -277,14 +296,19 @@ func (r *soakUserReader) SubscriptionByRoom(ctx context.Context) error {
 	})
 }
 
+// SubscriptionChannels asks which of the requester's channels also contain
+// another named account. The co-member must not be the requester: user-service
+// dedupes membersContain with the requester before matching, so naming self
+// collapses the intersection to one account and every channel matches — the
+// query would then measure nothing subscription.list does not already cover.
 func (r *soakUserReader) SubscriptionChannels(ctx context.Context) error {
-	account := r.pickAccount()
+	account, coMember := r.pickAccountPair()
 	var response soakSubscriptionListResponse
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionChannel,
 		Subject: subject.UserSubscriptionGetChannels(account, r.cfg.SiteID),
 		Body: soakUserChannelsRequest{
-			MembersContain: account, Limit: r.cfg.PageLimit,
+			MembersContain: coMember, Limit: r.cfg.PageLimit,
 		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {

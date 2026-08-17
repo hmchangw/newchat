@@ -256,20 +256,25 @@ func (r *soakRoomReader) RoomInfoFor(ctx context.Context, roomID string) (soakRo
 	return soakRoomInfo{RoomID: roomID}, nil
 }
 
-// SubscriptionsFor reads one account's subscriptions through the production RPC
-// path so the mute state can be checked the way a client would see it.
-func (r *soakRoomReader) SubscriptionsFor(
+// SubscriptionFor reads one account's subscription to one room through the
+// production RPC path, so mute and read state are checked the way a client sees
+// them. Deliberately the by-room lookup rather than subscription.list: that list
+// is paged, and the verifiers read "room absent from the response" as a
+// mismatch, so a room that fell off the page would be reported as corruption.
+// This answers 0-or-1 for the room asked about, and an empty answer means the
+// subscription is genuinely gone.
+func (r *soakRoomReader) SubscriptionFor(
 	ctx context.Context,
-	account string,
+	account, roomID string,
 ) (soakSubscriptionListResponse, error) {
 	var response soakSubscriptionListResponse
-	if account == "" {
-		return response, fmt.Errorf("subscription read requires an account")
+	if account == "" || roomID == "" {
+		return response, fmt.Errorf("subscription read requires an account and room")
 	}
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
-		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
-		Body:    soakSubscriptionListRequest{Type: soakSubscriptionListType},
+		Subject: subject.UserSubscriptionGetByRoomID(account, r.cfg.SiteID),
+		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Subscriptions)
