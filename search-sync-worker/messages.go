@@ -82,9 +82,9 @@ func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollectio
 
 // newTeamsMessageCollection binds to MESSAGES-TEAMS (message-worker's teams mode
 // persists the batch with no .created event on the canonical stream, so this is a
-// separate consumer, not a filter on the user collection). Reuses messageCollection's
-// BuildAction — it already detects + indexes the teams batch shape — and skips the
-// template/mapping pushes the user collection already performs for the same indexPrefix.
+// separate consumer, not a filter on the user collection). teamsOnly switches
+// BuildAction to decode only the batch shape, and skips the template/mapping pushes
+// the user collection already performs for the same indexPrefix.
 func newTeamsMessageCollection(indexPrefix, siteID string, devMode bool) *messageCollection {
 	return &messageCollection{
 		indexPrefix:  indexPrefix,
@@ -162,10 +162,18 @@ func (c *messageCollection) MappingUpdate() (string, json.RawMessage) {
 }
 
 func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
-	// A .teams.batch envelope carries a non-empty `messages` array; a normal
-	// MessageEvent has none. Detect by shape (BuildAction only sees the payload).
-	var batch model.TeamsBatchRequest
-	if err := json.Unmarshal(data, &batch); err == nil && len(batch.Messages) > 0 {
+	// Each collection consumes a single payload shape by mode: the teams-only
+	// collection binds MESSAGES-TEAMS (batch envelopes), every other binds a
+	// canonical stream (single MessageEvents). Decode exactly that shape and fail
+	// loud on a mismatch rather than silently trying the other.
+	if c.teamsOnly {
+		var batch model.TeamsBatchRequest
+		if err := json.Unmarshal(data, &batch); err != nil {
+			return nil, fmt.Errorf("teams batch: expected TeamsBatchRequest: %w", err)
+		}
+		if len(batch.Messages) == 0 {
+			return nil, fmt.Errorf("teams batch: expected TeamsBatchRequest with messages, got empty/other shape")
+		}
 		return c.buildTeamsActions(batch), nil
 	}
 
