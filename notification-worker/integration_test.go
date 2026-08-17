@@ -39,7 +39,7 @@ func TestNotificationWorker_CacheBackedFanOut(t *testing.T) {
 
 	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
 	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+	lookup := roomsubcache.NewLookup(cache, loader.Load, time.Minute)
 
 	nc, err := nats.Connect(natsURL)
 	require.NoError(t, err)
@@ -320,7 +320,7 @@ func TestNotificationWorker_BadgeRPCs_GroupByUsersHomeSite(t *testing.T) {
 
 	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
 	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+	lookup := roomsubcache.NewLookup(cache, loader.Load, time.Minute)
 
 	badge := &fakeBadgeClient{resp: map[string]map[string]int{
 		"site-a": {"bob": 2},

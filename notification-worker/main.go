@@ -18,6 +18,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -51,10 +52,13 @@ type config struct {
 	PushRecipientBatchSize int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
 	RoomMetaCacheSize      int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
 	RoomMetaCacheTTL       time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomMetaL2TTL          time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	RoomMetaL2TTL          time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
 	ValkeyAddrs            []string                `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword         string                  `env:"VALKEY_PASSWORD"           envDefault:""`
-	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
+	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"`
+	MongoBreakerFails      int                     `env:"MONGO_BREAKER_FAILS"       envDefault:"5"`
+	MongoBreakerCool       time.Duration           `env:"MONGO_BREAKER_COOLDOWN"    envDefault:"10s"`
+	MongoSelectTimeout     time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
@@ -206,7 +210,10 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		// A stopped Mongo must error rather than block: the member lookup is
+		// cache-fronted, and the driver default (30s) stalls every fan-out.
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -241,8 +248,16 @@ func main() {
 	}
 
 	cache := roomsubcache.NewValkeyCache(valkeyClient)
+	// mongoMemberLoader, not roomsubcache.NewMongoLoader: this service needs each
+	// member's HOME site stamped for the per-site badge RPC, which the shared
+	// loader does not resolve. roomsubcache.NewLookup then adds the TTL slide, so
+	// a warm member list survives an outage that outlasts its deadline.
 	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
+	// Guard the loader, not the Lookup: an open breaker must still serve L2 hits.
+	memberBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
+		circuitbreaker.Tracked(ctx, "roomsub"))
+	memberLookup := roomsubcache.NewLookup(cache,
+		roomsubcache.GuardLoader(loader.Load, memberBreaker), cfg.RoomSubCacheTTL)
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
