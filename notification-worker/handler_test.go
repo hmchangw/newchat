@@ -1714,7 +1714,7 @@ func TestHandle_BodyKeepsUnresolvedMentionVerbatim(t *testing.T) {
 		"an account with no display name keeps its @ marker rather than being invented")
 }
 
-func TestHandle_MentionResolverSeesOnlyLookupAccounts(t *testing.T) {
+func TestHandle_MentionResolverSeesOnlyAccountsNeedingLookup(t *testing.T) {
 	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
 	emit := &recordingEmitter{}
 	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
