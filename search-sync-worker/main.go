@@ -31,6 +31,10 @@ type bootstrapConfig struct {
 }
 
 type config struct {
+	// Mode selects which collections this pod binds: "default" runs the live
+	// message/bot/spotlight/user-room consumers; "teams" runs only the
+	// migrated-Teams-history consumer (MESSAGES-TEAMS).
+	Mode                string `env:"MODE" envDefault:"default"`
 	NatsURL             string `env:"NATS_URL,required"`
 	NatsCredsFile       string `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID              string `env:"SITE_ID,required"`
@@ -82,6 +86,11 @@ func main() {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+
+	if cfg.Mode != "default" && cfg.Mode != "teams" {
+		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
 		os.Exit(1)
 	}
 
@@ -159,27 +168,32 @@ func main() {
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 
-	msgColl := newMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, syncMessagesFrom, cfg.DevMode)
-	// search-service filters restricted-room access by threadParentMessageCreatedAt, so re-resolve it from the parent's indexed createdAt (the event omits it).
-	msgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
+	// Mode gates which consumers this pod binds. "teams" runs only the
+	// MESSAGES-TEAMS migrated-history consumer; "default" runs everything else.
+	var collections []Collection
+	if cfg.Mode == "teams" {
+		// Bound to MESSAGES-TEAMS: message-worker's teams mode persists migrated Teams
+		// history with no .created event on the canonical stream, so this indexes off
+		// its own stream/subject rather than a filter on the live message collection.
+		teamsMsgColl := newTeamsMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, cfg.DevMode)
+		teamsMsgColl.teamsUsers = newMongoTeamsUserResolver(db)
+		collections = []Collection{teamsMsgColl}
+	} else {
+		msgColl := newMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, syncMessagesFrom, cfg.DevMode)
+		// search-service filters restricted-room access by threadParentMessageCreatedAt, so re-resolve it from the parent's indexed createdAt (the event omits it).
+		msgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
-	// Second consumer over messageCollection, bound to BOT-MESSAGES-CANONICAL. isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
-	botMsgColl := newBotMessageCollection(cfg.MsgIndexPrefix, cfg.DevMode)
-	botMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
+		// Second consumer over messageCollection, bound to BOT-MESSAGES-CANONICAL. isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
+		botMsgColl := newBotMessageCollection(cfg.MsgIndexPrefix, cfg.DevMode)
+		botMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
-	// Third consumer, bound to MESSAGES-TEAMS: message-worker's teams mode persists
-	// migrated Teams history with no .created event on the canonical stream, so this
-	// indexes off its own stream/subject rather than a filter on msgColl.
-	teamsMsgColl := newTeamsMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, cfg.DevMode)
-	teamsMsgColl.teamsUsers = newMongoTeamsUserResolver(db)
-
-	collections := []Collection{
-		msgColl,
-		botMsgColl,
-		teamsMsgColl,
-		newSpotlightCollection(cfg.SpotlightIndex, cfg.DevMode),
-		newSpotlightOrgCollection(cfg.SpotlightOrgIndex, cfg.SiteID, cfg.HRCentralSiteID, cfg.DevMode),
-		newUserRoomCollection(cfg.UserRoomIndex, cfg.DevMode),
+		collections = []Collection{
+			msgColl,
+			botMsgColl,
+			newSpotlightCollection(cfg.SpotlightIndex, cfg.DevMode),
+			newSpotlightOrgCollection(cfg.SpotlightOrgIndex, cfg.SiteID, cfg.HRCentralSiteID, cfg.DevMode),
+			newUserRoomCollection(cfg.UserRoomIndex, cfg.DevMode),
+		}
 	}
 
 	for _, coll := range collections {
