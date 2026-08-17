@@ -46,7 +46,7 @@ you're testing is federation itself.
 ```sh
 make deps-down            # the two stacks share host ports; only one at a time
 ./docker-local/setup.sh   # regenerate: adds the two NATS confs + per-site env files
-make fed-deps-up          # 2× NATS (gateway-linked), 2× Valkey, shared datastores
+make fed-deps-up          # 2× NATS (leafnode-linked), 2× Valkey, shared datastores
 make fed-seed             # seed both sites' databases
 make fed-up               # both sites' services (detached)
 make fed-ui-up            # chat-frontend :3000 and :3100
@@ -66,7 +66,7 @@ Three Docker networks replace the single `chat-local`:
 ```
         ┌─────────── chat-federation ───────────┐
         │      (only the two NATS servers)      │
-        │   nats-site-local ⟷ nats-site-remote  │   ← gateway link :7222
+        │   nats-site-local ⟷ nats-site-remote  │   ← leafnode link :7422
         └───────────────────────────────────────┘
                  │                         │
    ┌─── chat-site-local ───┐   ┌─── chat-site-remote ───┐
@@ -119,7 +119,7 @@ exception: `AUTH_SERVICE_HOST_PORT` goes `8080 → 8190`, not `8180`, because
 
 The shared datastores (Mongo, Cassandra, Elasticsearch, MinIO, Keycloak,
 Vault) keep their single-site ports — that's *why* the federated and
-single-site dep stacks can't run together. The NATS gateway port (`:7222`)
+single-site dep stacks can't run together. The NATS leafnode port (`:7422`)
 stays container-internal on `chat-federation`; nothing is published to the
 host for it. Full merged reference: the "Host ports" table below.
 
@@ -287,7 +287,7 @@ rejected before they reach the collector.
 
 ### Known divergences from production
 
-- **`chat.local.room.>` crosses the gateway.** Production filters that lane
+- **`chat.local.room.>` crosses the leafnode link.** Production filters that lane
   at a leaf node; there are no leaf nodes locally, so interest propagates.
   Harmless: `chat-frontend/src/api/subscribeToRoomEvents` subscribes to
   exactly one lane per room, selected from `room.crossSite`, so no client
@@ -308,7 +308,7 @@ rejected before they reach the collector.
   has a `cluster{}` block, so each server owns its own JetStream and nothing
   spans a Raft meta-group. That is what this design needs — every stream is R1
   and site-scoped, and a cross-site event is a plain publish to
-  `chat.inbox.{destSite}.external.>` that the gateway routes by subject
+  `chat.inbox.{destSite}.external.>` that the leafnode link routes by subject
   interest, with the PubAck returning over the same link. A consequence worth
   knowing: there is no cross-site replication or failover of JetStream state,
   which is correct for a dev stack but is not how a production supercluster
@@ -440,7 +440,7 @@ the `local` column, since both sites run at once.
 the datastores `compose.fed-deps.yaml` pulls in with `extends:`, and the o11y
 components `compose.fed-o11y.yaml` overlays. The datastore half is exactly why
 the federated and single-site dep stacks can't run at the same time. The NATS
-gateway port (`:7222`) stays container-internal on `chat-federation`; nothing
+leafnode port (`:7422`) stays container-internal on `chat-federation`; nothing
 is published to the host for it.
 
 media-service and botplatform-service publish no host port on purpose: both

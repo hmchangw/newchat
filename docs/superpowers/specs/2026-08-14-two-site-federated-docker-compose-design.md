@@ -32,8 +32,11 @@ messages federate live.
 - **The existing single-site flow.** `make up`, `make deps-up`, `make seed` and
   `docker-local/.env` behave exactly as they do today. Two-site is purely
   additive.
-- **Leaf nodes.** Production filters the site-local room lane at a leaf node. We
-  do not model leaf nodes; see "Known divergences" for why that is safe here.
+- **Leaf-node filtering of the site-local room lane.** Production filters
+  `chat.local.room.>` at the leaf node between clients and the server; we do not
+  model that filter — see "Known divergences" for why it is safe here. (The two
+  *servers* are themselves joined by a leafnode link, added later during
+  implementation; that is a different use of the same mechanism.)
 - **Per-site Vault KEKs and per-site Keycloak.** Neither is site-scoped; both
   stay shared.
 
@@ -65,7 +68,7 @@ Three Docker networks replace the single `chat-local`:
 ```
         ┌─────────── chat-federation ───────────┐
         │      (only the two NATS servers)      │
-        │   nats-site-local ⟷ nats-site-remote  │   ← gateway link :7222
+        │   nats-site-local ⟷ nats-site-remote  │   ← leafnode link :7422
         └───────────────────────────────────────┘
                  │                         │
    ┌─── chat-site-local ───┐   ┌─── chat-site-remote ───┐
@@ -81,7 +84,7 @@ Three Docker networks replace the single `chat-local`:
 ```
 
 Each NATS container joins its site network **under the network alias `nats`**,
-plus `chat-federation` for the gateway link. That alias is what lets every
+plus `chat-federation` for the leafnode link. That alias is what lets every
 service keep `NATS_URL=nats://nats:4222` unchanged and still reach its own
 site's server. The shared datastores work the same way: one `mongodb` container
 attached to both networks resolves as `mongodb` from either side.
@@ -212,7 +215,7 @@ exception: `AUTH_SERVICE_HOST_PORT` goes `8080 → 8190`, because 8180 is Keyclo
 | upload | 8086 | 8186 | tcard | 8087 | 8187 |
 | search health | 19090 | 19190 | | | |
 
-The NATS gateway port (`:7222`) stays
+The NATS leafnode port (`:7422`) stays
 container-internal on `chat-federation`; nothing is published to the host.
 
 ### Site directory
@@ -229,34 +232,55 @@ That is the whole cross-site login story: ivan hits either portal, is told his
 home is `site-remote`, and his browser connects to `:7877` and
 `ws://localhost:9322`.
 
-## NATS gateway pair
+## NATS leafnode pair
 
-> **Corrected after implementation.** This section originally specified a
-> `cluster { name: <site>, port: 6222 }` block per server and described the
-> result as a supercluster. That configuration does not start: a cluster name
-> switches JetStream into clustered mode, whose Raft meta-group needs the
-> system account carried over intra-cluster routes, and with one server per
-> site there are none — NATS fails with *"JetStream cluster requires configured
-> routes or solicited leafnode for the system account"*. The `cluster{}` block
-> was dropped and `system_account` added; what shipped is below. A genuine
-> supercluster would need three servers per site with routes between them.
+> **Corrected twice during implementation, both times against a running
+> server.** This section originally specified `cluster { name: <site>, port:
+> 6222 }` per server plus a gateway, described as a supercluster. That does not
+> start: a cluster identity puts JetStream into clustered mode, whose Raft
+> meta-group needs the system account carried over intra-cluster routes, and
+> with one server per site there are none — NATS fails with *"JetStream cluster
+> requires configured routes or solicited leafnode for the system account"*.
+>
+> Dropping `cluster{}` and adding `system_account` was **not** sufficient: the
+> gateway **name is itself the cluster name**, so a gateway-only config still
+> logged `Cluster: site-local` and still demanded cluster connectivity. Gateways
+> and single-server JetStream are fundamentally incompatible.
+>
+> What shipped is a **leafnode** link — the other remedy the error names, and
+> the supported way to join two independent single-server JetStream
+> deployments. Reaching a genuine supercluster instead would mean three servers
+> per site with routes between them.
 
 `setup.sh` reuses the same operator, `chatapp` account and SYS keys it generates
 today — cross-site routing only works inside one account — and writes two confs
-instead of one. Per-site deltas:
+instead of one. Neither carries a `cluster{}` or `gateway{}` block, so each
+server stays standalone. Site-local listens, site-remote solicits:
 
 ```
+# nats-site-local.conf (hub)
 server_name: nats-site-local
 system_account: <SYS account pubkey>
-gateway  { name: site-local,  port: 7222,
-           gateways: [{ name: site-remote, url: nats://nats-site-remote:7222 }] }
+leafnodes { port: 7422 }
+
+# nats-site-remote.conf (spoke)
+server_name: nats-site-remote
+system_account: <SYS account pubkey>
+leafnodes {
+  remotes: [
+    { urls: ["nats-leaf://nats-site-local:7422"]
+      credentials: "/etc/nats/backend.creds" }
+  ]
+}
 ```
 
-`system_account` is required in operator mode for the gateway to establish its
-connection: the SYS account JWT is preloaded in `resolver_preload`, but the
-server must also be told which account is the system one.
+Traffic is bidirectional once the link is up, so only the spoke carries remote
+config. The link binds to the `chatapp` account via `backend.creds` — the
+account every chat subject lives in — which is why `compose.fed-deps.yaml`
+mounts that file into the spoke container but not the hub.
 
-Each server runs JetStream **standalone**; nothing spans a Raft meta-group.
+Each server runs JetStream **standalone**; nothing spans a Raft meta-group, so
+there is no quorum to lose when one site restarts.
 
 No `jetstream{domain}` on either side. A shared domain is what lets site-local's
 `outbox-worker` publish `chat.inbox.site-remote.external.*` on its **own local
@@ -384,15 +408,15 @@ Trimming is a first-run build-time optimisation more than a memory one.
 
 ## Acceptance criteria
 
-1. `curl localhost:8222/gatewayz` shows site-remote inbound and outbound
-   connected; `:8322` shows the converse.
+1. `curl localhost:8222/leafz` shows the leaf connection from site-remote;
+   `:8322/leafz` shows the outbound side.
 2. `nats stream ls` against either server lists both sites' streams (one JS
    domain), and `INBOX-site-remote` reports its leader in cluster `site-remote`.
 3. alice (`:3000`) creates a room and invites ivan; it appears in ivan's chat
-   list (`:3100`). Proves room-worker → `OUTBOX-site-local` → gateway →
+   list (`:3100`). Proves room-worker → `OUTBOX-site-local` → leaf link →
    `INBOX-site-remote` → inbox-worker → Mongo `chat_remote`.
 4. alice sends a message and ivan sees it live; ivan replies and alice sees it.
-   Proves the global `chat.room.{id}` lane crosses the gateway both ways.
+   Proves the global `chat.room.{id}` lane crosses the leaf link both ways.
 5. `docker stop` site-remote's inbox-worker, have alice fire several membership
    changes, then restart it: all of them land, in order. Proves the durable
    OUTBOX retry and the per-destination FIFO lane behave as CLAUDE.md describes.
