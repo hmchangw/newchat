@@ -52,12 +52,13 @@ func newHandler(s BotplatformStore, cfg *config) *handler {
 	}
 }
 
+// HandleHealth answers the liveness probe, which asks "is this process alive",
+// not "can it reach everything it needs". It deliberately checks nothing:
+// docs/health-probes.md says a dependency being down must never get the pod
+// restarted. That matters more now the service starts without waiting for
+// MongoDB — a health check that failed when MongoDB was down would have
+// Kubernetes restarting the pod through the very outage it can now survive.
 func (h *handler) HandleHealth(c *gin.Context) {
-	if err := h.store.Ping(c.Request.Context()); err != nil {
-		slog.WarnContext(c.Request.Context(), "healthz ping failed", "error", err)
-		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "down"})
-		return
-	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
