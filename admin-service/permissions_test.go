@@ -913,10 +913,10 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 		assert.WithinDuration(t, time.Now().Add(h.cfg.FanoutTimeout), callDeadline, 2*time.Second, "fanout deadline must be the configured fanout budget, not per-publish and not unbounded")
 	})
 
-	t.Run("chunking: 5001 accounts split into 5000+1 per destination", func(t *testing.T) {
+	t.Run("chunking: one account over the chunk size splits into a full chunk plus one per destination", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		m := NewMockAdminStore(ctrl)
-		accounts := manyAccounts(5001)
+		accounts := manyAccounts(fanoutChunkSize + 1)
 		mockPermissionStoreOK(m, accounts)
 
 		var log publishLog
@@ -944,7 +944,7 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 		}
 
 		for _, dest := range []string{"site-b", "site-c"} {
-			assert.ElementsMatch(t, []int{5000, 1}, chunkSizesByDest[dest], "dest %s chunk sizes", dest)
+			assert.ElementsMatch(t, []int{fanoutChunkSize, 1}, chunkSizesByDest[dest], "dest %s chunk sizes", dest)
 			assert.ElementsMatch(t, accounts, accountsByDest[dest], "dest %s account union must be complete, no dupes", dest)
 		}
 		for _, ts := range timestamps {
@@ -1056,6 +1056,37 @@ func postResync(h *Handler, body map[string]any, t *testing.T) *httptest.Respons
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	return w
+}
+
+// brokerMaxPayload is the max_payload our NATS brokers are configured with. The chunk
+// size is a compile-time guess at how many accounts fit under it, so this pins the
+// worst case the guess assumes — with the old 5000-account chunk this test fails.
+const brokerMaxPayload = 128 << 10
+
+func TestFanoutChunk_FitsBrokerMaxPayload(t *testing.T) {
+	// Worst case: a full chunk of long accounts with every state bound set. The INBOX
+	// envelope base64-encodes the inner event (InboxEvent.Payload is []byte), so the
+	// bytes on the wire are ~4/3 of the event JSON — measure the envelope, not the event.
+	accounts := make([]string, fanoutChunkSize)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("%064d", i) // 64-char accounts, well past any real directory id
+	}
+	state := model.PermissionState{
+		Granted:       true,
+		EffectiveFrom: timePtr(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
+		ExpiresAt:     timePtr(time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)),
+		UpdatedAt:     time.Date(2026, 6, 1, 8, 30, 0, 0, time.UTC),
+	}
+
+	var log publishLog
+	h := newHandler(nil, emptySessionStore(), fanoutTestCfg(), nil, log.publish)
+	failures := h.publishPermissionFanout(context.Background(), model.PermissionExternalImageView, []fanoutBatch{{accounts: accounts, state: state}})
+
+	require.Nil(t, failures)
+	require.Len(t, log.data, 2, "one full chunk -> one envelope per remote dest")
+	for _, data := range log.data {
+		assert.Less(t, len(data), brokerMaxPayload, "a worst-case chunk envelope must clear the broker max_payload")
+	}
 }
 
 func TestHandler_resyncPermissions(t *testing.T) {

@@ -295,8 +295,14 @@ func (h *Handler) createPermissions(c *gin.Context) {
 }
 
 // fanoutChunkSize bounds one UserPermissionsUpdated event's Accounts so a worst-case
-// event stays ~320KB — 3× margin under NATS's default 1MB max_payload.
-const fanoutChunkSize = 5000
+// chunk's INBOX envelope stays under the 128KB max_payload our NATS brokers are
+// configured with (the NATS default is 1MB, but ours is tightened). The envelope
+// base64-encodes the inner event (InboxEvent.Payload is []byte), so the wire size is
+// ~4/3 of the event JSON: 1000 accounts of up to 64 chars with every state bound set
+// land around 90KB — pinned by TestFanoutChunk_FitsBrokerMaxPayload. An oversized chunk
+// fails client-side with ErrMaxPayload on the create AND on every resync of the same
+// batch shape, so this margin is what keeps the fanout self-healing via resync.
+const fanoutChunkSize = 1000
 
 // fanoutBatch is one (accounts, state) unit of a cross-site fanout. The create path
 // sends a single batch; resync sends one per distinct stored state.
