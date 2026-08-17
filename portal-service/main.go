@@ -111,7 +111,7 @@ func run() error {
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	store := newMongoDirectoryStore(mongoClient.Database(cfg.MongoDB))
-	if err := store.EnsureIndexes(ctx); err != nil {
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("portal-service directory", store.EnsureIndexes)); err != nil {
 		return fmt.Errorf("ensure directory indexes: %w", err)
 	}
 

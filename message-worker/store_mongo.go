@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 var (
@@ -44,11 +45,10 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 		return fmt.Errorf("ensure thread_rooms parentMessageId index: %w", err)
 	}
 
-	// Best-effort: drop the legacy (threadRoomId, userId) unique index so the new
-	// (threadRoomId, userAccount) index can be created without a key conflict.
-	// The collection or index may not exist (fresh deploy / test container) — ignore all errors.
-	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-
+	// Create the new index before dropping the old one. Failing to create it no
+	// longer stops the service starting, so if we dropped first and the create
+	// then failed, the collection would be left with no unique index at all
+	// while the service carried on serving.
 	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
 		Options: options.Index().SetUnique(true),
@@ -56,7 +56,12 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
 	}
 
-	return nil
+	// Remove the old (threadRoomId, userId) unique index. It keys on a user id
+	// that only means something on one site, so it wrongly rejects writes coming
+	// from another site. Finding it already gone is the normal case; any other
+	// failure is reported, because the old index would still be there rejecting
+	// those writes.
+	return mongoutil.DropIndexIfExists(ctx, s.threadSubscriptions, "threadRoomId_1_userId_1")
 }
 
 func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {

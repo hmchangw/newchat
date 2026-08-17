@@ -150,8 +150,8 @@ func main() {
 
 	store := NewCassandraStore(cassSession, bucketSizer, cipher)
 	threadStore := newThreadStoreMongo(db)
-	if err := threadStore.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure thread store indexes failed", "error", err)
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("message-worker thread_rooms", threadStore.EnsureIndexes)); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
 	}
 	handler := NewHandler(store, us, threadStore, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
