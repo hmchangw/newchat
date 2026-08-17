@@ -58,9 +58,25 @@ type coalescingStore struct {
 	// publishActivity emits one refresh; nil disables. Errors are logged, never
 	// propagated — see Flush.
 	publishActivity func(ctx context.Context, r roomActivityRefresh) error
+	// refreshInterval throttles refreshes to at most one per room per interval,
+	// independently of the (much shorter) Mongo flush cadence. Non-positive
+	// publishes on every flush. See refreshRemoteActivity for why this is safe.
+	refreshInterval time.Duration
+	// lastRefreshed is the per-room watermark backing that throttle. Pruned each
+	// flush, so it stays bounded by rooms active within the interval rather than
+	// growing with every room ever seen.
+	lastRefreshed map[string]time.Time
+	now           func() time.Time
 
 	mu      sync.Mutex
 	pending map[string]roomLastMsgUpdate
+}
+
+func (c *coalescingStore) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func newCoalescingStore(inner Store, bulk bulkRoomLastMsgWriter) *coalescingStore {
@@ -104,23 +120,63 @@ func (c *coalescingStore) Flush(ctx context.Context) error {
 	return c.bulk.BulkUpdateRoomLastMessage(ctx, batch)
 }
 
-// refreshRemoteActivity emits one activity refresh per cross-site room in the
-// batch. Cost scales with distinct active cross-site rooms per flush interval,
-// not with message rate — coalescing has already collapsed the window.
+// refreshRemoteActivity emits at most one activity refresh per cross-site room
+// per refreshInterval. Cost scales with distinct active cross-site rooms per
+// interval, not with message rate — coalescing collapses the window, and the
+// throttle decouples the announce rate from the (much shorter) Mongo flush.
+//
+// The interval can be generous because the consumer cannot see the difference:
+// the subscription list serves ordering from a cache whose own TTL is an order
+// of magnitude longer, so a position a few seconds behind is indistinguishable
+// from a fresh one. The cost of the throttle is that a room going quiet right
+// after a burst keeps the position from its last announce — stale by at most
+// one interval, and repaired by its next message.
 //
 // Failures are logged, not returned: the position is decorative, the next
-// message in the room re-establishes it, and the room batch this rides with is
-// the write that actually matters.
+// message re-establishes it, and the room batch this rides with is the write
+// that actually matters.
 func (c *coalescingStore) refreshRemoteActivity(ctx context.Context, batch map[string]roomLastMsgUpdate) {
 	if c.publishActivity == nil || c.crossSite == nil {
 		return
 	}
+	now := c.clock()
 	for roomID, u := range batch {
 		if !c.crossSite(ctx, roomID) {
 			continue
 		}
+		if c.throttled(roomID, now) {
+			continue
+		}
 		if err := c.publishActivity(ctx, roomActivityRefresh{roomID: roomID, at: u.at}); err != nil {
 			slog.WarnContext(ctx, "publish room activity refresh failed", "room_id", roomID, "error", err)
+		}
+	}
+	c.pruneWatermarks(now)
+}
+
+// throttled reports whether roomID was announced within refreshInterval, and
+// records the announce when it was not.
+func (c *coalescingStore) throttled(roomID string, now time.Time) bool {
+	if c.refreshInterval <= 0 {
+		return false
+	}
+	if last, ok := c.lastRefreshed[roomID]; ok && now.Sub(last) < c.refreshInterval {
+		return true
+	}
+	if c.lastRefreshed == nil {
+		c.lastRefreshed = make(map[string]time.Time)
+	}
+	c.lastRefreshed[roomID] = now
+	return false
+}
+
+// pruneWatermarks drops rooms that have gone quiet for longer than the
+// interval; their next message re-announces immediately, so keeping them would
+// only leak memory.
+func (c *coalescingStore) pruneWatermarks(now time.Time) {
+	for roomID, last := range c.lastRefreshed {
+		if now.Sub(last) >= c.refreshInterval {
+			delete(c.lastRefreshed, roomID)
 		}
 	}
 }
