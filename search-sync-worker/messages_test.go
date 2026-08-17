@@ -761,32 +761,34 @@ func TestBuildMessageAction_NormalPath_OmitsOrigin(t *testing.T) {
 
 // --- Fail-loud mode split: each collection decodes only its own shape ---
 
-func TestMessageCollection_BuildAction_TeamsOnly_RejectsNonBatch(t *testing.T) {
-	c := newTeamsMessageCollection("messages-site-a-v1", "site-a", false)
+func TestMessageCollection_BuildAction_RejectsWrongShapePerMode(t *testing.T) {
+	teamsColl := newTeamsMessageCollection("messages-site-a-v1", "site-a", false)
+	defaultColl := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
 
-	// A bare array (not a {"messages":[...]} envelope) can't decode into the struct.
-	_, err := c.BuildAction([]byte(`[{"id":"x"}]`))
-	require.Error(t, err, "teams-only collection must reject a bare array, not fall through")
-
-	// A single MessageEvent object decodes but carries no `messages` — reject it
-	// instead of silently indexing nothing.
-	evt, _ := json.Marshal(model.MessageEvent{
+	msgEvent, _ := json.Marshal(model.MessageEvent{
 		Event:     model.EventCreated,
 		Timestamp: time.Now().UnixNano(),
 		Message:   model.Message{ID: "m-1", RoomID: "r-1", CreatedAt: time.Now().UTC()},
 	})
-	_, err = c.BuildAction(evt)
-	require.Error(t, err, "teams-only collection must reject a MessageEvent, not fall through")
-}
-
-func TestMessageCollection_BuildAction_Default_RejectsBatch(t *testing.T) {
-	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
-
-	// A teams batch envelope reaching the default (non-teamsOnly) collection is a
-	// wiring error — decode only MessageEvent, so this fails loud.
-	data := teamsBatch(t, teamsmigrate.Message{
+	batch := teamsBatch(t, teamsmigrate.Message{
 		ID: "tm-1", RoomID: "room-1", MessageType: "message", CreatedDateTime: time.Now().UTC(),
 	})
-	_, err := c.BuildAction(data)
-	require.Error(t, err, "default collection must reject a batch envelope, not build teams actions")
+
+	// Each collection decodes only its own shape and fails loud on a mismatch,
+	// never falls through to the other decode.
+	tests := []struct {
+		name string
+		c    Collection
+		data []byte
+	}{
+		{"teams-only rejects bare array", teamsColl, []byte(`[{"id":"x"}]`)},
+		{"teams-only rejects MessageEvent", teamsColl, msgEvent},
+		{"default rejects batch envelope", defaultColl, batch},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.c.BuildAction(tt.data)
+			require.Error(t, err)
+		})
+	}
 }
