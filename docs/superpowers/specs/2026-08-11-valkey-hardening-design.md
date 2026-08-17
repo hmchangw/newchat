@@ -102,17 +102,37 @@ command. Values box through `any`, which is free relative to a network round-tri
 | `Interval` | 0 | No auto-reset while closed; consecutive-failure semantics. |
 | `OnStateChange` | transition log + metric | See Observability. |
 
-### IsSuccessful is load-bearing
+### Error classification is load-bearing
 
-gobreaker counts every returned error as a failure. `valkeyutil.ErrCacheMiss` is
-not a failure — it is the cache working correctly — and a cold or sparse keyspace
-would otherwise trip the breaker and disable Valkey for a workload that is
-behaving perfectly. `Settings.IsSuccessful` must therefore classify both
-`ErrCacheMiss` and `context.Canceled` as successes. Only transport errors count
-toward the trip threshold.
+gobreaker's default counts every returned error as a failure.
+`valkeyutil.ErrCacheMiss` is not a failure — it is the cache working correctly —
+and a cold or sparse keyspace would otherwise trip the breaker and disable
+Valkey for a workload that is behaving perfectly. `Settings.IsSuccessful` must
+classify `ErrCacheMiss` as a success. Only transport errors count toward the
+trip threshold.
 
-This is the single detail most likely to be got wrong, and it fails in the
-direction of a self-inflicted outage. It gets a dedicated test.
+Some errors are evidence of nothing either way, and for those *both* scores are
+wrong. Counting them failures opens the breaker on a healthy cache and stampedes
+the fallback store; counting them successes clears `ConsecutiveFailures` and can
+hold the breaker closed straight through a real outage. gobreaker v2 provides a
+third outcome for exactly this — `Settings.IsExcluded` drops a call from the
+accounting entirely — and it is consulted before `IsSuccessful`. Two errors are
+excluded:
+
+| Error | Why it is excluded |
+|---|---|
+| `context.Canceled` | The caller went away. An outage generates these in bulk — one slow sibling makes an errgroup cancel all the others at once. |
+| `redis.ErrPoolTimeout` | Local saturation: our own concurrency outran the pool, so Valkey was never asked. |
+
+`context.DeadlineExceeded` is deliberately **not** excluded. With
+`ContextTimeoutEnabled` bounding socket reads, a deadline is precisely how a
+blackholing Valkey surfaces — the degraded mode this design targets — so it must
+keep counting as a failure.
+
+This is the single detail most likely to be got wrong, and each way of getting
+it wrong disables the protection in a different direction. Both predicates get
+dedicated tests, including a test that an excluded error does not reset the
+consecutive-failure count.
 
 ### Callers need almost no changes
 

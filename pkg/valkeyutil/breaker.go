@@ -56,28 +56,43 @@ func LogDegraded(ctx context.Context, msg string, err error, args ...any) {
 
 // isSuccessful classifies an inner-client error for breaker accounting.
 //
-// This is the most consequential function in the package. gobreaker treats
-// every returned error as a failure, so without this a cold or sparse keyspace
-// would trip the breaker on ordinary cache misses and disable Valkey for a
-// workload that is behaving perfectly — a self-inflicted outage. Only genuine
-// transport failures may count toward the trip threshold.
+// gobreaker's default treats every returned error as a failure, so without this
+// a cold or sparse keyspace would trip the breaker on ordinary cache misses and
+// disable Valkey for a workload that is behaving perfectly — a self-inflicted
+// outage. A miss is a completed round trip and so unambiguously healthy; only
+// genuine transport failures may count toward the trip threshold.
 //
-// gobreaker offers no neutral outcome, so each ambiguous error is scored by
-// which wrong answer costs less:
-//   - Cache miss: a completed round trip. Unambiguously healthy.
-//   - Pool timeout: our own concurrency outran the pool; Valkey was never asked.
-//     Scored a success, because counting it a failure lets a local burst black out
-//     a healthy cache and stampede the fallback store.
-//   - Cancellation: scored a FAILURE. It is no evidence Valkey is healthy, and
-//     since gobreaker clears ConsecutiveFailures on every success, scoring it a
-//     success would let cancellations — which an outage generates in bulk, e.g.
-//     an errgroup cancelling siblings — hold the breaker closed through a real
-//     outage. That is the failure this package exists to prevent.
+// Errors that are evidence of nothing either way never reach here: isExcluded
+// removes them from the accounting first.
 func isSuccessful(err error) bool {
 	if err == nil {
 		return true
 	}
-	return errors.Is(err, ErrCacheMiss) || errors.Is(err, redis.ErrPoolTimeout)
+	return errors.Is(err, ErrCacheMiss)
+}
+
+// isExcluded reports whether an error should be dropped from breaker accounting
+// entirely — counted neither a success nor a failure. gobreaker consults it
+// before isSuccessful.
+//
+// Both scores are wrong for an error that carries no signal about Valkey's
+// reachability, and each is wrong in its own direction: a failure lets these
+// open the breaker on a healthy cache and stampede the fallback store, while a
+// success clears ConsecutiveFailures and can hold the breaker closed straight
+// through a real outage. Exclusion is the only answer that does neither.
+//
+//   - Cancellation: the caller went away. Says nothing about Valkey, and an
+//     outage generates these in bulk — one slow sibling makes an errgroup cancel
+//     all the others at once.
+//   - Pool timeout: our own concurrency outran the pool, so Valkey was never
+//     asked.
+//
+// context.DeadlineExceeded is deliberately NOT excluded. Once
+// ContextTimeoutEnabled bounds socket reads, a deadline is exactly how a
+// blackholing Valkey surfaces — the degraded mode this package exists to catch —
+// so it must keep counting as a failure.
+func isExcluded(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, redis.ErrPoolTimeout)
 }
 
 // breakerClient wraps a Client with one shared circuit breaker. Reachability
@@ -100,6 +115,7 @@ func NewBreakerClient(inner Client, name string) Client {
 			return counts.ConsecutiveFailures >= breakerFailureThreshold
 		},
 		IsSuccessful: isSuccessful,
+		IsExcluded:   isExcluded,
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			slog.Warn("valkey circuit breaker state change",
 				"breaker", name, "from", from.String(), "to", to.String())
