@@ -119,10 +119,9 @@ exception: `AUTH_SERVICE_HOST_PORT` goes `8080 → 8190`, not `8180`, because
 
 The shared datastores (Mongo, Cassandra, Elasticsearch, MinIO, Keycloak,
 Vault) keep their single-site ports — that's *why* the federated and
-single-site dep stacks can't run together. The NATS cluster port (`:6222`)
-and gateway port (`:7222`) stay container-internal on `chat-federation`;
-nothing is published to the host for those. Full merged reference: the
-"Host ports" table below.
+single-site dep stacks can't run together. The NATS gateway port (`:7222`)
+stays container-internal on `chat-federation`; nothing is published to the
+host for it. Full merged reference: the "Host ports" table below.
 
 ### Trimming the remote peer
 
@@ -305,18 +304,24 @@ rejected before they reach the collector.
 - **Shared o11y backend.** One collector, Tempo, Prometheus, Loki and Grafana
   serve both sites; `site.id` on spans and the `site` label on metrics are what
   separate them, not separate backends.
-- **A 2-peer JetStream meta-group — EXPECTED BUT UNVERIFIED.** Each site is a
-  single-server cluster (`cluster { name: <site>, port: 6222 }`, no routes) and
-  the two are joined by gateways, so the supercluster's meta-group spans both
-  servers: a 2-peer Raft group with quorum 2 of 2 and no failure tolerance.
-  Expected symptom: restarting one NATS container wedges JetStream at **both**
-  sites, with the survivor's `/healthz` unhealthy until its peer is back.
-  Recovery is to bring both back — `make fed-deps-down && make fed-deps-up`.
-  Not reproduced: nobody has run this stack on a Docker host yet, so treat it
-  as a prediction from the topology, not an observed failure. Confirm it during
-  the verification pass below before acting on it; the fix would be a third
-  server purely for quorum, which is not worth the `setup.sh` complexity for a
-  dev stack unless the symptom is real.
+- **JetStream runs standalone per site, not as a supercluster.** Neither conf
+  has a `cluster{}` block, so each server owns its own JetStream and nothing
+  spans a Raft meta-group. That is what this design needs — every stream is R1
+  and site-scoped, and a cross-site event is a plain publish to
+  `chat.inbox.{destSite}.external.>` that the gateway routes by subject
+  interest, with the PubAck returning over the same link. A consequence worth
+  knowing: there is no cross-site replication or failover of JetStream state,
+  which is correct for a dev stack but is not how a production supercluster
+  would be built.
+
+  An earlier revision did emit `cluster { name: <site>, port: 6222 }` with no
+  routes. That is a trap: a cluster name switches JetStream into clustered
+  mode, whose Raft meta-group needs the system account carried over
+  intra-cluster routes, and with one server per site there are none — the
+  server refuses to start JetStream with *"JetStream cluster requires
+  configured routes or solicited leafnode for the system account"*. Reaching a
+  real supercluster from here means three servers per site with routes between
+  them, not a cluster name on a lone server.
 - **~8GB RAM.** Release valves are `fed-up-lean` and skipping the o11y stack.
 
 ### Verifying the two-site stack
@@ -332,10 +337,11 @@ brings it up first should check, and correct this README where reality differs:
 4. `make fed-o11y-up`, then in Grafana (`:3003`): one trace carrying spans with
    both `site.id` values, and Prometheus targets up for containers from both
    `chat-site-local` and `chat-site-remote`.
-5. **The meta-group question above.** `docker restart chat-fed-nats-site-remote`
-   and watch whether site-**local** JetStream keeps working (publish a message
-   as alice) or wedges until the remote server returns. Whichever happens,
-   replace the "EXPECTED BUT UNVERIFIED" entry with what was observed.
+5. **Restart isolation.** `docker restart chat-fed-nats-site-remote`, then
+   publish as alice: site-**local** JetStream should keep working throughout,
+   since the two servers share no meta-group. Once the remote server is back,
+   the parked forwards in `OUTBOX-site-local` should drain to ivan on their
+   own — `outbox-worker` retries indefinitely (`MaxDeliver=-1`).
 
 ## Logging in
 
@@ -434,8 +440,8 @@ the `local` column, since both sites run at once.
 the datastores `compose.fed-deps.yaml` pulls in with `extends:`, and the o11y
 components `compose.fed-o11y.yaml` overlays. The datastore half is exactly why
 the federated and single-site dep stacks can't run at the same time. The NATS
-cluster port (`:6222`) and gateway port (`:7222`) stay container-internal on
-`chat-federation`; nothing is published to the host for those.
+gateway port (`:7222`) stays container-internal on `chat-federation`; nothing
+is published to the host for it.
 
 media-service and botplatform-service publish no host port on purpose: both
 default to container port 8080, and only the gateway (media) or portal

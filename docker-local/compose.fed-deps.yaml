@@ -1,7 +1,7 @@
 name: chat-fed-deps
 
 # Federated counterpart of compose.deps.yaml. Owns everything that is not a Go
-# service: the three networks, the two NATS servers (supercluster gateway pair),
+# service: the three networks, the two NATS servers (gateway-linked pair),
 # the two Valkeys, and the shared datastores.
 #
 # Shared datastores are pulled in with `extends:` rather than copied, so their
@@ -16,7 +16,7 @@ name: chat-fed-deps
 # same host ports for the shared datastores.
 
 services:
-  # --- Per-site NATS: one supercluster, two clusters, gateway-linked ----------
+  # --- Per-site NATS: standalone JetStream each, joined by a gateway ----------
   # Each joins its site network under the alias `nats` so every service keeps
   # NATS_URL=nats://nats:4222 unchanged, plus chat-federation for the gateway.
   nats-site-local:

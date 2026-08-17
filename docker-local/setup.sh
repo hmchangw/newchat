@@ -220,12 +220,26 @@ echo "Wrote $FRONTEND_ENV_FILE (preserved if it already existed)"
 echo ""
 
 # --- Federated two-site NATS confs -------------------------------------------
-# Same operator/account/SYS as the single-site conf above: gateway routing of
-# JetStream publishes only works inside one account and one JS domain, so the
-# two servers are one supercluster, not two independent deployments.
-# No jetstream{domain} on either side — that shared domain is what lets
-# site-local's outbox-worker publish chat.inbox.site-remote.external.* on its
-# own local connection and have it land in INBOX-site-remote.
+# Same operator/account/SYS as the single-site conf above: cross-site routing
+# only works inside one account, so the two servers share one identity domain
+# rather than being independent deployments.
+#
+# Each server runs JetStream STANDALONE and the two are joined by a gateway.
+# There is deliberately no cluster{} block: a cluster name puts JetStream into
+# clustered mode, whose Raft meta-group needs the system account carried over
+# intra-cluster routes — and with one server per site there are no routes, so
+# the server refuses to start JetStream with "JetStream cluster requires
+# configured routes or solicited leafnode for the system account".
+# Standalone is also what this design actually needs: every stream is R1 and
+# site-scoped, and a cross-site event is a plain publish to
+# chat.inbox.{destSite}.external.> that the gateway routes by subject interest,
+# with the PubAck returning over the same link. Nothing spans a meta-group.
+#
+# system_account is required in operator mode for the gateway to establish its
+# connection — the SYS account JWT is preloaded above, but the server also has
+# to be told which account is the system one.
+# No jetstream{domain} on either side: a domain would scope each site's
+# JetStream separately and break the cross-site publish above.
 write_fed_nats_conf() {
   local site="$1" peer="$2" out="$3"
   cat > "$out" <<EOF
@@ -245,6 +259,8 @@ resolver_preload {
   ${SYS_PUB_KEY}: ${SYS_JWT}
 }
 
+system_account: ${SYS_PUB_KEY}
+
 jetstream {
   store_dir: /data/jetstream
   max_mem: 1G
@@ -254,11 +270,6 @@ jetstream {
 websocket {
   port: 9222
   no_tls: true
-}
-
-cluster {
-  name: ${site}
-  port: 6222
 }
 
 gateway {

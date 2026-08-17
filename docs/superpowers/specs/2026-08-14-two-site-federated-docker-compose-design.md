@@ -212,7 +212,7 @@ exception: `AUTH_SERVICE_HOST_PORT` goes `8080 → 8190`, because 8180 is Keyclo
 | upload | 8086 | 8186 | tcard | 8087 | 8187 |
 | search health | 19090 | 19190 | | | |
 
-The NATS cluster port (`:6222`) and gateway port (`:7222`) stay
+The NATS gateway port (`:7222`) stays
 container-internal on `chat-federation`; nothing is published to the host.
 
 ### Site directory
@@ -229,18 +229,34 @@ That is the whole cross-site login story: ivan hits either portal, is told his
 home is `site-remote`, and his browser connects to `:7877` and
 `ws://localhost:9322`.
 
-## NATS supercluster
+## NATS gateway pair
+
+> **Corrected after implementation.** This section originally specified a
+> `cluster { name: <site>, port: 6222 }` block per server and described the
+> result as a supercluster. That configuration does not start: a cluster name
+> switches JetStream into clustered mode, whose Raft meta-group needs the
+> system account carried over intra-cluster routes, and with one server per
+> site there are none — NATS fails with *"JetStream cluster requires configured
+> routes or solicited leafnode for the system account"*. The `cluster{}` block
+> was dropped and `system_account` added; what shipped is below. A genuine
+> supercluster would need three servers per site with routes between them.
 
 `setup.sh` reuses the same operator, `chatapp` account and SYS keys it generates
-today — gateway routing of JetStream publishes only works inside one account and
-one JetStream domain — and writes two confs instead of one. Per-site deltas:
+today — cross-site routing only works inside one account — and writes two confs
+instead of one. Per-site deltas:
 
 ```
 server_name: nats-site-local
-cluster  { name: site-local,  port: 6222 }
+system_account: <SYS account pubkey>
 gateway  { name: site-local,  port: 7222,
            gateways: [{ name: site-remote, url: nats://nats-site-remote:7222 }] }
 ```
+
+`system_account` is required in operator mode for the gateway to establish its
+connection: the SYS account JWT is preloaded in `resolver_preload`, but the
+server must also be told which account is the system one.
+
+Each server runs JetStream **standalone**; nothing spans a Raft meta-group.
 
 No `jetstream{domain}` on either side. A shared domain is what lets site-local's
 `outbox-worker` publish `chat.inbox.site-remote.external.*` on its **own local
