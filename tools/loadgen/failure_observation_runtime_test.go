@@ -183,3 +183,26 @@ func TestFailureObservationRuntime_SameEpochRecoversUnresolvedOperations(t *test
 	require.True(t, ok)
 	assert.Equal(t, failureOperationMemberAdd, operation.OperationType)
 }
+
+// The release before the epoch split wrote {runId}.wal. Bumping the epoch is
+// the documented upgrade path — the run ID is deliberately kept so the topology
+// survives — so that legacy journal is exactly the file an in-place upgrade
+// leaves behind. It is not replayed under a new contract, but it must not
+// vanish from the count either.
+func TestFailureObservationRuntime_PreEpochJournalIsCountedAsAbandoned(t *testing.T) {
+	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
+	cfg := validSoakConfig(t)
+	cfg.LedgerDir = t.TempDir()
+	cfg.LedgerEpoch = "v1"
+	legacy := filepath.Join(cfg.LedgerDir, cfg.RunID+".wal")
+	require.NoError(t, os.WriteFile(legacy, []byte("{}\n"), 0o600))
+
+	metrics := NewMetrics()
+	ledger, err := openSoakFailureLedger(&cfg, metrics, func() time.Time { return now })
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.FailureAbandonedJournals),
+		"an upgrade must not silently orphan the journal it inherited")
+	assert.FileExists(t, legacy, "retained evidence is never deleted")
+}

@@ -620,3 +620,138 @@ func soakNextReadIntentFor(t *testing.T, pool *soakRoomStatePool, account string
 	}
 	return soakReadIntent{}, false
 }
+
+// Retaking a recovered reservation has to move the candidate out of the
+// runnable ring, not just relock the room. The rebuilt pool put the account
+// back in a runnable slice from current topology; leaving it there lets the
+// next dispatch mutate a target whose real state is still unknown, which is the
+// resend the whole ledger design exists to prevent.
+func TestSoakRoomStatePool_ReserveInFlightRemovesTheCandidateFromTheRing(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		kind   failureOperationType
+		result failureResult
+	}{
+		{
+			name: "unverified add is parked, not reissued",
+			kind: failureOperationMemberAdd, result: failureResultUnverified,
+		},
+		{
+			name: "unverified remove is parked, not reissued",
+			kind: failureOperationMemberRemove, result: failureResultUnverified,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			pool, err := newSoakRoomStatePool(
+				soakRoomStateTestTopology(3), 8, nil, rand.New(rand.NewSource(1)),
+			)
+			require.NoError(t, err)
+
+			intent, ok := pool.NextMemberIntent()
+			require.True(t, ok)
+			pool.SettleMember(intent, failureResultGood)
+			roomID, account := intent.RoomID, intent.Account
+
+			require.True(t, pool.ReserveInFlight(testCase.kind, roomID, account))
+			pool.SettleMember(
+				soakMemberIntent{
+					RoomID: roomID, Account: account,
+					Add: testCase.kind == failureOperationMemberAdd,
+				},
+				testCase.result,
+			)
+
+			for range 32 {
+				next, more := pool.NextMemberIntent()
+				if !more {
+					break
+				}
+				assert.NotEqual(t, account, next.Account,
+					"a quarantined target must not be dispatched again")
+				pool.SettleMember(next, failureResultGood)
+			}
+		})
+	}
+}
+
+// A recovered reservation that resolves cleanly must return the candidate to
+// the ring exactly once. Settle appends, so leaving the original entry in place
+// would duplicate it and let two operations target the same account at once.
+func TestSoakRoomStatePool_ReserveInFlightDoesNotDuplicateTheCandidate(t *testing.T) {
+	pool, err := newSoakRoomStatePool(
+		soakRoomStateTestTopology(3), 8, nil, rand.New(rand.NewSource(2)),
+	)
+	require.NoError(t, err)
+
+	intent, ok := pool.NextMemberIntent()
+	require.True(t, ok)
+	pool.SettleMember(intent, failureResultGood)
+	roomID, account := intent.RoomID, intent.Account
+
+	require.True(t, pool.ReserveInFlight(failureOperationMemberAdd, roomID, account))
+	pool.SettleMember(
+		soakMemberIntent{RoomID: roomID, Account: account, Add: true},
+		failureResultGood,
+	)
+
+	// The ring legitimately recycles a candidate across dispatches, so the
+	// invariant is about the slices themselves: one entry, in one of them.
+	room := pool.byID[roomID]
+	require.NotNil(t, room)
+	occurrences := 0
+	for _, candidate := range room.available {
+		if candidate == account {
+			occurrences++
+		}
+	}
+	for _, candidate := range room.members {
+		if candidate == account {
+			occurrences++
+		}
+	}
+	assert.Equal(t, 1, occurrences, "the candidate must appear in the ring exactly once")
+}
+
+// The candidate gauges are maintained incrementally rather than recomputed, so
+// they are only correct if every transition adjusts them. This walks a full
+// add/remove cycle and checks the published totals against the pool's own
+// slices, which is what a recomputing implementation would have reported.
+func TestSoakRoomStatePool_CandidateGaugesTrackEveryTransition(t *testing.T) {
+	metrics := NewMetrics()
+	pool, err := newSoakRoomStatePool(
+		soakRoomStateTestTopology(3), 8, metrics, rand.New(rand.NewSource(3)),
+	)
+	require.NoError(t, err)
+
+	assertGaugesMatchPool := func(stage string) {
+		t.Helper()
+		expected := make(map[soakMemberCandidateState]int)
+		for _, room := range pool.rooms {
+			for _, state := range room.states {
+				expected[state]++
+			}
+		}
+		for _, state := range soakMemberCandidateStates {
+			assert.Equal(t, float64(expected[state]), testutil.ToFloat64(
+				metrics.SoakRoomCandidates.WithLabelValues(string(state)),
+			), "%s: %s", stage, state)
+		}
+	}
+
+	assertGaugesMatchPool("startup")
+
+	intent, ok := pool.NextMemberIntent()
+	require.True(t, ok)
+	assertGaugesMatchPool("dispatched")
+
+	pool.SettleMember(intent, failureResultGood)
+	assertGaugesMatchPool("settled good")
+
+	next, ok := pool.NextMemberIntent()
+	require.True(t, ok)
+	pool.SettleMember(next, failureResultUnverified)
+	assertGaugesMatchPool("quarantined")
+
+	require.True(t, pool.ReserveInFlight(failureOperationMemberAdd, intent.RoomID, intent.Account))
+	assertGaugesMatchPool("reserved after restart")
+}

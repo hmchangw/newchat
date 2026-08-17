@@ -410,6 +410,23 @@ func (l *soakRoomLanes) Reconcile(
 		}
 		return true, l.observe(operation.ID, failureObservationUnverified, failureReasonNone, now)
 	case result == soakRoomStateMatched:
+		// Ownership is a durable prerequisite of finishing a create, not an
+		// afterthought: once the ledger records the terminal observation the
+		// operation is gone and nothing is left to retry, so a room that could
+		// not be claimed would be invisible to both teardown and the create
+		// budget. Hold the operation open and try again while the deadline
+		// allows it.
+		if operation.OperationType == failureOperationRoomCreate {
+			if err := l.claimCreatedRoom(ctx, &operation); err != nil {
+				if now.Before(operation.Deadline) {
+					return true, l.release(operation.ID, now)
+				}
+				slog.Error("created soak room could not be claimed before its deadline",
+					"runId", l.cfg.RunID,
+					"roomName", operation.Targets["roomName"], "error", err)
+				l.countUntracked("ownership")
+			}
+		}
 		return true, l.observe(operation.ID, failureObservationGood, failureReasonNone, now)
 	case result == soakRoomStateMismatch:
 		return true, l.observe(operation.ID, failureObservationBad, reason, now)
@@ -554,7 +571,20 @@ func (l *soakRoomLanes) observeAdmission(
 			return fmt.Errorf("record soak room admission: %w", observeErr)
 		}
 		return nil
-	case err != nil && transientSoakError(outcome.ErrorClass):
+	case err == nil:
+		// The responder answered, but not with a verdict this run recognises —
+		// an unknown status, or one a newer service version introduced. It may
+		// well have applied the mutation, so calling it a rejection would close
+		// the operation, hand the candidate back as untouched, and leave a real
+		// effect with nothing left to reconcile it. Only a bounded error
+		// envelope below is a refusal.
+		if _, observeErr := l.ledger.Observe(
+			operationID, failureObserverAdmission, failureObservationUnverified, l.now().UTC(),
+		); observeErr != nil {
+			return fmt.Errorf("record unreadable soak room admission: %w", observeErr)
+		}
+		return nil
+	case transientSoakError(outcome.ErrorClass):
 		// Ambiguous: the request may or may not have been accepted. It is never
 		// resent and never called not_sent; reconciliation decides.
 		if _, observeErr := l.ledger.Observe(
@@ -621,7 +651,9 @@ func (l *soakRoomLanes) settle(operationID string, result failureResult) {
 	case failureOperationMuteToggle:
 		l.pool.SettleMute(pending.mute, result)
 	case failureOperationRoomCreate:
-		l.finishCreate(pending.roomName, result)
+		// Ownership already ran, as a prerequisite of finalizing the operation.
+		// There is no pool reservation to return: the create lane holds budget,
+		// not a lease.
 	case failureOperationMessageRead:
 		l.pool.SettleRead(pending.read, result, l.observedReadCursor(&pending))
 	case failureOperationMessageCreate:
@@ -629,34 +661,43 @@ func (l *soakRoomLanes) settle(operationID string, result failureResult) {
 	}
 }
 
-// finishCreate takes ownership of a confirmed room. Teardown only deletes rooms
-// carrying the run marker, so a created room that is never claimed would
-// outlive the run.
-func (l *soakRoomLanes) finishCreate(roomName string, result failureResult) {
-	if roomName == "" || result != failureResultGood || l.store == nil {
-		return
+// claimCreatedRoom takes ownership of a confirmed room and brings it into the
+// read mix. Teardown only deletes rooms carrying the run marker, so a created
+// room that is never claimed would outlive the run.
+//
+// The caller runs this before finalizing the operation, so returning an error
+// leaves the ledger entry open and the work retryable.
+func (l *soakRoomLanes) claimCreatedRoom(ctx context.Context, operation *failureOperation) error {
+	roomName := operation.Targets["roomName"]
+	if roomName == "" {
+		return fmt.Errorf("room create operation %q has no room name", operation.ID)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), soakRequestTimeout)
-	defer cancel()
+	if l.store == nil {
+		return fmt.Errorf("soak room ownership requires a store")
+	}
 	// The ID is resolved from the name rather than remembered from the reply,
 	// so a room whose reply was lost is still claimable — including by a
 	// replacement process, whose in-memory reservation is gone.
 	roomID, found, err := l.store.RoomIDByName(ctx, l.cfg.SiteID, roomName)
-	if err != nil || !found || roomID == "" {
-		slog.Warn("created soak room could not be resolved for ownership",
-			"runId", l.cfg.RunID, "roomName", roomName, "error", err)
-		l.countUntracked("ownership")
-		return
+	if err != nil {
+		return fmt.Errorf("resolve created soak room %q: %w", roomName, err)
+	}
+	if !found || roomID == "" {
+		return fmt.Errorf("created soak room %q is not visible yet", roomName)
 	}
 	if err := l.store.AppendOwnedRooms(ctx, l.cfg.RunID, []string{roomID}); err != nil {
-		l.countUntracked("ownership")
-		return
+		return fmt.Errorf("take ownership of created soak room %q: %w", roomName, err)
 	}
+	// Reads are issued as the account that created the room. Any other account
+	// is not a member, so the read lane would measure authorization failures
+	// rather than the reads it exists to exercise. The requester is journaled,
+	// so this survives a replacement process.
 	if l.reader != nil {
-		if requester, ok := l.pool.AnyOwner(); ok {
+		if requester := operation.Attributes[soakFailureAttributeRequester]; requester != "" {
 			l.reader.RegisterCreatedRoom(roomID, requester)
 		}
 	}
+	return nil
 }
 
 // observedReadCursor fetches the cursor the run just confirmed so it becomes
@@ -671,7 +712,17 @@ func (l *soakRoomLanes) observedReadCursor(pending *soakRoomPending) time.Time {
 	lastSeenAt, found, err := l.store.SubscriptionLastSeen(
 		ctx, pending.read.RoomID, pending.read.Account,
 	)
-	if err != nil || !found {
+	if err != nil {
+		// Losing the cursor costs the next operation its baseline, which
+		// weakens that verification to "some timestamp exists". That is a
+		// silent downgrade of the evidence, so it is reported rather than
+		// folded into the same zero a missing subscription returns.
+		slog.Warn("soak read cursor could not be re-read for the next baseline",
+			"runId", l.cfg.RunID, "error", err)
+		l.countUntracked("read_baseline")
+		return time.Time{}
+	}
+	if !found {
 		return time.Time{}
 	}
 	return lastSeenAt

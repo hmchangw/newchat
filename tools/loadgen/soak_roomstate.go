@@ -125,6 +125,9 @@ type soakRoomState struct {
 
 	memberLease bool
 	renameLease bool
+	// empty mirrors "this room has no candidate on either side", kept in step
+	// with the slices so the degraded gauge never has to walk the pool.
+	empty bool
 }
 
 // soakRoomStatePool owns which room/member mutation may be issued next. It
@@ -144,6 +147,45 @@ type soakRoomStatePool struct {
 	quarantineMax int
 	metrics       *Metrics
 	rng           *rand.Rand
+
+	// Candidate gauges are maintained incrementally. Recomputing them meant
+	// walking every candidate of every room while holding p.mu — at the default
+	// 10k rooms and a 64-account ring that is ~640k map reads per dispatch,
+	// several times a second, on the lock every lane needs to pick a target.
+	stateCounts map[soakMemberCandidateState]int
+	emptyRooms  int
+}
+
+// setCandidateStateLocked moves one candidate between states and keeps the
+// gauge counters in step.
+func (p *soakRoomStatePool) setCandidateStateLocked(
+	room *soakRoomState,
+	account string,
+	state soakMemberCandidateState,
+) {
+	if account == "" {
+		return
+	}
+	if previous, known := room.states[account]; known {
+		p.stateCounts[previous]--
+	}
+	room.states[account] = state
+	p.stateCounts[state]++
+}
+
+// trackRoomFillLocked re-evaluates one room's emptiness after its candidate
+// slices changed.
+func (p *soakRoomStatePool) trackRoomFillLocked(room *soakRoomState) {
+	empty := len(room.available) == 0 && len(room.members) == 0
+	if empty == room.empty {
+		return
+	}
+	room.empty = empty
+	if empty {
+		p.emptyRooms++
+		return
+	}
+	p.emptyRooms--
 }
 
 func newSoakRoomStatePool(
@@ -210,6 +252,7 @@ func newSoakRoomStatePool(
 	pool := &soakRoomStatePool{
 		byID: make(map[string]*soakRoomState, len(channels)),
 		rng:  rng, quarantineMax: quarantineMax, metrics: metrics,
+		stateCounts: make(map[soakMemberCandidateState]int, len(soakMemberCandidateStates)),
 	}
 	for _, roomID := range order {
 		state := channels[roomID]
@@ -242,6 +285,16 @@ func newSoakRoomStatePool(
 			"soak room state pool requires a channel room with an owner and at least one candidate",
 		)
 	}
+	// One tally at startup seeds the counters every later transition adjusts.
+	for _, room := range pool.rooms {
+		for _, state := range room.states {
+			pool.stateCounts[state]++
+		}
+		room.empty = len(room.available) == 0 && len(room.members) == 0
+		if room.empty {
+			pool.emptyRooms++
+		}
+	}
 	pool.refreshGaugesLocked()
 	return pool, nil
 }
@@ -269,7 +322,29 @@ func (p *soakRoomStatePool) ReserveInFlight(
 		if room.memberLease {
 			return false
 		}
+		// Take the candidate out of the runnable ring as well as locking the
+		// room. The pool was rebuilt from current topology, so this account is
+		// sitting in whichever slice its observed state implies; leaving it
+		// there means that once this operation settles — quarantined or not —
+		// the next dispatch pops it again and mutates a target whose real state
+		// the run does not know. Settle appends, so a stale entry would also
+		// duplicate the candidate on the way back in.
+		room.available = slices.DeleteFunc(room.available, func(candidate string) bool {
+			return candidate == account
+		})
+		room.members = slices.DeleteFunc(room.members, func(candidate string) bool {
+			return candidate == account
+		})
+		p.trackRoomFillLocked(room)
+		if account != "" {
+			inflight := soakMemberCandidateRemoveInflight
+			if kind == failureOperationMemberAdd {
+				inflight = soakMemberCandidateAddInflight
+			}
+			p.setCandidateStateLocked(room, account, inflight)
+		}
 		room.memberLease = true
+		p.refreshGaugesLocked()
 		return true
 	case failureOperationRoomRename:
 		if room.renameLease {
@@ -341,16 +416,17 @@ func (p *soakRoomStatePool) NextMemberIntent() (soakMemberIntent, bool) {
 		switch {
 		case len(room.members) > 0:
 			account, room.members = room.members[0], room.members[1:]
-			room.states[account] = soakMemberCandidateRemoveInflight
+			p.setCandidateStateLocked(room, account, soakMemberCandidateRemoveInflight)
 		case len(room.available) > 0:
 			account, room.available = room.available[0], room.available[1:]
-			room.states[account] = soakMemberCandidateAddInflight
+			p.setCandidateStateLocked(room, account, soakMemberCandidateAddInflight)
 			add = true
 		default:
 			continue
 		}
 		room.memberLease = true
 		p.memberCursor = (p.memberCursor + offset + 1) % len(p.rooms)
+		p.trackRoomFillLocked(room)
 		p.refreshGaugesLocked()
 		return soakMemberIntent{
 			RoomID: room.id, Account: account, Requester: room.owner, Add: add,
@@ -372,23 +448,24 @@ func (p *soakRoomStatePool) SettleMember(intent soakMemberIntent, result failure
 	case failureResultGood:
 		if intent.Add {
 			room.members = append(room.members, intent.Account)
-			room.states[intent.Account] = soakMemberCandidateMember
+			p.setCandidateStateLocked(room, intent.Account, soakMemberCandidateMember)
 		} else {
 			room.available = append(room.available, intent.Account)
-			room.states[intent.Account] = soakMemberCandidateAvailable
+			p.setCandidateStateLocked(room, intent.Account, soakMemberCandidateAvailable)
 		}
 	case failureResultBad, failureResultNotSent:
 		// Rejected or never sent: the room is exactly as it was before.
 		if intent.Add {
 			room.available = append(room.available, intent.Account)
-			room.states[intent.Account] = soakMemberCandidateAvailable
+			p.setCandidateStateLocked(room, intent.Account, soakMemberCandidateAvailable)
 		} else {
 			room.members = append(room.members, intent.Account)
-			room.states[intent.Account] = soakMemberCandidateMember
+			p.setCandidateStateLocked(room, intent.Account, soakMemberCandidateMember)
 		}
 	default:
 		p.quarantineLocked(soakRoomProbe{RoomID: room.id, Account: intent.Account}, room)
 	}
+	p.trackRoomFillLocked(room)
 	p.refreshGaugesLocked()
 }
 
@@ -564,12 +641,13 @@ func (p *soakRoomStatePool) ResolveMemberProbe(roomID, account string, isMember 
 	}
 	if isMember {
 		room.members = append(room.members, account)
-		room.states[account] = soakMemberCandidateMember
+		p.setCandidateStateLocked(room, account, soakMemberCandidateMember)
 	} else {
 		room.available = append(room.available, account)
-		room.states[account] = soakMemberCandidateAvailable
+		p.setCandidateStateLocked(room, account, soakMemberCandidateAvailable)
 	}
 	p.countProbe("resolved")
+	p.trackRoomFillLocked(room)
 	p.refreshGaugesLocked()
 }
 
@@ -583,6 +661,7 @@ func (p *soakRoomStatePool) ResolveMuteProbe(roomID, account string, muted bool)
 	}
 	room.mute[account] = soakMuteState{muted: muted, known: true}
 	p.countProbe("resolved")
+	p.trackRoomFillLocked(room)
 	p.refreshGaugesLocked()
 }
 
@@ -597,7 +676,7 @@ func (p *soakRoomStatePool) quarantineLocked(probe soakRoomProbe, room *soakRoom
 	}
 	p.quarantine = append(p.quarantine, probe)
 	if !probe.Mute {
-		room.states[probe.Account] = soakMemberCandidateQuarantined
+		p.setCandidateStateLocked(room, probe.Account, soakMemberCandidateQuarantined)
 	}
 }
 
@@ -619,18 +698,10 @@ func (p *soakRoomStatePool) refreshGaugesLocked() {
 	if p.metrics == nil {
 		return
 	}
-	counts := make(map[soakMemberCandidateState]int, len(soakMemberCandidateStates))
-	degraded := len(p.quarantine)+p.inProbe >= p.quarantineMax
-	for _, room := range p.rooms {
-		for _, state := range room.states {
-			counts[state]++
-		}
-		if len(room.available) == 0 && len(room.members) == 0 {
-			degraded = true
-		}
-	}
+	degraded := p.emptyRooms > 0 || len(p.quarantine)+p.inProbe >= p.quarantineMax
 	for _, state := range soakMemberCandidateStates {
-		p.metrics.SoakRoomCandidates.WithLabelValues(string(state)).Set(float64(counts[state]))
+		p.metrics.SoakRoomCandidates.WithLabelValues(string(state)).
+			Set(float64(p.stateCounts[state]))
 	}
 	if degraded {
 		p.metrics.SoakRoomPoolDegraded.Set(1)
@@ -660,17 +731,6 @@ func (p *soakRoomStatePool) RoomName(roomID string) (string, bool) {
 		return "", false
 	}
 	return room.confirmedName, true
-}
-
-// AnyOwner returns one owner account, used to address rooms the create lane
-// made rather than the seed.
-func (p *soakRoomStatePool) AnyOwner() (string, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.rooms) == 0 {
-		return "", false
-	}
-	return p.rooms[0].owner, true
 }
 
 // CreateRoomMembers returns a requester and the members a new room should start

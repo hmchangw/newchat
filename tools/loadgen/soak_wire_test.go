@@ -554,3 +554,19 @@ func TestSoakUserPageRequest_MatchesEveryPagedReader(t *testing.T) {
 		})
 	}
 }
+
+// The mutation lanes decide admission from these status strings, so a drift
+// between room-service and this run is not a cosmetic mismatch: it turns every
+// applied mutation into an unreadable verdict. The values are asserted against
+// the real reply types room-service returns.
+func TestSoakRoomStatusConstants_MatchRoomServiceReplies(t *testing.T) {
+	accepted, err := json.Marshal(model.StatusReply{Status: soakRoomStatusAccepted})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"status":"accepted"}`, string(accepted),
+		"member add/remove, rename, create and mark-read all reply accepted")
+
+	mute, err := json.Marshal(model.MuteToggleResponse{Status: soakRoomStatusOK, Muted: true})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"status":"ok","muted":true}`, string(mute),
+		"mute is applied inline and replies ok, not accepted")
+}

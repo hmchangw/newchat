@@ -840,8 +840,13 @@ func (s *mongoSoakStore) CountCreatedRooms(ctx context.Context, runID string) (i
 	if runID == "" {
 		return 0, fmt.Errorf("count created soak rooms requires a run ID")
 	}
+	// The name prefix already embeds the run ID, so it alone scopes the count.
+	// Requiring soakRunId as well would exclude exactly the rooms that matter:
+	// room-service creates the room, and the marker is only written afterwards
+	// by AppendOwnedRooms. A room stranded between the two has spent budget but
+	// would be invisible here, letting a crash loop re-spend the whole
+	// allowance on every restart.
 	total, err := s.primary("rooms").CountDocuments(ctx, bson.D{
-		{Key: "soakRunId", Value: runID},
 		{Key: "name", Value: bson.D{
 			{Key: "$regex", Value: "^" + regexp.QuoteMeta(soakCreatedRoomPrefix(runID))},
 		}},

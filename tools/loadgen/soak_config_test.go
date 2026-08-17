@@ -521,6 +521,11 @@ func TestValidateSoakConfig_RoomLaneBounds(t *testing.T) {
 			want:   "SOAK_ROOM_CREATE_BUDGET",
 		},
 		{
+			name:   "create budget above the retained-room cap",
+			mutate: func(cfg *soakConfig) { cfg.RoomCreateBudget = soakRoomCreateBudgetMax + 1 },
+			want:   "SOAK_ROOM_CREATE_BUDGET",
+		},
+		{
 			name:   "create size below two",
 			mutate: func(cfg *soakConfig) { cfg.RoomCreateSize = 1 },
 			want:   "SOAK_ROOM_CREATE_SIZE",

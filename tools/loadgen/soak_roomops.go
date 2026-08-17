@@ -119,8 +119,10 @@ func (m *soakRoomMutator) ToggleMute(
 		Subject: subject.MuteToggle(account, roomID, m.siteID),
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
-		// Mute is applied inline, so a reply is proof of the stored state.
-		outcome.Accepted = true
+		// Mute is applied inline, so a recognised reply is proof of the stored
+		// state. An unrecognised one is not: an empty body decodes cleanly and
+		// would otherwise be read as a confirmed toggle.
+		outcome.Accepted = reply.Status == soakRoomStatusOK
 		outcome.Muted = reply.Muted
 	})
 }
@@ -141,9 +143,7 @@ func (m *soakRoomMutator) MarkRead(
 		Subject: subject.MessageRead(account, roomID, m.siteID),
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
-		// room-service replies with a plain status; any successful reply means
-		// the subscription write ran.
-		outcome.Accepted = true
+		outcome.Accepted = reply.Status == soakRoomStatusAccepted
 	})
 }
 
@@ -169,7 +169,11 @@ func (m *soakRoomMutator) CreateRoom(
 	})
 }
 
-const soakRoomStatusAccepted = "accepted"
+const (
+	soakRoomStatusAccepted = "accepted"
+	// Mute answers "ok" rather than "accepted" because it is applied inline.
+	soakRoomStatusOK = "ok"
+)
 
 func (m *soakRoomMutator) call(
 	ctx context.Context,

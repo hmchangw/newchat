@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -91,6 +92,11 @@ func failureWALPath(dir, runID, epoch string) string {
 // this run. They stay on disk as evidence but belong to an incompatible
 // contract and are never replayed, so the boundary has to be visible rather
 // than silent.
+//
+// The pre-epoch release wrote {runId}.wal, which the epoch glob cannot match.
+// Bumping the epoch while keeping the run ID is the documented upgrade path, so
+// that file is precisely what an in-place upgrade inherits and it is counted
+// explicitly rather than left to disappear.
 func recordAbandonedFailureJournals(metrics *Metrics, dir, runID, epoch string) {
 	if metrics == nil {
 		return
@@ -100,6 +106,13 @@ func recordAbandonedFailureJournals(metrics *Metrics, dir, runID, epoch string) 
 	if err != nil {
 		slog.Error("scan retained failure journals", "runId", runID, "error", err)
 		return
+	}
+	legacy := filepath.Join(dir, runID+".wal")
+	if _, statErr := os.Stat(legacy); statErr == nil {
+		matches = append(matches, legacy)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		slog.Error("stat pre-epoch failure journal",
+			"runId", runID, "path", legacy, "error", statErr)
 	}
 	abandoned := 0
 	for _, match := range matches {
@@ -580,7 +593,12 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("soak failure reconciler is not configured")
 	}
 	now := r.now().UTC()
-	operation, ok := r.ledger.ClaimDue(now)
+	// Scoped to the message lane. This reconciler only understands history,
+	// recipient and search effects, and it records its verdict against the
+	// history observer; a room mutation claimed here would be verified by a
+	// Cassandra message lookup and closed against an observer it never
+	// declared, while its own room_state observer never resolves.
+	operation, ok := r.ledger.ClaimDueLanes(now, []string{soakFailureLaneMessageSend})
 	if !ok {
 		return false, nil
 	}

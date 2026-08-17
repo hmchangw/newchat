@@ -32,6 +32,7 @@ type soakRoomStateStoreStub struct {
 	byNameErr  error
 	ownedRooms int
 	ownedErr   error
+	reads      int
 }
 
 func (s *soakRoomStateStoreStub) RoomName(context.Context, string) (string, bool, error) {
@@ -51,6 +52,7 @@ func (s *soakRoomStateStoreStub) RoomIDByName(
 }
 
 func (s *soakRoomStateStoreStub) IsRoomMember(context.Context, string, string) (bool, error) {
+	s.reads++
 	return s.member, s.memberErr
 }
 
@@ -69,8 +71,12 @@ func (s *soakRoomStateStoreStub) SubscriptionLastSeen(
 func (s *soakRoomStateStoreStub) AppendOwnedRooms(
 	_ context.Context, _ string, roomIDs []string,
 ) error {
+	// A failed write records nothing, the way a rejected Mongo update does.
+	if s.appendErr != nil {
+		return s.appendErr
+	}
 	s.appended = append(s.appended, roomIDs...)
-	return s.appendErr
+	return nil
 }
 
 func newSoakRoomVerifyFixture(
@@ -113,11 +119,15 @@ func soakMemberOperation(add bool) *failureOperation {
 	}
 }
 
-func TestSoakRoomStateVerifier_MemberAddMatchesWhenBothSourcesAgree(t *testing.T) {
+// A positive from room-service settles the operation on its own: no primary
+// read can overturn "the effect is already visible". Absence still needs the
+// store, which the sibling tests cover.
+func TestSoakRoomStateVerifier_MemberAddIsSettledByThePositiveRPC(t *testing.T) {
 	transport := &soakRoomOpsTransport{
 		reply: []byte(`{"members":[{"id":"m1","rid":"room-1","member":{"account":"user-b0"}}]}`),
 	}
-	verifier, metrics := newSoakRoomVerifyFixture(t, transport, &soakRoomStateStoreStub{member: true})
+	store := &soakRoomStateStoreStub{member: true}
+	verifier, metrics := newSoakRoomVerifyFixture(t, transport, store)
 
 	result, reason, err := verifier.Verify(context.Background(), soakMemberOperation(true))
 
@@ -126,8 +136,8 @@ func TestSoakRoomStateVerifier_MemberAddMatchesWhenBothSourcesAgree(t *testing.T
 	assert.Equal(t, failureReasonNone, reason)
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.SoakRoomStateSources.WithLabelValues(soakRoomStateSourceRPC, "matched")))
-	assert.Equal(t, float64(1), testutil.ToFloat64(
-		metrics.SoakRoomStateSources.WithLabelValues(soakRoomStateSourceStore, "matched")))
+	assert.Zero(t, store.reads,
+		"a healthy reconciliation must not wait on the primary it does not need")
 }
 
 func TestSoakRoomStateVerifier_MemberAddIsAbsentWhenBothSourcesAgree(t *testing.T) {

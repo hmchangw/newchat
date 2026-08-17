@@ -518,4 +518,19 @@ func TestCountCreatedRooms_ExcludesTheSeededPopulation(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, "room-created-1", roomID)
+
+	// room-service creates the room; the ownership marker is written afterwards
+	// by AppendOwnedRooms. A room stranded between the two still spent budget,
+	// so a count that required the marker would let a crash loop re-spend the
+	// whole allowance every restart.
+	_, err = db.Collection("rooms").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "room-created-2"},
+		{Key: "name", Value: soakCreatedRoomPrefix(cfg.RunID) + "def"},
+		{Key: "siteId", Value: "site-a"},
+	})
+	require.NoError(t, err)
+
+	created, err = store.CountCreatedRooms(ctx, cfg.RunID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, created, "a created room that is not yet claimed still spent budget")
 }

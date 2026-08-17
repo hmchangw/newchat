@@ -109,6 +109,21 @@ func (v *soakRoomStateVerifier) Verify(
 	}
 }
 
+// settledByRPC is the one shortcut the two-source rule allows. room-service
+// returning nothing may only mean its read path is degraded, so absence always
+// needs the primary behind it — but room-service already showing the effect
+// proves the write landed, and no primary read can overturn that. Skipping it
+// keeps a healthy reconciliation off the authoritative path entirely, which
+// matters most when the primary is the thing that is slow.
+func (v *soakRoomStateVerifier) settledByRPC(
+	rpc soakRoomStateResult,
+) (soakRoomStateResult, failureReason, bool) {
+	if rpc != soakRoomStateMatched {
+		return soakRoomStateUnknown, failureReasonNone, false
+	}
+	return soakRoomStateMatched, failureReasonNone, true
+}
+
 func (v *soakRoomStateVerifier) verifyMember(
 	ctx context.Context,
 	operation *failureOperation,
@@ -137,6 +152,9 @@ func (v *soakRoomStateVerifier) verifyMember(
 		}
 	}
 	v.countSource(soakRoomStateSourceRPC, rpc)
+	if result, reason, done := v.settledByRPC(rpc); done {
+		return result, reason, nil
+	}
 
 	authoritative := soakRoomStateUnknown
 	member, err := v.store.IsRoomMember(ctx, roomID, account)
@@ -177,6 +195,9 @@ func (v *soakRoomStateVerifier) verifyRename(
 		}
 	}
 	v.countSource(soakRoomStateSourceRPC, rpc)
+	if result, reason, done := v.settledByRPC(rpc); done {
+		return result, reason, nil
+	}
 
 	authoritative := soakRoomStateUnknown
 	name, found, err := v.store.RoomName(ctx, roomID)
@@ -221,6 +242,9 @@ func (v *soakRoomStateVerifier) verifyMute(
 		}
 	}
 	v.countSource(soakRoomStateSourceRPC, rpc)
+	if result, reason, done := v.settledByRPC(rpc); done {
+		return result, reason, nil
+	}
 
 	authoritative := soakRoomStateUnknown
 	muted, found, err := v.store.SubscriptionMuted(ctx, roomID, account)
@@ -310,6 +334,9 @@ func (v *soakRoomStateVerifier) verifyRead(
 		}
 	}
 	v.countSource(soakRoomStateSourceRPC, rpc)
+	if result, reason, done := v.settledByRPC(rpc); done {
+		return result, reason, nil
+	}
 
 	authoritative := soakRoomStateUnknown
 	lastSeenAt, found, err := v.store.SubscriptionLastSeen(ctx, roomID, account)

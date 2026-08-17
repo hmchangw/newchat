@@ -823,3 +823,39 @@ func newSoakSearchTestLedger(t *testing.T, startedAt, now time.Time) *failureLed
 	require.NoError(t, err)
 	return ledger
 }
+
+// The message reconciler and the room reconciler each understand only their own
+// lane's effects. A lane-blind claim hands a room mutation to the Cassandra
+// history verifier, which cannot observe room_state and records its verdict
+// against an observer the operation never declared.
+func TestSoakFailureReconciler_LeavesRoomLaneOperationsAlone(t *testing.T) {
+	now := time.Date(2026, 8, 16, 4, 5, 6, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 4, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(&failureOperation{
+		SchemaVersion: 2, ID: "room-operation", RunID: "run-1",
+		Scenario: soakFailureScenario, Lane: soakFailureLaneMemberMutation,
+		OperationType: failureOperationMemberAdd, LifecycleState: failureOperationJournaled,
+		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+		Targets: map[string]string{"roomId": "room-1", "account": "user-a"},
+		Effects: memberMutationExpectedEffects(),
+	}))
+
+	reconciler := newSoakFailureReconciler(
+		ledger,
+		&fakeSoakFailureVerifier{err: errors.New("the message verifier must never see a room operation")},
+		time.Second,
+		func() time.Time { return now },
+	)
+
+	ran, err := reconciler.Try(context.Background())
+
+	require.NoError(t, err)
+	assert.False(t, ran, "a room operation is not the message reconciler's to claim")
+	operations := ledger.ActiveOperations()
+	require.Len(t, operations, 1)
+	assert.Empty(t, operations[0].Observations,
+		"the room operation must still be waiting for its own observer")
+}

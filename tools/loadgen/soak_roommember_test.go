@@ -595,6 +595,8 @@ func TestSoakRoomLanes_RoomCreateTracksAReplyWithoutARoomID(t *testing.T) {
 	assert.NotEmpty(t, operations[0].Targets["roomName"])
 }
 
+// Ownership is retried while the deadline allows it; past the deadline the room
+// is a real leak and has to be reported rather than quietly closed.
 func TestSoakRoomLanes_OwnershipFailureIsCountedAsUntracked(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t,
 		[]byte(`{"status":"accepted","roomId":"room-new"}`), nil)
@@ -602,7 +604,7 @@ func TestSoakRoomLanes_OwnershipFailureIsCountedAsUntracked(t *testing.T) {
 	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
 	fixture.store.byNameOK = true
 	fixture.store.byName = "room-new"
-	fixture.advance(2 * time.Second)
+	fixture.advance(2 * time.Minute)
 
 	_, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
 
@@ -616,9 +618,14 @@ func TestSoakRoomLanes_SettleIgnoresUnknownOperations(t *testing.T) {
 
 	assert.NotPanics(t, func() {
 		fixture.lanes.settle("missing-operation", failureResultGood)
-		fixture.lanes.finishCreate("", failureResultGood)
-		fixture.lanes.finishCreate("soak-run-1-created-x", failureResultUnverified)
 	})
+	assert.Empty(t, fixture.store.appended)
+
+	// A create with no journaled name has no handle to claim by, so ownership
+	// fails loudly rather than silently marking nothing.
+	require.Error(t, fixture.lanes.claimCreatedRoom(
+		context.Background(), &failureOperation{ID: "operation-1"},
+	))
 	assert.Empty(t, fixture.store.appended)
 }
 
@@ -757,7 +764,7 @@ func TestSoakRoomLanes_SettleFinalizedKeepsLiveReservations(t *testing.T) {
 }
 
 func TestSoakRoomLanes_ReadReceiptJournalsTheBaseline(t *testing.T) {
-	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 
 	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
 
@@ -771,7 +778,7 @@ func TestSoakRoomLanes_ReadReceiptJournalsTheBaseline(t *testing.T) {
 }
 
 func TestSoakRoomLanes_ReadReceiptConfirmsAnAdvancedCursor(t *testing.T) {
-	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
 	fixture.store.seenFound = true
 	fixture.store.lastSeen = fixture.now.Add(time.Second)
@@ -785,7 +792,7 @@ func TestSoakRoomLanes_ReadReceiptConfirmsAnAdvancedCursor(t *testing.T) {
 }
 
 func TestSoakRoomLanes_ReadReceiptMissingCursorAtDeadlineIsMissing(t *testing.T) {
-	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
 	fixture.store.seenFound = true
 	fixture.store.lastSeen = time.Time{}
@@ -801,7 +808,7 @@ func TestSoakRoomLanes_ReadReceiptMissingCursorAtDeadlineIsMissing(t *testing.T)
 }
 
 func TestSoakRoomLanes_ReadReceiptCursorBecomesTheNextBaseline(t *testing.T) {
-	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
 	first := soakSingleActiveOperation(t, fixture.ledger)
 	observed := fixture.now.Add(time.Second).UTC()
@@ -819,7 +826,7 @@ func TestSoakRoomLanes_ReadReceiptCursorBecomesTheNextBaseline(t *testing.T) {
 }
 
 func TestSoakRoomLanes_ReadReceiptWithoutBaselineAcceptsAnyCursor(t *testing.T) {
-	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"ok"}`), nil)
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 	require.NoError(t, fixture.lanes.ReadReceipt(context.Background()))
 	operation := soakSingleActiveOperation(t, fixture.ledger)
 	require.NotContains(t, operation.Attributes, soakFailureAttributeReadBaseline,
@@ -923,4 +930,73 @@ func TestSoakRoomLanes_SpendCreateBudgetMakesTheCapPerRun(t *testing.T) {
 	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
 	assert.Empty(t, fixture.ledger.ActiveOperations(),
 		"a run that already spent its budget must not create more rooms after a restart")
+}
+
+// A responder that answers with a status this run does not recognise has still
+// answered, and may well have applied the mutation. Scoring that as an explicit
+// rejection closes the operation, hands the candidate back as if nothing
+// happened, and leaves any real effect unreconciled. Only a bounded error
+// envelope is a rejection; anything else is ambiguous.
+func TestSoakRoomLanes_UnrecognisedReplyStaysAmbiguous(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"something-new"}`), nil)
+
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, failureObservationUnverified,
+		operation.Observations[failureObserverAdmission],
+		"an unreadable verdict is not proof the mutation was refused")
+	assert.Equal(t, uint64(0), fixture.ledger.Snapshot().Results[failureResultBad])
+}
+
+// Ownership is what teardown navigates by, and the ledger has nothing left to
+// retry once it closes the operation. A failed append before the deadline must
+// therefore keep the operation open rather than finalize an unclaimable room.
+func TestSoakRoomLanes_RoomCreateHoldsTheOperationUntilOwnershipLands(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.store.appendErr = errors.New("primary unavailable")
+	fixture.advance(2 * time.Second)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Len(t, fixture.ledger.ActiveOperations(), 1,
+		"a room that could not be claimed is not finished")
+	assert.Equal(t, uint64(0), fixture.ledger.Snapshot().Results[failureResultGood])
+
+	fixture.store.appendErr = nil
+	fixture.advance(2 * time.Second)
+	reconciled, err = fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Equal(t, []string{"room-new"}, fixture.store.appended)
+	assert.Equal(t, uint64(1), fixture.ledger.Snapshot().Results[failureResultGood])
+}
+
+// Reads against a created room are issued as the account that created it. Any
+// other account is not a member, so the room_read lane would measure
+// authorization failures instead of the reads it is there to exercise.
+func TestSoakRoomLanes_RoomCreateRegistersTheRequesterAsReader(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	requester := operation.Attributes[soakFailureAttributeRequester]
+	require.NotEmpty(t, requester)
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.advance(2 * time.Second)
+
+	_, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+
+	account, ok := fixture.lanes.reader.Account("room-new")
+	require.True(t, ok, "a created room joins the read mix")
+	assert.Equal(t, requester, account)
 }

@@ -299,6 +299,10 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	return nil
 }
 
+// soakRoomCreateBudgetMax bounds the rooms one run may create, and with them
+// the read-target set the create lane grows in memory.
+const soakRoomCreateBudgetMax = 100000
+
 func validateSoakRoomLaneConfig(cfg *soakConfig) error {
 	if !isFinite(cfg.RoomReconcileReadShare) ||
 		cfg.RoomReconcileReadShare <= 0 || cfg.RoomReconcileReadShare > 1 {
@@ -306,8 +310,14 @@ func validateSoakRoomLaneConfig(cfg *soakConfig) error {
 			"SOAK_ROOM_RECONCILE_READ_SHARE must be greater than zero and at most 1",
 		)
 	}
-	if cfg.RoomCreateBudget < 0 {
-		return fmt.Errorf("SOAK_ROOM_CREATE_BUDGET must be non-negative")
+	// Every created room is retained for the lifetime of the run: the read lane
+	// keeps its ID and owning account so the room can receive traffic, and
+	// nothing evicts them. The cap keeps that growth bounded by configuration
+	// rather than by how long the run happens to last.
+	if cfg.RoomCreateBudget < 0 || cfg.RoomCreateBudget > soakRoomCreateBudgetMax {
+		return fmt.Errorf(
+			"SOAK_ROOM_CREATE_BUDGET must be between 0 and %d", soakRoomCreateBudgetMax,
+		)
 	}
 	if cfg.RoomCreateSize < 2 || cfg.RoomCreateSize > 50 {
 		return fmt.Errorf("SOAK_ROOM_CREATE_SIZE must be between 2 and 50")
