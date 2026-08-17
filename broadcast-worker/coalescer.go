@@ -40,9 +40,24 @@ type bulkRoomLastMsgWriter interface {
 // than propagated to the handler. lastMsgAt is a derived/decorative field;
 // the message itself was already persisted to Cassandra by message-worker
 // before this code runs, so dropping the rooms-collection update is safe.
+// roomActivityRefresh is one room's coalesced position, handed to the publisher
+// so destination sites can order a room they hold no rooms doc for.
+type roomActivityRefresh struct {
+	roomID string
+	at     time.Time
+}
+
 type coalescingStore struct {
 	Store
 	bulk bulkRoomLastMsgWriter
+
+	// crossSite reports whether a room has members off this site; nil disables
+	// the refresh entirely. Backed by the room-meta cache, so the flush pays a
+	// cache hit rather than a read — the handler just resolved the same room.
+	crossSite func(ctx context.Context, roomID string) bool
+	// publishActivity emits one refresh; nil disables. Errors are logged, never
+	// propagated — see Flush.
+	publishActivity func(ctx context.Context, r roomActivityRefresh) error
 
 	mu      sync.Mutex
 	pending map[string]roomLastMsgUpdate
@@ -85,7 +100,29 @@ func (c *coalescingStore) Flush(ctx context.Context) error {
 	batch := c.pending
 	c.pending = make(map[string]roomLastMsgUpdate, len(batch))
 	c.mu.Unlock()
+	c.refreshRemoteActivity(ctx, batch)
 	return c.bulk.BulkUpdateRoomLastMessage(ctx, batch)
+}
+
+// refreshRemoteActivity emits one activity refresh per cross-site room in the
+// batch. Cost scales with distinct active cross-site rooms per flush interval,
+// not with message rate — coalescing has already collapsed the window.
+//
+// Failures are logged, not returned: the position is decorative, the next
+// message in the room re-establishes it, and the room batch this rides with is
+// the write that actually matters.
+func (c *coalescingStore) refreshRemoteActivity(ctx context.Context, batch map[string]roomLastMsgUpdate) {
+	if c.publishActivity == nil || c.crossSite == nil {
+		return
+	}
+	for roomID, u := range batch {
+		if !c.crossSite(ctx, roomID) {
+			continue
+		}
+		if err := c.publishActivity(ctx, roomActivityRefresh{roomID: roomID, at: u.at}); err != nil {
+			slog.WarnContext(ctx, "publish room activity refresh failed", "room_id", roomID, "error", err)
+		}
+	}
 }
 
 // Run drives the periodic flush loop until ctx is cancelled. On cancellation a

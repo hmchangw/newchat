@@ -40,10 +40,14 @@ type config struct {
 	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
-	MongoURI      string `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB       string `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
+	// AllSiteIDs is every site in the supercluster, this one included. Peers are
+	// the destinations for the cross-site room-activity refresh; empty (the
+	// single-site default) disables it.
+	AllSiteIDs    []string `env:"ALL_SITE_IDS" envSeparator:","`
+	MongoURI      string   `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
+	MongoDB       string   `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername string   `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword string   `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: reads only; writes always hit the primary. secondaryPreferred
 	// offloads reads (a just-joined member is recovered via history).
 	MongoReadPreference  string          `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
@@ -192,6 +196,11 @@ func main() {
 	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
 	// UpdateRoomLastMessage; the coalescing wrapper buffers it and drains via flushCtx/Run.
 	coalescer := newCoalescingStore(cachedStore, store)
+	if peers := remotePeers(cfg.SiteID, cfg.AllSiteIDs); len(peers) > 0 {
+		coalescer.crossSite = crossSiteChecker(cachedStore)
+		coalescer.publishActivity = roomActivityPublisher(publisher, cfg.SiteID, peers)
+		slog.Info("cross-site room-activity refresh enabled", "peers", peers)
+	}
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	go coalescer.Run(flushCtx, cfg.LastMsgFlushInterval, 5*time.Second)
 	slog.Info("last-msg coalescer enabled", "flush_interval", cfg.LastMsgFlushInterval)
