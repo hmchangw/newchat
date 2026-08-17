@@ -108,6 +108,7 @@ func main() {
 		mongoutil.WithReadPreference(readPref),
 		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
 		mongoutil.WithMinPoolSize(cfg.Mongo.MinPoolSize),
+		mongoutil.WithLazyConnect(),
 	)
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)

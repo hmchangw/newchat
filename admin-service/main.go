@@ -47,7 +47,8 @@ func run() error {
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
