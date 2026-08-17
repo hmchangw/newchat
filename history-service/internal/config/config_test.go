@@ -14,17 +14,24 @@ import (
 // doesn't touch them.
 func baseValid() Config {
 	return Config{
-		SubCacheSize:     100000,
-		SubCacheTTL:      2 * time.Minute,
-		RoomCacheSize:    50000,
-		RoomCacheTTL:     10 * time.Second,
-		PreviewCacheSize: 50000,
-		PreviewCacheTTL:  10 * time.Second,
-		MaxConcurrency:   256,
-		RequestTimeout:   10 * time.Second,
+		SubCacheSize:         100000,
+		SubCacheTTL:          2 * time.Minute,
+		RoomCacheSize:        50000,
+		RoomCacheTTL:         10 * time.Second,
+		PreviewCacheSize:     50000,
+		PreviewCacheTTL:      10 * time.Second,
+		MaxConcurrency:       256,
+		RequestTimeout:       10 * time.Second,
+		SubL2TTL:             90 * time.Minute,
+		MongoBreakerFails:    5,
+		MongoBreakerCooldown: 10 * time.Second,
+		DEKL2TTL:             90 * time.Minute,
+		DEKBreakerFails:      5,
+		DEKBreakerCooldown:   10 * time.Second,
 		Mongo: MongoConfig{
-			MaxPoolSize: 100,
-			MinPoolSize: 0,
+			MaxPoolSize:            100,
+			MinPoolSize:            0,
+			ServerSelectionTimeout: 2 * time.Second,
 		},
 	}
 }
@@ -42,6 +49,9 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	cfg.RoomCacheTTL = 0
 	cfg.PreviewCacheSize = 0
 	cfg.PreviewCacheTTL = 0
+	cfg.SubL2TTL = 0
+	cfg.MongoBreakerFails = 0
+	cfg.MongoBreakerCooldown = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
@@ -195,4 +205,50 @@ func unsetEnv(t *testing.T, key string) {
 			_ = os.Setenv(key, prev)
 		}
 	})
+}
+
+// Every knob this branch added is rejected when negative. Table-driven: the
+// next validated field is one row, not another six-line copy.
+func TestValidate_RejectsNegativeValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		set     func(*Config)
+		wantEnv string
+	}{
+		{"sub L2 TTL", func(c *Config) { c.SubL2TTL = -time.Second }, "HISTORY_SUB_L2_TTL"},
+		{"mongo breaker fails", func(c *Config) { c.MongoBreakerFails = -1 }, "HISTORY_MONGO_BREAKER_FAILS"},
+		{"mongo breaker cooldown", func(c *Config) { c.MongoBreakerCooldown = -time.Second }, "HISTORY_MONGO_BREAKER_COOLDOWN"},
+		{"DEK L2 TTL", func(c *Config) { c.DEKL2TTL = -time.Second }, "ATREST_DEK_L2_TTL"},
+		{"DEK breaker fails", func(c *Config) { c.DEKBreakerFails = -1 }, "ATREST_DEK_BREAKER_FAILS"},
+		{"DEK breaker cooldown", func(c *Config) { c.DEKBreakerCooldown = -time.Second }, "ATREST_DEK_BREAKER_COOLDOWN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseValid()
+			tt.set(&cfg)
+			err := validate(&cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantEnv)
+		})
+	}
+}
+
+func TestValidate_RejectsNonPositiveServerSelectionTimeout(t *testing.T) {
+	cfg := baseValid()
+	cfg.Mongo.ServerSelectionTimeout = 0
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_SERVER_SELECTION_TIMEOUT")
+}
+
+// The bound only works if it undercuts the request budget — otherwise the
+// handler deadline fires first and the read never returns the error the
+// fail-open paths need.
+func TestValidate_RejectsServerSelectionTimeoutAtOrAboveRequestTimeout(t *testing.T) {
+	cfg := baseValid()
+	cfg.RequestTimeout = 5 * time.Second
+	cfg.Mongo.ServerSelectionTimeout = 5 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be less than REQUEST_TIMEOUT")
 }

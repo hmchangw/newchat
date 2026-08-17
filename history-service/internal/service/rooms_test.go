@@ -221,6 +221,34 @@ func TestHistoryService_RoomsGet_ScanBudgetExhausted_NoEligibleMessage(t *testin
 	assert.Equal(t, []int{1, 8, 64, 100, 77}, sizes, "escalation clamps at 100 then the remaining budget, terminating at the 250-row scan cap")
 }
 
+// When Mongo is down, resolveRoomTimes fails open to zero times, which makes
+// walkBounds take the widest legal range: ceiling now+skew, floor the full
+// configured history floor. For rooms.get that is an amplification — up to 100
+// rooms each walking ~a-year-of-buckets in Cassandra, at the exact moment the
+// system is already degraded. The preview only needs the newest message, so the
+// degraded walk is bounded to a recent window instead.
+func TestHistoryService_RoomsGet_DegradedRoomTimesBoundThePreviewWalk(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	boom := errors.New("mongo down")
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).Return(nil, boom)
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(time.Time{}, time.Time{}, boom)
+
+	var gotFloor time.Time
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _, floor time.Time, _ cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			gotFloor = floor
+			return makePage(nil, false), nil
+		})
+
+	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+
+	// The configured floor here is 90 days; the degraded preview walk stops at 14.
+	assert.WithinDuration(t, time.Now().UTC().Add(-14*24*time.Hour), gotFloor, time.Minute,
+		"a degraded preview walk must not span the full configured history floor")
+}
+
 func TestHistoryService_RoomsGet_EmptyRoomOmitted(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 

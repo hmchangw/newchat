@@ -29,6 +29,15 @@ const (
 	lastMsgWalkGrowth    = 8
 	lastMsgWalkMaxScan   = 250
 	lastMsgWalkMaxPage   = cassrepo.MaxPageSize
+
+	// previewDegradedFloor bounds the preview bucket walk when room times are
+	// unavailable (Mongo outage). It is deliberately far narrower than
+	// MESSAGE_HISTORY_FLOOR_DAYS: with no lastMsgAt to anchor the ceiling, every
+	// room would otherwise walk from now back to the configured floor, turning a
+	// 100-room rooms.get into thousands of Cassandra bucket reads during an
+	// outage. Rooms with nothing newer than this simply have no preview until
+	// Mongo returns — the same degradation rooms.get already applies per room.
+	previewDegradedFloor = 14 * 24 * time.Hour
 )
 
 // RoomsGet handles chat.server.request.history.{siteID}.rooms.get: for each requested
@@ -156,7 +165,7 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta
 // all-ineligible within the walk cap, or a read failure). Walks backward from lastMsgAt in
 // pages, skipping ineligible messages.
 func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, bool) {
-	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, meta, now)
+	lastMsgAt, createdAt, degraded, err := s.resolveRoomTimesOrError(ctx, roomID, meta, now)
 	if err != nil {
 		slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,
 			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
@@ -164,6 +173,19 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 	}
 
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
+	// Without room times the floor collapses to the full configured history floor,
+	// so every room in the batch would walk a year of buckets — up to 100 of them,
+	// while the system is already degraded. A preview only needs the newest
+	// message, so bound the walk and drop rooms idle beyond the window; they
+	// return as soon as Mongo does.
+	if degraded {
+		if bounded := now.Add(-previewDegradedFloor); bounded.After(floor) {
+			floor = bounded
+		}
+		if ceiling.Before(floor) {
+			ceiling = floor
+		}
+	}
 	before := ceiling.Add(time.Millisecond)
 
 	pageSize := lastMsgWalkFirstPage

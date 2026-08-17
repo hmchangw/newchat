@@ -345,6 +345,45 @@ func TestHistoryService_LoadHistory_AccessErrorTakesPrecedence(t *testing.T) {
 	assertInternalErr(t, err, "verifying room access")
 }
 
+// TestLoadHistory_RoomTimesError_FailsOpenToNowFloor pins that a Mongo outage
+// on the room-times/receipt reads must not block a subscribed read: LoadHistory
+// still succeeds and returns Cassandra messages, using now/floor as the walk bounds.
+func TestLoadHistory_RoomTimesError_FailsOpenToNowFloor(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	msgs := mocks.NewMockMessageRepository(ctrl)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	rooms := mocks.NewMockRoomRepository(ctrl)
+	pub := mocks.NewMockEventPublisher(ctrl)
+	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
+	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
+	users := mocks.NewMockUserStore(ctrl)
+	apps := mocks.NewMockAppStore(ctrl)
+	cfg := &config.Config{
+		MessageHistoryFloorDays: 90,
+		LargeRoomThreshold:      500,
+		MaxPinnedPerRoom:        10,
+		PinEnabled:              true,
+	}
+	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
+	c := testContext()
+
+	// Subscription access OK, full history access (no HistorySharedSince floor).
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	// Room-times and receipt reads are unavailable (Mongo down).
+	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(time.Time{}, time.Time{}, errors.New("mongo down")).AnyTimes()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), "r1").Return(nil, errors.New("mongo down")).AnyTimes()
+
+	pageMessages := []models.Message{
+		{MessageID: "m1", RoomID: "r1", CreatedAt: joinTime},
+	}
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(pageMessages, false), nil)
+
+	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
+	require.NoError(t, err, "room-times error must fail-open, not block the read")
+	assert.Len(t, resp.Messages, 1)
+}
+
 func TestHistoryService_LoadNextMessages_ReturnsMinUserLastSeenAt(t *testing.T) {
 	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
