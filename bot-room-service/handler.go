@@ -17,7 +17,9 @@ import (
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // Rocket.Chat-legacy single-char rooms.t values.
@@ -62,6 +64,10 @@ type handler struct {
 	now        func() time.Time
 	newMsgID   func() string
 	newUUIDv7  func() string
+	// valkey is the L2 (Valkey) client used only to invalidate subauthcache
+	// entries after a member removal. nil disables invalidation (best-effort).
+	// Set post-construction, mirroring room-worker/room-service/inbox-worker.
+	valkey valkeyutil.Client
 }
 
 func newHandler(store RoomStore, siteID string, allSiteIDs []string, pub outboxPublisher,
@@ -382,6 +388,7 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	}
 
 	removed := []string{}
+	removedAccounts := []string{}
 	for _, userID := range req.UserIDs {
 		wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
 		if err != nil {
@@ -405,12 +412,21 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 				"userID", userID, "roomID", roomID, "error", err)
 			continue
 		}
+		// Collect for a single batched bust after the loop. u.Account (not
+		// userID) is the key subauthcache.SubKey uses — it's the same value
+		// UpsertSubscription wrote into subscriptions.u.account at add-time,
+		// sourced from this identical FindUser(userID) lookup.
+		removedAccounts = append(removedAccounts, u.Account)
 		if u.SiteID != "" && u.SiteID != h.siteID {
 			if err := h.federateMemberRemoved(c, roomID, u.ID, u.Account, u.SiteID); err != nil {
 				return nil, err
 			}
 		}
 	}
+	// Bust AFTER the writes: every deleted member's cached positive subauthcache
+	// decision must die immediately, not linger for the L2 TTL. One round trip
+	// for the whole set — the {roomID} hash tag keeps the keys in one slot.
+	subauthcache.BustSubs(c, h.valkey, roomID, removedAccounts)
 	// Only rotate when at least one subscription was actually deleted — a no-op remove must not rotate the room key (matches user pipeline).
 	if len(removed) > 0 {
 		if err := h.rotateAndFanOut(c, roomID); err != nil {

@@ -53,6 +53,10 @@ type MongoConfig struct {
 	Password string `env:"PASSWORD" envDefault:""`
 	// ReadPreference: read-only service; secondaryPreferred offloads the primary.
 	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// ServerSelectionTimeout bounds how long a read waits for a reachable
+	// server. Deliberately far below the driver default (30s), which outlasts
+	// any useful request budget on this path.
+	ServerSelectionTimeout time.Duration `env:"SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 }
 
 // UsersAPIConfig carries the third-party HR endpoint settings.
@@ -195,7 +199,8 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref),
+		mongoutil.WithServerSelectionTimeout(cfg.Mongo.ServerSelectionTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)

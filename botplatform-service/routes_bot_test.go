@@ -42,6 +42,10 @@ func (w *wireCaptureClient) Del(context.Context, ...string) error {
 	atomic.AddInt32(&w.del, 1)
 	return nil
 }
+func (w *wireCaptureClient) Expire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
 func (w *wireCaptureClient) Close() error { return nil }
 
 var _ valkeyutil.Client = (*wireCaptureClient)(nil)
@@ -203,4 +207,17 @@ func TestRegisterBotRoutes_AuthRequired(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (w *wireCaptureClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := w.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
 }

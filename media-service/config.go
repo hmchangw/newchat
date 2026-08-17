@@ -58,11 +58,12 @@ type config struct {
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
 
-	MinioEndpoint  string `env:"MINIO_ENDPOINT,required"`
-	MinioAccessKey string `env:"MINIO_ACCESS_KEY,required"`
-	MinioSecretKey string `env:"MINIO_SECRET_KEY,required"`
-	MinioUseSSL    bool   `env:"MINIO_USE_SSL" envDefault:"false"`
-	MinioBucket    string `env:"MINIO_BUCKET" envDefault:"avatars"`
+	MongoSelectTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	MinioEndpoint      string        `env:"MINIO_ENDPOINT,required"`
+	MinioAccessKey     string        `env:"MINIO_ACCESS_KEY,required"`
+	MinioSecretKey     string        `env:"MINIO_SECRET_KEY,required"`
+	MinioUseSSL        bool          `env:"MINIO_USE_SSL" envDefault:"false"`
+	MinioBucket        string        `env:"MINIO_BUCKET" envDefault:"avatars"`
 
 	NatsURL       string `env:"NATS_URL,required"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"`
