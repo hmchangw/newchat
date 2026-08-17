@@ -64,22 +64,54 @@ func TestSoakRoomReader_SubscriptionForIsARoomScopedPointLookup(t *testing.T) {
 	assert.Equal(t, "room-1", body["roomId"])
 }
 
-func TestSoakUserReader_SubscriptionChannelsAsksForACoMember(t *testing.T) {
+// Two failure modes, one assertion each. Naming the requester collapses
+// user-service's intersection to a single account so every channel matches;
+// naming an account that shares no channel makes an empty page the lane's
+// normal answer, which is indistinguishable from a broken query. Both make the
+// lane look healthy while measuring nothing.
+func TestSoakUserReader_SubscriptionChannelsAsksForARealCoMember(t *testing.T) {
 	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
-	reader, _ := newSoakUserReadFixture(t, transport, 1)
+	// user-c is active but belongs to no channel, so a picker that draws any
+	// active account will name it and produce a permanently empty page.
+	reader, err := newSoakUserReader(
+		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+		&soakTopology{
+			ActiveUsers: []model.User{
+				{ID: "u1", Account: "user-a"},
+				{ID: "u2", Account: "user-b"},
+				{ID: "u3", Account: "user-c"},
+			},
+			Rooms: []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
+			Subscriptions: []model.Subscription{
+				{RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
+				{RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
+			},
+		},
+		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+		&soakRoomReadRecorder{},
+		rand.New(rand.NewSource(1)),
+		nil,
+	)
+	require.NoError(t, err)
 
-	require.NoError(t, reader.SubscriptionChannels(context.Background()))
+	for range 20 {
+		require.NoError(t, reader.SubscriptionChannels(context.Background()))
+	}
 
-	require.Len(t, transport.bodies, 1)
-	body := decodeSoakRequestBody(t, transport.bodies[0])
-	contains, _ := body["membersContain"].(string)
-	require.NotEmpty(t, contains)
-	// user-service dedupes membersContain with the requester before matching, so
-	// naming the requester collapses the intersection to a single account and
-	// every channel they belong to matches. The query then measures nothing the
-	// plain subscription list does not already cover.
-	assert.NotContains(t, transport.subjects[0], contains,
-		"membersContain must be a different account than the requester")
+	require.Len(t, transport.subjects, 20)
+	valid := map[string]string{
+		subject.UserSubscriptionGetChannels("user-a", "site-a"): "user-b",
+		subject.UserSubscriptionGetChannels("user-b", "site-a"): "user-a",
+	}
+	for i, requestSubject := range transport.subjects {
+		coMember, known := valid[requestSubject]
+		require.True(t, known, "unexpected requester in %q", requestSubject)
+		assert.Equal(t, coMember,
+			decodeSoakRequestBody(t, transport.bodies[i])["membersContain"],
+			"the co-member must share a channel with the requester, and never be the requester")
+	}
 }
 
 func TestSoakRoomReader_ReadReceiptsAsksAsTheMessageAuthor(t *testing.T) {

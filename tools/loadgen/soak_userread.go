@@ -35,14 +35,16 @@ type soakUserReader struct {
 	rng      *rand.Rand
 	accounts []string
 	rooms    []string
-	// dmPairs holds ordered (requester, peer) pairs taken from the topology's
-	// DM rooms, so the DM read always names a counterpart that exists.
-	dmPairs []soakUserDMPair
-	reads   []soakUserRead
+	// dmPairs and channelPairs hold ordered (requester, peer) pairs taken from
+	// the topology's own rooms, so the DM and channel reads always name a
+	// counterpart the requester actually shares that kind of room with.
+	dmPairs      []soakUserAccountPair
+	channelPairs []soakUserAccountPair
+	reads        []soakUserRead
 }
 
-// soakUserDMPair is one direction of a DM room's two participants.
-type soakUserDMPair struct {
+// soakUserAccountPair is one direction of two accounts that share a room.
+type soakUserAccountPair struct {
 	Requester string
 	Peer      string
 }
@@ -91,28 +93,39 @@ func newSoakUserReader(
 	for i := range topology.Rooms {
 		reader.rooms = append(reader.rooms, topology.Rooms[i].ID)
 	}
-	reader.dmPairs = soakUserDMPairs(topology, reader.accounts)
+	reader.dmPairs = soakUserRoomPairs(topology, reader.accounts, model.RoomTypeDM)
+	reader.channelPairs = soakUserRoomPairs(topology, reader.accounts, model.RoomTypeChannel)
 	reader.reads = soakUserReads()
 	return reader, nil
 }
 
-// soakUserDMPairs indexes the topology's DM rooms as the directions whose
-// requester is one of the lane's active accounts. A DM room is always exactly
-// two accounts, so anything else is a malformed room and is left out rather
-// than guessed at.
+// soakUserRoomPairs indexes rooms of one type as the (requester, peer)
+// directions whose requester is one of the lane's active accounts. Both reads
+// that name another account depend on it: a pair drawn at random shares a DM
+// almost never and a channel seldom, and in either case an empty answer becomes
+// the lane's normal result — indistinguishable from a query that is simply
+// broken.
 //
-// Restricting the requester keeps the lane addressing the same ~2k accounts as
-// every other user read. DM rooms are seeded active↔active and active↔borrowed,
-// so at least one side always qualifies and no room is lost; indexing both
-// sides would instead have this one read issuing traffic as borrowed accounts
-// nothing else touches, quietly changing what the lane measures.
+// Restricting the requester keeps these reads addressing the same ~2k accounts
+// as every other user read. DM rooms are seeded active↔active and
+// active↔borrowed, so at least one side always qualifies and no room is lost;
+// indexing both sides would have these reads issuing traffic as borrowed
+// accounts nothing else touches, quietly changing what the lane measures.
+//
+// Only the first two members of a channel are paired. The point is a co-member
+// that genuinely shares a room, not coverage of the membership matrix, and a
+// full cross-product would be quadratic in channelMembers.
 //
 // Ordering follows topology.Rooms so a given seed draws the same sequence for a
 // given topology. It is not stable across the seed and restart paths: those
 // build Rooms in different orders, so a replacement process draws a different
-// sequence than the process it replaced. That is acceptable for a read lane
-// with no evidence to reconcile — it is recorded here so nobody relies on more.
-func soakUserDMPairs(topology *soakTopology, accounts []string) []soakUserDMPair {
+// sequence than the process it replaced. That is acceptable for read lanes with
+// no evidence to reconcile — it is recorded here so nobody relies on more.
+func soakUserRoomPairs(
+	topology *soakTopology,
+	accounts []string,
+	roomType model.RoomType,
+) []soakUserAccountPair {
 	active := make(map[string]struct{}, len(accounts))
 	for _, account := range accounts {
 		active[account] = struct{}{}
@@ -120,25 +133,29 @@ func soakUserDMPairs(topology *soakTopology, accounts []string) []soakUserDMPair
 	members := make(map[string][]string)
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
-		if subscription.RoomType != model.RoomTypeDM ||
-			subscription.User.Account == "" {
+		if subscription.RoomType != roomType || subscription.User.Account == "" {
 			continue
 		}
 		members[subscription.RoomID] = append(
 			members[subscription.RoomID], subscription.User.Account,
 		)
 	}
-	pairs := make([]soakUserDMPair, 0, len(members)*2)
+	pairs := make([]soakUserAccountPair, 0, len(members)*2)
 	for i := range topology.Rooms {
 		participants := members[topology.Rooms[i].ID]
-		if len(participants) != 2 || participants[0] == participants[1] {
+		// A DM room is always exactly two accounts; for a channel the first two
+		// are enough. Fewer than two cannot name a counterpart at all.
+		if roomType == model.RoomTypeDM && len(participants) != 2 {
 			continue
 		}
-		for side, requester := range participants {
+		if len(participants) < 2 || participants[0] == participants[1] {
+			continue
+		}
+		for side, requester := range participants[:2] {
 			if _, ok := active[requester]; !ok {
 				continue
 			}
-			pairs = append(pairs, soakUserDMPair{
+			pairs = append(pairs, soakUserAccountPair{
 				Requester: requester, Peer: participants[1-side],
 			})
 		}
@@ -297,12 +314,18 @@ func (r *soakUserReader) SubscriptionByRoom(ctx context.Context) error {
 }
 
 // SubscriptionChannels asks which of the requester's channels also contain
-// another named account. The co-member must not be the requester: user-service
-// dedupes membersContain with the requester before matching, so naming self
-// collapses the intersection to one account and every channel matches — the
-// query would then measure nothing subscription.list does not already cover.
+// another named account. The co-member comes from a channel they actually
+// share, for two reasons. user-service dedupes membersContain with the
+// requester before matching, so naming self collapses the intersection to one
+// account and every channel matches; and an account that shares no channel
+// makes an empty page the lane's normal answer, which cannot be told apart from
+// a query that is simply broken. Without a shared channel the lane skips.
 func (r *soakUserReader) SubscriptionChannels(ctx context.Context) error {
-	account, coMember := r.pickAccountPair()
+	account, coMember, ok := r.pickChannelPair()
+	if !ok {
+		r.recordSkip(soakRPCUserSubscriptionChannel)
+		return nil
+	}
 	var response soakSubscriptionListResponse
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionChannel,
@@ -385,12 +408,25 @@ func (r *soakUserReader) pickAccountPair() (string, string) {
 }
 
 func (r *soakUserReader) pickDMPair() (string, string, bool) {
+	return r.pickPair(func() []soakUserAccountPair { return r.dmPairs })
+}
+
+func (r *soakUserReader) pickChannelPair() (string, string, bool) {
+	return r.pickPair(func() []soakUserAccountPair { return r.channelPairs })
+}
+
+// pickPair reads the index under the same lock as rng, which is what makes the
+// draw safe from the lane's concurrent goroutines.
+func (r *soakUserReader) pickPair(
+	index func() []soakUserAccountPair,
+) (string, string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.dmPairs) == 0 {
+	pairs := index()
+	if len(pairs) == 0 {
 		return "", "", false
 	}
-	pair := r.dmPairs[r.rng.Intn(len(r.dmPairs))]
+	pair := pairs[r.rng.Intn(len(pairs))]
 	return pair.Requester, pair.Peer, true
 }
 

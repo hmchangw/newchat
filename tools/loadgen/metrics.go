@@ -307,7 +307,7 @@ func NewMetrics() *Metrics {
 	m.SoakEncryptionPreflight = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "loadgen_soak_encryption_preflight",
-			Help: "1 when this run verified that a message reached Cassandra encrypted and wrapped the room DEK, 0 when the check was skipped by configuration. A run reporting 0 is not evidence about at-rest encryption.",
+			Help: "1 once this run proved a message reached Cassandra encrypted and wrapped the room DEK. 0 means not proven — skipped by configuration, still in flight, failed, or a loadgen mode that never runs the check. Alert on a sustained 0 during soak, not on any 0.",
 		},
 	)
 	m.SoakRoomStateSources = prometheus.NewCounterVec(

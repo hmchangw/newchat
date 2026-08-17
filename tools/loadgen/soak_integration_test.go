@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	prommetrics "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -131,14 +132,23 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 
 	preflightCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	preflightMetrics := NewMetrics()
 	require.NoError(t, runSoakEncryptionPreflight(
 		preflightCtx,
-		soakEncryptionPreflightConfig{Enabled: true, Timeout: 5 * time.Second},
+		soakEncryptionPreflightConfig{
+			Enabled: true, Timeout: 5 * time.Second,
+			Verified: preflightMetrics.SoakEncryptionPreflight,
+		},
 		store,
 		sender,
 		selector,
 		replies,
 	))
+	// The gauge is the only artifact a reader sees after the run, so the passing
+	// path has to actually raise it — not merely avoid an error.
+	assert.Equal(t, float64(1),
+		prommetrics.ToFloat64(preflightMetrics.SoakEncryptionPreflight),
+		"a verified encrypted write path must be recorded, not just logged")
 	message := <-accepted
 
 	getSubject := subject.MsgGetWildcard(siteID)

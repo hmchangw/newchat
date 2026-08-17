@@ -317,6 +317,7 @@ func TestNewMetrics_RoomLaneFamiliesUseBoundedLabels(t *testing.T) {
 	metrics.SoakRoomStateSources.WithLabelValues("room_service", "matched").Inc()
 	metrics.SoakRoomPoolDegraded.Set(0)
 	metrics.SoakRoomCreateBudgetRemaining.Set(10)
+	metrics.SoakEncryptionPreflight.Set(1)
 	metrics.FailureAbandonedJournals.Set(0)
 
 	families, err := metrics.Registry.Gather()
@@ -338,6 +339,7 @@ func TestNewMetrics_RoomLaneFamiliesUseBoundedLabels(t *testing.T) {
 		"loadgen_soak_room_candidates", "loadgen_soak_room_quarantine_probes_total",
 		"loadgen_soak_room_pool_exhausted_total", "loadgen_soak_room_pool_degraded",
 		"loadgen_soak_room_create_budget_remaining", "loadgen_soak_room_state_source_total",
+		"loadgen_soak_encryption_preflight",
 		"loadgen_failure_abandoned_journals",
 	} {
 		assert.Contains(t, names, name)

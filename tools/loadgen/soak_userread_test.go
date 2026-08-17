@@ -38,6 +38,12 @@ func newSoakUserReadFixture(
 					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
 				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: true,
 					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
+				// The channel read names a co-member of a shared channel, so the
+				// fixture carries one between the same two accounts.
+				{RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
+				{RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
 			},
 		},
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
