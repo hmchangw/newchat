@@ -959,7 +959,15 @@ enough to evaluate recovery.
 - **Applies to:** soak, failure
 
 ```promql
+# Pacing validity (evidence contract). Holds the identity checked in D4-1.2.
 sum by (lane) (increase(loadgen_soak_dispatched_total[2m]))
+/
+(sum by (lane) (loadgen_soak_configured_rate) * 120)
+
+# Traffic validity (#295 pending). Required in addition, not instead.
+sum by (lane) (
+  increase(loadgen_soak_lane_attempts_total{outcome="sent"}[2m])
+)
 /
 (sum by (lane) (loadgen_soak_configured_rate) * 120)
 ```
@@ -967,6 +975,16 @@ sum by (lane) (increase(loadgen_soak_dispatched_total[2m]))
 - **Expected reading:** at or above 0.95 for every enabled lane. The exact
   0.95 boundary is valid. Below it, the run did not offer the declared traffic
   and every absence claim for that lane is `INCONCLUSIVE`.
+- **Both queries are needed, and they answer different questions.**
+  `loadgen_soak_dispatched_total` counts **scheduler slots**, and a lane
+  consumes one even when it finds no usable target — so a lane idling on an
+  exhausted pool reads as fully loaded. The first query cannot be replaced
+  because it holds the pacing identity in D4-1.2; the second cannot be omitted
+  because it is the only one that expresses offered load. #295's threshold on
+  the attempts gate is **90%**, and it makes the window inconclusive for that
+  lane only. The two non-`sent` outcomes name the two ways a slot passes
+  without a request: `no_target` for an exhausted pool, `refused` for a
+  mutation the ledger declined.
 - **No data:** `INCONCLUSIVE`, never a pass. Do not add `or vector(0)`.
 - **Note:** `loadgen_soak_intended_total` is an observed pacing counter and is
   not a substitute for this stable target calculation.
@@ -1191,12 +1209,20 @@ loadgen_consumer_ack_floor_stall_seconds{stream="$stream", durable="$durable"}
 
 - **Expected reading:** pending drains after the fault window. A plateau with
   the loop gauge at 1 is a consumer that is running but not keeping up.
-- **No data:** all four hot-path durables are sampled since #271 —
-  `message-gatekeeper` on MESSAGES plus `message-worker`, `broadcast-worker`,
-  and `notification-worker` on MESSAGES-CANONICAL. No data now means the
-  sampler could not reach the consumer; check
+- **No data:** four durables are sampled since #271 — `message-gatekeeper` on
+  MESSAGES plus `message-worker`, `broadcast-worker`, and `notification-worker`
+  on MESSAGES-CANONICAL. **#295 raises that to nine**, adding `message-sync`
+  (MESSAGES-CANONICAL), `room-worker` and
+  `notification-worker-room-event-invalidate` (ROOMS), and `spotlight-sync`
+  and `user-room-sync` (INBOX) — the durables the new room and member lanes
+  drive. No data means the sampler could not reach the consumer; check
   `loadgen_consumer_sample_errors_total{reason}` and `loadgen_consumer_up`
-  before reading it as an idle consumer.
+  before reading it as an idle consumer. A consumer that is simply not deployed
+  sets `loadgen_consumer_up` to 0 and counts a bounded sample error — it never
+  invalidates the ledger.
+- **Traps:** 7.18 — five of those nine durables have no `chat_nats_consumer_loop_up`
+  at all, so this run-scoped sampler is the *only* backlog evidence for them
+  until the platform exporter lands.
 - **Note:** the stall gauge is emitted **only** while `NumPending > 0` and
   `ConsumerInfo.AckFloor.Last` is available, so its absence is not a statement
   that the floor is healthy. It also does not replace oldest-pending age: a
@@ -1514,6 +1540,36 @@ consumer advancing too slowly to catch up never freezes its floor.
 `history_content_mismatch`, `history_missing`, `recipient_duplicate`,
 `recipient_unexpected`, `recipient_identity_mismatch`, `recipient_missing`,
 `publish_local_error`.
+
+**Added by #295 (pending).** Eleven families, all bounded; room IDs, accounts,
+and message IDs stay WAL and log content, never Prometheus labels.
+
+| Family | Meaning |
+|---|---|
+| `loadgen_soak_lane_attempts_total{lane,outcome}` | Lane slots by outcome: `sent`, `no_target`, `refused`. **The traffic-validity gate** — see D4-1.1. |
+| `loadgen_soak_room_candidates{state}` | Member candidates by lifecycle state |
+| `loadgen_soak_room_quarantine_probes_total{result}` | Parked-pair re-probe outcomes |
+| `loadgen_soak_room_pool_exhausted_total{reason}` | Mutations skipped for lack of a usable target |
+| `loadgen_soak_room_pool_degraded` | Reversible candidate-pool degradation flag |
+| `loadgen_soak_room_create_budget_remaining` | Rooms the create lane may still add |
+| `loadgen_soak_room_state_source_total{source,result}` | Room-state observer outcomes per source |
+| `loadgen_soak_presence_signals_total{signal}` | Presence signals published, by kind |
+| `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
+| `loadgen_soak_presence_connections{status}` | Connections the lane currently claims online |
+| `loadgen_failure_abandoned_journals` | Retained journals from earlier ledger epochs |
+
+The existing `loadgen_failure_*` and `loadgen_soak_*` pacing families cover the
+new lanes through their existing `lane` and `observer` labels — no new terminal
+result values, and `scenario` stays `message_soak`.
+
+**Pool degradation is reversible; ledger invalidation is not.** Quarantine
+overflow is reported through `loadgen_soak_room_pool_degraded` and
+`loadgen_soak_room_pool_exhausted_total`, deliberately **not** through
+`loadgen_failure_invalidations_total`. Invalidation is a one-way,
+process-lifetime latch: using it for a recoverable degradation would make every
+later fault window in a multi-day run inconclusive. Read a degraded pool as
+"this lane's offered load dropped" — which D4-1.1's attempts gate already
+measures — not as "the evidence is void".
 
 **Cardinality contract.** `scenario` is fixed to **`message_soak`** — #271
 renamed it from `cassandra_soak`, so a dashboard variable or hardcoded selector

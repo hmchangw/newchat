@@ -134,6 +134,7 @@ Every panel and alert in the companions carries one of these:
 |---|---|
 | **Available** | Emitted by code on `main` at `a96389f` and scrapeable wherever the service is deployed |
 | **#283 pending** | Depends on PR #283 (`codex/nats-metrics-review-followup`), which is open, in draft, and currently conflicted |
+| **#295 pending** | Depends on PR #295 (`claude/room-member-soak-expansion-6l6qq3`), which is open and not draft |
 | **Proposed** | Reviewed but not yet on any branch |
 | **Missing** | Not emitted and not planned; the panel is not built, and the gap is listed in Section 8 |
 
@@ -175,6 +176,31 @@ miss — a loop either runs or it is gone, and `chat_nats_consumer_loop_up`
 The only cost is the one trap 7.11 already records: anyone who read the #283
 discussion will expect self-healing that `main` does not have. Keep that
 paragraph either way.
+
+### 3.3 What #295 changes, if it merges
+
+#295 expands the continuous soak from six lanes to fourteen. It is open and not
+draft, so treat it as likely rather than speculative — but nothing below is on
+`main` yet.
+
+Three parts of this document are affected, and the first two would be **wrong**
+rather than merely incomplete once it lands:
+
+- **Section 6 (traffic reality).** The lane table doubles, and the statement
+  that there is no room/member lifecycle, no presence and no search lane stops
+  being true. Federation, push, and bot lanes stay absent.
+- **D4-1.1 (dispatch validity).** `loadgen_soak_dispatched_total` counts
+  *scheduler slots*, which a lane consumes even when it finds no usable target
+  — so a lane idling on an exhausted pool reads as fully loaded. #295 adds
+  `loadgen_soak_lane_attempts_total{lane,outcome}` to separate offered load
+  from an idle slot, and the traffic-validity gate moves onto it. The pacing
+  identity in D4-1.2 keeps using `dispatched`; the two serve different claims
+  and both are needed.
+- **D4-2.4 (consumer backlog).** Sampled durables go from four to nine.
+
+It also adds eleven metric families (Appendix A.6) and surfaces two failure
+modes that already exist on `main` but had no entry here: traps 7.17 and 7.18.
+
 
 ---
 
@@ -285,8 +311,10 @@ Two consequences for the panel catalog:
 
 ## 6. Traffic reality the panels must match
 
-The soak workload has six lanes and nothing else. Panels must not imply
-coverage that no traffic exercises.
+Panels must not imply coverage that no traffic exercises. The lane set is
+changing, so both states are recorded.
+
+### 6.1 On `main` today — six lanes
 
 | Lane | Default rate | Actions |
 |---|---|---|
@@ -297,16 +325,43 @@ coverage that no traffic exercises.
 | pinned-list | 1/s | pinned message list |
 | verify | 1/s | Cassandra read-back verification |
 
-Source: `tools/loadgen/soak_config.go` (`SEND_RATE`, `READ_RATE`,
-`MUTATION_RATE`, `REACTION_RATE`, `PINNED_LIST_RATE`, `VERIFY_RATE`).
+Source: `tools/loadgen/soak_config.go`.
 
 There is **no** room or member lifecycle lane, no presence, no search, no push,
-no federation, and no bot lane. Panels for those paths are legitimate on the
-operations dashboards, where real traffic exists, but on D4 they will be flat
-and must be labelled as such. A flat federation panel during a soak is not
-evidence that federation is healthy.
+no federation, and no bot lane.
 
----
+### 6.2 With #295 — fourteen lanes
+
+<span id="lanes-295"></span>#295 adds eight lanes to the same
+`seed → soak → stopped` lifecycle. No new deployment, no new phase.
+
+| Lane | Default rate | Ledger-tracked | Drives |
+|---|---|---|---|
+| member_mutation | 2/s | admission + room_state | paired add/remove over a candidate ring |
+| room_mutation | 1/s | admission + room_state | rename, mute/unmute |
+| room_read | 20/s | no | member list, rooms-info, subscription list, read receipts |
+| room_create | 0.05/s | admission + room_state | capped by `SOAK_ROOM_CREATE_BUDGET` (default 2000) |
+| read_receipt | 5/s | admission + room_state | `messageRead` |
+| user_read | 10/s | no | 14 user-service reads |
+| search_read | 5/s | no | message and room search |
+| presence | 30/s | **no, by design** | hello/ping/activity/bye plus batch query |
+
+Still absent after #295: **federation, push, and bot lanes.** A flat panel on
+those paths during a soak remains "not exercised", not "healthy".
+
+Two reading consequences worth carrying into the panels:
+
+- **Presence is deliberately outside the ledger.** Its signals are Core NATS
+  fire-and-forget publishes that the client buffers during an outage and
+  flushes on reconnect, so a successful publish proves nothing about delivery
+  and a failed one proves nothing about loss — the same reasoning as trap 7.16
+  and guide §2 item 6. Only the batch query is evidence, and only outside the
+  settle window.
+- **Read-only lanes carry latency, error and result metrics only.** A read has
+  no expected side effect to reconcile. Read receipts are the exception —
+  `messageRead` is a synchronous write with a monotonic cursor, so verification
+  compares two *server-written* timestamps and the generator's clock never
+  enters the verdict.
 
 ## 7. Reading traps
 
@@ -518,6 +573,55 @@ visible here, and for the inbound side it belongs to
 `chat_nats_request_handled_total`, whose `result` enum does distinguish the
 categories.
 
+### 7.17 Search-index loss is invisible to every signal in this document
+
+`search-sync-worker/handler.go` **Acks and drops** a message whose payload it
+cannot decode (`decode payload failed`) or cannot turn into a bulk action
+(`build action failed`). The comment on the second one is explicit: *"Every
+BuildAction error is parse/validation poison — Ack drops it for good, so this
+line is the only trace."*
+
+Trace the consequences through the signals this document specifies:
+
+| Signal | What it shows |
+|---|---|
+| JetStream backlog (D2-5.1) | Nothing. The message was Acked, so pending goes to zero. |
+| Ack-floor stall (D2-5.2) | Nothing. The floor advances normally. |
+| Redelivery (D2-1.3) | Nothing. There is no Nak and no redelivery. |
+| Terminal failures (D1-3.3, D2-1.5) | Nothing — **`search-sync-worker` is not a `chat_nats_*` adopter at all**, so it emits no consumer family, no loop gauge, and no terminal-failure counter. |
+| Loadgen ledger (D4-3.1) | Nothing. No observer covers the search path. |
+
+**A log line is the only evidence.** Search is the one MESSAGES-CANONICAL
+downstream with no end-to-end check, and this is the concrete reason the
+search-index observer exists in #295 — where it is present but **rejected at
+startup**, because every soak body is a single run of one character and
+analyzes to one token, so the probe would report every message lost.
+
+Do not read a clean backlog row as evidence that indexing is intact. Nothing on
+these dashboards can make that claim today.
+
+### 7.18 Some durables have no loop gauge
+
+`chat_nats_consumer_loop_up` exists only for the seven `chat_nats_*` adopters,
+and only for the consumer each of them registers with `natsmetrics`. Several
+durables that carry real traffic have no gauge:
+
+| Durable | Stream | Owner | Instrumented? |
+|---|---|---|---|
+| `notification-worker-room-event-invalidate` | ROOMS | notification-worker | **No** — the service registers only its canonical consumer |
+| `message-sync` | MESSAGES-CANONICAL | search-sync-worker | No — not an adopter |
+| `spotlight-sync` | INBOX | search-sync-worker | No — not an adopter |
+| `user-room-sync` | INBOX | search-sync-worker | No — not an adopter |
+
+Two consequences. **D1-1.1 cannot detect the absence of these durables**, and
+**D1-3.1 cannot detect them wedging** — the two rules that guide §2 items 2 and
+5 present as the ones only this project can write do not reach them. The
+platform exporter's backlog series do cover them, which is one more reason the
+JetStream backlog row (Section 9) is not optional.
+
+#295 makes this visible by sampling all nine durables during a run; the gap
+itself predates it and exists on `main` today.
+
 ---
 
 ## 8. Prerequisites
@@ -545,6 +649,8 @@ question that stays unanswerable until the item lands.
 | Domain metrics for `room-service`, `room-worker`, `inbox-worker`, `outbox-worker`, `search-sync-worker` | Missing | Business outcomes on the room, membership, and federation paths. #286 gave the first three `chat_nats_*` coverage, which is NATS failure evidence — not business outcomes. `o11y-metrics-inventory.md` §2 tracks these as F-items. |
 | Inbound request metrics for `user-service`, `search-service`, `media-service`, `bot-message-handler`, `bot-room-service` | Missing | Server-side success rate and latency for every request/reply service outside the seven-service failure-test scope. These build a `natsrouter` **without** `WithMetrics`, so the router is unchanged and emits nothing. |
 | Fault annotation source | Missing | Aligning injection, failover, recovery, and settle timestamps on D4. Manual annotations are acceptable locally; a durable event source is required for staging campaigns. |
+| Per-message searchable marker in soak payloads | Missing — blocks #295's search-index observer | Whether search indexing dropped a message (trap 7.17). #295 ships the observer machinery but **refuses the flag at startup**: soak bodies are one run of a single character, so they analyze to one token and the probe would report every message lost. The change touches the send path, the `SOAK_PAYLOAD_*` budgets, and the sonic wire-compat tests. |
+| Loop gauges for `notification-worker-room-event-invalidate`, `message-sync`, `spotlight-sync`, `user-room-sync` | Missing | Absence and wedge detection for four durables that carry real traffic (trap 7.18). Alert rules 1 and 2 do not reach them. |
 
 ### 8.3 Cleared by #271 and #286
 
