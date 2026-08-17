@@ -10,6 +10,17 @@ import { attachmentKind } from './attachment'
 // message sits in the sidebar for as long as it's the room's latest.
 export const PREVIEW_MAX_LENGTH = 140
 
+// Headroom applied BEFORE tokenizing: previewText runs on the reducer hot
+// path for every message in every room (not just the ones being rendered),
+// so parseMessageContent — recursive, O(body length) — must never see a
+// full multi-KB body just to produce a 140-char snippet. The margin has to
+// be generous rather than exactly PREVIEW_MAX_LENGTH because markup near the
+// boundary can both shrink (**bold** -> bold) and grow (@alice -> @Alice
+// Chen) once parsed, so the raw prefix needs slack on both sides to still
+// resolve correctly.
+const PARSE_SLICE_MARGIN = 500
+const PARSE_SLICE_LENGTH = PREVIEW_MAX_LENGTH + PARSE_SLICE_MARGIN
+
 const KIND_LABEL = { image: 'Photo', audio: 'Audio', video: 'Video' }
 
 /**
@@ -21,9 +32,22 @@ const KIND_LABEL = { image: 'Photo', audio: 'Audio', video: 'Video' }
  */
 export function previewText(content, mentions = []) {
   if (!content) return ''
-  const flat = flattenNodes(parseMessageContent(content, mentions))
+  const bounded = safeSlice(content, PARSE_SLICE_LENGTH)
+  const flat = flattenNodes(parseMessageContent(bounded, mentions))
   const collapsed = flat.replace(/\s+/g, ' ').trim()
-  return collapsed.length > PREVIEW_MAX_LENGTH ? collapsed.slice(0, PREVIEW_MAX_LENGTH) : collapsed
+  return safeSlice(collapsed, PREVIEW_MAX_LENGTH)
+}
+
+// Slice to at most maxLength UTF-16 code units without splitting a surrogate
+// pair. A plain slice(0, N) can land between a high surrogate (0xD800-
+// 0xDBFF) and its low surrogate, leaving a lone surrogate that renders as
+// U+FFFD — drop the whole pair instead of half of it.
+function safeSlice(str, maxLength) {
+  if (str.length <= maxLength) return str
+  let end = maxLength
+  const code = str.charCodeAt(end - 1)
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1
+  return str.slice(0, end)
 }
 
 /**

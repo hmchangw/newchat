@@ -68,6 +68,25 @@ interface RoomPreview {
   senderName: string
   /** Single-line, flattened, capped at PREVIEW_MAX_LENGTH. */
   text: string
+  /** RFC3339, from the previewed message's createdAt. Powers
+   *  ROOM_PREVIEW_UPDATED's recency guard: broadcast-worker processes
+   *  canonical messages concurrently, so an edit/delete's server-resolved
+   *  preview can arrive after a genuinely newer message's live preview —
+   *  a strictly older incoming createdAt is rejected rather than regressing
+   *  the sidebar. Optional because older code paths / test fixtures may not
+   *  set it; a missing timestamp on either side of the comparison is
+   *  treated as "accept the write". */
+  createdAt?: string
+  /** True when this preview was built from a live message the client
+   *  couldn't decrypt — the reducer's "[encrypted message]" placeholder
+   *  branch. Guards ROOM_PREVIEW_UPDATED from overwriting the placeholder
+   *  with the server's plaintext previewMessage body for the SAME message
+   *  (history-service / broadcast-worker relay that body unencrypted). A
+   *  wire preview for a DIFFERENT, newer message still overwrites normally.
+   *  Known residual: after a reload there's no placeholder in state to
+   *  compare against, so bootstrap still shows the server's plaintext —
+   *  fully closing that gap needs a backend change, not a client one. */
+  encrypted?: boolean
 }
 
 /** Sidebar summary — derived from `model.Room` + the user's

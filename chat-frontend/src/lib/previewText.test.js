@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { previewText, attachmentFallbackText, previewSnippet, PREVIEW_MAX_LENGTH } from './previewText'
+import * as messageContent from './messageContent'
 
 describe('previewText', () => {
   it('returns plain text unchanged', () => {
@@ -64,6 +65,36 @@ describe('previewText', () => {
     const out = previewText(long)
     expect(out).toHaveLength(PREVIEW_MAX_LENGTH)
     expect(PREVIEW_MAX_LENGTH).toBe(140)
+  })
+
+  it('does not split a surrogate pair straddling the PREVIEW_MAX_LENGTH boundary', () => {
+    // 139 plain chars + a 2-code-unit emoji puts the emoji's code units at
+    // indices 139/140 — a naive slice(0, 140) keeps only the high surrogate,
+    // leaving a lone surrogate that renders as U+FFFD.
+    const content = 'a'.repeat(139) + '😀' + 'b'.repeat(20)
+    const out = previewText(content)
+    expect(out).toHaveLength(139)
+    expect(out).toBe('a'.repeat(139))
+    // No lone surrogate anywhere in the output.
+    expect(/[\uD800-\uDFFF]/.test(out)).toBe(false)
+  })
+
+  it('slices the raw content to a bounded prefix before tokenizing (perf)', () => {
+    // parseMessageContent runs on the reducer hot path for every message in
+    // every room, so a multi-KB body must never be fully tokenized just to
+    // produce a 140-char snippet.
+    const spy = vi.spyOn(messageContent, 'parseMessageContent')
+    try {
+      const long = 'x'.repeat(20000)
+      const out = previewText(long)
+      expect(out).toHaveLength(PREVIEW_MAX_LENGTH)
+      expect(spy).toHaveBeenCalledTimes(1)
+      const [passedContent] = spy.mock.calls[0]
+      expect(passedContent.length).toBeLessThan(2000)
+      expect(passedContent.length).toBeGreaterThan(PREVIEW_MAX_LENGTH)
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
 
