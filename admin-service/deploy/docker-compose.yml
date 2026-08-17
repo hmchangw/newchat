@@ -19,6 +19,7 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - ROOM_RPC_TIMEOUT=${ROOM_RPC_TIMEOUT:-5s}
+      - FANOUT_TIMEOUT=${FANOUT_TIMEOUT:-5s}
       - BCRYPT_COST=${BCRYPT_COST:-10}
       - SESSIONS_MAX_PER_ACCOUNT=${SESSIONS_MAX_PER_ACCOUNT:-100}
     volumes:

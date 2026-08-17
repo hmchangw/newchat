@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -730,7 +731,7 @@ func TestHandler_createPermissions(t *testing.T) {
 // fanoutTestCfg is the 3-site fixture used by every fanout scenario below:
 // site-a (this site) publishing to remotes site-b and site-c.
 func fanoutTestCfg() Config {
-	return Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b", "site-c"}}
+	return Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b", "site-c"}, FanoutTimeout: 5 * time.Second}
 }
 
 // fanoutRequestBody returns a valid grant request for the given subject accounts.
@@ -909,7 +910,7 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 
 		assert.NoError(t, callErr, "publish ctx must not already be canceled/expired at call time — it must be severed from the client's cancellation (context.WithoutCancel)")
 		require.True(t, callHasDeadline, "publish ctx must carry the fanout's own deadline, not run unbounded")
-		assert.WithinDuration(t, time.Now().Add(5*time.Second), callDeadline, 2*time.Second, "fanout deadline must be ~5s, not per-publish and not unbounded")
+		assert.WithinDuration(t, time.Now().Add(h.cfg.FanoutTimeout), callDeadline, 2*time.Second, "fanout deadline must be the configured fanout budget, not per-publish and not unbounded")
 	})
 
 	t.Run("chunking: 5001 accounts split into 5000+1 per destination", func(t *testing.T) {
@@ -1119,6 +1120,22 @@ func TestHandler_resyncPermissions(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
 
+	t.Run("no requested account has a stored state → 200, nothing published, syncFailures omitted", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		perms := map[string]*model.UserPermissions{"alice": {}} // doc exists, permission never recorded; carol has no doc
+		m.EXPECT().GetUserPermissionsForAccounts(gomock.Any(), gomock.Any()).Return(perms, nil)
+
+		var log publishLog
+		h := newHandler(m, emptySessionStore(), fanoutTestCfg(), nil, log.publish)
+		w := postResync(h, map[string]any{"permission": knownPermission, "accounts": []string{"alice", "carol"}}, t)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, log.data, "nothing to re-deliver → no publish, even with remotes and a live publisher")
+		_, has := respBody(t, w)["syncFailures"]
+		assert.False(t, has, "syncFailures is omitted when no destination was attempted")
+	})
+
 	t.Run("two accounts sharing one stored state → one fanout group, one event per dest, stored UpdatedAt preserved", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		m := NewMockAdminStore(ctrl)
@@ -1247,7 +1264,7 @@ func TestHandler_resyncPermissions(t *testing.T) {
 
 	t.Run("every group shares ONE fanout budget — the deadline does not restart per group", func(t *testing.T) {
 		// Regression pin: the budget used to be established inside publishPermissionFanout,
-		// which resync calls once PER state group. Groups are keyed on UpdatedAt, so N admin
+		// which resync called once PER state group. Groups are keyed on UpdatedAt, so N admin
 		// submits yield N groups and one unreachable peer cost N × the budget in wall time —
 		// past httpWriteTimeout (30s) at N ≥ 6, so net/http dropped the connection before the
 		// handler could report syncFailures. One shared budget = one shared deadline instant.
@@ -1280,12 +1297,65 @@ func TestHandler_resyncPermissions(t *testing.T) {
 
 		require.Len(t, deadlines, 4, "2 groups x 2 remote dests")
 		require.True(t, allHaveDeadline, "every publish ctx must carry the fanout budget's deadline")
-		assert.WithinDuration(t, time.Now().Add(fanoutTimeout), deadlines[0], 2*time.Second, "the shared budget must be the ~5s fanout budget")
+		assert.WithinDuration(t, time.Now().Add(h.cfg.FanoutTimeout), deadlines[0], 2*time.Second, "the shared budget must be the configured fanout budget")
 		for i, d := range deadlines {
 			assert.True(t, d.Equal(deadlines[0]),
 				"publish %d saw a different deadline (%v) than the first (%v) — each group got a fresh budget instead of sharing the request's one",
 				i, d, deadlines[0])
 		}
+	})
+
+	t.Run("a stalled peer consumes only its own lane — healthy peers still receive every group", func(t *testing.T) {
+		// Regression pin for PR review: resync used to invoke the fanout once per state
+		// group, sequentially, under the shared budget. A peer that blocked until the
+		// deadline on the first group handed every later group an already-expired ctx,
+		// so healthy peers missed those groups and were reported as sync failures too.
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		stateB := model.PermissionState{Granted: false, UpdatedAt: time.Date(2025, 7, 15, 9, 0, 0, 0, time.UTC)}
+		perms := map[string]*model.UserPermissions{
+			"alice": {ExternalImageView: &storedState},
+			"bob":   {ExternalImageView: &stateB},
+		}
+		m.EXPECT().GetUserPermissionsForAccounts(gomock.Any(), gomock.Any()).Return(perms, nil)
+
+		var log publishLog
+		var siteBPublishes atomic.Int32
+		publish := func(ctx context.Context, subj string, data []byte) error {
+			if strings.Contains(subj, ".site-b.") {
+				siteBPublishes.Add(1)
+				<-ctx.Done() // site-b stalls until the fanout budget expires
+				return ctx.Err()
+			}
+			if err := ctx.Err(); err != nil { // a real publish fails on an expired budget
+				return err
+			}
+			return log.publish(ctx, subj, data)
+		}
+
+		cfg := fanoutTestCfg()
+		cfg.FanoutTimeout = 150 * time.Millisecond // keep the stalled lane short in tests
+		h := newHandler(m, emptySessionStore(), cfg, nil, publish)
+
+		w := postResync(h, map[string]any{"permission": knownPermission, "accounts": []string{"alice", "bob"}}, t)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		body := respBody(t, w)
+		assert.Equal(t, []any{"site-b"}, body["syncFailures"],
+			"only the stalled peer may be reported — site-c must not inherit an expired ctx from site-b's lane")
+		assert.Equal(t, int32(1), siteBPublishes.Load(),
+			"once the budget is gone the stalled lane must stop, not fail (and log) every remaining chunk")
+
+		var siteCAccounts []string
+		for _, data := range log.data {
+			var evt model.InboxEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			var payload model.UserPermissionsUpdated
+			require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+			siteCAccounts = append(siteCAccounts, payload.Accounts...)
+		}
+		assert.ElementsMatch(t, []string{"alice", "bob"}, siteCAccounts,
+			"site-c must receive BOTH state groups despite site-b stalling")
 	})
 
 	t.Run("nil bounds vs bounds set exactly at the Unix epoch are distinct states — must not collide into one group", func(t *testing.T) {

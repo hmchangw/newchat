@@ -7,7 +7,8 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
-// httpWriteTimeout bounds a response write; RoomRPCTimeout must stay under it so
+// httpWriteTimeout bounds a response write measured from the request, so in-handler
+// waits count against it: RoomRPCTimeout and FanoutTimeout must stay under it so
 // the handler always wins the race against net/http closing the connection.
 const httpWriteTimeout = 30 * time.Second
 
@@ -27,6 +28,11 @@ type Config struct {
 	// RoomRPCTimeout must stay below the HTTP server's WriteTimeout, or net/http
 	// closes the connection before the handler can answer.
 	RoomRPCTimeout time.Duration `env:"ROOM_RPC_TIMEOUT" envDefault:"5s"`
+	// FanoutTimeout is the server-side budget for ONE request's whole cross-site
+	// permission fanout — every destination lane, every batch, every chunk. Like
+	// RoomRPCTimeout it must stay below the HTTP write timeout, or net/http drops the
+	// connection before the admin can read syncFailures.
+	FanoutTimeout time.Duration `env:"FANOUT_TIMEOUT" envDefault:"5s"`
 	// AllSiteIDs lists every site in the federation (including this one); empty means
 	// no cross-site fanout — correct for single-site dev.
 	AllSiteIDs []string `env:"ALL_SITE_IDS" envSeparator:"," envDefault:""`
@@ -37,11 +43,24 @@ func loadConfig() (Config, error) {
 	if err := env.Parse(&c); err != nil {
 		return Config{}, err
 	}
-	if c.RoomRPCTimeout <= 0 {
-		return Config{}, fmt.Errorf("invalid ROOM_RPC_TIMEOUT %s: must be > 0", c.RoomRPCTimeout)
+	if err := checkHandlerTimeout("ROOM_RPC_TIMEOUT", c.RoomRPCTimeout); err != nil {
+		return Config{}, err
 	}
-	if c.RoomRPCTimeout >= httpWriteTimeout {
-		return Config{}, fmt.Errorf("invalid ROOM_RPC_TIMEOUT %s: must be below the %s HTTP write timeout", c.RoomRPCTimeout, httpWriteTimeout)
+	if err := checkHandlerTimeout("FANOUT_TIMEOUT", c.FanoutTimeout); err != nil {
+		return Config{}, err
 	}
 	return c, nil
+}
+
+// checkHandlerTimeout rejects a per-request budget the handler cannot honour: a
+// non-positive value yields an already-expired context, and one at or above
+// httpWriteTimeout lets net/http close the connection before the handler answers.
+func checkHandlerTimeout(name string, d time.Duration) error {
+	if d <= 0 {
+		return fmt.Errorf("invalid %s %s: must be > 0", name, d)
+	}
+	if d >= httpWriteTimeout {
+		return fmt.Errorf("invalid %s %s: must be below the %s HTTP write timeout", name, d, httpWriteTimeout)
+	}
+	return nil
 }
