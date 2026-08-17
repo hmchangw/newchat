@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -176,6 +177,12 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, room.ID, removed); err != nil {
 			return fmt.Errorf("delete departed subs: %w", err)
 		}
+		// Bust AFTER the write, one batched round trip: same store method
+		// (DeleteSubscriptionsByAccounts) as processRemoveOrg's live path,
+		// which busts every removed account — a departed member's cached
+		// positive decision must die immediately here too, not linger for
+		// the L2 TTL.
+		subauthcache.BustSubs(ctx, h.valkey, room.ID, removed)
 	}
 
 	added := make([]string, 0, len(newSubs))

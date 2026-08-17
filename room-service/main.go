@@ -28,6 +28,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -36,11 +37,12 @@ type config struct {
 	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
 	// LEGACY_ROOM_ORIGINS is a JSON array of {siteID, origin} objects mapping
 	// each room-origin site to the legacy URL substituted into ${roomOrigin}.
-	LegacyRoomOrigins legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
-	MongoURI          string            `env:"MONGO_URI,required"`
-	MongoDB           string            `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername     string            `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
+	LegacyRoomOrigins  legacyRoomOrigins `env:"LEGACY_ROOM_ORIGINS"`
+	MongoURI           string            `env:"MONGO_URI,required"`
+	MongoDB            string            `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername      string            `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword      string            `env:"MONGO_PASSWORD"            envDefault:""`
+	MongoSelectTimeout time.Duration     `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	// MongoReadPreference routes the store's display/list reads to secondaries; the
 	// client stays on primary for authz/dedup/read-after-write.
 	MongoReadPreference      string          `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
@@ -84,7 +86,9 @@ type config struct {
 	// RoomSubjectMode: same-site room .event namespace — global (default) | dual | local. See pkg/subject.RoomRouteMode.
 	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
 	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
-	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
+	// (pkg/badgecache) and best-effort subauthcache L2 invalidation after a
+	// membership, role or history-restriction write; empty disables both (clear
+	// hooks and busts become no-ops, and the subauthcache TTL reconciles).
 	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
 	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
 	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
@@ -176,7 +180,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -261,9 +267,10 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
-	// no-ops (nil-checked in handler.go).
+	// Empty VALKEY_ADDRS disables the badge cache and the subauthcache L2 bust
+	// — both become no-ops (nil-checked in handler.go).
 	var badge badgeCache
+	var subValkey valkeyutil.Client
 	var valkeyClient *redis.ClusterClient
 	if len(cfg.ValkeyAddrs) > 0 {
 		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
@@ -284,9 +291,14 @@ func main() {
 			os.Exit(1)
 		}
 		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
-		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL)
+		// The same connection backs best-effort subauthcache L2 invalidation
+		// after a membership, role or history-restriction write. One pool serves
+		// both tiers; an empty VALKEY_ADDRS leaves subValkey nil, which makes
+		// the bust a no-op that the L2 TTL reconciles.
+		subValkey = valkeyutil.WrapClusterClient(valkeyClient)
+		slog.Info("badge cache and subauth L2 invalidation enabled", "ttl", cfg.BadgeCacheTTL)
 	} else {
-		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+		slog.Warn("badge cache and subauth L2 invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
 	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics))
@@ -320,6 +332,7 @@ func main() {
 	)
 	handler.dekProvisioner = dekProvisioner
 	handler.badge = badge
+	handler.valkey = subValkey
 	handler.graphClient = graphClient
 	handler.directoryClient = directoryClient
 	handler.teamsMeetingStore = store
@@ -363,6 +376,7 @@ func main() {
 			}
 			return nil
 		},
+		// Closes the pool shared by the badge cache and the subauthcache bust.
 		func(ctx context.Context) error {
 			if valkeyClient == nil {
 				return nil

@@ -1108,6 +1108,26 @@ func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 	})
 }
 
+// TestMongoInboxStore_ListSubscriptionAccountsByRoom covers the store method
+// added to close the room_restricted bust gap: it must return every account
+// subscribed to the room (regardless of role) and nothing from other rooms.
+func TestMongoInboxStore_ListSubscriptionAccountsByRoom(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "inbox-worker-list-sub-accounts")
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		newSubFixtureWithRoles("s1", "u1", "alice", "r1", []model.Role{model.RoleOwner}),
+		newSubFixtureWithRoles("s2", "u2", "bob", "r1", []model.Role{model.RoleMember}),
+		newSubFixtureWithRoles("s3", "u3", "carol", "other-room", []model.Role{model.RoleMember}),
+	})
+	require.NoError(t, err)
+
+	accounts, err := store.ListSubscriptionAccountsByRoom(ctx, "r1")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"alice", "bob"}, accounts)
+}
+
 func TestIntegration_HandleRoomRenamed(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "inbox-worker-rename-handler")
