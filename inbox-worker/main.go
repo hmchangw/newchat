@@ -29,18 +29,23 @@ import (
 )
 
 type config struct {
-	NatsURL       string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID        string                  `env:"SITE_ID"         envDefault:"default"`
-	MongoURI      string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB       string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword string                  `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers    int                     `env:"MAX_WORKERS"     envDefault:"100"`
-	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	NatsURL       string `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string `env:"SITE_ID"         envDefault:"default"`
+	MongoURI      string `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
+	MaxWorkers    int    `env:"MAX_WORKERS"     envDefault:"100"`
+	// RoomSubCache memoizes the room-membership check on the activity-refresh
+	// lane, which would otherwise cost a Mongo read per broadcast message.
+	// Either value non-positive disables it.
+	RoomSubCacheSize int                     `env:"ROOM_SUB_CACHE_SIZE" envDefault:"50000"`
+	RoomSubCacheTTL  time.Duration           `env:"ROOM_SUB_CACHE_TTL"  envDefault:"5m"`
+	Consumer         stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap        bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr       string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled     bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
@@ -732,7 +737,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	handler := NewHandler(store)
+	handler := NewHandler(store, WithRoomSubCache(cfg.RoomSubCacheSize, cfg.RoomSubCacheTTL))
+	slog.Info("room-sub cache configured", "size", cfg.RoomSubCacheSize, "ttl", cfg.RoomSubCacheTTL)
 
 	// Core-NATS queue subscriber for the cross-site room-activity refresh. Not on
 	// INBOX by design: the signal is coalesced, idempotent and $max-guarded, so it

@@ -109,11 +109,27 @@ type InboxStore interface {
 // Handler processes cross-site InboxEvent messages; replicates only subscription/room metadata, never room keys.
 type Handler struct {
 	store InboxStore
+	// roomSubs memoizes the "is this site a member of this room" check the
+	// activity refresh performs; nil disables it and every refresh reads through.
+	roomSubs *roomSubCache
+}
+
+// HandlerOption configures optional Handler behaviour.
+type HandlerOption func(*Handler)
+
+// WithRoomSubCache memoizes the room-membership check on the activity-refresh
+// lane. A non-positive size or ttl leaves it disabled.
+func WithRoomSubCache(size int, ttl time.Duration) HandlerOption {
+	return func(h *Handler) { h.roomSubs = newRoomSubCache(size, ttl) }
 }
 
 // NewHandler creates a Handler with the given store.
-func NewHandler(store InboxStore) *Handler {
-	return &Handler{store: store}
+func NewHandler(store InboxStore, opts ...HandlerOption) *Handler {
+	h := &Handler{store: store}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // HandleRoomActivity applies a core-NATS activity refresh for a room owned by
@@ -132,7 +148,7 @@ func (h *Handler) HandleRoomActivity(ctx context.Context, data []byte) error {
 	if evt.RoomID == "" || evt.LastMsgAt <= 0 {
 		return fmt.Errorf("room activity event missing roomId or lastMsgAt")
 	}
-	subscribed, err := h.store.HasRoomSubscription(ctx, evt.RoomID)
+	subscribed, err := h.hasRoomSubscription(ctx, evt.RoomID)
 	if err != nil {
 		return fmt.Errorf("check room subscription: %w", err)
 	}
@@ -270,6 +286,7 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 	// no orphan row (nothing deletes them). Best-effort — the subscriptions above
 	// must not be re-run because an ordering row failed — but not self-healing
 	// yet, so alert on this log line.
+	h.roomSubs.set(event.RoomID, true)
 	if event.LastMsgAt != nil {
 		if err := h.store.UpsertRemoteRoomActivity(ctx, event.RoomID, event.SiteID, time.UnixMilli(*event.LastMsgAt).UTC()); err != nil {
 			slog.WarnContext(ctx, "seed remote room activity failed",
@@ -300,6 +317,9 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	if err := h.store.DeleteSubscriptionsByAccounts(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete subscriptions for room %s: %w", memberEvt.RoomID, err)
 	}
+	// Other members may remain, so re-resolve on the next refresh rather than
+	// caching a guess either way.
+	h.roomSubs.invalidate(memberEvt.RoomID)
 	// Scrub the removed accounts' thread read-state on this site too (#308).
 	if err := h.store.DeleteThreadSubscriptions(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete thread subscriptions for room %s: %w", memberEvt.RoomID, err)
