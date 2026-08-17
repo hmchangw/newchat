@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -34,7 +35,16 @@ type soakUserReader struct {
 	rng      *rand.Rand
 	accounts []string
 	rooms    []string
-	reads    []soakUserRead
+	// dmPairs holds ordered (requester, peer) pairs taken from the topology's
+	// DM rooms, so the DM read always names a counterpart that exists.
+	dmPairs []soakUserDMPair
+	reads   []soakUserRead
+}
+
+// soakUserDMPair is one direction of a DM room's two participants.
+type soakUserDMPair struct {
+	Requester string
+	Peer      string
 }
 
 // soakUserRead binds a bounded action label to the call that produces it.
@@ -81,8 +91,40 @@ func newSoakUserReader(
 	for i := range topology.Rooms {
 		reader.rooms = append(reader.rooms, topology.Rooms[i].ID)
 	}
+	reader.dmPairs = soakUserDMPairs(topology)
 	reader.reads = soakUserReads()
 	return reader, nil
+}
+
+// soakUserDMPairs indexes the topology's DM rooms as both directions of each
+// participant pair. A DM room is always exactly two accounts, so anything else
+// is a malformed room and is left out rather than guessed at.
+func soakUserDMPairs(topology *soakTopology) []soakUserDMPair {
+	members := make(map[string][]string)
+	for i := range topology.Subscriptions {
+		subscription := &topology.Subscriptions[i]
+		if subscription.RoomType != model.RoomTypeDM ||
+			subscription.User.Account == "" {
+			continue
+		}
+		members[subscription.RoomID] = append(
+			members[subscription.RoomID], subscription.User.Account,
+		)
+	}
+	// Room order, not map order, so a replacement process draws from the same
+	// sequence for a given seed.
+	pairs := make([]soakUserDMPair, 0, len(members)*2)
+	for i := range topology.Rooms {
+		accounts := members[topology.Rooms[i].ID]
+		if len(accounts) != 2 || accounts[0] == accounts[1] {
+			continue
+		}
+		pairs = append(pairs,
+			soakUserDMPair{Requester: accounts[0], Peer: accounts[1]},
+			soakUserDMPair{Requester: accounts[1], Peer: accounts[0]},
+		)
+	}
+	return pairs
 }
 
 // soakUserReads is the dispatch table. It is derived from soakUserReadActions
@@ -241,18 +283,25 @@ func (r *soakUserReader) SubscriptionChannels(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionChannel,
 		Subject: subject.UserSubscriptionGetChannels(account, r.cfg.SiteID),
-		Body:    soakUserPageRequest{Limit: r.cfg.PageLimit},
+		Body: soakUserChannelsRequest{
+			MembersContain: account, Limit: r.cfg.PageLimit,
+		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Subscriptions)
 	})
 }
 
-// SubscriptionDM asks for the DM with another account. A pair that has no DM is
-// a legitimate not-found rather than a fault, so the lane counts the outcome and
-// does not treat an empty answer as a failure.
+// SubscriptionDM asks for the DM with another account. The peer comes from the
+// topology's own DM rooms: an arbitrary pair almost never shares one, so
+// drawing at random would make a guaranteed not-found the lane's normal result
+// and hide a real regression behind it. Without a DM room the lane skips.
 func (r *soakUserReader) SubscriptionDM(ctx context.Context) error {
-	account, target := r.pickAccountPair()
+	account, target, ok := r.pickDMPair()
+	if !ok {
+		r.recordSkip(soakRPCUserSubscriptionDM)
+		return nil
+	}
 	var response soakUserDMResponse
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionDM,
@@ -309,6 +358,16 @@ func (r *soakUserReader) pickAccountPair() (string, string) {
 		}
 	}
 	return requester, requester
+}
+
+func (r *soakUserReader) pickDMPair() (string, string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.dmPairs) == 0 {
+		return "", "", false
+	}
+	pair := r.dmPairs[r.rng.Intn(len(r.dmPairs))]
+	return pair.Requester, pair.Peer, true
 }
 
 func (r *soakUserReader) pickRoom() (string, bool) {

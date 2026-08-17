@@ -226,6 +226,16 @@ type soakSubscriptionListResponse struct {
 	HasMore       bool                  `json:"hasMore"`
 }
 
+// soakSubscriptionListType is the list user-service serves for the room and
+// user lanes. It must be one of user-service's accepted types; the zero value a
+// missing body decodes to is rejected as an unknown type, which is how both
+// callers silently failed every request before.
+const soakSubscriptionListType = "rooms"
+
+type soakSubscriptionListRequest struct {
+	Type string `json:"type"`
+}
+
 // user-service read carriers. Each decodes only the fields the read lane
 // samples; user-service returns more, and the lane deliberately does not
 // assert on payload content it has no expectation for.
@@ -245,6 +255,15 @@ type soakUserRoomRequest struct {
 type soakUserPageRequest struct {
 	Limit  int `json:"limit,omitempty"`
 	Offset int `json:"offset,omitempty"`
+}
+
+// soakUserChannelsRequest carries getChannels' member selector. user-service
+// requires exactly one of membersContain / accountNames, so the page fields
+// alone are rejected — MembersContain is always set by the caller.
+type soakUserChannelsRequest struct {
+	MembersContain string `json:"membersContain"`
+	Limit          int    `json:"limit,omitempty"`
+	Offset         int    `json:"offset,omitempty"`
 }
 
 type soakUserCountRequest struct {

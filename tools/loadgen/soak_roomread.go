@@ -124,8 +124,12 @@ func (r *soakRoomReader) ReadMixed(ctx context.Context) error {
 // ReadReceipts asks who has read one persisted message. It needs a real message
 // ID, so it is the one room read that depends on the message catalog; without
 // one it degrades to a skip rather than measuring a rejected request.
+//
+// The request is addressed as the message's own author, not as the account the
+// reader holds the room under: room-service serves read receipts only to the
+// sender, so any other identity is a guaranteed permission error.
 func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
-	roomID, account, ok := r.pickRoom()
+	roomID, _, ok := r.pickRoom()
 	if !ok {
 		r.recordSkip(soakRPCReadReceiptList)
 		return nil
@@ -138,7 +142,7 @@ func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
 		return nil
 	}
 	message, found := messages.PickAnyEligible(roomID, soakCatalogReadReceipt)
-	if !found || message.ID == "" {
+	if !found || message.ID == "" || message.Author == "" {
 		r.recordSkip(soakRPCReadReceiptList)
 		return nil
 	}
@@ -146,7 +150,7 @@ func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
 	var response soakReadReceiptResponse
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCReadReceiptList,
-		Subject: subject.MessageReadReceipt(account, roomID, r.cfg.SiteID),
+		Subject: subject.MessageReadReceipt(message.Author, roomID, r.cfg.SiteID),
 		Body:    soakReadReceiptRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -199,6 +203,7 @@ func (r *soakRoomReader) SubscriptionList(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSubscriptionList,
 		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
+		Body:    soakSubscriptionListRequest{Type: soakSubscriptionListType},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Subscriptions)
@@ -264,6 +269,7 @@ func (r *soakRoomReader) SubscriptionsFor(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
 		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
+		Body:    soakSubscriptionListRequest{Type: soakSubscriptionListType},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Subscriptions)
