@@ -119,6 +119,10 @@ func pacedDispatch(
 	)
 }
 
+// pacedDispatchRate preserves the open-loop invariant: downstream action
+// latency never blocks the pacing clock or lowers offered load. Every due event
+// is either dispatched immediately or reported as saturation; capacity is
+// never awaited and missed work is never released later as a catch-up burst.
 func pacedDispatchRate(
 	ctx context.Context,
 	rate float64,
@@ -130,7 +134,26 @@ func pacedDispatchRate(
 	p := newRatePacer(rate, time.Now())
 	tick := time.NewTicker(p.interval)
 	defer tick.Stop()
+	pacedDispatchRateWithTicks(
+		ctx,
+		p,
+		tick.C,
+		maxInFlight,
+		recordUnderrun,
+		recordSaturation,
+		do,
+	)
+}
 
+func pacedDispatchRateWithTicks(
+	ctx context.Context,
+	p *pacer,
+	ticks <-chan time.Time,
+	maxInFlight int,
+	recordUnderrun func(int),
+	recordSaturation func(),
+	do func(context.Context),
+) {
 	sem := make(chan struct{}, maxInFlight)
 	var wg sync.WaitGroup
 	for {
@@ -143,8 +166,8 @@ func pacedDispatchRate(
 			case <-time.After(drainGracePeriod):
 			}
 			return
-		case <-tick.C:
-			emit, underrun := p.tick(time.Now())
+		case now := <-ticks:
+			emit, underrun := p.tick(now)
 			recordUnderrun(underrun)
 			for i := 0; i < emit; i++ {
 				select {

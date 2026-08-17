@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
@@ -42,6 +45,13 @@ type config struct {
 	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
+	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
+	// Keep identical across all badge-cache writers.
+	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 }
 
 // mongoInboxStore implements InboxStore using MongoDB.
@@ -540,72 +550,83 @@ func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, room
 	return nil
 }
 
-func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error {
-	// Guarded thread-sub update first; same gate then protects the Subscription overwrite.
-	tsFilter := bson.M{
-		"threadRoomId": threadRoomID,
-		"userAccount":  account,
-		"$or": bson.A{
-			bson.M{"lastSeenAt": nil},
-			bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
-		},
+// threadReadGuard adds the order-safety clause to a thread-subscription filter:
+// only docs whose lastSeenAt is unset or older than the event's may advance, so
+// out-of-order delivery can never regress a read position.
+func threadReadGuard(filter bson.M, lastSeenAt time.Time) bson.M {
+	filter["$or"] = bson.A{
+		bson.M{"lastSeenAt": nil},
+		bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
 	}
-	tsUpdate := bson.M{"$set": bson.M{
+	return filter
+}
+
+// threadReadUpdate is the read-advance write shared by the single and bulk
+// thread-read applies: advance the read position, clear the mention flag.
+func threadReadUpdate(lastSeenAt time.Time) bson.M {
+	return bson.M{"$set": bson.M{
 		"lastSeenAt": lastSeenAt,
 		"updatedAt":  lastSeenAt,
 		"hasMention": false,
 	}}
-	tsRes, err := s.threadSubCol.UpdateOne(ctx, tsFilter, tsUpdate)
+}
+
+// ApplyThreadRead advances the home-replica ThreadSubscription under the $lt
+// guard, then — only when that guarded update matched — $pulls parentMessageID
+// from the Subscription's threadUnread. The MatchedCount gate keeps a
+// stale/duplicate event from touching the Subscription.
+func (s *mongoInboxStore) ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account, parentMessageID string, lastSeenAt time.Time) error {
+	filter := threadReadGuard(bson.M{"threadRoomId": threadRoomID, "userAccount": account}, lastSeenAt)
+	tsRes, err := s.threadSubCol.UpdateOne(ctx, filter, threadReadUpdate(lastSeenAt))
 	if err != nil {
-		return fmt.Errorf("apply thread read on thread subscription for %q in thread room %q: %w",
-			account, threadRoomID, err)
+		return fmt.Errorf("apply thread read for %q in thread room %q: %w", account, threadRoomID, err)
 	}
-	if tsRes.MatchedCount == 0 {
+	// Guard rejected (stale/duplicate) or legacy event without a parent ID:
+	// leave threadUnread alone.
+	if tsRes.MatchedCount == 0 || parentMessageID == "" {
 		return nil
 	}
 
-	subFilter := bson.M{"roomId": roomID, "u.account": account}
-	var subUpdate bson.M
-	if len(newThreadUnread) == 0 {
-		subUpdate = bson.M{
-			"$set":   bson.M{"alert": alert},
-			"$unset": bson.M{"threadUnread": ""},
-		}
-	} else {
-		subUpdate = bson.M{"$set": bson.M{"threadUnread": newThreadUnread, "alert": alert}}
-	}
-	if _, err := s.subCol.UpdateOne(ctx, subFilter, subUpdate); err != nil {
+	// Per-ID $pull commutes with concurrent thread_unread_added $addToSets.
+	if _, err := s.subCol.UpdateOne(ctx,
+		bson.M{"roomId": roomID, "u.account": account},
+		bson.M{"$pull": bson.M{"threadUnread": parentMessageID}},
+	); err != nil {
 		return fmt.Errorf("apply thread read on subscription for %q in room %q: %w", account, roomID, err)
 	}
 	return nil
 }
 
 // ApplyThreadReadAll is the home-replica bulk clear for the federated
-// thread_read_all event. It advances every one of account's thread subscriptions
-// to lastSeenAt under a per-doc $lt guard (so a genuinely newer read is never
-// regressed) and clears threadUnread + alert on every subscription that still has
-// unread threads. Missing docs are a no-op (the mark-all dismiss is best-effort).
+// thread_read_all event: advance all of account's thread subscriptions under a
+// per-doc $lt guard and $unset threadUnread on every subscription that has
+// unread threads. Missing docs are a no-op.
 func (s *mongoInboxStore) ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error {
-	tsFilter := bson.M{
-		"userAccount": account,
-		"$or": bson.A{
-			bson.M{"lastSeenAt": nil},
-			bson.M{"lastSeenAt": bson.M{"$lt": lastSeenAt}},
-		},
-	}
-	tsUpdate := bson.M{"$set": bson.M{
-		"lastSeenAt": lastSeenAt,
-		"updatedAt":  lastSeenAt,
-		"hasMention": false,
-	}}
-	if _, err := s.threadSubCol.UpdateMany(ctx, tsFilter, tsUpdate); err != nil {
+	filter := threadReadGuard(bson.M{"userAccount": account}, lastSeenAt)
+	if _, err := s.threadSubCol.UpdateMany(ctx, filter, threadReadUpdate(lastSeenAt)); err != nil {
 		return fmt.Errorf("apply thread read all on thread subscriptions for %q: %w", account, err)
 	}
 
 	subFilter := bson.M{"u.account": account, "threadUnread.0": bson.M{"$exists": true}}
-	subUpdate := bson.M{"$set": bson.M{"alert": false}, "$unset": bson.M{"threadUnread": ""}}
+	subUpdate := bson.M{"$unset": bson.M{"threadUnread": ""}}
 	if _, err := s.subCol.UpdateMany(ctx, subFilter, subUpdate); err != nil {
 		return fmt.Errorf("apply thread read all on subscriptions for %q: %w", account, err)
+	}
+	return nil
+}
+
+// AddThreadUnread marks parentMessageID unread for accounts' subscriptions in
+// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
+// redelivery; accounts not subscribed simply match nothing.
+func (s *mongoInboxStore) AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	if _, err := s.subCol.UpdateMany(ctx,
+		bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}},
+		bson.M{"$addToSet": bson.M{"threadUnread": parentMessageID}},
+	); err != nil {
+		return fmt.Errorf("add thread unread %q in room %q: %w", parentMessageID, roomID, err)
 	}
 	return nil
 }
@@ -682,7 +703,36 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
+	// no-ops (nil-checked in handler.go).
+	var badge badgeCache
+	var valkeyClient *redis.ClusterClient
+	if len(cfg.ValkeyAddrs) > 0 {
+		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs:    cfg.ValkeyAddrs,
+			Password: cfg.ValkeyPassword,
+		})
+		// o11yredis.Wrap adds tracing+metrics in place, mirroring
+		// pkg/valkeyutil's instrumentCluster.
+		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
+			slog.Error("instrument valkey client failed", "error", err)
+			os.Exit(1)
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := valkeyClient.Ping(pingCtx).Err()
+		cancel()
+		if err != nil {
+			slog.Error("valkey connect failed", "error", err)
+			os.Exit(1)
+		}
+		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
+		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL)
+	} else {
+		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+	}
+
 	handler := NewHandler(store)
+	handler.badge = badge
 
 	// Two-lane pull pattern over the single INBOX external consumer:
 	//
@@ -801,6 +851,12 @@ func main() {
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(ctx context.Context) error {
+			if valkeyClient == nil {
+				return nil
+			}
+			return valkeyClient.Close()
+		},
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)

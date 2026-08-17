@@ -87,6 +87,10 @@ type config struct {
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 
+	// BotplatformURL is the LOCAL site's botplatform-service. Required and non-empty:
+	// the service must not start in a configuration that serves the writes anonymously.
+	BotplatformURL string `env:"BOTPLATFORM_URL,required,notEmpty"`
+
 	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
 	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB/MinIO.
 	// 0 disables the cap (unbounded spawn).

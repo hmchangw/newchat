@@ -6,6 +6,10 @@ import (
 	"os"
 	"time"
 
+	o11yredis "github.com/flywindy/o11y/redis"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -37,6 +41,30 @@ var (
 	_ service.TokenValidator               = (*pkgoidc.Validator)(nil)
 	_ service.TokenRefresher               = (*pkgoidc.Validator)(nil)
 )
+
+// badgeCache mirrors service.badgeCache (unexported in that package, so it
+// can't be named here) — Go interfaces are satisfied structurally, so this
+// local copy lets main hold either a *badgecache.Cache or a noopBadgeCache
+// before passing it into service.New.
+type badgeCache interface {
+	BumpBatch(ctx context.Context, accounts []string, roomID string) map[string]int
+	Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (int, bool)
+	Reseed(ctx context.Context, account string, roomIDs []string)
+	Count(ctx context.Context, account string) (int, bool)
+}
+
+// noopBadgeCache is the badge cache used when VALKEY_ADDRS is empty:
+// BumpBatch/Seed always miss, Reseed is a no-op. BadgeCountBatch's cappedUnion
+// fallback still returns a correct (just uncached) count, and CountSubscriptions'
+// Reseed call becomes a harmless no-op — so Phase A deploys need no Valkey.
+type noopBadgeCache struct{}
+
+func (noopBadgeCache) BumpBatch(context.Context, []string, string) map[string]int { return nil }
+func (noopBadgeCache) Seed(context.Context, string, []string, string) (int, bool) {
+	return 0, false
+}
+func (noopBadgeCache) Reseed(context.Context, string, []string)  {}
+func (noopBadgeCache) Count(context.Context, string) (int, bool) { return 0, false }
 
 func main() {
 	cfg, err := config.Load()
@@ -119,7 +147,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
+	// Empty VALKEY_ADDRS disables the badge cache: badge.count.batch and
+	// subscription.count still work, just uncached (dev-safe Phase A default).
+	var badge badgeCache = noopBadgeCache{}
+	var valkeyClient *redis.ClusterClient
+	if len(cfg.ValkeyAddrs) > 0 {
+		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs:    cfg.ValkeyAddrs,
+			Password: cfg.ValkeyPassword,
+		})
+		// o11yredis.Wrap mutates valkeyClient in place to add tracing+metrics —
+		// mirrors pkg/valkeyutil's instrumentCluster so the badge cache's Valkey
+		// calls are observable like every other instrumented client in the repo.
+		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
+			slog.Error("instrument valkey client failed", "error", err)
+			os.Exit(1)
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := valkeyClient.Ping(pingCtx).Err()
+		cancel()
+		if err != nil {
+			slog.Error("valkey connect failed", "error", err)
+			os.Exit(1)
+		}
+		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, cfg.BadgeCountCap)
+		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL, "count_cap", cfg.BadgeCountCap)
+	} else {
+		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+	}
+
+	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
@@ -145,6 +202,12 @@ func main() {
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(ctx context.Context) error {
+			if valkeyClient == nil {
+				return nil
+			}
+			return valkeyClient.Close()
+		},
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }

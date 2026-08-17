@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -50,9 +51,14 @@ func newProductionSoakSendIDs() *soakSendIDs {
 }
 
 type soakSendTarget struct {
-	UserID  string
-	Account string
-	RoomID  string
+	UserID               string
+	Account              string
+	RoomID               string
+	RoomType             model.RoomType
+	Recipients           []string
+	RecipientSetSource   recipientSetSource
+	RecipientSetComplete bool
+	RecipientRoute       recipientExpectedRoute
 }
 
 type soakPendingSend struct {
@@ -90,6 +96,8 @@ type soakSendReplyResult struct {
 
 type soakSendLifecycle interface {
 	Start(*soakPendingSend) error
+	Activate(*soakPendingSend) error
+	AbandonUnsent(*soakPendingSend) error
 }
 
 type soakSenderOption func(*soakSender)
@@ -154,6 +162,7 @@ func newSoakSender(
 	return sender
 }
 
+//nolint:gocritic // Publish snapshots the target by value into the durable pending operation.
 func (s *soakSender) Publish(
 	ctx context.Context,
 	target soakSendTarget,
@@ -184,6 +193,15 @@ func (s *soakSender) Publish(
 			kind = soakSendTopLevel
 		} else {
 			threadParentID = parent.ID
+			if target.RoomType == model.RoomTypeChannel {
+				target.Recipients, target.RecipientSetComplete = s.catalog.ThreadRecipientSet(
+					target.RoomID,
+					threadParentID,
+					target.Account,
+				)
+				target.RecipientSetSource = recipientSetSourceThreadFollowers
+				target.RecipientRoute = recipientExpectedRouteUser
+			}
 		}
 	}
 
@@ -220,22 +238,46 @@ func (s *soakSender) Publish(
 		s.rejectPending(pending)
 		return nil, err
 	}
+	tracked := false
 	if s.lifecycle != nil {
 		if err := s.lifecycle.Start(cloneSoakPendingSend(pending)); err != nil {
 			s.reportLifecycleError(fmt.Errorf("persist soak send intent: %w", err))
 		} else {
 			s.markPendingTracked(pending.RequestID)
+			tracked = true
 		}
 	}
 
-	published := s.clonePending(pending.RequestID)
+	published := s.markPendingDispatched(pending.RequestID, s.clock.Now())
 	if published == nil {
 		published = cloneSoakPendingSend(pending)
 	}
-	if err := s.publisher.Publish(ctx, pending.Subject, pending.Payload); err != nil {
-		return published, fmt.Errorf("publish soak send: %w", err)
+	publishErr := s.publisher.Publish(ctx, pending.Subject, pending.Payload)
+	definitelyNotSent := publishErr != nil && soakPublishDefinitelyNotSent(publishErr)
+	if tracked {
+		if definitelyNotSent {
+			if err := s.lifecycle.AbandonUnsent(cloneSoakPendingSend(published)); err != nil {
+				s.reportLifecycleError(fmt.Errorf("persist unsent soak send: %w", err))
+			}
+		} else if err := s.lifecycle.Activate(cloneSoakPendingSend(published)); err != nil {
+			s.reportLifecycleError(fmt.Errorf("persist soak send activation: %w", err))
+		}
+	}
+	if definitelyNotSent {
+		s.Discard(pending.RequestID)
+	}
+	if publishErr != nil {
+		return published, fmt.Errorf("publish soak send: %w", publishErr)
 	}
 	return published, nil
+}
+
+func soakPublishDefinitelyNotSent(err error) bool {
+	return errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrConnectionDraining) ||
+		errors.Is(err, nats.ErrBadSubject) ||
+		errors.Is(err, nats.ErrMaxPayload) ||
+		errors.Is(err, nats.ErrReconnectBufExceeded)
 }
 
 func (s *soakSender) Retry(ctx context.Context, requestID string) error {
@@ -406,13 +448,23 @@ func (s *soakSender) markPendingTracked(requestID string) {
 	}
 }
 
-func (s *soakSender) clonePending(requestID string) *soakPendingSend {
+// markPendingDispatched restarts the reply clock immediately before the publish
+// leaves the process. Journaling the send intent is durable and waits on a WAL
+// group commit, so measuring from the intent timestamp would report the load
+// generator's own flush delay as server latency. The ledger operation keeps the
+// earlier intent timestamp, which stays conservative for its verify deadline.
+func (s *soakSender) markPendingDispatched(
+	requestID string,
+	at time.Time,
+) *soakPendingSend {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
 	pending := s.pending[requestID]
 	if pending == nil {
 		return nil
 	}
+	pending.PublishedAt = at
+	pending.Deadline = at.Add(s.cfg.ReplyTimeout)
 	return cloneSoakPendingSend(pending)
 }
 
@@ -437,6 +489,7 @@ func matchingSoakSendReply(
 func cloneSoakPendingSend(pending *soakPendingSend) *soakPendingSend {
 	cloned := *pending
 	cloned.Payload = append([]byte(nil), pending.Payload...)
+	cloned.Target.Recipients = append([]string(nil), pending.Target.Recipients...)
 	return &cloned
 }
 

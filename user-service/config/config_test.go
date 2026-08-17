@@ -241,6 +241,79 @@ func TestLoad_SSOEnabledRequiresAudiencesAndClientID(t *testing.T) {
 	require.Equal(t, []string{"nats-chat"}, cfg.OIDCAudiences)
 }
 
+func TestLoad_ValkeyDisabledByDefault(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+}
+
+func TestLoad_ValkeyAddrsParsed(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("VALKEY_ADDRS", "node-1:6379,node-2:6379")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
+}
+
+func TestLoad_BadgeDefaults(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	unsetEnv(t, "BADGE_CACHE_TTL")
+	unsetEnv(t, "BADGE_COUNT_CAP")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 24*time.Hour, cfg.BadgeCacheTTL)
+	require.Equal(t, 10, cfg.BadgeCountCap)
+}
+
+func TestLoad_BadgeOverrides(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("BADGE_CACHE_TTL", "48h")
+	t.Setenv("BADGE_COUNT_CAP", "25")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 48*time.Hour, cfg.BadgeCacheTTL)
+	require.Equal(t, 25, cfg.BadgeCountCap)
+}
+
+func TestLoad_BadgeInvalidRejected(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+
+	t.Setenv("BADGE_CACHE_TTL", "0s")
+	_, err := Load()
+	require.ErrorContains(t, err, "BADGE_CACHE_TTL")
+
+	t.Setenv("BADGE_CACHE_TTL", "24h")
+	t.Setenv("BADGE_COUNT_CAP", "0")
+	_, err = Load()
+	require.ErrorContains(t, err, "BADGE_COUNT_CAP")
+}
+
+func TestLoad_BadgeCountCacheFirst(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	unsetEnv(t, "BADGE_COUNT_CACHE_FIRST")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.False(t, cfg.BadgeCountCacheFirst, "cache-first count must be opt-in (rollout gate)")
+
+	t.Setenv("BADGE_COUNT_CACHE_FIRST", "true")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.True(t, cfg.BadgeCountCacheFirst)
+}
+
 func TestLoad_SSORefreshWindowMustBePositive(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")

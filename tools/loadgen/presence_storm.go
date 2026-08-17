@@ -277,7 +277,7 @@ func (f *prodStormFactory) Build(cfg stormConfig) *stormEnv {
 	if siteID == "" {
 		siteID = "site-local"
 	}
-	pool, err := newPresencePool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile, cfg.PublisherConns, cfg.ObserverConns, c)
+	pool, err := newPresencePool(f.baseCfg.NatsURL, f.baseCfg.NatsCredsFile, cfg.PublisherConns, cfg.ObserverConns, c, nil)
 	if err != nil {
 		slog.Error("presence pool init failed", "err", err)
 	}

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/natsmetrics"
+
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -60,7 +62,7 @@ func TestHistoryParentFetcher_FetchParent(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		fetcher := newHistoryParentFetcher(nc)
+		fetcher := newHistoryParentFetcher(nc, natsmetrics.Publisher{})
 		got, err := fetcher.FetchParent(context.Background(), account, roomID, siteID, messageID)
 		require.NoError(t, err)
 		require.NotNil(t, got)
@@ -77,7 +79,7 @@ func TestHistoryParentFetcher_FetchParent(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		fetcher := newHistoryParentFetcher(nc)
+		fetcher := newHistoryParentFetcher(nc, natsmetrics.Publisher{})
 		got, err := fetcher.FetchParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)
@@ -90,7 +92,7 @@ func TestHistoryParentFetcher_FetchParent(t *testing.T) {
 		nc := startTestNATS(t)
 		// Intentionally no subscriber: nc.Request must fail with "no responders".
 
-		fetcher := newHistoryParentFetcher(nc)
+		fetcher := newHistoryParentFetcher(nc, natsmetrics.Publisher{})
 		got, err := fetcher.FetchParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)
@@ -104,7 +106,7 @@ func TestHistoryParentFetcher_FetchParent(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		fetcher := newHistoryParentFetcher(nc)
+		fetcher := newHistoryParentFetcher(nc, natsmetrics.Publisher{})
 		got, err := fetcher.FetchParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)

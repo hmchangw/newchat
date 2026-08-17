@@ -56,6 +56,28 @@ func TestRoomRepo_GetRoomTimes_NoLastMsg(t *testing.T) {
 	assert.Equal(t, createdAt.UTC(), gotCreated.UTC())
 }
 
+// An explicit BSON null lastMsgAt (as opposed to the field being absent) must
+// decode identically: nil pointer → zero time → "unknown" downstream.
+func TestRoomRepo_GetRoomTimes_NullLastMsg(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db)
+
+	createdAt := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	_, err := db.Collection("rooms").InsertOne(context.Background(), bson.M{
+		"_id":       "room-null-lastmsg",
+		"siteId":    "site-A",
+		"type":      "channel",
+		"createdAt": createdAt,
+		"lastMsgAt": nil,
+	})
+	require.NoError(t, err)
+
+	gotLast, gotCreated, err := repo.GetRoomTimes(context.Background(), "room-null-lastmsg")
+	require.NoError(t, err)
+	assert.True(t, gotLast.IsZero(), "lastMsgAt null → zero time, same as absent")
+	assert.Equal(t, createdAt.UTC(), gotCreated.UTC())
+}
+
 func TestRoomRepo_GetRoomTimes_NotFound(t *testing.T) {
 	db := setupMongo(t)
 	repo := NewRoomRepo(db)

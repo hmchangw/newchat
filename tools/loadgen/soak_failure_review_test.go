@@ -147,6 +147,30 @@ func TestSoakFailureReconciler_MismatchAfterDeadlineIsCorruption(t *testing.T) {
 	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultBad])
 }
 
+func TestSoakFailureReconciler_ReleasesMalformedClaim(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1, Now: func() time.Time { return now }})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(reviewFailureOperation("malformed", now)))
+	ledger.mu.Lock()
+	ledger.active["malformed"].Observations = map[failureObserver]failureObservation{
+		failureObserverAdmission: failureObservationGood,
+		failureObserverHistory:   failureObservationGood,
+	}
+	ledger.mu.Unlock()
+	reconciler := newSoakFailureReconciler(
+		ledger, &stubFailureHistoryVerifier{}, time.Second, func() time.Time { return now },
+	)
+
+	processed, err := reconciler.Try(context.Background())
+
+	assert.True(t, processed)
+	assert.ErrorContains(t, err, "without an unresolved observer")
+	ledger.mu.Lock()
+	assert.False(t, ledger.active["malformed"].claimed)
+	ledger.mu.Unlock()
+}
+
 func TestSoakFailureTracker_AbandonMarksSendAsNeverPublished(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 2})

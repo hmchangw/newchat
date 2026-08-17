@@ -16,6 +16,7 @@ func TestSoakConfig_Defaults(t *testing.T) {
 	cfg := mustDefaultSoakConfig(t)
 
 	assert.Equal(t, "", cfg.RunID)
+	assert.Equal(t, "local", cfg.Environment)
 	assert.Equal(t, "duration", cfg.RunMode)
 	assert.Equal(t, 72*time.Hour, cfg.RunDuration)
 	assert.Equal(t, 30*time.Second, cfg.Warmup)
@@ -62,6 +63,7 @@ func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
 			"NATS_URL":                              "nats://example.invalid",
 			"MONGO_URI":                             "mongodb://example.invalid",
 			"SOAK_RUN_ID":                           "run-20260724",
+			"SOAK_ENVIRONMENT":                      "staging",
 			"SOAK_RUN_MODE":                         "continuous",
 			"SOAK_RUN_DURATION":                     "4h",
 			"SOAK_HEARTBEAT_INTERVAL":               "15s",
@@ -78,6 +80,7 @@ func TestSoakConfig_EnvironmentOverrides(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "run-20260724", cfg.Soak.RunID)
+	assert.Equal(t, "staging", cfg.Soak.Environment)
 	assert.Equal(t, "continuous", cfg.Soak.RunMode)
 	assert.Equal(t, 4*time.Hour, cfg.Soak.RunDuration)
 	assert.Equal(t, 15*time.Second, cfg.Soak.HeartbeatInterval)
@@ -111,6 +114,24 @@ func TestValidateSoakConfig_RequiresRunID(t *testing.T) {
 	assert.Contains(t, err.Error(), "SOAK_RUN_ID")
 }
 
+func TestValidateSoakConfig_AcceptsBoundedTestEnvironment(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.Environment = "test"
+
+	require.NoError(t, validateSoakConfig(&cfg, "chat"))
+}
+
+func TestValidateSoakConfig_RejectsUnsafeRunIDs(t *testing.T) {
+	for _, runID := range []string{"../escape", "folder/run", `folder\\run`, ".", "..", " leading", "trailing "} {
+		t.Run(runID, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			cfg.RunID = runID
+
+			assert.ErrorContains(t, validateSoakConfig(&cfg, "chat"), "SOAK_RUN_ID")
+		})
+	}
+}
+
 func TestValidateSoakTeardownConfig_IgnoresUnrelatedWorkloadSettings(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.SendRate = -1
@@ -139,6 +160,7 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 		{"reaction remove share above one", func(c *soakConfig) { c.ReactionRemoveShare = 1.01 }, "SOAK_REACTION_REMOVE_SHARE"},
 		{"channel ratio above one", func(c *soakConfig) { c.ChannelRatio = 1.01 }, "SOAK_CHANNEL_RATIO"},
 		{"unknown run mode", func(c *soakConfig) { c.RunMode = "forever-ish" }, "SOAK_RUN_MODE"},
+		{"unknown environment", func(c *soakConfig) { c.Environment = "qa-42" }, "SOAK_ENVIRONMENT"},
 		{"zero run duration", func(c *soakConfig) { c.RunDuration = 0 }, "SOAK_RUN_DURATION"},
 		{"negative warmup", func(c *soakConfig) { c.Warmup = -time.Second }, "SOAK_WARMUP"},
 		{"warmup equals duration", func(c *soakConfig) { c.Warmup = c.RunDuration }, "SOAK_WARMUP"},
@@ -279,6 +301,14 @@ func validSoakConfig(t *testing.T) soakConfig {
 	return cfg
 }
 
+func TestSoakConfig_RecipientObserverDefaultsDisabled(t *testing.T) {
+	cfg := mustDefaultSoakConfig(t)
+
+	assert.False(t, cfg.RecipientObserverEnabled)
+	assert.Equal(t, 8192, cfg.RecipientObserverQueue)
+	assert.Equal(t, 32, cfg.RecipientObserverConnections)
+}
+
 func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -314,6 +344,34 @@ func TestValidateSoakConfig_FailureLedgerBounds(t *testing.T) {
 			name:   "read share is not a number",
 			mutate: func(cfg *soakConfig) { cfg.ReconcileReadShare = math.NaN() },
 			want:   "SOAK_RECONCILE_READ_SHARE",
+		},
+		{
+			name: "recipient observer requires durable ledger",
+			mutate: func(cfg *soakConfig) {
+				cfg.RecipientObserverEnabled = true
+				cfg.LedgerDir = ""
+			},
+			want: "SOAK_LEDGER_DIR",
+		},
+		{
+			name:   "zero recipient observer queue",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverQueue = 0 },
+			want:   "SOAK_RECIPIENT_OBSERVER_QUEUE",
+		},
+		{
+			name:   "unbounded recipient observer queue",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverQueue = maxFailureRecipientObserverQueue + 1 },
+			want:   "SOAK_RECIPIENT_OBSERVER_QUEUE",
+		},
+		{
+			name:   "zero recipient observer connections",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverConnections = 0 },
+			want:   "SOAK_RECIPIENT_OBSERVER_CONNECTIONS",
+		},
+		{
+			name:   "too many recipient observer connections",
+			mutate: func(cfg *soakConfig) { cfg.RecipientObserverConnections = 257 },
+			want:   "SOAK_RECIPIENT_OBSERVER_CONNECTIONS",
 		},
 	}
 	for _, tt := range tests {

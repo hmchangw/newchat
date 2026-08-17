@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -23,9 +24,13 @@ func pngBytes(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
+// putReq builds an authenticated PUT — every PUT route sits behind requireSession.
+// Tests needing an unauthenticated request build it inline.
 func putReq(path string, body []byte, ct string) *http.Request {
 	req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(body))
 	req.Header.Set("Content-Type", ct)
+	req.Header.Set(botauth.HeaderUserID, "u1")
+	req.Header.Set(botauth.HeaderAuthToken, "tok")
 	return req
 }
 

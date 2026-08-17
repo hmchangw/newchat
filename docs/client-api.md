@@ -245,7 +245,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "account must be a single NATS subject token (no '.', '*', '>' or whitespace)" }` — the account becomes a NATS subject token, so separator/wildcard/whitespace characters are refused. |
 | 401 | `unauthenticated` | `sso_token_expired` | `{ "code": "unauthenticated", "reason": "sso_token_expired", "error": "SSO token has expired, please re-login" }` |
 | 401 | `unauthenticated` | `invalid_sso_token` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid SSO token" }` |
-| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "session token invalid" }` — botplatform session token failed validation. |
+| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — botplatform session token failed validation. Same envelope every service returns for a rejected session token. |
 | 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — auth-service cannot reach botplatform to validate a session token. |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — the real cause is logged server-side and never sent to the client. |
 
@@ -423,13 +423,37 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 ### 2.4 HTTP — Protected file/image upload/download
 
 HTTP endpoints on `upload-service` for protected file uploads and downloads,
-proxied to/from an internal Drive. All require an OIDC-validated `ssoToken` — sent
-as the `ssoToken` header, or (for browser `<img>` downloads that cannot set headers)
-as an `ssoToken` cookie obtained from `POST /api/v1/file/setCookie` below; the header takes
-precedence. Room-scoped endpoints also require that the caller is a member (has a
-subscription) of `:roomId`. Cross-origin browsers are served credentialed CORS headers
-only when their `Origin` is in the server's `CORS_ALLOWED_ORIGINS` allowlist. Errors use
-the standard [§6](#6-error-envelope-reference) envelope `{ code, reason?, error }`.
+proxied to/from an internal Drive.
+
+**Auth — either credential is accepted:**
+
+| Caller | Credential |
+|---|---|
+| SSO user | An OIDC-validated `ssoToken`, sent as the `ssoToken` header, or (for browser `<img>` downloads that cannot set headers) as an `ssoToken` cookie obtained from `POST /api/v1/file/setCookie` below. The header takes precedence over the cookie. |
+| Bot / admin | A botplatform session token (§10.1), sent as `x-user-id` + `x-auth-token`. |
+
+Selection rules: sending **both** an `ssoToken` header and an `x-auth-token` header is
+`400 ambiguous_token`. An `x-auth-token` header takes precedence over an `ssoToken`
+**cookie** — the cookie is ambient state a browser attaches automatically, the header is
+an explicit act, so only two explicit headers are treated as a conflict.
+
+`POST /api/v1/file/setCookie` is the one exception: it is SSO-only and returns `400` to a
+session-token caller, because it exists solely to mirror an `ssoToken` into a cookie for
+browser downloads. Bots send headers on every request and need no cookie.
+
+Room-scoped endpoints also require that the caller is a member (has a subscription) of
+`:roomId` — this applies identically to bots, which hold real subscription rows.
+Cross-origin browsers are served credentialed CORS headers only when their `Origin` is in
+the server's `CORS_ALLOWED_ORIGINS` allowlist. Errors use the standard
+[§6](#6-error-envelope-reference) envelope `{ code, reason?, error }`.
+
+**Errors common to every endpoint below** (in addition to each endpoint's own):
+
+| Status | `code` | `reason` | Example body |
+|---|---|---|---|
+| 400 | `bad_request` | `ambiguous_token` | `{ "code": "bad_request", "reason": "ambiguous_token", "error": "set exactly one of ssoToken / x-auth-token" }` |
+| 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — missing, unknown, or mismatched session credential. The three cases are deliberately indistinguishable. |
+| 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — the session token could not be validated. Distinct from `401`: the credential was not rejected, it could not be checked. |
 
 #### POST /api/v1/file/setCookie
 
@@ -447,7 +471,7 @@ cannot refresh the cookie from an already-expired token.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; validated before the cookie is set. |
+| `ssoToken` | header | string | yes | OIDC-issued SSO token; validated before the cookie is set. **This endpoint is SSO-only** — a session-token caller gets `400`. |
 
 Cross-origin callers must send the request with credentials (e.g. `fetch(..., { credentials: "include" })`) and be served from an origin in `CORS_ALLOWED_ORIGINS`.
 
@@ -477,6 +501,7 @@ Uses the [§6](#6-error-envelope-reference) envelope. HTTP statuses:
 
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "setCookie requires an ssoToken; session-token callers send credentials as headers" }` — this endpoint is SSO-only. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 
 #### Triggered events — success path
@@ -504,7 +529,8 @@ success/failure in a single `200` (partial success).
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; identifies the uploader. |
+| `ssoToken` | header | string | conditional | OIDC-issued SSO token; identifies the uploader. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1); identifies a bot/admin uploader. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Target room ID; the caller must be a member. |
 | `images` | form file | file[] | yes | One or more images (`.png`/`.jpeg`/`.jpg`/`.heic`), each ≤ `MAX_IMAGE_SIZE_BYTES` (default 25 MiB); at most `MAX_IMAGES` (default 10). Repeat the field once per file. |
 
@@ -573,7 +599,8 @@ pure-HTTP endpoint — it does **not** publish a message.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header | string | yes | OIDC-issued SSO token; identifies the uploader. |
+| `ssoToken` | header | string | conditional | OIDC-issued SSO token; identifies the uploader. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1); identifies a bot/admin uploader. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Target room ID; the caller must be a member. |
 | `file` | form file | file | yes | The single file, ≤ `FILE_UPLOAD_MAX_FILE_SIZE` (default 100 MiB). At most `MAX_ATTACHMENTS` (default 1) parts may be sent under this field; more is rejected with `too many files`. Its MIME type must pass the server's allow/deny lists (`FILE_UPLOAD_MEDIA_TYPE_WHITELIST`/`BLACKLIST`; `image/svg+xml` is blocked by default). |
 | `description` | form field | string | no | Optional attachment description. |
@@ -640,7 +667,8 @@ or `titleLink` (file upload) returned by the upload endpoints.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Room the image belongs to; the caller must be a member. |
 | `fileId` | path | string | yes | Drive file ID (from the upload response). |
 | `drive_host` | query | string | yes | Drive base URL (from the upload response). |
@@ -687,7 +715,8 @@ calls this with the old-style path preserved in legacy messages.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Room the image belongs to; the caller must be a member. |
 | `fileId` | path | string | yes | Legacy Drive file ID (from the original message data). |
 | `drive_host` | query | string | yes | Legacy Drive base URL carried in the legacy message data. |
@@ -732,7 +761,8 @@ The response is always served as an attachment.
 
 | Field | Source | Type | Required | Notes |
 |---|---|---|---|---|
-| `ssoToken` | header/cookie | string | yes | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. |
+| `ssoToken` | header/cookie | string | conditional | OIDC-issued SSO token. Sent as the `ssoToken` header, or as the `ssoToken` cookie from `POST /api/v1/file/setCookie` (browser `<img>` downloads); header wins. Required unless the session-token pair below is sent. |
+| `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1), for bot/admin callers. Required unless `ssoToken` is sent. |
 | `fileId` | path | string | yes | Upload ID (the `uploads._id`); used for the metadata lookup. |
 | `fileName` | path | string | yes | Cosmetic — accepted but ignored; the served filename comes from the stored metadata. |
 
@@ -945,7 +975,7 @@ it is absent on every other action.
 | `isSubscribed` | boolean | Optional. Whether the user is actively subscribed. |
 | `historySharedSince` | RFC3339 timestamp | Optional. Boundary before which prior history is shared. |
 | `lastSeenAt` | RFC3339 timestamp | Optional. The user's last-seen time in the room. |
-| `threadUnread` | string[] | Optional. Thread room IDs with unread replies. |
+| `threadUnread` | string[] | Optional. Parent message IDs of threads with unread replies. |
 | `restricted` | boolean | Optional. Denormalized room restricted flag. |
 | `externalAccess` | boolean | Optional. Denormalized room external-access flag. |
 | `room` | [SubscriptionRoom](#subscriptionroom) | Optional. Room-derived view. Populated at read time by the user-service endpoints, and at publish time by room-worker on `added` `subscription.update` events (no user-service read needed); absent on every other event action. |
@@ -1246,9 +1276,9 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 | `users` | string[] | no | Internal user IDs (or accounts) to add directly. May include `.bot` bot accounts: each listed bot must resolve to an app with an **enabled assistant**, else the request is rejected (see Error response); a bot whose home site differs from the room's is allowed (cross-site bot membership). Bots join as plain members, count toward the room's `appCount` (not `userCount` or the capacity cap), and — because a bot can log into the chat frontend — receive the `subscription.update` event (with the room key inline under `subscription.room`) on their encoded per-user subject (`chat.user.{encodedAccount}.…`, dots→underscores; see [§5](#5-room-encryption)). The `p_admin` platform-admin pseudo-account may also be listed; it is admitted **without** app/assistant validation (it has no app) and, like a bot, counts toward `appCount`. Plain `p_` QA test accounts are **ordinary users** — they count toward `userCount`, are subject to the capacity cap, and behave like any human member. |
 | `orgs` | string[] | no | Org IDs to add (expanded server-side to all org members). |
 | `channels` | array<ChannelRef> | no | Other channels to add as bulk sources. Each entry is `{ "roomId": string, "siteId": string }`. |
-| `history.mode` | string | no | `"none"` (default) or `"all"` — controls whether new members see history before they joined. |
+| `history.mode` | string | no | `"none"` or `"all"` — controls whether new members see history before they joined. **When omitted or empty, the server treats it as `"all"`** (share-all). `"all"` is capped by the **requester's own** `historySharedSince`: when the adder's history is restricted, the new members inherit the adder's boundary instead of unrestricted history (members can never see more history than whoever added them). `"none"` restricts new members to messages from the add time onward (never earlier than the adder's own boundary — the later of the two wins). Any other value is rejected with `history.mode must be "none" or "all"` (`bad_request`). |
 
-The fields `requesterId`, `requesterAccount`, and `timestamp` on the Go `AddMembersRequest` are server-set — the client should omit them.
+The fields `requesterId`, `requesterAccount`, `timestamp`, and `historySharedSince` on the Go `AddMembersRequest` are server-set — the client should omit them (any client-supplied `historySharedSince` is overwritten).
 
 ```json
 {
@@ -1273,7 +1303,7 @@ The fields `requesterId`, `requesterAccount`, and `timestamp` on the Go `AddMemb
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled; a bot whose home site differs from the room's site is admitted (cross-site bot membership is allowed). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added).
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner, unrecognized `history.mode`). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled; a bot whose home site differs from the room's site is admitted (cross-site bot membership is allowed). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -1394,7 +1424,7 @@ For a **botDM**, the human member's event carries `appInfo` instead (the bot's o
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
 | `joinedAt` | number | Epoch ms (UTC). |
-| `historySharedSince` | number | Optional. Epoch ms (UTC); present when prior history is shared with the new members. |
+| `historySharedSince` | number | Optional. Epoch ms (UTC); the new members' history boundary, present when their history is restricted. For `history.mode: "none"` adds it is the add time or the requester's own boundary, whichever is later; for a share-all add by a requester whose own history is capped it is the requester's inherited boundary. Absent = unrestricted. |
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 
 The event carries no separate account list — member identities are in `members`. When new members actually join (or a new org is added), a `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event; a pure org→individual upgrade posts no such message.
@@ -1988,7 +2018,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
 
-This is a **synchronous RPC** — `room-service` performs all writes inline before replying. The handler validates room membership, recomputes the per-subscription `alert` flag, persists the new `lastSeenAt` and `alert` on the user's `Subscription`, and optionally recomputes `Room.MinUserLastSeenAt`.
+This is a **synchronous RPC** — `room-service` performs all writes inline before replying. The handler validates room membership, persists the new `lastSeenAt` on the user's `Subscription` (clearing `alert` and `hasMention`), and optionally recomputes `Room.MinUserLastSeenAt`.
 
 ##### Request body
 
@@ -2017,7 +2047,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 ##### Behaviour notes
 
-- **Alert recomputation:** new `alert = oldSub.alert && len(oldSub.threadUnread) > 0`. Reading the room clears the alert when there are no unread thread mentions; it stays set when thread-level unreads remain.
+- **Alert cleared:** reading the room clears the subscription's alert flag.
 - **No `JoinedAt` fallback for the early-return:** if `subscription.lastSeenAt` is null (the user was invited but has never opened the room), the handler does **not** treat `joinedAt` as a synthetic read position — being invited isn't reading. The room-floor recompute runs in this case so a member who has just read for the first time is reflected in the floor.
 - **Room-floor recompute (`Room.MinUserLastSeenAt`):** the room's read floor (surfaced as `minUserLastSeenAt` in history responses) is a **strict "everyone has read" marker**: `MIN(lastSeenAt)` across the room's **human** subscriptions — bots (`u.isBot`) and the `p_admin` platform-admin pseudo-account are excluded — set **only when every counted subscription has a usable `lastSeenAt`**. If **any** counted member has never read the room (no/zero `lastSeenAt` — e.g. invited but never opened), the floor is `$unset` (null). Because bots and the admin pseudo-account are excluded, a **botDM room resolves to the human's `lastSeenAt`** rather than being forced null by a never-reading bot; plain `p_` QA accounts are ordinary members and do count. Reading a room can advance the floor (or, if this was the last unread member, raise it from null to a value).
 - **Recompute trigger & a known gap:** the floor is recomputed only on this Mark Read path, and only when the caller was not already past `room.lastMsgAt` (the early-return above). Adding a member does not itself recompute the floor, so a newly-invited, never-read member will not flip an existing non-null floor to null until the next recompute is triggered (e.g. that member reads, or another member reads while the room has content).
@@ -2061,7 +2091,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
-A **synchronous RPC** that clears a single thread's unread state for the caller. `room-service` validates room membership, then — when the caller follows the thread — removes the threadId from the user's `Subscription.ThreadUnread`, recomputes the per-subscription `alert` flag, refreshes the `ThreadSubscription` (`lastSeenAt`, `updatedAt`, `hasMention=false`), and — for cross-site users — emits an `OutboxEvent` on the OUTBOX stream; `outbox-worker` forwards the cross-site `thread_read` event to the user's home site (at-least-once) so the destination `inbox-worker` can mirror both updates. If the caller has no `ThreadSubscription` for the thread (i.e. does not follow it), there is nothing to clear: the RPC performs no writes and returns `accepted`.
+A **synchronous RPC** that clears a single thread's unread state for the caller. `room-service` validates room membership, then — when the caller follows the thread — concurrently refreshes the `ThreadSubscription` (`lastSeenAt`, `updatedAt`, `hasMention=false`) and `$pull`s the thread's parent message ID out of the caller's `Subscription.threadUnread`, and — for cross-site users — emits an `OutboxEvent` on the OUTBOX stream; `outbox-worker` forwards the cross-site `thread_read` event to the user's home site (at-least-once) so the destination `inbox-worker` can mirror both updates. If the caller has no `ThreadSubscription` for the thread (i.e. does not follow it), there is nothing to clear: the RPC performs no writes and returns `accepted`.
 
 ##### Request body
 
@@ -2093,12 +2123,11 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 ##### Behaviour notes
 
-- **Alert recomputation:** `alert = oldSub.alert && len(newThreadUnread) > 0`. A thread-read can only clear an alert, never set one. When the post-removal `threadUnread` is empty, `alert` becomes false. This computation runs atomically inside the MongoDB aggregation pipeline on the handler's site — not derived client-side.
-- **Concurrent local writes:** the room-`Subscription` update and the `ThreadSubscription` update run in parallel inside an `errgroup`. Both must succeed before the handler proceeds.
-- **Cross-site federation:** if the user's home site differs from the handler's site, the handler emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `thread_read` event (at-least-once) to `chat.inbox.{userSite}.external.thread_read` with payload `{account, roomId, threadRoomId, parentMessageId, newThreadUnread, alert, lastSeenAt, timestamp}` (timestamps as `int64` UnixMilli). The destination `inbox-worker` applies the supplied `newThreadUnread`+`alert` to the local Subscription cache and applies `lastSeenAt`+`updatedAt`+`hasMention=false` to the local ThreadSubscription with an `$lt` order-safety guard so out-of-order delivery cannot regress the thread's read position.
-- **Not following the thread:** if the caller holds no `ThreadSubscription` for the supplied `threadId` in the room, the RPC is an idempotent no-op — it runs no `Subscription`/`ThreadSubscription` writes, no cross-site federation, and no floor recompute, and returns `{ "status": "accepted" }`.
+- **Local write:** the RPC advances the caller's `ThreadSubscription` read state (`lastSeenAt`, `updatedAt`, `hasMention=false`) and removes the thread's parent message ID from `Subscription.threadUnread` via `$pull` (the field is `$unset`, not stored empty, once the array drains). Room-level alert/unread is untouched — that's cleared by [Mark Messages Read](#mark-messages-read).
+- **Cross-site federation:** if the user's home site differs from the handler's site, the handler emits an `OutboxEvent` on the OUTBOX stream and `outbox-worker` forwards the cross-site `thread_read` event (at-least-once) to `chat.inbox.{userSite}.external.thread_read` with payload `{account, roomId, threadRoomId, lastSeenAt, parentMessageId, timestamp}` (timestamps as `int64` UnixMilli). The destination `inbox-worker` applies `lastSeenAt`+`updatedAt`+`hasMention=false` to the local ThreadSubscription with an `$lt` order-safety guard, and — only when that guard matches — `$pull`s `parentMessageId` from the local Subscription's `threadUnread`. The per-ID pull commutes with concurrent `thread_unread_added` merges for other threads, so out-of-order delivery can neither regress the read position nor lose or resurrect unrelated unread IDs.
+- **Not following the thread:** if the caller holds no `ThreadSubscription` for the supplied `threadId` in the room, the RPC is an idempotent no-op — it runs no `ThreadSubscription` write, no cross-site federation, and no floor recompute, and returns `{ "status": "accepted" }`.
 - **Defensive `roomId` filter:** the thread-subscription lookup additionally enforces that the supplied `threadId` belongs to the room named in the subject. A thread that belongs to a different room matches no `ThreadSubscription` and so is treated as the not-following no-op above (rather than clearing an unrelated thread).
-- **Thread-room read-floor recompute:** after both writes succeed, `room-service` recomputes `thread_rooms.minUserLastSeenAt` = `MIN(lastSeenAt)` across all `thread_subscriptions` for the thread room. The floor is set only when every subscriber has a usable `lastSeenAt`; otherwise it is cleared. The recompute is best-effort — a failure is logged but does not fail the RPC. The stored value is also available via [Get Thread Messages](#get-thread-messages).
+- **Thread-room read-floor recompute:** after the `ThreadSubscription` write succeeds, `room-service` recomputes `thread_rooms.minUserLastSeenAt` = `MIN(lastSeenAt)` across all `thread_subscriptions` for the thread room. The floor is set only when every subscriber has a usable `lastSeenAt`; otherwise it is cleared. The recompute is best-effort — a failure is logged but does not fail the RPC. The stored value is also available via [Get Thread Messages](#get-thread-messages).
 - **Read-floor fan-out:** when (and only when) the recompute above changes `thread_rooms.minUserLastSeenAt`, the server publishes a `thread_message_read` event (routed by the **parent** room's type) carrying the new floor, so peers can advance thread read-receipt UI live. Best-effort (a publish failure does not fail the RPC); never fires when the floor is unchanged or the thread room is missing.
 - **No system message:** thread reads are silent; only the requester receives the `accepted` reply.
 
@@ -3011,6 +3040,7 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
 | Field | Type | Notes |
 |---|---|---|
 | `messages` | array<Message> | Most-recent first. See [Message schema](#message-schema). |
+| `hasNext` | boolean | `true` if older messages may exist beyond this page — fetch the next page with `before` = the oldest returned message's `createdAt`. `false` once the caller's history boundary (room start, history floor, or access window) is reached. Conservative: occasionally `true` when nothing older remains; the following fetch then returns an empty page with `hasNext=false`. An empty page always has `hasNext=false`. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
 
 ```json
@@ -3028,6 +3058,7 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
       "msg": "morning team"
     }
   ],
+  "hasNext": true,
   "minUserLastSeenAt": 1746518100000
 }
 ```
@@ -5515,7 +5546,9 @@ Returns the count of active subscriptions, optionally filtered to unread rooms o
 
 **Unread count behavior:** when `unread: true`, the service fetches the active subscriptions and splits them by site. **Local** subscriptions are counted directly from the room baseline carried on the `$lookup` (comparing the room's `lastMsgAt` against the subscription's `lastSeenAt`) — no RPC is made. Only **cross-site** subscriptions trigger a per-site `GetRoomsInfo` RPC, run in **parallel**. The count **degrades per-site** (matching `subscription.list` enrichment): if a cross-site RPC fails, that site's subscriptions are **skipped** — omitted from the count and logged as a warning — while local subscriptions and the sites that did respond still contribute. The result is a best-effort count that may under-report while a remote site is unreachable, rather than the full active-subscription total.
 
-**Threads:** a room also counts as unread if it has at least one unread followed thread, even when its own messages are all read — at most **+1 per room** (existence, not a per-thread count). Muted rooms are excluded (as with room-level unread), and only rooms within the fetched active-subscription page are considered. For message-read rooms, thread last-activity is resolved per owning site and degrades best-effort: if a site's thread lookup fails, its rooms are simply not bumped.
+**Threads:** a room also counts as unread if it has at least one unread followed thread, even when its own messages are all read — at most **+1 per room** (existence, not a per-thread count). Muted rooms are excluded (as with room-level unread), and only rooms within the fetched active-subscription page are considered. Thread-unread state (`Subscription.ThreadUnread`, a list of unread thread parent-message IDs) is already carried on the subscription document fetched for the room-level pass — federated onto the account's home-replica sub for both local and cross-site rooms — so this phase needs no additional RPC and cannot degrade independently of the room-level pass.
+
+**Caching:** when the server-side badge cache is enabled, the unread count may be served from the account's maintained unread-room set (invalidated on every read, thread-read, and mute change; bumped on every message) instead of being recomputed — same response schema and staleness bounds as the badge counts carried on push notifications (this count is not capped for display, unlike push counts).
 
 ##### Error response
 
@@ -5871,7 +5904,7 @@ Empty object.
 
 - `{siteID}` is the **caller's own home site** — the site that holds the user's federated thread subscriptions and runs the aggregator.
 
-Clears the unread status of **all** of the user's threads across every site the user participates in — the server side of a "mark all threads read" action. `user-service` reads the user's local thread-subscription replicas, determines the distinct owning sites, and asks each site's `room-service` to clear that user's thread-subscription read state (`lastSeenAt` advanced, `hasMention` cleared) and room-subscription thread-unread state (`threadUnread` removed, `alert` cleared). Sites that fail to respond are listed in `unavailableSites` rather than failing the request.
+Clears the unread status of **all** of the user's threads across every site the user participates in — the server side of a "mark all threads read" action. `user-service` reads the user's local thread-subscription replicas, determines the distinct owning sites, and asks each site's `room-service` to clear that user's thread-subscription read state (`lastSeenAt` advanced, `hasMention` cleared) and, concurrently, `$unset` `threadUnread` on every one of that user's subscriptions that still has unread threads. Sites that fail to respond are listed in `unavailableSites` rather than failing the request.
 
 This is a bulk **dismiss**: it clears only the requesting user's own read state. It does **not** advance thread-room read floors or emit `thread_message_read` receipt events, so other participants' read-receipt UI is unaffected.
 
@@ -6714,7 +6747,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `pin_room_too_large` | forbidden | history-service pin/unpin (non-owner/admin/bot in a room above `LARGE_ROOM_THRESHOLD`) |
 | `sso_token_expired` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token expired), `sso.refresh` (refresh failed, re-login required) |
 | `invalid_sso_token` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token fails verification) |
-| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot reach botplatform); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site) |
+| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot reach botplatform); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site); upload-service (§2.4) and media-service (§7) — a session token could not be validated against botplatform |
 | `invalid_request` | bad_request | auth-service (body parse / required field missing) |
 | `invalid_nkey` | bad_request | auth-service (natsPublicKey format) |
 | `missing_fields` | bad_request | auth-service (ssoToken/account/natsPublicKey missing); portal-service `GET /api/userInfo` (account missing); user-service `sso.set` (ssoToken/refreshToken missing) |
@@ -6729,8 +6762,9 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `response_too_large` | internal | any RPC whose reply would exceed the transport `max_payload` (most often large history reads — retry with a smaller `limit`) |
 | `no_responders` | unavailable | any request/reply RPC whose upstream subject had no subscriber (`natsutil.RequestFailure`) — the upstream service is down, not yet started, or not routed to this site. Retry. |
 | `upstream_timeout` | unavailable | any request/reply RPC delivered to the upstream but not answered within the caller's timeout (`natsutil.RequestFailure`). Retry. |
-| `invalid_token` | unauthenticated | admin-service (every `Authorization: Bearer` route — §9.11 and all `/v1/admin/…`; token missing, unknown, or session not found), botplatform-service (session token failed validation, §7) |
-| `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match) |
+| `invalid_token` | unauthenticated | admin-service (every `Authorization: Bearer` route — §9.11 and all `/v1/admin/…`; token missing, unknown, or session not found), botplatform-service (session token failed validation, §10); upload-service (§2.4) and media-service (§7) — `x-user-id`/`x-auth-token` missing, unknown, or disagreeing with the session (deliberately indistinguishable) |
+| `not_admin` | forbidden | admin-service (valid session, but caller does not hold the `admin` role or the session site does not match); media-service (§7) — avatar PUT by a session that is neither the named bot nor an admin, emoji PUT without the `admin` role, or either PUT with a session issued for another site |
+| `ambiguous_token` | bad_request | auth-service `POST /api/v1/auth` (§2.2) — both `ssoToken` and `authToken` set; upload-service (§2.4) — both an `ssoToken` header and an `x-auth-token` header set |
 | `account_exists` | conflict | admin-service `POST /v1/admin/users` (account already exists in the users collection) |
 | `invalid_credentials` | unauthenticated | admin-service `POST /v1/login` (§9.10) (unknown account, wrong password, not admin, or deactivated — uniform response) |
 | `old_password_mismatch` | unauthenticated | admin-service `POST /v1/password/change` (§9.11) (`oldPassword` does not match) |
@@ -6749,7 +6783,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 
 - **NATS sync replies** — on the reply subject for §3/§4 RPCs.
 - **JetStream async results** — `model.AsyncJobResult` carries the same `code` + `reason` fields when `status == "error"`, so a failed async job is surfaced the same way as a sync error.
-- **HTTP** — auth-service `POST /api/v1/auth` (§2.2), portal-service `GET /api/userInfo` (§2.3), and upload-service's image endpoints (§2.4) write the envelope as the response body with the matching HTTP status from the table above.
+- **HTTP** — auth-service `POST /api/v1/auth` (§2.2), portal-service `GET /api/userInfo` (§2.3), upload-service's file/image endpoints (§2.4), and media-service's avatar and emoji PUTs (§7) write the envelope as the response body with the matching HTTP status from the table above.
 
 ### Client branching guidance
 
@@ -6759,7 +6793,7 @@ Compute the trigger as `reason ?? code` and branch on that. Use `code` for gener
 
 ## 7. Media Service
 
-Public HTTP endpoints served by `media-service`. GET image responses (streamed custom image and generated default SVG) set `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`; redirects do not, and the upload sets `nosniff` only.
+HTTP endpoints served by `media-service` — the three GETs are public, the two PUTs require a session token (see each). GET image responses (streamed custom image and generated default SVG) set `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'`; redirects do not, and the upload sets `nosniff` only.
 
 **Bot detection:** an account takes the bot avatar path if it ends in `.bot` **or** is the `p_admin` platform-admin pseudo-account. Everything else — including plain `p_` QA test accounts — is a user.
 
@@ -6841,10 +6875,9 @@ GET /api/v1/avatar/room/<dm-room-id>         → 200 (default SVG — use Endpoi
 
 ### PUT /api/v1/avatar/bot/:botName
 
-> [!WARNING]
-> **This endpoint is UNAUTHENTICATED in v1.** Anyone who can reach the service can upload or overwrite any bot's avatar. Auth is deferred until the authorization model is decided. **It MUST be network-restricted or gated before any production exposure.**
-
-**Auth:** none (v1)
+**Auth:** `x-user-id` + `x-auth-token` (botplatform session token, §10.1). The session must
+either **be** the bot named in the path (`account == :botName`) or hold the `admin` role;
+anything else is `403 not_admin`. A bot manages its own avatar; an admin manages any bot's.
 
 Uploads a custom PNG or JPEG avatar for a bot. The body is the raw image bytes; `Content-Type` declares the format.
 
@@ -6852,7 +6885,7 @@ Uploads a custom PNG or JPEG avatar for a bot. The body is the raw image bytes; 
 
 | | Notes |
 |---|---|
-| Path | `:botName` — bare bot account (stray `@…` is stripped). Must satisfy the bot pattern (ends in `.bot` or is the `p_admin` platform-admin pseudo-account). |
+| Path | `:botName` — bare bot account, matched exactly against the session's account. Do **not** prefix `@`. Must satisfy the bot pattern (ends in `.bot` or is the `p_admin` platform-admin pseudo-account). |
 | Body | Raw image bytes (PNG or JPEG). SVG and non-image payloads are rejected. |
 | `Content-Type` header | Advisory. Validation is by decoding the body — a valid PNG or JPEG is accepted regardless of the declared header; non-images are rejected. |
 | Max size | `MAX_UPLOAD_BYTES` (default 1 MiB). |
@@ -6864,9 +6897,12 @@ The service decodes the image bytes to verify they are a valid PNG or JPEG — m
 | Status | Condition |
 |---|---|
 | `200 OK` | Upload accepted and stored. Body returns the new avatar metadata (below). |
-| `400 Bad Request` | `botName` does not match the bot pattern; `Content-Type` is not `image/png` or `image/jpeg`; body is not a valid image; body exceeds `MAX_UPLOAD_BYTES`. |
+| `400 Bad Request` | `botName` does not match the bot pattern; body does not decode as a PNG or JPEG; body exceeds `MAX_UPLOAD_BYTES`. A wrong `Content-Type` alone is not rejected — the header is advisory, as the request table above states. |
+| `401 Unauthenticated` | `invalid_token` — missing, unknown, or mismatched session credential (the three are indistinguishable). |
+| `403 Forbidden` | `not_admin` — a valid session that is neither the named bot nor an admin, or one issued for another site. |
 | `404 Not Found` | No user record for `botName` — unknown bot. |
 | `409 Conflict` | Bot is owned by a different cluster. Response body names the correct domain. |
+| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against botplatform. |
 
 ##### Success response (`200`)
 
@@ -6919,7 +6955,11 @@ Serves a custom emoji image. The path no longer carries siteID: v1's FE only eve
 
 ### PUT /api/v1/emoji/:shortcode
 
-Uploads (or replaces — PUT is an upsert) a custom emoji. v1: no auth; the optional `?uploader={account}` query parameter is recorded for audit only. Values longer than 64 bytes are truncated. The upload always writes to **this** cluster's site — there is no cross-cluster upload in v1, so there is no declared-intent check to fail.
+Uploads (or replaces — PUT is an upsert) a custom emoji. The upload always writes to **this** cluster's site — there is no cross-cluster upload in v1, so there is no declared-intent check to fail.
+
+**Auth:** `x-user-id` + `x-auth-token` (botplatform session token, §10.1), **admin role required**. A shortcode is a site-wide shared name that every user on the site renders, so uploading one is an admin operation — a bot cannot overwrite an emoji for everybody. A valid non-admin session is `403 not_admin`.
+
+The `?uploader={account}` query parameter is **accepted and ignored**. The `createdBy` / `updatedBy` audit fields are taken from the authenticated session, which cannot be spoofed by a caller.
 
 #### Request
 
@@ -6932,6 +6972,9 @@ Raw image bytes as the body. PNG, JPEG, or GIF (animated GIFs are stored and ser
 | `200 OK` | Upload accepted and stored. Body returns the new emoji metadata (below). |
 | `400 Bad Request` | Malformed shortcode; body not a valid PNG/JPEG/GIF; body or dimensions over the limits. |
 | `400 Bad Request` | Reason `emoji_shortcode_reserved` — shortcode collides with a built-in standard emoji (would be permanently shadowed). |
+| `401 Unauthenticated` | `invalid_token` — missing, unknown, or mismatched session credential (the three are indistinguishable). |
+| `403 Forbidden` | `not_admin` — a valid session without the `admin` role, or one issued for another site. |
+| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against botplatform. |
 
 ##### Success response (`200`)
 

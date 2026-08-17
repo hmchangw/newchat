@@ -13,9 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -31,6 +33,54 @@ func startOtelNATS(t *testing.T) *o11ynats.Conn {
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
 	return nc
+}
+
+func TestHistoryMessageReader_RecordsBoundedRequestResult(t *testing.T) {
+	nc := startOtelNATS(t)
+	recorder := NewMockrequestRecorder(gomock.NewController(t))
+	recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationHistoryGetMessage, gomock.Any(), gomock.Nil()).
+		Do(func(_ context.Context, _ natsmetrics.Operation, duration time.Duration, _ error) {
+			assert.GreaterOrEqual(t, duration, time.Duration(0))
+		})
+	const siteID = "site-a"
+	_, err := nc.Subscribe(context.Background(), subject.MsgGet("alice", "room-a", siteID), func(_ context.Context, m *nats.Msg) {
+		data, _ := json.Marshal(cassandra.Message{RoomID: "room-a", CreatedAt: time.Now(), Sender: cassandra.Participant{Account: "alice"}})
+		_ = m.Respond(data)
+	})
+	require.NoError(t, err)
+
+	r := newHistoryMessageReader(nc, siteID, withHistoryRequestRecorder(recorder))
+	_, _, err = r.GetMessageReadMeta(context.Background(), "alice", "room-a", "message-a")
+	require.NoError(t, err)
+}
+
+func TestHistoryMessageReader_RecordsFinalRequestFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		response []byte
+	}{
+		{name: "invalid JSON", response: []byte(`not json`)},
+		{name: "no responder"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nc := startOtelNATS(t)
+			const siteID = "site-a"
+			if tt.response != nil {
+				_, err := nc.Subscribe(context.Background(), subject.MsgGet("alice", "room-a", siteID), func(_ context.Context, m *nats.Msg) {
+					_ = m.Respond(tt.response)
+				})
+				require.NoError(t, err)
+			}
+			recorder := NewMockrequestRecorder(gomock.NewController(t))
+			recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationHistoryGetMessage, gomock.Any(), gomock.Not(gomock.Nil()))
+			r := newHistoryMessageReader(nc, siteID, withHistoryRequestRecorder(recorder))
+
+			_, _, err := r.GetMessageReadMeta(context.Background(), "alice", "room-a", "message-a")
+
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestHistoryMessageReader_GetMessageReadMeta(t *testing.T) {

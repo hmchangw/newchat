@@ -22,6 +22,10 @@ type SubscriptionRepository interface {
 	GetDMSubscription(ctx context.Context, account, target string) (*model.EnrichedDMSubscription, error)
 	GetSubscriptionByRoomID(ctx context.Context, account, roomID string) (*model.EnrichedSubscription, error)
 	CountActiveSubscriptions(ctx context.Context, account string) (int, error)
+	// GetActiveSubscriptions returns up to limit active subscriptions. The cap
+	// is applied before the deleted-room filter, so a page whose capped slice
+	// contains soft-deleted rooms comes back slightly short of limit — fine for
+	// the unread count (its only consumer), not a general pagination surface.
 	GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error)
 	GetAppSubscription(ctx context.Context, account, botName string) (*model.Subscription, error)
 	SetAppSubscribed(ctx context.Context, account, botName string, subscribed, muted bool) error
@@ -54,6 +58,9 @@ type AppRepository interface {
 // RoomClient is the consumer-defined interface for room-service / room-worker RPC calls.
 type RoomClient interface {
 	GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error)
+	// GetRoomsMeta is the keyless (skipKeys) variant of GetRoomsInfo, for
+	// metadata-only callers.
+	GetRoomsMeta(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error)
 	CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (model.Subscription, error)
 	GetThreadRoomInfoBatch(ctx context.Context, siteID string, threadRoomIDs []string) ([]model.ThreadRoomInfo, error)
 	ClearAllThreadUnread(ctx context.Context, siteID, account string) error
@@ -63,7 +70,6 @@ type RoomClient interface {
 // the thread-unread badge.
 type ThreadSubscriptionRepository interface {
 	ListByAccount(ctx context.Context, account string) ([]model.ThreadUnreadRow, error)
-	ListByAccountInRooms(ctx context.Context, account string, roomIDs []string) ([]model.ThreadUnreadRow, error)
 }
 
 // HistoryClient is the consumer-defined interface for per-site history-service
@@ -76,6 +82,22 @@ type HistoryClient interface {
 // PresenceClient is the consumer-defined interface for user-presence-service RPC calls.
 type PresenceClient interface {
 	QueryPresence(ctx context.Context, siteID string, accounts []string) ([]model.PresenceState, error)
+}
+
+// badgeCache is the consumer-defined interface for the thread-unread badge's
+// Valkey accelerator (pkg/badgecache.Cache satisfies it; a disabled/no-op
+// implementation is wired when Valkey is not configured). Only
+// BumpBatch/Seed/Reseed/Count are consumed here — ClearRoom/ClearAll belong
+// to other event handlers.
+type badgeCache interface {
+	// BumpBatch pipelines the per-account bump; accounts absent from the result
+	// missed (or errored) and must be seeded from the source of truth.
+	BumpBatch(ctx context.Context, accounts []string, roomID string) map[string]int
+	Seed(ctx context.Context, account string, roomIDs []string, triggerRoomID string) (int, bool)
+	Reseed(ctx context.Context, account string, roomIDs []string)
+	// Count serves the account's unread-room count from the cache; fresh=false
+	// (marker absent or Valkey error) means the caller must recompute from Mongo.
+	Count(ctx context.Context, account string) (int, bool)
 }
 
 // EventPublisher is the consumer-defined interface for fire-and-forget
@@ -115,21 +137,28 @@ type UserService struct {
 	// clientPub fans out ephemeral client-facing events (settings.update) over
 	// core NATS — same delivery pattern as room-worker's subscription.update.
 	clientPub        EventPublisher
+	badge            badgeCache
 	ssoTokens        SSOTokenRepository
 	tokenValidator   TokenValidator
 	tokenRefresher   TokenRefresher
 	ssoRefreshWindow time.Duration
 	siteID           string
 	allSiteIDs       []string
-	maxSubs          int
-	defaultLimit     int
-	maxApps          int
-	defaultApps      int
-	maxAccountNames  int
+	// badgeCap caps badge unread-room counts on the cache-down fallback path
+	// (BADGE_COUNT_CAP; pkg/badgecache applies the same cap on cache hits).
+	badgeCap int
+	// badgeCacheFirst gates serving subscription.count (unread=true) from the
+	// badge cache on freshness-marker hit (BADGE_COUNT_CACHE_FIRST).
+	badgeCacheFirst bool
+	maxSubs         int
+	defaultLimit    int
+	maxApps         int
+	defaultApps     int
+	maxAccountNames int
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config) *UserService {
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, badge badgeCache, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config) *UserService {
 	return &UserService{
 		subs:             subs,
 		users:            users,
@@ -140,12 +169,15 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		presence:         presence,
 		pub:              pub,
 		clientPub:        clientPub,
+		badge:            badge,
 		ssoTokens:        ssoTokens,
 		tokenValidator:   tokenValidator,
 		tokenRefresher:   tokenRefresher,
 		ssoRefreshWindow: cfg.SSORefreshWindow,
 		siteID:           cfg.SiteID,
 		allSiteIDs:       cfg.AllSiteIDs,
+		badgeCap:         cfg.BadgeCountCap,
+		badgeCacheFirst:  cfg.BadgeCountCacheFirst,
 		maxSubs:          cfg.MaxSubscriptionLimit,
 		defaultLimit:     cfg.DefaultSubscriptionLimit,
 		maxApps:          cfg.MaxAppsLimit,
@@ -185,4 +217,5 @@ func (s *UserService) RegisterHandlers(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.UserAppsCategoriesPattern(s.siteID), s.ListAppCategories)
 	natsrouter.Register(r, subject.UserSSOSetPattern(s.siteID), s.SSOSet)
 	natsrouter.RegisterOptionalBody(r, subject.UserSSORefreshPattern(s.siteID), s.SSORefresh)
+	natsrouter.Register(r, subject.BadgeCountBatchPattern(s.siteID), s.BadgeCountBatch)
 }

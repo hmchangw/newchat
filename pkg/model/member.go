@@ -20,6 +20,12 @@ type HistoryConfig struct {
 	Mode HistoryMode `json:"mode" bson:"mode"`
 }
 
+// SharesAll reports whether this config grants new members pre-join history:
+// every mode except "none", including empty (= default "all"). Single source
+// of the share-all predicate so room-service's cap stamping and room-worker's
+// cap application can never drift.
+func (h HistoryConfig) SharesAll() bool { return h.Mode != HistoryModeNone }
+
 // ChannelRef identifies a source channel by room + its home site. Used by add-member
 // to expand cross-site source channels via the remote site's member.list endpoint.
 type ChannelRef struct {
@@ -29,14 +35,19 @@ type ChannelRef struct {
 
 // AddMembersRequest is the event published by room-service when a user requests to add members to a room.
 type AddMembersRequest struct {
-	RoomID           string        `json:"roomId"           bson:"roomId"`
-	Users            []string      `json:"users"            bson:"users"`
-	Orgs             []string      `json:"orgs"             bson:"orgs"`
-	Channels         []ChannelRef  `json:"channels"         bson:"channels"`
-	History          HistoryConfig `json:"history"          bson:"history"`
-	RequesterID      string        `json:"requesterId"      bson:"requesterId"`
-	RequesterAccount string        `json:"requesterAccount" bson:"requesterAccount"`
-	Timestamp        int64         `json:"timestamp"        bson:"timestamp"`
+	RoomID   string        `json:"roomId"           bson:"roomId"`
+	Users    []string      `json:"users"            bson:"users"`
+	Orgs     []string      `json:"orgs"             bson:"orgs"`
+	Channels []ChannelRef  `json:"channels"         bson:"channels"`
+	History  HistoryConfig `json:"history"          bson:"history"`
+	// HistorySharedSince is the inherited history cap (epoch ms UTC), server-set
+	// by room-service: on a share-all add it carries the requester's own
+	// historySharedSince so new members can never see more history than their
+	// adder. nil = no cap. Client-supplied values are always overwritten.
+	HistorySharedSince *int64 `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
+	RequesterID        string `json:"requesterId"      bson:"requesterId"`
+	RequesterAccount   string `json:"requesterAccount" bson:"requesterAccount"`
+	Timestamp          int64  `json:"timestamp"        bson:"timestamp"`
 }
 
 type RoomMember struct {

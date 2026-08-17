@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
@@ -37,6 +38,7 @@ type encryptionConfig struct {
 }
 
 type config struct {
+	ServiceName   string `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
@@ -105,6 +107,9 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	domainMetrics := newBroadcastMetrics(sdk.MeterProvider().Meter("broadcast-worker"))
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
 	if err != nil {
@@ -163,7 +168,7 @@ func main() {
 		keyStore = roomkeystore.NewMongoStore(roomsPrimary, cfg.RoomKeyGracePeriod)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -182,13 +187,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("broadcast-worker"), wiring.CanonicalWildcard))
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("broadcast-worker"), wiring.CanonicalWildcard)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
+	})
+	consumerMetrics.LoopStopped(ctx)
+	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
 
-	publisher := &natsPublisher{nc: nc}
+	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
 	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
 	// UpdateRoomLastMessage; the coalescing wrapper buffers it and drains via flushCtx/Run.
 	coalescer := newCoalescingStore(cachedStore, store)
@@ -213,8 +224,8 @@ func main() {
 		slog.Info("room-key cache enabled", "size", cfg.RoomKeyCacheSize, "ttl", cfg.RoomKeyCacheTTL)
 	}
 
-	parentFetcher := newHistoryParentFetcher(nc)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode)
+	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode, withBroadcastMetrics(domainMetrics))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
@@ -235,9 +246,12 @@ func main() {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
+	consumerMetrics.LoopStarted(ctx)
 
 	var wg sync.WaitGroup
-	go consumeLoop(iter, broadcastProcessor(handler), cfg.MaxWorkers, &wg)
+	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		guardedProcessor(broadcastProcessor(handler)))
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -254,6 +268,7 @@ func main() {
 			return broadcastSub.Unsubscribe()
 		},
 		func(ctx context.Context) error {
+			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
 			return nil
 		},
@@ -290,11 +305,14 @@ func main() {
 
 // natsPublisher adapts *o11ynats.Conn to the Publisher interface.
 type natsPublisher struct {
-	nc *o11ynats.Conn
+	nc      *o11ynats.Conn
+	metrics natsmetrics.Publisher
 }
 
 func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte) error {
-	if err := p.nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subject, data)); err != nil {
+	err := p.nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subject, data))
+	p.metrics.Attempt(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish, err)
+	if err != nil {
 		return fmt.Errorf("publish to %q: %w", subject, err)
 	}
 	return nil
@@ -302,12 +320,6 @@ func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte
 
 // messageProcessor handles one consumed message, performing its own Ack/Nak.
 type messageProcessor func(msgCtx context.Context, msg jetstream.Msg)
-
-// messageIterator is the slice of o11y/nats MessagesContext that consumeLoop drives —
-// an interface so the loop is testable against a real embedded JetStream consumer.
-type messageIterator interface {
-	Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error)
-}
 
 // broadcastProcessor builds the per-message processing closure: stamp the request ID, run
 // the handler, then settle via jsretry (short first retry; malformed events Ack-drop).
@@ -333,24 +345,13 @@ func broadcastProcessor(handler *Handler) messageProcessor {
 	}
 }
 
-// consumeLoop drains iter under a maxWorkers-bounded semaphore, tracking in-flight handlers on wg
-// so shutdown can wait; jobguard.Run recovers handler panics to avoid an un-acked crash-loop on JetStream redelivery.
-func consumeLoop(iter messageIterator, process messageProcessor, maxWorkers int, wg *sync.WaitGroup) {
-	sem := make(chan struct{}, maxWorkers)
-	for {
-		msgCtx, msg, err := iter.Next()
-		if err != nil {
-			return
-		}
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() {
-				<-sem
-				wg.Done()
-			}()
-			jobguard.Run(msg, func() { process(msgCtx, msg) })
-		}()
+// guardedProcessor adapts a messageProcessor to natsmetrics.Consume, keeping
+// jobguard's panic recovery in the composition so a handler panic Acks instead
+// of crash-looping on JetStream redelivery. The integration test drives this
+// exact composition rather than a parallel copy of the loop.
+func guardedProcessor(process messageProcessor) natsmetrics.ProcessMessage {
+	return func(msgCtx context.Context, msg *natsmetrics.Message) {
+		jobguard.Run(msg, func() { process(msgCtx, msg) })
 	}
 }
 

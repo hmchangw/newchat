@@ -786,6 +786,39 @@ func TestHandler_Integration_ThreadReplyMentionNonMemberExcluded(t *testing.T) {
 	})
 }
 
+func TestThreadStoreMongo_AddThreadUnread(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		&model.Subscription{ID: "sA", RoomID: "r1", User: model.SubscriptionUser{ID: "uA", Account: "alice"}},
+		&model.Subscription{ID: "sB", RoomID: "r1", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p1"}},
+		&model.Subscription{ID: "sC", RoomID: "r2", User: model.SubscriptionUser{ID: "uA", Account: "alice"}},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", []string{"alice", "bob"}))
+	// Idempotent under redelivery:
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", []string{"alice", "bob"}))
+
+	var a, b, c model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA"}).Decode(&a))
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB"}).Decode(&b))
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sC"}).Decode(&c))
+	assert.Equal(t, []string{"p1"}, a.ThreadUnread)
+	assert.Equal(t, []string{"p1"}, b.ThreadUnread, "$addToSet must not duplicate")
+	assert.Nil(t, c.ThreadUnread, "other rooms untouched")
+}
+
+func TestThreadStoreMongo_AddThreadUnread_EmptyAccountsNoop(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+
+	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", nil))
+}
+
 func TestThreadStoreMongo_CreateThreadRoom(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)

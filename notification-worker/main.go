@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -35,6 +36,7 @@ import (
 )
 
 type config struct {
+	ServiceName   string `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
@@ -57,6 +59,7 @@ type config struct {
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
+	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
 	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
 	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
 	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
@@ -70,8 +73,15 @@ type config struct {
 	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
+// mongoMemberLoader loads a room's member list and stamps each member's HOME
+// site from the users collection (one batch $in per cache fill). Not
+// Subscription.siteId — that is the ROOM's home site, which would misroute
+// badge RPCs. This deliberately revises the "no users-collection lookups"
+// contract (docs/notification-worker-downstream-contracts.md §3), cache-fill
+// time only.
 type mongoMemberLoader struct {
-	col *mongo.Collection
+	col   *mongo.Collection // subscriptions
+	users *mongo.Collection // users — home-site (siteId) lookup
 }
 
 func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
@@ -121,7 +131,49 @@ func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubc
 	if err := cur.Err(); err != nil {
 		return nil, fmt.Errorf("iterate subscriptions: %w", err)
 	}
+	if err := m.fillHomeSites(ctx, roomID, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// fillHomeSites stamps each member's HomeSiteID from the users collection
+// ({account $in members}, projected to {account, siteId}). An account missing
+// from users leaves HomeSiteID empty — that member degrades to no badge count
+// downstream rather than misrouting the RPC.
+func (m *mongoMemberLoader) fillHomeSites(ctx context.Context, roomID string, members []roomsubcache.Member) error {
+	if len(members) == 0 {
+		return nil
+	}
+	accounts := make([]string, 0, len(members))
+	for i := range members {
+		accounts = append(accounts, members[i].Account)
+	}
+	cur, err := m.users.Find(ctx, bson.M{"account": bson.M{"$in": accounts}},
+		options.Find().SetProjection(bson.M{"_id": 0, "account": 1, "siteId": 1}))
+	if err != nil {
+		return fmt.Errorf("find home sites for room %s members: %w", roomID, err)
+	}
+	defer cur.Close(ctx)
+
+	siteByAccount := make(map[string]string, len(accounts))
+	for cur.Next(ctx) {
+		var doc struct {
+			Account string `bson:"account"`
+			SiteID  string `bson:"siteId"`
+		}
+		if err := cur.Decode(&doc); err != nil {
+			return fmt.Errorf("decode user home site: %w", err)
+		}
+		siteByAccount[doc.Account] = doc.SiteID
+	}
+	if err := cur.Err(); err != nil {
+		return fmt.Errorf("iterate user home sites: %w", err)
+	}
+	for i := range members {
+		members[i].HomeSiteID = siteByAccount[members[i].Account]
+	}
+	return nil
 }
 
 func main() {
@@ -144,6 +196,9 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
+	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	domainMetrics := newNotificationMetrics(sdk.MeterProvider().Meter("notification-worker"))
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
 	if err != nil {
@@ -186,10 +241,10 @@ func main() {
 	}
 
 	cache := roomsubcache.NewValkeyCache(valkeyClient)
-	loader := &mongoMemberLoader{col: subCol}
+	loader := &mongoMemberLoader{col: subCol, users: usersCol}
 	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -210,16 +265,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated))
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated)
+	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
+		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
+	})
+	consumerMetrics.LoopStopped(ctx)
+	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
-
 	// The broker advertises max_payload in its INFO on connect, so this is
 	// always in step with the server. An env var was a second source of truth
 	// that silently dropped batches whenever it drifted below the real limit.
-	emitter := newMobileEmitter(&jsPublisher{js: otelJS}, wiring.PushSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
+	emitter := newMobileEmitter(&jsPublisher{js: otelJS, metrics: publishMetrics}, wiring.PushSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
 
 	var presence PresenceSnapshotter = noopPresenceSnapshotter{}
 	if cfg.PresenceEnabled {
@@ -228,7 +288,13 @@ func main() {
 			cfg.SiteID,
 			cfg.PresenceBatchSize,
 			cfg.PresenceRPCTimeout,
+			publishMetrics,
 		)
+	}
+
+	var badge badgeClient
+	if cfg.BadgeCountEnabled {
+		badge = newNatsBadgeClient(nc)
 	}
 
 	var settings UserSettingsSnapshotter = noopUserSettings{}
@@ -251,15 +317,17 @@ func main() {
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
-		Parent:             newHistoryParentFetcher(nc),
+		Parent:             newHistoryParentFetcher(nc, publishMetrics),
 		Presence:           presence,
 		Settings:           settings,
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
 		MentionNames:       newUserMentionNames(userCache, cfg.MentionNamesTimeout),
+		BadgeClient:        badge,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
+		Metrics:            domainMetrics,
 	})
 
 	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
@@ -320,20 +388,31 @@ func main() {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
 	}
+	consumerMetrics.LoopStarted(ctx)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	wg.Add(1)
 	go func() {
+		// The loop itself is counted so shutdown, which stops the iterator and
+		// then waits on wg, cannot pass through while a message Next already
+		// returned is still on its way to a worker.
+		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				consumerMetrics.LoopFailed(context.Background(), err)
 				return
 			}
 			sem <- struct{}{}
 			wg.Add(1)
-			go func() {
+			go func(msgCtx context.Context, msg jetstream.Msg) {
+				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
+				msg = tracked
+				msgCtx = tracked.Context(msgCtx)
 				defer func() {
+					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
 				}()
@@ -348,12 +427,13 @@ func main() {
 						if err := msg.Ack(); err != nil {
 							slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
 						}
+						domainMetrics.Record(handlerCtx, notifyKindPush, notifySuppressed)
 						return
 					}
 					// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
 					jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
 				})
-			}()
+			}(msgCtx, msg)
 		}
 	}()
 
@@ -371,11 +451,13 @@ func main() {
 		"push_recipient_batch_size", cfg.PushRecipientBatchSize,
 		"valkey_addrs", cfg.ValkeyAddrs,
 		"presence_enabled", cfg.PresenceEnabled,
+		"badge_count_enabled", cfg.BadgeCountEnabled,
 		"user_settings_enabled", cfg.UserSettingsEnabled,
 	)
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(_ context.Context) error {
+			consumerMetrics.LoopStopped(context.Background())
 			iter.Stop()
 			return nil
 		},

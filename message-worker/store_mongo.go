@@ -184,6 +184,22 @@ func (s *threadStoreMongo) AddReplyAccounts(ctx context.Context, threadRoomID st
 	return nil
 }
 
+// AddThreadUnread marks parentMessageID unread for accounts' subscriptions in
+// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
+// redelivery; accounts not subscribed simply match nothing.
+func (s *threadStoreMongo) AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	if _, err := s.subscriptions.UpdateMany(ctx,
+		bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}},
+		bson.M{"$addToSet": bson.M{"threadUnread": parentMessageID}},
+	); err != nil {
+		return fmt.Errorf("add thread unread %q in room %q: %w", parentMessageID, roomID, err)
+	}
+	return nil
+}
+
 func (s *threadStoreMongo) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {
 	out := make(map[string]*time.Time, len(accounts))
 	if len(accounts) == 0 {

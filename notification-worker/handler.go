@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
+	"go.opentelemetry.io/otel"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -44,14 +48,17 @@ type HandlerDeps struct {
 	Emitter            Emitter
 	RoomMeta           RoomMetaGetter      // nil → title falls back to sender.Account
 	MentionNames       MentionNameResolver // nil → only @all/@here are substituted in the body
+	BadgeClient        badgeClient         // nil (env-disabled or not wired) → badge phase skipped entirely (Phase A compat)
 	LargeRoomThreshold int
-	RecipientBatchSize int // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
+	RecipientBatchSize int                  // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
+	Metrics            *notificationMetrics // nil → built on the global meter
 }
 
 // Handler runs the per-message fan-out pipeline: exclusion filters, hook veto, EligibleForPush
 // routing, then the settings- and presence-gated shouldPush — one Emitter.Emit per surviving recipient.
 type Handler struct {
-	deps HandlerDeps
+	deps    HandlerDeps
+	metrics *notificationMetrics
 }
 
 // isNotifiable reports whether a message type produces push notifications.
@@ -72,12 +79,23 @@ func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one
 	if deps.Settings == nil {
 		deps.Settings = noopUserSettings{}
 	}
-	return &Handler{deps: deps}
+	if deps.Metrics == nil {
+		deps.Metrics = newNotificationMetrics(otel.Meter("notification-worker"))
+	}
+	return &Handler{deps: deps, metrics: deps.Metrics}
 }
 
-func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
+func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error) {
+	outcome := notifySuppressed
+	defer func() {
+		if retErr != nil && outcome == notifySuppressed {
+			outcome = notifyFailed
+		}
+		h.metrics.Record(ctx, notifyKindPush, outcome)
+	}()
 	var evt model.MessageEvent
 	if err := sonic.Unmarshal(data, &evt); err != nil {
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
 		// Malformed payload — it will never parse on redelivery. Mark permanent so the caller Acks (drops) it instead of retrying until MaxDeliver.
 		return errcode.Permanent(errcode.BadRequest("malformed message event"))
 	}
@@ -151,8 +169,16 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		DisplayName: msg.SenderDisplayName(),
 	}
 
+	// Two audiences fall out of the member pipeline:
+	// - badgeAccounts: everyone whose unread state changes (past the
+	//   sender/muted/restricted/thread-scope filters) — bumped even when not
+	//   pushed, or cached counts go stale.
+	// - candidates → survivors: push recipients, further filtered by hook
+	//   veto, EligibleForPush, and presence.
 	candidates := make([]roomsubcache.Member, 0, len(members))
 	accounts := make([]string, 0, len(members))
+	badgeAccounts := make([]string, 0, len(members))
+	siteByAccount := make(map[string]string, len(members))
 	for i := range members {
 		m := members[i]
 		if m.ID == msg.UserID {
@@ -179,6 +205,10 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 			}
 		}
 
+		badgeAccounts = append(badgeAccounts, m.Account)
+		siteByAccount[m.Account] = m.HomeSiteID
+
+		// Push-only filters from here down.
 		// Stage 2: hook veto (fail-open on error).
 		allow, herr := h.deps.Hook.Allow(ctx, &msg, m)
 		if herr != nil {
@@ -197,7 +227,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		candidates = append(candidates, m)
 		accounts = append(accounts, m.Account)
 	}
-	if len(candidates) == 0 {
+	if len(badgeAccounts) == 0 {
 		return nil
 	}
 
@@ -217,10 +247,14 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		}
 		survivors = append(survivors, c.Account)
 	}
+	sort.Strings(survivors)
+
+	// Badge phase runs over the FULL badge audience (bumps must land even for
+	// members who won't be pushed); only survivors ride the push payload.
+	unreadCounts := h.fetchUnreadCounts(ctx, msg.RoomID, badgeAccounts, siteByAccount)
 	if len(survivors) == 0 {
 		return nil
 	}
-	sort.Strings(survivors)
 
 	now := time.Now().UTC()
 	// Template carries fields shared across every batch — only ID and Accounts change per batch.
@@ -255,7 +289,11 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 		evt := pushEvt
 		evt.ID = fmt.Sprintf("%s-b%d", msg.ID, batchIdx)
 		evt.Accounts = batchAccounts
+		if counts := filterUnreadCounts(unreadCounts, batchAccounts); len(counts) > 0 {
+			evt.UnreadCounts = counts
+		}
 		if err := h.deps.Emitter.Emit(ctx, evt); err != nil {
+			outcome = notifyPublishFailed
 			slog.Error("emit push batch failed", "error", err, "batch", batchIdx,
 				"recipients", len(batchAccounts), "messageId", msg.ID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
@@ -265,7 +303,71 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) error {
 	if len(emitErrs) > 0 {
 		return fmt.Errorf("emit push batches for message %s: %w", msg.ID, errors.Join(emitErrs...))
 	}
+	outcome = notifySent
 	return nil
+}
+
+// fetchUnreadCounts groups the badge audience by home site (Member.HomeSiteID,
+// not the room's site) and issues one badge.count.batch RPC per site
+// concurrently, merged into one account → count map. Fail-open throughout: nil
+// BadgeClient is a no-op, an unknown home site skips the account, and a
+// per-site RPC failure just leaves that site's accounts out of the result.
+func (h *Handler) fetchUnreadCounts(ctx context.Context, roomID string, accounts []string, siteByAccount map[string]string) map[string]int {
+	if h.deps.BadgeClient == nil {
+		return nil
+	}
+
+	bySite := make(map[string][]string)
+	for _, account := range accounts {
+		siteID := siteByAccount[account]
+		if siteID == "" {
+			continue
+		}
+		bySite[siteID] = append(bySite[siteID], account)
+	}
+	if len(bySite) == 0 {
+		return nil
+	}
+
+	var (
+		mu     sync.Mutex
+		merged = make(map[string]int, len(accounts))
+		g      errgroup.Group
+	)
+	for siteID, siteAccounts := range bySite {
+		g.Go(func() error {
+			counts, err := h.deps.BadgeClient.Counts(ctx, siteID, roomID, siteAccounts)
+			if err != nil {
+				slog.Warn("badge count batch RPC failed, accounts publish without counts",
+					"error", err, "siteId", siteID, "roomId", roomID, "accounts", len(siteAccounts),
+					"request_id", natsutil.RequestIDFromContext(ctx))
+				return nil // never fail the push on a badge-count failure
+			}
+			mu.Lock()
+			for account, n := range counts {
+				merged[account] = n
+			}
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait() // every g.Go above always returns nil — errors are logged and absorbed per-site
+	return merged
+}
+
+// filterUnreadCounts returns the subset of unreadCounts whose keys are in batchAccounts,
+// so each outgoing batch only carries counts for the accounts it actually addresses.
+func filterUnreadCounts(unreadCounts map[string]int, batchAccounts []string) map[string]int {
+	if len(unreadCounts) == 0 {
+		return nil
+	}
+	filtered := make(map[string]int, len(batchAccounts))
+	for _, account := range batchAccounts {
+		if n, ok := unreadCounts[account]; ok {
+			filtered[account] = n
+		}
+	}
+	return filtered
 }
 
 // mentionedSet returns mentioned accounts as a set for O(1) per-recipient lookup.

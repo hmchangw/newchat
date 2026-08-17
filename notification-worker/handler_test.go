@@ -130,7 +130,7 @@ type accountVetoer struct {
 	deny map[string]struct{}
 }
 
-func (a accountVetoer) Allow(_ context.Context, _ *model.Message, m roomsubcache.Member) (bool, error) {
+func (a accountVetoer) Allow(_ context.Context, _ *model.Message, m roomsubcache.Member) (bool, error) { //nolint:gocritic // hugeParam: must match Vetoer interface value semantics
 	_, denied := a.deny[m.Account]
 	return !denied, nil
 }
@@ -1116,6 +1116,291 @@ func TestHandle_SystemMessageProducesNoPush(t *testing.T) {
 
 			assert.Empty(t, emit.emitted, "system message must not push")
 		})
+	}
+}
+
+// badgeCall records one Counts invocation for order/content assertions.
+type badgeCall struct {
+	siteID   string
+	roomID   string
+	accounts []string
+}
+
+// fakeBadgeClient is a badgeClient test double: per-siteID configurable
+// response/error, records every call.
+type fakeBadgeClient struct {
+	mu    sync.Mutex
+	calls []badgeCall
+	resp  map[string]map[string]int
+	err   map[string]error
+}
+
+func (f *fakeBadgeClient) Counts(_ context.Context, siteID, roomID string, accounts []string) (map[string]int, error) {
+	f.mu.Lock()
+	accCopy := append([]string(nil), accounts...)
+	f.calls = append(f.calls, badgeCall{siteID: siteID, roomID: roomID, accounts: accCopy})
+	f.mu.Unlock()
+
+	if f.err != nil {
+		if err, ok := f.err[siteID]; ok {
+			return nil, err
+		}
+	}
+	if f.resp != nil {
+		return f.resp[siteID], nil
+	}
+	return nil, nil
+}
+
+func (f *fakeBadgeClient) callsFor(siteID string) []badgeCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []badgeCall
+	for _, c := range f.calls {
+		if c.siteID == siteID {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// TestHandle_BadgeAudience_WiderThanSurvivors: a member excluded from push by
+// presence (busy) still has their unread state changed by the message — they
+// must be in the badge RPC audience (their set gets bumped) while staying
+// absent from the push payload's accounts.
+func TestHandle_BadgeAudience_WiderThanSurvivors(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+			{ID: "carol", Account: "carol", HomeSiteID: "site-a"},
+		},
+	}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"bob": 2, "carol": 3}}}
+	presence := &stubPresence{out: map[string]model.Presence{
+		"bob": {AggregatedStatus: "busy"}, // push-excluded, badge-included
+	}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: presence,
+		Hook: noopVetoer{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	calls := badge.callsFor("site-a")
+	require.Len(t, calls, 1)
+	assert.ElementsMatch(t, []string{"bob", "carol"}, calls[0].accounts, "badge audience includes the push-excluded member")
+	assert.ElementsMatch(t, []string{"carol"}, emit.accounts(), "push payload stays survivor-only")
+}
+
+// TestHandle_BadgeAudience_ExcludesMuted: muted members are outside the badge
+// audience entirely — their room must never enter their set via a bump.
+func TestHandle_BadgeAudience_ExcludesMuted(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a", Muted: true},
+			{ID: "carol", Account: "carol", HomeSiteID: "site-a"},
+		},
+	}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"carol": 1}}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: noopVetoer{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	calls := badge.callsFor("site-a")
+	require.Len(t, calls, 1)
+	assert.ElementsMatch(t, []string{"carol"}, calls[0].accounts, "muted member excluded from the badge audience")
+}
+
+// TestHandle_BadgeBumpWithoutPush: when every candidate is hook-vetoed (zero
+// push survivors), the badge RPC must still fire — the members' unread state
+// changed even though nobody gets pushed.
+func TestHandle_BadgeBumpWithoutPush(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+		},
+	}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"bob": 1}}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: rejectHook{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	calls := badge.callsFor("site-a")
+	require.Len(t, calls, 1)
+	assert.ElementsMatch(t, []string{"bob"}, calls[0].accounts, "hook-vetoed member still gets bumped")
+	assert.Empty(t, emit.emitted, "no push survivors → no batches emitted")
+}
+
+// Survivors on two distinct home sites must trigger exactly one RPC per
+// site, each carrying only that site's accounts, merged into one map
+// stamped on the outgoing batch. HomeSiteID is the member's home site as
+// resolved from the users collection at cache-fill time (mixed values within
+// one room are the normal cross-site shape — the room's own subscription
+// siteId would be identical for everyone and must not be used); the fill
+// path itself is covered by TestMongoMemberLoader_Load_HomeSiteFromUsers and
+// TestNotificationWorker_BadgeRPCs_GroupByUsersHomeSite (integration).
+func TestHandle_BadgeCounts_TwoHomeSites_MergesPerSiteRPCs(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+			{ID: "carol", Account: "carol", HomeSiteID: "site-b"},
+			{ID: "dave", Account: "dave", HomeSiteID: "site-b"},
+		},
+	}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{
+		"site-a": {"bob": 2},
+		"site-b": {"carol": 5, "dave": 9},
+	}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: noopVetoer{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	siteACalls := badge.callsFor("site-a")
+	require.Len(t, siteACalls, 1)
+	assert.Equal(t, []string{"bob"}, siteACalls[0].accounts)
+	assert.Equal(t, "r1", siteACalls[0].roomID)
+
+	siteBCalls := badge.callsFor("site-b")
+	require.Len(t, siteBCalls, 1)
+	assert.ElementsMatch(t, []string{"carol", "dave"}, siteBCalls[0].accounts)
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, map[string]int{"bob": 2, "carol": 5, "dave": 9}, emit.emitted[0].UnreadCounts)
+}
+
+// A per-site RPC error must not fail the handler or drop the push — that
+// site's accounts are simply absent from UnreadCounts.
+func TestHandle_BadgeCounts_OneSiteErrors_AccountsAbsent(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+			{ID: "carol", Account: "carol", HomeSiteID: "site-b"},
+		},
+	}}
+	badge := &fakeBadgeClient{
+		resp: map[string]map[string]int{"site-b": {"carol": 3}},
+		err:  map[string]error{"site-a": errors.New("user-service unreachable")},
+	}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: noopVetoer{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})), "badge RPC failure must not fail HandleMessage — the push ships without counts")
+
+	require.Len(t, emit.emitted, 1)
+	assert.ElementsMatch(t, []string{"bob", "carol"}, emit.emitted[0].Accounts, "publish still happens for both accounts")
+	assert.Equal(t, map[string]int{"carol": 3}, emit.emitted[0].UnreadCounts, "bob's site errored — bob absent")
+}
+
+// A nil badge client (env-disabled or not wired) must skip the badge phase
+// entirely: no RPCs, no UnreadCounts on the outgoing batch (Phase A compat).
+func TestHandle_BadgeCounts_NilClient_NoRPCNoMap(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit) // BadgeClient unset → nil
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Empty(t, emit.emitted[0].UnreadCounts, "nil badge client must produce no UnreadCounts")
+}
+
+// A survivor with no known home site (empty HomeSiteID — the account is
+// missing from the users collection, or a stale pre-upgrade cache entry)
+// degrades: no RPC is issued on its behalf and it is simply absent from
+// UnreadCounts, but it still receives the push.
+func TestHandle_BadgeCounts_EmptyHomeSiteIDMember_Skipped(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+			{ID: "carol", Account: "carol", HomeSiteID: ""},
+		},
+	}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"bob": 4}}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: noopVetoer{}, Emitter: emit, BadgeClient: badge, LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	assert.Len(t, badge.calls, 1, "only the known-site account triggers an RPC")
+	require.Len(t, emit.emitted, 1)
+	assert.ElementsMatch(t, []string{"bob", "carol"}, emit.emitted[0].Accounts, "carol still receives the push")
+	assert.Equal(t, map[string]int{"bob": 4}, emit.emitted[0].UnreadCounts, "carol (unknown site) absent from counts")
+}
+
+// UnreadCounts is filtered per batch: an account must only see counts data
+// relevant to accounts actually present in that outgoing batch.
+func TestHandle_BadgeCounts_StampedPerBatch_FilteredToBatchAccounts(t *testing.T) {
+	roomMembers := []roomsubcache.Member{{ID: "alice", Account: "alice", HomeSiteID: "site-a"}}
+	resp := map[string]int{}
+	for i := 0; i < 150; i++ {
+		account := fmt.Sprintf("u%03d", i)
+		roomMembers = append(roomMembers, roomsubcache.Member{ID: account, Account: account, HomeSiteID: "site-a"})
+		resp[account] = i % 10
+	}
+	members := &stubMembers{out: map[string][]roomsubcache.Member{"r1": roomMembers}}
+	badge := &fakeBadgeClient{resp: map[string]map[string]int{"site-a": resp}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members: members, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: noopVetoer{}, Emitter: emit, BadgeClient: badge,
+		LargeRoomThreshold: 1000, RecipientBatchSize: 100,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 2, "150 recipients, batch size 100 → 2 batches")
+	for _, batch := range emit.emitted {
+		assert.Len(t, batch.UnreadCounts, len(batch.Accounts), "counts map must be filtered to exactly this batch's accounts")
+		for _, account := range batch.Accounts {
+			_, ok := batch.UnreadCounts[account]
+			assert.True(t, ok, "account %s missing its own batch's UnreadCounts entry", account)
+		}
 	}
 }
 

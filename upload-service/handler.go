@@ -109,6 +109,21 @@ func (h *Handler) HandleHealth(c *gin.Context) {
 // cookie so the browser can authenticate <img>-driven downloads that cannot send headers.
 // SameSite=None + Partitioned require the hand-built http.Cookie; c.SetCookie cannot set them.
 func (h *Handler) HandleSetCookie(c *gin.Context) {
+	ctx := logCtx(c)
+
+	user, ok := userFromContext(c)
+	if !ok {
+		errhttp.Write(ctx, c, errcode.Internal("user not authenticated"))
+		return
+	}
+	// Session callers have no ssoToken to mirror; without this guard the cookie
+	// would be issued empty and fail confusingly on the next download.
+	if user.Session != nil {
+		errhttp.Write(ctx, c, errcode.BadRequest(
+			"setCookie requires an ssoToken; session-token callers send credentials as headers"))
+		return
+	}
+
 	token := tokenFromRequest(c)
 	// #nosec G124 -- SameSite=None is required for the cross-site <img> download flow; mitigated by Secure + HttpOnly (and Partitioned when SETCOOKIE_PARTITIONED is enabled).
 	http.SetCookie(c.Writer, &http.Cookie{
@@ -139,7 +154,9 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 		errhttp.Write(ctx, c, errcode.Internal("user not authenticated"))
 		return
 	}
-	if user.Email == "" {
+	// A blank email on an SSO caller is a broken token. Session callers legitimately
+	// have none unless BOT_EMAIL_DOMAIN is set.
+	if user.Email == "" && user.Session == nil {
 		errhttp.Write(ctx, c, errcode.Internal("the user has no email provided"))
 		return
 	}
@@ -218,7 +235,9 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		errhttp.Write(ctx, c, errcode.Internal("user not authenticated"))
 		return
 	}
-	if user.Email == "" {
+	// A blank email on an SSO caller is a broken token. Session callers legitimately
+	// have none unless BOT_EMAIL_DOMAIN is set.
+	if user.Email == "" && user.Session == nil {
 		errhttp.Write(ctx, c, errcode.Internal("the user has no email provided"))
 		return
 	}

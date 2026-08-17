@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
 // publisher is the narrow sync-publish surface mobileEmitter needs; sync semantics let the
@@ -75,9 +76,11 @@ type jsPublisher struct {
 	js interface {
 		PublishMsg(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 	}
+	metrics natsmetrics.Publisher
 }
 
 func (p *jsPublisher) PublishMsg(ctx context.Context, msg *nats.Msg) error {
 	_, err := p.js.PublishMsg(ctx, msg)
+	p.metrics.Attempt(ctx, natsmetrics.DestinationPush, natsmetrics.OperationPushPublish, err)
 	return err
 }
