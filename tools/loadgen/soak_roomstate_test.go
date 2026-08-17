@@ -755,3 +755,35 @@ func TestSoakRoomStatePool_CandidateGaugesTrackEveryTransition(t *testing.T) {
 	require.True(t, pool.ReserveInFlight(failureOperationMemberAdd, intent.RoomID, intent.Account))
 	assertGaugesMatchPool("reserved after restart")
 }
+
+// Quarantine overflow drops the candidate outright instead of parking it, which
+// is the one transition that removes a state rather than moving between two.
+// Sustained failure is exactly when the pool gauges are read, so the counters
+// have to survive it.
+func TestSoakRoomStatePool_CandidateGaugesSurviveQuarantineOverflow(t *testing.T) {
+	metrics := NewMetrics()
+	pool, err := newSoakRoomStatePool(
+		soakRoomStateTestTopology(3), 1, metrics, rand.New(rand.NewSource(4)),
+	)
+	require.NoError(t, err)
+
+	for range 4 {
+		intent, ok := pool.NextMemberIntent()
+		if !ok {
+			break
+		}
+		pool.SettleMember(intent, failureResultUnverified)
+	}
+
+	expected := make(map[soakMemberCandidateState]int)
+	for _, room := range pool.rooms {
+		for _, state := range room.states {
+			expected[state]++
+		}
+	}
+	for _, state := range soakMemberCandidateStates {
+		assert.Equal(t, float64(expected[state]), testutil.ToFloat64(
+			metrics.SoakRoomCandidates.WithLabelValues(string(state)),
+		), "a dropped candidate must leave no count behind: %s", state)
+	}
+}

@@ -173,6 +173,19 @@ func (p *soakRoomStatePool) setCandidateStateLocked(
 	p.stateCounts[state]++
 }
 
+// dropCandidateStateLocked removes a candidate entirely. Quarantine overflow is
+// the one transition that deletes a state rather than moving between two, so it
+// needs its own helper or the counter it leaves behind never comes back down.
+func (p *soakRoomStatePool) dropCandidateStateLocked(room *soakRoomState, account string) {
+	if account == "" {
+		return
+	}
+	if previous, known := room.states[account]; known {
+		p.stateCounts[previous]--
+	}
+	delete(room.states, account)
+}
+
 // trackRoomFillLocked re-evaluates one room's emptiness after its candidate
 // slices changed.
 func (p *soakRoomStatePool) trackRoomFillLocked(room *soakRoomState) {
@@ -670,7 +683,7 @@ func (p *soakRoomStatePool) quarantineLocked(probe soakRoomProbe, room *soakRoom
 		// Dropping the candidate is a traffic degradation, not an evidence
 		// problem: nothing was sent without being journaled. The reversible
 		// gauge below is the signal, never a ledger invalidation.
-		delete(room.states, probe.Account)
+		p.dropCandidateStateLocked(room, probe.Account)
 		p.countExhausted(soakRoomPoolReasonQuarantineFull)
 		return
 	}
