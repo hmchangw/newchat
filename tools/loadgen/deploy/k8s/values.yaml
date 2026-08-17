@@ -54,6 +54,15 @@ ledger:
 searchObserver:
   enabled: false
 
+# The one-message check that the encrypted write path reaches Cassandra and
+# wraps the room DEK. Turning it off is only allowed outside staging and
+# production: a run that skipped it is not evidence about at-rest encryption.
+# Raise the timeout — not soak.persistGrace — when an environment persists
+# slowly; persistGrace also sets when every ledger verification begins.
+encryptionPreflight:
+  enabled: true
+  timeout: 30s
+
 recipientObserver:
   enabled: false
   queue: 8192

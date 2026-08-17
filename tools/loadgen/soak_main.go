@@ -652,11 +652,14 @@ func runSoakWorkload(
 
 	if err := runSoakEncryptionPreflight(
 		ctx,
+		soakEncryptionPreflightConfig{
+			Enabled: cfg.Soak.EncryptionPreflight,
+			Timeout: cfg.Soak.EncryptionPreflightTimeout,
+		},
 		store,
 		sender,
 		selector,
 		sendReplies,
-		cfg.Soak.PersistGrace,
 	); err != nil {
 		slog.Error("Cassandra soak encryption preflight", "error", err)
 		return 1
@@ -1127,21 +1130,39 @@ func warmSoakPinnedCatalog(
 	return nil
 }
 
+// soakEncryptionPreflightConfig is the preflight's own gate and budget. The
+// timeout is deliberately not derived from SOAK_PERSIST_GRACE: that value also
+// sets when every ledger verification begins, so borrowing it to survive a slow
+// environment would silently delay the evidence the run exists to collect.
+type soakEncryptionPreflightConfig struct {
+	Enabled bool
+	Timeout time.Duration
+}
+
 func runSoakEncryptionPreflight(
 	ctx context.Context,
+	cfg soakEncryptionPreflightConfig,
 	store soakEncryptionStore,
 	sender *soakSender,
 	selector *soakRuntimeSelector,
 	replies <-chan soakSendObservation,
-	persistGrace time.Duration,
 ) error {
+	if !cfg.Enabled {
+		// Loud, and on the run's own record: a report from this run cannot be
+		// read as evidence that messages were encrypted at rest.
+		slog.Warn(
+			"Cassandra soak encryption preflight skipped by configuration",
+			"encryptionPreflight", false,
+			"consequence", "this run does not verify the encrypted write path",
+		)
+		return nil
+	}
 	target, content := selector.nextSend()
 	pending, err := sender.Publish(ctx, target, content)
 	if err != nil {
 		return fmt.Errorf("publish encrypted front-door probe: %w", err)
 	}
-	timeout := max(30*time.Second, persistGrace+10*time.Second)
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	probeCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 	for {
 		select {

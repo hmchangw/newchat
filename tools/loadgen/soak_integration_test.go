@@ -133,11 +133,11 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 	defer cancel()
 	require.NoError(t, runSoakEncryptionPreflight(
 		preflightCtx,
+		soakEncryptionPreflightConfig{Enabled: true, Timeout: 5 * time.Second},
 		store,
 		sender,
 		selector,
 		replies,
-		0,
 	))
 	message := <-accepted
 
