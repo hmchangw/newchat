@@ -4,6 +4,7 @@ package valkeyutil
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -91,4 +92,38 @@ func TestClusterRedisClient_Integration_IncrEx(t *testing.T) {
 	n, err = client.IncrEx(ctx, "rl:alice", 10*time.Second)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), n)
+}
+
+// TestClusterRedisClient_Integration_MGetCrossSlot is the point of MGet: these
+// keys deliberately hash to different slots, which a plain MGET would reject
+// with CROSSSLOT. The pipelined implementation must fetch them anyway, in one
+// call, and report absent keys by omission rather than by error.
+func TestClusterRedisClient_Integration_MGetCrossSlot(t *testing.T) {
+	client := setupClusterClient(t)
+	ctx := context.Background()
+
+	keys := make([]string, 0, 32)
+	want := make(map[string]string, 32)
+	for i := 0; i < 32; i++ {
+		k := fmt.Sprintf("user:acct:mget-%d", i)
+		keys = append(keys, k)
+		if i%2 == 0 { // leave the odd keys absent
+			v := fmt.Sprintf("value-%d", i)
+			require.NoError(t, client.Set(ctx, k, v, time.Hour))
+			want[k] = v
+		}
+	}
+	keys = append(keys, "user:acct:never-written")
+
+	got, err := client.MGet(ctx, keys)
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "present keys come back; absent ones are simply omitted")
+}
+
+func TestClusterRedisClient_Integration_MGetEmptyKeys(t *testing.T) {
+	client := setupClusterClient(t)
+
+	got, err := client.MGet(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, got, "an empty key set must not round-trip")
 }
