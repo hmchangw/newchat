@@ -10,17 +10,6 @@ import { attachmentKind } from './attachment'
 // message sits in the sidebar for as long as it's the room's latest.
 export const PREVIEW_MAX_LENGTH = 140
 
-// Headroom applied BEFORE tokenizing: previewText runs on the reducer hot
-// path for every message in every room (not just the ones being rendered),
-// so parseMessageContent — recursive, O(body length) — must never see a
-// full multi-KB body just to produce a 140-char snippet. The margin has to
-// be generous rather than exactly PREVIEW_MAX_LENGTH because markup near the
-// boundary can both shrink (**bold** -> bold) and grow (@alice -> @Alice
-// Chen) once parsed, so the raw prefix needs slack on both sides to still
-// resolve correctly.
-const PARSE_SLICE_MARGIN = 500
-const PARSE_SLICE_LENGTH = PREVIEW_MAX_LENGTH + PARSE_SLICE_MARGIN
-
 const KIND_LABEL = { image: 'Photo', audio: 'Audio', video: 'Video' }
 
 /**
@@ -32,8 +21,7 @@ const KIND_LABEL = { image: 'Photo', audio: 'Audio', video: 'Video' }
  */
 export function previewText(content, mentions = []) {
   if (!content) return ''
-  const bounded = safeSlice(content, PARSE_SLICE_LENGTH)
-  const flat = flattenNodes(parseMessageContent(bounded, mentions))
+  const flat = flattenNodes(parseMessageContent(content, mentions))
   const collapsed = flat.replace(/\s+/g, ' ').trim()
   return safeSlice(collapsed, PREVIEW_MAX_LENGTH)
 }
