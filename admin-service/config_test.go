@@ -18,7 +18,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "chat", cfg.MongoDB)
 	assert.Equal(t, 10, cfg.BcryptCost)
 	assert.Equal(t, 5*time.Second, cfg.RoomRPCTimeout)
-	assert.Equal(t, 5*time.Second, cfg.FanoutTimeout)
+	assert.Equal(t, 30*time.Second, cfg.FanoutTimeout)
 }
 
 func TestLoadConfig_RequiresSiteAndMongo(t *testing.T) {

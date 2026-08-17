@@ -10,7 +10,7 @@ import (
 // httpWriteTimeout bounds a response write measured from the request, so in-handler
 // waits count against it: RoomRPCTimeout and FanoutTimeout must stay under it so
 // the handler always wins the race against net/http closing the connection.
-const httpWriteTimeout = 30 * time.Second
+const httpWriteTimeout = 40 * time.Second
 
 type Config struct {
 	Port                  string `env:"PORT" envDefault:"8082"`
@@ -29,10 +29,13 @@ type Config struct {
 	// closes the connection before the handler can answer.
 	RoomRPCTimeout time.Duration `env:"ROOM_RPC_TIMEOUT" envDefault:"5s"`
 	// FanoutTimeout is the server-side budget for ONE request's whole cross-site
-	// permission fanout — every destination lane, every batch, every chunk. Like
-	// RoomRPCTimeout it must stay below the HTTP write timeout, or net/http drops the
-	// connection before the admin can read syncFailures.
-	FanoutTimeout time.Duration `env:"FANOUT_TIMEOUT" envDefault:"5s"`
+	// permission fanout — every destination lane, every batch, every chunk. Sized for a
+	// whole-site batch over cross-site gateways. Like RoomRPCTimeout it must stay below
+	// the HTTP write timeout, or net/http drops the connection before the admin can read
+	// syncFailures. The default exceeds main.go's 25s graceful-shutdown budget: a SIGTERM
+	// mid-fanout can kill the request before the admin sees syncFailures. Accepted — the
+	// ledger write already committed, and resync re-delivers anything cut short.
+	FanoutTimeout time.Duration `env:"FANOUT_TIMEOUT" envDefault:"30s"`
 	// AllSiteIDs lists every site in the federation (including this one); empty means
 	// no cross-site fanout — correct for single-site dev.
 	AllSiteIDs []string `env:"ALL_SITE_IDS" envSeparator:"," envDefault:""`

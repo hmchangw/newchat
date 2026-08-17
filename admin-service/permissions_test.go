@@ -1297,7 +1297,7 @@ func TestHandler_resyncPermissions(t *testing.T) {
 		// Regression pin: the budget used to be established inside publishPermissionFanout,
 		// which resync called once PER state group. Groups are keyed on UpdatedAt, so N admin
 		// submits yield N groups and one unreachable peer cost N × the budget in wall time —
-		// past httpWriteTimeout (30s) at N ≥ 6, so net/http dropped the connection before the
+		// past httpWriteTimeout at small N, so net/http dropped the connection before the
 		// handler could report syncFailures. One shared budget = one shared deadline instant.
 		ctrl := gomock.NewController(t)
 		m := NewMockAdminStore(ctrl)
