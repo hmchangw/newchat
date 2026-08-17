@@ -260,6 +260,14 @@ func TestReplaceAccounts(t *testing.T) {
 		{name: "empty display name falls back to raw token", content: "hey @alice", names: map[string]string{"alice": ""}, want: "hey @alice"},
 		{name: "literals win over a same-named account", content: "@all", names: map[string]string{"all": "Should Not Win"}, want: "All"},
 		{name: "everything at once", content: "@all ping @alice and @nobody cc @here", names: names, want: "All ping Alice Wang 愛麗絲 and @nobody cc here"},
+		// Substituted text is never rescanned: a display name that looks like a
+		// mention passes through inert. Pins the ReplaceAllStringFunc choice.
+		{name: "display name containing a mention is not rescanned", content: "@alice @bob", names: map[string]string{"alice": "@bob", "bob": "Bob Chen"}, want: "@bob Bob Chen"},
+		{name: "display name containing at-all is not rescanned", content: "@alice", names: map[string]string{"alice": "@all"}, want: "@all"},
+		// Regexp expansion metachars in a display name must survive verbatim; they
+		// would be eaten by a ReplaceAllString refactor.
+		{name: "dollar metachars in display name survive", content: "@eve hi", names: map[string]string{"eve": "Eve $1 $name &"}, want: "Eve $1 $name & hi"},
+		{name: "backslash in display name survives", content: "@eve hi", names: map[string]string{"eve": `Eve \\1`}, want: `Eve \\1 hi`},
 	}
 
 	for _, tt := range tests {
@@ -278,27 +286,6 @@ func TestReplaceAccounts_DoesNotMutateInput(t *testing.T) {
 	assert.Equal(t, "hey @alice", content, "input content must not be mutated")
 	assert.Equal(t, "hey Alice Wang", got)
 	assert.Len(t, names, 1, "names map must not be mutated")
-}
-
-func TestLookupAccounts(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-		want    []string
-	}{
-		{name: "no mentions", content: "hello world", want: nil},
-		{name: "single account", content: "hey @alice", want: []string{"alice"}},
-		{name: "all is excluded", content: "@all hey", want: nil},
-		{name: "here is excluded", content: "@here hey", want: nil},
-		{name: "literals excluded, accounts kept", content: "@all @here @alice", want: []string{"alice"}},
-		{name: "deduplicated and lowercased", content: "@alice @ALICE @bob", want: []string{"alice", "bob"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, LookupAccounts(tt.content))
-		})
-	}
 }
 
 func TestLookupAccountsFromParsed(t *testing.T) {

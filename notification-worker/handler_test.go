@@ -1630,10 +1630,9 @@ func (s *stubMentionNames) Resolve(_ context.Context, accounts []string) (map[st
 	copy(got, accounts)
 	s.gotCalls = append(s.gotCalls, got)
 	s.mu.Unlock()
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.out, nil
+	// out AND err together — the real resolver returns the names it collected
+	// before failing, so nil-ing out here would hide the partial-result path.
+	return s.out, s.err
 }
 
 func (s *stubMentionNames) callCount() int {
@@ -1817,4 +1816,69 @@ func TestHandle_MentionResolverCalledOnceForRepeatedMention(t *testing.T) {
 	require.Len(t, emit.emitted, 1)
 	assert.Equal(t, "Bob Chen then Bob Chen again", emit.emitted[0].Body)
 	assert.Equal(t, []string{"bob"}, names.lastAccounts(), "duplicate mentions dedup to one lookup key")
+}
+
+func TestHandle_MentionLookupIsCapped(t *testing.T) {
+	var content string
+	for i := 0; i < maxMentionLookups+25; i++ {
+		content += fmt.Sprintf("@user%03d ", i)
+	}
+	names := &stubMentionNames{out: map[string]string{"user000": "User Zero"}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg(content)))
+
+	assert.Len(t, names.lastAccounts(), maxMentionLookups,
+		"user-controlled content must not drive an unbounded $in")
+	require.Len(t, emit.emitted, 1)
+	assert.Contains(t, emit.emitted[0].Body, "User Zero", "tokens within the cap still resolve")
+	assert.Contains(t, emit.emitted[0].Body, "@user070", "tokens past the cap keep their raw @token")
+}
+
+func TestHandle_MentionPartialResolutionOnError(t *testing.T) {
+	// The production resolver returns names it did collect alongside the error;
+	// the handler must substitute those rather than dropping the whole map.
+	names := &stubMentionNames{
+		out: map[string]string{"bob": "Bob Chen"},
+		err: errors.New("mongo down"),
+	}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("@bob and @ghost and @all")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "Bob Chen and @ghost and All", emit.emitted[0].Body)
+}
+
+// TestHandle_MentionsAndBadgeCountsCoexist pins the two independently-added
+// push-envelope phases against each other: substituted body and per-recipient
+// unread counts must both survive on the same event.
+func TestHandle_MentionsAndBadgeCountsCoexist(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+		},
+	}}
+	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          &stubFollowers{},
+		Parent:             stubParent{},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		MentionNames:       names,
+		BadgeClient:        &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"bob": 7}}},
+		LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("hey @bob")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "hey Bob Chen", emit.emitted[0].Body, "body substitution survives the badge phase")
+	assert.Equal(t, map[string]int{"bob": 7}, emit.emitted[0].UnreadCounts, "badge counts survive substitution")
 }

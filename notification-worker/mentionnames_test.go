@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,10 +28,10 @@ func (s *stubUserFinder) FindUsersByAccounts(_ context.Context, accounts []strin
 	copy(got, accounts)
 	s.gotCalls = append(s.gotCalls, got)
 	s.mu.Unlock()
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.out, nil
+	// Returns out AND err together: userstore.Cache does exactly that (cache hits
+	// alongside a failed read for the misses), so a stub that nils out on error
+	// would make the production partial-result path untestable.
+	return s.out, s.err
 }
 
 func (s *stubUserFinder) callCount() int {
@@ -141,4 +142,57 @@ func TestUserMentionNames_Resolve_PassesAccountsThrough(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"alice", "bob"}, finder.lastAccounts())
+}
+
+// TestUserMentionNames_Resolve_PartialResultsOnError pins the contract the real
+// dependency actually exercises: userstore.Cache returns cache hits alongside a
+// non-nil error when the backing read for the misses fails. Resolve must keep
+// those hits rather than discarding them.
+func TestUserMentionNames_Resolve_PartialResultsOnError(t *testing.T) {
+	finder := &stubUserFinder{
+		out: []model.User{{Account: "bob", EngName: "Bob Chen"}},
+		err: errors.New("mongo down"),
+	}
+	r := newUserMentionNames(finder, 0)
+
+	got, err := r.Resolve(context.Background(), []string{"bob", "ghost"})
+
+	require.Error(t, err)
+	assert.Equal(t, map[string]string{"bob": "Bob Chen"}, got,
+		"names collected before the error must survive so a partial read substitutes what it can")
+}
+
+func TestNewUserMentionNames_TimeoutDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{name: "zero takes the default", in: 0, want: defaultMentionNamesTimeout},
+		{name: "negative takes the default", in: -time.Second, want: defaultMentionNamesTimeout},
+		{name: "positive is kept", in: 5 * time.Second, want: 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, newUserMentionNames(&stubUserFinder{}, tc.in).timeout)
+		})
+	}
+}
+
+// blockingUserFinder blocks until its context is cancelled, so the test can
+// assert the resolver's own timeout bounds the call rather than the caller's.
+type blockingUserFinder struct{}
+
+func (blockingUserFinder) FindUsersByAccounts(ctx context.Context, _ []string) ([]model.User, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestUserMentionNames_Resolve_TimeoutBoundsTheCall(t *testing.T) {
+	r := newUserMentionNames(blockingUserFinder{}, 20*time.Millisecond)
+
+	got, err := r.Resolve(context.Background(), []string{"alice"})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded, "the resolver's own timeout must bite")
+	assert.Empty(t, got)
 }

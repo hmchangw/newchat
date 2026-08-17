@@ -18,6 +18,10 @@ var mentionRe = regexp.MustCompile(`(^|\s)@([0-9a-zA-Z_-]+(\.[0-9a-zA-Z_-]+)*)`)
 // render as in human-facing text. Keys are lowercased; the values' casing is
 // deliberate and asymmetric ("All" but "here"), matching the product copy.
 // These never hit the users collection — no account owns them.
+//
+// Consequence: an account literally named "all" or "here" renders as the
+// literal word, not its display name, even though Parse still treats "here" as
+// an ordinary account for notification-targeting purposes.
 var literalMentions = map[string]string{
 	"all":  "All",
 	"here": "here",
@@ -122,27 +126,21 @@ func ResolveFromParsed(parsed ParseResult, users map[string]model.User) *Resolve
 	return result
 }
 
-// LookupAccounts returns the unique lowercased accounts in content that need a
-// user lookup to render — Parse's accounts minus @all/@here, which resolve from
-// literalMentions. Feed the result to a store, then pass the resulting
-// account→display-name map to ReplaceAccounts.
-func LookupAccounts(content string) []string {
-	return LookupAccountsFromParsed(Parse(content))
-}
-
-// LookupAccountsFromParsed is LookupAccounts over an already-parsed result. Use
-// it when the caller has parsed the content for its own reasons, so the hot
-// path runs the mention regexp once rather than twice.
-func LookupAccountsFromParsed(parsed ParseResult) []string { //nolint:gocritic // hugeParam: mirrors ResolveFromParsed's value semantics
-	out := make([]string, 0, len(parsed.Accounts))
+// LookupAccountsFromParsed returns the unique lowercased accounts in a parsed
+// result that need a user lookup to render — Parse's accounts minus @all/@here,
+// which resolve from literalMentions. Feed the result to a store, then pass the
+// resulting account→display-name map to ReplaceAccounts. Takes a ParseResult
+// rather than content so the hot path runs the mention regexp once, not twice.
+func LookupAccountsFromParsed(parsed ParseResult) []string {
+	if len(parsed.Accounts) == 0 {
+		return nil
+	}
+	var out []string
 	for _, a := range parsed.Accounts {
 		if _, literal := literalMentions[a]; literal {
 			continue
 		}
 		out = append(out, a)
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return out
 }

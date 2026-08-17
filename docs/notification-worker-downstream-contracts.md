@@ -73,11 +73,15 @@ Field notes:
   - `@all` → `All`, `@here` → `here` — fixed words, matched case-insensitively, never a DB lookup;
   - anything unresolved — unknown account, user with neither name, failed lookup — keeps its literal `@token`, so push-service may still see raw `@account` text and must not assume substitution succeeded.
 
-  Names come from the `users` collection through an LRU+TTL cache (`pkg/userstore`, `USER_CACHE_SIZE` / `USER_CACHE_TTL`), bounded by `MENTION_NAMES_TIMEOUT`. The lookup runs once per message, only when the content has mentions **and** at least one recipient survived the filters, and it **fails open**: a Mongo error or timeout sends the unsubstituted body rather than dropping the push. Substitution is not idempotent or reversible — consumers must treat `body` as display text, not as a parseable mention source.
+  At most **50 distinct accounts** per message are resolved (`maxMentionLookups`); tokens past that cap keep their raw `@token`, bounding a user-controlled fan-out.
+
+  Names come from the `users` collection through an LRU+TTL cache (`pkg/userstore`, `USER_CACHE_SIZE` / `USER_CACHE_TTL`), bounded by `MENTION_NAMES_TIMEOUT` and gated by `MENTION_NAMES_ENABLED`. A renamed user can therefore show a stale name for up to `USER_CACHE_TTL`. The lookup runs once per message, only when the content has mentions **and** at least one recipient survived the filters, and it **fails open**: a Mongo error or timeout sends the unsubstituted body rather than dropping the push. Substitution is not idempotent or reversible — consumers must treat `body` as display text, not as a parseable mention source.
 - **`data.type`** is the short room type: `"c"` channel, `"d"` DM/botDM, `"p"` discussion.
 - **`data.sender`** is a `Participant` carrying `account`, `userId`, and `displayName`. **`displayName` is pre-composed by `message-gatekeeper`** at canonical-message write time via `pkg/displayfmt.CombineWithFallback(engName, chineseName, account)` (same helper already used by `room-worker/sysmsg.go`, `room-service/store_mongo.go`, and reaction rendering — one source of truth for display formatting across the system). The composition happens once per message regardless of downstream consumer count and never on the push hot path; push-service renders `sender.displayName` verbatim. Empty `displayName` (legacy in-flight canonical messages predating the field) falls back to `sender.account` in `notification-worker`. `engName` / `chineseName` are deliberately not propagated on the push event since the composed string is the only render-time input.
 - **`timestamp`** is event publish time (UnixMilli); **`data.pushTime`** is the RFC3339 domain send time. They are distinct fields.
 - **`unreadCounts`** (optional) is per-recipient badge counts stamped at notify time — see § Badge counts below. Omitted entirely (not an empty object) when the badge phase is disabled or produced no counts for this batch.
+
+Operators: `notification_worker_mention_resolution_total{result="resolved|unresolved|failed"}` counts one point per looked-up token. `failed` is non-zero only when the users lookup itself errored or timed out, so alert on it; a rising `unresolved` ratio instead means senders are mentioning unknown accounts.
 
 ### Badge counts (`unreadCounts`)
 
@@ -392,6 +396,7 @@ Required before a production rollout:
    - `PUSH_RECIPIENT_BATCH_SIZE` (default `100` — recipients per push event; tune toward provider multicast caps)
    - `ROOM_META_CACHE_SIZE` (default `10000`), `ROOM_META_CACHE_TTL` (default `2m`) — fronts `rooms` collection lookups for title resolution
    - `USER_CACHE_SIZE` (default `10000`), `USER_CACHE_TTL` (default `5m`) — LRU+TTL cache fronting the `users` collection for mention display names
+   - `MENTION_NAMES_ENABLED` (default `true`) — kill switch for mention display-name resolution; `false` skips the users lookup entirely and only `@all`/`@here` are substituted
    - `MENTION_NAMES_TIMEOUT` (default `2s`) — bounds the mention display-name lookup; on expiry the body ships with raw `@tokens`
    - `PUSH_ASYNC_MAX_PENDING` (default `1024`)
 

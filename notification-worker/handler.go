@@ -26,6 +26,11 @@ import (
 // defaultRecipientBatchSize mirrors PUSH_RECIPIENT_BATCH_SIZE's envDefault so unit tests don't re-declare it.
 const defaultRecipientBatchSize = 100
 
+// maxMentionLookups caps how many distinct @accounts one message may resolve.
+// Not an env knob: it bounds a user-controlled fan-out rather than tuning a
+// workload, and no legible push body renders this many names.
+const maxMentionLookups = 50
+
 // MemberCache reads the cached member list and supports targeted invalidation.
 type MemberCache interface {
 	GetMembers(ctx context.Context, roomID string) ([]roomsubcache.Member, error)
@@ -411,21 +416,52 @@ func shortRoomType(t model.RoomType) string {
 // Runs after the survivor filter, so a message nobody receives never pays for the
 // lookup. Fails open — a resolver error substitutes whatever names came back and
 // leaves the rest as raw @tokens rather than dropping the push.
-func (h *Handler) resolveBody(ctx context.Context, content string, parsed mention.ParseResult) string { //nolint:gocritic // hugeParam: mirrors mention.ParseResult's value semantics
+func (h *Handler) resolveBody(ctx context.Context, content string, parsed mention.ParseResult) string {
 	if len(parsed.Accounts) == 0 && !parsed.MentionAll {
 		return content
 	}
 	var names map[string]string
-	if lookup := mention.LookupAccountsFromParsed(parsed); len(lookup) > 0 && h.deps.MentionNames != nil {
-		resolved, err := h.deps.MentionNames.Resolve(ctx, lookup)
-		if err != nil {
-			slog.Warn("mention name lookup failed, body keeps raw mentions",
-				"error", err, "mentions", len(lookup),
-				"request_id", natsutil.RequestIDFromContext(ctx))
+	if h.deps.MentionNames != nil {
+		if lookup := mention.LookupAccountsFromParsed(parsed); len(lookup) > 0 {
+			// Message content is user-controlled, so cap the fan-out: the $in is
+			// unbounded otherwise, and userstore's batch path neither dedups
+			// concurrent misses nor negatively-caches them, so a message spamming
+			// unknown @tokens would re-query Mongo on every redelivery. Tokens past
+			// the cap keep their raw @token — a push body can't render 50 names anyway.
+			if len(lookup) > maxMentionLookups {
+				lookup = lookup[:maxMentionLookups]
+			}
+			resolved, err := h.deps.MentionNames.Resolve(ctx, lookup)
+			names = resolved
+			h.recordMentionResults(ctx, lookup, resolved, err)
+			if err != nil {
+				slog.WarnContext(ctx, "mention name lookup failed, body keeps raw mentions",
+					"error", err, "mentions", len(lookup), "resolved", len(resolved),
+					"request_id", natsutil.RequestIDFromContext(ctx))
+			}
 		}
-		names = resolved
 	}
 	return mention.ReplaceAccounts(content, names)
+}
+
+// recordMentionResults partitions the looked-up tokens across the three
+// mentionResult buckets. On a failed lookup the unresolved remainder is
+// attributed to `failed` rather than `unresolved`, so alerting on `failed`
+// separates an outage from users simply mentioning unknown accounts.
+func (h *Handler) recordMentionResults(ctx context.Context, lookup []string, resolved map[string]string, err error) {
+	hits := 0
+	for _, account := range lookup {
+		if resolved[account] != "" {
+			hits++
+		}
+	}
+	h.metrics.RecordMentions(ctx, mentionResolved, hits)
+	remainder := len(lookup) - hits
+	if err != nil {
+		h.metrics.RecordMentions(ctx, mentionFailed, remainder)
+		return
+	}
+	h.metrics.RecordMentions(ctx, mentionUnresolved, remainder)
 }
 
 // resolveTitle returns the room name when present, else the sender's account (legacy rule).

@@ -65,6 +65,7 @@ type config struct {
 	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
 	UserCacheSize          int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
 	UserCacheTTL           time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	MentionNamesEnabled    bool                    `env:"MENTION_NAMES_ENABLED"     envDefault:"true"` // false → MentionNames nil, i.e. only @all/@here substituted; kill switch for a sick users collection
 	MentionNamesTimeout    time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
 	Mode                   stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -302,17 +303,27 @@ func main() {
 		settings = newMongoUserSettings(usersCol, cfg.UserSettingsBatchSize, cfg.UserSettingsTimeout)
 	}
 
-	// Display names for the push body read from the default (secondaryPreferred)
-	// collection handle, not the primary-pinned usersCol above: a renamed user
-	// tolerates replica lag, unlike the mute settings that gate delivery.
-	userCache, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
-	if err != nil {
-		slog.Error("init user cache failed", "error", err)
-		os.Exit(1)
+	// Display names for the push body read from the client-wide read preference
+	// (MONGO_READ_PREFERENCE, secondaryPreferred by default), not the
+	// primary-pinned usersCol above: a renamed user tolerates replica lag —
+	// and up to USER_CACHE_TTL of cache staleness — unlike the mute settings
+	// that gate delivery.
+	var mentionNames MentionNameResolver
+	if cfg.MentionNamesEnabled {
+		userCache, cerr := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
+			cfg.UserCacheSize, cfg.UserCacheTTL)
+		if cerr != nil {
+			// Degrade rather than exit: a bad cache size/TTL costs display names in
+			// push bodies, which is not worth refusing to deliver notifications at all.
+			slog.Error("init user cache failed, mention display names disabled", "error", cerr)
+		} else {
+			mentionNames = newUserMentionNames(userCache, cfg.MentionNamesTimeout)
+			slog.Info("mention display names enabled", "user_cache_size", cfg.UserCacheSize,
+				"user_cache_ttl", cfg.UserCacheTTL, "lookup_timeout", cfg.MentionNamesTimeout)
+		}
+	} else {
+		slog.Info("mention display names disabled", "reason", "MENTION_NAMES_ENABLED=false")
 	}
-	slog.Info("mention display names enabled", "user_cache_size", cfg.UserCacheSize,
-		"user_cache_ttl", cfg.UserCacheTTL, "lookup_timeout", cfg.MentionNamesTimeout)
 
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
@@ -323,7 +334,7 @@ func main() {
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
-		MentionNames:       newUserMentionNames(userCache, cfg.MentionNamesTimeout),
+		MentionNames:       mentionNames,
 		BadgeClient:        badge,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,

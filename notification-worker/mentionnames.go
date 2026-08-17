@@ -23,6 +23,12 @@ type MentionNameResolver interface {
 
 // UserAccountFinder is the userstore surface this resolver needs; both
 // userstore.Cache and the raw Mongo store satisfy it.
+//
+// Implementations MAY return partial results alongside a non-nil error —
+// userstore.Cache does exactly that, returning cache hits when the backing
+// read for the misses fails. Resolve relies on this, so an implementation
+// that returns a partially-populated slice with an error must ensure those
+// entries are valid rather than garbage.
 type UserAccountFinder interface {
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
 }
