@@ -11,19 +11,17 @@ import (
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // fetchTimeout bounds the detached shared load so a hung backend cannot leak
 // the singleflight goroutine or pin the in-flight key. See the design spec.
 const fetchTimeout = 10 * time.Second
 
-// Recorder records the outcome of a cache lookup. cachemetrics.Recorder
-// satisfies it; tests substitute a spy.
-type Recorder interface {
-	Hit(ctx context.Context)
-	Miss(ctx context.Context)
-	Error(ctx context.Context)
-}
+// Recorder records the outcome of an L2 cache lookup. An alias of
+// valkeyutil.CacheRecorder: every tier in this repo records against one
+// interface, and cachemetrics.Recorder satisfies it.
+type Recorder = valkeyutil.CacheRecorder
 
 // Cache fronts a UserStore with two LRU+TTL stores (byID, byAccount) sharing
 // value pointers; populate writes to both so a hit on either satisfies the
