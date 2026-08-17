@@ -35,6 +35,7 @@ func TestBuildConcurrentConsumerConfig(t *testing.T) {
 		"chat.outbox.site-a.site-b.subscription_opened",
 		"chat.outbox.site-a.site-b.room_restricted",
 		"chat.outbox.site-a.site-b.thread_subscription_upserted",
+		"chat.outbox.site-a.site-b.thread_unread_added",
 	}, cc.FilterSubjects)
 	assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 	assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)

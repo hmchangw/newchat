@@ -50,9 +50,26 @@ type Config struct {
 	OIDCClientID     string        `env:"OIDC_CLIENT_ID"     envDefault:""`
 	SSORefreshWindow time.Duration `env:"SSO_REFRESH_WINDOW" envDefault:"1h"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
-	AdminAcctPrefix string      `env:"ADMIN_ACCT_PREFIX"      envDefault:"p_admin"`
-	Mongo           MongoConfig `envPrefix:"MONGO_"`
-	NATS            NATSConfig  `envPrefix:"NATS_"`
+	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX"      envDefault:"p_admin"`
+	// ValkeyAddrs seeds the Valkey cluster backing the thread-unread badge
+	// accelerator (pkg/badgecache); empty disables it (Phase A deploys need no
+	// Valkey — badge.count.batch falls back to computing counts on the fly).
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// BadgeCacheTTL bounds how long an account's badge unread-room set survives
+	// without a BumpBatch/Seed/Reseed refresh. Keep identical across the badge
+	// cache's writers (user-service, room-service, inbox-worker).
+	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
+	// BadgeCountCap caps every badge unread-room count returned to clients and
+	// the push pipeline (the UI renders the cap as "N-1+", e.g. 10 → "9+").
+	BadgeCountCap int `env:"BADGE_COUNT_CAP" envDefault:"10"`
+	// BadgeCountCacheFirst serves subscription.count (unread=true) from the
+	// Valkey badge set on freshness-marker hit. Flip to true only after every
+	// badge writer runs the marker-aware pkg/badgecache — an old writer's
+	// set-only ClearAll leaves a stale "fresh zero" marker for up to the TTL.
+	BadgeCountCacheFirst bool        `env:"BADGE_COUNT_CACHE_FIRST" envDefault:"false"`
+	Mongo                MongoConfig `envPrefix:"MONGO_"`
+	NATS                 NATSConfig  `envPrefix:"NATS_"`
 	// ShowTeamsRoom controls whether Teams-migrated rooms (origin "teams")
 	// appear in the subscription list/count; false hides them (reversible
 	// read-time filter — see pkg/model.OriginTeams).
@@ -88,6 +105,12 @@ func Load() (Config, error) {
 	}
 	if cfg.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)
+	}
+	if cfg.BadgeCacheTTL <= 0 {
+		return Config{}, fmt.Errorf("BADGE_CACHE_TTL must be > 0, got %s", cfg.BadgeCacheTTL)
+	}
+	if cfg.BadgeCountCap < 1 {
+		return Config{}, fmt.Errorf("BADGE_COUNT_CAP must be >= 1, got %d", cfg.BadgeCountCap)
 	}
 	if cfg.OIDCIssuerURL != "" {
 		if len(cfg.OIDCAudiences) == 0 {

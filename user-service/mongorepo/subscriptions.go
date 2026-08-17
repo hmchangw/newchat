@@ -460,15 +460,18 @@ func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account
 	return out[0].N, nil
 }
 
-// GetActiveSubscriptions returns the deleted-filtered active set used by the unread count, capped by limit.
+// GetActiveSubscriptions returns the active set used by the unread count,
+// capped by limit. The cap runs before the rooms join so $lookup touches
+// ≤limit rows; the deleted-room filter runs after it, so a capped page can
+// come back slightly short — tolerable for the unread count, its only consumer.
 func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
 	pipeline = append(pipeline, r.originFilterStage(account)...)
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
-	// MongoDB rejects $limit:0 — callers short-circuit zero; stay defensive here.
+	// MongoDB rejects $limit:0 — treat it as "no cap".
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
+	pipeline = append(pipeline, roomsEnrichStages(true)...)
 	return r.enrichedSecondary.Aggregate(ctx, pipeline)
 }
 

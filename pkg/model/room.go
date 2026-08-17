@@ -48,6 +48,10 @@ const OriginTeams = "teams"
 // RoomsInfoBatchRequest is the NATS request body for the batch room info RPC.
 type RoomsInfoBatchRequest struct {
 	RoomIDs []string `json:"roomIds"`
+	// SkipKeys asks the server to skip the room E2E key lookup
+	// (PrivateKey/KeyVersion stay unset) — for callers that need only room
+	// metadata.
+	SkipKeys bool `json:"skipKeys,omitempty"`
 }
 
 // RoomInfo is a single aggregated room record: Mongo metadata + room key.

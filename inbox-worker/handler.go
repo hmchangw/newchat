@@ -15,6 +15,8 @@ import (
 )
 
 // InboxStore abstracts the data store operations needed by the inbox worker.
+//
+//go:generate mockgen -destination=mock_store_test.go -package=main . InboxStore
 type InboxStore interface {
 	CreateSubscription(ctx context.Context, sub *model.Subscription) error
 	BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error
@@ -41,13 +43,20 @@ type InboxStore interface {
 	// A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
 	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
-	// ApplyThreadRead writes ThreadSubscription under a $lt lastSeenAt guard, then the Subscription only if the guard accepted.
-	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account string, newThreadUnread []string, alert bool, lastSeenAt time.Time) error
+	// ApplyThreadRead advances the home-replica ThreadSubscription read state
+	// under a $lt guard and, when the guard matches, $pulls parentMessageID
+	// from the subscription's threadUnread (per-ID pull commutes with other
+	// threads' $addToSet; empty parentMessageID skips the pull).
+	ApplyThreadRead(ctx context.Context, roomID, threadRoomID, account, parentMessageID string, lastSeenAt time.Time) error
 	// ApplyThreadReadAll is the federated "mark all threads read" bulk clear on the
 	// user's home replica: it advances every one of account's thread subscriptions
-	// to lastSeenAt under a per-doc $lt guard (clearing hasMention), and clears
-	// threadUnread + alert on every subscription that still has unread threads.
+	// to lastSeenAt under a per-doc $lt guard (clearing hasMention), and $unsets
+	// threadUnread on every subscription that currently has unread threads.
 	ApplyThreadReadAll(ctx context.Context, account string, lastSeenAt time.Time) error
+	// AddThreadUnread marks parentMessageID unread for accounts' subscriptions in
+	// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
+	// redelivery; accounts not subscribed simply match nothing.
+	AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error
 	// UpdateSubscriptionMute sets muted by (roomID, account), guarded by
 	// muteUpdatedAt (the source event's publish time): older/duplicate events
 	// are silent no-ops. A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
@@ -96,9 +105,20 @@ type InboxStore interface {
 	UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error
 }
 
+// badgeCache is the badge cache's Valkey accelerator (pkg/badgecache.Cache
+// satisfies it). Nil when VALKEY_ADDRS is unset — call sites nil-check, so a
+// disabled cache is a silent no-op.
+type badgeCache interface {
+	ClearRoom(ctx context.Context, account, roomID string)
+	ClearAll(ctx context.Context, account string)
+}
+
 // Handler processes cross-site InboxEvent messages; replicates only subscription/room metadata, never room keys.
 type Handler struct {
 	store InboxStore
+	// badge is the badge cache; nil (VALKEY_ADDRS unset) disables the
+	// invalidation hooks. Injected post-construction.
+	badge badgeCache
 }
 
 // NewHandler creates a Handler with the given store.
@@ -136,6 +156,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleThreadRead(ctx, &evt)
 	case model.InboxThreadReadAll:
 		return h.handleThreadReadAll(ctx, &evt)
+	case model.InboxThreadUnreadAdded:
+		return h.handleThreadUnreadAdded(ctx, &evt)
 	case model.InboxRoomRenamed:
 		return h.handleRoomRenamed(ctx, &evt)
 	case model.InboxRoomRestricted:
@@ -254,6 +276,12 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	if err := h.store.DeleteThreadSubscriptions(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete thread subscriptions for room %s: %w", memberEvt.RoomID, err)
 	}
+	// A removed member's badge entry for this room is stale.
+	if h.badge != nil {
+		for _, account := range memberEvt.Accounts {
+			h.badge.ClearRoom(ctx, account, memberEvt.RoomID)
+		}
+	}
 	return nil
 }
 
@@ -306,6 +334,10 @@ func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.InboxEv
 	if err := h.store.UpdateSubscriptionRead(ctx, e.RoomID, e.Account, lastSeenAt, e.Alert); err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", e.Account, e.RoomID, err)
 	}
+	// A read shrinks the unread set — drop it and recompute on next count.
+	if h.badge != nil {
+		h.badge.ClearAll(ctx, e.Account)
+	}
 	return nil
 }
 
@@ -317,6 +349,15 @@ func (h *Handler) handleSubscriptionMuteToggled(ctx context.Context, evt *model.
 	}
 	if err := h.store.UpdateSubscriptionMute(ctx, e.RoomID, e.Account, e.Muted, time.UnixMilli(e.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription mute for %q in room %q: %w", e.Account, e.RoomID, err)
+	}
+	// Mute is an exact removal (set stays fresh); unmute drops the set so the
+	// next recompute re-adds the room iff unread.
+	if h.badge != nil {
+		if e.Muted {
+			h.badge.ClearRoom(ctx, e.Account, e.RoomID)
+		} else {
+			h.badge.ClearAll(ctx, e.Account)
+		}
 	}
 	return nil
 }
@@ -367,9 +408,15 @@ func (h *Handler) handleThreadRead(ctx context.Context, evt *model.InboxEvent) e
 		return fmt.Errorf("unmarshal thread_read payload: %w", err)
 	}
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
-	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.NewThreadUnread, e.Alert, lastSeenAt); err != nil {
-		return fmt.Errorf("apply thread read (room %q, thread %q, account %q): %w",
-			e.RoomID, e.ThreadRoomID, e.Account, err)
+	if err := h.store.ApplyThreadRead(ctx, e.RoomID, e.ThreadRoomID, e.Account, e.ParentMessageID, lastSeenAt); err != nil {
+		return fmt.Errorf("apply thread read (thread %q, account %q): %w",
+			e.ThreadRoomID, e.Account, err)
+	}
+	// A thread read shrinks the unread set — drop it and recompute on next
+	// count; the recompute also absorbs stale/redelivered events and racing
+	// thread_unread_added writes.
+	if h.badge != nil {
+		h.badge.ClearAll(ctx, e.Account)
 	}
 	return nil
 }
@@ -382,6 +429,23 @@ func (h *Handler) handleThreadReadAll(ctx context.Context, evt *model.InboxEvent
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
 	if err := h.store.ApplyThreadReadAll(ctx, e.Account, lastSeenAt); err != nil {
 		return fmt.Errorf("apply thread read all (account %q): %w", e.Account, err)
+	}
+	// Bulk dismiss on the home replica — ClearAll always applies.
+	if h.badge != nil {
+		h.badge.ClearAll(ctx, e.Account)
+	}
+	return nil
+}
+
+// handleThreadUnreadAdded $addToSet-merges parentMessageID into the
+// home-replica Subscription.threadUnread for each account in the event.
+func (h *Handler) handleThreadUnreadAdded(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.ThreadUnreadAddedEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal thread_unread_added payload: %w", err)
+	}
+	if err := h.store.AddThreadUnread(ctx, e.RoomID, e.ParentMessageID, e.Accounts); err != nil {
+		return fmt.Errorf("add thread unread %q in room %q: %w", e.ParentMessageID, e.RoomID, err)
 	}
 	return nil
 }

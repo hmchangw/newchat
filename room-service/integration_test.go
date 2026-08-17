@@ -190,10 +190,9 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 	assert.Equal(t, "rproj", got.RoomID)
 	assert.Equal(t, "site-a", got.SiteID)
 	assert.Equal(t, []model.Role{model.RoleOwner, model.RoleMember}, got.Roles)
-	assert.True(t, got.Alert)
-	assert.Equal(t, []string{"t1", "t2"}, got.ThreadUnread)
 	require.NotNil(t, got.LastSeenAt)
 	assert.WithinDuration(t, lastSeen, *got.LastSeenAt, time.Second)
+	assert.Equal(t, []string{"t1", "t2"}, got.ThreadUnread)
 	require.NotNil(t, got.HistorySharedSince, "historySharedSince must be in the projection (addMembers inherits the requester's cap from it)")
 	assert.WithinDuration(t, hss, *got.HistorySharedSince, time.Second)
 }
@@ -1982,7 +1981,7 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now, false))
+	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now))
 
 	got, err := store.GetSubscription(ctx, "alice", "r1")
 	require.NoError(t, err)
@@ -1990,7 +1989,7 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	require.NotNil(t, got.LastSeenAt)
 	assert.WithinDuration(t, now, *got.LastSeenAt, time.Second)
 
-	err = store.UpdateSubscriptionRead(ctx, "r1", "missing", now, false)
+	err = store.UpdateSubscriptionRead(ctx, "r1", "missing", now)
 	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
@@ -2012,7 +2011,7 @@ func TestMongoStore_UpdateSubscriptionRead_ClearsHasMention(t *testing.T) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now, false))
+	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now))
 
 	var raw model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "s1"}).Decode(&raw))
@@ -2541,78 +2540,6 @@ func TestMongoStore_GetThreadSubscriptionByParent(t *testing.T) {
 	})
 }
 
-func TestMongoStore_UpdateSubscriptionThreadRead(t *testing.T) {
-	db := setupMongo(t)
-	store := NewMongoStore(db)
-	require.NoError(t, store.EnsureIndexes(context.Background()))
-	ctx := context.Background()
-
-	sub := model.Subscription{
-		ID: "sub-1", RoomID: "r1", SiteID: "site-a",
-		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
-		JoinedAt:     time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond),
-		ThreadUnread: []string{"t1", "t2"},
-		Alert:        true,
-	}
-	_, err := db.Collection("subscriptions").InsertOne(ctx, &sub)
-	require.NoError(t, err)
-
-	t.Run("removes specified threadID and returns remaining", func(t *testing.T) {
-		newUnread, newAlert, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "t1")
-		require.NoError(t, err)
-		assert.Equal(t, []string{"t2"}, newUnread)
-		assert.True(t, newAlert)
-		var got model.Subscription
-		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&got))
-		assert.Equal(t, []string{"t2"}, got.ThreadUnread)
-		assert.True(t, got.Alert)
-	})
-
-	t.Run("last element removed unsets threadUnread field and clears alert", func(t *testing.T) {
-		newUnread, newAlert, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "t2")
-		require.NoError(t, err)
-		assert.Nil(t, newUnread)
-		assert.False(t, newAlert)
-		var raw bson.M
-		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
-		_, present := raw["threadUnread"]
-		assert.False(t, present, "threadUnread must be $unset, not stored as empty array")
-		assert.Equal(t, false, raw["alert"])
-	})
-
-	t.Run("missing subscription returns sentinel", func(t *testing.T) {
-		_, _, err := store.UpdateSubscriptionThreadRead(ctx, "r-missing", "alice", "t1")
-		require.ErrorIs(t, err, model.ErrSubscriptionNotFound)
-	})
-
-	t.Run("concurrent removals do not lose updates", func(t *testing.T) {
-		// Reset subscription to ["c1", "c2"] with alert=true
-		_, err := db.Collection("subscriptions").UpdateOne(ctx, bson.M{"_id": "sub-1"},
-			bson.M{"$set": bson.M{"threadUnread": []string{"c1", "c2"}, "alert": true}})
-		require.NoError(t, err)
-
-		// Two concurrent calls each remove a different threadID
-		done := make(chan error, 2)
-		go func() {
-			_, _, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "c1")
-			done <- err
-		}()
-		go func() {
-			_, _, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "c2")
-			done <- err
-		}()
-		require.NoError(t, <-done)
-		require.NoError(t, <-done)
-
-		// Both removals must have applied — threadUnread should be absent (empty)
-		var raw bson.M
-		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
-		_, present := raw["threadUnread"]
-		assert.False(t, present, "both concurrent removals must apply — no lost updates")
-		assert.Equal(t, false, raw["alert"])
-	})
-}
-
 func TestMongoStore_UpdateThreadSubscriptionRead(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -2647,6 +2574,86 @@ func TestMongoStore_UpdateThreadSubscriptionRead(t *testing.T) {
 	t.Run("missing thread subscription returns sentinel", func(t *testing.T) {
 		err := store.UpdateThreadSubscriptionRead(ctx, "tr-missing", "alice", time.Now().UTC())
 		require.ErrorIs(t, err, model.ErrThreadSubscriptionNotFound)
+	})
+}
+
+func TestMongoStore_UpdateSubscriptionThreadRead(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	require.NoError(t, store.EnsureIndexes(context.Background()))
+	ctx := context.Background()
+
+	sub := model.Subscription{
+		ID: "sub-1", RoomID: "r1", SiteID: "site-a",
+		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
+		JoinedAt: time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond),
+	}
+	_, err := db.Collection("subscriptions").InsertOne(ctx, &sub)
+	require.NoError(t, err)
+
+	// seedThreadUnread resets sub-1's threadUnread to the exact starting state
+	// a subtest needs. Called at the start of every subtest that depends on
+	// threadUnread's value, so each subtest is self-contained and passes in
+	// isolation (e.g. `-run .../last_element_removed`) regardless of whether a
+	// sibling subtest ran first — CLAUDE.md forbids relying on execution order.
+	seedThreadUnread := func(t *testing.T, threadUnread []string) {
+		t.Helper()
+		_, err := db.Collection("subscriptions").UpdateOne(ctx, bson.M{"_id": "sub-1"},
+			bson.M{"$set": bson.M{"threadUnread": threadUnread}})
+		require.NoError(t, err)
+	}
+
+	t.Run("removes specified threadID and returns remaining", func(t *testing.T) {
+		seedThreadUnread(t, []string{"t1", "t2"})
+		newUnread, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "t1")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"t2"}, newUnread)
+		var got model.Subscription
+		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&got))
+		assert.Equal(t, []string{"t2"}, got.ThreadUnread)
+	})
+
+	t.Run("last element removed leaves empty array, no second write", func(t *testing.T) {
+		seedThreadUnread(t, []string{"t2"})
+		newUnread, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "t2")
+		require.NoError(t, err)
+		assert.Nil(t, newUnread)
+		// The stored empty array stays — a second $unset round-trip is not worth
+		// it (omitempty keeps it off the wire; all readers check len > 0).
+		var raw bson.M
+		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&raw))
+		val, present := raw["threadUnread"]
+		require.True(t, present, "empty threadUnread array stays stored")
+		arr, ok := val.(bson.A)
+		require.True(t, ok)
+		assert.Empty(t, arr)
+	})
+
+	t.Run("missing subscription returns sentinel", func(t *testing.T) {
+		_, err := store.UpdateSubscriptionThreadRead(ctx, "r-missing", "alice", "t1")
+		require.ErrorIs(t, err, model.ErrSubscriptionNotFound)
+	})
+
+	t.Run("concurrent removals do not lose updates", func(t *testing.T) {
+		seedThreadUnread(t, []string{"c1", "c2"})
+
+		// Two concurrent calls each remove a different threadID
+		done := make(chan error, 2)
+		go func() {
+			_, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "c1")
+			done <- err
+		}()
+		go func() {
+			_, err := store.UpdateSubscriptionThreadRead(ctx, "r1", "alice", "c2")
+			done <- err
+		}()
+		require.NoError(t, <-done)
+		require.NoError(t, <-done)
+
+		// Both removals must have applied — the stored array is empty.
+		var got model.Subscription
+		require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sub-1"}).Decode(&got))
+		assert.Empty(t, got.ThreadUnread, "both concurrent removals must apply — no lost updates")
 	})
 }
 
@@ -4323,27 +4330,25 @@ func TestMongoStore_ClearSubscriptionThreadUnreadForAccount_Integration(t *testi
 	ctx := context.Background()
 
 	subs := []model.Subscription{
-		{ID: "sA1", RoomID: "r1", SiteID: "site-a", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, ThreadUnread: []string{"p1", "p2"}, Alert: true},
-		{ID: "sA2", RoomID: "r2", SiteID: "site-a", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, Alert: false},
-		{ID: "sB1", RoomID: "r1", SiteID: "site-a", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p9"}, Alert: true},
+		{ID: "sA1", RoomID: "r1", SiteID: "site-a", User: model.SubscriptionUser{ID: "uA", Account: "alice"}, ThreadUnread: []string{"p1", "p2"}},
+		{ID: "sA2", RoomID: "r2", SiteID: "site-a", User: model.SubscriptionUser{ID: "uA", Account: "alice"}},
+		{ID: "sB1", RoomID: "r1", SiteID: "site-a", User: model.SubscriptionUser{ID: "uB", Account: "bob"}, ThreadUnread: []string{"p9"}},
 	}
 	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{&subs[0], &subs[1], &subs[2]})
 	require.NoError(t, err)
 
 	require.NoError(t, store.ClearSubscriptionThreadUnreadForAccount(ctx, "alice"))
 
-	// alice r1: threadUnread unset, alert cleared.
+	// alice r1: threadUnread unset.
 	var r1 bson.M
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sA1"}).Decode(&r1))
 	_, present := r1["threadUnread"]
 	assert.False(t, present, "threadUnread must be $unset")
-	assert.Equal(t, false, r1["alert"])
 
 	// bob r1: untouched.
 	var bobRaw model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "sB1"}).Decode(&bobRaw))
 	assert.Equal(t, []string{"p9"}, bobRaw.ThreadUnread)
-	assert.True(t, bobRaw.Alert)
 }
 
 // RebalanceSection renumbers a section's rows spaced by 10, not 1, so later

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -13,6 +14,22 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+func TestConfig_BadgeCacheTTL(t *testing.T) {
+	t.Run("defaults to 24h", func(t *testing.T) {
+		require.NoError(t, os.Unsetenv("BADGE_CACHE_TTL"))
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 24*time.Hour, cfg.BadgeCacheTTL)
+	})
+
+	t.Run("honors BADGE_CACHE_TTL override", func(t *testing.T) {
+		t.Setenv("BADGE_CACHE_TTL", "48h")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 48*time.Hour, cfg.BadgeCacheTTL)
+	})
+}
 
 func TestConfig_MaxWorkers(t *testing.T) {
 	t.Run("defaults to 100", func(t *testing.T) {
@@ -27,6 +44,22 @@ func TestConfig_MaxWorkers(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 32, cfg.MaxWorkers)
 	})
+}
+
+func TestConfig_ValkeyDisabledByDefault(t *testing.T) {
+	require.NoError(t, os.Unsetenv("VALKEY_ADDRS"))
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+}
+
+func TestConfig_ValkeyAddrsParsed(t *testing.T) {
+	t.Setenv("VALKEY_ADDRS", "node-1:6379,node-2:6379")
+	t.Setenv("VALKEY_PASSWORD", "hunter2")
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
+	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
 }
 
 func TestIsMembershipSubject(t *testing.T) {

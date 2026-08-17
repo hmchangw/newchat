@@ -54,4 +54,8 @@ type ThreadStore interface {
 	// implies they've seen up to their own reply, keeping the thread read-floor
 	// (minUserLastSeenAt) from counting the replier against it (#396).
 	AdvanceThreadSubscriptionLastSeen(ctx context.Context, threadRoomID, account string, at time.Time) error
+	// AddThreadUnread marks parentMessageID unread for accounts' subscriptions in
+	// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
+	// redelivery; accounts not subscribed simply match nothing.
+	AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error
 }

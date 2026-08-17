@@ -36,10 +36,15 @@ type Subscription struct {
 	JoinedAt           time.Time        `json:"joinedAt" bson:"joinedAt"`
 	LastSeenAt         *time.Time       `json:"lastSeenAt,omitempty" bson:"lastSeenAt,omitempty"`
 	HasMention         bool             `json:"hasMention" bson:"hasMention"`
-	ThreadUnread       []string         `json:"threadUnread,omitempty" bson:"threadUnread,omitempty"`
-	Alert              bool             `json:"alert" bson:"alert"`
-	Muted              bool             `json:"muted" bson:"muted"`
-	Favorite           bool             `json:"favorite" bson:"favorite"`
+	// ThreadUnread lists parent-message IDs of threads in this room with
+	// replies the user hasn't read. Written by message-worker on each thread
+	// reply (federated to the user's home replica via thread_unread_added),
+	// cleared by message.thread.read / thread.read.all. Feeds the badge count
+	// only — precise thread state stays on the derived lastSeenAt model.
+	ThreadUnread []string `json:"threadUnread,omitempty" bson:"threadUnread,omitempty"`
+	Alert        bool     `json:"alert" bson:"alert"`
+	Muted        bool     `json:"muted" bson:"muted"`
+	Favorite     bool     `json:"favorite" bson:"favorite"`
 	// SectionId is the custom chatlist section this chat is in; nil = no custom
 	// section (the client derives a built-in placement). SectionOrder is the manual
 	// position within that section, honored only when the section's sortMode ==
@@ -214,4 +219,18 @@ func IsRoomMember(sub *Subscription) bool {
 // MessageThreadReadRequest is the body of the message.thread.read RPC.
 type MessageThreadReadRequest struct {
 	ThreadID string `json:"threadId"`
+}
+
+// BadgeCountBatchRequest is the server-to-server badge.count.batch request:
+// notification-worker asks the accounts' home-site user-service for badge
+// unread counts, naming the room that triggered the notification.
+type BadgeCountBatchRequest struct {
+	RoomID   string   `json:"roomId"`
+	Accounts []string `json:"accounts"`
+}
+
+// BadgeCountBatchResponse maps account → unread-room count capped at 10
+// (10 renders as "9+"). Accounts whose count could not be computed are absent.
+type BadgeCountBatchResponse struct {
+	Counts map[string]int `json:"counts"`
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
@@ -49,6 +50,47 @@ func TestLegacyRoomOrigins_EnvParse(t *testing.T) {
 	t.Setenv("LEGACY_ROOM_ORIGINS", `[{"siteID":"s1"`)
 	_, err = env.ParseAs[originsConfig]()
 	assert.Error(t, err, "malformed JSON must fail startup, not be silently ignored")
+}
+
+func TestConfig_ValkeyDisabledByDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	require.NoError(t, os.Unsetenv("VALKEY_ADDRS"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+}
+
+func TestConfig_ValkeyAddrsParsed(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("VALKEY_ADDRS", "node-1:6379,node-2:6379")
+	t.Setenv("VALKEY_PASSWORD", "hunter2")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
+	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
+}
+
+func TestConfig_BadgeCacheTTL(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	t.Run("default", func(t *testing.T) {
+		require.NoError(t, os.Unsetenv("BADGE_CACHE_TTL"))
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 24*time.Hour, cfg.BadgeCacheTTL)
+	})
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("BADGE_CACHE_TTL", "48h")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 48*time.Hour, cfg.BadgeCacheTTL)
+	})
 }
 
 func TestConfig_MaxConcurrency(t *testing.T) {

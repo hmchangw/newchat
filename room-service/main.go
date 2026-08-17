@@ -10,9 +10,12 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
+	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -81,6 +84,13 @@ type config struct {
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 	// RoomSubjectMode: same-site room .event namespace — global (default) | dual | local. See pkg/subject.RoomRouteMode.
 	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
+	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
+	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
+	// Keep identical across all badge-cache writers.
+	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
 	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
@@ -254,6 +264,34 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
+	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
+	// no-ops (nil-checked in handler.go).
+	var badge badgeCache
+	var valkeyClient *redis.ClusterClient
+	if len(cfg.ValkeyAddrs) > 0 {
+		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs:    cfg.ValkeyAddrs,
+			Password: cfg.ValkeyPassword,
+		})
+		// o11yredis.Wrap adds tracing+metrics in place, mirroring
+		// pkg/valkeyutil's instrumentCluster.
+		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
+			slog.Error("instrument valkey client failed", "error", err)
+			os.Exit(1)
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := valkeyClient.Ping(pingCtx).Err()
+		cancel()
+		if err != nil {
+			slog.Error("valkey connect failed", "error", err)
+			os.Exit(1)
+		}
+		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
+		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL)
+	} else {
+		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+	}
+
 	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics))
 	handler := NewHandler(store, keyStore, memberListClient, msgReader, cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
 		func(ctx context.Context, subj string, data []byte, msgID string) error {
@@ -284,6 +322,7 @@ func main() {
 		roomRouteMode,
 	)
 	handler.dekProvisioner = dekProvisioner
+	handler.badge = badge
 	handler.graphClient = graphClient
 	handler.directoryClient = directoryClient
 	handler.teamsMeetingStore = store
@@ -326,6 +365,12 @@ func main() {
 				return vaultWrapper.Close()
 			}
 			return nil
+		},
+		func(ctx context.Context) error {
+			if valkeyClient == nil {
+				return nil
+			}
+			return valkeyClient.Close()
 		},
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },

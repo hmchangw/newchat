@@ -34,6 +34,7 @@ services:
       - ROOM_META_CACHE_SIZE=${ROOM_META_CACHE_SIZE:-10000}
       - ROOM_META_CACHE_TTL=${ROOM_META_CACHE_TTL:-2m}
       - PRESENCE_RPC_ENABLED=${PRESENCE_RPC_ENABLED:-false}
+      - BADGE_COUNT_RPC_ENABLED=${BADGE_COUNT_RPC_ENABLED:-true}
       # Enforces muteAllNotifications / alwaysAllowPriorityNotifications /
       # showNotificationsInCall. Kill switch: false reverts to pre-enforcement
       # delivery without rolling back the binary.
