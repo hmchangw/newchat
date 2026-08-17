@@ -25,7 +25,7 @@ services:
       - USER_ROOM_INDEX=user-room-mv-site-local
       - MIGRATION_START_AT=2025-07-01T00:00:00Z
       - MIGRATION_END_AT=2026-07-01T00:00:00Z
-      - MESSAGE_BUCKET_HOURS=72
+      - MESSAGE_BUCKET_HOURS=360
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - CASSANDRA_HOSTS=cassandra

@@ -93,8 +93,12 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
+	// An empty page must never claim hasNext: this RPC pages by before = oldest
+	// returned createdAt, so an empty resumable page (budget-exhausted walk over
+	// a long silent gap) would leave the client no way to advance.
 	return &models.LoadHistoryResponse{
 		Messages:          page.Data,
+		HasNext:           page.HasNext && len(page.Data) > 0,
 		MinUserLastSeenAt: minMs,
 	}, nil
 }

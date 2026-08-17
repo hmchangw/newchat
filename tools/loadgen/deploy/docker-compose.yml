@@ -24,7 +24,7 @@ services:
       # guarded teardown with SOAK_CASSANDRA_CLEANUP=truncate.
       - CASSANDRA_HOSTS=cassandra
       - CASSANDRA_KEYSPACE=${CASSANDRA_KEYSPACE:-chat}
-      - MESSAGE_BUCKET_HOURS=${MESSAGE_BUCKET_HOURS:-72}
+      - MESSAGE_BUCKET_HOURS=${MESSAGE_BUCKET_HOURS:-360}
       - METRICS_ADDR=:9099
       # Worker-pool cap for concurrent publishes. Set to 0 to publish
       # serially on the ticker goroutine (legacy behavior).

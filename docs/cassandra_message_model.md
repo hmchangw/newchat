@@ -86,7 +86,7 @@ CREATE TYPE IF NOT EXISTS chat.reactor_info (
 `messages_by_room` uses a composite partition key `(room_id, bucket)`. `bucket`
 is the start-of-window in unix milliseconds derived deterministically from
 `created_at` via `pkg/msgbucket.Sizer`. The window size is configured per
-service via `MESSAGE_BUCKET_HOURS` (envDefault 72 in both `message-worker` and
+service via `MESSAGE_BUCKET_HOURS` (envDefault 360 in both `message-worker` and
 `history-service`); all services that read or write this table MUST be
 configured with the same window.
 
@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS messages_by_room(
   AND compaction = {
     'class': 'TimeWindowCompactionStrategy',
     'compaction_window_unit': 'HOURS',
-    'compaction_window_size': '72'
+    'compaction_window_size': '360'
   };
 ```
 

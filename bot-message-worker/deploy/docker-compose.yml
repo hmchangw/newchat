@@ -15,7 +15,7 @@ services:
       - CASSANDRA_HOSTS=cassandra:9042
       - CASSANDRA_KEYSPACE=chat
       - CASSANDRA_NUM_CONNS=4
-      - MESSAGE_BUCKET_HOURS=72
+      - MESSAGE_BUCKET_HOURS=360
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - MAX_WORKERS=100

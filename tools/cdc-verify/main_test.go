@@ -35,7 +35,7 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 200, cfg.RecentCap)
 	assert.Equal(t, 1000, cfg.FailedCap)
 	assert.Equal(t, 5*time.Second, cfg.StatsInterval)
-	assert.Equal(t, 72, cfg.MessageBucketHours)
+	assert.Equal(t, 360, cfg.MessageBucketHours)
 	assert.Equal(t, "primary", cfg.SourceReadPreference)
 	assert.False(t, cfg.Bootstrap.Enabled)
 	assert.NoError(t, cfg.validate())
