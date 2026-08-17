@@ -369,7 +369,7 @@ func TestSoakSender_ErrorAndMalformedRepliesRejectPendingCandidate(t *testing.T)
 			name:       "malformed success",
 			reply:      []byte(`{"id":`),
 			wantStatus: soakSendReplyMalformed,
-			wantClass:  soakErrorDecode,
+			wantClass:  soakErrorResponseDecode,
 		},
 		{
 			name:       "wrong message",

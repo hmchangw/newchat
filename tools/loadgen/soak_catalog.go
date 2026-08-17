@@ -24,6 +24,10 @@ const (
 	// asks "can a new reply be attached here?", which is true of a message with
 	// zero replies — precisely the case that has no thread room yet.
 	soakCatalogThreadRead soakCatalogAction = "thread_read"
+	// soakCatalogReadReceipt picks any persisted message to ask "who has read
+	// this?". Authorship is irrelevant — a reader asks about other people's
+	// messages as readily as their own.
+	soakCatalogReadReceipt soakCatalogAction = "read_receipt"
 )
 
 type soakClock interface {
@@ -665,7 +669,7 @@ func (c *soakCatalog) eligible(
 		// The reply budget is irrelevant here: a full thread is still readable.
 		return entry.ThreadParentID == "" && entry.threadReplies > 0 &&
 			!now.Before(entry.threadReadableAt)
-	case soakCatalogPin, soakCatalogReaction:
+	case soakCatalogPin, soakCatalogReaction, soakCatalogReadReceipt:
 		return true
 	default:
 		return false

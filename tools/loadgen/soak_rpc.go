@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -31,33 +32,91 @@ const (
 	soakRPCReadBack    soakRPCAction = "read_back"
 	soakRPCMarkRead    soakRPCAction = "mark_read"
 	soakRPCScroll      soakRPCAction = "scroll_history"
+
+	soakRPCMemberAdd        soakRPCAction = "member_add"
+	soakRPCMemberRemove     soakRPCAction = "member_remove"
+	soakRPCRoomRename       soakRPCAction = "room_rename"
+	soakRPCMuteToggle       soakRPCAction = "mute_toggle"
+	soakRPCRoomCreate       soakRPCAction = "room_create"
+	soakRPCMemberList       soakRPCAction = "member_list"
+	soakRPCRoomsInfo        soakRPCAction = "rooms_info"
+	soakRPCSubscriptionList soakRPCAction = "subscription_list"
+	soakRPCRoomStateRead    soakRPCAction = "room_state_read"
+	soakRPCMessageRead      soakRPCAction = "message_read"
+	soakRPCReadReceiptList  soakRPCAction = "read_receipt_list"
+	soakRPCPresenceQuery    soakRPCAction = "presence_query"
+
+	soakRPCSearchMessages soakRPCAction = "search_messages"
+	soakRPCSearchRooms    soakRPCAction = "search_rooms"
+	// soakRPCSearchIndexProbe is the evidence query, kept on its own label so
+	// its latency and error rate never blend into the read lane's.
+	soakRPCSearchIndexProbe soakRPCAction = "search_index_probe"
+
+	// The user-service read lane. Every one of these is read-only, so they
+	// carry latency and outcome only and never enter the evidence ledger.
+	soakRPCUserMe                  soakRPCAction = "user_me"
+	soakRPCUserProfileGet          soakRPCAction = "user_profile_get"
+	soakRPCUserStatusGet           soakRPCAction = "user_status_get"
+	soakRPCUserSettingsGet         soakRPCAction = "user_settings_get"
+	soakRPCUserChatlistGet         soakRPCAction = "user_chatlist_get"
+	soakRPCUserPriorityContacts    soakRPCAction = "user_priority_contacts"
+	soakRPCUserAppsList            soakRPCAction = "user_apps_list"
+	soakRPCUserAppsCategories      soakRPCAction = "user_apps_categories"
+	soakRPCUserSubscriptionCount   soakRPCAction = "user_subscription_count"
+	soakRPCUserSubscriptionByRoom  soakRPCAction = "user_subscription_by_room"
+	soakRPCUserSubscriptionChannel soakRPCAction = "user_subscription_channels"
+	soakRPCUserSubscriptionDM      soakRPCAction = "user_subscription_dm"
+	soakRPCUserThreadList          soakRPCAction = "user_thread_list"
+	soakRPCUserThreadUnread        soakRPCAction = "user_thread_unread"
 )
+
+// soakUserReadActions is every action the user-service read lane dispatches. It
+// is the single source for both the allowlist and the lane's own dispatch
+// table, so an action can never be allowlisted without being sent.
+var soakUserReadActions = []soakRPCAction{
+	soakRPCUserMe, soakRPCUserProfileGet, soakRPCUserStatusGet,
+	soakRPCUserSettingsGet, soakRPCUserChatlistGet, soakRPCUserPriorityContacts,
+	soakRPCUserAppsList, soakRPCUserAppsCategories,
+	soakRPCUserSubscriptionCount, soakRPCUserSubscriptionByRoom,
+	soakRPCUserSubscriptionChannel, soakRPCUserSubscriptionDM,
+	soakRPCUserThreadList, soakRPCUserThreadUnread,
+}
 
 func validSoakRPCAction(action soakRPCAction) bool {
 	switch action {
 	case soakRPCSend, soakRPCThreadReply, soakRPCLoadHistory, soakRPCLoadNext,
 		soakRPCGetThread, soakRPCGetMessage, soakRPCReact, soakRPCEdit,
 		soakRPCDelete, soakRPCPin, soakRPCUnpin, soakRPCPinnedList,
-		soakRPCReadBack, soakRPCMarkRead, soakRPCScroll:
+		soakRPCReadBack, soakRPCMarkRead, soakRPCScroll,
+		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename,
+		soakRPCMuteToggle, soakRPCRoomCreate, soakRPCMemberList,
+		soakRPCRoomsInfo, soakRPCSubscriptionList, soakRPCRoomStateRead,
+		soakRPCMessageRead, soakRPCReadReceiptList, soakRPCPresenceQuery,
+		soakRPCSearchMessages, soakRPCSearchRooms, soakRPCSearchIndexProbe:
 		return true
 	default:
-		return false
+		return slices.Contains(soakUserReadActions, action)
 	}
 }
 
 type soakErrorClass string
 
 const (
-	soakErrorTimeout               soakErrorClass = "timeout"
-	soakErrorNoResponder           soakErrorClass = "no_responder"
-	soakErrorDisconnected          soakErrorClass = "disconnected"
-	soakErrorUnavailable           soakErrorClass = "unavailable"
-	soakErrorInternal              soakErrorClass = "internal"
-	soakErrorNotFound              soakErrorClass = "not_found"
-	soakErrorForbidden             soakErrorClass = "forbidden"
-	soakErrorBadRequest            soakErrorClass = "bad_request"
-	soakErrorConflict              soakErrorClass = "conflict"
-	soakErrorDecode                soakErrorClass = "decode"
+	soakErrorTimeout      soakErrorClass = "timeout"
+	soakErrorNoResponder  soakErrorClass = "no_responder"
+	soakErrorDisconnected soakErrorClass = "disconnected"
+	soakErrorUnavailable  soakErrorClass = "unavailable"
+	soakErrorInternal     soakErrorClass = "internal"
+	soakErrorNotFound     soakErrorClass = "not_found"
+	soakErrorForbidden    soakErrorClass = "forbidden"
+	soakErrorBadRequest   soakErrorClass = "bad_request"
+	soakErrorConflict     soakErrorClass = "conflict"
+	// soakErrorRequestEncode is a body that never reached the wire; it is the
+	// only decode-shaped failure a mutation may treat as proven not-sent.
+	soakErrorRequestEncode soakErrorClass = "request_encode"
+	// soakErrorResponseDecode means the server replied and the reply could not
+	// be parsed. The request was delivered, so any effect it had is real.
+	soakErrorResponseDecode        soakErrorClass = "response_decode"
 	soakErrorAssertion             soakErrorClass = "assertion"
 	soakErrorAmbiguous             soakErrorClass = "ambiguous"
 	soakErrorMutationTargetMissing soakErrorClass = "mutation_target_missing"
@@ -69,7 +128,8 @@ func validSoakErrorClass(class soakErrorClass) bool {
 	case soakErrorTimeout, soakErrorNoResponder, soakErrorDisconnected,
 		soakErrorUnavailable, soakErrorInternal, soakErrorNotFound,
 		soakErrorForbidden, soakErrorBadRequest, soakErrorConflict,
-		soakErrorDecode, soakErrorAssertion, soakErrorAmbiguous,
+		soakErrorRequestEncode, soakErrorResponseDecode,
+		soakErrorAssertion, soakErrorAmbiguous,
 		soakErrorMutationTargetMissing, soakErrorResponseTooLarge:
 		return true
 	default:
@@ -260,7 +320,7 @@ func (c *soakRPCClient) Call(
 	}
 	body, err := json.Marshal(request.Body)
 	if err != nil {
-		result.ErrorClass = soakErrorDecode
+		result.ErrorClass = soakErrorRequestEncode
 		return result, fmt.Errorf("marshal %s request: %w", request.Action, err)
 	}
 
@@ -281,7 +341,7 @@ func (c *soakRPCClient) Call(
 		if requestErr == nil {
 			if response != nil {
 				if err := json.Unmarshal(reply, response); err != nil {
-					result.ErrorClass = soakErrorDecode
+					result.ErrorClass = soakErrorResponseDecode
 					return result, fmt.Errorf("decode %s response: %w", request.Action, err)
 				}
 			}

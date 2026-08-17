@@ -167,13 +167,25 @@ func TestSoakLifecycle_WrapsStoreFailures(t *testing.T) {
 }
 
 func TestNewSoakWorkload_AppliesSafeDefaults(t *testing.T) {
-	workload := newSoakWorkload(nil, nil, soakWorkloadActions{}, nil, nil, nil)
+	workload := newSoakWorkload(nil, nil, &soakWorkloadActions{}, nil, nil, nil)
 
 	assert.Equal(t, 256, workload.cfg.MaxInFlight)
 	assert.NotNil(t, workload.dispatch)
 	assert.NotNil(t, workload.now)
 	assert.NotNil(t, workload.onSaturation)
-	assert.Len(t, workload.lanes(), 6)
+	// A named set rather than a count: it says which lane went missing, and a
+	// new lane has to be added here deliberately rather than by bumping a
+	// number that carries no meaning.
+	names := make([]string, 0, len(workload.lanes()))
+	for _, lane := range workload.lanes() {
+		names = append(names, lane.name)
+	}
+	assert.ElementsMatch(t, []string{
+		"send", "read", "mutation", "reaction", "pinned_list", "verify",
+		soakFailureLaneMemberMutation, soakFailureLaneRoomMutation,
+		"room_read", "user_read", "search_read",
+		soakFailureLaneRoomCreate, soakFailureLaneReadReceipt, "presence",
+	}, names)
 }
 
 func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {
@@ -181,7 +193,7 @@ func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {
 	newSoakWorkload(
 		&workloadConfig,
 		nil,
-		soakWorkloadActions{},
+		&soakWorkloadActions{},
 		nil,
 		nil,
 		nil,
@@ -293,7 +305,7 @@ func TestNewSoakRPCClient_DefaultsAndInputFailures(t *testing.T) {
 		Body:   make(chan int),
 	}, nil)
 	require.Error(t, err)
-	assert.Equal(t, soakErrorDecode, result.ErrorClass)
+	assert.Equal(t, soakErrorRequestEncode, result.ErrorClass)
 }
 
 func TestSoakRPCClient_PropagatesResolverAndSleeperFailures(t *testing.T) {
@@ -659,7 +671,8 @@ func TestClassifySoakVerifyRPCError_CoversTerminalAndTransientClasses(t *testing
 		want  soakVerifyClass
 	}{
 		{class: soakErrorNotFound, want: soakVerifyMissing},
-		{class: soakErrorDecode, want: soakVerifyMalformed},
+		{class: soakErrorRequestEncode, want: soakVerifyMalformed},
+		{class: soakErrorResponseDecode, want: soakVerifyMalformed},
 		{class: soakErrorTimeout, want: soakVerifyRetryable},
 		{class: soakErrorForbidden, want: soakVerifyRPCError},
 	}

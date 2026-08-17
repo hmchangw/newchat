@@ -134,6 +134,44 @@ read-lane slots to reconcile every ledger-admitted message through
 configured traffic profile. See
 [`docs/load-testing/loadgen-failure-observation.md`](../../docs/load-testing/loadgen-failure-observation.md).
 
+The same run also drives room and member traffic: `member_mutation` cycles
+paired add/remove operations over a reusable per-room candidate ring,
+`room_mutation` alternates renames and mute toggles over a fixed room pool,
+`room_read` covers member list, rooms-info batch, subscription list and the
+read-receipt list (who has read a given message — a read, tracked by no ledger),
+and
+`room_create` adds rooms at a low rate until `SOAK_ROOM_CREATE_BUDGET` is
+spent. Every mutation is journaled before it is sent and reconciled through the
+room-service RPC with a MongoDB primary read as the authoritative arbiter.
+Mutations are never resent, and only a request proven not to have left the
+process is recorded as `not_sent`.
+
+The `read_receipt` lane is a mutation, not that read: it marks a room as read
+and is journaled. The subscription cursor only moves forward,
+so the lane journals the previously confirmed cursor as a baseline and the
+observer compares two server-written timestamps — loadgen's clock never enters
+the verdict. `user_read` covers user-service's read surface — me, profile, settings,
+status, chatlist, priority contacts, apps, the four subscription reads, and the
+two thread reads — dispatched uniformly rather than weighted like a real
+client, so each path gets enough samples in a fault window to be
+interpretable. `search_read` drives message and room search. Room queries use tokens the seeded
+room names carry and return real hits; message bodies are generated filler with
+no word boundaries, so message queries match nothing by construction and measure
+the request path and an empty result set — which is what the lane is for, since
+it exists to show whether search-service still answers during a fault. `presence` publishes
+hello/ping/activity/bye and periodically re-queries presence-service in
+batches. It is intentionally outside the ledger:
+core NATS publishes are buffered during an outage, so only the query answer is
+evidence, and comparison is suppressed while a signal is still settling
+(`SOAK_PRESENCE_SETTLE`) or old enough for the connection TTL
+(`SOAK_PRESENCE_TTL`) to have legitimately expired it.
+
+The evidence journal is identified by `SOAK_LEDGER_EPOCH` rather than the run
+ID alone: the run ID owns the seeded topology, the epoch owns the journal, so
+an image whose ledger contract changed starts a fresh journal without a
+re-seed. Earlier journals are retained, never replayed, and counted in
+`loadgen_failure_abandoned_journals`.
+
 Persistent WAL writes use a 10 ms bounded group-commit window. A pre-publish
 intent waits for the shared fsync barrier; later lifecycle records flush on the
 next barrier, timer, compaction, or shutdown. Use

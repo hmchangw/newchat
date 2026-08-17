@@ -3,110 +3,463 @@
   "schemaVersion": 39,
   "version": 1,
   "refresh": "5s",
-  "time": {"from": "now-15m", "to": "now"},
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
   "panels": [
     {
       "type": "timeseries",
       "title": "Throughput (msg/s)",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-      "targets": [{"expr": "rate(loadgen_published_total[10s])", "refId": "A"}]
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "rate(loadgen_published_total[10s])",
+          "refId": "A"
+        }
+      ]
     },
     {
       "type": "timeseries",
       "title": "E1 gatekeeper latency (P50/P95/P99)",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum(rate(loadgen_e1_latency_seconds_bucket[30s])) by (le))", "legendFormat": "p50", "refId": "A"},
-        {"expr": "histogram_quantile(0.95, sum(rate(loadgen_e1_latency_seconds_bucket[30s])) by (le))", "legendFormat": "p95", "refId": "B"},
-        {"expr": "histogram_quantile(0.99, sum(rate(loadgen_e1_latency_seconds_bucket[30s])) by (le))", "legendFormat": "p99", "refId": "C"}
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(loadgen_e1_latency_seconds_bucket[30s])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(loadgen_e1_latency_seconds_bucket[30s])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(loadgen_e1_latency_seconds_bucket[30s])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "E2 broadcast latency (P50/P95/P99)",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum(rate(loadgen_e2_latency_seconds_bucket[30s])) by (le))", "legendFormat": "p50", "refId": "A"},
-        {"expr": "histogram_quantile(0.95, sum(rate(loadgen_e2_latency_seconds_bucket[30s])) by (le))", "legendFormat": "p95", "refId": "B"},
-        {"expr": "histogram_quantile(0.99, sum(rate(loadgen_e2_latency_seconds_bucket[30s])) by (le))", "legendFormat": "p99", "refId": "C"}
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(loadgen_e2_latency_seconds_bucket[30s])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(loadgen_e2_latency_seconds_bucket[30s])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(loadgen_e2_latency_seconds_bucket[30s])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Consumer pending",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-      "targets": [{"expr": "loadgen_consumer_pending", "legendFormat": "{{durable}}", "refId": "A"}]
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "loadgen_consumer_pending",
+          "legendFormat": "{{durable}}",
+          "refId": "A"
+        }
+      ]
     },
     {
       "type": "timeseries",
       "title": "Consumer ack pending",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-      "targets": [{"expr": "loadgen_consumer_ack_pending", "legendFormat": "{{durable}}", "refId": "A"}]
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "loadgen_consumer_ack_pending",
+          "legendFormat": "{{durable}}",
+          "refId": "A"
+        }
+      ]
     },
     {
       "type": "timeseries",
       "title": "Publish errors/sec",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
-      "targets": [{"expr": "rate(loadgen_publish_errors_total[10s])", "legendFormat": "{{reason}}", "refId": "A"}]
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "rate(loadgen_publish_errors_total[10s])",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
     },
     {
       "type": "timeseries",
       "title": "Cassandra soak operation rate",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
-      "targets": [{"expr": "sum by (action, outcome) (rate(loadgen_soak_operations_total[1m]))", "legendFormat": "{{action}} / {{outcome}}", "refId": "A"}]
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum by (action, outcome) (rate(loadgen_soak_operations_total[1m]))",
+          "legendFormat": "{{action}} / {{outcome}}",
+          "refId": "A"
+        }
+      ]
     },
     {
       "type": "timeseries",
       "title": "Failure ledger terminal outcomes",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
-      "targets": [{"expr": "sum by (lane, result) (rate(loadgen_failure_operations_total{scenario=\"message_soak\"}[1m]))", "legendFormat": "{{lane}} / {{result}}", "refId": "A"}]
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum by (lane, result) (rate(loadgen_failure_operations_total{scenario=\"message_soak\"}[1m]))",
+          "legendFormat": "{{lane}} / {{result}}",
+          "refId": "A"
+        }
+      ]
     },
     {
       "type": "timeseries",
       "title": "NATS connection and lifecycle events",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
       "targets": [
-        {"expr": "loadgen_nats_connected{pool=\"soak\"}", "legendFormat": "{{pool}} connected", "refId": "A"},
-        {"expr": "sum by (pool, event) (rate(loadgen_nats_connection_events_total[1m]))", "legendFormat": "{{pool}} / {{event}}/s", "refId": "B"}
+        {
+          "expr": "loadgen_nats_connected{pool=\"soak\"}",
+          "legendFormat": "{{pool}} connected",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (pool, event) (rate(loadgen_nats_connection_events_total[1m]))",
+          "legendFormat": "{{pool}} / {{event}}/s",
+          "refId": "B"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Reconciliation inflight and invalidations",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
       "targets": [
-        {"expr": "sum by (lane) (loadgen_failure_inflight{scenario=\"message_soak\"})", "legendFormat": "{{lane}} inflight", "refId": "A"},
-        {"expr": "sum by (reason) (increase(loadgen_failure_invalidations_total[5m]))", "legendFormat": "{{reason}} invalidations/5m", "refId": "B"},
-        {"expr": "sum by (reason) (increase(loadgen_failure_untracked_total[5m]))", "legendFormat": "{{reason}} untracked/5m", "refId": "C"},
-        {"expr": "increase(loadgen_failure_dropped_total[5m])", "legendFormat": "dropped on recovery/5m", "refId": "D"}
+        {
+          "expr": "sum by (lane) (loadgen_failure_inflight{scenario=\"message_soak\"})",
+          "legendFormat": "{{lane}} inflight",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (increase(loadgen_failure_invalidations_total[5m]))",
+          "legendFormat": "{{reason}} invalidations/5m",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (reason) (increase(loadgen_failure_untracked_total[5m]))",
+          "legendFormat": "{{reason}} untracked/5m",
+          "refId": "C"
+        },
+        {
+          "expr": "increase(loadgen_failure_dropped_total[5m])",
+          "legendFormat": "dropped on recovery/5m",
+          "refId": "D"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Failure ledger WAL and loadgen memory",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
       "targets": [
-        {"expr": "loadgen_failure_journal_bytes", "legendFormat": "WAL bytes", "refId": "A"},
-        {"expr": "process_resident_memory_bytes", "legendFormat": "RSS bytes", "refId": "B"},
-        {"expr": "go_memstats_heap_alloc_bytes", "legendFormat": "Go heap bytes", "refId": "C"}
+        {
+          "expr": "loadgen_failure_journal_bytes",
+          "legendFormat": "WAL bytes",
+          "refId": "A"
+        },
+        {
+          "expr": "process_resident_memory_bytes",
+          "legendFormat": "RSS bytes",
+          "refId": "B"
+        },
+        {
+          "expr": "go_memstats_heap_alloc_bytes",
+          "legendFormat": "Go heap bytes",
+          "refId": "C"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Reconciliation observations",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
-      "targets": [{"expr": "sum by (observer, result) (rate(loadgen_failure_observations_total{scenario=\"message_soak\"}[1m]))", "legendFormat": "{{observer}} / {{result}}", "refId": "A"}]
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "targets": [
+        {
+          "expr": "sum by (observer, result) (rate(loadgen_failure_observations_total{scenario=\"message_soak\"}[1m]))",
+          "legendFormat": "{{observer}} / {{result}}",
+          "refId": "A"
+        }
+      ]
     },
     {
       "type": "timeseries",
       "title": "Failure evidence durability",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 48},
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
       "targets": [
-        {"expr": "histogram_quantile(0.95, sum by (le) (rate(loadgen_failure_wal_flush_duration_seconds_bucket[5m])))", "legendFormat": "WAL fsync p95", "refId": "A"},
-        {"expr": "sum(rate(loadgen_failure_wal_flush_batch_size_sum[5m])) / sum(rate(loadgen_failure_wal_flush_batch_size_count[5m]))", "legendFormat": "WAL mean batch records", "refId": "B"},
-        {"expr": "sum(rate(loadgen_failure_wal_appends_total{result=\"error\"}[5m]))", "legendFormat": "WAL append errors/s", "refId": "C"},
-        {"expr": "histogram_quantile(0.95, sum by (le) (rate(loadgen_failure_evidence_flush_duration_seconds_bucket[5m])))", "legendFormat": "recipient sidecar flush p95", "refId": "D"},
-        {"expr": "sum(rate(loadgen_failure_evidence_flush_duration_seconds_count{result=\"error\"}[5m]))", "legendFormat": "recipient sidecar errors/s", "refId": "E"}
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(loadgen_failure_wal_flush_duration_seconds_bucket[5m])))",
+          "legendFormat": "WAL fsync p95",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(loadgen_failure_wal_flush_batch_size_sum[5m])) / sum(rate(loadgen_failure_wal_flush_batch_size_count[5m]))",
+          "legendFormat": "WAL mean batch records",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(loadgen_failure_wal_appends_total{result=\"error\"}[5m]))",
+          "legendFormat": "WAL append errors/s",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(loadgen_failure_evidence_flush_duration_seconds_bucket[5m])))",
+          "legendFormat": "recipient sidecar flush p95",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(loadgen_failure_evidence_flush_duration_seconds_count{result=\"error\"}[5m]))",
+          "legendFormat": "recipient sidecar errors/s",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Room and member lane outcomes",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "targets": [
+        {
+          "expr": "sum by (lane, result) (rate(loadgen_failure_operations_total{scenario=\"message_soak\", lane=~\"member_mutation|room_mutation|room_create|read_receipt\"}[5m]))",
+          "legendFormat": "{{lane}} {{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Room state observer sources",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "targets": [
+        {
+          "expr": "sum by (source, result) (rate(loadgen_soak_room_state_source_total[5m]))",
+          "legendFormat": "{{source}} {{result}}",
+          "refId": "A"
+        },
+        {
+          "expr": "loadgen_failure_observer_up{observer=\"room_state\"}",
+          "legendFormat": "observer up",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Member candidate pool",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "targets": [
+        {
+          "expr": "sum by (state) (loadgen_soak_room_candidates)",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        },
+        {
+          "expr": "loadgen_soak_room_pool_degraded",
+          "legendFormat": "degraded",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (reason) (rate(loadgen_soak_room_pool_exhausted_total[5m]))",
+          "legendFormat": "exhausted {{reason}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Room create budget and retained journals",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "targets": [
+        {
+          "expr": "loadgen_soak_room_create_budget_remaining",
+          "legendFormat": "create budget remaining",
+          "refId": "A"
+        },
+        {
+          "expr": "loadgen_failure_abandoned_journals",
+          "legendFormat": "abandoned journals",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Search index evidence",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 104
+      },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(loadgen_failure_observations_total{scenario=\"message_soak\", observer=\"search_index\"}[5m]))",
+          "legendFormat": "index {{result}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (outcome) (rate(loadgen_soak_operations_total{action=\"search_index_probe\"}[5m]))",
+          "legendFormat": "probe {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "expr": "loadgen_failure_observer_up{observer=\"search_index\"}",
+          "legendFormat": "observer up",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sampled consumer health",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 96
+      },
+      "targets": [
+        {
+          "expr": "loadgen_consumer_up",
+          "legendFormat": "{{durable}} up",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (durable, reason) (rate(loadgen_consumer_sample_errors_total[5m]))",
+          "legendFormat": "{{durable}} {{reason}} errors/s",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Presence signals and verification",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 88
+      },
+      "targets": [
+        {
+          "expr": "sum by (signal) (rate(loadgen_soak_presence_signals_total[5m]))",
+          "legendFormat": "{{signal}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (result) (rate(loadgen_soak_presence_checks_total[5m]))",
+          "legendFormat": "check {{result}}",
+          "refId": "B"
+        },
+        {
+          "expr": "loadgen_soak_presence_connections",
+          "legendFormat": "connections online",
+          "refId": "C"
+        }
       ]
     }
   ]

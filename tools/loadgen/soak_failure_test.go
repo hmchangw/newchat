@@ -726,3 +726,136 @@ func (v *fakeSoakFailureVerifier) Verify(
 	v.results = v.results[1:]
 	return result, nil
 }
+
+type stubSoakSearchIndexProbe struct {
+	result soakSearchIndexResult
+	err    error
+	settle time.Duration
+	calls  int
+}
+
+func (p *stubSoakSearchIndexProbe) Indexed(
+	context.Context,
+	*failureOperation,
+) (soakSearchIndexResult, error) {
+	p.calls++
+	return p.result, p.err
+}
+
+func (p *stubSoakSearchIndexProbe) SettleBoundary(publishedAt time.Time) time.Time {
+	return publishedAt.Add(p.settle)
+}
+
+// A too-early operation must be rescheduled to the settle boundary. Retrying it
+// every retry interval instead would spend several times the whole
+// reconciliation budget on queries that cannot succeed yet.
+func TestSoakFailureReconciler_TooEarlySearchProbeWaitsForTheSettleBoundary(t *testing.T) {
+	startedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	now := startedAt.Add(12 * time.Second)
+	probe := &stubSoakSearchIndexProbe{result: soakSearchIndexTooEarly, settle: 30 * time.Second}
+	ledger := newSoakSearchTestLedger(t, startedAt, now)
+	reconciler := newSoakFailureReconciler(
+		ledger, &fakeSoakFailureVerifier{results: []soakFailureHistoryResult{soakFailureHistoryFound}},
+		time.Second, func() time.Time { return now },
+		withSoakFailureSearchIndexProbe(probe),
+	)
+
+	// History resolves first, then the search step runs and finds it too early.
+	handled, err := reconciler.Try(context.Background())
+	require.NoError(t, err)
+	require.True(t, handled)
+	handled, err = reconciler.Try(context.Background())
+	require.NoError(t, err)
+	require.True(t, handled)
+	assert.Equal(t, 1, probe.calls)
+
+	// Nothing is claimable again until the settle boundary, not one retry
+	// interval later.
+	_, claimable := ledger.ClaimDue(startedAt.Add(29 * time.Second))
+	assert.False(t, claimable, "polling through the settle window burns the reconcile budget")
+	_, claimable = ledger.ClaimDue(startedAt.Add(31 * time.Second))
+	assert.True(t, claimable)
+}
+
+// Too-early at the deadline means the settle window outlived the deadline. That
+// is a configuration problem, not evidence of loss.
+func TestSoakFailureReconciler_TooEarlyAtTheDeadlineIsUnverified(t *testing.T) {
+	startedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	probe := &stubSoakSearchIndexProbe{result: soakSearchIndexTooEarly, settle: time.Hour}
+	now := startedAt.Add(time.Second)
+	ledger := newSoakSearchTestLedger(t, startedAt, now)
+	reconciler := newSoakFailureReconciler(
+		ledger, &fakeSoakFailureVerifier{results: []soakFailureHistoryResult{soakFailureHistoryFound}},
+		time.Second, func() time.Time { return now },
+		withSoakFailureSearchIndexProbe(probe),
+	)
+
+	_, err := reconciler.Try(context.Background())
+	require.NoError(t, err)
+	now = startedAt.Add(2 * time.Minute)
+	_, err = reconciler.Try(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultUnverified])
+}
+
+func newSoakSearchTestLedger(t *testing.T, startedAt, now time.Time) *failureLedger {
+	t.Helper()
+	contract := newFailureObserverContract(false, true)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 4, Now: func() time.Time { return now }, ObserverContract: &contract,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(&failureOperation{
+		ID: "m1", Scenario: soakFailureScenario, Lane: soakFailureLaneMessageSend,
+		OperationType:  failureOperationMessageCreate,
+		LifecycleState: failureOperationJournaled,
+		StartedAt:      startedAt, VerifyAfter: startedAt,
+		Deadline:   startedAt.Add(time.Minute),
+		Targets:    map[string]string{"roomId": "room-1", "messageId": "m1"},
+		Attributes: map[string]string{soakFailureAttributeAccount: "user-a"},
+		Effects:    messageCreateExpectedEffectsForObservers(false, true, 0, ""),
+		Expected: []failureObserver{
+			failureObserverAdmission, failureObserverHistory, failureObserverSearchIndex,
+		},
+	}))
+	_, err = ledger.Observe("m1", failureObserverAdmission, failureObservationGood, startedAt)
+	require.NoError(t, err)
+	return ledger
+}
+
+// The message reconciler and the room reconciler each understand only their own
+// lane's effects. A lane-blind claim hands a room mutation to the Cassandra
+// history verifier, which cannot observe room_state and records its verdict
+// against an observer the operation never declared.
+func TestSoakFailureReconciler_LeavesRoomLaneOperationsAlone(t *testing.T) {
+	now := time.Date(2026, 8, 16, 4, 5, 6, 0, time.UTC)
+	ledger, err := newFailureLedger(failureLedgerConfig{
+		Capacity: 4, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Start(&failureOperation{
+		SchemaVersion: 2, ID: "room-operation", RunID: "run-1",
+		Scenario: soakFailureScenario, Lane: soakFailureLaneMemberMutation,
+		OperationType: failureOperationMemberAdd, LifecycleState: failureOperationJournaled,
+		StartedAt: now, VerifyAfter: now, Deadline: now.Add(time.Minute),
+		Targets: map[string]string{"roomId": "room-1", "account": "user-a"},
+		Effects: memberMutationExpectedEffects(),
+	}))
+
+	reconciler := newSoakFailureReconciler(
+		ledger,
+		&fakeSoakFailureVerifier{err: errors.New("the message verifier must never see a room operation")},
+		time.Second,
+		func() time.Time { return now },
+	)
+
+	ran, err := reconciler.Try(context.Background())
+
+	require.NoError(t, err)
+	assert.False(t, ran, "a room operation is not the message reconciler's to claim")
+	operations := ledger.ActiveOperations()
+	require.Len(t, operations, 1)
+	assert.Empty(t, operations[0].Observations,
+		"the room operation must still be waiting for its own observer")
+}

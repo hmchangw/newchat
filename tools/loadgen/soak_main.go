@@ -52,6 +52,11 @@ type soakRuntimeStore interface {
 // own: validateSoakPageBudget checks the actual pair at startup.
 const soakDefaultPageLimit = 15
 
+// soakRoomInfoBatchSize is how many rooms a room-read batch asks about. It is
+// far below the payload budget a message page needs, since a room record is
+// metadata rather than message bodies.
+const soakRoomInfoBatchSize = 20
+
 // soakWalkRowBudget is how many clustered rows a paged walk must be able to
 // reach, independent of how the pages are sized.
 //
@@ -568,6 +573,9 @@ func runSoakWorkload(
 	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
 		trackerOptions = append(trackerOptions, withSoakFailureRecipientObserver(recipientObserver))
 	}
+	trackerOptions = append(
+		trackerOptions, withSoakFailureSearchObserver(cfg.Soak.SearchObserverEnabled),
+	)
 	failureTracker := newSoakFailureTracker(
 		ledger,
 		cfg.Soak.PersistGrace,
@@ -672,7 +680,25 @@ func runSoakWorkload(
 		recorders.verify,
 		now,
 	)
-	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 1)
+	searchReader, searchReaderErr := newSoakSearchReader(
+		soakSearchConfig{
+			SiteID: cfg.SiteID, PageSize: opts.PageLimit,
+			RequestTimeout: soakRequestTimeout, Settle: cfg.Soak.SearchSettle,
+		},
+		&topology, rpc, recorders.read,
+		rand.New(rand.NewSource(seed+13)),
+		now,
+	)
+	if searchReaderErr != nil {
+		slog.Error("build Cassandra soak search reader", "error", searchReaderErr)
+		return 1
+	}
+	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 2)
+	if cfg.Soak.SearchObserverEnabled {
+		reconcilerOptions = append(reconcilerOptions, withSoakFailureSearchIndexProbe(
+			newSoakSearchIndexProbe(searchReader, catalog),
+		))
+	}
 	if recipientObserver := observationRuntime.Recipient(); recipientObserver != nil {
 		reconcilerOptions = append(reconcilerOptions, withSoakFailureRecipientFinalizer(recipientObserver))
 	}
@@ -742,6 +768,107 @@ func runSoakWorkload(
 		recorders.verify,
 		now,
 	)
+
+	roomPool, err := newSoakRoomStatePool(
+		&topology,
+		cfg.Soak.MemberQuarantineMax,
+		metrics,
+		rand.New(rand.NewSource(seed+8)),
+	)
+	if err != nil {
+		slog.Error("prepare soak room state pool", "error", err)
+		return 1
+	}
+	roomReader := newSoakRoomReader(
+		soakRoomReadConfig{
+			SiteID: cfg.SiteID, BatchSize: soakRoomInfoBatchSize,
+			RequestTimeout: soakRequestTimeout,
+		},
+		roomPool,
+		rpc,
+		recorders.read,
+		rand.New(rand.NewSource(seed+9)),
+		now,
+	)
+	// The read-receipt read needs a real message ID, which only the catalog has.
+	roomReader.SetMessageSource(catalog)
+	userReader, userReaderErr := newSoakUserReader(
+		soakUserReadConfig{
+			SiteID: cfg.SiteID, PageLimit: opts.PageLimit,
+			RequestTimeout: soakRequestTimeout,
+		},
+		&topology, rpc, recorders.read,
+		rand.New(rand.NewSource(seed+11)),
+		now,
+	)
+	if userReaderErr != nil {
+		slog.Error("build Cassandra soak user reader", "error", userReaderErr)
+		return 1
+	}
+	roomStateHealth := newFailureObserverHealth(failureObserverRoomState, now())
+	roomVerifier := newSoakRoomStateVerifier(roomReader, store, cfg.SiteID, metrics, roomStateHealth, now)
+	roomLanes := newSoakRoomLanes(
+		soakRoomLaneConfig{
+			RunID: cfg.Soak.RunID, SiteID: cfg.SiteID,
+			PersistGrace: cfg.Soak.PersistGrace,
+			Deadline:     cfg.Soak.ReconcileDeadline, RetryInterval: cfg.Soak.ReconcileRetryInterval,
+			RoomCreateBudget: cfg.Soak.RoomCreateBudget, CreateRoomSize: cfg.Soak.RoomCreateSize,
+		},
+		roomPool,
+		newSoakRoomMutator(cfg.SiteID, rpc, soakRequestTimeout, now),
+		ledger,
+		roomReader,
+		store,
+		metrics,
+		recorders.mutation,
+		now,
+	)
+	// A replacement process inherits the run's unresolved operations from the
+	// WAL. Retake their pool reservations and subtract the rooms the run already
+	// created, or the new process races its predecessor's in-flight mutations
+	// and restarts the create cap from zero.
+	if recovered := ledger.ActiveOperations(); len(recovered) > 0 {
+		if inFlight := roomLanes.Rehydrate(recovered); inFlight > 0 {
+			// Counted for visibility only, and that is only safe because
+			// CountCreatedRooms matches on the run's name prefix alone: a
+			// create whose room was made is counted below whether or not
+			// ownership was ever recorded, and one whose room was not made
+			// occupies no allowance. Narrowing that query to claimed rooms
+			// would strand this count and let a crash loop re-spend the cap.
+			slog.Info("recovered in-flight soak room creates", "count", inFlight)
+		}
+	}
+	// An unknown count cannot be treated as zero: the lane would restart with the
+	// whole allowance and the per-run cap would become per-process, which is the
+	// unbounded MongoDB growth the budget exists to prevent.
+	created, countErr := store.CountCreatedRooms(ctx, cfg.Soak.RunID)
+	if countErr != nil {
+		slog.Error("count rooms this soak run already created",
+			"runId", cfg.Soak.RunID, "error", countErr)
+		return 1
+	}
+	roomLanes.SpendCreateBudget(created)
+	roomReconcileGate := newSoakShareGate(cfg.Soak.RoomReconcileReadShare)
+
+	presenceLane, err := newSoakPresenceLane(
+		soakPresenceConfig{
+			SiteID: cfg.SiteID, Connections: cfg.Soak.PresenceConnections,
+			QueryShare: cfg.Soak.PresenceQueryShare, Settle: cfg.Soak.PresenceSettle,
+			TTL: cfg.Soak.PresenceTTL, QueryBatchSize: cfg.Soak.PresenceQueryBatch,
+			RequestTimeout: soakRequestTimeout,
+		},
+		&topology,
+		newNATSSoakPresencePublisher(nc.NatsConn()),
+		rpc,
+		metrics,
+		recorders.read,
+		rand.New(rand.NewSource(seed+10)),
+		now,
+	)
+	if err != nil {
+		slog.Error("prepare soak presence lane", "error", err)
+		return 1
+	}
 
 	var verificationSequence atomic.Uint64
 	actions := soakWorkloadActions{
@@ -823,20 +950,85 @@ func runSoakWorkload(
 			verifier.Sample(actionCtx, roomID)
 			return nil
 		},
+		MemberMutation: func(actionCtx context.Context, _ bool) error {
+			if err := roomLanes.MemberMutation(actionCtx); err != nil {
+				slog.Error("run Cassandra soak member mutation", "error", err)
+			}
+			return nil
+		},
+		RoomMutation: func(actionCtx context.Context, _ bool) error {
+			if err := roomLanes.RoomMutation(actionCtx); err != nil {
+				slog.Error("run Cassandra soak room mutation", "error", err)
+			}
+			return nil
+		},
+		RoomRead: func(actionCtx context.Context, _ bool) error {
+			// Room and member reconciliation borrows read slots so verification
+			// adds no unbudgeted request rate, capped by its share so a
+			// fault-time backlog cannot starve the room read mix.
+			if roomReconcileGate.Allow() {
+				reconciled, err := roomLanes.Reconcile(actionCtx, roomVerifier)
+				if err != nil {
+					slog.Error("reconcile Cassandra soak room operation", "error", err)
+				}
+				if reconciled {
+					return nil
+				}
+				probed, probeErr := roomLanes.ProbeQuarantine(actionCtx, roomVerifier)
+				if probeErr != nil {
+					slog.Error("probe quarantined soak member candidate", "error", probeErr)
+				}
+				if probed {
+					return nil
+				}
+				// The expiry sweep can finalize an operation this lane never
+				// claimed, which happens whenever a fault leaves more work than
+				// the reconcile budget retires. Reclaim those reservations or
+				// the affected rooms stop mutating for the rest of the run.
+				if roomLanes.SettleFinalized() > 0 {
+					return nil
+				}
+			}
+			if err := roomReader.ReadMixed(actionCtx); err != nil {
+				slog.Error("run Cassandra soak room read", "error", err)
+			}
+			return nil
+		},
+		UserRead: func(actionCtx context.Context, _ bool) error {
+			if err := userReader.ReadMixed(actionCtx); err != nil {
+				slog.Error("run Cassandra soak user read", "error", err)
+			}
+			return nil
+		},
+		SearchRead: func(actionCtx context.Context, _ bool) error {
+			if err := searchReader.ReadMixed(actionCtx); err != nil {
+				slog.Error("run Cassandra soak search read", "error", err)
+			}
+			return nil
+		},
+		RoomCreate: func(actionCtx context.Context, _ bool) error {
+			if err := roomLanes.RoomCreate(actionCtx); err != nil {
+				slog.Error("run Cassandra soak room create", "error", err)
+			}
+			return nil
+		},
+		ReadReceipt: func(actionCtx context.Context, _ bool) error {
+			if err := roomLanes.ReadReceipt(actionCtx); err != nil {
+				slog.Error("run Cassandra soak read receipt", "error", err)
+			}
+			return nil
+		},
+		Presence: func(actionCtx context.Context, _ bool) error {
+			if err := presenceLane.Signal(actionCtx); err != nil {
+				slog.Error("run Cassandra soak presence signal", "error", err)
+			}
+			return nil
+		},
 	}
 	workload := newSoakWorkload(
-		&soakWorkloadConfig{
-			RunID: cfg.Soak.RunID, Duration: cfg.Soak.RunDuration,
-			Continuous:        cfg.Soak.RunMode == soakRunModeContinuous,
-			HeartbeatInterval: cfg.Soak.HeartbeatInterval,
-			Warmup:            cfg.Soak.Warmup, SendRate: cfg.Soak.SendRate,
-			ReadRate: cfg.Soak.ReadRate, MutationRate: cfg.Soak.MutationRate,
-			ReactionRate:   cfg.Soak.ReactionRate,
-			PinnedListRate: cfg.Soak.PinnedListRate,
-			VerifyRate:     cfg.Soak.VerifyRate, MaxInFlight: cfg.MaxInFlight,
-		},
+		soakWorkloadConfigFrom(&cfg.Soak, cfg.MaxInFlight),
 		store,
-		actions,
+		&actions,
 		nil,
 		now,
 		nil,
@@ -870,13 +1062,29 @@ type soakConsumerSamplerTarget struct {
 	Durable string
 }
 
+// soakConsumerSamplerTargets lists every durable the lanes feed. A consumer
+// with traffic and no sampler is a blind spot precisely where a fault window
+// needs backlog evidence, so the room and member lanes' downstream consumers on
+// ROOMS and INBOX belong here alongside the message hops.
 func soakConsumerSamplerTargets(siteID string) []soakConsumerSamplerTarget {
 	canonicalStream := stream.MessagesCanonical(siteID).Name
+	roomsStream := stream.Rooms(siteID).Name
+	inboxStream := stream.Inbox(siteID).Name
 	return []soakConsumerSamplerTarget{
 		{Stream: stream.Messages(siteID).Name, Durable: "message-gatekeeper"},
 		{Stream: canonicalStream, Durable: "message-worker"},
 		{Stream: canonicalStream, Durable: "broadcast-worker"},
 		{Stream: canonicalStream, Durable: "notification-worker"},
+		// search-sync-worker indexes messages off the same canonical stream.
+		{Stream: canonicalStream, Durable: "message-sync"},
+		{Stream: roomsStream, Durable: "room-worker"},
+		// notification-worker runs a second consumer that invalidates its cache
+		// on mute events, which the room mutation lane drives.
+		{Stream: roomsStream, Durable: "notification-worker-room-event-invalidate"},
+		// Both search-sync collections index subscription lifecycle events off
+		// the INBOX internal lane that the member mutation lane produces.
+		{Stream: inboxStream, Durable: "spotlight-sync"},
+		{Stream: inboxStream, Durable: "user-room-sync"},
 	}
 }
 
@@ -989,7 +1197,7 @@ func startSoakMetricsServer(addr string, metrics *Metrics) *http.Server {
 }
 
 func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
-	return map[soakRPCAction]float64{
+	rates := map[soakRPCAction]float64{
 		soakRPCSend:        cfg.SendRate * (1 - cfg.ThreadShare),
 		soakRPCThreadReply: cfg.SendRate * cfg.ThreadShare,
 		soakRPCLoadHistory: cfg.ReadRate * 0.75,
@@ -998,7 +1206,29 @@ func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
 		soakRPCReact:       cfg.ReactionRate,
 		soakRPCPinnedList:  cfg.PinnedListRate,
 		soakRPCReadBack:    cfg.VerifyRate,
+		// The room mutation lane alternates rename and mute, so each shape gets
+		// half of the configured rate.
+		soakRPCMemberAdd:        cfg.MemberMutationRate / 2,
+		soakRPCMemberRemove:     cfg.MemberMutationRate / 2,
+		soakRPCRoomRename:       cfg.RoomMutationRate / 2,
+		soakRPCMuteToggle:       cfg.RoomMutationRate / 2,
+		soakRPCRoomCreate:       cfg.RoomCreateRate,
+		soakRPCMemberList:       cfg.RoomReadRate * 0.45,
+		soakRPCRoomsInfo:        cfg.RoomReadRate * 0.27,
+		soakRPCSubscriptionList: cfg.RoomReadRate * 0.18,
+		soakRPCReadReceiptList:  cfg.RoomReadRate * 0.10,
+		soakRPCMessageRead:      cfg.ReadReceiptRate,
+		soakRPCPresenceQuery:    cfg.PresenceRate * cfg.PresenceQueryShare,
+		soakRPCSearchMessages:   cfg.SearchReadRate * 0.7,
+		soakRPCSearchRooms:      cfg.SearchReadRate * 0.3,
 	}
+	// The user lane dispatches uniformly across its reads, so each carries an
+	// equal share of the configured rate.
+	share := cfg.UserReadRate / float64(len(soakUserReadActions))
+	for _, action := range soakUserReadActions {
+		rates[action] = share
+	}
+	return rates
 }
 
 var _ soakRuntimeStore = (*mongoSoakStore)(nil)

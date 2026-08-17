@@ -99,6 +99,26 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_RECIPIENT_OBSERVER_ENABLED` | `false` | Opt in to exact recipient observation |
 | `SOAK_RECIPIENT_OBSERVER_QUEUE` | `8192` | Bounded recipient callback queue |
 | `SOAK_RECIPIENT_OBSERVER_CONNECTIONS` | `32` | Bounded account-attributed NATS connection pool |
+| `SOAK_LEDGER_EPOCH` | `v1` | Evidence-journal identity, separate from the run ID |
+| `SOAK_MEMBER_MUTATION_RATE` | `2` | Member add/remove cycles per second |
+| `SOAK_ROOM_MUTATION_RATE` | `1` | Rename and mute toggles per second, alternating |
+| `SOAK_ROOM_READ_RATE` | `20` | Room reads per second; also funds reconciliation |
+| `SOAK_USER_READ_RATE` | `10` | user-service reads per second, split evenly across its reads |
+| `SOAK_SEARCH_READ_RATE` | `5` | search-service reads per second |
+| `SOAK_SEARCH_OBSERVER_ENABLED` | `false` | Opt in to search-index observation |
+| `SOAK_SEARCH_SETTLE` | `30s` | Grace before the index probe asks about a message |
+| `SOAK_ROOM_CREATE_RATE` | `0.05` | Room creations per second until the budget is spent |
+| `SOAK_ROOM_CREATE_BUDGET` | `2000` | Total rooms the create lane may add in one run |
+| `SOAK_ROOM_CREATE_SIZE` | `5` | Members a created room starts with |
+| `SOAK_ROOM_RECONCILE_READ_SHARE` | `0.5` | Maximum room-read share reconciliation may claim |
+| `SOAK_MEMBER_QUARANTINE_MAX` | `10000` | Bounded parked room/account pairs awaiting a re-probe |
+| `SOAK_READ_RECEIPT_RATE` | `5` | Mark-read operations per second |
+| `SOAK_PRESENCE_RATE` | `30` | Presence signals per second |
+| `SOAK_PRESENCE_CONNECTIONS` | `2000` | Simulated presence connections held online |
+| `SOAK_PRESENCE_QUERY_SHARE` | `0.1` | Share of presence slots spent verifying instead of signalling |
+| `SOAK_PRESENCE_QUERY_BATCH` | `50` | Accounts per batch presence query |
+| `SOAK_PRESENCE_SETTLE` | `5s` | Grace before a published signal is compared |
+| `SOAK_PRESENCE_TTL` | `5m` | Connection TTL past which an absence is legal |
 
 Helm exposes the same opt-in as
 `recipientObserver.enabled|queue|connections`. Queue and connection bounds are
@@ -106,3 +126,270 @@ validated even while disabled.
 
 The dashboard interpretation contract is defined in
 [`failure-testing/dashboard-evidence-contract.md`](failure-testing/dashboard-evidence-contract.md).
+
+## Room and member lanes
+
+The continuous soak also exercises room and member state. The lanes ride the
+same `phase: seed -> soak -> stopped` lifecycle; there is no extra Deployment
+and no extra phase.
+
+| Lane | Operations | Ledger |
+|---|---|---|
+| `member_mutation` | `member_add`, `member_remove` | `admission` + `room_state` |
+| `room_mutation` | `room_rename`, `mute_toggle` | `admission` + `room_state` |
+| `room_create` | `room_create` | `admission` + `room_state` |
+| `read_receipt` | `message_read` | `admission` + `room_state` |
+| `room_read` | member list, rooms-info batch, subscription list, read receipts | none |
+| `user_read` | 14 user-service reads, dispatched uniformly | none |
+| `search_read` | message and room search | none |
+| `presence` | hello / ping / activity / bye, batch query | none |
+
+`room_read` is read-only. A read has no expected side effect to reconcile, so
+it emits latency, error, and result metrics and creates no ledger operation.
+`presence` is a special case covered below.
+
+### The room_state observer
+
+Room and member effects are reconciled through one observer with two sources:
+
+1. **room-service RPC** — the path a real client uses.
+2. **MongoDB primary read** — the authoritative arbiter.
+
+The store settles disagreements. room-service returning nothing can mean its
+read path is degraded, while a primary read that finds the state proves the
+write landed, so an absence claim requires the authoritative source to agree.
+An unreachable primary produces no claim at all: the probe stays `unverified`
+and is re-run, because "we could not look" is not evidence of loss. The one
+thing the RPC can settle alone is a positive — if room-service already shows
+the effect, the write landed. Reads are explicitly routed at the primary because the
+shared soak client connects with `SecondaryPreferred`; a lagging secondary
+would otherwise report a completed write as missing and turn replication lag
+into a false data-loss claim during exactly the failures being measured.
+
+Rename and mute additionally separate "the change did not land" from a state
+that could not legally occur — a name nobody asked for, or a subscription that
+vanished — so a lost mutation is never confused with a corrupted one.
+
+### Result rules
+
+- `missing_after_deadline` requires the admission observer to have recorded
+  `good`. An ambiguous request that left no state is `unverified`, never a
+  data-loss claim.
+- `not_sent` is reserved for failures proven not to have left the process: a
+  body that could not be encoded, or a request never attempted. A timeout or a
+  dropped connection stays ambiguous.
+- Mutations are never resent. They are not idempotent — a replayed remove drops
+  a member the first attempt already removed and a replayed mute toggle
+  restores the state it just changed — so ambiguity is settled by
+  reconciliation, not by retrying.
+- A mutation the ledger refuses is not sent at all. Message traffic keeps
+  flowing when the ledger degrades because holding the offered load matters
+  more; a room mutation does the opposite, because untracked state drift cannot
+  be reconciled afterwards.
+
+### Candidate cycling and quarantine
+
+Each room owns a ring of reusable accounts. A candidate is added, verified,
+then removed and returned to the ring, so room size oscillates by one and the
+pool never runs dry. A per-room lease and a per-account mute lease keep two
+conflicting operations off the same target.
+
+A mutation that ends `unverified` leaves the real state unknown. Acting on a
+guess would re-add an existing member or toggle a mute twice, so the pair is
+parked and re-probed from the room-read lane until its state is known again.
+
+Quarantine overflow is a **reversible traffic degradation**, reported through
+`loadgen_soak_room_pool_degraded` and `loadgen_soak_room_pool_exhausted_total`.
+It never invalidates the ledger: invalidation is a one-way, process-lifetime
+latch, so using it here would make every later fault window in a multi-day run
+inconclusive. Operators should gate on offered load instead — a lane whose
+`loadgen_soak_lane_attempts_total{outcome="sent"}` falls below 90% of
+`loadgen_soak_configured_rate` over a window makes that window inconclusive for
+that lane only.
+
+Use the attempts counter, **not** `loadgen_soak_dispatched_total`: dispatched
+counts scheduler slots and holds the pacing identity `intended = dispatched +
+scheduler_underrun + lane_saturation + global_saturation`, so a lane that found
+no usable target still consumes one and looks fully loaded. The two non-`sent`
+outcomes name the two ways a slot passes without a request: `no_target` for an
+exhausted pool, `refused` for a mutation the ledger declined.
+
+### Room creation budget
+
+Created rooms accumulate in MongoDB with no safe delete path before teardown,
+so the lane stops once `SOAK_ROOM_CREATE_BUDGET` is spent while every other
+room and member lane keeps running. A confirmed room is stamped with the run's
+ownership marker and appended to an ownership chunk, because teardown only
+deletes rooms carrying that marker and only reaches rooms a chunk lists.
+
+Created rooms join the room-read mix only. They stay out of the message and
+history lanes, which build their recipient expectations, room distribution, and
+pinned catalog once at startup — adding rooms mid-run would shift the traffic
+profile that a fault window is compared against, and a new room's encryption
+key is provisioned asynchronously.
+
+### Read receipts
+
+`messageRead` is a synchronous room-service write to `subscriptions.lastSeenAt`,
+so it is ledger-tracked like any other mutation. The cursor only ever moves
+forward, which makes it verifiable without trusting loadgen's clock: the lane
+records the previously confirmed cursor as the operation's baseline and the
+observer compares it against the new value. Both timestamps are written by the
+server, so clock skew between loadgen and room-service cannot produce a
+verdict.
+
+The first mark-read on a subscription has no baseline yet. Any cursor present
+at reconciliation settles it `good`; from then on the baseline is known and a
+cursor that failed to advance is real loss. A cursor that moved *backwards* is
+a `mismatch`, not a lost write — the monotonic guarantee was violated.
+
+The lane shares the room-read reconciliation budget, so its rate is included in
+the startup capacity check and in the chart's equivalent guard.
+
+### Presence
+
+Presence is deliberately outside the evidence ledger. Its signals — hello,
+ping, activity, bye — are core NATS fire-and-forget publishes: they are
+buffered client-side during an outage and flushed on reconnect, so a successful
+publish proves nothing about delivery and a failed one proves nothing about
+loss. Recording them as ledger operations would manufacture verdicts from
+non-evidence.
+
+What *is* evidence is the batch query. The lane keeps its own view of the
+connections it announced and periodically asks presence-service for the same
+set, comparing the answer. Two windows are excluded from comparison because a
+disagreement there is legal rather than a fault:
+
+- **Settle** (`SOAK_PRESENCE_SETTLE`) — a just-published signal has not
+  necessarily been applied yet.
+- **TTL** (`SOAK_PRESENCE_TTL`) — past the connection TTL, presence-service is
+  entitled to have expired the connection on its own.
+
+Outcomes land in `loadgen_soak_presence_checks_total{result}`; the announced
+population is reported as `loadgen_soak_presence_connections`. Accounts and
+connection IDs stay out of labels.
+
+### Sampled consumers
+
+The soak polls `ConsumerInfo` for every durable its lanes feed, so a backlog
+building behind any lane is visible without reading NATS directly:
+
+| Stream | Durable | Fed by |
+|---|---|---|
+| `MESSAGES` | `message-gatekeeper` | send |
+| `MESSAGES-CANONICAL` | `message-worker`, `broadcast-worker`, `notification-worker`, `message-sync` | send |
+| `ROOMS` | `room-worker` | member, rename, create |
+| `ROOMS` | `notification-worker-room-event-invalidate` | mute |
+| `INBOX` | `spotlight-sync`, `user-room-sync` | member |
+
+Stream and durable are Prometheus labels, so both are allowlisted and a typo
+fails at construction rather than minting an unbounded label.
+
+A consumer that is not deployed is a **reversible** condition, never a ledger
+invalidation: the sampler sets `loadgen_consumer_up` to 0 and counts a bounded
+`loadgen_consumer_sample_errors_total{reason}`. Treat a window where a required
+consumer reports `up == 0` as inconclusive for the lanes that feed it, and
+nothing more.
+
+Backlog is not a complete loss signal on its own. `search-sync-worker` Acks and
+drops a message whose payload fails to decode or build an action, so that class
+of loss leaves the consumer at zero pending — only the `search_index` observer
+sees it.
+
+### Search-index observation
+
+`search-sync-worker` Acks and drops a message whose payload it cannot decode or
+turn into a bulk action. That loss leaves its consumer at zero pending, no Nak
+and no redelivery — it is invisible from JetStream by construction. The only
+way to see it is to ask the query side, which is what the `search_index`
+observer does: after `SOAK_SEARCH_SETTLE`, it searches the message's own room
+and checks whether the message ID is among the hits.
+
+Three outcomes, deliberately distinct:
+
+| Probe answer | Result |
+|---|---|
+| Message among the hits | `good` |
+| Inside the settle window | rescheduled to the settle boundary, no query sent |
+| search-service answered without it, past the deadline | `missing_after_deadline` |
+| search-service unreachable, past the deadline | `unverified` |
+| Still too early at the deadline | `unverified` |
+
+"Too early" is a distinct answer from "unknown" on purpose. The operation is
+rescheduled to exactly the settle boundary rather than re-asked every retry
+interval: at the default rates, polling through a 30 s settle window would cost
+roughly `SOAK_SEND_RATE x 20` reconcile slots per second against a budget of
+`SOAK_READ_RATE x SOAK_RECONCILE_READ_SHARE`, several times over — the
+reconciliation backlog would grow without bound and the run would report a
+search problem it had created itself.
+
+Startup refuses a configuration where that cannot work: the observer adds a
+second reconcile step to every admitted message, so `SOAK_READ_RATE x
+SOAK_RECONCILE_READ_SHARE` must be at least `2 x SOAK_SEND_RATE`, and
+`SOAK_SEARCH_SETTLE` must be shorter than `SOAK_RECONCILE_DEADLINE`.
+
+An outage proves nothing about the message, so an unreachable search-service is
+never a loss claim.
+
+The probe takes its query term from the in-process message catalog, not the
+WAL: the ledger deliberately never stores a message body, and search-service
+has no lookup by message ID. A message recovered from the WAL after a pod
+replacement therefore has no term to query with and resolves `unverified` — the
+same stance recovered recipient operations already take, and the honest one,
+since the pre-restart evidence cannot be reconstructed.
+
+The observer is **opt-in** via `SOAK_SEARCH_OBSERVER_ENABLED`, and **enabling
+it is currently refused at startup**. The probe locates a message by full-text
+search, but every soak body is a single run of one character differing only in
+length, which analyzes to one huge token: the query distinguishes nothing and
+would report every message lost. Payloads need a per-message searchable marker
+before the observer can be trusted, so the run refuses rather than manufacture
+a data-loss report.
+
+With it off the observer contract is byte-identical to one built before the
+observer existed, so an existing `SOAK_LEDGER_EPOCH` stays valid. Turning it on
+will change the contract and require a new epoch.
+
+### Ledger epoch
+
+The run ID owns the seeded topology; the epoch owns the evidence journal. The
+WAL path is `{SOAK_LEDGER_DIR}/{runId}.{epoch}.wal`.
+
+A contract change makes an existing journal for the same run ID incompatible,
+which is a hard startup failure rather than a silent downgrade. Bumping
+`ledger.epoch` starts a fresh journal on an unchanged topology, so upgrading
+the image no longer forces a re-seed of the whole room set. Journals from
+earlier epochs stay on disk as evidence, are never replayed, and are counted in
+`loadgen_failure_abandoned_journals`. Treat one reconciliation deadline either
+side of an epoch switch as `INCONCLUSIVE`.
+
+### Reconciliation budget
+
+Room and member reconciliation and quarantine probes borrow `room_read` slots
+under `SOAK_ROOM_RECONCILE_READ_SHARE`, so verification adds no unbudgeted
+request rate and a fault-time backlog cannot starve the room read mix. Startup
+refuses a configuration whose room-read rate cannot retire the mutations the
+lanes produce; without that check the unresolved backlog grows without bound
+and every mutation eventually expires unverified.
+
+### Metrics
+
+| Metric | Meaning |
+|---|---|
+| `loadgen_soak_room_candidates{state}` | Member candidates by lifecycle state |
+| `loadgen_soak_room_quarantine_probes_total{result}` | Parked-pair re-probe outcomes |
+| `loadgen_soak_room_pool_exhausted_total{reason}` | Mutations skipped for lack of a usable target |
+| `loadgen_soak_room_pool_degraded` | Reversible candidate-pool degradation flag |
+| `loadgen_soak_room_create_budget_remaining` | Rooms the create lane may still add |
+| `loadgen_soak_room_state_source_total{source,result}` | Room-state observer outcomes per source |
+| `loadgen_soak_lane_attempts_total{lane,outcome}` | Lane slots by outcome: `sent`, `no_target`, `refused` |
+| `loadgen_soak_presence_signals_total{signal}` | Presence signals published, by kind |
+| `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
+| `loadgen_soak_presence_connections` | Connections the lane currently claims online |
+| `loadgen_failure_abandoned_journals` | Retained journals from earlier epochs |
+
+The existing `loadgen_failure_operations_total`,
+`loadgen_failure_observations_total`, `loadgen_failure_inflight`, and the
+`loadgen_soak_*` pacing families cover the new lanes through their existing
+`lane` and `observer` labels. Room IDs, accounts, and operation IDs remain WAL
+and log content only.

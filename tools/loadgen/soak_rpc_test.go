@@ -319,7 +319,7 @@ func TestSoakRPCClient_ClassifiesDecodeAndAssertionErrors(t *testing.T) {
 			Body: soakGetMessageByIDRequest{MessageID: "m1"}, Timeout: time.Second,
 		}, &cannedSoakResponse{})
 		require.Error(t, err)
-		assert.Equal(t, soakErrorDecode, result.ErrorClass)
+		assert.Equal(t, soakErrorResponseDecode, result.ErrorClass)
 	})
 
 	t.Run("assertion", func(t *testing.T) {
@@ -380,4 +380,41 @@ func TestValidSoakErrorClass_AgreesWithTheReportedSet(t *testing.T) {
 		assert.True(t, validSoakErrorClass(class),
 			"%q is reported but rejected by validation", class)
 	}
+}
+
+func TestValidSoakRPCAction_AcceptsRoomAndMemberActions(t *testing.T) {
+	for _, action := range []soakRPCAction{
+		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename, soakRPCMuteToggle,
+		soakRPCRoomCreate, soakRPCMemberList, soakRPCRoomsInfo,
+		soakRPCSubscriptionList, soakRPCRoomStateRead,
+	} {
+		t.Run(string(action), func(t *testing.T) {
+			assert.True(t, validSoakRPCAction(action))
+		})
+	}
+}
+
+// The two failures sit on opposite sides of the wire, so they must not share a
+// class: one proves the request never left, the other proves the server replied.
+func TestSoakRPCClient_ClassifiesEncodeAndDecodeSeparately(t *testing.T) {
+	client := newSoakRPCClient(
+		&soakRPCFakeTransport{}, soakRetryConfig{MaxAttempts: 1}, nil, nil,
+	)
+
+	result, err := client.Call(context.Background(), soakRPCRequest{
+		Action: soakRPCGetMessage, Body: make(chan int),
+	}, nil)
+	require.Error(t, err)
+	assert.Equal(t, soakErrorRequestEncode, result.ErrorClass)
+
+	decoding := newSoakRPCClient(
+		&soakRPCFakeTransport{replies: []soakRPCFakeReply{{data: []byte(`{"messageId":`)}}},
+		soakRetryConfig{MaxAttempts: 1}, nil, nil,
+	)
+	var response soakGetMessageByIDRequest
+	result, err = decoding.Call(context.Background(), soakRPCRequest{
+		Action: soakRPCGetMessage,
+	}, &response)
+	require.Error(t, err)
+	assert.Equal(t, soakErrorResponseDecode, result.ErrorClass)
 }

@@ -11,28 +11,74 @@ import (
 type soakWorkloadAction func(context.Context, bool) error
 
 type soakWorkloadActions struct {
-	Send       soakWorkloadAction
-	Read       soakWorkloadAction
-	Mutation   soakWorkloadAction
-	Reaction   soakWorkloadAction
-	PinnedList soakWorkloadAction
-	Verify     soakWorkloadAction
+	Send           soakWorkloadAction
+	Read           soakWorkloadAction
+	Mutation       soakWorkloadAction
+	Reaction       soakWorkloadAction
+	PinnedList     soakWorkloadAction
+	Verify         soakWorkloadAction
+	MemberMutation soakWorkloadAction
+	RoomMutation   soakWorkloadAction
+	RoomRead       soakWorkloadAction
+	UserRead       soakWorkloadAction
+	SearchRead     soakWorkloadAction
+	RoomCreate     soakWorkloadAction
+	ReadReceipt    soakWorkloadAction
+	Presence       soakWorkloadAction
 }
 
 type soakWorkloadConfig struct {
-	RunID             string
-	Duration          time.Duration
-	Continuous        bool
-	Warmup            time.Duration
-	HeartbeatInterval time.Duration
-	SendRate          float64
-	ReadRate          float64
-	MutationRate      float64
-	ReactionRate      float64
-	PinnedListRate    float64
-	VerifyRate        float64
-	MaxInFlight       int
-	StopOnActionError bool
+	RunID              string
+	Duration           time.Duration
+	Continuous         bool
+	Warmup             time.Duration
+	HeartbeatInterval  time.Duration
+	SendRate           float64
+	ReadRate           float64
+	MutationRate       float64
+	ReactionRate       float64
+	PinnedListRate     float64
+	VerifyRate         float64
+	MemberMutationRate float64
+	RoomMutationRate   float64
+	RoomReadRate       float64
+	UserReadRate       float64
+	SearchReadRate     float64
+	RoomCreateRate     float64
+	ReadReceiptRate    float64
+	PresenceRate       float64
+	MaxInFlight        int
+	StopOnActionError  bool
+}
+
+// soakWorkloadConfigFrom maps the parsed environment onto the workload's lane
+// rates. It exists as a named function rather than an inline literal because a
+// lane whose rate is never mapped through is skipped by lanes() and sends
+// nothing, while still reporting a configured target — a silent hole that only
+// a test over this mapping can catch.
+func soakWorkloadConfigFrom(cfg *soakConfig, maxInFlight int) *soakWorkloadConfig {
+	return &soakWorkloadConfig{
+		RunID:              cfg.RunID,
+		Duration:           cfg.RunDuration,
+		Continuous:         cfg.RunMode == soakRunModeContinuous,
+		Warmup:             cfg.Warmup,
+		HeartbeatInterval:  cfg.HeartbeatInterval,
+		SendRate:           cfg.SendRate,
+		ReadRate:           cfg.ReadRate,
+		MutationRate:       cfg.MutationRate,
+		ReactionRate:       cfg.ReactionRate,
+		PinnedListRate:     cfg.PinnedListRate,
+		VerifyRate:         cfg.VerifyRate,
+		MemberMutationRate: cfg.MemberMutationRate,
+		RoomMutationRate:   cfg.RoomMutationRate,
+		RoomReadRate:       cfg.RoomReadRate,
+		UserReadRate:       cfg.UserReadRate,
+		SearchReadRate:     cfg.SearchReadRate,
+		RoomCreateRate:     cfg.RoomCreateRate,
+		ReadReceiptRate:    cfg.ReadReceiptRate,
+		PresenceRate:       cfg.PresenceRate,
+		MaxInFlight:        maxInFlight,
+	}
 }
 
 type soakCompletion string
@@ -137,7 +183,7 @@ type soakWorkload struct {
 func newSoakWorkload(
 	cfg *soakWorkloadConfig,
 	store soakLifecycleStore,
-	actions soakWorkloadActions,
+	actions *soakWorkloadActions,
 	dispatch soakLaneDispatcher,
 	now func() time.Time,
 	onSaturation func(),
@@ -162,8 +208,11 @@ func newSoakWorkload(
 	if onSaturation == nil {
 		onSaturation = func() {}
 	}
+	if actions == nil {
+		actions = &soakWorkloadActions{}
+	}
 	workload := &soakWorkload{
-		cfg: config, store: store, actions: actions, dispatch: dispatch,
+		cfg: config, store: store, actions: *actions, dispatch: dispatch,
 		now: now, onSaturation: onSaturation,
 	}
 	for _, option := range options {
@@ -367,6 +416,26 @@ func (w *soakWorkload) lanes() []soakLane {
 		{name: "reaction", rate: w.cfg.ReactionRate, action: w.actions.Reaction},
 		{name: "pinned_list", rate: w.cfg.PinnedListRate, action: w.actions.PinnedList},
 		{name: "verify", rate: w.cfg.VerifyRate, action: w.actions.Verify},
+		{
+			name: soakFailureLaneMemberMutation, rate: w.cfg.MemberMutationRate,
+			action: w.actions.MemberMutation,
+		},
+		{
+			name: soakFailureLaneRoomMutation, rate: w.cfg.RoomMutationRate,
+			action: w.actions.RoomMutation,
+		},
+		{name: "room_read", rate: w.cfg.RoomReadRate, action: w.actions.RoomRead},
+		{name: "user_read", rate: w.cfg.UserReadRate, action: w.actions.UserRead},
+		{name: "search_read", rate: w.cfg.SearchReadRate, action: w.actions.SearchRead},
+		{
+			name: soakFailureLaneRoomCreate, rate: w.cfg.RoomCreateRate,
+			action: w.actions.RoomCreate,
+		},
+		{
+			name: soakFailureLaneReadReceipt, rate: w.cfg.ReadReceiptRate,
+			action: w.actions.ReadReceipt,
+		},
+		{name: "presence", rate: w.cfg.PresenceRate, action: w.actions.Presence},
 	}
 }
 

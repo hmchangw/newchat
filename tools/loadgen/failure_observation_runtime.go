@@ -32,7 +32,9 @@ func openSoakFailureObservationLedger(
 		return nil, false, errors.Join(err, fallbackErr)
 	}
 	fallback.Invalidate("wal")
-	recordFailureObserverConfiguration(metrics, newFailureObserverContract(cfg.RecipientObserverEnabled))
+	recordFailureObserverConfiguration(metrics, newFailureObserverContract(
+		cfg.RecipientObserverEnabled, cfg.SearchObserverEnabled,
+	))
 	return fallback, true, nil
 }
 

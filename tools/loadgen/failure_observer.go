@@ -9,6 +9,19 @@ import (
 
 const failureObserverRecipient failureObserver = "recipient_broadcast"
 
+// failureObserverRoomState reconciles room and member final state. It is one
+// observer with two sources — the room-service RPC and an authoritative
+// MongoDB primary read — because both answer the same question about the same
+// effect; splitting them would make an operation unverified whenever either
+// source is down, even though the other one already proved the effect.
+const failureObserverRoomState failureObserver = "room_state"
+
+// failureObserverSearchIndex answers whether a message reached the search
+// index. It exists because search-sync-worker Acks and drops a message it
+// cannot decode or turn into an action, so that loss leaves the consumer at
+// zero pending and is invisible from JetStream. Only the query side sees it.
+const failureObserverSearchIndex failureObserver = "search_index"
+
 const failureObserverHealthIntervalLimit = 4096
 
 type failureObserverMode string
@@ -30,6 +43,20 @@ var failureObserverRegistry = map[failureObserver]failureObserverDefinition{
 	failureObserverAdmission: {Name: failureObserverAdmission, Mode: failureObserverEvent, Effects: []failureEffect{failureEffectAdmission}},
 	failureObserverHistory:   {Name: failureObserverHistory, Mode: failureObserverQuery, Effects: []failureEffect{failureEffectMessagePersisted}, FinalReconciliation: true},
 	failureObserverRecipient: {Name: failureObserverRecipient, Mode: failureObserverEvent, Effects: []failureEffect{failureEffectRecipientEvent}, FinalReconciliation: true},
+	failureObserverRoomState: {
+		Name: failureObserverRoomState, Mode: failureObserverQuery,
+		Effects: []failureEffect{
+			failureEffectMemberState, failureEffectRoomName,
+			failureEffectSubscriptionMute, failureEffectRoomCreated,
+			failureEffectSubscriptionRead,
+		},
+		FinalReconciliation: true,
+	},
+	failureObserverSearchIndex: {
+		Name: failureObserverSearchIndex, Mode: failureObserverQuery,
+		Effects:             []failureEffect{failureEffectMessageIndexed},
+		FinalReconciliation: true,
+	},
 }
 
 func validateRegisteredObservers(observers []failureObserver) error {

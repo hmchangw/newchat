@@ -291,7 +291,7 @@ func classifySoakVerifyRPCError(
 	switch {
 	case class == soakErrorNotFound:
 		result.Class = soakVerifyMissing
-	case class == soakErrorDecode:
+	case class == soakErrorRequestEncode, class == soakErrorResponseDecode:
 		result.Class = soakVerifyMalformed
 	case transientSoakError(class):
 		result.Class = soakVerifyRetryable

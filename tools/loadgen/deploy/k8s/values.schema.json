@@ -13,6 +13,7 @@
     "metrics",
     "ledger",
     "recipientObserver",
+    "searchObserver",
     "seed",
     "soak",
     "teardown"
@@ -101,7 +102,9 @@
         "capacity",
         "reconcileDeadline",
         "reconcileRetryInterval",
-        "reconcileReadShare"
+        "reconcileReadShare",
+        "epoch",
+        "roomReconcileReadShare"
       ],
       "properties": {
         "enabled": {"type": "boolean"},
@@ -116,7 +119,17 @@
         "capacity": {"type": "string", "minLength": 1},
         "reconcileDeadline": {"type": "string", "minLength": 1},
         "reconcileRetryInterval": {"type": "string", "minLength": 1},
-        "reconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+        "reconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "epoch": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "roomReconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      }
+    },
+    "searchObserver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"}
       }
     },
     "recipientObserver": {
@@ -176,6 +189,23 @@
         "reactionRemoveShare",
         "pinnedListRate",
         "verifyRate",
+        "memberMutationRate",
+        "roomMutationRate",
+        "roomReadRate",
+        "userReadRate",
+        "searchReadRate",
+        "searchSettle",
+        "roomCreateRate",
+        "roomCreateBudget",
+        "roomCreateSize",
+        "readReceiptRate",
+        "presenceRate",
+        "presenceConnections",
+        "presenceQueryShare",
+        "presenceQueryBatch",
+        "presenceSettle",
+        "presenceTTL",
+        "memberQuarantineMax",
         "maxUsers",
         "activeUsers",
         "roomCount",
@@ -221,6 +251,23 @@
         "reactionRemoveShare": {"type": "string", "minLength": 1},
         "pinnedListRate": {"type": "string", "minLength": 1},
         "verifyRate": {"type": "string", "minLength": 1},
+        "memberMutationRate": {"type": "string", "minLength": 1},
+        "roomMutationRate": {"type": "string", "minLength": 1},
+        "roomReadRate": {"type": "string", "minLength": 1},
+        "userReadRate": {"type": "string", "minLength": 1},
+        "searchReadRate": {"type": "string", "minLength": 1},
+        "searchSettle": {"type": "string", "minLength": 1},
+        "roomCreateRate": {"type": "string", "minLength": 1},
+        "roomCreateBudget": {"type": "string", "minLength": 1},
+        "roomCreateSize": {"type": "string", "minLength": 1},
+        "readReceiptRate": {"type": "string", "minLength": 1},
+        "presenceRate": {"type": "string", "minLength": 1},
+        "presenceConnections": {"type": "string", "minLength": 1},
+        "presenceQueryShare": {"type": "string", "minLength": 1},
+        "presenceQueryBatch": {"type": "string", "minLength": 1},
+        "presenceSettle": {"type": "string", "minLength": 1},
+        "presenceTTL": {"type": "string", "minLength": 1},
+        "memberQuarantineMax": {"type": "string", "minLength": 1},
         "maxUsers": {"type": "string", "minLength": 1},
         "activeUsers": {"type": "string", "minLength": 1},
         "roomCount": {"type": "string", "minLength": 1},

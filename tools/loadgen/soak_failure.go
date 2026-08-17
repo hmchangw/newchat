@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,6 +22,11 @@ const (
 	soakFailureScenario                   = "message_soak"
 	soakFailureTrafficProfile             = "cassandra-soak-v1"
 	soakFailureLaneMessageSend            = "message_send"
+	soakFailureLaneMemberMutation         = "member_mutation"
+	soakFailureLaneRoomMutation           = "room_mutation"
+	soakFailureLaneRoomCreate             = "room_create"
+	soakFailureLaneReadReceipt            = "read_receipt"
+	soakFailureDefaultLedgerEpoch         = "v1"
 	soakFailureAttributeRoomID            = "room_id"
 	soakFailureAttributeAccount           = "account"
 	soakFailureAttributeContentSHA256     = "content_sha256"
@@ -70,6 +77,56 @@ func runSoakFailureExpiry(
 	}
 }
 
+// failureWALPath separates the two identities the journal name used to
+// conflate: the run ID owns the seeded topology, the epoch owns the evidence
+// journal. Bumping the epoch starts a fresh journal on an unchanged topology,
+// so a contract change no longer forces a re-seed.
+func failureWALPath(dir, runID, epoch string) string {
+	if epoch == "" {
+		epoch = soakFailureDefaultLedgerEpoch
+	}
+	return filepath.Join(dir, runID+"."+epoch+".wal")
+}
+
+// recordAbandonedFailureJournals counts retained journals from earlier epochs of
+// this run. They stay on disk as evidence but belong to an incompatible
+// contract and are never replayed, so the boundary has to be visible rather
+// than silent.
+//
+// The pre-epoch release wrote {runId}.wal, which the epoch glob cannot match.
+// Bumping the epoch while keeping the run ID is the documented upgrade path, so
+// that file is precisely what an in-place upgrade inherits and it is counted
+// explicitly rather than left to disappear.
+func recordAbandonedFailureJournals(metrics *Metrics, dir, runID, epoch string) {
+	if metrics == nil {
+		return
+	}
+	active := failureWALPath(dir, runID, epoch)
+	matches, err := filepath.Glob(filepath.Join(dir, runID+".*.wal"))
+	if err != nil {
+		slog.Error("scan retained failure journals", "runId", runID, "error", err)
+		return
+	}
+	legacy := filepath.Join(dir, runID+".wal")
+	if _, statErr := os.Stat(legacy); statErr == nil {
+		matches = append(matches, legacy)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		slog.Error("stat pre-epoch failure journal",
+			"runId", runID, "path", legacy, "error", statErr)
+	}
+	abandoned := 0
+	for _, match := range matches {
+		if match != active {
+			abandoned++
+		}
+	}
+	metrics.FailureAbandonedJournals.Set(float64(abandoned))
+	if abandoned > 0 {
+		slog.Warn("retained failure journals from earlier epochs are not replayed",
+			"runId", runID, "epoch", epoch, "abandoned", abandoned)
+	}
+}
+
 func openSoakFailureLedger(
 	cfg *soakConfig,
 	metrics *Metrics,
@@ -79,12 +136,18 @@ func openSoakFailureLedger(
 		return nil, fmt.Errorf("soak configuration is required")
 	}
 	var journal failureJournal
-	contract := newFailureObserverContract(cfg.RecipientObserverEnabled)
+	contract := newFailureObserverContract(
+		cfg.RecipientObserverEnabled, cfg.SearchObserverEnabled,
+	)
 	if cfg.LedgerDir != "" {
-		wal, err := openFailureWAL(filepath.Join(cfg.LedgerDir, cfg.RunID+".wal"))
+		wal, err := openFailureWAL(failureWALPath(cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf(
+				"open soak failure WAL for run %q epoch %q: %w",
+				cfg.RunID, cfg.LedgerEpoch, err,
+			)
 		}
+		recordAbandonedFailureJournals(metrics, cfg.LedgerDir, cfg.RunID, cfg.LedgerEpoch)
 		journal = newFailureJournalMetrics(
 			newFailureJournalGroupCommit(
 				wal,
@@ -141,6 +204,13 @@ type soakFailureTracker struct {
 	metrics      *Metrics
 	runID        string
 	recipient    *failureRecipientObserver
+	// searchIndexed is set when the search-index observer is enabled, which
+	// makes every admitted message additionally require an index hit.
+	searchIndexed bool
+}
+
+func withSoakFailureSearchObserver(enabled bool) soakFailureTrackerOption {
+	return func(tracker *soakFailureTracker) { tracker.searchIndexed = enabled }
 }
 
 type soakFailureTrackerOption func(*soakFailureTracker)
@@ -254,6 +324,7 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 		Targets:  map[string]string{"messageId": pending.MessageID, "roomId": pending.Target.RoomID},
 		Effects: messageCreateExpectedEffectsForObservers(
 			t.recipient != nil,
+			t.searchIndexed,
 			len(recipients),
 			hex.EncodeToString(recipientHash[:]),
 		),
@@ -465,10 +536,27 @@ type soakFailureReconciler struct {
 	retryInterval time.Duration
 	now           func() time.Time
 	recipient     soakFailureRecipientFinalizer
+	searchIndex   soakFailureSearchIndexProbe
 }
 
 type soakFailureRecipientFinalizer interface {
 	Finalize(string, time.Time, time.Time) recipientEvidenceResult
+}
+
+// soakFailureSearchIndexProbe answers whether one admitted message reached the
+// search index. Defined here rather than with the search reader so the
+// reconciler depends only on the question it asks.
+type soakFailureSearchIndexProbe interface {
+	Indexed(context.Context, *failureOperation) (soakSearchIndexResult, error)
+	// SettleBoundary is when a too-early operation can first produce a usable
+	// answer, so it is rescheduled there rather than polled meanwhile.
+	SettleBoundary(publishedAt time.Time) time.Time
+}
+
+func withSoakFailureSearchIndexProbe(
+	probe soakFailureSearchIndexProbe,
+) soakFailureReconcilerOption {
+	return func(reconciler *soakFailureReconciler) { reconciler.searchIndex = probe }
 }
 
 type soakFailureReconcilerOption func(*soakFailureReconciler)
@@ -505,7 +593,12 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("soak failure reconciler is not configured")
 	}
 	now := r.now().UTC()
-	operation, ok := r.ledger.ClaimDue(now)
+	// Scoped to the message lane. This reconciler only understands history,
+	// recipient and search effects, and it records its verdict against the
+	// history observer; a room mutation claimed here would be verified by a
+	// Cassandra message lookup and closed against an observer it never
+	// declared, while its own room_state observer never resolves.
+	operation, ok := r.ledger.ClaimDueLanes(now, []string{soakFailureLaneMessageSend})
 	if !ok {
 		return false, nil
 	}
@@ -546,6 +639,10 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 				return true, fmt.Errorf("record soak recipient observation: %w", err)
 			}
 			return true, nil
+		}
+		if _, searchObserved := operation.Observations[failureObserverSearchIndex]; !searchObserved &&
+			slices.Contains(operation.Expected, failureObserverSearchIndex) {
+			return true, r.observeSearchIndex(ctx, &operation, now)
 		}
 		for _, observer := range operation.Expected {
 			if _, observed := operation.Observations[observer]; observed {
@@ -593,6 +690,69 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		observation = failureObservationBad
 	}
 	return true, r.observe(operation.ID, observation, now)
+}
+
+// observeSearchIndex asks the query side whether the message reached the index.
+//
+// Three outcomes, deliberately distinct. A hit is good. An unreachable
+// search-service proves nothing and stays claimable until the deadline, then
+// resolves unverified — reporting missing there would turn every dependency
+// outage longer than the deadline into a data-loss claim. Only an answer from a
+// healthy search-service that does not contain the message, past the deadline,
+// is loss; and it is only loss because admission already recorded good, which
+// the ledger enforces.
+func (r *soakFailureReconciler) observeSearchIndex(
+	ctx context.Context,
+	operation *failureOperation,
+	now time.Time,
+) error {
+	result := soakSearchIndexUnknown
+	var probeErr error
+	if r.searchIndex != nil {
+		result, probeErr = r.searchIndex.Indexed(ctx, operation)
+	}
+	if probeErr == nil && result == soakSearchIndexFound {
+		return r.observeAs(operation.ID, failureObserverSearchIndex, failureObservationGood, now)
+	}
+	if now.Before(operation.Deadline) {
+		// A too-early operation is rescheduled to the settle boundary, not the
+		// retry interval. Polling through the settle window would spend several
+		// times the whole reconciliation budget on queries that cannot succeed,
+		// starving the lanes that share it.
+		retryAt := now.Add(r.retryInterval)
+		if result == soakSearchIndexTooEarly && r.searchIndex != nil {
+			if boundary := r.searchIndex.SettleBoundary(operation.StartedAt); boundary.After(retryAt) {
+				retryAt = boundary
+			}
+		}
+		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
+			return fmt.Errorf(
+				"reschedule soak search index probe for %q: %w", operation.ID, err,
+			)
+		}
+		return nil
+	}
+	observation := failureObservationMissingAfterDeadline
+	if probeErr != nil || result != soakSearchIndexMissing {
+		// Only a healthy search-service that answered without the message is
+		// loss. Too-early at the deadline means the settle window outlived it,
+		// which is a configuration problem, not evidence.
+		observation = failureObservationUnverified
+	}
+	return r.observeAs(operation.ID, failureObserverSearchIndex, observation, now)
+}
+
+func (r *soakFailureReconciler) observeAs(
+	operationID string,
+	observer failureObserver,
+	observation failureObservation,
+	now time.Time,
+) error {
+	if _, err := r.ledger.Observe(operationID, observer, observation, now); err != nil {
+		_ = r.ledger.ReleaseClaim(operationID, now.Add(r.retryInterval))
+		return fmt.Errorf("record soak %s observation: %w", observer, err)
+	}
+	return nil
 }
 
 func (r *soakFailureReconciler) observe(

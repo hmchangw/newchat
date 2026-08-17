@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,30 +24,74 @@ const (
 	failureObserverHistory   failureObserver = "cassandra_history"
 )
 
-const failureObserverContractSchemaVersion = 1
+// failureObserverContractSchemaVersion is 2 because the contract became
+// per-lane: version 1 declared one observer set for the whole scenario, which
+// no longer describes a run whose lanes require different observers.
+const failureObserverContractSchemaVersion = 2
 
 type failureObserverContract struct {
-	SchemaVersion            int               `json:"schemaVersion"`
-	Scenario                 string            `json:"scenario"`
-	Observers                []failureObserver `json:"observers"`
-	RecipientObserverEnabled bool              `json:"recipientObserverEnabled"`
+	SchemaVersion            int                          `json:"schemaVersion"`
+	Scenario                 string                       `json:"scenario"`
+	Observers                []failureObserver            `json:"observers"`
+	Lanes                    map[string][]failureObserver `json:"lanes"`
+	RecipientObserverEnabled bool                         `json:"recipientObserverEnabled"`
 }
 
-func newFailureObserverContract(recipientEnabled bool) failureObserverContract {
-	observers := []failureObserver{failureObserverAdmission, failureObserverHistory}
+// newFailureObserverContract builds the contract the WAL header stores. Both
+// optional observers are additive: with each disabled the contract is identical
+// to one built without them ever existing, so enabling search observation is
+// the only thing that requires a new ledger epoch.
+func newFailureObserverContract(recipientEnabled, searchEnabled bool) failureObserverContract {
+	messageObservers := []failureObserver{failureObserverAdmission, failureObserverHistory}
+	if recipientEnabled {
+		messageObservers = append(messageObservers, failureObserverRecipient)
+	}
+	if searchEnabled {
+		messageObservers = append(messageObservers, failureObserverSearchIndex)
+	}
+	roomObservers := []failureObserver{failureObserverAdmission, failureObserverRoomState}
+	observers := []failureObserver{
+		failureObserverAdmission, failureObserverHistory, failureObserverRoomState,
+	}
 	if recipientEnabled {
 		observers = append(observers, failureObserverRecipient)
 	}
+	if searchEnabled {
+		observers = append(observers, failureObserverSearchIndex)
+	}
+	slices.Sort(observers)
 	return failureObserverContract{
 		SchemaVersion: failureObserverContractSchemaVersion,
 		Scenario:      soakFailureScenario, Observers: observers,
+		Lanes: map[string][]failureObserver{
+			soakFailureLaneMessageSend:    messageObservers,
+			soakFailureLaneMemberMutation: slices.Clone(roomObservers),
+			soakFailureLaneRoomMutation:   slices.Clone(roomObservers),
+			soakFailureLaneRoomCreate:     slices.Clone(roomObservers),
+			soakFailureLaneReadReceipt:    slices.Clone(roomObservers),
+		},
 		RecipientObserverEnabled: recipientEnabled,
 	}
 }
 
 type failureOperationType string
 
-const failureOperationMessageCreate failureOperationType = "message_create"
+const (
+	failureOperationMessageCreate failureOperationType = "message_create"
+	failureOperationMemberAdd     failureOperationType = "member_add"
+	failureOperationMemberRemove  failureOperationType = "member_remove"
+	failureOperationRoomRename    failureOperationType = "room_rename"
+	failureOperationMuteToggle    failureOperationType = "mute_toggle"
+	failureOperationRoomCreate    failureOperationType = "room_create"
+	failureOperationMessageRead   failureOperationType = "message_read"
+)
+
+var failureOperationTypeRegistry = map[failureOperationType]struct{}{
+	failureOperationMessageCreate: {}, failureOperationMemberAdd: {},
+	failureOperationMemberRemove: {}, failureOperationRoomRename: {},
+	failureOperationMuteToggle: {}, failureOperationRoomCreate: {},
+	failureOperationMessageRead: {},
+}
 
 type failureOperationLifecycle string
 
@@ -61,6 +106,12 @@ const (
 	failureEffectAdmission        failureEffect = "admission"
 	failureEffectMessagePersisted failureEffect = "message_persisted"
 	failureEffectRecipientEvent   failureEffect = "recipient_event"
+	failureEffectMemberState      failureEffect = "member_state"
+	failureEffectRoomName         failureEffect = "room_name"
+	failureEffectSubscriptionMute failureEffect = "subscription_mute"
+	failureEffectRoomCreated      failureEffect = "room_created"
+	failureEffectSubscriptionRead failureEffect = "subscription_read"
+	failureEffectMessageIndexed   failureEffect = "message_indexed"
 )
 
 type failureCardinality struct {
@@ -76,12 +127,9 @@ type failureExpectedEffect struct {
 	Cardinality *failureCardinality `json:"cardinality,omitempty"`
 }
 
-func messageCreateExpectedEffects(recipientCount int, recipientHash string) []failureExpectedEffect {
-	return messageCreateExpectedEffectsForObservers(true, recipientCount, recipientHash)
-}
-
 func messageCreateExpectedEffectsForObservers(
 	recipientEnabled bool,
+	searchEnabled bool,
 	recipientCount int,
 	recipientHash string,
 ) []failureExpectedEffect {
@@ -95,7 +143,45 @@ func messageCreateExpectedEffectsForObservers(
 			Cardinality: &failureCardinality{Mode: "exact_set_hash", Count: recipientCount, SHA256: recipientHash},
 		})
 	}
+	if searchEnabled {
+		effects = append(effects, failureExpectedEffect{
+			Effect: failureEffectMessageIndexed, Observer: failureObserverSearchIndex,
+			Required: true,
+		})
+	}
 	return effects
+}
+
+func memberMutationExpectedEffects() []failureExpectedEffect {
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: failureEffectMemberState, Observer: failureObserverRoomState, Required: true},
+	}
+}
+
+func roomMutationExpectedEffects(operationType failureOperationType) []failureExpectedEffect {
+	effect := failureEffectRoomName
+	if operationType == failureOperationMuteToggle {
+		effect = failureEffectSubscriptionMute
+	}
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: effect, Observer: failureObserverRoomState, Required: true},
+	}
+}
+
+func readReceiptExpectedEffects() []failureExpectedEffect {
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: failureEffectSubscriptionRead, Observer: failureObserverRoomState, Required: true},
+	}
+}
+
+func roomCreateExpectedEffects() []failureExpectedEffect {
+	return []failureExpectedEffect{
+		{Effect: failureEffectAdmission, Observer: failureObserverAdmission, Required: true},
+		{Effect: failureEffectRoomCreated, Observer: failureObserverRoomState, Required: true},
+	}
 }
 
 type failureObservation string
@@ -121,6 +207,11 @@ const (
 	failureReasonRecipientIdentityMismatch failureReason = "recipient_identity_mismatch"
 	failureReasonRecipientMissing          failureReason = "recipient_missing"
 	failureReasonPublishLocalError         failureReason = "publish_local_error"
+	failureReasonMemberStateMismatch       failureReason = "member_state_mismatch"
+	failureReasonRoomNameMismatch          failureReason = "room_name_mismatch"
+	failureReasonMuteStateMismatch         failureReason = "mute_state_mismatch"
+	failureReasonRoomStateMissing          failureReason = "room_state_missing"
+	failureReasonReadStateRegressed        failureReason = "read_state_regressed"
 )
 
 var failureReasonRegistry = map[failureReason]struct{}{
@@ -128,7 +219,9 @@ var failureReasonRegistry = map[failureReason]struct{}{
 	failureReasonHistoryContentMismatch: {}, failureReasonHistoryMissing: {},
 	failureReasonRecipientDuplicate: {}, failureReasonRecipientUnexpected: {},
 	failureReasonRecipientIdentityMismatch: {}, failureReasonRecipientMissing: {},
-	failureReasonPublishLocalError: {},
+	failureReasonPublishLocalError: {}, failureReasonMemberStateMismatch: {},
+	failureReasonRoomNameMismatch: {}, failureReasonMuteStateMismatch: {},
+	failureReasonRoomStateMissing: {}, failureReasonReadStateRegressed: {},
 }
 
 var errFailureObserverContractMismatch = errors.New("failure observer contract mismatch")
@@ -164,7 +257,11 @@ var failureOperationScenarioRegistry = map[string]struct{}{
 }
 
 var failureOperationLaneRegistry = map[string]struct{}{
-	"message_send": {},
+	soakFailureLaneMessageSend:    {},
+	soakFailureLaneMemberMutation: {},
+	soakFailureLaneRoomMutation:   {},
+	soakFailureLaneRoomCreate:     {},
+	soakFailureLaneReadReceipt:    {},
 }
 
 type failureOperation struct {
@@ -298,7 +395,7 @@ type failureLedger struct {
 
 	active                map[string]*failureOperation
 	starting              map[string]struct{}
-	verifyQueue           failureVerifyQueue
+	verifyQueues          map[string]*failureVerifyQueue
 	results               map[failureResult]uint64
 	observations          map[failureObserver]map[failureObservation]uint64
 	notSent               map[string]struct{}
@@ -364,6 +461,7 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 		recorder:     cfg.Recorder,
 		active:       make(map[string]*failureOperation, cfg.Capacity),
 		starting:     make(map[string]struct{}),
+		verifyQueues: make(map[string]*failureVerifyQueue),
 		results:      make(map[failureResult]uint64),
 		observations: make(map[failureObserver]map[failureObservation]uint64),
 		notSent:      make(map[string]struct{}),
@@ -750,15 +848,46 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 }
 
 func (l *failureLedger) ClaimDue(now time.Time) (failureOperation, bool) {
+	return l.claimDue(now, nil)
+}
+
+// ClaimDueLanes restricts a claim to the given lanes. Each lane is reconciled
+// by the observer that understands its effects, so a lane-blind claim would
+// hand a room mutation to the message-history verifier and vice versa.
+func (l *failureLedger) ClaimDueLanes(now time.Time, lanes []string) (failureOperation, bool) {
+	if len(lanes) == 0 {
+		return failureOperation{}, false
+	}
+	return l.claimDue(now, lanes)
+}
+
+func (l *failureLedger) claimDue(now time.Time, lanes []string) (failureOperation, bool) {
 	if now.IsZero() {
 		now = l.now()
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.verifyQueue.Len() == 0 || now.Before(l.verifyQueue[0].nextVerifyAt) {
+	if lanes == nil {
+		lanes = make([]string, 0, len(l.verifyQueues))
+		for lane := range l.verifyQueues {
+			lanes = append(lanes, lane)
+		}
+		slices.Sort(lanes)
+	}
+	var earliest *failureVerifyQueue
+	for _, lane := range lanes {
+		queue := l.verifyQueues[lane]
+		if queue == nil || queue.Len() == 0 || now.Before((*queue)[0].nextVerifyAt) {
+			continue
+		}
+		if earliest == nil || (*queue)[0].nextVerifyAt.Before((*earliest)[0].nextVerifyAt) {
+			earliest = queue
+		}
+	}
+	if earliest == nil {
 		return failureOperation{}, false
 	}
-	selected, ok := heap.Pop(&l.verifyQueue).(*failureOperation)
+	selected, ok := heap.Pop(earliest).(*failureOperation)
 	if !ok {
 		return failureOperation{}, false
 	}
@@ -788,21 +917,27 @@ func (l *failureLedger) enqueueLocked(operation *failureOperation) {
 	if !l.scheduleNextLocked(operation) {
 		return
 	}
-	heap.Push(&l.verifyQueue, operation)
+	queue := l.verifyQueues[operation.Lane]
+	if queue == nil {
+		queue = &failureVerifyQueue{}
+		l.verifyQueues[operation.Lane] = queue
+	}
+	heap.Push(queue, operation)
 }
 
+// scheduleNextLocked decides when an operation becomes claimable again. A
+// query observer polls from its verify time so a converged effect is seen
+// early; an event observer has nothing to poll, so it waits for the deadline
+// and is resolved from what arrived by then.
 func (l *failureLedger) scheduleNextLocked(operation *failureOperation) bool {
-	if slices.Contains(operation.Expected, failureObserverHistory) {
-		if _, observed := operation.Observations[failureObserverHistory]; !observed {
+	for _, observer := range operation.Expected {
+		if _, observed := operation.Observations[observer]; observed {
+			continue
+		}
+		if failureObserverRegistry[observer].Mode == failureObserverQuery {
 			if operation.nextVerifyAt.IsZero() {
 				operation.nextVerifyAt = operation.VerifyAfter
 			}
-			return true
-		}
-	}
-	if slices.Contains(operation.Expected, failureObserverRecipient) {
-		if _, observed := operation.Observations[failureObserverRecipient]; !observed {
-			operation.nextVerifyAt = operation.Deadline
 			return true
 		}
 	}
@@ -816,10 +951,11 @@ func (l *failureLedger) scheduleNextLocked(operation *failureOperation) bool {
 }
 
 func (l *failureLedger) dequeueLocked(operation *failureOperation) {
-	if operation.heapIndex < 0 {
+	queue := l.verifyQueues[operation.Lane]
+	if operation.heapIndex < 0 || queue == nil {
 		return
 	}
-	heap.Remove(&l.verifyQueue, operation.heapIndex)
+	heap.Remove(queue, operation.heapIndex)
 }
 
 func (l *failureLedger) Snapshot() failureLedgerSnapshot {
@@ -1226,7 +1362,10 @@ func validateFailureOperation(operation *failureOperation) error {
 			operation.LifecycleState != failureOperationActive {
 			return fmt.Errorf("failure operation %q has invalid lifecycle state %q", operation.ID, operation.LifecycleState)
 		}
-		if operation.RunID == "" || operation.OperationType != failureOperationMessageCreate || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
+		if _, known := failureOperationTypeRegistry[operation.OperationType]; !known {
+			return fmt.Errorf("version 2 failure operation %q has unsupported type %q", operation.ID, operation.OperationType)
+		}
+		if operation.RunID == "" || len(operation.Targets) == 0 || len(operation.Effects) == 0 {
 			return fmt.Errorf("version 2 failure operation %q requires run, type, targets, and effects", operation.ID)
 		}
 		operation.Expected = make([]failureObserver, 0, len(operation.Effects))
@@ -1588,7 +1727,23 @@ func validateFailureObserverContract(contract failureObserverContract) error {
 	if err := validateRegisteredObservers(contract.Observers); err != nil {
 		return err
 	}
-	hasRecipient := slices.Contains(contract.Observers, failureObserverRecipient)
+	if len(contract.Lanes) == 0 {
+		return fmt.Errorf("observer contract must declare at least one lane")
+	}
+	for lane, observers := range contract.Lanes {
+		if _, known := failureOperationLaneRegistry[lane]; !known {
+			return fmt.Errorf("observer contract declares unsupported lane %q", lane)
+		}
+		if len(observers) == 0 {
+			return fmt.Errorf("observer contract lane %q declares no observer", lane)
+		}
+		if err := validateRegisteredObservers(observers); err != nil {
+			return fmt.Errorf("observer contract lane %q: %w", lane, err)
+		}
+	}
+	// Recipient observation only applies to the message lane, so its enablement
+	// flag is checked there rather than against the scenario-wide union.
+	hasRecipient := slices.Contains(contract.Lanes[soakFailureLaneMessageSend], failureObserverRecipient)
 	if hasRecipient != contract.RecipientObserverEnabled {
 		return fmt.Errorf("recipient observer enablement does not match configured observers")
 	}
@@ -1599,7 +1754,8 @@ func equalFailureObserverContract(left, right failureObserverContract) bool {
 	return left.SchemaVersion == right.SchemaVersion &&
 		left.Scenario == right.Scenario &&
 		left.RecipientObserverEnabled == right.RecipientObserverEnabled &&
-		slices.Equal(left.Observers, right.Observers)
+		slices.Equal(left.Observers, right.Observers) &&
+		maps.EqualFunc(left.Lanes, right.Lanes, slices.Equal)
 }
 
 func cloneFailureObserverContract(contract *failureObserverContract) *failureObserverContract {
@@ -1607,7 +1763,13 @@ func cloneFailureObserverContract(contract *failureObserverContract) *failureObs
 		return nil
 	}
 	cloned := *contract
-	cloned.Observers = append([]failureObserver(nil), contract.Observers...)
+	cloned.Observers = slices.Clone(contract.Observers)
+	if contract.Lanes != nil {
+		cloned.Lanes = make(map[string][]failureObserver, len(contract.Lanes))
+		for lane, observers := range contract.Lanes {
+			cloned.Lanes[lane] = slices.Clone(observers)
+		}
+	}
 	return &cloned
 }
 
@@ -1618,11 +1780,15 @@ func failureOperationMatchesObserverContract(
 	if operation == nil || operation.Scenario != contract.Scenario {
 		return false
 	}
-	expected := append([]failureObserver(nil), operation.Expected...)
+	configured, known := contract.Lanes[operation.Lane]
+	if !known {
+		return false
+	}
+	expected := slices.Clone(operation.Expected)
 	slices.Sort(expected)
-	configured := append([]failureObserver(nil), contract.Observers...)
-	slices.Sort(configured)
-	return slices.Equal(expected, configured)
+	laneObservers := slices.Clone(configured)
+	slices.Sort(laneObservers)
+	return slices.Equal(expected, laneObservers)
 }
 
 func (w *fileFailureWAL) writeHeaderLocked() error {

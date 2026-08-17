@@ -79,7 +79,7 @@ func characterizeFailureWAL(
 	wal, err := openFailureWAL(filepath.Join(t.TempDir(), fmt.Sprintf("wal-%d.jsonl", injectedLatency.Nanoseconds())))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, wal.Close()) })
-	require.NoError(t, wal.ConfigureObserverContract(newFailureObserverContract(false), nil))
+	require.NoError(t, wal.ConfigureObserverContract(newFailureObserverContract(false, false), nil))
 	journal := &delayedFailureJournal{journal: wal, delay: injectedLatency}
 	durations := make([]time.Duration, 0, samples)
 	for sequence := 1; sequence <= samples; sequence++ {
