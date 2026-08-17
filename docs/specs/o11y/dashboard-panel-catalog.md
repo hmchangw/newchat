@@ -6,8 +6,9 @@
 
 Every panel carries: source status, applicable situations, PromQL, expected
 reading, and what no-data means. Source status values are defined in the guide
-§3 (Available / #283 pending / Proposed / Missing). #271 and #286 merged on
-2026-08-16; guide §3.1 lists what they cleared.
+§3. Verified against `main` at `d4d270e`. Everything the application emits is
+Available; the only Proposed panels are the JetStream backlog row, which is
+blocked on a deployment rather than on code (guide §9).
 
 Metric names below are the expected Prometheus rendering of the OTel instrument
 names. **Verify label spelling and unit suffixes against the deployed
@@ -129,7 +130,7 @@ sum by (reason) (rate(message_gatekeeper_messages_total{result="rejected"}[5m]))
 
 ### Row 3 — Health strip
 
-Seven stat tiles. This row is the visual form of the alert set in
+Six stat tiles. This row is the visual form of the alert set in
 [Alerting Baseline](alerting-baseline.md) §3, deliberately one-to-one with it
 so the two cannot drift.
 
@@ -146,30 +147,11 @@ count(chat_nats_consumer_loop_up == 0)
   consuming.
 - **No data:** no consumer is reporting at all — worse than a non-zero count,
   and caught by D1-1.1.
-- **Traps:** 7.11 — there is no supervisor on `main`, so a loop that drops does
-  not come back on its own. A non-zero value here is immediately actionable and
-  will not resolve itself.
+- **Traps:** 7.11 — there is no supervisor, so a loop that drops does not come
+  back on its own. A non-zero value here is immediately actionable and will not
+  resolve itself.
 
-#### D1-3.2 · Consumer recovery failures
-
-- **Source:** **#283 pending — not buildable today**
-- **Applies to:** operations, soak, failure
-
-```promql
-sum(rate(chat_nats_consumer_recovery_attempts_total{result="failure"}[10m]))
-```
-
-- **Expected reading:** 0. Non-zero means iterator recreation is failing.
-  Sustained non-zero while D1-3.1 reads 0 is the churn case: recovery keeps
-  succeeding and failing alternately, so the loop gauge looks healthy.
-- **No data:** this series does not exist on `main`. #286 shipped #283's other
-  scope without the consumer supervisor, and #283 is still open and conflicted,
-  so the tile would show no data permanently. **Do not build it until #283
-  merges** (guide §8.1). Until then D1-3.1 carries the whole signal, and it is
-  a complete one — with no supervisor, a stopped loop stays stopped
-  (trap 7.11).
-
-#### D1-3.3 · Terminal failures
+#### D1-3.2 · Terminal failures
 
 - **Source:** Available (#272)
 - **Applies to:** operations, soak, failure
@@ -184,7 +166,7 @@ sum(rate(chat_nats_terminal_failures_total[10m]))
   further application attempt.
 - **No data:** no consumer is reporting.
 
-#### D1-3.4 · Reconnect buffer overflow
+#### D1-3.3 · Reconnect buffer overflow
 
 - **Source:** Available (#272)
 - **Applies to:** operations, soak, failure
@@ -198,7 +180,7 @@ sum(increase(chat_nats_publish_attempts_total{outcome="buffer_full"}[5m]))
   because Core NATS publish success is buffered (guide §2 item 6).
 - **No data:** healthy or not reporting; check D1-1.2.
 
-#### D1-3.5 · Services disconnected from the broker
+#### D1-3.4 · Services disconnected from the broker
 
 - **Source:** Available (#272)
 - **Applies to:** operations, soak, failure
@@ -217,7 +199,7 @@ count(
 - **Traps:** 7.12. Without the join this tile can tell you a connection was
   lost but not by which service.
 
-#### D1-3.6 · Slow consumer events
+#### D1-3.5 · Slow consumer events
 
 - **Source:** Available
 - **Applies to:** operations, soak, failure
@@ -230,7 +212,7 @@ sum(increase(nats_slow_consumer_events_total[5m]))
   one of our subscriptions.
 - **No data:** healthy or not scraped.
 
-#### D1-3.7 · At-rest key renewal failures
+#### D1-3.6 · At-rest key renewal failures
 
 - **Source:** Available, **but see trap 7.14**
 - **Applies to:** operations
@@ -290,7 +272,7 @@ sum(db_client_connection_pending_requests{db_system_name="mongodb"})
 Opened from D1. Repeat rows 1–4 per service for the seven adopters
 (`message-gatekeeper`, `message-worker`, `broadcast-worker`,
 `notification-worker`, plus `history-service`, `room-service`, `room-worker`
-after #283). Use `$service_name` as a repeat variable.
+after #286). Use `$service_name` as a repeat variable.
 
 **`history-service` has no JetStream consumer loop.** It adopts only the
 connection, request/reply, and publish families, so rows 1 and 2 are
@@ -299,26 +281,19 @@ panel, and its row must say so.
 
 ### Row 1 — Consume path
 
-#### D2-1.1 · Loop state and recovery
+#### D2-1.1 · Loop state
 
-- **Source:** `loop_up` Available; `recovery_attempts` **#283 pending**
+- **Source:** Available (#272, extended to seven services by #286)
 - **Applies to:** operations, soak, failure
 
 ```promql
 chat_nats_consumer_loop_up{service_name="$service_name", site="$site"}
-
-sum by (stream, consumer, result) (
-  rate(chat_nats_consumer_recovery_attempts_total{
-    service_name="$service_name", site="$site"}[5m])
-)
 ```
 
-- **Expected reading:** the gauge sits at 1 per (stream, consumer). On `main`
-  it does not recover: once it drops it stays down until the process restarts,
-  so any dip is a restart boundary or a dead loop. The recovery query returns
-  nothing until #283 merges; under #283 a dip paired with a `result="success"`
-  spike would be a transient loss that healed, and a flat 1 with a steady
-  failure rate would be the churn case.
+- **Expected reading:** the gauge sits at 1 per (stream, consumer), and **it
+  does not recover** — once it drops it stays down until the process restarts,
+  so any dip is either a restart boundary or a dead loop. There is no
+  self-healing to wait out and no third state to interpret.
 - **No data:** the service is not deployed or not scraped — except for
   `history-service`, where it is correct and permanent.
 - **Traps:** 7.11.
@@ -454,7 +429,7 @@ sum by (subject, queue) (increase(nats_slow_consumer_events_total[5m]))
 
 #### D2-2.1 · Publish attempts by outcome
 
-- **Source:** Available (#272), extended to seven services by #283
+- **Source:** Available (#272), extended to seven services by #286
 - **Applies to:** operations, soak, failure
 
 ```promql
@@ -652,11 +627,11 @@ histogram_quantile(0.99,
 )
 ```
 
-- **Expected reading:** the caller's view of a callee. Before #283 this is the
+- **Expected reading:** the caller's view of a callee. Before #286 this was the
   only signal about `history-service` health, seen through
-  `operation="history_get_message"` from `message-gatekeeper`. Useful, but it is
-  the reply-parent lookup path, not `LoadHistory` — do not read it as
-  representative of the read lane.
+  `operation="history_get_message"` from `message-gatekeeper`. Still useful as a
+  cross-check, but it is the reply-parent lookup path, not `LoadHistory` — do
+  not read it as representative of the read lane. D2-4.1 is now the primary.
 - **No data:** no outbound requests were made.
 - **Traps:** 7.16 — this family is transport-shaped. A remote "not a room
   member" is deliberately **not** counted as a failure, so `outcome` here says
@@ -964,7 +939,7 @@ sum by (lane) (increase(loadgen_soak_dispatched_total[2m]))
 /
 (sum by (lane) (loadgen_soak_configured_rate) * 120)
 
-# Traffic validity (#295 pending). Required in addition, not instead.
+# Traffic validity (#295). Required in addition, not instead.
 sum by (lane) (
   increase(loadgen_soak_lane_attempts_total{outcome="sent"}[2m])
 )
@@ -980,9 +955,9 @@ sum by (lane) (
   consumes one even when it finds no usable target — so a lane idling on an
   exhausted pool reads as fully loaded. The first query cannot be replaced
   because it holds the pacing identity in D4-1.2; the second cannot be omitted
-  because it is the only one that expresses offered load. #295's threshold on
-  the attempts gate is **90%**, and it makes the window inconclusive for that
-  lane only. The two non-`sent` outcomes name the two ways a slot passes
+  because it is the only one that expresses offered load. The threshold on the
+  attempts gate is **90%**, and it makes the window inconclusive for that lane
+  only. The two non-`sent` outcomes name the two ways a slot passes
   without a request: `no_target` for an exhausted pool, `refused` for a
   mutation the ledger declined.
 - **No data:** `INCONCLUSIVE`, never a pass. Do not add `or vector(0)`.
@@ -1042,8 +1017,16 @@ clamp_min(
   absence claim for that operation. Startup-down time, disconnects, queue
   overflow, truncated health history, and stale health all count as blind.
 - **No data:** inconclusive. A disabled observer is not eligible and cannot
-  make the interval unverified — check `loadgen_failure_observer_configured`
-  before concluding an observer is broken rather than switched off.
+  make the interval unverified.
+- **Traps:** `loadgen_failure_observer_configured` **does not cover every
+  observer.** It is set for `admission`, `cassandra_history`, and
+  `recipient_broadcast` only. `room_state` — which is `Required: true` for every
+  member, room, read-receipt and create operation — has **no series in that
+  gauge at all**, and neither does `search_index`. For `room_state`, use
+  `loadgen_failure_observer_up` (D4-1.4), which does cover it: that answers
+  live-versus-down, but enabled-versus-disabled is not answerable from metrics.
+  A `configured` query returning nothing for `room_state` is the expected
+  state, not a broken observer.
 
 #### D4-1.4 · Observer liveness
 
@@ -1058,6 +1041,11 @@ rate(loadgen_failure_observer_events_total[2m])
 
 - **Expected reading:** up at 1, queue depth bounded. A growing queue precedes
   overflow, which becomes blind evidence.
+- **Coverage:** `loadgen_failure_observer_up` is emitted for
+  `recipient_broadcast` and `room_state`. The `admission` and
+  `cassandra_history` observers are inline in the send path and have no
+  liveness gauge — their health shows up as `unverified` results in D4-1.3
+  rather than as a down gauge.
 - **No data:** the observer is not reporting, which is itself a blind interval.
 
 #### D4-1.5 · Ledger integrity
@@ -1110,7 +1098,7 @@ loadgen_nats_current_outage_seconds
   permanent closure, failed recovery, observer loss, or inability to offer the
   declared traffic.
 - **No data:** the generator is not reporting.
-- **Note:** place this next to D4-4.5 so generator disconnection and service
+- **Note:** place this next to D4-4.4 so generator disconnection and service
   disconnection are never confused.
 
 #### D4-1.7 · Run metadata and scrape continuity
@@ -1194,7 +1182,7 @@ increase(loadgen_failure_recovered_operations_total[$__range])
 
 #### D4-2.4 · Consumer backlog during the run
 
-- **Source:** Available (#271) — all four hot-path durables
+- **Source:** Available (#271, extended to nine durables by #295)
 - **Applies to:** soak, failure
 
 ```promql
@@ -1209,13 +1197,11 @@ loadgen_consumer_ack_floor_stall_seconds{stream="$stream", durable="$durable"}
 
 - **Expected reading:** pending drains after the fault window. A plateau with
   the loop gauge at 1 is a consumer that is running but not keeping up.
-- **No data:** four durables are sampled since #271 — `message-gatekeeper` on
-  MESSAGES plus `message-worker`, `broadcast-worker`, and `notification-worker`
-  on MESSAGES-CANONICAL. **#295 raises that to nine**, adding `message-sync`
-  (MESSAGES-CANONICAL), `room-worker` and
-  `notification-worker-room-event-invalidate` (ROOMS), and `spotlight-sync`
-  and `user-room-sync` (INBOX) — the durables the new room and member lanes
-  drive. No data means the sampler could not reach the consumer; check
+- **No data:** nine durables are sampled — `message-gatekeeper` on MESSAGES;
+  `message-worker`, `broadcast-worker`, `notification-worker` and
+  `message-sync` on MESSAGES-CANONICAL; `room-worker` and
+  `notification-worker-room-event-invalidate` on ROOMS; `spotlight-sync` and
+  `user-room-sync` on INBOX. No data means the sampler could not reach the consumer; check
   `loadgen_consumer_sample_errors_total{reason}` and `loadgen_consumer_up`
   before reading it as an idle consumer. A consumer that is simply not deployed
   sets `loadgen_consumer_up` to 0 and counts a bounded sample error — it never
@@ -1320,11 +1306,10 @@ fault annotation overlaid rather than as a stat tile (guide §4.3).
 | Panel | Query | Expected during a fault window |
 |---|---|---|
 | D4-4.1 Consumer loop | `chat_nats_consumer_loop_up` | Drops to 0 and **stays** at 0 until the pod restarts — there is no supervisor on `main` (trap 7.11). **A vanishing series is a killed pod, a zero is a live process not consuming** (trap 7.1) — these are different findings. |
-| D4-4.2 Recovery attempts | `sum by (stream, consumer, result) (rate(chat_nats_consumer_recovery_attempts_total[2m]))` | **#283 pending — do not build yet.** `main` has no supervisor, so a loop that drops during the fault stays down until the pod restarts; D4-4.1 alone carries that evidence today (trap 7.11). |
-| D4-4.3 Terminal failures | `sum by (reason) (rate(chat_nats_terminal_failures_total[2m]))` | Non-zero is expected and is the enumerable-loss evidence. `reason` identifies whether it was `max_deliver` exhaustion or a permanent drop. |
-| D4-4.4 Buffer full | `sum(increase(chat_nats_publish_attempts_total{outcome="buffer_full"}[2m]))` | Non-zero during a broker outage. **Any interval overlapping this has unproven recipient delivery** — mark the affected absence claims inconclusive. |
-| D4-4.5 Client connected | `chat_nats_client_connected * on (job, instance) group_left (service_name) target_info` | Drops to 0 for affected services. Read beside D4-1.6 to separate service disconnection from generator disconnection. |
-| D4-4.6 Slow consumers | `sum(increase(nats_slow_consumer_events_total[2m]))` | May rise during a reconnect surge. |
+| D4-4.2 Terminal failures | `sum by (reason) (rate(chat_nats_terminal_failures_total[2m]))` | Non-zero is expected and is the enumerable-loss evidence. `reason` identifies whether it was `max_deliver` exhaustion or a permanent drop. |
+| D4-4.3 Buffer full | `sum(increase(chat_nats_publish_attempts_total{outcome="buffer_full"}[2m]))` | Non-zero during a broker outage. **Any interval overlapping this has unproven recipient delivery** — mark the affected absence claims inconclusive. |
+| D4-4.4 Client connected | `chat_nats_client_connected * on (job, instance) group_left (service_name) target_info` | Drops to 0 for affected services. Read beside D4-1.6 to separate service disconnection from generator disconnection. |
+| D4-4.5 Slow consumers | `sum(increase(nats_slow_consumer_events_total[2m]))` | May rise during a reconnect surge. |
 
 **Do not silence these signals during a test.** They are the expected result.
 Routing, not suppression, is the correct handling — see
@@ -1355,7 +1340,6 @@ enum is a bug, not a new series — the code normalizes unrecognized inputs to
 | `chat_nats_consumer_redeliveries_total` | counter | `stream`, `consumer`, `event_type` | 6 of 7 | Available |
 | `chat_nats_consumer_processing_duration_seconds_*` | histogram | `stream`, `consumer`, `event_type`, `outcome` | 6 of 7 | Available |
 | `chat_nats_terminal_failures_total` | counter | `stream`, `consumer`, `event_type`, `reason` | 6 of 7 | Available |
-| `chat_nats_consumer_recovery_attempts_total` | counter | `stream`, `consumer`, `result` | none | **#283 pending** — #286 shipped without the supervisor |
 | `chat_nats_publish_attempts_total` | counter | `destination_kind`, `operation`, `outcome` | 7 | Available |
 | `chat_nats_publish_retries_total` | counter | `destination_kind`, `operation` | none | Available, **no producer** |
 | `chat_nats_requests_total` | counter | `operation`, `outcome` | 7 (outbound) | Available |
@@ -1387,7 +1371,6 @@ build a router without it and emit nothing.
 | `outcome` (consumer) | `ack` `nak` `term` `left_pending` `handler_cancelled` |
 | `outcome` (publish) | `success` `timeout` `no_responders` `disconnected` `buffer_full` `permission` `payload_too_large` `other_error` |
 | `reason` (terminal) | `max_deliver` `permanent` `publish_exhausted` `consumer_deleted` `stream_unavailable` `invalid_payload` `internal` |
-| `result` (recovery) | `success` `failure` |
 | `result` (request) | `success` `bad_request` `unauthenticated` `forbidden` `not_found` `conflict` `too_many_requests` `unavailable` `internal` |
 | `event_type` | `created` `updated` `deleted` `pinned` `unpinned` `reacted` `thread_reply_added` `send` `teams_batch` `room_create` `member_add` `member_remove` `room_rename` `member_muted` `unknown` |
 | `destination_kind` | `canonical` `recipient_event` `notification` `push` `outbox` `inbox` `client_response` `user_sync` `room_canonical` `room_event` `member_event` `unknown` |
@@ -1461,8 +1444,9 @@ Instrumented Cassandra sessions: `message-worker`, `bot-message-worker`,
 |---|---|---|
 | `search_service_requests_total`, `search_service_request_duration_seconds_*`, `search_service_es_duration_seconds_*` | per service | No soak lane exercises search; flat on D4 by design |
 | `cache_hits_total`, `cache_misses_total`, `cache_errors_total` | `service_name`, `cache`, `tier` | Present on selected services |
-| `room_key_*_total` | — | `room-worker` |
+| `room_key_absent_errors_total`, `room_key_fanout_errors_total`, `room_key_store_errors_total` | — | `room-worker` via `pkg/roomkeysender` |
 | `oplog_events_published_total`, `oplog_publish_errors_total`, `oplog_events_skipped_total`, `oplog_events_degraded_total`, `oplog_replication_lag_ms` | — | `data-migration/oplog-connector` |
+| `oplog_transformer_*`, `oplog_collections_transformer_*`, `oplog_direct_transfer_*` — each with `_events_processed_total`, `_events_skipped_total`, `_naks_total`, `_terms_total`, `_exhausted_total`, `_writes_total` and family-specific extras | — | `data-migration` transformers. The richest domain-metric set in the repo and the pattern `o11y-metrics-inventory.md` §2 tells the hot-path workers to copy. |
 | `atrest_dek_cache_hits_total`, `atrest_dek_cache_misses_total`, `atrest_dek_creations_total`, `atrest_kek_wrap_total{result}`, `atrest_kek_unwrap_total{result}`, `atrest_kek_renewal_failures_total` | mostly none | **`promauto`, not the OTel meter — not on `:2112`, no resource attributes** (trap 7.14) |
 | `bot_msg_worker_permanent_error_total` | none | Same `promauto` caveat |
 | `go_*`, `process_*`, cAdvisor, kube-state-metrics | — | Runtime |
@@ -1541,7 +1525,7 @@ consumer advancing too slowly to catch up never freezes its floor.
 `recipient_unexpected`, `recipient_identity_mismatch`, `recipient_missing`,
 `publish_local_error`.
 
-**Added by #295 (pending).** Eleven families, all bounded; room IDs, accounts,
+**Added by #295.** Eleven families, all bounded; room IDs, accounts,
 and message IDs stay WAL and log content, never Prometheus labels.
 
 | Family | Meaning |

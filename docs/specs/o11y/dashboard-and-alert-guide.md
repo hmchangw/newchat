@@ -1,8 +1,8 @@
 # Dashboard and Alert Guide
 
-> Status: design specification. Written against `main` at `a96389f`
-> (#272, #271, and #286 merged), plus the unmerged work described in Section 3.
-> Re-verified 2026-08-16 after #271 and #286 landed. This document
+> Status: design specification. Verified against `main` at `d4d270e`
+> (#272, #271, #286, and #295 merged). #283 is not expected to land and nothing
+> here depends on it. This document
 > and its two companions are the only version-controlled description of the
 > dashboards. Grafana JSON is not committed to this repository, so a dashboard
 > that drifts from this document is wrong, and a dashboard lost to a Grafana
@@ -132,74 +132,45 @@ Every panel and alert in the companions carries one of these:
 
 | Status | Meaning |
 |---|---|
-| **Available** | Emitted by code on `main` at `a96389f` and scrapeable wherever the service is deployed |
-| **#283 pending** | Depends on PR #283 (`codex/nats-metrics-review-followup`), which is open, in draft, and currently conflicted |
-| **#295 pending** | Depends on PR #295 (`claude/room-member-soak-expansion-6l6qq3`), which is open and not draft |
-| **Proposed** | Reviewed but not yet on any branch |
+| **Available** | Emitted by code on `main` at `d4d270e` and scrapeable wherever the service is deployed |
+| **Proposed** | Specified here but not emitted yet. Only the JetStream backlog row is in this state, and it is blocked on a deployment, not on code — see Section 9. |
 | **Missing** | Not emitted and not planned; the panel is not built, and the gap is listed in Section 8 |
 
-### 3.1 What #271 and #286 changed
+### 3.1 Everything the application emits is Available
 
-Both merged on 2026-08-16, and between them they cleared most of what this
-document previously listed as blocked.
+Four merges cleared what earlier revisions of this document listed as blocked:
 
-- **#271** landed the loadgen evidence ledger. Every dispatch-validity,
-  observer-validity, and terminal-result series on D4 is now Available, and the
-  consumer sampler grew from two durables to all four hot-path durables plus a
-  full set of JetStream cursor gauges, including an ack-floor stall **duration**.
-- **#286** landed the inbound request/reply metrics and extended the shared NATS
-  families to `history-service`, `room-service`, and `room-worker`. The D2
-  request/reply row is now Available.
+| PR | What it landed |
+|---|---|
+| #272 | The shared `chat_nats_*` consumer and publish families on the four hot-path workers |
+| #286 | Inbound request/reply metrics, and the same families on `history-service`, `room-service`, `room-worker` |
+| #271 | The loadgen evidence ledger: dispatch validity, observer validity, terminal results, and a full set of JetStream cursor gauges including an ack-floor stall duration |
+| #295 | Eight more soak lanes, eleven metric families, and consumer sampling across nine durables |
 
-**#286 is not #283.** It is a re-scoped subset (branch `codex/nats-metrics-only`)
-that deliberately shipped the request metrics and the three extra services
-*without* the consumer supervisor. #283 remains open, in draft, and conflicted
-against `main`. Everything that depends on the supervisor —
-`chat_nats_consumer_recovery_attempts_total` and the alerting rule built on it —
-is therefore still blocked, and the loop-failure semantics on `main` are the
-pre-supervisor ones (trap 7.11).
+**Only one thing in this document is not Available: the JetStream backlog row**
+(D2 Row 5 and alert rule 9). It needs no application change — just the NATS
+exporter scraped in staging and production. Section 9 is its full
+specification.
 
-### 3.2 If #283 is abandoned
+### 3.2 #283 is not landing, and nothing here depends on it
 
-**#283 is the only pending dependency in this document, and exactly one metric
-hangs off it:** `chat_nats_consumer_recovery_attempts_total`. It appears in four
-places — panel D1-3.2, the second query in D2-1.1, row D4-4.2, and alert rule 3.
-Nothing else references it.
+#283 proposed a consumer supervisor that would recreate a lost iterator with
+capped backoff, plus a `chat_nats_consumer_recovery_attempts_total` counter.
+#286 shipped the rest of its scope without it, and it is not expected to merge.
 
-If #283 is dropped, **delete those four and simplify trap 7.11 to a single
-statement**. No monitoring gap results, and that is worth being explicit about
-because it is counter-intuitive: the recovery counter only has meaning if a
-supervisor exists to recover. Without one there is no churn failure mode to
-miss — a loop either runs or it is gone, and `chat_nats_consumer_loop_up`
-(alert rule 2) covers the second case completely.
+**Every reference to it has been removed** — the panel, the alert rule, and the
+recovery query are gone rather than parked, because a permanently empty tile
+teaches exactly the no-data blindness this document exists to prevent
+(Section 4.2).
 
-The only cost is the one trap 7.11 already records: anyone who read the #283
-discussion will expect self-healing that `main` does not have. Keep that
-paragraph either way.
+No coverage is lost, and that is worth stating because it is counter-intuitive:
+the recovery counter only has meaning if a supervisor exists to recover.
+Without one there is no churn failure mode to miss — a loop either runs or it
+is gone, and `chat_nats_consumer_loop_up` (alert rule 2) covers the second case
+completely.
 
-### 3.3 What #295 changes, if it merges
-
-#295 expands the continuous soak from six lanes to fourteen. It is open and not
-draft, so treat it as likely rather than speculative — but nothing below is on
-`main` yet.
-
-Three parts of this document are affected, and the first two would be **wrong**
-rather than merely incomplete once it lands:
-
-- **Section 6 (traffic reality).** The lane table doubles, and the statement
-  that there is no room/member lifecycle, no presence and no search lane stops
-  being true. Federation, push, and bot lanes stay absent.
-- **D4-1.1 (dispatch validity).** `loadgen_soak_dispatched_total` counts
-  *scheduler slots*, which a lane consumes even when it finds no usable target
-  — so a lane idling on an exhausted pool reads as fully loaded. #295 adds
-  `loadgen_soak_lane_attempts_total{lane,outcome}` to separate offered load
-  from an idle slot, and the traffic-validity gate moves onto it. The pacing
-  identity in D4-1.2 keeps using `dispatched`; the two serve different claims
-  and both are needed.
-- **D4-2.4 (consumer backlog).** Sampled durables go from four to nine.
-
-It also adds eleven metric families (Appendix A.6) and surfaces two failure
-modes that already exist on `main` but had no entry here: traps 7.17 and 7.18.
+What does survive is trap 7.11: anyone who read the #283 discussion will expect
+self-healing that `main` does not have.
 
 
 ---
@@ -311,32 +282,18 @@ Two consequences for the panel catalog:
 
 ## 6. Traffic reality the panels must match
 
-Panels must not imply coverage that no traffic exercises. The lane set is
-changing, so both states are recorded.
-
-### 6.1 On `main` today — six lanes
-
-| Lane | Default rate | Actions |
-|---|---|---|
-| send | 100/s | message send, 10% of which are thread replies |
-| read | 700/s | LoadHistory 75%, GetThreadMessages 15%, GetMessageByID 10% |
-| mutation | 5/s | edit, delete, pin, unpin |
-| reaction | 100/s | reaction add/remove |
-| pinned-list | 1/s | pinned message list |
-| verify | 1/s | Cassandra read-back verification |
-
-Source: `tools/loadgen/soak_config.go`.
-
-There is **no** room or member lifecycle lane, no presence, no search, no push,
-no federation, and no bot lane.
-
-### 6.2 With #295 — fourteen lanes
-
-<span id="lanes-295"></span>#295 adds eight lanes to the same
-`seed → soak → stopped` lifecycle. No new deployment, no new phase.
+Panels must not imply coverage that no traffic exercises. Since #295 the
+continuous soak runs fourteen lanes on one `seed -> soak -> stopped` lifecycle;
+there is no separate deployment and no extra phase.
 
 | Lane | Default rate | Ledger-tracked | Drives |
 |---|---|---|---|
+| send | 100/s | yes | message send, 10% of which are thread replies |
+| read | 700/s | no | LoadHistory 75%, GetThreadMessages 15%, GetMessageByID 10% |
+| mutation | 5/s | no | edit, delete, pin, unpin |
+| reaction | 100/s | no | reaction add/remove |
+| pinned_list | 1/s | no | pinned message list |
+| verify | 1/s | no | Cassandra read-back verification |
 | member_mutation | 2/s | admission + room_state | paired add/remove over a candidate ring |
 | room_mutation | 1/s | admission + room_state | rename, mute/unmute |
 | room_read | 20/s | no | member list, rooms-info, subscription list, read receipts |
@@ -346,22 +303,29 @@ no federation, and no bot lane.
 | search_read | 5/s | no | message and room search |
 | presence | 30/s | **no, by design** | hello/ping/activity/bye plus batch query |
 
-Still absent after #295: **federation, push, and bot lanes.** A flat panel on
-those paths during a soak remains "not exercised", not "healthy".
+Source: `tools/loadgen/soak_config.go` and `soak_workload.go`.
 
-Two reading consequences worth carrying into the panels:
+**Still absent: federation, push, and bot lanes.** A flat panel on those paths
+during a soak means "not exercised", never "healthy".
+
+Three reading consequences the panels carry:
 
 - **Presence is deliberately outside the ledger.** Its signals are Core NATS
   fire-and-forget publishes that the client buffers during an outage and
   flushes on reconnect, so a successful publish proves nothing about delivery
   and a failed one proves nothing about loss — the same reasoning as trap 7.16
-  and guide §2 item 6. Only the batch query is evidence, and only outside the
+  and Section 2 item 6. Only the batch query is evidence, and only outside the
   settle window.
 - **Read-only lanes carry latency, error and result metrics only.** A read has
   no expected side effect to reconcile. Read receipts are the exception —
   `messageRead` is a synchronous write with a monotonic cursor, so verification
   compares two *server-written* timestamps and the generator's clock never
   enters the verdict.
+- **Ledger-tracked mutations are never resent.** They are not idempotent: a
+  replayed remove drops a member the first attempt already removed. Ambiguity
+  is settled by reconciliation against a MongoDB primary read, not by retry.
+  This is why `not_sent` is reserved for proven local failures and everything
+  ambiguous stays `unverified` (D4-3.1).
 
 ## 7. Reading traps
 
@@ -416,11 +380,18 @@ Staging and production scrape every 30s, which is what the evidence contract's
 cadence is built on: 2-minute lookback, 1-minute step, minimum three samples
 per required series.
 
-Local differs: `docker-local/o11y/prometheus.yaml` uses 15s and
+Local differs: `docker-local/o11y/prometheus.yaml` and its two-site variant
+`docker-local/o11y/prometheus.fed.yaml` use 15s, and
 `tools/observability/prometheus/prometheus.yml` uses 5s. A recording rule or
 alert validated locally will behave differently in staging. In particular, do
 not use a `[1m]` range with a 30s scrape — two samples is not enough for a
 stable rate.
+
+The federated variant is also the only local config that produces a real `site`
+label: both sites run identical service names, so it derives `site` from the
+Compose project (`chat-site-local` -> `site-local`). Any panel or rule that
+aggregates without `site` is untested against a multi-site deployment
+everywhere except there.
 
 ### 7.6 Clustered consumer state double-counts without a leader filter
 
@@ -479,27 +450,17 @@ latency on `history_mutation` and nowhere else.
 
 ### 7.11 A stopped consumer loop does not restart itself
 
-On `main` there is no consumer supervisor. `natsmetrics.Consume` calls
-`LoopFailed` on a terminal `Next` error and then **returns** — the loop is gone
-until the process restarts. `chat_nats_consumer_loop_up` therefore stays at zero
-once it drops, which makes it a strong and immediate signal.
+`natsmetrics.Consume` calls `LoopFailed` on a terminal `Next` error and then
+**returns** — the loop is gone until the process restarts.
+`chat_nats_consumer_loop_up` therefore stays at zero once it drops, which makes
+it a strong and immediate signal and justifies the short `for` window on alert
+rule 2.
 
-This is worth stating explicitly because #283 proposed the opposite behavior
-(capped-backoff iterator recreation with a
-`chat_nats_consumer_recovery_attempts_total` counter), and #286 shipped without
-it. Anyone reading the #283 discussion will expect self-healing that `main` does
-not have.
-
-Two consequences, both of which flip back if #283 ever merges:
-
-- A short `for:` on the loop-down alert is correct today (2m), because there is
-  no recovery window to wait out. Under #283 it would need lengthening, and
-  sustained zero would mean *recovery repeatedly failing* rather than *the loop
-  died*.
-- There is no churn case to detect today — a loop either runs or it is gone.
-  The churn failure mode (recovery alternating between success and failure while
-  `loop_up` mostly reads 1) only exists under #283, and only the recovery
-  counter would reveal it.
+Stated explicitly because #283 proposed the opposite — capped-backoff iterator
+recreation with a recovery counter — and it is not landing (Section 3.2).
+**Anyone who read that discussion will expect self-healing that does not
+exist.** There is no churn failure mode to look for and no recovery metric to
+build a panel on.
 
 ### 7.12 `chat_nats_client_*` carry no service or site label
 
@@ -636,7 +597,7 @@ question that stays unanswerable until the item lands.
 | **Scrape the NATS exporter in staging and production** | Not deployed | The entire JetStream backlog row (D2 Row 5), its two alerts, and the daily-operations outage backstop that `sli-slo.md` §7 names for every asynchronous SLO. **This is the largest single blocker and it is a deployment task, not a metrics one** — Section 9 specifies every rule and panel that appears the moment the series arrive. |
 | Diff the deployed exporter's `/metrics` against Section 9.1 | Not started | Whether the recording rules can be adopted as written. Section 9.1's vocabulary is verified against `natsio/prometheus-nats-exporter:0.16.0` with `-jsz=all`, which is what `tools/observability/` runs; a different pinned version needs one sample captured and diffed. |
 | Establish how the deployment exposes consumer-leader identity | Open | Whether the rules need a leader-label filter or `max by (...)` over replicas is sufficient (Section 9.4 question 3). Getting this wrong does not break a panel — it multiplies it by the replication factor (trap 7.6). |
-| PR #283 merged | Open, draft, conflicted | `chat_nats_consumer_recovery_attempts_total` and everything reading it: the churn failure mode (trap 7.11) and alert rule 3. **Nothing else**, and Section 3.2 explains why dropping it costs no coverage. |
+
 
 ### 8.2 Known gaps with no panel
 
@@ -651,19 +612,22 @@ question that stays unanswerable until the item lands.
 | Fault annotation source | Missing | Aligning injection, failover, recovery, and settle timestamps on D4. Manual annotations are acceptable locally; a durable event source is required for staging campaigns. |
 | Per-message searchable marker in soak payloads | Missing — blocks #295's search-index observer | Whether search indexing dropped a message (trap 7.17). #295 ships the observer machinery but **refuses the flag at startup**: soak bodies are one run of a single character, so they analyze to one token and the probe would report every message lost. The change touches the send path, the `SOAK_PAYLOAD_*` budgets, and the sonic wire-compat tests. |
 | Loop gauges for `notification-worker-room-event-invalidate`, `message-sync`, `spotlight-sync`, `user-room-sync` | Missing | Absence and wedge detection for four durables that carry real traffic (trap 7.18). Alert rules 1 and 2 do not reach them. |
+| `loadgen_failure_observer_configured` for the `room_state` and `search_index` observers | Missing | Whether an observer is switched off or broken. The gauge is set for `admission`, `cassandra_history`, and `recipient_broadcast` only, while `room_state` is `Required: true` for every room, member, and read-receipt operation. `loadgen_failure_observer_up` does cover `room_state`, so live-versus-down is answerable; enabled-versus-disabled is not (see D4-1.3). |
 
-### 8.3 Cleared by #271 and #286
+### 8.3 Cleared
 
 Recorded so a reader coming from an earlier revision knows these are done, not
-forgotten:
+forgotten. All four are Available on `main` at `d4d270e`.
 
-| Was blocked on | Now |
+| Was blocked on | Cleared by |
 |---|---|
-| Inbound request/reply panels (D2 Row 4) | Available via #286, on `history-service`, `room-service`, and `room-worker` |
-| D4 Evidence row: dispatch validity, observer validity, dispatch identity | Available via #271 |
-| Consumer sampler coverage for `message-gatekeeper` and `notification-worker` | Available via #271 — all four hot-path durables are sampled |
-| Ack-floor gauge in the loadgen sampler | Available via #271, and better than proposed: `loadgen_consumer_ack_floor_stall_seconds` is a **duration**, not a boolean |
-| Whether the exporter exposes an ack floor at all | Answered: **yes.** `jetstream_consumer_ack_floor_stream_seq` is in active use by the repo's own local dashboards (Section 9.1), so the stall rule is a recording rule, not a collector |
+| Inbound request/reply panels (D2 Row 4) | #286 — `history-service`, `room-service`, `room-worker` |
+| D4 Evidence row: dispatch validity, observer validity, dispatch identity | #271 |
+| Consumer sampler coverage beyond two durables | #271, then #295 — nine durables now |
+| Ack-floor gauge in the loadgen sampler | #271, and better than proposed: `loadgen_consumer_ack_floor_stall_seconds` is a **duration**, not a boolean |
+| Whether the exporter exposes an ack floor at all | Answered **yes** — `jetstream_consumer_ack_floor_stream_seq` is in active use by the repo's own local dashboards (Section 9.1) |
+| Room, member, presence, search and user traffic in the soak | #295 — Section 6 |
+
 
 ---
 
