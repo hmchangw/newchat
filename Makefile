@@ -1,7 +1,7 @@
 .PHONY: lint fmt tidy test test-integration coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
         o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep \
-        fed-deps-up fed-deps-down require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs \
+        fed-deps-up fed-deps-down fed-regen require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs \
         fed-seed fed-seed-reset fed-o11y-up fed-o11y-down
 
 DEPS_COMPOSE     := docker-local/compose.deps.yaml
@@ -266,6 +266,27 @@ fed-deps-up:
 	KEYSPACE=chat docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm cassandra-init
 	KEYSPACE=chat_remote docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm cassandra-init
 	docker compose -f $(FED_DEPS_COMPOSE) --profile init run --rm vault-init
+
+# Force a full regeneration of the per-site NATS confs and env files, then
+# recreate the containers. Needed because `fed-deps-up` only runs setup.sh when
+# a generated file is MISSING — so an edit to the conf template never reaches a
+# tree that already has them — and because a bind-mounted file changing on disk
+# does not restart the process that already read it. Both gaps have bitten;
+# this target closes them together.
+#
+# setup.sh regenerates the NATS operator and account keys, so backend.creds and
+# .env are rewritten too. The previous .env is saved to .env.bak: re-apply any
+# local edits (e.g. DEV_MODE=false) afterwards.
+fed-regen:
+	@if [ -f $(ENV_FILE) ]; then \
+	  cp $(ENV_FILE) $(ENV_FILE).bak; \
+	  echo "WARNING: $(ENV_FILE) regenerated with new NATS keys; previous copy saved to $(ENV_FILE).bak."; \
+	  echo "         Re-apply any local edits (e.g. DEV_MODE=false) after this finishes."; \
+	fi
+	docker compose -f $(FED_DEPS_COMPOSE) down
+	rm -f $(FED_GENERATED)
+	./docker-local/setup.sh
+	$(MAKE) --no-print-directory fed-deps-up
 
 fed-deps-down:
 	docker compose -f $(FED_DEPS_COMPOSE) down

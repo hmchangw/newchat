@@ -61,6 +61,17 @@ does the same for the single-site `nats.conf`/`backend.creds`/`.env`.) Bring it
 down with `make fed-deps-down`, `make fed-down`, `make fed-ui-down` and
 `make fed-o11y-down`.
 
+**After changing anything `setup.sh` generates, run `make fed-regen`.** Two
+things make a config change fail to take otherwise, and they compound: the
+guard above only regenerates when a file is *missing*, so an edited template
+never reaches a tree that already has the old output; and a bind-mounted file
+changing on disk does not restart the NATS process that already read it. The
+symptom is an error that survives a fix you can see applied on disk.
+`fed-regen` takes the stack down, deletes the generated files, re-runs
+`setup.sh` and brings everything back. It rotates the NATS keys, so
+`docker-local/.env` is rewritten — the previous copy lands in `.env.bak` and
+any local edits need re-applying.
+
 Three Docker networks replace the single `chat-local`:
 
 ```
