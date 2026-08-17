@@ -1,5 +1,8 @@
 import { appendBounded, mergeById, MAX_CACHED } from '@/lib/messageBuffer'
 import { defaultChatlistState, sortByLastMsgDesc } from '@/lib/chatlist'
+import { previewSnippet } from '@/lib/previewText'
+import { participantDisplayName, messageSenderName } from '@/lib/participantName'
+import { isSystemMessageType } from '@/lib/messageType'
 
 export { MAX_CACHED }
 
@@ -85,6 +88,16 @@ export const initialState = {
    */
   subscriptions: {},
   /**
+   * Per-roomId sidebar preview: the room's most recent eligible message,
+   * flattened to a single line at write time. An absent key means there is
+   * nothing to show — the row still renders at full height with a blank
+   * snippet line (the row's height is a CSS property, not a consequence of
+   * this map).
+   *
+   * Shape: { [roomId]: { messageId, senderName, text } }
+   */
+  previews: {},
+  /**
    * The per-user chatlist section-definition overlay (ChatlistState) — the
    * section names, display order, and sortMode. Membership is NOT here; it
    * rides each subscription's sectionId/sectionOrder. Seeded by
@@ -115,6 +128,77 @@ function toSummary(room) {
     hasMention: false,
     mentionAll: false,
   }
+}
+
+// Build a stored preview from a live message. Returns null when there is
+// nothing to store, so callers leave the map untouched rather than writing an
+// empty sentinel.
+function previewFromMessage(msg, fallbackMentions) {
+  if (!msg || !msg.id) return null
+  // Fix 1: a system message (room_renamed, members_added, …) is published to
+  // MESSAGES-CANONICAL with non-empty content and fans out as an ordinary
+  // new_message event, but it must never become the room's sidebar snippet —
+  // history-service's previewMessage resolution already excludes it, so
+  // treating it as eligible here makes a reload flip the snippet back.
+  // isSystemMessageType is a set-membership test, NOT `type !== ''`: the
+  // client-settable "important" type is deliberately absent from that set
+  // and previews like a normal message. sysMsgData is checked belt-and-
+  // braces because that's the field MessageList actually keys off to route
+  // a message to the SystemMessage renderer.
+  if (isSystemMessageType(msg.type) || msg.sysMsgData != null) return null
+  return {
+    messageId: msg.id,
+    senderName: messageSenderName(msg),
+    // Mentions ride the event, not the message — the gatekeeper never populates
+    // Message.Mentions. Without the fallback a live preview shows the raw
+    // @account while the same message shows @Display Name after a reload.
+    text: previewSnippet(msg.content, msg.mentions ?? fallbackMentions, msg.attachments),
+    createdAt: msg.createdAt,
+    // Fix 3: marks a preview built from the "[encrypted message]" placeholder
+    // (see the MESSAGE_RECEIVED encrypted-message branch below) so
+    // ROOM_PREVIEW_UPDATED can avoid clobbering it with the server's
+    // unencrypted previewMessage body for the same message.
+    ...(msg.encrypted ? { encrypted: true } : {}),
+  }
+}
+
+// Two stored previews are interchangeable when all three RENDERED fields
+// match (messageId/senderName/text — what RoomList actually displays). Used
+// to keep the previews reference stable on a same-content write (e.g. the
+// server echo of a message this client already stored optimistically) — a
+// fresh object would invalidate useSidebarSections' memo for every room in
+// the sidebar. createdAt is deliberately NOT part of this comparison: it's
+// metadata for the ROOM_PREVIEW_UPDATED recency guard, not something the UI
+// renders, and two writes sharing the same messageId always share the same
+// createdAt (it's immutable per message) so including it could never change
+// the outcome — it would just be a redundant field-by-field check.
+function samePreview(a, b) {
+  return !!a && !!b && a.messageId === b.messageId && a.senderName === b.senderName && a.text === b.text
+}
+
+// Build a stored preview from a wire PreviewMessage (subscription.list rows
+// and the refreshed preview on edit/delete events).
+function previewFromWire(previewMessage) {
+  if (!previewMessage || !previewMessage.messageId) return null
+  return {
+    messageId: previewMessage.messageId,
+    senderName: participantDisplayName(previewMessage.sender),
+    text: previewSnippet(previewMessage.content, previewMessage.mentions, previewMessage.attachments),
+    createdAt: previewMessage.createdAt,
+  }
+}
+
+// Fix 7: true only when `nextCreatedAt` is a STRICTLY older, parseable
+// timestamp than `curCreatedAt`. Tolerant by design — a missing or
+// unparseable timestamp on either side is treated as "accept the write"
+// rather than dropping a legitimate update just because older stored data
+// (or a malformed wire payload) lacks a comparable createdAt.
+function isOlderPreview(nextCreatedAt, curCreatedAt) {
+  if (!nextCreatedAt || !curCreatedAt) return false
+  const nextT = Date.parse(nextCreatedAt)
+  const curT = Date.parse(curCreatedAt)
+  if (Number.isNaN(nextT) || Number.isNaN(curT)) return false
+  return nextT < curT
 }
 
 /**
@@ -252,6 +336,11 @@ export function roomEventsReducer(state, action) {
         const { [action.roomId]: _drop, ...restSubs } = subscriptions
         subscriptions = restSubs
       }
+      let previews = state.previews
+      if (previews[action.roomId]) {
+        const { [action.roomId]: _dropPreview, ...restPreviews } = previews
+        previews = restPreviews
+      }
       return {
         ...state,
         summaries,
@@ -260,6 +349,7 @@ export function roomEventsReducer(state, action) {
         appIds,
         channelDmIds,
         subscriptions,
+        previews,
       }
     }
     case 'BUCKETS_LOADED': {
@@ -283,6 +373,18 @@ export function roomEventsReducer(state, action) {
           subs[s.id] ? mergeSubscriptionIntoSummary(s, subs[s.id]) : s
         )
       }
+      // Seed only rooms with no preview yet. A live message can land before
+      // fetchSidebarBuckets resolves (the DM subscription goes live first), and
+      // that message is NEWER than this list snapshot — overwriting it would show
+      // an older message in the sidebar than the room itself displays.
+      let previews = state.previews
+      for (const [roomId, sub] of Object.entries(subs)) {
+        if (previews[roomId]) continue
+        const preview = previewFromWire(sub?.room?.previewMessage)
+        if (!preview) continue
+        if (previews === state.previews) previews = { ...state.previews }
+        previews[roomId] = preview
+      }
       return {
         ...state,
         summaries,
@@ -290,6 +392,7 @@ export function roomEventsReducer(state, action) {
         appIds: new Set(action.appIds),
         channelDmIds: new Set(action.channelDmIds),
         subscriptions: subs,
+        previews,
       }
     }
     case 'SUBSCRIPTION_UPSERTED': {
@@ -419,6 +522,21 @@ export function roomEventsReducer(state, action) {
         }
       }
       const roomId = evt.roomId
+      // Thread replies returned above, so anything reaching here belongs in
+      // the room timeline and is a preview candidate. Computed once and
+      // applied at every return point below.
+      //
+      // Note: excluding EVERY thread reply this way is broader than the
+      // server's rule — the server excludes only hidden (tshow: false)
+      // replies, and a tshow: true reply can legitimately be a room's
+      // preview. That's fine only because this frontend has no tshow
+      // support at all, so no thread reply ever reaches the room timeline
+      // here. Anyone adding tshow must revisit this.
+      const nextPreview = previewFromMessage(msg, evt.mentions)
+      const previews =
+        !nextPreview || samePreview(state.previews[roomId], nextPreview)
+          ? state.previews
+          : { ...state.previews, [roomId]: nextPreview }
       const prev = state.roomState[roomId] ?? emptyRoomState()
       const isActive = state.activeRoomId === roomId
       if (prev.bufferMode === BUFFER_MODE.HISTORICAL) {
@@ -426,7 +544,13 @@ export function roomEventsReducer(state, action) {
           prev.messages.some((m) => m.id === msg.id) ||
           prev.pendingLiveMessages.some((m) => m.id === msg.id)
         ) {
-          return state
+          // Fix 2: previews is computed once above and applied at every
+          // return point in this action — this duplicate-message guard used
+          // to skip that, discarding an optimistic preview's upgrade from
+          // the server echo whenever the room sat in historical buffer mode.
+          // Only allocate when the write actually changed something, so a
+          // true no-op still returns the identical state reference.
+          return previews === state.previews ? state : { ...state, previews }
         }
         const pendingLiveMessages = [...prev.pendingLiveMessages, msg]
         const nextRoomState = {
@@ -462,6 +586,7 @@ export function roomEventsReducer(state, action) {
           summaries,
           roomState: { ...state.roomState, [roomId]: nextRoomState },
           msgRecvSeq: state.msgRecvSeq + 1,
+          previews,
         }
       }
       // Replace optimistic createdAt (client clock) with server's — keeping
@@ -480,6 +605,7 @@ export function roomEventsReducer(state, action) {
         return {
           ...state,
           roomState: { ...state.roomState, [roomId]: { ...prev, messages: mergedMessages } },
+          previews,
         }
       }
       const messages = appendBounded(prev.messages, msg)
@@ -513,6 +639,7 @@ export function roomEventsReducer(state, action) {
         summaries,
         roomState: { ...state.roomState, [roomId]: nextRoomState },
         msgRecvSeq: state.msgRecvSeq + 1,
+        previews,
       }
     }
     case 'HISTORY_LOADED': {
@@ -718,9 +845,25 @@ export function roomEventsReducer(state, action) {
       const prev = state.roomState[roomId] ?? emptyRoomState()
       if (prev.messages.some((m) => m.id === msg.id)) return state
       const messages = appendBounded(prev.messages, msg)
+      // A thread reply doesn't appear in the room timeline, so it isn't the
+      // room's preview either. This excludes EVERY thread reply, which is
+      // broader than the server's rule — the server excludes only hidden
+      // (tshow: false) replies; a tshow: true reply can legitimately be a
+      // room's preview. Correct only because this frontend has no tshow
+      // support: no thread reply ever appears in the room timeline here.
+      // Anyone adding tshow must revisit this.
+      // A local optimistic send has no event, so there's no fallback mentions
+      // source — msg.mentions is always undefined for these and the raw
+      // @account renders until the server echo (MESSAGE_RECEIVED) arrives.
+      const nextPreview = msg.threadParentMessageId ? null : previewFromMessage(msg)
+      const previews =
+        !nextPreview || samePreview(state.previews[roomId], nextPreview)
+          ? state.previews
+          : { ...state.previews, [roomId]: nextPreview }
       return {
         ...state,
         roomState: { ...state.roomState, [roomId]: { ...prev, messages } },
+        previews,
       }
     }
     case 'MESSAGE_EDITED_LOCAL': {
@@ -730,9 +873,30 @@ export function roomEventsReducer(state, action) {
       if (idx < 0) return state
       const updatedMsg = { ...prev.messages[idx], content: action.content, editedAt: action.editedAt }
       const messages = [...prev.messages.slice(0, idx), updatedMsg, ...prev.messages.slice(idx + 1)]
+      // Only the message currently on display affects the preview. The
+      // action carries no mentions, so mention tokens flatten literally
+      // here; the server's message_edited event follows with the
+      // authoritative preview a moment later.
+      // Fix 4: use previewSnippet (not previewText) so an edit that blanks
+      // the body falls back to the attachment label instead of leaving a
+      // dangling "Sender: " row — attachments aren't on the action (edits
+      // never touch them), so read them off the buffered message being
+      // edited (updatedMsg, which carries them forward from prev.messages[idx]).
+      const cur = state.previews[action.roomId]
+      const previews =
+        cur && cur.messageId === action.messageId
+          ? {
+              ...state.previews,
+              [action.roomId]: {
+                ...cur,
+                text: previewSnippet(action.content, updatedMsg.mentions, updatedMsg.attachments),
+              },
+            }
+          : state.previews
       return {
         ...state,
         roomState: { ...state.roomState, [action.roomId]: { ...prev, messages } },
+        previews,
       }
     }
     case 'MESSAGE_DELETED_LOCAL': {
@@ -742,6 +906,9 @@ export function roomEventsReducer(state, action) {
       if (idx < 0) return state
       const updatedMsg = { ...prev.messages[idx], deleted: true }
       const messages = [...prev.messages.slice(0, idx), updatedMsg, ...prev.messages.slice(idx + 1)]
+      // Preview deliberately untouched: the client can't reproduce the
+      // server's walk-back to an earlier eligible message. The authoritative
+      // message_deleted event corrects it.
       return {
         ...state,
         roomState: { ...state.roomState, [action.roomId]: { ...prev, messages } },
@@ -790,6 +957,45 @@ export function roomEventsReducer(state, action) {
           },
         },
       }
+    }
+    case 'ROOM_PREVIEW_UPDATED': {
+      // The room's refreshed preview after an edit or delete, computed
+      // server-side. Its own action rather than a field on MESSAGE_EDITED /
+      // MESSAGE_DELETED because both of those bail when the room has no
+      // message buffer — which is the normal case for a sidebar row.
+      const { roomId, previewMessage, deletedMessageId } = action
+      if (!roomId) return state
+      const next = previewFromWire(previewMessage)
+      if (next) {
+        const cur = state.previews[roomId]
+        // Fix 3: the live path already knows this message can't be decrypted
+        // and stored the "[encrypted message]" placeholder. history-service /
+        // broadcast-worker relay previewMessage.content unencrypted, so a
+        // wire preview for the SAME message would flip the row back to
+        // plaintext the timeline is deliberately refusing to render. A wire
+        // preview for a DIFFERENT (newer) message still overwrites normally.
+        // Known residual: after a reload there's no placeholder in state to
+        // compare against (BUCKETS_LOADED seeds straight from the wire), so
+        // bootstrap still shows the server's plaintext — fully closing that
+        // needs a backend change (withholding plaintext for encrypted rooms
+        // server-side), not something this guard can fix client-side.
+        if (cur?.encrypted && cur.messageId === next.messageId) return state
+        // Fix 7: broadcast-worker processes canonical messages concurrently,
+        // so an edit/delete's server-resolved preview can be computed before
+        // a genuinely newer message and still arrive after it — reject only
+        // a STRICTLY older write; missing/unparseable timestamps are
+        // accepted rather than dropped (see isOlderPreview).
+        if (isOlderPreview(next.createdAt, cur?.createdAt)) return state
+        return { ...state, previews: { ...state.previews, [roomId]: next } }
+      }
+      // No preview on the event. For a delete that means nothing eligible is
+      // left — but only when the deleted message is the one on display. Any
+      // other id is contradictory input (the server would have echoed the
+      // unchanged preview), so leave what's there.
+      const cur = state.previews[roomId]
+      if (!deletedMessageId || !cur || cur.messageId !== deletedMessageId) return state
+      const { [roomId]: _cleared, ...rest } = state.previews
+      return { ...state, previews: rest }
     }
     case 'MESSAGE_REACTED': {
       // Live `message_reacted` toggle. Mirrors MESSAGE_EDITED's dual-buffer

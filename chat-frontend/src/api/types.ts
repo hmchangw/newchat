@@ -48,6 +48,11 @@ export interface SubscriptionRoom {
    *  for initial key bootstrap (same payload as the room.key.get RPC). */
   privateKey?: string
   keyVersion?: number
+  /** The room's latest eligible message. Omitted when the room has no
+   *  message, that site's enrichment degraded, or the request set
+   *  `includeLastMessage: false`. Never present on live
+   *  `subscription.update` events — only on `subscription.list` rows. */
+  previewMessage?: PreviewMessage
 }
 
 /** Mirrors pkg/model.Subscription — the per-user record linking a user
@@ -171,6 +176,10 @@ export interface Participant {
   engName?: string
   chineseName?: string
   siteId?: string
+  /** Server-composed render-ready name (engName + chineseName + account
+   *  fallback; a bot sender's is its app name). Prefer it over the raw
+   *  fields. Mirrors model.Participant.DisplayName. */
+  displayName?: string
 }
 
 /** One reactor on a message reaction. Mirrors the wire `reactionUser`
@@ -213,6 +222,27 @@ export interface Attachment {
   /** Client-only: a local object URL for an optimistic just-sent image.
    *  Never arrives from the server; preferred as the <img> src when present. */
   localUrl?: string
+}
+
+/** Mirrors model.PreviewMessage — a room's most-recent eligible message,
+ *  resolved server-side at read time for room-list rendering. Eligible means
+ *  not soft-deleted and not a system message; the server walks back past an
+ *  ineligible tail, so the client never re-implements that rule.
+ *
+ *  Delivered on `subscription.list` rows (`SubscriptionRoom.previewMessage`)
+ *  and refreshed on `message_edited` / `message_deleted` events. */
+export interface PreviewMessage {
+  messageId: string
+  sender: Participant
+  /** The full message body; the client truncates for display. */
+  content: string
+  /** RFC3339. */
+  createdAt: string
+  attachments?: Attachment[]
+  mentions?: Participant[]
+  /** Always empty today — the server-side write path has not landed.
+   *  Declared for forward-compat; nothing reads it. */
+  visibleTo?: string
 }
 
 /** Cassandra's QuotedParentMessage shape — what gets embedded on a
