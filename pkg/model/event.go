@@ -138,6 +138,18 @@ type InboxMemberEvent struct {
 	Origin string `json:"origin,omitempty"`
 }
 
+// RoomActivityEvent refreshes a remote room's chat-list ordering position on a
+// destination site, which holds no Room document for it. Published on the
+// core-NATS subject.RoomActivity lane, coalesced per room by the origin's
+// last-message flush, and applied under a $max guard — so it is safe to lose,
+// duplicate, or deliver out of order. LastMsgAt and Timestamp are epoch millis.
+type RoomActivityEvent struct {
+	RoomID    string `json:"roomId"    bson:"roomId"`
+	SiteID    string `json:"siteId"    bson:"siteId"`
+	LastMsgAt int64  `json:"lastMsgAt" bson:"lastMsgAt"`
+	Timestamp int64  `json:"timestamp" bson:"timestamp"`
+}
+
 // NotificationEvent is the per-user reaction notification on chat.user.{account}.notification;
 // distinct from PushNotificationEvent (batched mobile) — this is the legacy single-user envelope the FE listens on.
 type NotificationEvent struct {
