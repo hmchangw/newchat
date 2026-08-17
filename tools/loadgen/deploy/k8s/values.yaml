@@ -21,7 +21,7 @@ cassandra:
   keyspace: chat
   cleanup: none
   confirmKeyspace: ""
-  messageBucketHours: 72
+  messageBucketHours: 360
 
 metrics:
   port: 9099

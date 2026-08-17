@@ -48,7 +48,7 @@ type config struct {
 
 	MappingFile        string          `env:"MAPPING_FILE,required"`
 	Bootstrap          bootstrapConfig `envPrefix:"BOOTSTRAP_"`
-	MessageBucketHours int             `env:"MESSAGE_BUCKET_HOURS" envDefault:"72"`
+	MessageBucketHours int             `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
 	TrackConsumers     []string        `env:"TRACK_CONSUMERS" envDefault:""`
 	StartAtTime        string          `env:"START_AT_TIME" envDefault:""`
 	VerifyPoll         time.Duration   `env:"VERIFY_POLL" envDefault:"2s"`

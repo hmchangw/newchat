@@ -72,7 +72,7 @@ type config struct {
 	CassandraKeyspace  string `env:"CASSANDRA_KEYSPACE"     envDefault:"chat"`
 	CassandraUsername  string `env:"CASSANDRA_USERNAME"     envDefault:""`
 	CassandraPassword  string `env:"CASSANDRA_PASSWORD"     envDefault:""`
-	MessageBucketHours int    `env:"MESSAGE_BUCKET_HOURS"   envDefault:"72"`
+	MessageBucketHours int    `env:"MESSAGE_BUCKET_HOURS"   envDefault:"360"`
 
 	// NATS monitoring endpoint used by the `daily` subcommand to poll
 	// JetStream consumer pending counts. Defaults to the docker-compose
