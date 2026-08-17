@@ -1,0 +1,49 @@
+# Federated overlay for compose.o11y.yaml — the o11y stack against the two-site
+# deps stack instead of the single-site one.
+#
+#   docker compose -f compose.o11y.yaml -f compose.fed-o11y.yaml up -d
+#   make fed-o11y-up   /   make fed-o11y-down
+#
+# Two things change, and nothing else:
+#
+# 1. The inherited `chat-local` network key is repointed at the real
+#    chat-site-local network via `name:`, exactly as compose.site.yaml and
+#    compose.fed-deps.yaml do. Both site networks stay `external: true` —
+#    compose.fed-deps.yaml owns them.
+# 2. otel-collector and prometheus join chat-site-remote as well, because those
+#    are the only two components that talk to (or are talked to by) service
+#    containers on both sites:
+#      - otel-collector receives OTLP from every service, and both sites'
+#        services resolve it by name (OTEL_EXPORTER_OTLP_ENDPOINT=
+#        http://otel-collector:4318) — that name only resolves on a network the
+#        collector is attached to.
+#      - prometheus scrapes each service container's :2112 directly over Docker
+#        SD (o11y/prometheus.yaml), so it needs a route to container IPs on both
+#        site networks. It also needs different relabel filters, since the
+#        federated stack's networks and Compose projects are named
+#        chat-site-{local,remote}, not chat-local / chat-local-services —
+#        hence the prometheus.fed.yaml mount below.
+# tempo, loki and grafana stay on chat-site-local only: tempo and loki are
+# written to by the collector, and grafana reads tempo/loki/prometheus. None of
+# them touches a service container.
+services:
+  otel-collector:
+    networks:
+      - chat-local
+      - chat-site-remote
+
+  prometheus:
+    volumes:
+      - ./o11y/prometheus.fed.yaml:/etc/prometheus/prometheus.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - chat-local
+      - chat-site-remote
+
+networks:
+  chat-local:
+    external: true
+    name: chat-site-local
+  chat-site-remote:
+    external: true
+    name: chat-site-remote

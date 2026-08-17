@@ -1,0 +1,56 @@
+# Prometheus — federated (two-site) variant of prometheus.yaml, mounted over it
+# by compose.fed-o11y.yaml. Identical scrape strategy (Docker SD, :2112 on every
+# service container); only the relabel filters differ, because the federated
+# stack renames both things the single-site filters key off:
+#
+#   network  chat-local          -> chat-site-local, chat-site-remote
+#   project  chat-local-services -> chat-site-local, chat-site-remote
+#            (the two Compose project names `make fed-up` uses)
+#
+# Prometheus must be attached to both site networks for these targets to be
+# reachable — compose.fed-o11y.yaml does that.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: chat-services
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        port: 2112
+    relabel_configs:
+      # Only containers attached to one of the two site networks.
+      - source_labels: [__meta_docker_network_name]
+        regex: chat-site-(local|remote)
+        action: keep
+      # Only the two per-site microservice stacks; deps/o11y/UI containers
+      # either do not expose :2112 or have their own explicit scrape jobs.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        regex: chat-site-(local|remote)
+        action: keep
+      # Ignore stale/orphan one-off containers if they are still present from an
+      # older local stack.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        regex: traefik|vault|portal-seed
+        action: drop
+      # docker_sd emits each container's exposed app port when one is present;
+      # force every service target to the SDK Prometheus endpoint instead.
+      - source_labels: [__meta_docker_network_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: ${1}:2112
+      # Use the container name as the Prometheus `instance`.
+      - source_labels: [__meta_docker_container_name]
+        regex: /?(.*)
+        target_label: instance
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      # Both sites run the same service names, so `service` alone is ambiguous.
+      # The Compose project name is the site: chat-site-local -> site-local.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        regex: chat-(site-.*)
+        target_label: site
+        replacement: ${1}
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]

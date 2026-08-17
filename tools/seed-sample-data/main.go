@@ -4,9 +4,12 @@
 //
 // Flags:
 //
-//	(none)     idempotent populate
-//	--reset    drop seed records then populate
-//	--dry-run  print the plan and exit
+//	(none)      idempotent populate
+//	--reset     drop seed records then populate
+//	--dry-run   print the plan and exit
+//	--site      home site to scope seeding to: site-local or site-remote
+//	            (default: unfiltered, seeds every fixture — the single-site path)
+//	--mongo-db  target database, overriding MONGO_DB
 package main
 
 import (
@@ -56,21 +59,32 @@ func envFromOS() map[string]string {
 	return out
 }
 
+// siteLabel renders site for display: "all" when unfiltered (the single-site
+// path — site is empty), otherwise the site itself.
+func siteLabel(site string) string {
+	if site == "" {
+		return "all"
+	}
+	return site
+}
+
 // dryRunSummary returns a multi-line human-readable plan: one line per
 // collection plus the two side-store domains (MongoDB room keys and the Valkey
-// restricted-rooms cache), in `<key> <count>` format.
-func dryRunSummary() string {
+// restricted-rooms cache), in `<key> <count>` format, scoped to what would
+// actually be written for site (every row, when site is empty).
+func dryRunSummary(site string) string {
 	lines := []string{
+		fmt.Sprintf("site %s", siteLabel(site)),
 		fmt.Sprintf("users %d", len(BuildUsers())),
 		fmt.Sprintf("hr_employee %d", len(BuildHREmployees())),
-		fmt.Sprintf("rooms %d", len(BuildRooms())),
-		fmt.Sprintf("subscriptions %d", len(BuildSubscriptions())),
-		fmt.Sprintf("room_members %d", len(BuildRoomMembers())),
-		fmt.Sprintf("messages %d", len(BuildMessages())),
-		fmt.Sprintf("thread_rooms %d", len(BuildThreadRooms())),
-		fmt.Sprintf("thread_subscriptions %d", len(BuildThreadSubscriptions())),
-		fmt.Sprintf("mongo:roomKeys %d", len(BuildRoomKeys())),
-		fmt.Sprintf("valkey:restrictedCache %d", len(BuildRestrictedCache())),
+		fmt.Sprintf("rooms %d", len(scopeToSite(BuildRooms(), site, roomHomeSite))),
+		fmt.Sprintf("subscriptions %d", len(scopeToSite(BuildSubscriptions(), site, subscriptionHomeSite))),
+		fmt.Sprintf("room_members %d", len(scopeToSite(BuildRoomMembers(), site, memberHomeSite))),
+		fmt.Sprintf("messages %d", len(scopeToSite(BuildMessages(), site, messageHomeSite))),
+		fmt.Sprintf("thread_rooms %d", len(scopeToSite(BuildThreadRooms(), site, threadRoomHomeSite))),
+		fmt.Sprintf("thread_subscriptions %d", len(scopeToSite(BuildThreadSubscriptions(), site, threadSubscriptionHomeSite))),
+		fmt.Sprintf("mongo:roomKeys %d", len(scopeToSite(BuildRoomKeys(), site, roomKeyHomeSite))),
+		fmt.Sprintf("valkey:restrictedCache %d", len(scopeToSite(BuildRestrictedCache(), site, restrictedCacheHomeSite))),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -80,26 +94,34 @@ func main() {
 
 	reset := flag.Bool("reset", false, "delete seed records before re-populating")
 	dryRun := flag.Bool("dry-run", false, "print the plan and exit without writing")
+	site := flag.String("site", "", "home site to scope seeding to: site-local or site-remote (default: unfiltered, single-site seeding)")
+	mongoDB := flag.String("mongo-db", "", "target database, overriding MONGO_DB")
 	flag.Parse()
 
+	if err := validateSite(*site); err != nil {
+		slog.Error("seed failed", "error", err)
+		os.Exit(1)
+	}
+
 	if *dryRun {
-		slog.Info("seed dry-run summary", "plan", dryRunSummary())
+		slog.Info("seed dry-run summary", "site", siteLabel(*site), "plan", dryRunSummary(*site))
 		return
 	}
 
 	// run() handles all setup/teardown so deferred cleanup runs before
 	// any non-zero exit. main() only translates the error into an exit code.
-	if err := run(*reset); err != nil {
+	if err := run(*reset, *site, *mongoDB); err != nil {
 		slog.Error("seed failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(reset bool) error {
+func run(reset bool, site, mongoDBFlag string) error {
 	cfg, err := parseConfig(envFromOS())
 	if err != nil {
 		return err
 	}
+	dbName, site := resolveTarget(cfg.MongoDB, mongoDBFlag, site)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -109,7 +131,7 @@ func run(reset bool) error {
 		return fmt.Errorf("mongo connect: %w", err)
 	}
 	defer mongoutil.Disconnect(ctx, mongoClient)
-	db := mongoClient.Database(cfg.MongoDB)
+	db := mongoClient.Database(dbName)
 
 	// Room keys live in the rooms collection; upsertAll inserts the rooms before
 	// writeSideStores provisions their keys.
@@ -131,17 +153,18 @@ func run(reset bool) error {
 		slog.Info("seed reset complete")
 	}
 
-	mc, err := upsertAll(ctx, db)
+	mc, err := upsertAll(ctx, db, site)
 	if err != nil {
 		return fmt.Errorf("mongo upsert: %w", err)
 	}
 
-	vc, err := writeSideStores(ctx, keyStore, valkeyClient)
+	vc, err := writeSideStores(ctx, keyStore, valkeyClient, site)
 	if err != nil {
 		return fmt.Errorf("side-store write: %w", err)
 	}
 
 	slog.Info("seed complete",
+		"site", siteLabel(site),
 		"users", mc.Users,
 		"hrEmployees", mc.HREmployees,
 		"rooms", mc.Rooms,

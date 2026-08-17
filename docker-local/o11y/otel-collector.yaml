@@ -9,9 +9,14 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
         cors:
+          # :3100 is site-remote's chat-frontend in the two-site stack
+          # (compose.fed-o11y.yaml); browser spans are exported straight to the
+          # host-published :4318, so its origin needs listing too.
           allowed_origins:
             - http://localhost:3000
             - http://127.0.0.1:3000
+            - http://localhost:3100
+            - http://127.0.0.1:3100
           allowed_headers:
             - Content-Type
           max_age: 7200
