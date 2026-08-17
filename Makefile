@@ -30,12 +30,14 @@ FED_NATS_LOCAL   := docker-local/nats-site-local.conf
 FED_NATS_REMOTE  := docker-local/nats-site-remote.conf
 FED_NATS_CONTAINER := chat-fed-nats-site-local
 FED_O11Y_COMPOSE := docker-local/compose.fed-o11y.yaml
-# Every artifact setup.sh generates for the federated stack. Guards check all
-# four together: a bind mount whose source file is missing makes Docker
+# Every artifact setup.sh generates for the federated stack. Guards check them
+# all together: a bind mount whose source file is missing makes Docker
 # materialise a directory in its place, so a partial check lets one absent conf
 # turn into a crash-looping NATS and a later setup.sh failing with
-# "Is a directory".
-FED_GENERATED    := $(FED_NATS_LOCAL) $(FED_NATS_REMOTE) $(FED_ENV_LOCAL) $(FED_ENV_REMOTE)
+# "Is a directory". sys.creds is the SYS-account credential the site-remote
+# spoke's second leafnode remote needs — without it JetStream will not start.
+FED_SYS_CREDS    := docker-local/sys.creds
+FED_GENERATED    := $(FED_NATS_LOCAL) $(FED_NATS_REMOTE) $(FED_ENV_LOCAL) $(FED_ENV_REMOTE) $(FED_SYS_CREDS)
 
 # Services site-remote starts. Empty = every service. Set to trim the remote
 # peer; see the tier table in docker-local/README.md for what each drop costs.

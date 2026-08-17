@@ -49,9 +49,11 @@ services:
       - "9322:9222"
     volumes:
       - ./nats-site-remote.conf:/etc/nats/nats.conf:ro
-      # The spoke authenticates its leafnode link into the chatapp account with
-      # these creds; the hub only listens, so it needs no credentials file.
+      # The spoke authenticates its two leafnode remotes with these: backend.creds
+      # for the chatapp account (chat subjects) and sys.creds for SYS (which is
+      # what lets JetStream start). The hub only listens, so it needs neither.
       - ./backend.creds:/etc/nats/backend.creds:ro
+      - ./sys.creds:/etc/nats/sys.creds:ro
       - nats-site-remote-data:/data/jetstream
     command: ["-c", "/etc/nats/nats.conf"]
     healthcheck:

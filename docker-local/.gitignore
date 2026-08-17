@@ -7,3 +7,4 @@ nats-site-local.conf
 nats-site-remote.conf
 .env.site-local
 .env.site-remote
+sys.creds

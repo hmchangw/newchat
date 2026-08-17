@@ -15,6 +15,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 NATS_CONF="$SCRIPT_DIR/nats.conf"
 BACKEND_CREDS="$SCRIPT_DIR/backend.creds"
+SYS_CREDS="$SCRIPT_DIR/sys.creds"
 FRONTEND_ENV_FILE="$REPO_ROOT/chat-frontend/.env.local"
 NATS_BOX_IMAGE="natsio/nats-box:latest"
 
@@ -90,9 +91,18 @@ docker run --rm \
     nsc add user --account chatapp --name backend
     nsc edit user --account chatapp --name backend --allow-sub ">" --allow-pub ">"
     nsc generate creds --account chatapp --name backend > /output/backend.creds
+
+    # SYS-account user for the federated stack only. JetStream refuses to start
+    # on a server with a cluster identity unless the SYSTEM account has a
+    # solicited leafnode (or routes), so the site-remote spoke opens a second
+    # leaf remote bound to SYS and needs credentials for it.
+    nsc add user --account SYS --name sysleaf
+    nsc generate creds --account SYS --name sysleaf > /output/sys.creds
   '
 
 cp "$SETUP_TMP_DIR/backend.creds" "$BACKEND_CREDS"
+cp "$SETUP_TMP_DIR/sys.creds" "$SYS_CREDS"
+chmod 644 "$SYS_CREDS"
 # 0644, not 0600: service containers run as non-root (uid 10001) and
 # bind-mount this file read-only at /etc/nats/backend.creds, so the
 # in-container user must be able to read it. Acceptable only because
@@ -215,6 +225,7 @@ EOF
 
 echo "Wrote $NATS_CONF"
 echo "Wrote $BACKEND_CREDS"
+echo "Wrote $SYS_CREDS"
 echo "Wrote $ENV_FILE"
 echo "Wrote $FRONTEND_ENV_FILE (preserved if it already existed)"
 echo ""
@@ -240,11 +251,19 @@ echo ""
 # single-server JetStream deployments, and are the other remedy the error names.
 #
 # Topology: site-local listens (hub), site-remote solicits (spoke). Traffic is
-# bidirectional once established, so only the spoke carries remote config. The
-# link is bound to the chatapp account via backend.creds, which is the account
-# every chat subject lives in — so a cross-site event stays a plain publish to
-# chat.inbox.{destSite}.external.> routed by subject interest over the leaf,
-# with the PubAck returning the same way.
+# bidirectional once established, so only the spoke carries remote config.
+#
+# The spoke opens TWO remotes over the same port, because operator mode binds a
+# leaf connection to exactly one account and we need two:
+#   - chatapp — every chat subject lives here, so this is the one that carries
+#     cross-site events. A federated event stays a plain publish to
+#     chat.inbox.{destSite}.external.> routed by subject interest over the leaf,
+#     with the PubAck returning the same way.
+#   - SYS     — JetStream refuses to start on a server with a cluster identity
+#     unless the SYSTEM account specifically has routes or a solicited
+#     leafnode. The chatapp leaf alone does not satisfy it.
+# Both need an explicit `account:` nkey: operator mode rejects a remote without
+# one ("operator mode requires account nkeys in remotes").
 #
 # No jetstream{domain} on either side: a domain would scope each site's
 # JetStream separately and force $JS.<domain>.API addressing that the services
@@ -261,7 +280,13 @@ write_fed_nats_conf() {
   remotes: [
     {
       urls: [\"nats-leaf://nats-${peer}:7422\"]
+      account: \"${ACCOUNT_PUB_KEY}\"
       credentials: \"/etc/nats/backend.creds\"
+    }
+    {
+      urls: [\"nats-leaf://nats-${peer}:7422\"]
+      account: \"${SYS_PUB_KEY}\"
+      credentials: \"/etc/nats/sys.creds\"
     }
   ]
 }"
