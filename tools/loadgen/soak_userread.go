@@ -136,6 +136,16 @@ func soakUserPeerFor(participants []string, requester string) (string, bool) {
 // truncating first would silently drop every room whose only active member
 // happens to be seeded further down.
 //
+// The index is built once and never refreshed, which is safe only because the
+// member-mutation lane cannot touch an account it holds. That lane draws its
+// targets from room.available, which soak_roomstate.go builds from
+// BorrowedUsers while skipping every account already subscribed to the room;
+// this index sees only subscribed rows. The two sets are disjoint by
+// construction, so a pair here can never name someone the lane removes. A
+// change that lets either side cross into the other's accounts makes these
+// pairs go stale silently, and would need this index invalidated on successful
+// membership mutations.
+//
 // Ordering follows topology.Rooms so a given seed draws the same sequence for a
 // given topology. It is not stable across the seed and restart paths: those
 // build Rooms in different orders, so a replacement process draws a different
