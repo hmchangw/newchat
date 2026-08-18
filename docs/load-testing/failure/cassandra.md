@@ -1,6 +1,6 @@
 # Cassandra Failure Testing and Loadgen Coverage Plan
 
-> Inventory date: 2026-08-11. This plan is based on the current Cassandra connection configuration, message/history repositories, JetStream consumers, loadgen soak implementation, CQL schema, and observability wiring. It complements the non-destructive [Cassandra Run A Soak Test](cassandra/soak-test-plan.md); it does not replace it.
+> Inventory date: 2026-08-11. This plan is based on the current Cassandra connection configuration, message/history repositories, JetStream consumers, loadgen soak implementation, CQL schema, and observability wiring. It complements the non-destructive [Cassandra Run A Soak Test](../soak/cassandra-soak-plan.md); it does not replace it.
 
 ## 1. Executive Summary
 
@@ -150,7 +150,7 @@ message-send intents to a PVC-backed WAL, records admission and
 `GetMessageByID` observations, retries reconciliation inside the existing read
 budget, restores unresolved operations after restart, and emits bounded
 terminal-outcome and loadgen self-health metrics. See
-[Loadgen Failure Observation Runtime](loadgen-failure-observation.md).
+[Loadgen Failure Observation Runtime](../loadgen/observation.md).
 
 1. Extend the implemented user-message operation ledger to carry the expected table set for mutations, thread counters, pins, and reactions.
 2. Extend the implemented per-message history reconciliation to full post-settle mirror reconciliation for all run-owned operation types.
@@ -170,7 +170,7 @@ terminal-outcome and loadgen self-health metrics. See
 
 ## 8. Observability Preconditions
 
-The authoritative metric inventory and dashboard design are in [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md).
+The authoritative metric inventory and dashboard design are in [Storage Dependency Metrics and Dashboard Contract](../../specs/o11y/storage-dependency-metrics.md).
 
 A Cassandra campaign is conclusive only when:
 
@@ -216,5 +216,5 @@ Numeric latency/error/RTO limits must use production objectives plus baseline me
 - Migration reader: `data-migration/es-index-migrator/messagesource_cassandra.go`.
 - Schema and partitioning: `docs/cassandra_message_model.md` and `docker-local/cassandra/init/`.
 - JetStream retry behavior: `pkg/jsretry/jsretry.go`, `pkg/stream/consumer.go`, and worker consumer setup.
-- Existing workload and metrics: `tools/loadgen/soak_*`, `tools/loadgen/metrics.go`, and `docs/load-testing/cassandra/soak-test-plan.md`.
+- Existing workload and metrics: `tools/loadgen/soak_*`, `tools/loadgen/metrics.go`, and `docs/load-testing/soak/cassandra-soak-plan.md`.
 - Current local topology/RF: `docker-local/compose.deps.yaml` and `docker-local/cassandra/init/01-keyspace.cql`.

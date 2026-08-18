@@ -125,7 +125,7 @@ Helm exposes the same opt-in as
 validated even while disabled.
 
 The dashboard interpretation contract is defined in
-[`failure-testing/dashboard-evidence-contract.md`](failure-testing/dashboard-evidence-contract.md).
+[`failure-testing/dashboard-evidence-contract.md`](dashboard-contract.md).
 
 ## Room and member lanes
 

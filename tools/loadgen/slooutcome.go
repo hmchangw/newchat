@@ -7,7 +7,7 @@ import (
 )
 
 // sloOutcome is the error-budget eligibility class of one measured attempt,
-// implementing the table in docs/load-testing/system/sli-slo.md §0.1. It is shared by
+// implementing the table in docs/load-testing/common/sli-slo.md §0.1. It is shared by
 // every workload that scores an SLO so the rule has exactly one definition:
 // two copies would let an HTTP journey and a NATS journey drift into scoring
 // the same failure differently.

@@ -2,7 +2,7 @@
 
 > This is the authoritative specification for the Cassandra Run A soak test.
 > The engineering work breakdown is maintained in
-> [`run-a-implementation-plan.md`](run-a-implementation-plan.md).
+> [`run-a-implementation-plan.md`](../loadgen/run-a-implementation-plan.md).
 
 A production-like soak test to validate the Cassandra **schema design** and
 **access patterns** of this project before release. **Run A (a soak through the
@@ -12,8 +12,31 @@ experiments are follow-on and out of the primary timeline.
 | | |
 |---|---|
 | **Validates** | Cassandra schema, access patterns, sustained read/write/compaction behavior, disk-growth trend under realistic load |
-| **Does NOT validate** | newchat end-to-end capacity, user-facing SLOs, NATS / broadcast-worker / notification path, degraded-mode (node failure) behavior, and Cassandra breaking points (this test is non-destructive by decision) |
+| **Does NOT validate** | newchat end-to-end capacity, user-facing SLOs, NATS / broadcast-worker / notification path, **MongoDB** (see below), degraded-mode (node failure) behavior, and Cassandra breaking points (this test is non-destructive by decision) |
 | **A "pass" means** | No Cassandra-level defect surfaced under realistic sustained load — an exploratory result, **not** a production-readiness certification |
+
+**MongoDB is exercised but not validated.** The run touches MongoDB on several
+paths, so its load is real and must be planned for — but it is deliberately not
+a MongoDB test and no acceptance criterion covers it:
+
+| Path | Operation | Cached? | Sustained pressure |
+|---|---|---|---|
+| Seed / teardown | Bulk insert/delete of run-owned rooms, subscriptions, ownership ledger, manifest, room keys | — | One-off burst; at the planned scale (10k rooms at `CHANNEL_RATIO=0.30` — 3k channels × 100 members plus 7k DMs × 2) this is ~314k subscription documents |
+| Send (gatekeeper) | `GetSubscription` read | Yes — LRU+TTL (`GATEKEEPER_SUB_CACHE_TTL`) | Low; the fixed room set gives a high hit rate |
+| Read (history-service) | `GetHistorySharedSince` access check, room times | Yes — `readcache` LRU+TTL with singleflight | Low, for the same reason |
+| **Thread reply (message-worker)** | `thread_rooms` insert, `thread_subscriptions` upsert | **No** | **The only sustained write path** — at `THREAD_SHARE=0.10` and 100 sends/s this is ~10 writes/s plus per-participant upserts |
+| At-rest encryption | `room_data_keys` DEK read | Yes | Negligible |
+| Heartbeat | One `UpdateOne` per interval | — | Negligible |
+
+Because both read paths are cached and the room set is fixed, MongoDB read load
+is far below the RPC rate; the meaningful ongoing cost is the uncached thread
+write path. This is not a valid MongoDB capacity test: the access-pattern mix is
+partial (no read-state, user lookup, search, or presence traffic), the volume is
+cache-absorbed, and there are no MongoDB acceptance thresholds. Operationally,
+plan for the seed/teardown write burst on shared environments, note that
+`thread_subscriptions` grows for the life of the run (teardown removes it with
+the owned rooms), and remember that room/subscription changes propagate to any
+oplog consumer in the environment.
 
 **Retention assumption.** The message tables have **no TTL in the repo DDL**
 (confirmed). Staging currently applies a 1-year TTL out-of-band; production is

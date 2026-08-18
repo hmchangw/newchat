@@ -233,7 +233,7 @@ connected state, lifecycle events, and outage duration, and its user-message
 lane has a PVC-backed admission-to-history operation ledger. These are shared
 building blocks, but the daily connection pool, other loadgen modes, complete
 durable sampler, terminal advisories, and federation observers below remain
-open. See [Loadgen Failure Observation Runtime](loadgen-failure-observation.md).
+open. See [Loadgen Failure Observation Runtime](../loadgen/observation.md).
 
 1. **Shared resilient connection and self-monitoring**
    - Give every loadgen pool a consistent, explicit reconnect policy.
@@ -283,7 +283,7 @@ Loadgen should not receive node-deletion privileges for a production-like cluste
 
 ## 9. Acceptance Criteria
 
-The following are common hard gates for every campaign. Exact latency and error-budget values continue to come from `docs/load-testing/system/sli-slo.md`. New federation/search/push metrics require a baseline before final thresholds are approved.
+The following are common hard gates for every campaign. Exact latency and error-budget values continue to come from `docs/load-testing/common/sli-slo.md`. New federation/search/push metrics require a baseline before final thresholds are approved.
 
 - Every operation accepted by the system must produce success, an explicit failure, or a queryable terminal outcome. `missing_after_deadline` must be zero unless the campaign explicitly permits it under an approved error budget.
 - No silent drop may exist only in a log without a counter or advisory. MaxDeliver exhaustion must be enumerable by operation/event ID.
@@ -327,5 +327,5 @@ The following are common hard gates for every campaign. Exact latency and error-
 - Core fanout loss semantics: `broadcast-worker/handler.go`, `room-worker/handler.go`.
 - Loadgen consumer sampling and connection pools: `tools/loadgen/consumerlag.go`, `tools/loadgen/maxrps_messages.go`, `tools/loadgen/daily_pool.go`.
 - Loadgen action mix and botroom path: `tools/loadgen/daily_user.go`, `tools/loadgen/daily_actions.go`, `tools/loadgen/botroom.go`.
-- Current SLO assertion design: `docs/load-testing/system/sli-slo.md`.
+- Current SLO assertion design: `docs/load-testing/common/sli-slo.md`.
 - Local single-node NATS: `docker-local/nats.conf`, `docker-local/compose.deps.yaml`.

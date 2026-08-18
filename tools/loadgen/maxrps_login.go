@@ -16,7 +16,7 @@ import (
 
 // The login workload drives auth-service's POST /api/v1/auth so SLO-3
 // ("successful login within the bound / eligible login attempts",
-// docs/load-testing/system/sli-slo.md §3) can be measured under load. Every other
+// docs/load-testing/common/sli-slo.md §3) can be measured under load. Every other
 // loadgen workload reaches NATS with a pre-provisioned creds file, which skips
 // the HTTP leg entirely — auth was the one already-measurable SLO that no
 // workload could exercise.

@@ -40,7 +40,7 @@ too slow":
 | 7 services (static) | `:9090` | hand-rolled counters, incl. `search_service_requests_total{type,status}` |
 | `cadvisor` | `:8080` | per-container CPU/memory |
 
-Consumer backlog matters most: per `docs/load-testing/system/sli-slo.md` §0.1 and §7 it
+Consumer backlog matters most: per `docs/load-testing/common/sli-slo.md` §0.1 and §7 it
 is the *primary* enforcement signal for every async SLO, because the event
 ratios behind those SLOs are approximate until the outcome ledger lands. A run
 where latency looks fine but `num_pending` climbs monotonically is a run that
@@ -132,7 +132,7 @@ intent before publish, observes the gatekeeper result, and consumes existing
 read-lane slots to reconcile every ledger-admitted message through
 `GetMessageByID`. Fault injection remains external and does not change the
 configured traffic profile. See
-[`docs/load-testing/loadgen-failure-observation.md`](../../docs/load-testing/loadgen-failure-observation.md).
+[`docs/load-testing/loadgen/observation.md`](../../docs/load-testing/loadgen/observation.md).
 
 The same run also drives room and member traffic: `member_mutation` cycles
 paired add/remove operations over a reusable per-room candidate ring,
@@ -822,7 +822,7 @@ at the same threshold as `err%` (`--slo-error-rate`), because from the
 sender's side a reply that never comes is no better than an error reply.
 
 They are counted and gated separately rather than summed, mirroring the way
-`docs/load-testing/system/sli-slo.md` §2 scores persistence (SLO-1a) and publication
+`docs/load-testing/common/sli-slo.md` §2 scores persistence (SLO-1a) and publication
 (SLO-1b) as independent ratios: one send has two deliverables, so a fully
 dropped message would otherwise be counted twice against a denominator that
 counted it once. The CSV carries `missing_replies`, `missing_broadcasts`,
@@ -903,7 +903,7 @@ loadgen teardown --workload=history --preset=history-medium
 ### Login workload (`--workload=login`)
 
 Drives `POST /api/v1/auth` on auth-service so **SLO-3** — *successful login
-within 1 s / eligible login attempts* (`docs/load-testing/system/sli-slo.md` §3) — can
+within 1 s / eligible login attempts* (`docs/load-testing/common/sli-slo.md` §3) — can
 be measured under load. Every other workload connects to NATS with a
 pre-provisioned creds file (`NATS_CREDS_FILE`) and never touches the HTTP auth
 leg, which is why auth was the one already-measurable SLO no workload could
@@ -944,7 +944,7 @@ that looks like a service failure.
 ### Search workload (`--workload=search`)
 
 Drives search-service's request/reply endpoints so **SLO-7** — *search returns
-ok / eligible search requests* (`docs/load-testing/system/sli-slo.md` §5) — can be
+ok / eligible search requests* (`docs/load-testing/common/sli-slo.md` §5) — can be
 measured under load.
 
 ```bash
@@ -1244,7 +1244,7 @@ run:
   reads as "no service errors".
 
   Enabling it needs a uniform per-service error counter first. The intended
-  source is the natsrouter middleware in `docs/load-testing/system/sli-slo.md` §8 P1
+  source is the natsrouter middleware in `docs/load-testing/common/sli-slo.md` §8 P1
   (`rpc_server_duration_seconds{subject_pattern, errcode_category}`); once it
   ships, point `serviceErrorCounterName` at it and fill `svcURLs` in
   `prodEnvFactory.Build`. A scrape that cannot find the family now fails with

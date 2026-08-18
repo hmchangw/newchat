@@ -48,7 +48,7 @@ func TestFailureDashboardContract_ThresholdsAndRecoveryStreak(t *testing.T) {
 }
 
 func TestFailureDashboardContract_DocPinsCadenceAndMissingSeriesSemantics(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
+	encoded, err := os.ReadFile("../../docs/load-testing/loadgen/dashboard-contract.md")
 	require.NoError(t, err)
 	contract := string(encoded)
 	for _, required := range []string{
@@ -70,7 +70,7 @@ func TestFailureDashboardContract_DocPinsCadenceAndMissingSeriesSemantics(t *tes
 }
 
 func TestFailureDashboardContract_ObserverRatioUsesMatchingBoundedSelectors(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
+	encoded, err := os.ReadFile("../../docs/load-testing/loadgen/dashboard-contract.md")
 	require.NoError(t, err)
 	contract := string(encoded)
 
@@ -83,7 +83,7 @@ func TestFailureDashboardContract_ObserverRatioUsesMatchingBoundedSelectors(t *t
 }
 
 func TestFailureDashboardContract_AckFloorStallIsDocumentedAsAProxy(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
+	encoded, err := os.ReadFile("../../docs/load-testing/loadgen/dashboard-contract.md")
 	require.NoError(t, err)
 	contract := string(encoded)
 
@@ -92,7 +92,7 @@ func TestFailureDashboardContract_AckFloorStallIsDocumentedAsAProxy(t *testing.T
 }
 
 func TestFailureDashboardContract_UsesWorkloadOrientedScenario(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
+	encoded, err := os.ReadFile("../../docs/load-testing/loadgen/dashboard-contract.md")
 	require.NoError(t, err)
 	contract := string(encoded)
 	observerStart := strings.Index(contract, "## Observer validity")
@@ -148,7 +148,7 @@ func TestFailureDashboardContract_ObservabilityInventoryUsesSplitSaturationMetri
 }
 
 func TestFailureRuntimeControlFollowUp_PinsAuthenticatedStatusAndPausedEvidence(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/runtime-control-api.md")
+	encoded, err := os.ReadFile("../../docs/load-testing/loadgen/runtime-api.md")
 	require.NoError(t, err)
 	contract := string(encoded)
 	for _, required := range []string{
