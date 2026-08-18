@@ -45,6 +45,65 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
+func TestValidate_RejectsNegativeBucketCacheTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.BucketCacheTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_TTL")
+}
+
+func TestValidate_RejectsNegativeBucketCacheL1MaxBytes(t *testing.T) {
+	cfg := baseValid()
+	cfg.BucketCacheL1MaxBytes = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_L1_MAX_BYTES")
+}
+
+func TestValidate_RejectsNegativeBucketCacheMaxRows(t *testing.T) {
+	cfg := baseValid()
+	cfg.BucketCacheMaxRows = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_MAX_ROWS")
+}
+
+func TestValidate_AcceptsZeroBucketCacheAsDisable(t *testing.T) {
+	cfg := baseValid()
+	cfg.BucketCacheTTL = 0
+	cfg.BucketCacheL1MaxBytes = 0
+	cfg.BucketCacheMaxRows = 0
+	require.NoError(t, validate(&cfg), "zero is the documented disable value")
+}
+
+func TestConfig_BucketCacheEnabled(t *testing.T) {
+	// Zero is the documented disable value for every bucket-cache knob, so any
+	// one of them at zero must keep Valkey unconnected and the cache uninstalled.
+	tests := []struct {
+		name     string
+		mutate   func(*Config)
+		expected bool
+	}{
+		{name: "all set", mutate: func(*Config) {}, expected: true},
+		{name: "no valkey addrs", mutate: func(c *Config) { c.ValkeyAddrs = nil }},
+		{name: "zero l1 budget", mutate: func(c *Config) { c.BucketCacheL1MaxBytes = 0 }},
+		{name: "zero ttl", mutate: func(c *Config) { c.BucketCacheTTL = 0 }},
+		{name: "zero max rows", mutate: func(c *Config) { c.BucketCacheMaxRows = 0 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseValid()
+			cfg.ValkeyAddrs = []string{"valkey:6379"}
+			cfg.BucketCacheL1MaxBytes = 1 << 20
+			cfg.BucketCacheTTL = 10 * time.Minute
+			cfg.BucketCacheMaxRows = 2000
+			tt.mutate(&cfg)
+			assert.Equal(t, tt.expected, cfg.BucketCacheEnabled())
+		})
+	}
+}
+
 func TestValidate_RejectsNegativeSubCacheSize(t *testing.T) {
 	cfg := baseValid()
 	cfg.SubCacheSize = -1
@@ -181,6 +240,29 @@ func TestLoad_DefaultsReadPreferenceToSecondaryPreferred(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.Equal(t, "secondaryPreferred", cfg.Mongo.ReadPreference)
+}
+
+// The per-bucket cache defaults are a tuning decision, not an accident: MaxRows
+// sits just above surroundingPageSize (50) so the cache holds the sparse buckets
+// that force a multi-bucket walk and declines the dense ones a single bounded
+// query already satisfies. Pinned here so a future edit has to be deliberate.
+func TestLoad_BucketCacheDefaults(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	for _, k := range []string{
+		"HISTORY_BUCKET_CACHE_MAX_ROWS",
+		"HISTORY_BUCKET_CACHE_TTL",
+		"HISTORY_BUCKET_CACHE_L1_MAX_BYTES",
+	} {
+		unsetEnv(t, k) // defaults only apply when unset
+	}
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 50, cfg.BucketCacheMaxRows)
+	assert.Equal(t, 10*time.Minute, cfg.BucketCacheTTL)
+	assert.Equal(t, int64(256<<20), cfg.BucketCacheL1MaxBytes)
 }
 
 // unsetEnv removes key for the duration of the test and restores its prior
