@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"testing"
 	"time"
 
@@ -264,4 +265,57 @@ func TestSettle_EmptyScheduleDoesNotPanic(t *testing.T) {
 	assert.NotPanics(t, func() {
 		Settle(context.Background(), m, nil, errors.New("boom"))
 	})
+}
+
+func TestElapsedFor(t *testing.T) {
+	// The schedule Settle applies: the delay served after delivery k is
+	// backoff[k-1] while the schedule lasts, then the last entry repeats.
+	sched := []time.Duration{time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute}
+
+	tests := []struct {
+		name         string
+		backoff      []time.Duration
+		numDelivered uint64
+		want         time.Duration
+	}{
+		{name: "first delivery has served no delay", backoff: sched, numDelivered: 1, want: 0},
+		{name: "zero is treated as a first delivery", backoff: sched, numDelivered: 0, want: 0},
+		{name: "second delivery served the first delay", backoff: sched, numDelivered: 2, want: time.Second},
+		{name: "third delivery served 1s+5s", backoff: sched, numDelivered: 3, want: 6 * time.Second},
+		{name: "fourth delivery served 1s+5s+30s", backoff: sched, numDelivered: 4, want: 36 * time.Second},
+		{name: "fifth delivery adds the first tail wait", backoff: sched, numDelivered: 5, want: 2*time.Minute + 36*time.Second},
+		{name: "tail repeats past the schedule", backoff: sched, numDelivered: 7, want: 6*time.Minute + 36*time.Second},
+		// 36s + 30 tail waits = 1h36s: the first delivery at or past a 1h window.
+		{name: "an hour of retrying is reached on the 34th delivery", backoff: sched, numDelivered: 34, want: time.Hour + 36*time.Second},
+		{name: "the 33rd delivery is still under an hour", backoff: sched, numDelivered: 33, want: 58*time.Minute + 36*time.Second},
+		{name: "empty schedule has no accumulated wait", backoff: nil, numDelivered: 99, want: 0},
+		{name: "single-entry schedule repeats it", backoff: []time.Duration{time.Second}, numDelivered: 4, want: 3 * time.Second},
+		// A nonsense delivery count must saturate, never wrap: a wrapped negative
+		// would read as "barely retried" to a caller deciding whether to give up.
+		{name: "an absurd delivery count saturates", backoff: sched, numDelivered: ^uint64(0), want: time.Duration(math.MaxInt64)},
+		{name: "a zero-delay tail stops accumulating", backoff: []time.Duration{time.Second, 0}, numDelivered: 1 << 40, want: time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ElapsedFor(tt.backoff, tt.numDelivered))
+		})
+	}
+}
+
+func TestElapsedFor_BracketsTheJitteredSchedule(t *testing.T) {
+	// ElapsedFor sums the un-jittered schedule backoffFor draws from, so the two
+	// cannot drift apart in shape — but equal jitter means an actual wait lands
+	// anywhere in [half, full] of its entry. Assert the bracket rather than
+	// equality: it still catches a schedule/accumulator divergence, without
+	// depending on the draws this run happened to get.
+	var actual time.Duration
+	for n := uint64(1); n <= 40; n++ {
+		budget := ElapsedFor(DefaultBackoff, n)
+		assert.LessOrEqual(t, actual, budget,
+			"actual jittered wait must never exceed the accumulated budget, numDelivered=%d", n)
+		assert.GreaterOrEqual(t, actual, budget/2,
+			"equal jitter floors each wait at half its entry, numDelivered=%d", n)
+		actual += backoffFor(&fakeMsg{numDelivered: n}, DefaultBackoff)
+	}
 }
