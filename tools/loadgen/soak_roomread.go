@@ -124,8 +124,12 @@ func (r *soakRoomReader) ReadMixed(ctx context.Context) error {
 // ReadReceipts asks who has read one persisted message. It needs a real message
 // ID, so it is the one room read that depends on the message catalog; without
 // one it degrades to a skip rather than measuring a rejected request.
+//
+// The request is addressed as the message's own author, not as the account the
+// reader holds the room under: room-service serves read receipts only to the
+// sender, so any other identity is a guaranteed permission error.
 func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
-	roomID, account, ok := r.pickRoom()
+	roomID, _, ok := r.pickRoom()
 	if !ok {
 		r.recordSkip(soakRPCReadReceiptList)
 		return nil
@@ -138,7 +142,7 @@ func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
 		return nil
 	}
 	message, found := messages.PickAnyEligible(roomID, soakCatalogReadReceipt)
-	if !found || message.ID == "" {
+	if !found || message.ID == "" || message.Author == "" {
 		r.recordSkip(soakRPCReadReceiptList)
 		return nil
 	}
@@ -146,7 +150,7 @@ func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
 	var response soakReadReceiptResponse
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCReadReceiptList,
-		Subject: subject.MessageReadReceipt(account, roomID, r.cfg.SiteID),
+		Subject: subject.MessageReadReceipt(message.Author, roomID, r.cfg.SiteID),
 		Body:    soakReadReceiptRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -199,6 +203,7 @@ func (r *soakRoomReader) SubscriptionList(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSubscriptionList,
 		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
+		Body:    soakSubscriptionListRequest{Type: soakSubscriptionListType},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Subscriptions)
@@ -251,24 +256,35 @@ func (r *soakRoomReader) RoomInfoFor(ctx context.Context, roomID string) (soakRo
 	return soakRoomInfo{RoomID: roomID}, nil
 }
 
-// SubscriptionsFor reads one account's subscriptions through the production RPC
-// path so the mute state can be checked the way a client would see it.
-func (r *soakRoomReader) SubscriptionsFor(
+// SubscriptionFor reads one account's subscription to one room through the
+// production RPC path, so mute and read state are checked the way a client sees
+// them. Deliberately the by-room lookup rather than subscription.list: that list
+// is paged, and the verifiers read "room absent from the response" as a
+// mismatch, so a room that fell off the page would be reported as corruption.
+// This answers 0-or-1 for the room asked about, and an empty answer means the
+// subscription is genuinely gone.
+func (r *soakRoomReader) SubscriptionFor(
 	ctx context.Context,
-	account string,
+	account, roomID string,
 ) (soakSubscriptionListResponse, error) {
 	var response soakSubscriptionListResponse
-	if account == "" {
-		return response, fmt.Errorf("subscription read requires an account")
+	if account == "" || roomID == "" {
+		return response, fmt.Errorf("subscription read requires an account and room")
 	}
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
-		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
+		Subject: subject.UserSubscriptionGetByRoomID(account, r.cfg.SiteID),
+		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Subscriptions)
 	})
-	return response, err
+	if err != nil {
+		// Two verifiers share this call, so the transport error alone does not
+		// say which room's state could not be read.
+		return response, fmt.Errorf("read subscription for room %q: %w", roomID, err)
+	}
+	return response, nil
 }
 
 // Account returns the account the reader addresses a room as, so the observer

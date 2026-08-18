@@ -25,66 +25,77 @@ var soakEnvironmentRegistry = map[string]struct{}{
 // soakConfig is the Run A configuration contract. I8, I10, and I12 remain
 // explicit inputs because their production interpretation is not yet confirmed.
 type soakConfig struct {
-	RunID                        string        `env:"RUN_ID"                          envDefault:""`
-	Environment                  string        `env:"ENVIRONMENT"                     envDefault:"local"`
-	RunMode                      string        `env:"RUN_MODE"                        envDefault:"duration"`
-	RunDuration                  time.Duration `env:"RUN_DURATION"                    envDefault:"72h"`
-	Warmup                       time.Duration `env:"WARMUP"                          envDefault:"30s"`
-	HeartbeatInterval            time.Duration `env:"HEARTBEAT_INTERVAL"               envDefault:"30s"`
-	HeartbeatStaleAfter          time.Duration `env:"HEARTBEAT_STALE_AFTER"            envDefault:"2m"`
-	SendRate                     float64       `env:"SEND_RATE"                       envDefault:"100"`
-	ReadRate                     float64       `env:"READ_RATE"                       envDefault:"700"`
-	ThreadShare                  float64       `env:"THREAD_SHARE"                    envDefault:"0.10"`
-	MutationRate                 float64       `env:"MUTATION_RATE"                   envDefault:"5"`
-	SoftDeleteRatio              float64       `env:"SOFT_DELETE_RATIO"               envDefault:"0.001"`
-	ReactionRate                 float64       `env:"REACTION_RATE"                   envDefault:"100"`
-	ReactionsPerHotMessage       int           `env:"REACTIONS_PER_HOT_MESSAGE"       envDefault:"30"`
-	ReactionMessageScope         string        `env:"REACTION_MESSAGE_SCOPE"          envDefault:"hot_only"`
-	ReactionRemoveShare          float64       `env:"REACTION_REMOVE_SHARE"           envDefault:"0.20"`
-	PinnedListRate               float64       `env:"PINNED_LIST_RATE"                 envDefault:"1"`
-	VerifyRate                   float64       `env:"VERIFY_RATE"                      envDefault:"1"`
-	MemberMutationRate           float64       `env:"MEMBER_MUTATION_RATE"             envDefault:"2"`
-	RoomMutationRate             float64       `env:"ROOM_MUTATION_RATE"               envDefault:"1"`
-	RoomReadRate                 float64       `env:"ROOM_READ_RATE"                   envDefault:"20"`
-	RoomCreateRate               float64       `env:"ROOM_CREATE_RATE"                 envDefault:"0.05"`
-	RoomCreateBudget             int           `env:"ROOM_CREATE_BUDGET"               envDefault:"2000"`
-	RoomCreateSize               int           `env:"ROOM_CREATE_SIZE"                 envDefault:"5"`
-	RoomReconcileReadShare       float64       `env:"ROOM_RECONCILE_READ_SHARE"        envDefault:"0.5"`
-	MemberQuarantineMax          int           `env:"MEMBER_QUARANTINE_MAX"            envDefault:"10000"`
-	ReadReceiptRate              float64       `env:"READ_RECEIPT_RATE"                envDefault:"5"`
-	UserReadRate                 float64       `env:"USER_READ_RATE"                   envDefault:"10"`
-	SearchReadRate               float64       `env:"SEARCH_READ_RATE"                 envDefault:"5"`
-	SearchObserverEnabled        bool          `env:"SEARCH_OBSERVER_ENABLED"          envDefault:"false"`
-	SearchSettle                 time.Duration `env:"SEARCH_SETTLE"                    envDefault:"30s"`
-	PresenceRate                 float64       `env:"PRESENCE_RATE"                    envDefault:"30"`
-	PresenceConnections          int           `env:"PRESENCE_CONNECTIONS"             envDefault:"2000"`
-	PresenceQueryShare           float64       `env:"PRESENCE_QUERY_SHARE"             envDefault:"0.1"`
-	PresenceQueryBatch           int           `env:"PRESENCE_QUERY_BATCH"             envDefault:"50"`
-	PresenceSettle               time.Duration `env:"PRESENCE_SETTLE"                  envDefault:"5s"`
-	PresenceTTL                  time.Duration `env:"PRESENCE_TTL"                     envDefault:"5m"`
-	MaxUsers                     int           `env:"MAX_USERS"                        envDefault:"20000"`
-	ActiveUsers                  int           `env:"ACTIVE_USERS"                     envDefault:"2000"`
-	RoomCount                    int           `env:"ROOM_COUNT"                       envDefault:"10000"`
-	ChannelRatio                 float64       `env:"CHANNEL_RATIO"                    envDefault:"0.30"`
-	ChannelMembers               int           `env:"CHANNEL_MEMBERS"                  envDefault:"100"`
-	LargeRoomThreshold           int           `env:"LARGE_ROOM_THRESHOLD"             envDefault:"500"`
-	RateScope                    string        `env:"RATE_SCOPE"                       envDefault:"site"`
-	MessagesPerActiveUserPerDay  float64       `env:"MESSAGES_PER_ACTIVE_USER_PER_DAY" envDefault:"0"`
-	PayloadMedianBytes           int           `env:"PAYLOAD_MEDIAN_BYTES"             envDefault:"1024"`
-	PayloadP95Bytes              int           `env:"PAYLOAD_P95_BYTES"                envDefault:"2048"`
-	PayloadMaxBytes              int           `env:"PAYLOAD_MAX_BYTES"                envDefault:"10240"`
-	PersistGrace                 time.Duration `env:"PERSIST_GRACE"                    envDefault:"10s"`
-	MutationRetries              int           `env:"MUTATION_RETRIES"                 envDefault:"3"`
-	RetryMinBackoff              time.Duration `env:"RETRY_MIN_BACKOFF"                envDefault:"100ms"`
-	RetryMaxBackoff              time.Duration `env:"RETRY_MAX_BACKOFF"                envDefault:"5s"`
-	RecentPerRoom                int           `env:"RECENT_PER_ROOM"                  envDefault:"128"`
-	RecentTotal                  int           `env:"RECENT_TOTAL"                     envDefault:"200000"`
-	LedgerDir                    string        `env:"LEDGER_DIR"                       envDefault:""`
-	LedgerEpoch                  string        `env:"LEDGER_EPOCH"                     envDefault:"v1"`
-	LedgerCapacity               int           `env:"LEDGER_CAPACITY"                  envDefault:"200000"`
-	ReconcileDeadline            time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
-	ReconcileRetryInterval       time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
-	ReconcileReadShare           float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
+	RunID                       string        `env:"RUN_ID"                          envDefault:""`
+	Environment                 string        `env:"ENVIRONMENT"                     envDefault:"local"`
+	RunMode                     string        `env:"RUN_MODE"                        envDefault:"duration"`
+	RunDuration                 time.Duration `env:"RUN_DURATION"                    envDefault:"72h"`
+	Warmup                      time.Duration `env:"WARMUP"                          envDefault:"30s"`
+	HeartbeatInterval           time.Duration `env:"HEARTBEAT_INTERVAL"               envDefault:"30s"`
+	HeartbeatStaleAfter         time.Duration `env:"HEARTBEAT_STALE_AFTER"            envDefault:"2m"`
+	SendRate                    float64       `env:"SEND_RATE"                       envDefault:"100"`
+	ReadRate                    float64       `env:"READ_RATE"                       envDefault:"700"`
+	ThreadShare                 float64       `env:"THREAD_SHARE"                    envDefault:"0.10"`
+	MutationRate                float64       `env:"MUTATION_RATE"                   envDefault:"5"`
+	SoftDeleteRatio             float64       `env:"SOFT_DELETE_RATIO"               envDefault:"0.001"`
+	ReactionRate                float64       `env:"REACTION_RATE"                   envDefault:"100"`
+	ReactionsPerHotMessage      int           `env:"REACTIONS_PER_HOT_MESSAGE"       envDefault:"30"`
+	ReactionMessageScope        string        `env:"REACTION_MESSAGE_SCOPE"          envDefault:"hot_only"`
+	ReactionRemoveShare         float64       `env:"REACTION_REMOVE_SHARE"           envDefault:"0.20"`
+	PinnedListRate              float64       `env:"PINNED_LIST_RATE"                 envDefault:"1"`
+	VerifyRate                  float64       `env:"VERIFY_RATE"                      envDefault:"1"`
+	MemberMutationRate          float64       `env:"MEMBER_MUTATION_RATE"             envDefault:"2"`
+	RoomMutationRate            float64       `env:"ROOM_MUTATION_RATE"               envDefault:"1"`
+	RoomReadRate                float64       `env:"ROOM_READ_RATE"                   envDefault:"20"`
+	RoomCreateRate              float64       `env:"ROOM_CREATE_RATE"                 envDefault:"0.05"`
+	RoomCreateBudget            int           `env:"ROOM_CREATE_BUDGET"               envDefault:"2000"`
+	RoomCreateSize              int           `env:"ROOM_CREATE_SIZE"                 envDefault:"5"`
+	RoomReconcileReadShare      float64       `env:"ROOM_RECONCILE_READ_SHARE"        envDefault:"0.5"`
+	MemberQuarantineMax         int           `env:"MEMBER_QUARANTINE_MAX"            envDefault:"10000"`
+	ReadReceiptRate             float64       `env:"READ_RECEIPT_RATE"                envDefault:"5"`
+	UserReadRate                float64       `env:"USER_READ_RATE"                   envDefault:"10"`
+	SearchReadRate              float64       `env:"SEARCH_READ_RATE"                 envDefault:"5"`
+	SearchObserverEnabled       bool          `env:"SEARCH_OBSERVER_ENABLED"          envDefault:"false"`
+	SearchSettle                time.Duration `env:"SEARCH_SETTLE"                    envDefault:"30s"`
+	PresenceRate                float64       `env:"PRESENCE_RATE"                    envDefault:"30"`
+	PresenceConnections         int           `env:"PRESENCE_CONNECTIONS"             envDefault:"2000"`
+	PresenceQueryShare          float64       `env:"PRESENCE_QUERY_SHARE"             envDefault:"0.1"`
+	PresenceQueryBatch          int           `env:"PRESENCE_QUERY_BATCH"             envDefault:"50"`
+	PresenceSettle              time.Duration `env:"PRESENCE_SETTLE"                  envDefault:"5s"`
+	PresenceTTL                 time.Duration `env:"PRESENCE_TTL"                     envDefault:"5m"`
+	MaxUsers                    int           `env:"MAX_USERS"                        envDefault:"20000"`
+	ActiveUsers                 int           `env:"ACTIVE_USERS"                     envDefault:"2000"`
+	RoomCount                   int           `env:"ROOM_COUNT"                       envDefault:"10000"`
+	ChannelRatio                float64       `env:"CHANNEL_RATIO"                    envDefault:"0.30"`
+	ChannelMembers              int           `env:"CHANNEL_MEMBERS"                  envDefault:"100"`
+	LargeRoomThreshold          int           `env:"LARGE_ROOM_THRESHOLD"             envDefault:"500"`
+	RateScope                   string        `env:"RATE_SCOPE"                       envDefault:"site"`
+	MessagesPerActiveUserPerDay float64       `env:"MESSAGES_PER_ACTIVE_USER_PER_DAY" envDefault:"0"`
+	PayloadMedianBytes          int           `env:"PAYLOAD_MEDIAN_BYTES"             envDefault:"1024"`
+	PayloadP95Bytes             int           `env:"PAYLOAD_P95_BYTES"                envDefault:"2048"`
+	PayloadMaxBytes             int           `env:"PAYLOAD_MAX_BYTES"                envDefault:"10240"`
+	PersistGrace                time.Duration `env:"PERSIST_GRACE"                    envDefault:"10s"`
+	MutationRetries             int           `env:"MUTATION_RETRIES"                 envDefault:"3"`
+	RetryMinBackoff             time.Duration `env:"RETRY_MIN_BACKOFF"                envDefault:"100ms"`
+	RetryMaxBackoff             time.Duration `env:"RETRY_MAX_BACKOFF"                envDefault:"5s"`
+	RecentPerRoom               int           `env:"RECENT_PER_ROOM"                  envDefault:"128"`
+	RecentTotal                 int           `env:"RECENT_TOTAL"                     envDefault:"200000"`
+	LedgerDir                   string        `env:"LEDGER_DIR"                       envDefault:""`
+	LedgerEpoch                 string        `env:"LEDGER_EPOCH"                     envDefault:"v1"`
+	LedgerCapacity              int           `env:"LEDGER_CAPACITY"                  envDefault:"200000"`
+	ReconcileDeadline           time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
+	ReconcileRetryInterval      time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
+	ReconcileReadShare          float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
+	// EncryptionPreflight gates the one-message check that the encrypted write
+	// path reaches Cassandra and wraps the room DEK. It is on by default and
+	// may only be turned off outside staging and production: a run that skipped
+	// it proves nothing about at-rest encryption, so the choice has to be
+	// explicit and is refused where the answer matters.
+	EncryptionPreflight bool `env:"ENCRYPTION_PREFLIGHT" envDefault:"true"`
+	// EncryptionPreflightTimeout budgets that check on its own, rather than
+	// borrowing SOAK_PERSIST_GRACE, which also decides when every ledger
+	// verification starts. A slow environment needs a longer preflight without
+	// moving the evidence timing.
+	EncryptionPreflightTimeout   time.Duration `env:"ENCRYPTION_PREFLIGHT_TIMEOUT"      envDefault:"30s"`
 	RecipientObserverEnabled     bool          `env:"RECIPIENT_OBSERVER_ENABLED"        envDefault:"false"`
 	RecipientObserverQueue       int           `env:"RECIPIENT_OBSERVER_QUEUE"          envDefault:"8192"`
 	RecipientObserverConnections int           `env:"RECIPIENT_OBSERVER_CONNECTIONS"    envDefault:"32"`
@@ -236,6 +247,9 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if err := validateSoakRoomLaneConfig(cfg); err != nil {
 		return err
 	}
+	if err := validateSoakEncryptionPreflight(cfg); err != nil {
+		return err
+	}
 	if cfg.RecipientObserverEnabled && strings.TrimSpace(cfg.LedgerDir) == "" {
 		return fmt.Errorf("SOAK_LEDGER_DIR is required when SOAK_RECIPIENT_OBSERVER_ENABLED=true")
 	}
@@ -302,6 +316,29 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 // soakRoomCreateBudgetMax bounds the rooms one run may create, and with them
 // the read-target set the create lane grows in memory.
 const soakRoomCreateBudgetMax = 100000
+
+// soakPreflightRequiredEnvironments are the environments whose results are
+// reported onwards, so a run there must have proven the encrypted write path
+// rather than assumed it.
+var soakPreflightRequiredEnvironments = map[string]struct{}{
+	"staging": {}, "production": {},
+}
+
+func validateSoakEncryptionPreflight(cfg *soakConfig) error {
+	if cfg.EncryptionPreflightTimeout <= 0 {
+		return fmt.Errorf("SOAK_ENCRYPTION_PREFLIGHT_TIMEOUT must be greater than zero")
+	}
+	if cfg.EncryptionPreflight {
+		return nil
+	}
+	if _, required := soakPreflightRequiredEnvironments[cfg.Environment]; required {
+		return fmt.Errorf(
+			"SOAK_ENCRYPTION_PREFLIGHT cannot be disabled when SOAK_ENVIRONMENT is %q",
+			cfg.Environment,
+		)
+	}
+	return nil
+}
 
 func validateSoakRoomLaneConfig(cfg *soakConfig) error {
 	if !isFinite(cfg.RoomReconcileReadShare) ||

@@ -47,6 +47,9 @@ loadgen.newchat/run: {{ include "cassandra-soak.runSlug" . | quote }}
 {{- if and .Values.recipientObserver.enabled (not .Values.ledger.enabled) -}}
 {{- fail "ledger.enabled=true is required when recipientObserver.enabled=true" -}}
 {{- end -}}
+{{- if and (not .Values.encryptionPreflight.enabled) (or (eq .Values.soak.environment "staging") (eq .Values.soak.environment "production")) -}}
+{{- fail "encryptionPreflight.enabled=false is not allowed when soak.environment is staging or production; such a run proves nothing about at-rest encryption" -}}
+{{- end -}}
 {{- if not .Values.ledger.epoch -}}
 {{- fail "ledger.epoch is required; bump it whenever the loadgen image changes the ledger contract" -}}
 {{- end -}}

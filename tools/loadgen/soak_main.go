@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -652,11 +653,15 @@ func runSoakWorkload(
 
 	if err := runSoakEncryptionPreflight(
 		ctx,
+		soakEncryptionPreflightConfig{
+			Enabled:  cfg.Soak.EncryptionPreflight,
+			Timeout:  cfg.Soak.EncryptionPreflightTimeout,
+			Verified: metrics.SoakEncryptionPreflight,
+		},
 		store,
 		sender,
 		selector,
 		sendReplies,
-		cfg.Soak.PersistGrace,
 	); err != nil {
 		slog.Error("Cassandra soak encryption preflight", "error", err)
 		return 1
@@ -1127,22 +1132,48 @@ func warmSoakPinnedCatalog(
 	return nil
 }
 
+// soakEncryptionPreflightConfig is the preflight's own gate and budget. The
+// timeout is deliberately not derived from SOAK_PERSIST_GRACE: that value also
+// sets when every ledger verification begins, so borrowing it to survive a slow
+// environment would silently delay the evidence the run exists to collect.
+type soakEncryptionPreflightConfig struct {
+	Enabled bool
+	Timeout time.Duration
+	// Verified is set to 1 when the check passed and 0 when it was skipped, so
+	// the run's own metrics say whether at-rest encryption was ever proven. A
+	// warning at t=0 of a multi-day run is not a durable record.
+	Verified prometheus.Gauge
+}
+
 func runSoakEncryptionPreflight(
 	ctx context.Context,
+	cfg soakEncryptionPreflightConfig,
 	store soakEncryptionStore,
 	sender *soakSender,
 	selector *soakRuntimeSelector,
 	replies <-chan soakSendObservation,
-	persistGrace time.Duration,
 ) error {
+	if cfg.Verified != nil {
+		cfg.Verified.Set(0)
+	}
+	if !cfg.Enabled {
+		slog.Warn(
+			"Cassandra soak encryption preflight skipped by configuration",
+			"encryptionPreflight", false,
+			"consequence", "this run does not verify the encrypted write path",
+		)
+		return nil
+	}
+	// The budget starts before the publish, not after it: the front-door outage
+	// this check exists to notice is exactly the case where the send itself
+	// stalls, and a deadline created afterwards would not bound it.
+	probeCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
 	target, content := selector.nextSend()
-	pending, err := sender.Publish(ctx, target, content)
+	pending, err := sender.Publish(probeCtx, target, content)
 	if err != nil {
 		return fmt.Errorf("publish encrypted front-door probe: %w", err)
 	}
-	timeout := max(30*time.Second, persistGrace+10*time.Second)
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	for {
 		select {
 		case <-probeCtx.Done():
@@ -1167,6 +1198,9 @@ func runSoakEncryptionPreflight(
 				soakEncryptionPollPeriod,
 			); err != nil {
 				return err
+			}
+			if cfg.Verified != nil {
+				cfg.Verified.Set(1)
 			}
 			slog.Info(
 				"Cassandra soak encryption preflight passed",

@@ -27,7 +27,24 @@ func newSoakUserReadFixture(
 				{ID: "u1", Account: "user-a"},
 				{ID: "u2", Account: "user-b"},
 			},
-			Rooms: []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
+			Rooms: []model.Room{
+				{ID: "room-1", Type: model.RoomTypeChannel},
+				// The DM read draws its peer from a real DM room, so the shared
+				// fixture carries one between the same two accounts.
+				{ID: "dm-1", Type: model.RoomTypeDM},
+			},
+			Subscriptions: []model.Subscription{
+				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
+				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
+				// The channel read names a co-member of a shared channel, so the
+				// fixture carries one between the same two accounts.
+				{RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
+				{RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
+					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
+			},
 		},
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
 		recorder,

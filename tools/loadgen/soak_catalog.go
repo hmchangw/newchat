@@ -24,9 +24,11 @@ const (
 	// asks "can a new reply be attached here?", which is true of a message with
 	// zero replies — precisely the case that has no thread room yet.
 	soakCatalogThreadRead soakCatalogAction = "thread_read"
-	// soakCatalogReadReceipt picks any persisted message to ask "who has read
-	// this?". Authorship is irrelevant — a reader asks about other people's
-	// messages as readily as their own.
+	// soakCatalogReadReceipt picks a persisted message to ask "who has read
+	// this?". The caller must address the request as that message's own author:
+	// room-service serves read receipts only to the sender, so any other
+	// identity is refused. This comment previously claimed the opposite, and the
+	// lane it misled failed every request it ever sent.
 	soakCatalogReadReceipt soakCatalogAction = "read_receipt"
 )
 

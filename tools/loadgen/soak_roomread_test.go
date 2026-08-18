@@ -226,13 +226,15 @@ func TestSoakRoomReader_RoomInfoForSurfacesTransportFailures(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestSoakRoomReader_SubscriptionsForRejectsAnEmptyAccount(t *testing.T) {
+func TestSoakRoomReader_SubscriptionForRejectsAnEmptyAccountOrRoom(t *testing.T) {
 	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
 	reader, _, _ := newSoakRoomReadFixture(t, transport, 15)
 
-	_, err := reader.SubscriptionsFor(context.Background(), "")
-
+	_, err := reader.SubscriptionFor(context.Background(), "", "room-1")
 	require.Error(t, err)
+
+	_, err = reader.SubscriptionFor(context.Background(), "user-a0", "")
+	require.Error(t, err, "an unscoped lookup would answer about the wrong room")
 }
 
 func TestSoakRoomReader_RequiresAnRPCClient(t *testing.T) {
@@ -271,7 +273,9 @@ func TestSoakRoomReader_ReadReceiptsUsesTheRoomMessageSubject(t *testing.T) {
 	reader, _, recorder := newSoakRoomReadFixture(t, transport, 11)
 	messages := &soakRoomMessageStub{
 		message: soakCatalogMessage{
-			soakCatalogCandidate: soakCatalogCandidate{ID: "msg-1", RoomID: "room-1"},
+			soakCatalogCandidate: soakCatalogCandidate{
+				ID: "msg-1", RoomID: "room-1", Author: "user-a0",
+			},
 		}, found: true,
 	}
 	reader.SetMessageSource(messages)
@@ -283,6 +287,8 @@ func TestSoakRoomReader_ReadReceiptsUsesTheRoomMessageSubject(t *testing.T) {
 	assert.True(t, strings.HasSuffix(transport.subjects[0], ".message.read-receipt"),
 		"subject=%s", transport.subjects[0])
 	assert.Contains(t, transport.subjects[0], "room-1")
+	assert.Contains(t, transport.subjects[0], "user-a0",
+		"the request is addressed as the message's author")
 	require.Len(t, recorder.samples, 1)
 	assert.Equal(t, soakRPCReadReceiptList, recorder.samples[0].Action)
 	assert.Equal(t, 1, recorder.samples[0].Messages, "the reader count is the payload size")

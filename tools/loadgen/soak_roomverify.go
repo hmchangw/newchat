@@ -227,7 +227,7 @@ func (v *soakRoomStateVerifier) verifyMute(
 
 	rpc := soakRoomStateUnknown
 	if v.reader != nil {
-		if response, err := v.reader.SubscriptionsFor(ctx, account); err == nil {
+		if response, err := v.reader.SubscriptionFor(ctx, account, roomID); err == nil {
 			rpc = soakRoomStateMismatch
 			for i := range response.Subscriptions {
 				if response.Subscriptions[i].RoomID != roomID {
@@ -320,7 +320,7 @@ func (v *soakRoomStateVerifier) verifyRead(
 
 	rpc := soakRoomStateUnknown
 	if v.reader != nil {
-		if response, err := v.reader.SubscriptionsFor(ctx, account); err == nil {
+		if response, err := v.reader.SubscriptionFor(ctx, account, roomID); err == nil {
 			rpc = soakRoomStateMismatch
 			for i := range response.Subscriptions {
 				if response.Subscriptions[i].RoomID != roomID {
