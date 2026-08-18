@@ -52,7 +52,11 @@ func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.Subscr
 	slog.InfoContext(c, "preview-debug list",
 		"sentByClient", req.IncludeLastMessage != nil,
 		"clientValue", req.IncludeLastMessage != nil && *req.IncludeLastMessage,
-		"withLastMsg", withLastMsg, "type", req.Type, "rows", len(res.Data))
+		"withLastMsg", withLastMsg, "type", req.Type, "rows", len(res.Data),
+		// Identify the caller: no commit in this repo sends includeLastMessage,
+		// so whoever sets it is a client we have not accounted for.
+		"account", account, "offset", req.Offset, "limit", req.Limit,
+		"favorite", req.Favorite != nil, "updatedWithinDays", req.UpdatedWithinDays != nil)
 	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, true, withLastMsg)
 	items := s.buildListItems(c, res.Data)
 	return &models.PagedSubscriptionListResponse{
