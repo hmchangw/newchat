@@ -209,7 +209,7 @@ func (f *fakeRoomSource) SetPreviewMessage(_ context.Context, roomID string, _ p
 }
 
 //nolint:gocritic // hugeParam: the by-value shape is the RoomSource contract under test.
-func (f *fakeRoomSource) UpdatePreviewBody(_ context.Context, roomID string, _ pkgmodel.PreviewMessage, asOf int64) error {
+func (f *fakeRoomSource) UpdatePreviewBody(_ context.Context, roomID string, _ pkgmodel.PreviewMessage, _ string, asOf int64) error {
 	f.updateBodyCalls.Add(1)
 	f.updateBodyArgs = previewWrite{roomID: roomID, asOf: asOf}
 	return nil
@@ -231,7 +231,7 @@ func TestRoomCache_PreviewWrites_BypassTheCache(t *testing.T) {
 
 	require.NoError(t, c.SetPreviewMessage(ctx, "r1", pkgmodel.PreviewMessage{}, "m-9", 100))
 	require.NoError(t, c.SetPreviewMessage(ctx, "r1", pkgmodel.PreviewMessage{}, "m-9", 100))
-	require.NoError(t, c.UpdatePreviewBody(ctx, "r1", pkgmodel.PreviewMessage{}, 200))
+	require.NoError(t, c.UpdatePreviewBody(ctx, "r1", pkgmodel.PreviewMessage{}, "m-observed", 200))
 	require.NoError(t, c.ClearPreview(ctx, "r1", 300))
 
 	assert.Equal(t, int32(2), src.setPreviewCalls.Load(), "an identical repeat write must still reach the source")

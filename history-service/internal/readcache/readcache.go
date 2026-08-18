@@ -155,7 +155,7 @@ type RoomSource interface {
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
 	SetPreviewMessage(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) error
-	UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, asOf int64) error
+	UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) error
 	ClearPreview(ctx context.Context, roomID string, asOf int64) error
 }
 
@@ -241,8 +241,8 @@ func (c *RoomCache) SetPreviewMessage(ctx context.Context, roomID string, pvw pk
 // not a read this cache fronts.
 //
 //nolint:gocritic // hugeParam: pvw's by-value shape is the RoomSource contract this passes through unchanged.
-func (c *RoomCache) UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, asOf int64) error {
-	return c.inner.UpdatePreviewBody(ctx, roomID, pvw, asOf)
+func (c *RoomCache) UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) error {
+	return c.inner.UpdatePreviewBody(ctx, roomID, pvw, forMsgID, asOf)
 }
 
 // ClearPreview bypasses the cache and delegates to the source — a write, not a

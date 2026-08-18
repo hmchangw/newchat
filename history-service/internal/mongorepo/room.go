@@ -185,12 +185,18 @@ func (r *RoomRepo) SetPreviewMessage(ctx context.Context, roomID string, pvw mod
 // refuses to create: a doc minted here would carry no key and never be invalidatable.
 //
 //nolint:gocritic // hugeParam: pvw's by-value shape matches SetPreviewMessage and the RoomRepository contract.
-func (r *RoomRepo) UpdatePreviewBody(ctx context.Context, roomID string, pvw model.PreviewMessage, asOf int64) error {
+func (r *RoomRepo) UpdatePreviewBody(ctx context.Context, roomID string, pvw model.PreviewMessage, forMsgID string, asOf int64) error {
+	// No observed key means nothing to pin the body to; storing it could pair this
+	// body with whatever key the doc happens to hold.
+	if forMsgID == "" {
+		return nil
+	}
 	sealed, ok, err := r.seal(ctx, roomID, "", pvw)
 	if err != nil || !ok {
 		return err
 	}
-	return r.applyPreviewFields(ctx, roomID, "update room preview body", preview.GuardedUpdateBodyFields(sealed, asOf))
+	return r.applyPreviewFields(ctx, roomID, "update room preview body",
+		preview.GuardedUpdateBodyFields(sealed, forMsgID, asOf))
 }
 
 // ClearPreview removes every preview field, advancing previewAsOf against older replays.

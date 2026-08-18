@@ -74,8 +74,11 @@ type RoomRepository interface {
 	SetPreviewMessage(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error
 	// UpdatePreviewBody reseals the body after an edit/delete, leaving the
 	// freshness key alone (a mutation does not move lastMsgId) and refusing to
-	// create — an insert is the sole creator.
-	UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, asOf int64) error
+	// create — an insert is the sole creator. forMsgID is the key the walk
+	// OBSERVED: the write lands only while the stored key still equals it, so an
+	// insert that advanced the key between walk and write makes this a no-op
+	// rather than pairing this older body with the newer key.
+	UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error
 	// ClearPreview removes the stored preview under the same guard, for a
 	// mutation that leaves the room with no eligible message.
 	ClearPreview(ctx context.Context, roomID string, asOf int64) error

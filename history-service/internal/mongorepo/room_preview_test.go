@@ -277,7 +277,7 @@ func TestRoomRepo_UpdatePreviewBody_ReplacesBodyKeepingFreshnessKey(t *testing.T
 
 	edited := samplePreview()
 	edited.Content = "edited content"
-	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-edit", edited, 200))
+	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-edit", edited, "m-preview", 200))
 
 	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-edit"})
 	require.NoError(t, err)
@@ -297,7 +297,7 @@ func TestRoomRepo_UpdatePreviewBody_RefusesToCreate(t *testing.T) {
 	ctx := context.Background()
 	seedBareRoom(t, repo, "r-nopreview", "m-newest")
 
-	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-nopreview", samplePreview(), 200))
+	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-nopreview", samplePreview(), "m-newest", 200))
 
 	var raw bson.M
 	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-nopreview"}).Decode(&raw))
@@ -334,7 +334,7 @@ func TestRoomRepo_PreviewWrites_NoCipherIsANoOp(t *testing.T) {
 	seedBareRoom(t, repo, "r-off", "m-newest")
 
 	require.NoError(t, repo.SetPreviewMessage(ctx, "r-off", samplePreview(), "m-newest", 100))
-	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-off", samplePreview(), 100))
+	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-off", samplePreview(), "m-any", 100))
 	require.NoError(t, repo.ClearPreview(ctx, "r-off", 100))
 
 	var raw bson.M

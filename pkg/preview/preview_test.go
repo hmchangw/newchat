@@ -3,6 +3,7 @@ package preview
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -205,7 +206,7 @@ func TestGuardedUpdateBodyFields_MovesOnlyTheBodyAndRequiresExisting(t *testing.
 		KeyEpoch:   3,
 		ForMsgID:   "ignored",
 	}
-	fields := GuardedUpdateBodyFields(sealed, 1754388000000)
+	fields := GuardedUpdateBodyFields(sealed, "m-observed", 1754388000000)
 
 	require.Contains(t, fields, "previewAsOf")
 	assert.NotContains(t, fields, "previewForMsgId",
@@ -218,10 +219,34 @@ func TestGuardedUpdateBodyFields_MovesOnlyTheBodyAndRequiresExisting(t *testing.
 		assert.True(t, hasLiteral, "%s must be $literal-wrapped", f)
 		assert.Equal(t, "$"+f, cond[2], "%s must be preserved when the guard fails", f)
 
-		// Two conjuncts: the watermark, and "a readable preview already exists".
+		// Two conjuncts: the watermark, and the stored key equalling the observed one.
+		// The equality also refuses to create — a missing key reads as "" and cannot
+		// equal a non-empty observed id, so only an insert may mint a preview.
 		and := cond[0].(bson.M)["$and"].(bson.A)
 		require.Len(t, and, 2)
 		assertGuardExpr(t, and[0].(bson.M), 1754388000000)
-		assert.Equal(t, bson.M{"$gt": bson.A{bson.M{"$strLenCP": bson.M{"$ifNull": bson.A{"$previewForMsgId", ""}}}, 0}}, and[1])
+		assert.Equal(t, bson.M{"$eq": bson.A{bson.M{"$ifNull": bson.A{"$previewForMsgId", ""}}, "m-observed"}}, and[1])
 	}
+}
+
+// The body write is pinned to the key the walk OBSERVED. Without that conjunct an
+// insert landing between the walk and this write advances previewForMsgId, the older
+// body is stored under the newer key, and the reader's identity check passes on the
+// mismatch — the #224 shape, reached by a different route.
+func TestGuardedUpdateBodyFields_PinsTheBodyToTheObservedKey(t *testing.T) {
+	sealed := Sealed{
+		Meta:       model.PreviewMeta{MessageID: "m1"},
+		Ciphertext: []byte{0x01},
+		Nonce:      []byte{0x02},
+		KeyEpoch:   3,
+	}
+	fields := GuardedUpdateBodyFields(sealed, "m-observed", 1754388000000)
+
+	// The guard lives inside each field's $cond; rendering the whole update is the
+	// least brittle way to assert on it without mirroring the pipeline's shape here.
+	rendered := fmt.Sprintf("%v", fields)
+	assert.Contains(t, rendered, "m-observed",
+		"the guard must compare the stored freshness key against the observed one")
+	assert.Contains(t, rendered, "previewForMsgId",
+		"the comparison must read the stored key, not just the incoming one")
 }

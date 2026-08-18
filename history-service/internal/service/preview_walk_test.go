@@ -42,7 +42,7 @@ func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[mode
 	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	hydrated := &models.Message{

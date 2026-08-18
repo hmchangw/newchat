@@ -641,10 +641,12 @@ func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID str
 
 	switch w.State {
 	case previewFound:
-		// Body only: a mutation does not move lastMsgId, so previewForMsgId stays correct.
+		// Body only: a mutation does not move lastMsgId. Pinned to the key the walk
+		// OBSERVED, not left unconditional — an insert landing between the walk and this
+		// write advances the key, and an unpinned body would then be stored under it.
 		ctx, cancel := context.WithTimeout(c, warmBackTimeout)
 		defer cancel()
-		if err := s.rooms.UpdatePreviewBody(ctx, roomID, w.Preview, asOf); err != nil {
+		if err := s.rooms.UpdatePreviewBody(ctx, roomID, w.Preview, w.NewestObservedID, asOf); err != nil {
 			slog.WarnContext(c, "update mutated room preview failed", "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(c), "error", err)
 		}

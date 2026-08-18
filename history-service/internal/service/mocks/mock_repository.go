@@ -709,17 +709,17 @@ func (mr *MockRoomRepositoryMockRecorder) SetPreviewMessage(ctx, roomID, pvw, fo
 }
 
 // UpdatePreviewBody mocks base method.
-func (m *MockRoomRepository) UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, asOf int64) error {
+func (m *MockRoomRepository) UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdatePreviewBody", ctx, roomID, pvw, asOf)
+	ret := m.ctrl.Call(m, "UpdatePreviewBody", ctx, roomID, pvw, forMsgID, asOf)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdatePreviewBody indicates an expected call of UpdatePreviewBody.
-func (mr *MockRoomRepositoryMockRecorder) UpdatePreviewBody(ctx, roomID, pvw, asOf any) *gomock.Call {
+func (mr *MockRoomRepositoryMockRecorder) UpdatePreviewBody(ctx, roomID, pvw, forMsgID, asOf any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePreviewBody", reflect.TypeOf((*MockRoomRepository)(nil).UpdatePreviewBody), ctx, roomID, pvw, asOf)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePreviewBody", reflect.TypeOf((*MockRoomRepository)(nil).UpdatePreviewBody), ctx, roomID, pvw, forMsgID, asOf)
 }
 
 // MockEventPublisher is a mock of EventPublisher interface.

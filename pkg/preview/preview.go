@@ -118,13 +118,18 @@ func GuardedAdvanceKeyFields(forMsgID string, asOf int64) bson.M {
 }
 
 // GuardedUpdateBodyFields replaces an EXISTING body, leaving the key alone — a mutation
-// never moves lastMsgId. The extra conjunct refuses to create: only an insert may mint one.
+// never moves lastMsgId. forMsgID is the key the caller's walk OBSERVED, and the write
+// lands only while the stored key still equals it. That equality does double duty: it
+// refuses to create (a missing key cannot equal a non-empty id, and only an insert may
+// mint one), and it closes the window where an insert advances the key between the walk
+// and this write — without it the older body would be stored under the newer key and the
+// reader's identity check would pass on the mismatch, exactly the #224 shape.
 //
 //nolint:gocritic // hugeParam: Sealed is the stored shape itself; by-value matches Seal/Open.
-func GuardedUpdateBodyFields(s Sealed, asOf int64) bson.M {
+func GuardedUpdateBodyFields(s Sealed, forMsgID string, asOf int64) bson.M {
 	cond := bson.M{"$and": bson.A{
 		watermarkGuard(asOf),
-		bson.M{"$gt": bson.A{bson.M{"$strLenCP": bson.M{"$ifNull": bson.A{"$previewForMsgId", ""}}}, 0}},
+		bson.M{"$eq": bson.A{bson.M{"$ifNull": bson.A{"$previewForMsgId", ""}}, forMsgID}},
 	}}
 	return guardedFields(asOf, previewBodyFields, cond, literalBody(s))
 }

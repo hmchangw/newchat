@@ -49,7 +49,7 @@ func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageReposi
 	// The mutation path persists what its walk resolved, and the read path warm-backs.
 	// Tests that assert on those writes take the room mock (newServiceWithRoomMock) and
 	// set their own expectations instead of inheriting these.
-	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	rooms.EXPECT().
@@ -2011,8 +2011,8 @@ func TestHistoryService_DeleteMessage_PublishesCanonicalBeforePersistingPreview(
 			order = append(order, "publish")
 			return nil
 		})
-	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), "r1", gomock.Any(), gomock.Any()).
-		DoAndReturn(func(context.Context, string, model.PreviewMessage, int64) error {
+	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(context.Context, string, model.PreviewMessage, string, int64) error {
 			order = append(order, "persist")
 			return nil
 		})
