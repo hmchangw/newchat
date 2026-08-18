@@ -18,6 +18,19 @@ var ErrEncryptedRowCipherDisabled = errors.New("encrypted row encountered but ci
 // enc_payload is nil the row is treated as legacy plaintext and m is
 // returned unchanged. When the cipher is nil and enc_payload is non-nil,
 // ErrEncryptedRowCipherDisabled is returned.
+// decryptRows decrypts msgs in place. Rows carrying no enc_payload pass through
+// untouched, so a bucket written across an at-rest rollout (some rows sealed,
+// some not) needs no special casing. Used on the cached read path, where rows
+// arrive in the sealed form loadSealedBucket stored.
+func (r *Repository) decryptRows(ctx context.Context, msgs []models.Message) error {
+	for i := range msgs {
+		if err := r.decryptIfNeeded(ctx, &msgs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *Repository) decryptIfNeeded(ctx context.Context, m *models.Message) error {
 	if len(m.EncPayload) == 0 {
 		return nil
