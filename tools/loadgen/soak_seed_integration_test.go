@@ -534,3 +534,116 @@ func TestCountCreatedRooms_ExcludesTheSeededPopulation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, created, "a created room that is not yet claimed still spent budget")
 }
+
+// insertRoomServiceCreatedRoom writes a room and its subscriptions the way
+// room-service does when the create lane calls room.create: no soakRunId, since
+// the marker is a loadgen-private field the service knows nothing about. The
+// run claims the room afterwards, which is the only stamping that happens.
+func insertRoomServiceCreatedRoom(
+	t *testing.T,
+	ctx context.Context,
+	store *mongoSoakStore,
+	runID, siteID, roomID string,
+	accounts []model.SubscriptionUser,
+) {
+	t.Helper()
+	_, err := store.db.Collection("rooms").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: roomID},
+		{Key: "name", Value: soakCreatedRoomPrefix(runID) + "abc"},
+		{Key: "type", Value: model.RoomTypeChannel},
+		{Key: "siteId", Value: siteID},
+		{Key: "userCount", Value: len(accounts)},
+	})
+	require.NoError(t, err)
+
+	documents := make([]any, 0, len(accounts))
+	for i, account := range accounts {
+		roles := []model.Role{model.RoleMember}
+		if i == 0 {
+			roles = []model.Role{model.RoleOwner}
+		}
+		documents = append(documents, bson.D{
+			{Key: "_id", Value: roomID + "-sub-" + account.Account},
+			{Key: "u", Value: bson.D{
+				{Key: "_id", Value: account.ID},
+				{Key: "account", Value: account.Account},
+			}},
+			{Key: "roomId", Value: roomID},
+			{Key: "siteId", Value: siteID},
+			{Key: "roles", Value: roles},
+			{Key: "roomType", Value: model.RoomTypeChannel},
+			{Key: "isSubscribed", Value: true},
+			{Key: "joinedAt", Value: time.Now().UTC()},
+		})
+	}
+	_, err = store.db.Collection("subscriptions").InsertMany(ctx, documents)
+	require.NoError(t, err)
+
+	require.NoError(t, store.AppendOwnedRooms(ctx, runID, []string{roomID}))
+}
+
+// A room the create lane made is claimed by stamping soakRunId on the room, but
+// its subscriptions are written by room-service and never carry that marker.
+// Loading subscriptions by the marker therefore returns the room with no
+// members, and the runtime selector refuses to start:
+//
+//	soak room %q has no subscribed member
+//
+// One created room is enough to make every later restart of that run fail, so
+// at the default create rate a soak brands its own restart unusable about
+// twenty seconds in.
+func TestLoadTopology_RestoresSubscriptionsRoomServiceWroteForCreatedRooms(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "loadgen_soak_created_reload")
+
+	users := makeSoakUsers(12, "site-a")
+	userDocs := make([]any, len(users))
+	for i := range users {
+		userDocs[i] = users[i]
+	}
+	_, err := db.Collection("users").InsertMany(ctx, userDocs)
+	require.NoError(t, err)
+
+	store := &mongoSoakStore{db: db}
+	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
+	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
+	cfg := validSoakConfig(t)
+	cfg.MaxUsers = 12
+	cfg.ActiveUsers = 6
+	cfg.RoomCount = 5
+	cfg.ChannelRatio = 0.6
+	cfg.ChannelMembers = 3
+	cfg.ReactionsPerHotMessage = 3
+
+	seeded, err := seedSoak(ctx, store, keyStore, &soakSeedInput{
+		RunID: cfg.RunID, SiteID: "site-a", MongoDatabase: db.Name(),
+		CassandraKeyspace: "chat", Seed: 42, Config: &cfg,
+	}, newProductionSoakIDs())
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(seeded.ActiveUsers), 2)
+
+	const createdRoomID = "created-room-1"
+	members := []model.SubscriptionUser{
+		{ID: seeded.ActiveUsers[0].ID, Account: seeded.ActiveUsers[0].Account},
+		{ID: seeded.ActiveUsers[1].ID, Account: seeded.ActiveUsers[1].Account},
+	}
+	insertRoomServiceCreatedRoom(t, ctx, store, cfg.RunID, "site-a", createdRoomID, members)
+
+	reloaded, err := store.LoadTopology(ctx, cfg.RunID, "site-a")
+	require.NoError(t, err)
+
+	var createdRoomSubscriptions int
+	for i := range reloaded.Subscriptions {
+		if reloaded.Subscriptions[i].RoomID == createdRoomID {
+			createdRoomSubscriptions++
+		}
+	}
+	assert.Equal(t, len(members), createdRoomSubscriptions,
+		"the created room is loaded, so its subscriptions must load with it")
+
+	// The assertion that matches what an operator sees: a restarted process
+	// cannot build its selector at all.
+	_, err = newSoakRuntimeSelector(&reloaded, &cfg, 7)
+	require.NoError(t, err,
+		"a run that created a room must still be able to restart")
+}
