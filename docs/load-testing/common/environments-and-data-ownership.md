@@ -44,8 +44,8 @@ deciding what a run may do and what its numbers are worth.
 | **NATS / JetStream** | Managed, own cluster | **Dedicated** | shared k8s nodes; pods carry CPU/memory requests and limits | provider / infra Grafana + JetStream exporter (consumer state) |
 | **MongoDB** | Managed, own cluster | **Dedicated** | shared k8s nodes; pods carry CPU/memory requests and limits | provider / infra Grafana |
 | **Cassandra** | Managed, own cluster | **Dedicated** | shared k8s nodes; pods carry CPU/memory requests and limits. **Storage locality unconfirmed** - see §7 | provider / infra Grafana |
-| **Elasticsearch** | **Self-hosted** | ours | ours | ours to instrument (cAdvisor + ES metrics) |
-| **Valkey** | **Self-hosted** | ours | ours | ours to instrument (cAdvisor + Valkey metrics) |
+| **Elasticsearch** | **Self-hosted** | ours | shared k8s nodes; **placement unconfirmed** - see §7 | ours to instrument (cAdvisor + ES metrics) |
+| **Valkey** | **Self-hosted** | ours | shared k8s nodes; **placement unconfirmed** - see §7 | ours to instrument (cAdvisor + Valkey metrics) |
 
 **What requests and limits do and do not bound.** Configured CPU and memory
 requests/limits bound those two resources per pod, which removes most of the
@@ -53,6 +53,15 @@ node-level contention risk. They bound **neither disk IO nor network
 bandwidth**. For a Cassandra soak, whose subject is compaction and disk
 behaviour, IO is the axis that matters most and the one the limits do not
 cover - hence the open storage-locality question in §7.
+
+**Owning a dependency is not the same as isolating it.** For Elasticsearch and
+Valkey, "ours" answers who operates and instruments them, not whose CPU, disk,
+or network they compete for. They run on the same Kubernetes substrate, so
+their resource isolation is unconfirmed on the same three questions as the
+databases: affinity or taints, storage class, and network placement. Until that
+placement evidence exists, a capacity result for either is **provisional**, and
+accepting one requires node-level utilisation and neighbour-activity evidence
+for the run window.
 
 **Current operating assumption:** staging utilisation is low enough that
 neighbour interference is not expected to affect results. This is an
@@ -157,3 +166,16 @@ Two consequences for load testing:
 - **Node affinity or taints** keeping other workloads off the database nodes. If
   present, resource isolation is effectively dedicated too and the neighbour
   caveats in §2 and §3 can be dropped.
+- **Placement evidence for the self-hosted Elasticsearch and Valkey** - the same
+  three questions, so their capacity numbers stop being provisional (§2).
+- **Run-scoped isolation and cleanup for the persistent state teardown does not
+  reach.** §5 classes NATS streams, Elasticsearch data, and Valkey keys as "not
+  auto-removed", and the implemented teardown covers Mongo ownership plus an
+  optional Cassandra `TRUNCATE` only. There is no run-scoped stream, index, or
+  key prefix, no named owner, no expiry, and no post-run cleanup verification for
+  those three. The 24-72h evidence window is a retention rule, not a cleanup
+  mechanism: it does not prevent a later run reading stale state, nor Valkey
+  eviction of pre-existing keys, whose refill lands as extra Mongo and
+  Elasticsearch load. Deciding this needs both a loadgen teardown change and a
+  policy call on whether a capacity run may touch shared persistent state at all,
+  so it is recorded here rather than settled in this document.
