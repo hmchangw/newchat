@@ -14,10 +14,10 @@ first**, for the parts of the system that may be safely driven to failure.
 | Target | Ramp-to-breach? | Note |
 |---|---|---|
 | **App services** (gatekeeper / workers) | ✅ | `max-rps` per workload; `BOTTLENECK:` attribution |
-| **MongoDB** | ✅ | dedicated — send-path write capacity |
+| **MongoDB** | ✅ | dedicated cluster — send-path write capacity. Shared k8s nodes, but pods carry CPU/memory requests and limits |
 | **Elasticsearch / Valkey** | ✅ (isolated) | self-hosted, sized to prod ratio |
-| **Cassandra** | ⚠️ bounded | realistic + isolated-keyspace pathological only; not to failure on shared |
-| **NATS/JetStream** | ❌ broker breakpoint | validate consumer keep-up + bounded interest-map at expected + headroom, not broker-to-failure |
+| **Cassandra** | ⚠️ bounded | dedicated cluster; the bound is a decision, not a hosting constraint. Realistic + isolated-keyspace pathological only. Storage locality unconfirmed, so IO-bound ceilings are provisional |
+| **NATS/JetStream** | ❌ broker breakpoint | dedicated cluster, but a broker breakpoint is not the question — validate consumer keep-up + bounded interest-map at expected + headroom |
 
 ## Method *(to expand)*
 
@@ -25,6 +25,11 @@ first**, for the parts of the system that may be safely driven to failure.
   (loadgen `max-rps`). Report largest passing step + first-failing signal.
 - INCONCLUSIVE guard when the load box, not the SUT, is the limit (GC pause /
   emit-underrun) — already in loadgen.
+- INCONCLUSIVE guard on the **SUT side** as well: the databases run on shared
+  Kubernetes nodes, so a ceiling is only valid for the neighbour state during the
+  run. CPU and memory are bounded by pod requests/limits, but **disk IO and
+  network are not**. Record node-level neighbour activity for the run window; an
+  unexplained ceiling or latency step is INCONCLUSIVE until it reproduces.
 - Capacity is reported as **headroom vs current prod load**, not an absolute.
 
 ## loadgen coverage today

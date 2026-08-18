@@ -363,14 +363,17 @@ pollutes TWCS windows).
 CPU/RAM/heap/disk, `num_tokens`, keyspace RF; live values of
 `tombstone_warn/fail_threshold`, memtable flush thresholds, `compaction_throughput`,
 `concurrent_compactors`, `batch_size_warn/fail_threshold`, read/write timeouts;
-repair/snapshot schedule; dedicated vs shared cluster; maintenance windows;
+repair/snapshot schedule; maintenance windows; whether storage is node-local or
+network-attached (see `../common/environments-and-data-ownership.md` §7 - pod
+CPU/memory limits do not bound disk IO, so this decides whether compaction and
+disk-growth findings are attributable to this workload alone);
 **staging vs production node count and the actual staging TTL / gc_grace values**.
 
 **Confirm present in Grafana:** read/write latency (coordinator + per-table),
 SSTables/read, tombstones-scanned, pending compactions, flush count, per-table
 disk/SSTable count, partition size, CAS latency, dropped mutations, thread-pool
 pending/blocked, timeouts/unavailables, hinted handoff, GC pause, per-node
-CPU/disk (often missing on shared clusters).
+CPU/disk (per-node views are frequently unavailable on managed clusters).
 
 ---
 

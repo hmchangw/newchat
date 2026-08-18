@@ -21,7 +21,7 @@ edges, the cross-site federation lane.
 | **Author** | Michelle Leu |
 | **Driver** | `tools/loadgen` (NATS surface) |
 | **Validates** | That current code / schema / usage-pattern design meets the SLOs under realistic load; end-to-end publish->delivery latency budget; sustainable per-site throughput; the throughput **ceiling** and which service saturates first; back-pressure and consumer-lag behavior |
-| **Does NOT validate** | The frontend/last mile (render, websocket, browser login), true broker breakpoints on shared managed services, cross-site federation at scale (single-site loadgen), auth/login (stub), component-internal defects already owned by a component plan, or any breaking-point result promoted to a production SLO without infra sign-off — see §13 |
+| **Does NOT validate** | The frontend/last mile (render, websocket, browser login), true broker breakpoints (excluded by decision, not by hosting), cross-site federation at scale (single-site loadgen), auth/login (stub), component-internal defects already owned by a component plan, or any breaking-point result promoted to a production SLO without infra sign-off — see §13 |
 | **A "pass" means** | The exercised scenario met its SLO predicate/target over an isolated run window, with bounded consumer lag — an evidence-based readiness signal, **not** a blanket production certification |
 
 **Scope note — loadgen-driven, no frontend.** Every scenario is driven through
@@ -345,13 +345,15 @@ overhead a stress run is trying to measure (o11y perf spec §3).
 
 Full treatment in
 [`../common/environments-and-data-ownership.md`](../common/environments-and-data-ownership.md).
-In short: **NATS / Mongo / Cassandra are managed; ES / Valkey are self-hosted; no
-dedicated test cluster is provisioned.** Mongo is dedicated to us (CPU pressure
-acceptable); Cassandra is semi-conservative (realistic load acceptable,
-pathological isolated); NATS raw throughput is not the concern — **our usage
-patterns** are; ES/Valkey we own and may drive to capacity in isolation.
-Managed-service runs require pre-communication with infra and a recorded blast
-radius.
+In short: **NATS, MongoDB, and Cassandra each run as a cluster dedicated to us**
+on **shared Kubernetes nodes**; ES and Valkey are self-hosted. Isolation is
+therefore two-axis — dedicated at the data plane, shared at the resource plane —
+and pod CPU/memory requests and limits bound that sharing for CPU and memory but
+not for disk IO or network. Mongo may be driven to capacity; Cassandra stays
+bounded by decision rather than by hosting; NATS raw throughput is not the
+concern — **our usage patterns** are; ES/Valkey we own and may drive to capacity
+in isolation. Runs still require pre-communication with infra and a recorded
+blast radius.
 
 ---
 
