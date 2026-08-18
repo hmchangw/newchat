@@ -3,7 +3,7 @@
 > **Status: baseline seeded from the Cassandra plan; confirm the flagged items.**
 > Shared production workload inputs for all system-level load tests. The
 > authoritative per-input detail currently lives in
-> [`../cassandra/soak-test-plan.md`](../soak/cassandra-soak-plan.md) §B; this doc
+> [`../soak/cassandra-soak-plan.md`](../soak/cassandra-soak-plan.md) §B; this doc
 > promotes it to a system-wide input and will absorb newer traffic data as it
 > arrives.
 

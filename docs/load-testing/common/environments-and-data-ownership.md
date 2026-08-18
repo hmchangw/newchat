@@ -3,8 +3,8 @@
 > Shared input for every system-level load test. Defines where tests run, which
 > dependencies are managed vs self-hosted, the blast radius on shared
 > infrastructure, and the data-ownership/cleanup rules. Consumed by
-> [`../system/end-to-end-load-test-plan.md`](../performance/end-to-end-plan.md),
-> `capacity-test-plan.md`, and the failure-testing program under `../failure-testing/`.
+> [`../performance/end-to-end-plan.md`](../performance/end-to-end-plan.md),
+> `../performance/capacity-test-plan.md`, and the failure-testing program under `../failure/`.
 
 | | |
 |---|---|
@@ -37,7 +37,7 @@ SLO/behavior (staging).
 | **Elasticsearch** | **Self-hosted** | ours | ours to instrument (cAdvisor + ES metrics) |
 | **Valkey** | **Self-hosted** | ours | ours to instrument (cAdvisor + Valkey metrics) |
 
-The **L1/L2/L3 observability model** (`end-to-end-load-test-plan.md` §5) matters
+The **L1/L2/L3 observability model** (`../performance/end-to-end-plan.md` §5) matters
 here: for **managed** services we do **not** own L3 — server internals come from
 the provider/infra dashboards, so capacity findings depend on infra
 coordination. For **self-hosted** ES/Valkey we own L3 and can read container
@@ -76,7 +76,7 @@ Before any staging run that materially loads a **managed** dependency:
 - [ ] Confirm **data isolation** (dedicated `SITE_ID` / DB / keyspace / test index).
 
 This mirrors the Cassandra plan's "Items to Confirm With Infrastructure"
-(`../cassandra/soak-test-plan.md` §7), generalized to every managed dependency.
+(`../soak/cassandra-soak-plan.md` §7), generalized to every managed dependency.
 
 ---
 
@@ -100,7 +100,7 @@ Prefer a dedicated `SITE_ID` / Mongo DB / keyspace / ES index. Retain evidence
 ## 6. Dependency criticality — summary
 
 Full **failure-mode matrix** (dead / degraded / slow → impact + backstop) is in
-[`../failure-testing/failure-testing-overview.md`](../failure/overview.md) §6.1. In
+[`../failure/overview.md`](../failure/overview.md) §6.1. In
 short, criticality ranks: **NATS (send path + federation) > MongoDB (control
 plane + send path) > Cassandra (history only, off the send path) ≈
 Elasticsearch (search only) > Valkey (best-effort cache, graceful degrade)**.
@@ -122,4 +122,4 @@ Two consequences for load testing:
   prod node counts, throughput ceilings, maintenance windows, L3 dashboard access.
 - Self-hosted ES/Valkey: staging node sizing vs prod ratio.
 - Whether a quiescent/dedicated **test `SITE_ID`** (traffic isolation for the SLO
-  assertion window, `end-to-end-load-test-plan.md` §0) is available on staging.
+  assertion window, `../performance/end-to-end-plan.md` §0) is available on staging.

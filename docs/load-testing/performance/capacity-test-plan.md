@@ -31,4 +31,4 @@ first**, for the parts of the system that may be safely driven to failure.
 
 `max-rps --workload=messages|history|thread|thread-read|read-receipt|room-read`,
 `members-capacity`, `botroom` (max-room-size), `presence-capacity`. Gaps: search
-(ES), federation (single-site). See `end-to-end-load-test-plan.md` §3.
+(ES), federation (single-site). See [`end-to-end-plan.md`](end-to-end-plan.md) §3.

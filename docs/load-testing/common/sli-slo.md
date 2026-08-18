@@ -12,8 +12,9 @@ Companions (o11y specs): `../../specs/o11y/o11y-metrics-inventory.md`,
 `../../specs/o11y/o11y-trace-design.md`,
 `../../specs/o11y/o11y-performance-and-sampling.md`. Error budget policy:
 placeholder (`o11y-error-budget-policy.md`, to be written). Load-test alignment:
-§10 here is the self-contained summary; a fuller `end-to-end-load-test-plan.md`
-is a **planned companion (separate PR)** that will own execution.
+§10 here is the self-contained summary;
+[`../performance/end-to-end-plan.md`](../performance/end-to-end-plan.md) owns
+execution.
 
 ---
 

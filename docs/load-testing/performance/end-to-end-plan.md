@@ -128,7 +128,7 @@ phased after; resilience runs on the failure program's own schedule.
 | | **Capacity (ramp-to-breach)** | **Fixed-load soak** |
 |---|---|---|
 | **Question** | "at how many msg/s does SLO-2 miss 1 s? what backs up first?" | "at 100 msg/s for N hours, does any SLO drift?" |
-| **Load shape** | 500 -> 1k -> 2k -> 5k msg/s, hold each step, stop at first breach | pinned at the expected peak (100 msg/s, workload-model I1) |
+| **Load shape** | 100 (I1 baseline) -> 250 -> 500 -> 1k -> 2k -> 5k msg/s, hold each step, stop at first breach, then bisect between the last passing and first failing step | pinned at the expected peak (100 msg/s, workload-model I1) |
 | **loadgen** | `max-rps --workload=messages` | `daily` / `soak` at a fixed rate |
 | **Verdict** | largest step where **all** SLO signals held = capacity; `BOTTLENECK:` names the culprit | SLO held for the whole run **and** consumer lag / Mongo write latency / memory did not drift |
 | **What it cannot tell you** | endurance / slow drift (it is short per step) | the ceiling (you never push past peak) |
@@ -136,6 +136,13 @@ phased after; resilience runs on the failure program's own schedule.
 Both use the **same realistic mix** (channel/DM/thread split, message-size
 distribution, room-size Zipf); only the **rate profile** and the **question**
 differ. This is the template for every other journey.
+
+**The ramp starts at the declared I1 baseline (100 msg/s), not above it.** A ramp
+that begins at 500 msg/s cannot observe a first SLO breach that occurs between
+expected peak and that first step, and would report the ceiling as "at least
+500" when it is in fact lower. After the first failing step, bisect the interval
+between it and the last passing step until the breach point is bounded to within
+one step width.
 
 ---
 
@@ -318,7 +325,11 @@ overhead a stress run is trying to measure (o11y perf spec §3).
 1. **Preflight:** isolated/disposable environment confirmed (D6); `O11Y_ENABLED`
    and sampler ratio set and recorded; `ENCRYPTION_ENABLED=true`; loadgen scraped
    by Prometheus; L2/L3 dashboards reachable; blast radius acknowledged for
-   NATS/ES/Valkey side effects; `run_id` recorded.
+   every dependency the run touches - NATS, MongoDB, Cassandra, Elasticsearch,
+   and Valkey - with the exact Mongo database and Cassandra keyspace scope
+   recorded, and managed-service runs pre-communicated with infra per
+   [`../common/environments-and-data-ownership.md`](../common/environments-and-data-ownership.md);
+   `run_id` recorded.
 2. **Seed** fixtures (`loadgen seed --preset=...`).
 3. **Run 1 Baseline** for the fixed window; confirm the budget and flat lag.
 4. **Run 2 Stress/Capacity** (`max-rps` ramp); capture the knee, the
