@@ -1484,6 +1484,9 @@ func newSub(id string, user *model.User, room *model.Room, roles []model.Role,
 		IsSubscribed: isSubscribed,
 		JoinedAt:     joinedAt,
 		Open:         true,
+		// Denorm from room so subscription.list doesn't drop new members of a restricted room (#298).
+		Restricted:     room.Restricted,
+		ExternalAccess: room.ExternalAccess,
 	}
 }
 
