@@ -41,6 +41,7 @@ func (r *Repository) AddReaction(ctx context.Context, msg *models.Message, key m
 		if err := r.session.ExecuteBatch(batch); err != nil {
 			return fmt.Errorf("add reaction on message %s in room %s via batch(messages_by_id, messages_by_room): %w", msg.MessageID, msg.RoomID, err)
 		}
+		r.bustBucket(ctx, msg.RoomID, msg.CreatedAt)
 		return nil
 	}
 	batch.Query(addReactionThreadMsg, key, reactor, reactedAt, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID)
@@ -64,6 +65,7 @@ func (r *Repository) RemoveReaction(ctx context.Context, msg *models.Message, ke
 		if err := r.session.ExecuteBatch(batch); err != nil {
 			return fmt.Errorf("remove reaction on message %s in room %s via batch(messages_by_id, messages_by_room): %w", msg.MessageID, msg.RoomID, err)
 		}
+		r.bustBucket(ctx, msg.RoomID, msg.CreatedAt)
 		return nil
 	}
 	batch.Query(removeReactionThreadMsg, key, msg.ThreadRoomID, msg.CreatedAt, msg.MessageID)
