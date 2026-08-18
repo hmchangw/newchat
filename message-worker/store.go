@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/histdegrade"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
@@ -58,4 +59,16 @@ type ThreadStore interface {
 	// roomID via a single $addToSet UpdateMany. Idempotent under JetStream
 	// redelivery; accounts not subscribed simply match nothing.
 	AddThreadUnread(ctx context.Context, roomID, parentMessageID string, accounts []string) error
+}
+
+// DegradeStore persists the site's history-degraded marker. Satisfied by
+// *histdegrade.Store.
+//
+// Deliberately absent from the mockgen directive above: the tracker tests need a
+// stateful double (a Set must be visible to a later Get, first-writer-wins), which
+// the hand-written fakeDegradeStore expresses and gomock expectations do not.
+type DegradeStore interface {
+	Set(ctx context.Context, siteID string, sinceMillis int64) error
+	Clear(ctx context.Context, siteID string) error
+	Get(ctx context.Context, siteID string) (*histdegrade.Marker, error)
 }
