@@ -99,6 +99,22 @@ func newSoakUserReader(
 	return reader, nil
 }
 
+// soakUserPairsPerRoom bounds how many (requester, peer) directions one room
+// contributes, keeping the index linear in the number of subscriptions.
+const soakUserPairsPerRoom = 2
+
+// soakUserPeerFor returns a member of the room other than requester. Any
+// co-member serves the purpose — the read asserts that a shared room is
+// visible, not which one of several co-members it names.
+func soakUserPeerFor(participants []string, requester string) (string, bool) {
+	for _, participant := range participants {
+		if participant != requester {
+			return participant, true
+		}
+	}
+	return "", false
+}
+
 // soakUserRoomPairs indexes rooms of one type as the (requester, peer)
 // directions whose requester is one of the lane's active accounts. Both reads
 // that name another account depend on it: a pair drawn at random shares a DM
@@ -112,9 +128,13 @@ func newSoakUserReader(
 // indexing both sides would have these reads issuing traffic as borrowed
 // accounts nothing else touches, quietly changing what the lane measures.
 //
-// Only the first two members of a channel are paired. The point is a co-member
-// that genuinely shares a room, not coverage of the membership matrix, and a
-// full cross-product would be quadratic in channelMembers.
+// A channel contributes at most soakUserPairsPerRoom pairs. The point is a
+// co-member that genuinely shares a room, not coverage of the membership
+// matrix, and a full cross-product would be quadratic in channelMembers. The
+// cap is applied after the active filter, never before it: which members a room
+// lists first is an ordering accident of how the topology was loaded, so
+// truncating first would silently drop every room whose only active member
+// happens to be seeded further down.
 //
 // Ordering follows topology.Rooms so a given seed draws the same sequence for a
 // given topology. It is not stable across the seed and restart paths: those
@@ -147,21 +167,30 @@ func soakUserRoomPairs(
 	pairs := make([]soakUserAccountPair, 0, len(members)*2)
 	for i := range topology.Rooms {
 		participants := members[topology.Rooms[i].ID]
-		// A DM room is always exactly two accounts; for a channel the first two
-		// are enough. Fewer than two cannot name a counterpart at all.
+		// A DM room is always exactly two accounts. Fewer than two cannot name a
+		// counterpart at all, whatever the room type.
 		if roomType == model.RoomTypeDM && len(participants) != 2 {
 			continue
 		}
-		if len(participants) < 2 || participants[0] == participants[1] {
+		if len(participants) < 2 {
 			continue
 		}
-		for side, requester := range participants[:2] {
+		paired := 0
+		for _, requester := range participants {
+			if paired == soakUserPairsPerRoom {
+				break
+			}
 			if _, ok := active[requester]; !ok {
 				continue
 			}
-			pairs = append(pairs, soakUserAccountPair{
-				Requester: requester, Peer: participants[1-side],
-			})
+			peer, ok := soakUserPeerFor(participants, requester)
+			if !ok {
+				// Every row in this room names the same account, so there is no
+				// counterpart to ask about.
+				continue
+			}
+			pairs = append(pairs, soakUserAccountPair{Requester: requester, Peer: peer})
+			paired++
 		}
 	}
 	return pairs

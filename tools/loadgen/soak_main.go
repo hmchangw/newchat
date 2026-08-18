@@ -1164,13 +1164,16 @@ func runSoakEncryptionPreflight(
 		)
 		return nil
 	}
+	// The budget starts before the publish, not after it: the front-door outage
+	// this check exists to notice is exactly the case where the send itself
+	// stalls, and a deadline created afterwards would not bound it.
+	probeCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
 	target, content := selector.nextSend()
-	pending, err := sender.Publish(ctx, target, content)
+	pending, err := sender.Publish(probeCtx, target, content)
 	if err != nil {
 		return fmt.Errorf("publish encrypted front-door probe: %w", err)
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	defer cancel()
 	for {
 		select {
 		case <-probeCtx.Done():

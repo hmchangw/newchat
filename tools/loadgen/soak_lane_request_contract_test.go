@@ -291,3 +291,72 @@ func TestSoakUserReader_SubscriptionDMAsksFromTheActiveSide(t *testing.T) {
 			decodeSoakRequestBody(t, transport.bodies[i])["accountName"])
 	}
 }
+
+// The active-account filter must choose which participants may be the
+// requester, not be applied to a pre-truncated slice. A channel whose first two
+// members are both borrowed still has active members who can ask about it, and
+// dropping it shrinks the lane to whichever rooms happen to be ordered well.
+func TestSoakUserReader_ChannelPairsFindActiveMembersBeyondTheFirstTwo(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+	subscribed := func(account string) model.Subscription {
+		return model.Subscription{
+			RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
+			User: model.SubscriptionUser{ID: account, Account: account},
+		}
+	}
+	reader, err := newSoakUserReader(
+		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+		&soakTopology{
+			ActiveUsers: []model.User{{ID: "active-a", Account: "active-a"}},
+			Rooms:       []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
+			Subscriptions: []model.Subscription{
+				subscribed("borrowed-a"), subscribed("borrowed-b"), subscribed("active-a"),
+			},
+		},
+		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+		&soakRoomReadRecorder{},
+		rand.New(rand.NewSource(7)),
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, reader.SubscriptionChannels(context.Background()))
+
+	require.Len(t, transport.subjects, 1,
+		"the room has an active member, so the lane must not skip it")
+	assert.Equal(t, subject.UserSubscriptionGetChannels("active-a", "site-a"),
+		transport.subjects[0])
+	assert.Contains(t, []any{"borrowed-a", "borrowed-b"},
+		decodeSoakRequestBody(t, transport.bodies[0])["membersContain"])
+}
+
+// A room whose rows all name the same account has no counterpart to ask about.
+// The previous index guarded this by comparing the first two participants; the
+// scan that replaced it has to keep refusing, otherwise the lane would send an
+// account its own name as membersContain — the degenerate query that made
+// getChannels return nothing in the first place.
+func TestSoakUserReader_ChannelPairsSkipRoomsWithASingleDistinctMember(t *testing.T) {
+	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
+	duplicated := model.Subscription{
+		RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
+		User: model.SubscriptionUser{ID: "active-a", Account: "active-a"},
+	}
+	reader, err := newSoakUserReader(
+		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+		&soakTopology{
+			ActiveUsers:   []model.User{{ID: "active-a", Account: "active-a"}},
+			Rooms:         []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
+			Subscriptions: []model.Subscription{duplicated, duplicated},
+		},
+		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+		&soakRoomReadRecorder{},
+		rand.New(rand.NewSource(11)),
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, reader.SubscriptionChannels(context.Background()))
+
+	assert.Empty(t, transport.subjects,
+		"the room names one account twice, so there is no co-member to query for")
+}

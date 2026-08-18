@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"math/rand"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 func TestSoakConfig_EncryptionPreflightDefaultsOn(t *testing.T) {
@@ -69,4 +72,64 @@ func TestRunSoakEncryptionPreflight_DisabledSendsNothing(t *testing.T) {
 	)
 
 	require.NoError(t, err)
+}
+
+// soakPreflightDeadlinePublisher records whether the publish ran under the
+// preflight's own budget. The publish is the part most likely to hang during
+// the front-door outage this check exists to notice, so a timeout that starts
+// only after it returns does not bound what it claims to.
+type soakPreflightDeadlinePublisher struct {
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (p *soakPreflightDeadlinePublisher) Publish(
+	ctx context.Context,
+	_ string,
+	_ []byte,
+) error {
+	p.deadline, p.hasDeadline = ctx.Deadline()
+	return nil
+}
+
+func TestRunSoakEncryptionPreflight_PublishesUnderTheConfiguredTimeout(t *testing.T) {
+	publisher := &soakPreflightDeadlinePublisher{}
+	clock := newFakeSoakClock(time.Unix(100, 0).UTC())
+	sender := newSoakSender(soakSendConfig{
+		SiteID: "site-a", ReplyTimeout: 5 * time.Second,
+	}, newSoakCatalog(8, 100, 0, clock), publisher, clock,
+		rand.New(rand.NewSource(1)), nil)
+	cfg := validSoakConfig(t)
+	selector, err := newSoakRuntimeSelector(&soakTopology{
+		Rooms: []model.Room{{ID: "room-1"}},
+		Subscriptions: []model.Subscription{{
+			RoomID: "room-1", IsSubscribed: true,
+			User: model.SubscriptionUser{ID: "u-1", Account: "alice"},
+		}},
+	}, &cfg, 42)
+	require.NoError(t, err)
+
+	// The reply never arrives, so the preflight fails on its own deadline; the
+	// assertion is about the context the publish already ran under.
+	err = runSoakEncryptionPreflight(
+		context.Background(),
+		soakEncryptionPreflightConfig{Enabled: true, Timeout: 40 * time.Millisecond},
+		&soakStubEncryptionStore{},
+		sender,
+		selector,
+		make(chan soakSendObservation),
+	)
+	require.Error(t, err)
+
+	require.True(t, publisher.hasDeadline,
+		"the probe publish ran under an unbounded context, so a stalled publish "+
+			"would outlive SOAK_ENCRYPTION_PREFLIGHT_TIMEOUT")
+	assert.WithinDuration(t, time.Now().Add(40*time.Millisecond), publisher.deadline,
+		2*time.Second, "the publish must share the preflight's budget")
+}
+
+type soakStubEncryptionStore struct{}
+
+func (soakStubEncryptionStore) HasWrappedDEK(context.Context, string) (bool, error) {
+	return false, nil
 }
