@@ -33,7 +33,10 @@ const (
 	pinnedColumns = "room_id, pinned_at, message_id, sender, " +
 		"msg, mentions, attachments, card, card_action, quoted_parent_message, " +
 		"visible_to, deleted, type, sys_msg_data, site_id, edited_at, " +
-		"updated_at, pinned_by, created_at, tshow, thread_parent_id, thread_parent_created_at"
+		"updated_at, pinned_by, created_at, tshow, thread_parent_id, thread_parent_created_at, " +
+		// An at-rest edit rewrites the pinned row as ciphertext (msg nulled), so
+		// the read must carry these or an edited pin comes back empty.
+		"enc_payload, enc_meta"
 
 	pinnedByRoomQuery = "SELECT " + pinnedColumns + " FROM pinned_messages_by_room WHERE room_id = ?"
 )
@@ -120,11 +123,15 @@ func (r *Repository) GetPinnedMessages(ctx context.Context, roomID string, pageR
 			if !found {
 				break
 			}
+			if dErr := r.decryptIfNeeded(ctx, &m); dErr != nil {
+				scanErr = dErr
+				return
+			}
 			rows = append(rows, m)
 		}
 	})
 	if scanErr != nil {
-		return Page[models.Message]{}, fmt.Errorf("scan pinned message row for room %s: %w", roomID, scanErr)
+		return Page[models.Message]{}, fmt.Errorf("read pinned message row for room %s: %w", roomID, scanErr)
 	}
 	if err != nil {
 		return Page[models.Message]{}, fmt.Errorf("query pinned messages for room %s: %w", roomID, err)
@@ -133,6 +140,7 @@ func (r *Repository) GetPinnedMessages(ctx context.Context, roomID string, pageR
 }
 
 // GetAllPinnedMessages returns every pin for a room (internal: cap + orphan scan need it all).
+// Deliberately does not decrypt — its only caller reads MessageID/PinnedAt.
 func (r *Repository) GetAllPinnedMessages(ctx context.Context, roomID string) ([]models.Message, error) {
 	iter := r.session.Query(pinnedByRoomQuery, roomID).WithContext(ctx).Iter()
 	rows := make([]models.Message, 0)

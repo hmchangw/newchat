@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/pkg/atrest"
+	cassmodel "github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
 
@@ -229,4 +231,57 @@ func TestRepository_GetPinnedMessages_Paginates(t *testing.T) {
 	}
 	assert.Len(t, seen, 5, "every pin returned exactly once across pages")
 	assert.ElementsMatch(t, []string{"a", "b", "c", "d", "e"}, seen)
+}
+
+// TestRepository_GetPinnedMessages_EditedEncryptedPin covers the at-rest path
+// end to end: an encrypted edit moves the body into enc_payload and nulls the
+// pinned mirror's plaintext columns, so the pinned read must select and decrypt
+// enc_payload or it hands the client an empty message.
+func TestRepository_GetPinnedMessages_EditedEncryptedPin(t *testing.T) {
+	ctx := context.Background()
+	session := setupCassandra(t)
+	mongoDB := setupMongo(t)
+
+	wrapper := newTestVaultWrapper(t, ctx)
+	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
+		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
+	sizer := msgbucket.New(24 * time.Hour)
+	repo := NewRepository(session, sizer, 365, cipher)
+
+	roomID := "r-pin-enc-1"
+	created := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	sender := models.Participant{ID: "u1", Account: "alice"}
+	attachments := [][]byte{[]byte("att-1.bin")}
+
+	// Seed the message as an at-rest write leaves it: body in enc_payload, msg null.
+	payload, meta, err := cipher.Encrypt(ctx, roomID,
+		atrest.EncryptedFields{Msg: "original body", Attachments: attachments})
+	require.NoError(t, err)
+	encMeta := &cassmodel.EncMeta{Nonce: meta.Nonce}
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, enc_payload, enc_meta, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"m1", roomID, created, sender, payload, encMeta, false,
+	).WithContext(ctx).Exec())
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, enc_payload, enc_meta, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		roomID, sizer.Of(created), created, "m1", sender, payload, encMeta, false,
+	).WithContext(ctx).Exec())
+
+	// Pin then edit exactly as the service does: read (decrypts) before each write.
+	toPin, err := repo.GetMessageByID(ctx, "m1")
+	require.NoError(t, err)
+	pinnedAt := created.Add(time.Hour)
+	require.NoError(t, repo.PinMessage(ctx, toPin, pinnedAt, models.Participant{ID: "u2", Account: "mod"}))
+
+	toEdit, err := repo.GetMessageByID(ctx, "m1")
+	require.NoError(t, err)
+	require.NotNil(t, toEdit.PinnedAt, "the edit only touches the pinned mirror when PinnedAt is set")
+	require.NoError(t, repo.UpdateMessageContent(ctx, toEdit, "edited body", created.Add(2*time.Hour)))
+
+	page, err := repo.GetPinnedMessages(ctx, roomID, PageRequest{PageSize: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Data, 1)
+	assert.Equal(t, "edited body", page.Data[0].Msg, "pinned list must return the edited body, not an empty string")
+	assert.Equal(t, attachments, page.Data[0].Attachments, "the encrypted edit nulls the plaintext attachments column too")
+	assert.Empty(t, page.Data[0].EncPayload, "ciphertext must not escape the repository")
 }
