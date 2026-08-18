@@ -102,16 +102,16 @@ application code.
 
 ### Observability parity between the local overlay and the real test cluster
 
-`tools/loadgen/deploy/prometheus/prometheus.yml` scrapes three sources beyond
-loadgen's own series: the `prometheus-nats-exporter` sidecar on `:7777`
-(JetStream consumer backlog), the o11y SDK endpoint on `:2112` via Docker
-service discovery, and per-service counters on `:9090`.
+The Helm chart under `tools/loadgen/deploy/k8s/` carries **no scrape config of
+its own**. It relies on `prometheus.io/scrape` pod annotations plus a
+cluster-wide Prometheus, and those annotations cover the loadgen pod (`:9099`)
+only — not the services under test, and not the NATS server.
 
-**That covers the docker-compose path only.** The Helm chart under
-`tools/loadgen/deploy/k8s/` carries no scrape config of its own — it relies on
-`prometheus.io/scrape` pod annotations and a cluster-wide Prometheus, and those
-annotations cover the loadgen pod (`:9099`), not the services under test or the
-NATS server.
+> The Prometheus config under `tools/loadgen/deploy/prometheus/` is the local
+> docker-compose overlay for developing loadgen. It is **not** a model of the
+> real test cluster and must not be cited as evidence of what staging or
+> production scrapes. The requirements below stand on the Helm chart and on the
+> campaign contract, not on that file.
 
 So a run executed in Kubernetes has **no consumer-backlog signal** unless the
 cluster is separately configured for it. That matters more than it sounds:

@@ -139,10 +139,20 @@ raw metric names before applying canonical rules.
 | `cadvisor` / kubelet | cluster standard | Kubernetes | namespace, pod, container, node | Needed for resource invalidation and recovery surge |
 | `kube-state-metrics` | cluster standard | Kubernetes | namespace, workload, pod, reason | Needed for readiness, restart, OOM, scheduling evidence |
 
-Recommended scrape interval is 15 seconds for base monitoring and 5 seconds for
-approved short failure campaigns if backend capacity has been validated. All
-campaign thresholds must be longer than two scrape intervals or explicitly
-account for sampling uncertainty.
+**Campaign scrape interval is 30 seconds, confirmed.** This is the cadence the
+dashboard contract's evaluation rules are derived from
+([`../loadgen/dashboard-contract.md`](../loadgen/dashboard-contract.md)): the
+two-minute lookback, the one-minute evaluation step, the minimum of three
+samples, and the five-consecutive-healthy-points recovery rule are all sized
+against 30-second samples and do not carry over unchanged to another cadence.
+A campaign that scrapes at a different interval must restate those thresholds,
+not merely reuse them.
+
+The 5-second interval in the loadgen docker-compose overlay is a local
+development setting and is not the campaign cadence.
+
+All campaign thresholds must remain longer than two scrape intervals or
+explicitly account for sampling uncertainty.
 
 Prometheus must reject samples older than the allowed clock-skew threshold. A
 target that reports `up=1` but whose required business series is stale or absent

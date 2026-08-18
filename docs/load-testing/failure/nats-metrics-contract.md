@@ -111,7 +111,7 @@ the drop keeps its own reason — the first classification per delivery wins.
 | OTel NATS spans | instrumented services | Existing | Spans do not replace counters, gauges, or terminal advisories |
 | `nats_slow_consumer_events_total{subject,queue}` | `pkg/natsutil` | Existing | Per-episode count; exact drops are in the log fields |
 | `chat_nats_client_connected` / `chat_nats_client_connection_events_total{event}` | `pkg/natsutil` | Existing | Every service connecting through the shared helper; scoped by resource, not by inline `service_name` |
-| Section 7 shared application families | `pkg/natsmetrics` | Existing for message-gatekeeper, message-worker, broadcast-worker, notification-worker | Other services are not yet adopted; `publish_retries_total` has no producer |
+| Section 7 shared application families | `pkg/natsmetrics` | Existing for message-gatekeeper, message-worker, broadcast-worker, notification-worker, history-service, room-service, and room-worker | Adoption depth differs: the first four and room-worker instrument the consumer path; history-service and room-service are publisher-side only. `publish_retries_total` still has no producer, so an empty family is expected rather than a freshness-gate failure |
 | Section 8 domain families | owning service | Existing for the four first-campaign services | See Section 8 for the channel fan-out caveat |
 
 ## 5. Canonical Infrastructure Metrics
