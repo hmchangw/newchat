@@ -913,6 +913,48 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 		assert.WithinDuration(t, time.Now().Add(h.cfg.FanoutTimeout), callDeadline, 2*time.Second, "fanout deadline must be the configured fanout budget, not per-publish and not unbounded")
 	})
 
+	t.Run("fanout deadline is capped by the whole-request budget, not a fresh FANOUT_TIMEOUT", func(t *testing.T) {
+		// net/http's WriteTimeout runs from the request, not from the fanout: local work
+		// (Mongo tx, audit) that runs first eats into it. A fanout budget that always
+		// starts fresh could finish after net/http closed the connection, losing
+		// syncFailures. So the handler pins one absolute request deadline at entry and
+		// the fanout takes the earlier of it and now+FanoutTimeout.
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		accounts := []string{"alice"}
+		mockPermissionStoreOK(m, accounts)
+
+		var mu sync.Mutex
+		var callDeadline time.Time
+		publish := func(ctx context.Context, _ string, _ []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			callDeadline, _ = ctx.Deadline()
+			return nil
+		}
+		cfg := fanoutTestCfg()
+		cfg.FanoutTimeout = time.Hour // far past the request budget: the request budget must win
+		h := newHandler(m, emptySessionStore(), cfg, nil, publish)
+		start := time.Now()
+		require.Equal(t, http.StatusCreated, postPermissions(h, fanoutRequestBody(accounts), t).Code)
+
+		mu.Lock()
+		defer mu.Unlock()
+		assert.WithinDuration(t, start.Add(requestBudget), callDeadline, 2*time.Second,
+			"fanout deadline must be bounded by the request budget measured from handler entry")
+		assert.Less(t, requestBudget, httpWriteTimeout, "the request budget must leave room to write the response before net/http's WriteTimeout")
+	})
+
+	t.Run("an already-spent request budget reports every destination without publishing", func(t *testing.T) {
+		var log publishLog
+		h := newHandler(nil, emptySessionStore(), fanoutTestCfg(), nil, log.publish)
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		failures := h.publishPermissionFanout(ctx, model.PermissionExternalImageView, []fanoutBatch{{accounts: []string{"alice"}, state: model.PermissionState{Granted: true}}})
+		assert.Equal(t, []string{"site-b", "site-c"}, failures)
+		assert.Empty(t, log.subjects, "no publish may run on an expired budget")
+	})
+
 	t.Run("chunking: one account over the chunk size splits into a full chunk plus one per destination", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		m := NewMockAdminStore(ctrl)

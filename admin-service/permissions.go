@@ -136,7 +136,8 @@ func displayUntilDate(t time.Time) string {
 // a permission for one or more subject accounts, all-or-nothing, with one
 // audit entry per created row. Validation order matches spec §4.4 exactly.
 func (h *Handler) createPermissions(c *gin.Context) {
-	ctx := c.Request.Context()
+	ctx, cancel := withRequestBudget(c)
+	defer cancel()
 
 	var req permissionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -322,12 +323,19 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 	if h.publishInbox == nil || len(dests) == 0 {
 		return nil
 	}
-	// The request ctx has no deadline and dies if the client disconnects — neither fits:
-	// the caller's local work is done (create's ledger write already committed; resync
-	// writes nothing), so re-delivery runs to completion on its own budget
-	// (cfg.FanoutTimeout), shared by every lane. A destination that doesn't land within
-	// it is reported like any other unacknowledged publish.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.cfg.FanoutTimeout)
+	// The request ctx dies if the client disconnects, which doesn't fit: the caller's
+	// local work is done (create's ledger write already committed; resync writes
+	// nothing), so re-delivery runs to completion on its own budget, shared by every
+	// lane. That budget is cfg.FanoutTimeout capped by the request's absolute deadline
+	// (withRequestBudget): the local work already spent part of net/http's write window,
+	// and a fresh full FanoutTimeout on top could outlive it — the connection would
+	// close before the caller reads syncFailures. A destination that doesn't land in
+	// time is reported like any other unacknowledged publish.
+	deadline := time.Now().Add(h.cfg.FanoutTimeout)
+	if reqDeadline, ok := ctx.Deadline(); ok && reqDeadline.Before(deadline) {
+		deadline = reqDeadline
+	}
+	ctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	defer cancel()
 
 	now := time.Now().UTC().UnixMilli()
@@ -403,6 +411,13 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 	return failures
 }
 
+// withRequestBudget pins one absolute deadline for the whole request, measured from
+// handler entry: net/http's WriteTimeout runs from the request, so the fanout can
+// only spend what the local work left over — see publishPermissionFanout.
+func withRequestBudget(c *gin.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(c.Request.Context(), requestBudget)
+}
+
 // remoteSites filters allSiteIDs down to real remote destinations: no self, no blanks,
 // no repeats — a peer listed twice in ALL_SITE_IDS would otherwise get a second lane,
 // a duplicate publish, and a duplicate syncFailures entry.
@@ -431,7 +446,8 @@ type resyncPermissionsResponse struct {
 // and is idempotent (delivered states keep their stored watermarks, so remote guards
 // no-op anything already applied).
 func (h *Handler) resyncPermissions(c *gin.Context) {
-	ctx := c.Request.Context()
+	ctx, cancel := withRequestBudget(c)
+	defer cancel()
 	var req resyncPermissionsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errhttp.Write(ctx, c, errcode.BadRequest("invalid request body", errcode.WithReason(errcode.AuthMissingFields)))

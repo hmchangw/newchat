@@ -12,6 +12,11 @@ import (
 // the handler always wins the race against net/http closing the connection.
 const httpWriteTimeout = 40 * time.Second
 
+// requestBudget is the absolute per-request deadline the permission handlers pin at
+// entry (withRequestBudget): httpWriteTimeout minus a margin to write the response
+// after the last in-handler wait, so syncFailures always reaches the caller.
+const requestBudget = httpWriteTimeout - 2*time.Second
+
 type Config struct {
 	Port                  string `env:"PORT" envDefault:"8082"`
 	SiteID                string `env:"SITE_ID,required"`

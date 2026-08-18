@@ -397,7 +397,7 @@ base64-encodes the payload; each site has its own INBOX stream), published to
 `chat.inbox.{dest}.external.user_permissions_updated`, wrapped in the standard
 `InboxEvent` envelope, skipping self, blank, and repeated entries of `ALL_SITE_IDS`. The
 payload is marshaled once; each destination publishes every chunk in its own goroutine
-lane under one shared `FANOUT_TIMEOUT` budget (2026-08-17). No `Nats-Msg-Id` dedup — the guarded apply is idempotent, the same
+lane under one shared budget: `FANOUT_TIMEOUT` capped by the request's absolute deadline (handler entry + 38s, i.e. the 40s HTTP write timeout minus a response margin), so local work that already spent part of the write window can't let the fanout outlive the connection (2026-08-18). No `Nats-Msg-Id` dedup — the guarded apply is idempotent, the same
 rationale user-service's publisher documents for status/settings.
 
 **Success means the destination stream acknowledged the publish** — the event is in that
