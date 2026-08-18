@@ -106,30 +106,15 @@ func (r *Repository) UnpinMessage(ctx context.Context, msg *models.Message) erro
 
 // GetPinnedMessages returns one page of pins for a room (redaction is service-side).
 func (r *Repository) GetPinnedMessages(ctx context.Context, roomID string, pageReq PageRequest) (Page[models.Message], error) {
-	builder := NewQueryBuilder(r.session.Query(pinnedByRoomQuery, roomID).WithContext(ctx)).
-		WithPageSize(pageReq.PageSize).
-		WithCursor(pageReq.Cursor)
-
-	rows := make([]models.Message, 0, pageReq.PageSize)
+	scan := r.scanMessagesUpTo(ctx)
+	var rows []models.Message
 	var scanErr error
-	nextCursor, err := builder.Fetch(func(iter *gocql.Iter) {
-		for {
-			var m models.Message
-			found, sErr := structScan(iter, &m)
-			if sErr != nil {
-				scanErr = sErr
-				return
-			}
-			if !found {
-				break
-			}
-			if dErr := r.decryptIfNeeded(ctx, &m); dErr != nil {
-				scanErr = dErr
-				return
-			}
-			rows = append(rows, m)
-		}
-	})
+	nextCursor, err := NewQueryBuilder(r.session.Query(pinnedByRoomQuery, roomID).WithContext(ctx)).
+		WithPageSize(pageReq.PageSize).
+		WithCursor(pageReq.Cursor).
+		Fetch(func(iter *gocql.Iter) {
+			rows, scanErr = scan(iter, pageReq.PageSize)
+		})
 	if scanErr != nil {
 		return Page[models.Message]{}, fmt.Errorf("read pinned message row for room %s: %w", roomID, scanErr)
 	}

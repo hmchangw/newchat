@@ -253,7 +253,7 @@ func TestRepository_GetPinnedMessages_EditedEncryptedPin(t *testing.T) {
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	attachments := [][]byte{[]byte("att-1.bin")}
 
-	// Seed the message as an at-rest write leaves it: body in enc_payload, msg null.
+	// Seed the canonical row as an at-rest write leaves it: body in enc_payload, msg null.
 	payload, meta, err := cipher.Encrypt(ctx, roomID,
 		atrest.EncryptedFields{Msg: "original body", Attachments: attachments})
 	require.NoError(t, err)
@@ -261,10 +261,6 @@ func TestRepository_GetPinnedMessages_EditedEncryptedPin(t *testing.T) {
 	require.NoError(t, session.Query(
 		`INSERT INTO messages_by_id (message_id, room_id, created_at, sender, enc_payload, enc_meta, deleted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		"m1", roomID, created, sender, payload, encMeta, false,
-	).WithContext(ctx).Exec())
-	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, enc_payload, enc_meta, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, sizer.Of(created), created, "m1", sender, payload, encMeta, false,
 	).WithContext(ctx).Exec())
 
 	// Pin then edit exactly as the service does: read (decrypts) before each write.
