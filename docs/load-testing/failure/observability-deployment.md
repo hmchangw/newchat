@@ -49,6 +49,7 @@ metadata, fault windows, loadgen outcomes, reconciliation, and verdict panels.
 | NATS exporter | Existing in local observability/loadgen compose | Required, all nodes/JSZ | Required |
 | MongoDB exporter | Missing | Required, every replica-set member | Required |
 | Cassandra JMX exporter | Missing | Required, every node | Required |
+| Elasticsearch exporter | Missing | Required **only for an Elasticsearch capacity run** (see `../performance/capacity-test-plan.md`); not needed for the NATS/Mongo/Cassandra failure campaigns | Required for ES capacity |
 | Fault annotations | Manual acceptable | Required durable event + Grafana copy | Change/incident annotations only |
 | Election/quorum campaigns | Invalid | Required topology | Normally observation only |
 | Full-disk/destructive faults | Disposable local variant only | Isolated disposable namespace/cluster | Prohibited unless separately approved |

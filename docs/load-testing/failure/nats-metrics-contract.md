@@ -175,9 +175,19 @@ cannot distinguish a fresh burst from a permanently parked message.
 
 ## 6. Advisory Metrics
 
-Subscribe a dedicated platform observer to the applicable JetStream advisory
-subjects. It must persist raw advisory JSON in the run evidence bundle and
-emit only bounded aggregates.
+JetStream advisories are **Core NATS messages, not a replayable stream**. A
+direct subscriber that is connected to the node being faulted loses every
+advisory emitted while it reconnects, with no replay - in F02, precisely the
+leader-change and terminal-delivery advisories the campaign is trying to
+capture. A plain subscription therefore cannot support any claim that terminal
+or max-delivery evidence is complete.
+
+Provision a stream capturing the required `$JS.EVENT.ADVISORY.>` subjects
+**before** the campaign starts, consume it with a monitored durable using
+explicit acknowledgements, and persist the raw advisory JSON to the run evidence
+bundle from that durable. Emit only bounded aggregates as metrics. A campaign
+whose advisory capture was a direct subscription may report advisory counts, but
+must not claim advisory completeness.
 
 | Metric | Type | Labels |
 |---|---|---|

@@ -91,7 +91,7 @@ and network are not bounded by them. Per-dependency stance:
 | **MongoDB** | **Yes** | Dedicated to us — CPU pressure is acceptable. It is on the **send path both ends** (gatekeeper `GetSubscription`/`FindUserByID`; broadcast-worker `UpdateRoomLastMessage`/`AdvanceSubscriptionLastSeen`; `SetSubscriptionMentions` fan-out write), so a write-load capacity test is both possible and valuable. Isolate data (own test DB / `SITE_ID`). |
 | **Cassandra** | **Bounded** | The cluster is ours, so TWCS pollution and disk growth are not a cross-tenant risk; the bound is a **decision**, not a hosting constraint. Realistic soak (Run A) is fine; **pathological** shapes only in an **isolated keyspace** so a bad shape does not contaminate the soak's own evidence. Non-destructive by decision (soak plan D1). Storage locality is unconfirmed (§7), so IO-bound findings are provisional. |
 | **NATS / JetStream** | **Not to broker breakpoint** | Raw broker throughput is robust and not the concern — **our usage patterns** are (consumer lag/ack-pending under fan-out, gateway interest-map memory, notification O(N), outbox FIFO). Validate *consumer keep-up + bounded interest-map* at expected + headroom load; do not ramp the broker to failure - not because it is shared, but because a broker breakpoint is not the question this program asks. |
-| **Elasticsearch** | **Yes (isolated)** | Self-hosted — may drive to index/query capacity in an isolated index; size the test node to prod ratios. |
+| **Elasticsearch** | **Blocked pending isolation** | Self-hosted, and driving it to index/query capacity is acceptable *in principle* - but the isolated index this depends on does not exist yet (§7): there is no run-scoped index, owner, expiry, or cleanup verification. Until reads and writes can target a dedicated test index whose deletion teardown verifies, a capacity run writes into persistent shared state, mixes stale documents into later search results, and distorts segment/cache/index-size behaviour across runs. Resolving the index target is a preflight requirement, not a run-time detail. |
 | **Valkey** | **Yes (isolated)** | Self-hosted, best-effort cache — may drive to cluster capacity in isolation; not correctness-critical. |
 
 ---
@@ -124,11 +124,31 @@ test. Ownership classes and rules (generalized from the Cassandra plan's D6/§3)
 |---|---|---|
 | **Borrowed** | real Mongo `users` | Read-only; **never deleted**. Persist selected active-user IDs in the run manifest so restarts don't shift the population. |
 | **Mongo test-owned** | rooms, subscriptions, room keys, thread rooms/subs | Recorded in a run-prefixed ownership ledger; teardown verifies ownership then deletes in paced batches (uses existing service indexes, no teardown-only index). |
-| **Cassandra test-owned** | messages, pins, reactions | Retained by default; `TRUNCATE` only for an isolated disposable keyspace with explicit confirmation. No row-by-row delete on a keyspace holding evidence another run depends on. |
+| **Cassandra test-owned** | messages, pins, reactions | Retained by default; `TRUNCATE` only for an isolated disposable keyspace with explicit confirmation. No row-by-row delete on a keyspace holding evidence another run depends on. **Retention here is not a cleanup path** - see the disk-reclaim requirement below. |
 | **Other side effects** | NATS streams, Elasticsearch, Valkey | Not auto-removed; **record the accepted staging blast radius before the run**. |
 
 Prefer a dedicated `SITE_ID` / Mongo DB / keyspace / ES index. Retain evidence
 24–72h before cleanup.
+
+**Cassandra retention has no disk-reclaiming path, and the volume is not small.**
+At the planned 100 msg/s a three-day Run A produces roughly 26 million message
+operations before mirrored rows, pins, and reactions. The default is to retain
+that data, and the 24–72h window above is a retention rule that mandates no
+Cassandra cleanup at all. Even the permitted `TRUNCATE`/`DROP` path may not
+reclaim disk, because Cassandra can preserve the data in auto-snapshots.
+Repeated runs - pathological F1-F6 especially - can therefore accumulate
+SSTables or snapshots, distort the compaction and disk-growth evidence that the
+soak exists to produce, and eventually exhaust node storage.
+
+Before a repeated or pathological run, one of these must hold, and which one is
+an owner decision recorded in §7:
+
+- a run-scoped disposable keyspace (or cluster) plus post-retention teardown
+  that clears the applicable snapshots and verifies disk and compaction return
+  to baseline; or
+- a bounded TTL and an explicit storage budget, both verified before execution.
+
+Neither exists today.
 
 ---
 
@@ -179,3 +199,7 @@ Two consequences for load testing:
   Elasticsearch load. Deciding this needs both a loadgen teardown change and a
   policy call on whether a capacity run may touch shared persistent state at all,
   so it is recorded here rather than settled in this document.
+- **Which Cassandra disk-reclaim path applies** - a run-scoped disposable
+  keyspace with verified snapshot clearing, or a bounded TTL with an explicit
+  storage budget (§5). Neither exists today, and repeated or pathological runs
+  need one before they can execute.

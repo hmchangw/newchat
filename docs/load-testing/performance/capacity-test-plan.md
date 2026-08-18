@@ -15,7 +15,7 @@ first**, for the parts of the system that may be safely driven to failure.
 |---|---|---|
 | **App services** (gatekeeper / workers) | ✅ | `max-rps` per workload; `BOTTLENECK:` attribution |
 | **MongoDB** | ✅ | dedicated cluster — send-path write capacity. Shared k8s nodes, but pods carry CPU/memory requests and limits |
-| **Elasticsearch / Valkey** | ✅ (isolated) | self-hosted, sized to prod ratio |
+| **Elasticsearch / Valkey** | ⚠️ blocked | self-hosted, sized to prod ratio - but **two preconditions are unmet for Elasticsearch**: no run-scoped isolated index with verified teardown (`../common/environments-and-data-ownership.md` §7), and no Elasticsearch telemetry contract. `../failure/observability-deployment.md` requires exporters for NATS, MongoDB, and Cassandra only, and cAdvisor alone cannot separate application saturation from shard failures, thread-pool rejection, circuit-breaker trips, merge pressure, or disk watermarks - so a search SLO can breach with no way to name what broke first. Do not report an Elasticsearch capacity result while the required ES series are absent or stale |
 | **Cassandra** | ⚠️ bounded | dedicated cluster; the bound is a decision, not a hosting constraint. Realistic + isolated-keyspace pathological only. Storage locality unconfirmed, so IO-bound ceilings are provisional |
 | **NATS/JetStream** | ❌ broker breakpoint | dedicated cluster, but a broker breakpoint is not the question — validate consumer keep-up + bounded interest-map at expected + headroom |
 
@@ -34,6 +34,9 @@ first**, for the parts of the system that may be safely driven to failure.
 
 ## loadgen coverage today
 
-`max-rps --workload=messages|history|thread|thread-read|read-receipt|room-read`,
-`members-capacity`, `botroom` (max-room-size), `presence-capacity`. Gaps: search
-(ES), federation (single-site). See [`end-to-end-plan.md`](end-to-end-plan.md) §3.
+`max-rps --workload=messages|history|thread|thread-read|read-receipt|room-read|search`,
+`members-capacity`, `botroom` (max-room-size), `presence-capacity`. The search
+workload drives search-service request/reply load (`tools/loadgen/maxrps_search.go`)
+and is the Elasticsearch capacity workload - do not treat ES as uncovered. The
+remaining gap is federation (loadgen is single-site). See
+[`end-to-end-plan.md`](end-to-end-plan.md) §3.

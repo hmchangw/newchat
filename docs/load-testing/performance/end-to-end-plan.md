@@ -160,8 +160,20 @@ scenario (exists / partial / none).
 | T1-1 | **Cassandra schema soak (Run A)** | soak plan (unrun) | Cassandra write/read/compaction/disk | — (feeds 1a) | L2 op-duration exists - L3 exists | `soak` |
 | T1-4 | **Mongo send-path writes** | broadcast-worker `UpdateRoomLastMessage` + `AdvanceSubscriptionLastSeen` per send | Mongo writes | 1a/1b (underlying) | P-pending; L2 mongo exists | `messages` (no Mongo assert) |
 | T1-5 | **`SetSubscriptionMentions` UpdateMany fan-out** | broadcast-worker; @all -> many sub docs | Mongo write amplification | 1b | P-pending; L2 exists | partial: `realistic` (mentions, unasserted) |
-| T1-6 | **gatekeeper 2-3 Mongo reads/send** | `GetSubscription` + `FindUserByID` (+ `GetRoomMeta`) | Mongo reads (blocks E1) | 1a/1b | P-pending; L2 exists | `messages` |
+| T1-6 | **gatekeeper 2-3 Mongo reads/send** | `GetSubscription` + `FindUserByID` (+ `GetRoomMeta`) | Mongo reads (blocks E1) | 1a/1b | P-pending; L2 exists | `messages` - **see cache caveat below** |
 | T1-7 | **J1 full-chain E2E at peak** | gatekeeper->canonical->workers | all | **1a/1b/2** | P2; **loadgen L1 exists** | `messages`/`daily` |
+
+**T1-6 does not measure MongoDB read capacity by default.** All three named calls
+are cache-absorbed: `GetSubscription` behind the gatekeeper LRU+TTL
+(`GATEKEEPER_SUB_CACHE_TTL`) and the room/access reads behind history-service's
+`readcache` - see [`../soak/cassandra-soak-plan.md`](../soak/cassandra-soak-plan.md)
+MongoDB exposure table. A ramp over a small reusable fixture therefore drives
+service RPCs while issuing far fewer MongoDB queries, which overstates read
+capacity. Before reporting a MongoDB read-capacity number, declare the room and
+user working set and the intended cache-hit distribution, then require the
+observed MongoDB command rate and query mix to match that model; if they do not
+match, the result is INCONCLUSIVE for MongoDB regardless of the RPC rate
+achieved.
 
 ### Tier 2 — critical but likely sturdier / needs setup
 
@@ -177,8 +189,9 @@ scenario (exists / partial / none).
 
 Cassandra F1-F6 (tombstone storm, hot partition, TWCS pollution, reaction MAP
 width — isolated keyspace) - dependency fault injection (see
-[`../failure/overview.md`](../failure/overview.md)) - search (ES) capacity,
-auth/login, reconnect/presence storms.
+[`../failure/overview.md`](../failure/overview.md)) - end-to-end search indexing
+(the `search` max-rps workload already covers the query side), auth/login,
+reconnect/presence storms.
 
 ---
 
@@ -364,7 +377,10 @@ Out of scope:
 - **Frontend / last mile** (render, websocket, browser login) — loadgen-only.
 - **SLO-3 login** — auth is a loadgen stub.
 - **Federation at scale (SLO-9)** — loadgen is single-site.
-- **Search E2E (SLO-7/8)** — no search workload in loadgen yet (addable).
+- **Search E2E (SLO-7/8)** — partially covered. `max-rps --workload=search` drives
+  search-service request/reply load; what is missing is the end-to-end index-to-query
+  path and the Elasticsearch-side telemetry to attribute a breach (see
+  [`capacity-test-plan.md`](capacity-test-plan.md)).
 - **Datastore node failure** — managed clusters (soak plan D4).
 
 To confirm with infrastructure:

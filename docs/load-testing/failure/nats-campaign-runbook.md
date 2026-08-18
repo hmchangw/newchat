@@ -388,6 +388,16 @@ across the disconnect, so recipient delivery for this interval is read from the
 recipient observer and the connection metrics, never from
 `chat_nats_publish_attempts_total` alone.
 
+**The reconnect buffer is bounded in bytes, not in time.** A duration alone does
+not guarantee overflow: if the offered payload volume stays under the buffer
+limit, an outage can run past any stated time boundary and still produce no
+explicit publish failure, so the intended overflow path is never exercised.
+Record a finite reconnect-buffer byte limit for each publishing pool, and derive
+the outage duration from the bytes that pool offers - long enough that offered
+bytes exceed the limit, and spanning at least one application retry/AckWait
+boundary. A run that never crossed the byte limit has not tested overflow,
+whatever its duration.
+
 ### F07b: long complete outage
 
 Apply:

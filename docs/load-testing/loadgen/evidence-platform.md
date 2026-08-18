@@ -108,6 +108,11 @@ the fault begins.
     "natsServers": 3,
     "streamReplicas": 3,
     "mongodbMembers": 3,
+    "mongodbVotingMembers": 3,
+    "mongodbReadPreference": "primary",
+    "mongodbReadConcern": "majority",
+    "mongodbWriteConcern": {"w": "majority", "j": true, "wtimeoutMS": 5000},
+    "mongodbRetryWrites": true,
     "cassandraReplicationFactor": 3,
     "cassandraConsistency": "LOCAL_QUORUM"
   },
@@ -251,6 +256,7 @@ stateDiagram-v2
     Active --> Active: observation or retry scheduled
     Active --> Good: all required effects good
     Active --> Bad: explicit rejection, mismatch, or duplicate state
+    Good --> Bad: duplicate or mismatch observed before the report is frozen
     Active --> Unverified: required observer unavailable at deadline
     Active --> Missing: healthy observer confirms absence at deadline
     Good --> [*]
@@ -259,6 +265,17 @@ stateDiagram-v2
     Missing --> [*]
     NotSent --> [*]
 ```
+
+**`Good` is provisional until the duplicate-detection window closes.** All
+required effects being observed once is not proof that they were observed
+*exactly* once: a reconnect or a JetStream redelivery can produce a duplicate
+after finalization but before the deadline and settle window end. If `Good` were
+immediately terminal the late duplicate could not supersede it, and a campaign
+would pass despite a disallowed duplicate - the precise failure the duplicate
+gates exist to catch. A successful operation therefore stays observable until
+its duplicate window closes, and `Good -> Bad` is permitted up to the moment the
+report is frozen. Only `Bad` is reachable from `Good`; stronger later evidence
+may fail an operation, never rescue one.
 
 Terminal operation results remain:
 
@@ -333,11 +350,22 @@ Evaluation order is fixed:
 Precedence:
 
 ```text
-INCONCLUSIVE > FAIL > PASS
+proven FAIL > INCONCLUSIVE > FAIL > PASS
 ```
 
-This precedence means insufficient evidence is never converted into either a
-pass or a product failure. Examples:
+Insufficient evidence is never converted into a pass, and never *invented* into
+a product failure. But a product failure that independent, complete evidence
+already proves is **not** demoted by an unrelated evidence gap: a healthy
+authoritative observer confirming an accepted message is missing stays a `FAIL`
+even while a required exporter is stale elsewhere in the run. Demoting it would
+contradict §11, which states that observer loss is not a product `FAIL` *unless
+independent evidence proves one*, and it would contradict the campaign runbook's
+abort rule, which preserves a product `FAIL` proven by complete independent
+evidence.
+
+A run in that state reports **both**: the proven `FAIL` with its evidence, and
+the separate inconclusive scope naming which gates could not be evaluated. The
+inconclusive scope never narrows or softens the failure claim. Examples:
 
 | Condition | Verdict |
 |---|---|
