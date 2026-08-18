@@ -20,6 +20,12 @@ services:
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - CASSANDRA_HOSTS=${CASSANDRA_HOSTS:-cassandra}
       - CASSANDRA_KEYSPACE=${CASSANDRA_KEYSPACE:-chat}
+      # Per-bucket read cache L2 (sealed LoadHistory reads). Set VALKEY_ADDRS to
+      # empty to disable the cache and read straight from Cassandra — hence the
+      # `-` (unset-only) default rather than `:-`, which would override empty.
+      - VALKEY_ADDRS=${VALKEY_ADDRS-valkey:6379}
+      - VALKEY_PASSWORD=${VALKEY_PASSWORD:-}
+      - HISTORY_BUCKET_CACHE_TTL=${HISTORY_BUCKET_CACHE_TTL:-10m}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
       - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}
