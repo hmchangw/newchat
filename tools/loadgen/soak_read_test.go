@@ -265,12 +265,13 @@ func TestSoakReader_NormalEmptyResponseIsNotAnError(t *testing.T) {
 	assert.Empty(t, samples[0].ErrorClass)
 }
 
-func TestSoakReader_SelectsOnlySubscribedAccountForRoom(t *testing.T) {
+func TestSoakReader_SelectsOnlyActiveAccountForRoom(t *testing.T) {
 	topology := soakTopology{
+		ActiveUsers: []model.User{{ID: "u-alice", Account: "alice"}},
 		Subscriptions: []model.Subscription{
-			{RoomID: "room-1", IsSubscribed: false, User: model.SubscriptionUser{Account: "inactive"}},
-			{RoomID: "room-2", IsSubscribed: true, User: model.SubscriptionUser{Account: "other"}},
-			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
+			{RoomID: "room-1", User: model.SubscriptionUser{ID: "u-inactive", Account: "inactive"}},
+			{RoomID: "room-2", User: model.SubscriptionUser{ID: "u-other", Account: "other"}},
+			{RoomID: "room-1", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}},
 		},
 	}
 	transport := &soakReadTransport{replies: []soakRPCFakeReply{{

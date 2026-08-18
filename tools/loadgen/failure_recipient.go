@@ -264,7 +264,7 @@ func startFailureRecipientSubscriptions(
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
 		account := subscription.User.Account
-		if !subscription.IsSubscribed || subscription.User.IsBot || account == "" {
+		if !isSoakRoomMember(subscription) || subscription.User.IsBot || account == "" {
 			continue
 		}
 		add(subject.UserRoomEvent(account), account, recipientDeliveryRouteUser)

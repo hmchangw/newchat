@@ -163,10 +163,7 @@ func soakUserRoomPairs(
 	members := make(map[string][]string)
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
-		// isSubscribed=false is a room the account left; the row survives. The
-		// room pool filters the same way, and a pair built from a left room
-		// names a counterpart who no longer shares it.
-		if subscription.RoomType != roomType || !subscription.IsSubscribed ||
+		if subscription.RoomType != roomType || !isSoakRoomMember(subscription) ||
 			subscription.User.Account == "" {
 			continue
 		}

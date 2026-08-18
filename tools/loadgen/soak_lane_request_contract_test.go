@@ -218,40 +218,61 @@ func TestSoakUserReader_SubscriptionDMTargetsAKnownDMPeer(t *testing.T) {
 	}
 }
 
-// A left room keeps its subscription row with isSubscribed=false. Pairing on it
-// names a counterpart who no longer shares the room, so the read is answered
-// with a legitimate empty result — the exact "measures nothing" outcome the
-// index exists to avoid. The room pool already filters on this; the pair index
-// has to agree with it.
-func TestSoakUserReader_RoomPairsIgnoreUnsubscribedMemberships(t *testing.T) {
-	transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
-	reader, err := newSoakUserReader(
-		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
-		&soakTopology{
-			ActiveUsers: []model.User{
-				{ID: "u1", Account: "user-a"},
-				{ID: "u2", Account: "user-b"},
-			},
-			Rooms: []model.Room{{ID: "dm-1", Type: model.RoomTypeDM}},
-			Subscriptions: []model.Subscription{
-				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: true,
-					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
-				// user-b left: the row survives with isSubscribed=false.
-				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: false,
-					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
-			},
+// Channel and DM membership is represented by row existence. Production does
+// not set isSubscribed for these rows; only botDM uses it as a soft toggle.
+func TestSoakUserReader_RoomPairsUseExistingDMMembershipRows(t *testing.T) {
+	allSubscriptions := []model.Subscription{
+		{RoomID: "dm-1", RoomType: model.RoomTypeDM,
+			User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
+		{RoomID: "dm-1", RoomType: model.RoomTypeDM,
+			User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
+	}
+	tests := []struct {
+		name          string
+		subscriptions []model.Subscription
+		wantRequests  int
+		wantSkipped   bool
+	}{
+		{
+			name:          "two membership rows dispatch",
+			subscriptions: allSubscriptions,
+			wantRequests:  1,
 		},
-		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-		&soakRoomReadRecorder{},
-		rand.New(rand.NewSource(3)),
-		nil,
-	)
-	require.NoError(t, err)
+		{
+			name:          "one remaining membership row skips",
+			subscriptions: allSubscriptions[:1],
+			wantSkipped:   true,
+		},
+	}
 
-	require.NoError(t, reader.SubscriptionDM(context.Background()))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
+			recorder := &soakRoomReadRecorder{}
+			reader, err := newSoakUserReader(
+				soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+				&soakTopology{
+					ActiveUsers: []model.User{
+						{ID: "u1", Account: "user-a"},
+						{ID: "u2", Account: "user-b"},
+					},
+					Rooms:         []model.Room{{ID: "dm-1", Type: model.RoomTypeDM}},
+					Subscriptions: tt.subscriptions,
+				},
+				newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+				recorder,
+				rand.New(rand.NewSource(3)),
+				nil,
+			)
+			require.NoError(t, err)
 
-	assert.Empty(t, transport.subjects,
-		"a room with one live member cannot name a counterpart; the lane must skip")
+			require.NoError(t, reader.SubscriptionDM(context.Background()))
+
+			assert.Len(t, transport.subjects, tt.wantRequests)
+			require.Len(t, recorder.samples, 1)
+			assert.Equal(t, tt.wantSkipped, recorder.samples[0].Skipped)
+		})
+	}
 }
 
 // The user lane addresses 2000 active accounts by design. DM rooms are seeded

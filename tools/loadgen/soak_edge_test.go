@@ -232,12 +232,12 @@ func TestNewSoakRuntimeSelector_ValidatesInputs(t *testing.T) {
 			topology: &soakTopology{Rooms: []model.Room{{ID: "room-1"}}},
 		},
 		{
-			name: "room without subscribed member",
+			name: "room without usable member",
 			topology: &soakTopology{
 				Rooms: []model.Room{{ID: "room-1"}},
 				Subscriptions: []model.Subscription{{
 					RoomID: "room-1",
-					User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
+					User:   model.SubscriptionUser{ID: "u-1"},
 				}},
 			},
 			cfg: &cfg,
@@ -255,15 +255,16 @@ func TestNewSoakRuntimeSelector_ValidatesInputs(t *testing.T) {
 func TestNewSoakRuntimeSelector_SelectsOnlyValidMembers(t *testing.T) {
 	cfg := validSoakConfig(t)
 	selector, err := newSoakRuntimeSelector(&soakTopology{
-		Rooms: []model.Room{{ID: "room-1"}},
+		ActiveUsers: []model.User{{ID: "u-1", Account: "alice"}},
+		Rooms:       []model.Room{{ID: "room-1"}},
 		Subscriptions: []model.Subscription{
 			{
-				RoomID: "room-1", IsSubscribed: true,
-				User: model.SubscriptionUser{ID: "u-1", Account: "alice"},
+				RoomID: "room-1",
+				User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
 			},
 			{
-				RoomID: "room-1", IsSubscribed: false,
-				User: model.SubscriptionUser{ID: "u-2", Account: "bob"},
+				RoomID: "room-1",
+				User:   model.SubscriptionUser{ID: "u-2", Account: "bob"},
 			},
 			{
 				RoomID: "room-1", IsSubscribed: true,
@@ -348,16 +349,18 @@ func TestSoakTimerSleeper_ObservesCancellationAndTimer(t *testing.T) {
 func TestNewSoakMutator_AppliesDefaultsAndFiltersMembers(t *testing.T) {
 	mutator := newSoakMutator(
 		nil,
-		&soakTopology{Subscriptions: []model.Subscription{
-			{
-				RoomID: "room-1", IsSubscribed: true,
-				User: model.SubscriptionUser{Account: "alice"},
-			},
-			{
-				RoomID: "room-1", IsSubscribed: false,
-				User: model.SubscriptionUser{Account: "bob"},
-			},
-		}},
+		&soakTopology{
+			ActiveUsers: []model.User{{ID: "u-1", Account: "alice"}},
+			Subscriptions: []model.Subscription{
+				{
+					RoomID: "room-1",
+					User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
+				},
+				{
+					RoomID: "room-1",
+					User:   model.SubscriptionUser{ID: "u-2", Account: "bob"},
+				},
+			}},
 		nil,
 		nil,
 		nil,
@@ -487,8 +490,8 @@ func TestSoakReaderAndVerifier_ApplyDefaultsAndSkipEmptyCatalog(t *testing.T) {
 		soakReadConfig{},
 		&soakTopology{Subscriptions: []model.Subscription{
 			{
-				RoomID: "room-1", IsSubscribed: false,
-				User: model.SubscriptionUser{Account: "ignored"},
+				RoomID: "room-1",
+				User:   model.SubscriptionUser{},
 			},
 		}},
 		catalog,

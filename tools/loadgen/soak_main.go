@@ -315,7 +315,8 @@ func soakRecipientSets(topology *soakTopology) map[string][]string {
 	// production broadcast worker is still required to reach.
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
-		if !subscription.IsSubscribed || subscription.User.IsBot || subscription.User.Account == "" {
+		if !isSoakRoomMember(subscription) ||
+			subscription.User.IsBot || subscription.User.Account == "" {
 			continue
 		}
 		recipients[subscription.RoomID] = append(recipients[subscription.RoomID], subscription.User.Account)
