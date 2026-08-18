@@ -218,12 +218,9 @@ func TestSoakUserReader_SubscriptionDMTargetsAKnownDMPeer(t *testing.T) {
 	}
 }
 
-// A left room keeps its subscription row with isSubscribed=false. Pairing on it
-// names a counterpart who no longer shares the room, so the read is answered
-// with a legitimate empty result — the exact "measures nothing" outcome the
-// index exists to avoid. The room pool already filters on this; the pair index
-// has to agree with it.
-func TestSoakUserReader_RoomPairsIgnoreUnsubscribedMemberships(t *testing.T) {
+// Channel and DM membership is represented by row existence. Production does
+// not set isSubscribed for these rows; only botDM uses it as a soft toggle.
+func TestSoakUserReader_RoomPairsUseExistingDMMembershipRows(t *testing.T) {
 	transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
 	reader, err := newSoakUserReader(
 		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
@@ -234,10 +231,9 @@ func TestSoakUserReader_RoomPairsIgnoreUnsubscribedMemberships(t *testing.T) {
 			},
 			Rooms: []model.Room{{ID: "dm-1", Type: model.RoomTypeDM}},
 			Subscriptions: []model.Subscription{
-				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: true,
+				{RoomID: "dm-1", RoomType: model.RoomTypeDM,
 					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
-				// user-b left: the row survives with isSubscribed=false.
-				{RoomID: "dm-1", RoomType: model.RoomTypeDM, IsSubscribed: false,
+				{RoomID: "dm-1", RoomType: model.RoomTypeDM,
 					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
 			},
 		},
@@ -250,8 +246,7 @@ func TestSoakUserReader_RoomPairsIgnoreUnsubscribedMemberships(t *testing.T) {
 
 	require.NoError(t, reader.SubscriptionDM(context.Background()))
 
-	assert.Empty(t, transport.subjects,
-		"a room with one live member cannot name a counterpart; the lane must skip")
+	require.Len(t, transport.subjects, 1)
 }
 
 // The user lane addresses 2000 active accounts by design. DM rooms are seeded

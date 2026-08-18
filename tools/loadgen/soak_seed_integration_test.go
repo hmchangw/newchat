@@ -404,6 +404,74 @@ func TestLoadTopology_RestoresEnoughStateToBuildTheRoomPool(t *testing.T) {
 	assert.NotEmpty(t, pool.RoomIDs())
 }
 
+// Created rooms share the ownership ledger with the seeded topology. Their
+// subscriptions are written by room-service and carry neither loadgen's
+// soakRunId marker nor isSubscribed, so restart must recover them by owned room
+// scope and use row existence as channel membership.
+func TestLoadTopology_RestoresRoomsCreatedDuringTheRun(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "loadgen_soak_reload_created")
+
+	users := makeSoakUsers(12, "site-a")
+	userDocs := make([]any, len(users))
+	for i := range users {
+		userDocs[i] = users[i]
+	}
+	_, err := db.Collection("users").InsertMany(ctx, userDocs)
+	require.NoError(t, err)
+
+	store := &mongoSoakStore{db: db}
+	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
+	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
+	cfg := validSoakConfig(t)
+	cfg.MaxUsers = 12
+	cfg.ActiveUsers = 6
+	cfg.RoomCount = 5
+	cfg.ChannelRatio = 0.6
+	cfg.ChannelMembers = 3
+	cfg.ReactionsPerHotMessage = 3
+
+	seeded, err := seedSoak(ctx, store, keyStore, &soakSeedInput{
+		RunID: cfg.RunID, SiteID: "site-a", MongoDatabase: db.Name(),
+		CassandraKeyspace: "chat", Seed: 42, Config: &cfg,
+	}, newProductionSoakIDs())
+	require.NoError(t, err)
+
+	const createdRoomID = "created-room-1"
+	_, err = db.Collection("rooms").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: createdRoomID},
+		{Key: "name", Value: soakCreatedRoomPrefix(cfg.RunID) + "one"},
+		{Key: "type", Value: model.RoomTypeChannel},
+		{Key: "siteId", Value: "site-a"},
+	})
+	require.NoError(t, err)
+	_, err = db.Collection("subscriptions").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "created-subscription-1"},
+		{Key: "u", Value: bson.D{
+			{Key: "_id", Value: seeded.ActiveUsers[0].ID},
+			{Key: "account", Value: seeded.ActiveUsers[0].Account},
+		}},
+		{Key: "roomId", Value: createdRoomID},
+		{Key: "siteId", Value: "site-a"},
+		{Key: "roles", Value: bson.A{model.RoleOwner}},
+		{Key: "roomType", Value: model.RoomTypeChannel},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.AppendOwnedRooms(ctx, cfg.RunID, []string{createdRoomID}))
+
+	reloaded, err := store.LoadTopology(ctx, cfg.RunID, "site-a")
+	require.NoError(t, err)
+
+	assert.Len(t, reloaded.Rooms, len(seeded.Rooms)+1)
+	foundCreated := false
+	for i := range reloaded.Rooms {
+		foundCreated = foundCreated || reloaded.Rooms[i].ID == createdRoomID
+	}
+	assert.True(t, foundCreated)
+	_, err = newSoakRuntimeSelector(&reloaded, &cfg, 42)
+	require.NoError(t, err)
+}
+
 // The pool seeds its mute and read-cursor expectations from the reloaded
 // subscriptions. A projection that drops those fields makes a restarted process
 // expect the opposite mute state and report a correctness violation it caused.

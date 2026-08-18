@@ -241,7 +241,7 @@ func newSoakRoomStatePool(
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
 		state, ok := channels[subscription.RoomID]
-		if !ok || !subscription.IsSubscribed || subscription.User.Account == "" {
+		if !ok || !isSoakRoomMember(subscription) || subscription.User.Account == "" {
 			continue
 		}
 		if subscribed[state.id] == nil {

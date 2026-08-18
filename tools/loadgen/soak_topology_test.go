@@ -184,6 +184,32 @@ func TestBuildSoakTopology_IsDeterministicWithSeededIdentitySource(t *testing.T)
 	assert.Equal(t, a, b)
 }
 
+func TestIsActiveSoakSubscription_UsesExistingRoomRowsAsMembership(t *testing.T) {
+	active := map[string]struct{}{"u-1": {}}
+
+	assert.True(t, isActiveSoakSubscription(&model.Subscription{
+		RoomType: model.RoomTypeChannel,
+		User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+	}, active))
+	assert.True(t, isActiveSoakSubscription(&model.Subscription{
+		RoomType: model.RoomTypeDM,
+		User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+	}, active))
+	assert.False(t, isActiveSoakSubscription(&model.Subscription{
+		RoomType: model.RoomTypeChannel,
+		User:     model.SubscriptionUser{ID: "u-2", Account: "bob"},
+	}, active))
+	assert.False(t, isActiveSoakSubscription(&model.Subscription{
+		RoomType: model.RoomTypeBotDM,
+		User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+	}, active))
+	assert.True(t, isActiveSoakSubscription(&model.Subscription{
+		RoomType:     model.RoomTypeBotDM,
+		IsSubscribed: true,
+		User:         model.SubscriptionUser{ID: "u-1", Account: "alice"},
+	}, active))
+}
+
 func TestBuildSoakTopology_RejectsImpossibleRoomShape(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.MaxUsers = 3
