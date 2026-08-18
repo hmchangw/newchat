@@ -46,6 +46,13 @@ func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.Subscr
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
+	// TEMP DEBUG (remove before merge): absent and explicit-false are opposite
+	// here — nil means previews ARE requested. A nil *bool logs as false under
+	// naive formatting, so report presence and the derived gate separately.
+	slog.InfoContext(c, "preview-debug list",
+		"sentByClient", req.IncludeLastMessage != nil,
+		"clientValue", req.IncludeLastMessage != nil && *req.IncludeLastMessage,
+		"withLastMsg", withLastMsg, "type", req.Type, "rows", len(res.Data))
 	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, true, withLastMsg)
 	items := s.buildListItems(c, res.Data)
 	return &models.PagedSubscriptionListResponse{
