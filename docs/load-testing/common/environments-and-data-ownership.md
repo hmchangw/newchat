@@ -146,9 +146,17 @@ an owner decision recorded in §7:
 - a run-scoped disposable keyspace (or cluster) plus post-retention teardown
   that clears the applicable snapshots and verifies disk and compaction return
   to baseline; or
-- a bounded TTL and an explicit storage budget, both verified before execution.
+- a bounded TTL and an explicit storage budget, both verified before execution,
+  **and still an isolated keyspace**.
 
-Neither exists today.
+Keyspace isolation is not optional in either branch. §3 already restricts
+pathological shapes to an isolated keyspace, and a TTL bounds how long rows live
+without bounding whose evidence they sit beside - a shared keyspace under the
+TTL branch would still contaminate another run's compaction and disk-growth
+observations. The TTL branch trades the disposable keyspace for a bounded
+lifetime, never for shared storage.
+
+Neither branch exists today.
 
 ---
 
@@ -201,5 +209,6 @@ Two consequences for load testing:
   so it is recorded here rather than settled in this document.
 - **Which Cassandra disk-reclaim path applies** - a run-scoped disposable
   keyspace with verified snapshot clearing, or a bounded TTL with an explicit
-  storage budget (§5). Neither exists today, and repeated or pathological runs
-  need one before they can execute.
+  storage budget (§5). Both branches still require an isolated keyspace.
+  Neither exists today, and repeated or pathological runs need one before they
+  can execute.
