@@ -343,14 +343,13 @@ func buildSoakSubscriptions(
 				ID:      members[i].ID,
 				Account: members[i].Account,
 			},
-			RoomID:       room.ID,
-			SiteID:       room.SiteID,
-			Roles:        roles,
-			Name:         name,
-			RoomType:     room.Type,
-			IsSubscribed: true,
-			Open:         true,
-			JoinedAt:     joinedAt,
+			RoomID:   room.ID,
+			SiteID:   room.SiteID,
+			Roles:    roles,
+			Name:     name,
+			RoomType: room.Type,
+			Open:     true,
+			JoinedAt: joinedAt,
 		}
 	}
 	return subscriptions

@@ -221,32 +221,58 @@ func TestSoakUserReader_SubscriptionDMTargetsAKnownDMPeer(t *testing.T) {
 // Channel and DM membership is represented by row existence. Production does
 // not set isSubscribed for these rows; only botDM uses it as a soft toggle.
 func TestSoakUserReader_RoomPairsUseExistingDMMembershipRows(t *testing.T) {
-	transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
-	reader, err := newSoakUserReader(
-		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
-		&soakTopology{
-			ActiveUsers: []model.User{
-				{ID: "u1", Account: "user-a"},
-				{ID: "u2", Account: "user-b"},
-			},
-			Rooms: []model.Room{{ID: "dm-1", Type: model.RoomTypeDM}},
-			Subscriptions: []model.Subscription{
-				{RoomID: "dm-1", RoomType: model.RoomTypeDM,
-					User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
-				{RoomID: "dm-1", RoomType: model.RoomTypeDM,
-					User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
-			},
+	allSubscriptions := []model.Subscription{
+		{RoomID: "dm-1", RoomType: model.RoomTypeDM,
+			User: model.SubscriptionUser{ID: "u1", Account: "user-a"}},
+		{RoomID: "dm-1", RoomType: model.RoomTypeDM,
+			User: model.SubscriptionUser{ID: "u2", Account: "user-b"}},
+	}
+	tests := []struct {
+		name          string
+		subscriptions []model.Subscription
+		wantRequests  int
+		wantSkipped   bool
+	}{
+		{
+			name:          "two membership rows dispatch",
+			subscriptions: allSubscriptions,
+			wantRequests:  1,
 		},
-		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-		&soakRoomReadRecorder{},
-		rand.New(rand.NewSource(3)),
-		nil,
-	)
-	require.NoError(t, err)
+		{
+			name:          "one remaining membership row skips",
+			subscriptions: allSubscriptions[:1],
+			wantSkipped:   true,
+		},
+	}
 
-	require.NoError(t, reader.SubscriptionDM(context.Background()))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
+			recorder := &soakRoomReadRecorder{}
+			reader, err := newSoakUserReader(
+				soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+				&soakTopology{
+					ActiveUsers: []model.User{
+						{ID: "u1", Account: "user-a"},
+						{ID: "u2", Account: "user-b"},
+					},
+					Rooms:         []model.Room{{ID: "dm-1", Type: model.RoomTypeDM}},
+					Subscriptions: tt.subscriptions,
+				},
+				newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+				recorder,
+				rand.New(rand.NewSource(3)),
+				nil,
+			)
+			require.NoError(t, err)
 
-	require.Len(t, transport.subjects, 1)
+			require.NoError(t, reader.SubscriptionDM(context.Background()))
+
+			assert.Len(t, transport.subjects, tt.wantRequests)
+			require.Len(t, recorder.samples, 1)
+			assert.Equal(t, tt.wantSkipped, recorder.samples[0].Skipped)
+		})
+	}
 }
 
 // The user lane addresses 2000 active accounts by design. DM rooms are seeded
