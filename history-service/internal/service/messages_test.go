@@ -2746,3 +2746,16 @@ func TestHistoryService_GetMessagesByIDs_QuoteRedaction(t *testing.T) {
 	require.Len(t, result.Messages, 1)
 	assert.Equal(t, service.UnavailableQuoteMsg, result.Messages[0].QuotedParentMessage.Msg)
 }
+
+func TestLoadHistoryResponse_IncompleteSinceOmittedWhenHealthy(t *testing.T) {
+	// Guards the additive-only wire contract: clients that predate the field must
+	// see byte-identical responses on the happy path.
+	body, err := json.Marshal(models.LoadHistoryResponse{Messages: []models.Message{}})
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "incompleteSince")
+
+	since := int64(1700000000000)
+	body, err = json.Marshal(models.LoadHistoryResponse{Messages: []models.Message{}, IncompleteSince: &since})
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"incompleteSince":1700000000000`)
+}

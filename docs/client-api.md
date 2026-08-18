@@ -3050,6 +3050,7 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
 | `hasNext` | boolean | `true` if older messages may exist beyond this page — fetch the next page with `before` = the oldest returned message's `createdAt`. `false` once the caller's history boundary (room start, history floor, or access window) is reached. Conservative: occasionally `true` when nothing older remains; the following fetch then returns an empty page with `hasNext=false`. An empty page always has `hasNext=false`. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
 | `sizeLimited` | boolean | Optional. `true` when rows were dropped to keep the reply inside the transport's `max_payload`. A short page alone does not mean this — the history walk returns one too — so branch on this flag, never on `len(messages) < limit`. Absent when nothing was dropped, including when a row was merely blanked (`truncated`). See **A page may be shorter than `limit`** for how to pick the next `limit`. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — messages at or after this timestamp may not have been persisted yet, so the returned page can be missing rows that were delivered live. Clients should surface a "still catching up" state rather than rendering the gap as complete history, and may retry later. |
 
 ```json
 {
@@ -3068,6 +3069,15 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
   ],
   "hasNext": true,
   "minUserLastSeenAt": 1746518100000
+}
+```
+
+Degraded-case example (history catching up after a persistence outage):
+
+```json
+{
+  "messages": [],
+  "incompleteSince": 1700000000000
 }
 ```
 
@@ -3122,6 +3132,7 @@ Fetches messages newer than a cursor — the forward-pagination counterpart to L
 | `nextCursor` | string | Optional. Opaque cursor to pass to the next call. Empty when `hasNext=false`. |
 | `hasNext` | boolean | `true` if more messages exist beyond this page. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — messages at or after this timestamp may not have been persisted yet, so the returned page can be missing rows that were delivered live. Clients should surface a "still catching up" state rather than rendering the gap as complete history, and may retry later. |
 
 ```json
 {
@@ -3137,6 +3148,15 @@ Fetches messages newer than a cursor — the forward-pagination counterpart to L
   "nextCursor": "eyJ0cyI6MTc0NjUxODQwMDAwMH0=",
   "hasNext": true,
   "minUserLastSeenAt": 1746518100000
+}
+```
+
+Degraded-case example (history catching up after a persistence outage):
+
+```json
+{
+  "messages": [],
+  "incompleteSince": 1700000000000
 }
 ```
 
@@ -3204,6 +3224,7 @@ last-read position". The pivot is **exactly one of** `messageId` or `timestamp`.
 | `moreAfter` | boolean | `true` if more messages exist after the window. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
 | `sizeLimited` | boolean | Optional. `true` when the window was narrowed to keep the reply inside the transport's `max_payload`. Branch on this, never on the window being shorter than `limit`. Absent when nothing was dropped, including when a row was merely blanked (`truncated`). See **A page may be shorter than `limit`** for how to pick the next `limit`. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — messages at or after this timestamp may not have been persisted yet, so the returned page can be missing rows that were delivered live. Clients should surface a "still catching up" state rather than rendering the gap as complete history, and may retry later. |
 
 ```json
 {
@@ -3219,6 +3240,15 @@ last-read position". The pivot is **exactly one of** `messageId` or `timestamp`.
   "moreBefore": true,
   "moreAfter": false,
   "minUserLastSeenAt": 1746518100000
+}
+```
+
+Degraded-case example (history catching up after a persistence outage):
+
+```json
+{
+  "messages": [],
+  "incompleteSince": 1700000000000
 }
 ```
 
