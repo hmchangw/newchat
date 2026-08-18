@@ -100,6 +100,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 		Messages:          page.Data,
 		HasNext:           page.HasNext && len(page.Data) > 0,
 		MinUserLastSeenAt: minMs,
+		IncompleteSince:   s.incompleteSince(c),
 	}, nil
 }
 
@@ -161,6 +162,7 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 		NextCursor:        page.NextCursor,
 		HasNext:           page.HasNext,
 		MinUserLastSeenAt: minMs,
+		IncompleteSince:   s.incompleteSince(c),
 	}, nil
 }
 
@@ -230,6 +232,7 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 		return &models.LoadSurroundingMessagesResponse{
 			Messages:          []models.Message{only},
 			MinUserLastSeenAt: s.minUserLastSeenMillis(c, roomID),
+			IncompleteSince:   s.incompleteSince(c),
 		}, nil
 	}
 	beforeCount := (remaining + 1) / 2
@@ -383,6 +386,7 @@ func (s *HistoryService) assembleSurrounding(
 		MoreBefore:        beforePage.HasNext,
 		MoreAfter:         afterPage.HasNext,
 		MinUserLastSeenAt: minMs,
+		IncompleteSince:   s.incompleteSince(c),
 	}, nil
 }
 

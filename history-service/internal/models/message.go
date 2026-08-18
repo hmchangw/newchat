@@ -31,6 +31,10 @@ type LoadHistoryResponse struct {
 	Messages          []Message `json:"messages"`
 	HasNext           bool      `json:"hasNext"`
 	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
+	// IncompleteSince is set (UTC millis) while the site's message history is
+	// still catching up after a persistence outage: rows at or after this
+	// timestamp may not have been written yet. Absent when history is healthy.
+	IncompleteSince *int64 `json:"incompleteSince,omitempty"`
 }
 
 type LoadNextMessagesRequest struct {
@@ -45,6 +49,10 @@ type LoadNextMessagesResponse struct {
 	NextCursor        string    `json:"nextCursor,omitempty"`
 	HasNext           bool      `json:"hasNext"`
 	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
+	// IncompleteSince is set (UTC millis) while the site's message history is
+	// still catching up after a persistence outage: rows at or after this
+	// timestamp may not have been written yet. Absent when history is healthy.
+	IncompleteSince *int64 `json:"incompleteSince,omitempty"`
 }
 
 // LoadSurroundingMessagesRequest centers a window on exactly one of MessageID
@@ -63,6 +71,10 @@ type LoadSurroundingMessagesResponse struct {
 	MoreBefore        bool      `json:"moreBefore"`
 	MoreAfter         bool      `json:"moreAfter"`
 	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
+	// IncompleteSince is set (UTC millis) while the site's message history is
+	// still catching up after a persistence outage: rows at or after this
+	// timestamp may not have been written yet. Absent when history is healthy.
+	IncompleteSince *int64 `json:"incompleteSince,omitempty"`
 }
 
 type GetMessageByIDRequest struct {
