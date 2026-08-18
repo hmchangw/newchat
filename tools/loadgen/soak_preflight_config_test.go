@@ -74,11 +74,17 @@ func TestRunSoakEncryptionPreflight_DisabledSendsNothing(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// soakPreflightTestTimeout is short enough that the probe's doomed wait does not
+// slow the suite, and long enough that the wiring cost between creating the
+// deadline and entering Publish stays well inside the assertions below.
+const soakPreflightTestTimeout = 200 * time.Millisecond
+
 // soakPreflightDeadlinePublisher records whether the publish ran under the
 // preflight's own budget. The publish is the part most likely to hang during
 // the front-door outage this check exists to notice, so a timeout that starts
 // only after it returns does not bound what it claims to.
 type soakPreflightDeadlinePublisher struct {
+	publishedAt time.Time
 	deadline    time.Time
 	hasDeadline bool
 }
@@ -88,6 +94,10 @@ func (p *soakPreflightDeadlinePublisher) Publish(
 	_ string,
 	_ []byte,
 ) error {
+	// Anchored here rather than after the call, because the preflight goes on to
+	// wait out the whole budget: measured from the far side, remaining time is
+	// near zero whatever the timeout was.
+	p.publishedAt = time.Now()
 	p.deadline, p.hasDeadline = ctx.Deadline()
 	return nil
 }
@@ -113,7 +123,7 @@ func TestRunSoakEncryptionPreflight_PublishesUnderTheConfiguredTimeout(t *testin
 	// assertion is about the context the publish already ran under.
 	err = runSoakEncryptionPreflight(
 		context.Background(),
-		soakEncryptionPreflightConfig{Enabled: true, Timeout: 40 * time.Millisecond},
+		soakEncryptionPreflightConfig{Enabled: true, Timeout: soakPreflightTestTimeout},
 		&soakStubEncryptionStore{},
 		sender,
 		selector,
@@ -124,8 +134,13 @@ func TestRunSoakEncryptionPreflight_PublishesUnderTheConfiguredTimeout(t *testin
 	require.True(t, publisher.hasDeadline,
 		"the probe publish ran under an unbounded context, so a stalled publish "+
 			"would outlive SOAK_ENCRYPTION_PREFLIGHT_TIMEOUT")
-	assert.WithinDuration(t, time.Now().Add(40*time.Millisecond), publisher.deadline,
-		2*time.Second, "the publish must share the preflight's budget")
+	budget := publisher.deadline.Sub(publisher.publishedAt)
+	assert.LessOrEqual(t, budget, soakPreflightTestTimeout,
+		"the publish was given a deadline from some other budget, not the "+
+			"preflight's own")
+	assert.Greater(t, budget, soakPreflightTestTimeout/2,
+		"the publish got a remnant of the budget rather than the budget; the "+
+			"deadline must be created before the send, not part-way through it")
 }
 
 type soakStubEncryptionStore struct{}
