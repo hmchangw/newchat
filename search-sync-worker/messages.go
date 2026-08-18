@@ -19,7 +19,7 @@ import (
 
 // parentCreatedAtResolver resolves a thread parent's authoritative createdAt; ok=false leaves the field unset. Never errors. Satisfied by *esParentResolver.
 type parentCreatedAtResolver interface {
-	ResolveParentCreatedAt(ctx context.Context, messageID string) (time.Time, bool)
+	ResolveParentCreatedAt(ctx context.Context, messageID string, replyCreatedAt time.Time) (time.Time, bool)
 }
 
 // teamsIdentity is a migrated sender's nextgen identity for the search index: the
@@ -210,6 +210,9 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 
 // resolveThreadParentCreatedAt fills the parent createdAt for a thread reply; the gatekeeper's
 // value wins when present, else re-resolve from the ES index. No-op for nil resolver/non-thread/delete.
+//
+// The reply's own createdAt goes to the resolver as the upper bound on where the parent
+// can live: BuildAction has already rejected a zero value, so it is always usable.
 func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent) {
 	if c.parentResolver == nil || evt.Message.ThreadParentMessageID == "" || evt.Event == model.EventDeleted {
 		return
@@ -217,7 +220,8 @@ func (c *messageCollection) resolveThreadParentCreatedAt(evt *model.MessageEvent
 	if evt.Message.ThreadParentMessageCreatedAt != nil {
 		return
 	}
-	if createdAt, ok := c.parentResolver.ResolveParentCreatedAt(context.Background(), evt.Message.ThreadParentMessageID); ok {
+	if createdAt, ok := c.parentResolver.ResolveParentCreatedAt(
+		context.Background(), evt.Message.ThreadParentMessageID, evt.Message.CreatedAt); ok {
 		evt.Message.ThreadParentMessageCreatedAt = &createdAt
 	}
 }

@@ -15,15 +15,16 @@ import (
 
 // fakeParentResolver is a test double for parentCreatedAtResolver.
 type fakeParentResolver struct {
-	val    time.Time
-	ok     bool
-	calls  int
-	lastID string
+	val         time.Time
+	ok          bool
+	calls       int
+	lastID      string
+	lastReplyAt time.Time
 }
 
-func (f *fakeParentResolver) ResolveParentCreatedAt(_ context.Context, messageID string) (time.Time, bool) {
+func (f *fakeParentResolver) ResolveParentCreatedAt(_ context.Context, messageID string, replyCreatedAt time.Time) (time.Time, bool) {
 	f.calls++
-	f.lastID = messageID
+	f.lastID, f.lastReplyAt = messageID, replyCreatedAt
 	return f.val, f.ok
 }
 
@@ -131,4 +132,20 @@ func TestMessageCollection_BuildAction_ReresolvesThreadParent(t *testing.T) {
 		require.NotNil(t, got)
 		assert.True(t, got.Equal(eventVal))
 	})
+}
+
+// The resolver point-reads the reply's own month before falling back, so the reply's
+// createdAt has to reach it — otherwise every lookup probes the zero-time index.
+func TestMessageCollection_BuildAction_PassesReplyCreatedAtToResolver(t *testing.T) {
+	resolver := &fakeParentResolver{ok: false}
+	coll := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
+	coll.parentResolver = resolver
+
+	_, err := coll.BuildAction(threadReplyData(t, model.EventCreated, nil))
+	require.NoError(t, err)
+
+	require.Equal(t, 1, resolver.calls)
+	assert.Equal(t, "parent-1", resolver.lastID)
+	assert.True(t, resolver.lastReplyAt.Equal(time.Date(2026, 1, 20, 12, 0, 0, 0, time.UTC)),
+		"the reply's createdAt bounds where the parent can live; got %v", resolver.lastReplyAt)
 }
