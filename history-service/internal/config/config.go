@@ -96,12 +96,46 @@ type Config struct {
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
+	// Per-bucket read cache (Cassandra sealed-bucket LoadHistory reads). L2 is
+	// Valkey; when ValkeyAddrs is empty the whole cache is disabled and reads go
+	// direct to Cassandra. Only sealed buckets (strictly older than the current
+	// one) are cached; the hot current bucket is always read live.
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS"                 envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD"              envDefault:""`
+	// BucketCacheL1MaxBytes caps the total encoded bucket data held in the
+	// per-replica L1, LRU-evicted to stay under budget. Byte-bounded (not entry-
+	// count-bounded) so the memory ceiling holds regardless of bucket size.
+	// Default 256 MiB.
+	BucketCacheL1MaxBytes int64         `env:"HISTORY_BUCKET_CACHE_L1_MAX_BYTES" envDefault:"268435456"`
+	BucketCacheTTL        time.Duration `env:"HISTORY_BUCKET_CACHE_TTL"          envDefault:"10m"`
+	// BucketCacheMaxRows caps how many rows a bucket may hold to be cacheable;
+	// larger (dense) buckets are read live instead of cached whole. The default
+	// sits just above the largest ordinary page (surroundingPageSize 50), which
+	// is where caching stops paying: the walker fills a page from a dense start
+	// bucket in one query with no speculative reads, so caching such a bucket
+	// saves no round trip while making every hit decode the whole partition.
+	// Below the cap, a page spans several buckets and the walk is what the cache
+	// collapses.
+	BucketCacheMaxRows int `env:"HISTORY_BUCKET_CACHE_MAX_ROWS" envDefault:"50"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
 	// DebugLog gates the X-Debug ladder rate cap and DEBUG_LOG_PAYLOADS
 	// (dev-only full request/reply payload logging). Default: payloads off.
 	DebugLog logctx.Config `envPrefix:"DEBUG_LOG_"`
+}
+
+// BucketCacheEnabled reports whether the per-bucket sealed-read cache should be
+// stood up. Zero is the documented disable value for each knob, so any one of
+// them at zero keeps Valkey unconnected and the cache uninstalled — including
+// MaxRows, where a zero cap would otherwise install a cache that classifies
+// every non-empty bucket as oversized and so can never serve a hit.
+func (c *Config) BucketCacheEnabled() bool {
+	return len(c.ValkeyAddrs) > 0 &&
+		c.BucketCacheL1MaxBytes > 0 &&
+		c.BucketCacheTTL > 0 &&
+		c.BucketCacheMaxRows > 0
 }
 
 // Load parses environment variables into Config; returns an error when required vars are absent.
@@ -142,6 +176,15 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	if cfg.BucketCacheTTL < 0 {
+		return fmt.Errorf("HISTORY_BUCKET_CACHE_TTL must be >= 0, got %s", cfg.BucketCacheTTL)
+	}
+	if cfg.BucketCacheL1MaxBytes < 0 {
+		return fmt.Errorf("HISTORY_BUCKET_CACHE_L1_MAX_BYTES must be >= 0, got %d", cfg.BucketCacheL1MaxBytes)
+	}
+	if cfg.BucketCacheMaxRows < 0 {
+		return fmt.Errorf("HISTORY_BUCKET_CACHE_MAX_ROWS must be >= 0, got %d", cfg.BucketCacheMaxRows)
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
