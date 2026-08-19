@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -497,6 +498,10 @@ type engineAdapter struct {
 
 func (a *engineAdapter) Bulk(ctx context.Context, actions []searchengine.BulkAction) ([]searchengine.BulkResult, error) {
 	return a.engine.Bulk(ctx, actions)
+}
+
+func (a *engineAdapter) UpdateByQuery(ctx context.Context, index string, body json.RawMessage) error {
+	return a.engine.UpdateByQuery(ctx, index, body)
 }
 
 // consumerSource is the subset of Collection that buildConsumerConfig needs. Narrowing keeps the helper unit-testable with a small fake.

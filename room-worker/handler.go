@@ -2342,6 +2342,22 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	if err != nil {
 		return fmt.Errorf("marshal rename inbox payload: %w", err)
 	}
+	now := time.Now().UTC().UnixMilli()
+	// Same-site search feed: search-sync re-indexes the room name from this
+	// internal-lane event (mirrors the member_added/removed internal publish).
+	// Cross-site members are covered by the OUTBOX federate below; a single-site
+	// rename has no remote sites, so without this the spotlight index goes stale.
+	internalRename := model.InboxEvent{
+		Type:       model.InboxRoomRenamed,
+		SiteID:     h.siteID,
+		DestSiteID: h.siteID,
+		Payload:    renamedPayload,
+		Timestamp:  now,
+	}
+	internalRenameData, _ := json.Marshal(internalRename)
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxRoomRenamed), internalRenameData, natsutil.InboxDedupID(ctx, h.siteID, requestID)); err != nil {
+		slog.ErrorContext(ctx, "local inbox room_renamed publish failed", "error", err, "room_id", req.RoomID)
+	}
 	// Relay room_renamed through the OUTBOX ordered lane (not a direct INBOX
 	// publish) so it shares the per-destination FIFO consumer with member_added
 	// and cannot overtake the add that creates a new member's subscription — a
@@ -2350,7 +2366,6 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	// per-room ordering, so member.add and room.rename (separate ROOMS messages,
 	// concurrent workers) can still enqueue out of causal order. Full ordering
 	// awaits producer per-room lanes / reconciliation (design doc §5, §7).
-	now := time.Now().UTC().UnixMilli()
 	for _, remoteSiteID := range remoteSites {
 		if err := h.federate(ctx, req.RoomID, remoteSiteID, model.InboxRoomRenamed,
 			renamedPayload, natsutil.InboxDedupID(ctx, remoteSiteID, requestID), now); err != nil {

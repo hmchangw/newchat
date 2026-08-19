@@ -113,6 +113,58 @@ func (c *spotlightCollection) BuildAction(data []byte) ([]searchengine.BulkActio
 	return actions, nil
 }
 
+// BuildByQuery handles room_renamed: roomName lives on every member's spotlight
+// doc (`{account}_{roomId}`), and the rename payload carries no account list, so
+// a single _update_by_query keyed on roomId re-indexes them all. Returns ok=false
+// for member events, which fall through to BuildAction's bulk path.
+func (c *spotlightCollection) BuildByQuery(data []byte) (string, json.RawMessage, bool, error) {
+	var evt model.InboxEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return "", nil, false, fmt.Errorf("unmarshal inbox event: %w", err)
+	}
+	if evt.Type != model.InboxRoomRenamed {
+		return "", nil, false, nil
+	}
+	var p model.RoomRenamedInboxPayload
+	if err := json.Unmarshal(evt.Payload, &p); err != nil {
+		return "", nil, false, fmt.Errorf("unmarshal room_renamed payload: %w", err)
+	}
+	if p.RoomID == "" {
+		return "", nil, false, fmt.Errorf("build spotlight rename: missing roomId")
+	}
+	if p.NewName == "" {
+		return "", nil, false, fmt.Errorf("build spotlight rename: missing newName")
+	}
+	body, err := buildSpotlightRenameByQuery(p.RoomID, p.NewName)
+	if err != nil {
+		return "", nil, false, fmt.Errorf("build spotlight rename: %w", err)
+	}
+	return c.indexName, body, true, nil
+}
+
+// buildSpotlightRenameByQuery is the _update_by_query that sets roomName on every
+// doc of the renamed room. Ordering caveat (v1, no guard): with out-of-order
+// renames the older name can win and persist until the next rename (a later
+// member event stamps whatever name it was born with, so it doesn't reliably
+// correct forward). Spotlight is a derived cache — the room doc is source of
+// truth — so this is stale typeahead text, never data loss. Upgrade path: add
+// roomNameUpdatedAt to SpotlightDoc + its mapping and guard the script with
+// `if (params.ts > ctx._source.roomNameUpdatedAt)`.
+func buildSpotlightRenameByQuery(roomID, newName string) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{
+		"query": map[string]any{"term": map[string]any{"roomId": roomID}},
+		"script": map[string]any{
+			"lang":   "painless",
+			"source": "ctx._source.roomName = params.name",
+			"params": map[string]any{"name": newName},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal update-by-query: %w", err)
+	}
+	return body, nil
+}
+
 func newSpotlightSearchIndex(account string, evt *model.InboxMemberEvent) searchindex.SpotlightDoc {
 	return searchindex.NewSpotlightDoc(searchindex.SpotlightFields{
 		UserAccount: account,

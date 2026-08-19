@@ -69,6 +69,14 @@ type SearchEngine interface {
 	// matching pattern; templates apply only at creation, existing indices need this.
 	UpdateMapping(ctx context.Context, indexPattern string, body json.RawMessage) error
 
+	// UpdateByQuery runs a painless `_update_by_query` against index with the
+	// given request body (query + script). It mutates every matching document,
+	// so callers use it for field-keyed multi-doc updates the DocID-keyed Bulk
+	// API can't express — e.g. re-indexing roomName on every member's spotlight
+	// doc after a room rename. Runs with conflicts=proceed so a concurrent
+	// version bump skips that one doc instead of aborting the whole batch.
+	UpdateByQuery(ctx context.Context, index string, body json.RawMessage) error
+
 	GetIndexMapping(ctx context.Context, index string) (json.RawMessage, error)
 
 	// Search executes a `_search` against the comma-joined list of indices

@@ -86,9 +86,11 @@ func TestSpotlightCollection_Metadata(t *testing.T) {
 		"chat.inbox.site-a.internal.member_added",
 		"chat.inbox.site-a.internal.member_removed",
 		"chat.inbox.site-a.internal.member_joinedat_refreshed",
+		"chat.inbox.site-a.internal.room_renamed",
 		"chat.inbox.site-a.external.member_added",
 		"chat.inbox.site-a.external.member_removed",
 		"chat.inbox.site-a.external.member_joinedat_refreshed",
+		"chat.inbox.site-a.external.room_renamed",
 	}, filters)
 }
 
@@ -408,6 +410,71 @@ func TestSpotlightCollection_BuildAction_BulkRemove(t *testing.T) {
 		assert.Equal(t, int64(67890), action.Version)
 		assert.Nil(t, action.Doc)
 	}
+}
+
+func makeInboxRenameEvent(t *testing.T, typ string, p model.RoomRenamedInboxPayload, ts int64) []byte {
+	t.Helper()
+	payloadData, err := json.Marshal(p)
+	require.NoError(t, err)
+	evt := model.InboxEvent{Type: typ, SiteID: "site-a", DestSiteID: "site-a", Payload: payloadData, Timestamp: ts}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+	return data
+}
+
+func TestSpotlightCollection_BuildByQuery_RoomRenamed(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	data := makeInboxRenameEvent(t, model.InboxRoomRenamed,
+		model.RoomRenamedInboxPayload{RoomID: "r-eng", NewName: "platform", Timestamp: 5000}, 5000)
+
+	index, body, ok, err := coll.BuildByQuery(data)
+	require.NoError(t, err)
+	require.True(t, ok, "room_renamed must be claimed by the by-query path")
+	assert.Equal(t, "spotlight-site-a-v1-chat", index)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(body, &req))
+	term := req["query"].(map[string]any)["term"].(map[string]any)
+	assert.Equal(t, "r-eng", term["roomId"], "update-by-query must be keyed on roomId")
+	script := req["script"].(map[string]any)
+	assert.Equal(t, "painless", script["lang"])
+	assert.Equal(t, "ctx._source.roomName = params.name", script["source"])
+	assert.Equal(t, "platform", script["params"].(map[string]any)["name"], "the new room name must ride the script params")
+}
+
+func TestSpotlightCollection_BuildByQuery_MemberEventFallsThrough(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, baseInboxMemberEvent(), 1000)
+
+	index, body, ok, err := coll.BuildByQuery(data)
+	require.NoError(t, err)
+	assert.False(t, ok, "member events fall through to the bulk BuildAction path")
+	assert.Empty(t, index)
+	assert.Nil(t, body)
+}
+
+func TestSpotlightCollection_BuildByQuery_Errors(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+
+	t.Run("malformed inbox event", func(t *testing.T) {
+		_, _, ok, err := coll.BuildByQuery([]byte("{invalid"))
+		assert.Error(t, err)
+		assert.False(t, ok)
+	})
+
+	t.Run("missing roomId", func(t *testing.T) {
+		data := makeInboxRenameEvent(t, model.InboxRoomRenamed, model.RoomRenamedInboxPayload{NewName: "x", Timestamp: 1}, 1)
+		_, _, ok, err := coll.BuildByQuery(data)
+		assert.Error(t, err)
+		assert.False(t, ok)
+	})
+
+	t.Run("missing newName", func(t *testing.T) {
+		data := makeInboxRenameEvent(t, model.InboxRoomRenamed, model.RoomRenamedInboxPayload{RoomID: "r-eng", Timestamp: 1}, 1)
+		_, _, ok, err := coll.BuildByQuery(data)
+		assert.Error(t, err)
+		assert.False(t, ok)
+	})
 }
 
 // Spotlight writes to one fixed index — no additive mapping push at startup.

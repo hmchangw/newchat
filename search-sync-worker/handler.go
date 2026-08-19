@@ -90,6 +90,31 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 		h.metrics.recordMessages(ctx, dispAckedPoison, 1)
 		return
 	}
+
+	// By-query events (e.g. room rename) mutate many docs by field, not by
+	// DocID, so they can't ride the bulk buffer — apply each as a standalone
+	// _update_by_query and ack/nak it on its own. A collection that doesn't
+	// implement ByQueryCollection, or a message it doesn't claim (ok=false),
+	// falls through to the normal bulk path.
+	if bq, isBQ := h.collection.(ByQueryCollection); isBQ {
+		index, body, ok, bqErr := bq.BuildByQuery(data)
+		if bqErr != nil {
+			// Parse/validation poison — Ack drops it (same as BuildAction).
+			slog.ErrorContext(ctx, "build by-query", "error", bqErr, "subject", msg.Subject(), "consumer", h.collection.ConsumerName())
+			natsutil.Ack(msg, "build by-query failed")
+			return
+		}
+		if ok {
+			if err := h.store.UpdateByQuery(ctx, index, body); err != nil {
+				slog.ErrorContext(ctx, "update-by-query failed", "error", err, "index", index, "consumer", h.collection.ConsumerName())
+				natsutil.Nak(msg, "update-by-query failed")
+				return
+			}
+			natsutil.Ack(msg, "update-by-query succeeded")
+			return
+		}
+	}
+
 	actions, err := h.collection.BuildAction(data)
 	if err != nil {
 		// Every BuildAction error is parse/validation poison — Ack drops it for

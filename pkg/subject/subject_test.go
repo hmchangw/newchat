@@ -224,9 +224,11 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.inbox.site-a.internal.member_added",
 			"chat.inbox.site-a.internal.member_removed",
 			"chat.inbox.site-a.internal.member_joinedat_refreshed",
+			"chat.inbox.site-a.internal.room_renamed",
 			"chat.inbox.site-a.external.member_added",
 			"chat.inbox.site-a.external.member_removed",
 			"chat.inbox.site-a.external.member_joinedat_refreshed",
+			"chat.inbox.site-a.external.room_renamed",
 		}
 		if len(got) != len(want) {
 			t.Fatalf("got %d subjects, want %d", len(got), len(want))
