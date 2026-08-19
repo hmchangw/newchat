@@ -32,6 +32,11 @@ services:
       # - HR_JETSTREAM_DOMAIN=hr-hub
       - USER_ROOM_INDEX=${USER_ROOM_INDEX:-user-room-mv-${SITE_ID:-site-local}}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (stream readiness, consumer bind, dual-lane drain) still runs.
+      # Placement is not asserted here — a single-server NATS reports no cluster.
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
       # Optional YYYY-MM-DD (UTC) cutoff for the messages collection.
       # When set, events whose Message.CreatedAt predates the date are
       # skipped — used during legacy-data migration. Leave unset/empty
