@@ -20,6 +20,9 @@ import (
 type InboxStore interface {
 	CreateSubscription(ctx context.Context, sub *model.Subscription) error
 	BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error
+	// BulkRefreshJoinedAt sets joinedAt on existing (roomId, account) replicas —
+	// the Teams migration's cross-site joinedAt correction; a missing sub is a no-op.
+	BulkRefreshJoinedAt(ctx context.Context, roomID string, joinedAtByAccount map[string]time.Time) error
 	// UpsertRoom replicates room metadata, guarded by the incoming room's
 	// UpdatedAt: an event carrying an older (or equal) UpdatedAt than the
 	// stored one is a silent no-op, so out-of-order federated delivery cannot
@@ -138,6 +141,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleMemberAdded(ctx, &evt)
 	case "member_removed":
 		return h.handleMemberRemoved(ctx, &evt)
+	case model.InboxMemberJoinedAtRefreshed:
+		return h.handleMemberJoinedAtRefreshed(ctx, &evt)
 	case "room_sync":
 		return h.handleRoomSync(ctx, &evt)
 	case "role_updated":
@@ -261,6 +266,28 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 // SubscriptionUpdateEvent is published here — room-worker already publishes
 // to the user's subject and the NATS supercluster routes it to the user's
 // home site.
+// handleMemberJoinedAtRefreshed applies the Teams migration's joinedAt correction
+// to the home-site replicas (a joinedAt-only $set; a replica not yet present is a
+// no-op — the next member_added carries the corrected joinedAt).
+func (h *Handler) handleMemberJoinedAtRefreshed(ctx context.Context, evt *model.InboxEvent) error {
+	var event model.MemberAddEvent
+	if err := json.Unmarshal(evt.Payload, &event); err != nil {
+		return fmt.Errorf("unmarshal member_joinedat_refreshed payload: %w", err)
+	}
+	if len(event.Accounts) == 0 {
+		return nil
+	}
+	joinedAt := time.UnixMilli(event.JoinedAt).UTC()
+	byAccount := make(map[string]time.Time, len(event.Accounts))
+	for _, account := range event.Accounts {
+		byAccount[account] = joinedAt
+	}
+	if err := h.store.BulkRefreshJoinedAt(ctx, event.RoomID, byAccount); err != nil {
+		return fmt.Errorf("refresh joinedAt on replicas: %w", err)
+	}
+	return nil
+}
+
 func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent) error {
 	var memberEvt model.MemberRemoveEvent
 	if err := json.Unmarshal(evt.Payload, &memberEvt); err != nil {

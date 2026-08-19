@@ -112,9 +112,11 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		wantAccounts[member.Account] = struct{}{}
 		if existing, ok := existingByAccount[member.Account]; ok {
 			// Already a member — no add. But self-correct a joinedAt stamped before the
-			// createdDateTime fix: a joinedAt-only refresh, no re-add or re-fanout.
+			// createdDateTime fix: a joinedAt-only refresh, no re-add. A cross-site
+			// member's home-site replica is refreshed via federation (memberSite).
 			if want := chat.CreatedDateTime.UTC(); !existing.JoinedAt.Equal(want) {
 				joinedAtFixes[member.Account] = want
+				memberSite[member.Account] = existing.SiteID
 			}
 			continue
 		}
@@ -163,6 +165,11 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	if len(joinedAtFixes) > 0 {
 		if err := h.store.BulkRefreshJoinedAt(ctx, room.ID, joinedAtFixes); err != nil {
 			return fmt.Errorf("refresh migrated joinedAt: %w", err)
+		}
+		// Federate the same correction to cross-site members' home-site replicas
+		// (the local room-site copies were just updated above).
+		if err := h.federateJoinedAtRefresh(ctx, room, joinedAtFixes, memberSite, acceptedAt); err != nil {
+			return fmt.Errorf("federate joinedAt refresh: %w", err)
 		}
 	}
 	if len(removed) > 0 {
@@ -264,11 +271,14 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		return nil
 	}
 	evt := model.InboxMemberEvent{
-		RoomID:    room.ID,
-		RoomName:  room.Name,
-		RoomType:  room.Type,
-		SiteID:    h.siteID,
-		Accounts:  accounts,
+		RoomID:   room.ID,
+		RoomName: room.Name,
+		RoomType: room.Type,
+		SiteID:   h.siteID,
+		Accounts: accounts,
+		// Migrated JoinedAt = the chat's creation time (room.CreatedAt), so the
+		// home-site replica matches the room-site copy instead of defaulting to epoch.
+		JoinedAt:  room.CreatedAt.UnixMilli(),
 		Timestamp: acceptedAt.UnixMilli(),
 		Origin:    model.OriginTeams,
 	}
@@ -310,6 +320,39 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
 		if err := h.federate(ctx, room.ID, destSite, eventType, siteData, dedupID, acceptedAt.UnixMilli()); err != nil {
 			return fmt.Errorf("federate to %s: %w", destSite, err)
+		}
+	}
+	return nil
+}
+
+// federateJoinedAtRefresh fans the joinedAt correction to each cross-site member's
+// home site so the replica matches the room-site copy (just updated locally).
+// Local-site members are skipped. joinedAt is uniform per room (chat createdDateTime);
+// the remote apply is a no-op if the replica is absent.
+func (h *Handler) federateJoinedAtRefresh(ctx context.Context, room *model.Room, joinedAtByAccount map[string]time.Time, memberSite map[string]string, acceptedAt time.Time) error {
+	bySite := make(map[string][]string)
+	for account := range joinedAtByAccount {
+		if site := memberSite[account]; site != "" && site != h.siteID {
+			bySite[site] = append(bySite[site], account)
+		}
+	}
+	for destSite, accounts := range bySite {
+		evt := model.InboxMemberEvent{
+			RoomID:    room.ID,
+			SiteID:    h.siteID,
+			Accounts:  accounts,
+			JoinedAt:  room.CreatedAt.UnixMilli(),
+			Timestamp: acceptedAt.UnixMilli(),
+			Origin:    model.OriginTeams,
+		}
+		payload, err := json.Marshal(evt)
+		if err != nil {
+			return fmt.Errorf("marshal joinedAt-refresh event (dest %s): %w", destSite, err)
+		}
+		seed := fmt.Sprintf("%s:%s:%d", room.ID, model.InboxMemberJoinedAtRefreshed, acceptedAt.UnixMilli())
+		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
+		if err := h.federate(ctx, room.ID, destSite, model.InboxMemberJoinedAtRefreshed, payload, dedupID, acceptedAt.UnixMilli()); err != nil {
+			return fmt.Errorf("federate joinedAt refresh to %s: %w", destSite, err)
 		}
 	}
 	return nil

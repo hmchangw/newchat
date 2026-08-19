@@ -294,6 +294,25 @@ func (s *mongoInboxStore) BulkCreateSubscriptions(ctx context.Context, subs []*m
 	return nil
 }
 
+// BulkRefreshJoinedAt sets joinedAt on existing (roomId, account) replicas — the
+// Teams migration's cross-site joinedAt correction. joinedAt only; a missing
+// replica leaves MatchedCount 0 and is a silent no-op (no insert).
+func (s *mongoInboxStore) BulkRefreshJoinedAt(ctx context.Context, roomID string, joinedAtByAccount map[string]time.Time) error {
+	if len(joinedAtByAccount) == 0 {
+		return nil
+	}
+	models := make([]mongo.WriteModel, 0, len(joinedAtByAccount))
+	for account, joinedAt := range joinedAtByAccount {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"roomId": roomID, "u.account": account}).
+			SetUpdate(bson.M{"$set": bson.M{"joinedAt": joinedAt}}))
+	}
+	if _, err := s.subCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("bulk refresh joinedAt for %d replicas: %w", len(models), err)
+	}
+	return nil
+}
+
 // UpdateSubscriptionMute sets muted by (roomID, account) under a muteUpdatedAt
 // guard so an out-of-order or duplicate toggle cannot regress mute state.
 // Missing-sub and guard-rejected events both leave MatchedCount 0 and are

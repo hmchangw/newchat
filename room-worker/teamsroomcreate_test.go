@@ -295,6 +295,38 @@ func TestProcessTeamsRoomCreate_RefreshesStaleJoinedAt(t *testing.T) {
 	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
 }
 
+// TestProcessTeamsRoomCreate_FederatesJoinedAtRefreshCrossSite: a stale existing
+// member whose home site differs from the room site gets a member_joinedat_refreshed
+// federated to that site (carrying the chat createdDateTime), on top of the local
+// room-site correction.
+func TestProcessTeamsRoomCreate_FederatesJoinedAtRefreshCrossSite(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, published := newTeamsTestHandler(t, store)
+
+	chatCreated := time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC)
+	stale := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return([]model.Subscription{
+		{User: model.SubscriptionUser{Account: "bob"}, RoomID: "chat1", SiteID: "site-b", JoinedAt: stale}, // remote home site
+	}, nil)
+	store.EXPECT().BulkRefreshJoinedAt(gomock.Any(), gomock.Any(),
+		map[string]time.Time{"bob": chatCreated}).Return(nil)
+
+	chat := model.TeamsRoomCreateChat{
+		ID:              "chat1",
+		Members:         []model.TeamsRoomCreateMember{{ID: "aad1", Account: "bob"}},
+		CreatedDateTime: chatCreated,
+	}
+	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+
+	fed := membershipEvents(t, *published, "chat.outbox.site-a.site-b.member_joinedat_refreshed")
+	require.Len(t, fed, 1, "cross-site member gets a joinedAt-refresh federated to their home site")
+	assert.Equal(t, []string{"bob"}, fed[0].Accounts)
+	assert.Equal(t, chatCreated.UnixMilli(), fed[0].JoinedAt, "federated refresh carries the chat createdDateTime")
+}
+
 // TestProcessTeamsRoomCreate_NoRefreshWhenJoinedAtCurrent: a converged re-run whose
 // existing joinedAt already equals the chat createdDateTime writes nothing.
 func TestProcessTeamsRoomCreate_NoRefreshWhenJoinedAtCurrent(t *testing.T) {
