@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/searchengine"
@@ -146,6 +148,30 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 	h.mu.Unlock()
 }
 
+// bulkItemError builds the settle error for one failed bulk item. A permanent failure
+// is wrapped with errcode.Permanent so jsretry Ack-drops it instead of retrying — the
+// backend rejected the document itself, so redelivering identical bytes can only fail
+// identically, and retrying would just hold an ack-pending slot for the full window.
+//
+// Only the status and error type go into the message; the document body never belongs
+// in an error that reaches the server log.
+func bulkItemError(result searchengine.BulkResult) error {
+	if searchengine.IsBulkItemPermanent(result) {
+		return errcode.Permanent(errcode.BadRequest(
+			fmt.Sprintf("search backend rejected the document: status %d %q", result.Status, result.ErrorType)))
+	}
+	return fmt.Errorf("bulk item failed: status %d %q", result.Status, result.ErrorType)
+}
+
+// itemBackoff picks the retry schedule a failed bulk item calls for. Backpressure gets
+// the slow curve; everything else rides the shared default.
+func itemBackoff(result searchengine.BulkResult) []time.Duration {
+	if searchengine.IsBulkItemBackpressure(result) {
+		return jsretry.BackpressureBackoff
+	}
+	return jsretry.DefaultBackoff
+}
+
 // Flush sends all buffered actions to ES and acks/naks per source message.
 func (h *Handler) Flush(ctx context.Context) {
 	h.mu.Lock()
@@ -194,35 +220,57 @@ func (h *Handler) Flush(ctx context.Context) {
 
 	h.metrics.recordFlush(bulkCtx, flushSuccess, elapsed, len(actions))
 
-	var acked, nakked int
+	var acked, poisoned, nakked int
 	for _, p := range pending {
-		allOK := true
+		var itemErr error
+		backoff := jsretry.DefaultBackoff
+		failed, permanent := false, false
 		for i := p.actionStart; i < p.actionStart+p.actionCount; i++ {
 			if searchengine.IsBulkItemSuccess(actions[i].Action, results[i]) {
 				continue
 			}
 			h.metrics.recordItemFailure(bulkCtx, string(actions[i].Action), results[i].Status)
-			if allOK {
-				// Log only the first failed item per message; the counter above still
-				// sees every failed action.
-				slog.Error("bulk item failed",
-					"status", results[i].Status,
-					"error", results[i].Error,
-					"docID", actions[i].DocID,
-					"index", actions[i].Index,
-				)
+			if failed {
+				continue // the counter above sees every failed action; the rest is decided once
 			}
-			allOK = false
+			failed = true
+			// The first failure decides the message's fate. disposition spells out what that
+			// was, because SettleQuiet leaves the Ack-drop of a permanent failure otherwise
+			// unlogged; it reads from the result, not the error, so the log cannot disagree
+			// with the settle decision.
+			permanent = searchengine.IsBulkItemPermanent(results[i])
+			disposition := "retry"
+			if permanent {
+				disposition = "drop"
+			}
+			slog.ErrorContext(p.ctx, "bulk item failed",
+				"status", results[i].Status,
+				"error", results[i].Error,
+				"errorType", results[i].ErrorType,
+				"backpressure", searchengine.IsBulkItemBackpressure(results[i]),
+				"disposition", disposition,
+				"docID", actions[i].DocID,
+				"index", actions[i].Index,
+			)
+			itemErr, backoff = bulkItemError(results[i]), itemBackoff(results[i])
 		}
-		if allOK {
+		// A permanent failure is Acked, not nakked, so it counts as a poison drop rather
+		// than inflating the nakked series with messages that were never retried.
+		switch {
+		case !failed:
 			acked++
-			natsutil.Ack(p.jsMsg, "bulk actions succeeded")
-		} else {
+		case permanent:
+			poisoned++
+		default:
 			nakked++
-			jsretry.Nak(bulkCtx, p.jsMsg, jsretry.DefaultBackoff, "bulk action failed")
 		}
+		// One SettleQuiet covers all three dispositions: a nil error acks, a permanent
+		// error Ack-drops, anything else naks on `backoff`. Quiet because the failure is
+		// already logged above with its ES detail.
+		jsretry.SettleQuiet(p.ctx, p.jsMsg, backoff, itemErr)
 	}
 	h.metrics.recordMessages(bulkCtx, dispAckedSuccess, acked)
+	h.metrics.recordMessages(bulkCtx, dispAckedPoison, poisoned)
 	h.metrics.recordMessages(bulkCtx, dispNakkedItemFailed, nakked)
 }
 

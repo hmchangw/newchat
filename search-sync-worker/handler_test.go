@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -23,25 +24,44 @@ import (
 
 // stubMsg implements jetstream.Msg for testing.
 type stubMsg struct {
-	data     []byte
-	headers  nats.Header
-	acked    bool
-	nacked   bool
-	nakDelay time.Duration
+	data    []byte
+	headers nats.Header
+	acked   bool
+	// nacked is set by either nak path; nakedBare distinguishes the immediate
+	// Nak() (which asks for instant redelivery) from the paced NakWithDelay.
+	nacked       bool
+	nakedBare    bool
+	nakDelay     time.Duration
+	numDelivered uint64
 }
 
-func (m *stubMsg) Data() []byte                              { return m.data }
-func (m *stubMsg) Ack() error                                { m.acked = true; return nil }
-func (m *stubMsg) Nak() error                                { m.nacked = true; return nil }
-func (m *stubMsg) NakWithDelay(d time.Duration) error        { m.nacked = true; m.nakDelay = d; return nil }
-func (m *stubMsg) InProgress() error                         { return nil }
-func (m *stubMsg) Term() error                               { return nil }
-func (m *stubMsg) TermWithReason(string) error               { return nil }
-func (m *stubMsg) Metadata() (*jetstream.MsgMetadata, error) { return nil, nil }
-func (m *stubMsg) Subject() string                           { return "" }
-func (m *stubMsg) Reply() string                             { return "" }
-func (m *stubMsg) Headers() nats.Header                      { return m.headers }
-func (m *stubMsg) DoubleAck(context.Context) error           { return nil }
+func (m *stubMsg) Data() []byte                       { return m.data }
+func (m *stubMsg) Ack() error                         { m.acked = true; return nil }
+func (m *stubMsg) Nak() error                         { m.nacked, m.nakedBare = true, true; return nil }
+func (m *stubMsg) NakWithDelay(d time.Duration) error { m.nacked, m.nakDelay = true, d; return nil }
+func (m *stubMsg) InProgress() error                  { return nil }
+func (m *stubMsg) Term() error                        { return nil }
+func (m *stubMsg) TermWithReason(string) error        { return nil }
+func (m *stubMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	if m.numDelivered == 0 {
+		return nil, nil // mirrors a message whose metadata can't be parsed
+	}
+	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
+}
+func (m *stubMsg) Subject() string                 { return "" }
+func (m *stubMsg) Reply() string                   { return "" }
+func (m *stubMsg) Headers() nats.Header            { return m.headers }
+func (m *stubMsg) DoubleAck(context.Context) error { return nil }
+
+// assertJitteredDelay asserts got is jsretry's equal-jitter of base: half the
+// base delay plus up to the other half. Exact-value assertions would be flaky —
+// jsretry deliberately randomizes so a fleet that parked during one outage does
+// not retry in lockstep.
+func assertJitteredDelay(t *testing.T, base, got time.Duration) {
+	t.Helper()
+	assert.GreaterOrEqual(t, got, base/2, "jittered delay must be at least half the base %s", base)
+	assert.LessOrEqual(t, got, base, "jittered delay must not exceed the base %s", base)
+}
 
 func makeStubMsg(t *testing.T, evt *model.MessageEvent) *stubMsg {
 	t.Helper()
@@ -113,6 +133,9 @@ func TestHandler_Add_RoomRenamed_UpdateByQuery(t *testing.T) {
 		msg := &stubMsg{data: renameData(t)}
 		h.Add(msg)
 		assert.True(t, msg.nacked)
+		assert.False(t, msg.nakedBare,
+			"an immediate nak re-hammers a backend that just failed the by-query")
+		assertJitteredDelay(t, 1*time.Second, msg.nakDelay)
 	})
 }
 
@@ -595,4 +618,100 @@ func (c *captureCollection) MappingUpdate() (string, json.RawMessage)  { return 
 func (c *captureCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
 	c.received = append(c.received[:0], data...)
 	return nil, nil
+}
+
+func TestHandler_Flush_RetryPacing(t *testing.T) {
+	evt := model.MessageEvent{
+		Event: model.EventCreated,
+		Message: model.Message{
+			ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+			Content: "hello", CreatedAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		},
+		SiteID: "site-a", Timestamp: 100,
+	}
+
+	newMsg := func(t *testing.T, numDelivered uint64) *stubMsg {
+		t.Helper()
+		m := makeStubMsg(t, &evt)
+		m.numDelivered = numDelivered
+		return m
+	}
+
+	flushItem := func(t *testing.T, msg *stubMsg, result searchengine.BulkResult) {
+		t.Helper()
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		store.EXPECT().Bulk(gomock.Any(), gomock.Len(1)).Return([]searchengine.BulkResult{result}, nil)
+		h := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 500)
+		h.Add(msg)
+		h.Flush(context.Background())
+	}
+
+	transient := searchengine.BulkResult{Status: 500, Error: "boom"}
+	backpressure := searchengine.BulkResult{Status: 429, ErrorType: searchengine.ErrRejectedExecution}
+
+	t.Run("transient failure walks jsretry.DefaultBackoff", func(t *testing.T) {
+		tests := []struct {
+			name         string
+			numDelivered uint64
+			want         time.Duration
+		}{
+			{"first delivery", 1, 1 * time.Second},
+			{"second delivery", 2, 5 * time.Second},
+			{"third delivery", 3, 30 * time.Second},
+			{"past the schedule clamps to the longest step", 9, 10 * time.Minute},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				msg := newMsg(t, tt.numDelivered)
+				flushItem(t, msg, transient)
+
+				assert.True(t, msg.nacked)
+				assert.False(t, msg.nakedBare, "an immediate nak re-hammers a backend that just failed")
+				assertJitteredDelay(t, tt.want, msg.nakDelay)
+			})
+		}
+	})
+
+	t.Run("backpressure skips the fast rungs of the default schedule", func(t *testing.T) {
+		msg := newMsg(t, 1)
+		flushItem(t, msg, backpressure)
+
+		assert.True(t, msg.nacked)
+		assert.False(t, msg.nakedBare)
+		assertJitteredDelay(t, 30*time.Second, msg.nakDelay)
+		assert.GreaterOrEqual(t, msg.nakDelay, 15*time.Second,
+			"a saturated cluster needs time to drain; retrying in 1s only feeds the overload")
+	})
+
+	t.Run("success still acks", func(t *testing.T) {
+		msg := newMsg(t, 1)
+		flushItem(t, msg, searchengine.BulkResult{Status: 201})
+
+		assert.True(t, msg.acked)
+		assert.False(t, msg.nacked)
+	})
+
+	t.Run("a document ES rejects as malformed is dropped, not retried", func(t *testing.T) {
+		msg := newMsg(t, 1)
+		flushItem(t, msg, searchengine.BulkResult{Status: 400, ErrorType: "mapper_parsing_exception"})
+
+		assert.True(t, msg.acked, "poison must be acked (dropped) so it stops consuming deliveries")
+		assert.False(t, msg.nacked)
+		assert.Zero(t, msg.nakDelay)
+	})
+
+	t.Run("whole-batch failure is paced too", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		store.EXPECT().Bulk(gomock.Any(), gomock.Any()).Return(nil, errors.New("es unreachable"))
+		h := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 500)
+		msg := newMsg(t, 2)
+		h.Add(msg)
+		h.Flush(context.Background())
+
+		assert.True(t, msg.nacked)
+		assert.False(t, msg.nakedBare)
+		assertJitteredDelay(t, 5*time.Second, msg.nakDelay)
+	})
 }
