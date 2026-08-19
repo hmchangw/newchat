@@ -97,8 +97,9 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	wantAccounts := make(map[string]struct{}, len(chat.Members))
 	memberSite := make(map[string]string, len(chat.Members)) // account -> home site, for federation
 	var newSubs []*model.Subscription
-	var addedUsers []model.User        // for the room-key fan-out
-	teamsSection := model.SectionTeams // addressable built-in section id for every migrated sub
+	var refreshSubs []*model.Subscription // existing members whose joinedAt needs correcting
+	var addedUsers []model.User           // for the room-key fan-out
+	teamsSection := model.SectionTeams    // addressable built-in section id for every migrated sub
 
 	for _, member := range chat.Members {
 		if member.Account == "" {
@@ -109,8 +110,16 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 			continue // duplicate account in the batch — already handled
 		}
 		wantAccounts[member.Account] = struct{}{}
-		if _, ok := existingByAccount[member.Account]; ok {
-			continue // already a member — no change
+		if existing, ok := existingByAccount[member.Account]; ok {
+			// Already a member — no add. But self-correct a joinedAt stamped before
+			// the createdDateTime fix: refresh it to the chat's createdDateTime via the
+			// same (roomId, account) upsert, without re-adding or re-fanning-out.
+			if want := chat.CreatedDateTime.UTC(); !existing.JoinedAt.Equal(want) {
+				s := *existing
+				s.JoinedAt = want
+				refreshSubs = append(refreshSubs, &s)
+			}
+			continue
 		}
 		user, err := h.resolveMember(ctx, member.Account, member.ID, member.DisplayName)
 		if err != nil {
@@ -152,6 +161,13 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	if len(newSubs) > 0 {
 		if err := h.store.BulkCreateSubscriptions(ctx, newSubs); err != nil {
 			return fmt.Errorf("bulk create subs: %w", err)
+		}
+	}
+	if len(refreshSubs) > 0 {
+		// The (roomId, account) doc exists, so the upsert's $setOnInsert is a no-op
+		// and only joinedAt ($set) is corrected — read state stays untouched.
+		if err := h.store.BulkCreateSubscriptions(ctx, refreshSubs); err != nil {
+			return fmt.Errorf("refresh migrated joinedAt: %w", err)
 		}
 	}
 	if len(removed) > 0 {

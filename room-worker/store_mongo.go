@@ -507,25 +507,52 @@ func (s *MongoStore) DeleteThreadSubscriptions(ctx context.Context, roomID strin
 }
 
 // BulkCreateSubscriptions upserts each sub idempotently, keyed on
-// (roomId, u.account). On collision with an existing document (e.g. a
-// JetStream redelivery of the same create/add-member event), $setOnInsert
-// is a no-op so the persisted sub is preserved unchanged — preserving the
-// insert-only contract for channel/DM/add-member paths while avoiding
-// the duplicate-key error path entirely.
+// (roomId, u.account). Every field except joinedAt goes in $setOnInsert, so on
+// collision (a JetStream redelivery, or a migration replay) the persisted sub —
+// including its read state (lastSeenAt), roles and section — is preserved.
+// joinedAt is in $set so a replay converges it to the event's value: this
+// self-corrects a migrated sub whose joinedAt was stamped before the
+// createdDateTime fix. joinedAt is deterministic from the event/chat and is not
+// read-state, so overwriting it every write is safe. (A field cannot appear in
+// both $setOnInsert and $set, hence the marshal-then-remove.)
 func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error {
 	if len(subs) == 0 {
 		return nil
 	}
 	models := make([]mongo.WriteModel, 0, len(subs))
 	for _, sub := range subs {
+		onInsert, err := bsonMExcept(sub, "joinedAt")
+		if err != nil {
+			return fmt.Errorf("marshal subscription for upsert: %w", err)
+		}
 		filter := bson.M{"roomId": sub.RoomID, "u.account": sub.User.Account}
-		models = append(models, mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": sub}))
+		models = append(models, mongoutil.UpsertModel(filter, bson.M{
+			"$setOnInsert": onInsert,
+			"$set":         bson.M{"joinedAt": sub.JoinedAt},
+		}))
 	}
 	opts := options.BulkWrite().SetOrdered(false)
 	if _, err := s.subscriptions.BulkWrite(ctx, models, opts); err != nil {
 		return fmt.Errorf("bulk create %d subscriptions: %w", len(subs), err)
 	}
 	return nil
+}
+
+// bsonMExcept marshals v to a bson.M with the given top-level keys removed, so a
+// field can move from $setOnInsert to $set without a Mongo path conflict.
+func bsonMExcept(v any, keys ...string) (bson.M, error) {
+	raw, err := bson.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var m bson.M
+	if err := bson.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	for _, k := range keys {
+		delete(m, k)
+	}
+	return m, nil
 }
 
 // BulkCreateRoomMembers upserts each row on the (rid, member.type, member.id) unique key. $setOnInsert
