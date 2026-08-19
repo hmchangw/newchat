@@ -582,7 +582,7 @@ func TestCompareSoakVerifiedMessage_ClassifiesEveryMismatch(t *testing.T) {
 	expected := soakCatalogMessage{
 		soakCatalogCandidate: soakCatalogCandidate{
 			ID: "message-1", RoomID: "room-1", Author: "alice",
-			Content: "hello",
+			ContentSHA256: soakContentDigest("hello"),
 		},
 		Edited: true,
 	}

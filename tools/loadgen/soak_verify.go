@@ -354,7 +354,7 @@ func compareSoakVerifiedMessage(
 	case actual.Deleted != expected.Deleted:
 		result.Class = soakVerifyMismatch
 		result.Field = soakVerifyFieldDeleted
-	case !expected.Deleted && actual.Msg != expected.Content:
+	case !expected.Deleted && soakContentDigest(actual.Msg) != expected.ContentSHA256:
 		result.Class = soakVerifyMismatch
 		result.Field = soakVerifyFieldContent
 	case expected.Edited && actual.EditedAt == nil:

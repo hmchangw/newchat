@@ -20,7 +20,7 @@ func messageCreateExpectedEffects(recipientCount int, recipientHash string) []fa
 
 func TestFailureLedger_FinalizesOnlyAfterEveryObservation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2,
 		Now:      func() time.Time { return now },
 	})
@@ -53,7 +53,7 @@ func TestFailureLedger_FinalizesOnlyAfterEveryObservation(t *testing.T) {
 
 func TestFailureLedger_RejectedAdmissionDoesNotBecomeMissingSideEffect(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1,
 		Now:      func() time.Time { return now },
 	})
@@ -80,7 +80,7 @@ func TestFailureLedger_RejectedAdmissionDoesNotBecomeMissingSideEffect(t *testin
 
 func TestFailureLedger_ClaimsDueOperationOnceUntilReleased(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1,
 		Now:      func() time.Time { return now },
 	})
@@ -110,7 +110,7 @@ func TestFailureLedger_ClaimsDueOperationOnceUntilReleased(t *testing.T) {
 
 func TestFailureLedger_CapacityFailureInvalidatesRun(t *testing.T) {
 	now := time.Now().UTC()
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(testFailureOperation("message-1", now)))
 
@@ -125,7 +125,7 @@ func TestFailureLedger_FileWALRecoversUnresolvedOperation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.wal")
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, Journal: wal, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -138,7 +138,7 @@ func TestFailureLedger_FileWALRecoversUnresolvedOperation(t *testing.T) {
 
 	reopenedWAL, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{
+	recovered, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, Journal: reopenedWAL, Now: func() time.Time { return now.Add(2 * time.Second) },
 	})
 	require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestFailureLedger_CompactsFinalizedHistoryToActiveSet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.wal")
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 3, CompactEvery: 1, Journal: wal,
 		Now: func() time.Time { return now },
 	})
@@ -177,7 +177,7 @@ func TestFailureLedger_CompactsFinalizedHistoryToActiveSet(t *testing.T) {
 
 	reopenedWAL, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{
+	recovered, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 3, CompactEvery: 1, Journal: reopenedWAL,
 		Now: func() time.Time { return now },
 	})
@@ -192,7 +192,7 @@ func TestFailureLedger_CompactsFinalizedHistoryToActiveSet(t *testing.T) {
 
 func TestFailureLedger_WALAppendFailureDoesNotPublishOperation(t *testing.T) {
 	wantErr := errors.New("disk full")
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1,
 		Journal:  &failingFailureJournal{err: wantErr},
 	})
@@ -334,7 +334,7 @@ func TestFailureLedger_StartsRoomLaneOperations(t *testing.T) {
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			ledger, err := newFailureLedger(failureLedgerConfig{
+			ledger, err := newFailureLedger(&failureLedgerConfig{
 				Capacity: 4,
 				Now:      func() time.Time { return now },
 			})
@@ -378,7 +378,7 @@ func TestValidateFailureOperation_RejectsUnknownOperationType(t *testing.T) {
 
 func TestFailureLedger_ClaimDueLanesKeepsLanesSeparate(t *testing.T) {
 	now := time.Date(2026, 8, 16, 6, 0, 0, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -414,7 +414,7 @@ func TestFailureLedger_ClaimDueLanesKeepsLanesSeparate(t *testing.T) {
 }
 
 func TestFailureLedger_ClaimDueLanesRejectsAnEmptyLaneSet(t *testing.T) {
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 
 	_, ok := ledger.ClaimDueLanes(time.Now(), nil)
@@ -424,7 +424,7 @@ func TestFailureLedger_ClaimDueLanesRejectsAnEmptyLaneSet(t *testing.T) {
 
 func TestFailureLedger_RoomLaneIsClaimableFromItsVerifyTime(t *testing.T) {
 	now := time.Date(2026, 8, 16, 6, 0, 0, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)

@@ -148,12 +148,15 @@ func (r *soakSearchReader) SearchRooms(ctx context.Context) error {
 // query to the message's own room so the answer does not depend on relevance
 // ranking across the whole corpus.
 //
+// term is the query the catalogue kept for this message; the catalogue reduces
+// each body to it so no verifier has to hold one.
+//
 // publishedAt gates the settle window. Before it elapses the probe returns
 // unknown without issuing a request, because an absent hit there is legal and
 // the query would only spend a read slot to learn nothing.
 func (r *soakSearchReader) IndexedAt(
 	ctx context.Context,
-	account, roomID, messageID, content string,
+	account, roomID, messageID, term string,
 	publishedAt time.Time,
 ) (soakSearchIndexResult, error) {
 	if account == "" || roomID == "" || messageID == "" {
@@ -169,7 +172,7 @@ func (r *soakSearchReader) IndexedAt(
 		Action:  soakRPCSearchIndexProbe,
 		Subject: subject.SearchMessages(account, r.cfg.SiteID),
 		Body: model.SearchMessagesRequest{
-			Query:   searchProbeTerm(content),
+			Query:   term,
 			RoomIDs: []string{roomID},
 			Size:    r.cfg.PageSize,
 		},
@@ -276,11 +279,11 @@ func (p *soakSearchIndexProbe) Indexed(
 		return soakSearchIndexUnknown, nil
 	}
 	message, known := p.catalog.Get(roomID, messageID)
-	if !known || message.Content == "" {
+	if !known || message.SearchTerm == "" {
 		return soakSearchIndexUnknown, nil
 	}
 	return p.reader.IndexedAt(
-		ctx, account, roomID, messageID, message.Content, operation.StartedAt,
+		ctx, account, roomID, messageID, message.SearchTerm, operation.StartedAt,
 	)
 }
 

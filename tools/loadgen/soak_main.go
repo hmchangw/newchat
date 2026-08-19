@@ -622,6 +622,7 @@ func runSoakWorkload(
 		cfg.Soak.PersistGrace,
 		nil,
 	)
+	catalog.RetainSearchTerms(cfg.Soak.SearchObserverEnabled)
 	scheduler := newSoakMutationScheduler(
 		cfg.Soak.SoftDeleteRatio,
 		rand.New(rand.NewSource(seed+3)),

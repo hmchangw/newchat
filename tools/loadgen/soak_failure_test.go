@@ -22,7 +22,7 @@ import (
 func TestSoakFailureTracker_StartsDurableMessageOperation(t *testing.T) {
 	assert.Equal(t, "message_soak", soakFailureScenario)
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
 	tracker := newSoakFailureTracker(
@@ -56,7 +56,7 @@ func TestSoakFailureTracker_StartsDurableMessageOperation(t *testing.T) {
 
 func TestSoakFailureExpiryLoop_FinalizesPastDeadline(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1,
 		Now:      func() time.Time { return now },
 	})
@@ -84,7 +84,7 @@ func TestSoakFailureExpiryLoop_FinalizesPastDeadline(t *testing.T) {
 func TestSoakFailureExpiryLoop_ReportsPersistenceFailureAndStopsOnCancel(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	journal := &failingFailureJournal{err: errors.New("disk full")}
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1,
 		Now:      func() time.Time { return now },
 	})
@@ -108,7 +108,7 @@ func TestSoakFailureExpiryLoop_ReportsPersistenceFailureAndStopsOnCancel(t *test
 
 func TestSoakFailureTracker_ForgetsRecipientExpectationWhenLedgerRejectsStart(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(testFailureOperation("occupied", now)))
 	observer := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
@@ -125,7 +125,7 @@ func TestSoakFailureTracker_ForgetsRecipientExpectationWhenLedgerRejectsStart(t 
 
 func TestSoakFailureTracker_RegistersRecipientExpectation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(ledger, NewMetrics(), 2, func() time.Time { return now })
 	tracker := newSoakFailureTracker(
@@ -141,7 +141,7 @@ func TestSoakFailureTracker_RegistersRecipientExpectation(t *testing.T) {
 
 func TestSoakFailureTracker_PersistsRecipientExpectationSemantics(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
 	tracker := newSoakFailureTracker(
@@ -166,7 +166,7 @@ func TestSoakFailureTracker_PersistsRecipientExpectationSemantics(t *testing.T) 
 
 func TestSoakFailureTracker_DisabledRecipientObserverOmitsExactSetFromWAL(t *testing.T) {
 	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
 	pending := testSoakFailurePending(now)
@@ -216,7 +216,7 @@ func TestSoakFailureTracker_RejectsInvalidInputs(t *testing.T) {
 	require.Error(t, tracker.Start(nil))
 	require.Error(t, tracker.ObserveReply(nil))
 
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker = newSoakFailureTracker(ledger, 0, time.Minute, time.Now)
 	require.Error(t, tracker.Start(nil))
@@ -226,7 +226,7 @@ func TestSoakFailureTracker_RejectsInvalidInputs(t *testing.T) {
 
 func TestSoakFailureReconciler_AcceptedAndPersistedIsGood(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
@@ -254,7 +254,7 @@ func TestSoakFailureReconciler_AcceptedAndPersistedIsGood(t *testing.T) {
 
 func TestSoakFailureReconciler_FinalizesRecipientAtDeadlineWithoutRepeatingHistoryQuery(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	recipientObserver := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
 	tracker := newSoakFailureTracker(
@@ -290,7 +290,7 @@ func TestSoakFailureReconciler_FinalizesRecipientAtDeadlineWithoutRepeatingHisto
 
 func TestSoakFailureReconciler_UnverifiedRecipientDoesNotUseNegativeReason(t *testing.T) {
 	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	recipientObserver := newFailureRecipientObserver(ledger, nil, 1, func() time.Time { return now })
 	tracker := newSoakFailureTracker(
@@ -324,7 +324,7 @@ func TestSoakFailureReconciler_UnverifiedRecipientDoesNotUseNegativeReason(t *te
 
 func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
@@ -352,7 +352,7 @@ func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t
 func TestSoakFailureTracker_ActivatesDurableIntent(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	journal := &memoryFailureJournal{}
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1, Journal: journal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1, Journal: journal})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
 	pending := testSoakFailurePending(now)
@@ -369,7 +369,7 @@ func TestSoakFailureTracker_ActivatesDurableIntent(t *testing.T) {
 
 func TestSoakFailureTracker_ActivateRejectsInvalidInputs(t *testing.T) {
 	assert.Error(t, (*soakFailureTracker)(nil).Activate(nil))
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(ledger, 0, time.Minute, time.Now)
 	assert.Error(t, tracker.Activate(nil))
@@ -379,7 +379,7 @@ func TestSoakFailureTracker_ActivateRejectsInvalidInputs(t *testing.T) {
 
 func TestSoakFailureReconciler_RetriesMissingUntilDeadline(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(
 		ledger, 0, 10*time.Second, func() time.Time { return now },
@@ -418,7 +418,7 @@ func TestSoakFailureReconciler_RetriesMissingUntilDeadline(t *testing.T) {
 
 func TestSoakFailureReconciler_RPCFailureReleasesClaim(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
@@ -443,7 +443,7 @@ func TestSoakFailureReconciler_RPCFailureReleasesClaim(t *testing.T) {
 
 func TestSoakFailureReconciler_MismatchRetriesUntilDeadlineThenFails(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(
 		ledger, 0, 10*time.Second, func() time.Time { return now },
@@ -679,7 +679,7 @@ func TestSoakFailureReconciler_HandlesNoDueAndInvalidConfiguration(t *testing.T)
 	_, err := reconciler.Try(context.Background())
 	require.Error(t, err)
 
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	reconciler = newSoakFailureReconciler(
 		ledger,
@@ -802,7 +802,7 @@ func TestSoakFailureReconciler_TooEarlyAtTheDeadlineIsUnverified(t *testing.T) {
 func newSoakSearchTestLedger(t *testing.T, startedAt, now time.Time) *failureLedger {
 	t.Helper()
 	contract := newFailureObserverContract(false, true)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Now: func() time.Time { return now }, ObserverContract: &contract,
 	})
 	require.NoError(t, err)
@@ -830,7 +830,7 @@ func newSoakSearchTestLedger(t *testing.T, startedAt, now time.Time) *failureLed
 // against an observer the operation never declared.
 func TestSoakFailureReconciler_LeavesRoomLaneOperationsAlone(t *testing.T) {
 	now := time.Date(2026, 8, 16, 4, 5, 6, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)

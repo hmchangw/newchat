@@ -113,7 +113,7 @@ func TestFailureLedger_RecoveryStreamsInsteadOfBufferingTheJournal(t *testing.T)
 		{Type: failureLedgerEventActivated, OperationID: "op-1", At: now},
 	}}
 
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 10, Journal: journal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 10, Journal: journal})
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, journal.streamedReplay)
@@ -130,7 +130,7 @@ func TestFailureLedger_RecoveryFallsBackToBufferingWhenTheJournalCannotStream(t 
 		{Type: failureLedgerEventStarted, Operation: testFailureOperation("op-1", now), At: now},
 	}}
 
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 10, Journal: journal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 10, Journal: journal})
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, journal.replays)

@@ -164,7 +164,7 @@ func openSoakFailureLedger(
 			metrics,
 		)
 	}
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity:         cfg.LedgerCapacity,
 		CompactEvery:     cfg.LedgerCompactEvery,
 		MaxJournalBytes:  cfg.LedgerMaxBytes,
@@ -471,8 +471,7 @@ func (v *soakFailureRPCVerifier) Verify(
 	expectedDeleted := false
 	if v.catalog != nil {
 		if current, ok := v.catalog.Get(roomID, operation.ID); ok {
-			currentHash := sha256.Sum256([]byte(current.Content))
-			expectedHash = hex.EncodeToString(currentHash[:])
+			expectedHash = current.ContentSHA256
 			expectedDeleted = current.Deleted
 		}
 	}

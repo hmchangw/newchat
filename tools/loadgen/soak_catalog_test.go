@@ -125,7 +125,7 @@ func TestSoakCatalog_StateTransitions(t *testing.T) {
 	got, ok := catalog.Get("r-1", "m-1")
 	require.True(t, ok)
 	assert.True(t, got.Edited)
-	assert.Equal(t, "edited", got.Content)
+	assert.Equal(t, soakContentDigest("edited"), got.ContentSHA256)
 	assert.True(t, got.Pinned)
 	assert.Equal(t, map[string][]string{"party": {"bob"}}, got.Reactions)
 	assert.Equal(t, 1, got.ThreadReplies)

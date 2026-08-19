@@ -30,7 +30,7 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 	wal, err := openFailureWAL(walPath)
 	require.NoError(t, err)
 	contract := newFailureObserverContract(true, false)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Journal: wal, Now: func() time.Time { return now },
 		ObserverContract: &contract,
 	})
@@ -107,7 +107,7 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 
 	reopenedWAL, err := openFailureWAL(walPath)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{
+	recovered, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Journal: reopenedWAL, Now: func() time.Time { return now },
 		ObserverContract: &contract,
 	})

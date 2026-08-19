@@ -25,7 +25,7 @@ func startExpiredOperations(t *testing.T, ledger *failureLedger, count int, at t
 // makes the pause predictable; the backlog drains over the following sweeps.
 func TestFailureLedger_ExpireRetiresAtMostOneBatchPerSweep(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1000, ExpireBatch: 25, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -40,7 +40,7 @@ func TestFailureLedger_ExpireRetiresAtMostOneBatchPerSweep(t *testing.T) {
 
 func TestFailureLedger_ExpireDrainsTheBacklogOverSuccessiveSweeps(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1000, ExpireBatch: 25, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -59,7 +59,7 @@ func TestFailureLedger_ExpireDrainsTheBacklogOverSuccessiveSweeps(t *testing.T) 
 
 func TestFailureLedger_ExpireIsUnboundedWhenNoBatchIsConfigured(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1000, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)

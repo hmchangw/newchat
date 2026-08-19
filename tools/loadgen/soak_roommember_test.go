@@ -44,7 +44,7 @@ func newSoakRoomLaneFixture(t *testing.T, reply []byte, requestErr error) *soakR
 		soakRoomStateTestTopology(3), 8, fixture.metrics, rand.New(rand.NewSource(1)),
 	)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 16, Now: now})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 16, Now: now})
 	require.NoError(t, err)
 	rpc := newSoakRPCClient(
 		fixture.transport, soakRetryConfig{MaxAttempts: 3}, &soakRecordingSleeper{}, nil,
@@ -131,7 +131,7 @@ func TestSoakRoomLanes_ExplicitRejectionClosesTheOperation(t *testing.T) {
 
 func TestSoakRoomLanes_LedgerRefusalSkipsTheRequest(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
-	full, err := newFailureLedger(failureLedgerConfig{
+	full, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Now: func() time.Time { return fixture.now },
 	})
 	require.NoError(t, err)
@@ -459,7 +459,7 @@ func TestSoakRoomLanes_LedgerRefusalRestoresEveryIntentKind(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
-			closed, err := newFailureLedger(failureLedgerConfig{
+			closed, err := newFailureLedger(&failureLedgerConfig{
 				Capacity: 1, Now: func() time.Time { return fixture.now },
 			})
 			require.NoError(t, err)

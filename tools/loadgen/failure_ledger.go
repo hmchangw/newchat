@@ -464,7 +464,7 @@ func (q *failureVerifyQueue) Pop() any {
 	return operation
 }
 
-func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
+func newFailureLedger(cfg *failureLedgerConfig) (*failureLedger, error) {
 	if cfg.Capacity <= 0 {
 		return nil, fmt.Errorf("failure ledger capacity must be greater than zero")
 	}

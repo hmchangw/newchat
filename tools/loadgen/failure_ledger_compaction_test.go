@@ -64,7 +64,7 @@ func compactionTestEvents(t *testing.T, operations int) []failureLedgerEvent {
 func TestFailureLedger_CompactsOnceAfterRecoveringAJournal(t *testing.T) {
 	journal := &compactionCountingJournal{events: compactionTestEvents(t, 50), size: 1 << 20}
 
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1000, Journal: journal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1000, Journal: journal})
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, journal.compacts, "recovery must reclaim the inherited journal")
@@ -76,7 +76,7 @@ func TestFailureLedger_CompactsOnceAfterRecoveringAJournal(t *testing.T) {
 func TestFailureLedger_DoesNotCompactAnEmptyJournalOnRecovery(t *testing.T) {
 	journal := &compactionCountingJournal{}
 
-	_, err := newFailureLedger(failureLedgerConfig{Capacity: 1000, Journal: journal})
+	_, err := newFailureLedger(&failureLedgerConfig{Capacity: 1000, Journal: journal})
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, journal.compacts, "there is nothing to reclaim in a fresh journal")
@@ -87,7 +87,7 @@ func TestFailureLedger_DoesNotCompactAnEmptyJournalOnRecovery(t *testing.T) {
 // it triggers on its own.
 func TestFailureLedger_CompactsWhenTheJournalOutgrowsItsBudget(t *testing.T) {
 	journal := &compactionCountingJournal{}
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1000, Journal: journal,
 		CompactEvery: 1000000, MaxJournalBytes: 4096,
 	})
@@ -106,7 +106,7 @@ func TestFailureLedger_CompactsWhenTheJournalOutgrowsItsBudget(t *testing.T) {
 
 func TestFailureLedger_LeavesTheJournalAloneWhileUnderBudget(t *testing.T) {
 	journal := &compactionCountingJournal{}
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1000, Journal: journal,
 		CompactEvery: 1000000, MaxJournalBytes: 1 << 20,
 	})
@@ -125,7 +125,7 @@ func TestFailureLedger_LeavesTheJournalAloneWhileUnderBudget(t *testing.T) {
 // erase it. The budget check must not override that.
 func TestFailureLedger_DefersCompactionWhileAnOperationIsMidStart(t *testing.T) {
 	journal := &compactionCountingJournal{}
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1000, Journal: journal,
 		CompactEvery: 1000000, MaxJournalBytes: 1,
 	})
