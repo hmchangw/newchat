@@ -12,6 +12,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -171,4 +172,38 @@ func TestTeardownSoak_PreservesArtifactsForUnownedRoomInOwnershipChunk(t *testin
 			bson.D{},
 		), collection)
 	}
+}
+
+// Teardown deletes subscriptions by the run marker, but a room the create lane
+// made has its subscriptions written by room-service, which never sets that
+// marker. The room is deleted and its subscriptions are left behind — silently,
+// so every run leaks a little more orphaned state.
+func TestTeardownSoak_DeletesSubscriptionsRoomServiceWroteForCreatedRooms(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "loadgen_soak_teardown_created")
+	store := &mongoSoakStore{db: db}
+	now := time.Now().UTC()
+
+	require.NoError(t, store.PutManifest(ctx, &soakManifest{
+		ID: "run-created", State: soakManifestSeeded, StartedAt: now, UpdatedAt: now,
+	}))
+	insertRoomServiceCreatedRoom(
+		t, ctx, store, "run-created", "site-a", "created-room-1",
+		[]model.SubscriptionUser{
+			{ID: "u1", Account: "alice"},
+			{ID: "u2", Account: "bob"},
+		},
+	)
+
+	cfg := validSoakConfig(t)
+	cfg.RunID = "run-created"
+	cfg.CassandraCleanup = "none"
+	found, err := teardownSoak(ctx, store, nil, &cfg, "chat")
+	require.NoError(t, err)
+	assert.True(t, found)
+
+	assert.Equal(t, int64(0), countDocuments(t, db.Collection("rooms"), bson.D{}),
+		"the created room carries the marker, so teardown already removed it")
+	assert.Equal(t, int64(0), countDocuments(t, db.Collection("subscriptions"), bson.D{}),
+		"its subscriptions belong to the same run and must go with it")
 }

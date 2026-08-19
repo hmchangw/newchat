@@ -202,7 +202,7 @@ func TestSoakPrometheusMetrics_StableNamesAndBoundedLabels(t *testing.T) {
 		metrics.SoakOperations.WithLabelValues("reaction", "failed", "measured"),
 	))
 	assert.Equal(t, float64(2), testutil.ToFloat64(
-		metrics.SoakRetries.WithLabelValues("reaction"),
+		metrics.SoakRetries.WithLabelValues("reaction", "measured"),
 	))
 }
 

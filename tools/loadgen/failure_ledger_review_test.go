@@ -20,7 +20,7 @@ func reviewFailureOperation(id string, now time.Time) *failureOperation {
 
 func TestFailureLedger_AbandonFinalizesWithoutDataLoss(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestFailureLedger_AbandonFinalizesWithoutDataLoss(t *testing.T) {
 func TestFailureLedger_BoundedResultReasons(t *testing.T) {
 	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, Recorder: newFailureLedgerPromRecorder(metrics),
 	})
 	require.NoError(t, err)
@@ -166,7 +166,7 @@ func TestFailureLedger_FinalizationPreservesDeterministicReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			journal := &memoryFailureJournal{}
-			ledger, err := newFailureLedger(failureLedgerConfig{
+			ledger, err := newFailureLedger(&failureLedgerConfig{
 				Capacity: 1, Journal: journal, Now: func() time.Time { return now },
 			})
 			require.NoError(t, err)
@@ -195,7 +195,7 @@ func TestFailureLedger_FinalizationPreservesDeterministicReason(t *testing.T) {
 func TestFailureLedger_NotSentRequiresBoundedLocalProofReason(t *testing.T) {
 	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Recorder: newFailureLedgerPromRecorder(metrics),
 	})
 	require.NoError(t, err)
@@ -219,7 +219,7 @@ func TestFailureLedger_NotSentRequiresBoundedLocalProofReason(t *testing.T) {
 
 func TestFailureLedger_ActivatedPublishCannotBecomeNotSent(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	operation := testFailureOperation("message-1", now)
 	operation.LifecycleState = failureOperationJournaled
@@ -234,7 +234,7 @@ func TestFailureLedger_ActivatedPublishCannotBecomeNotSent(t *testing.T) {
 
 func TestFailureLedger_StartRejectsVersionTwoWithoutLifecycleState(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	operation := testFailureOperation("message-v2", now)
 	operation.SchemaVersion = 2
@@ -251,7 +251,7 @@ func TestFailureLedger_StartRejectsVersionTwoWithoutLifecycleState(t *testing.T)
 
 func TestFailureLedger_StartDoesNotMutateCallerExpectedObservers(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	operation := testFailureOperation("message-v2", now)
 	operation.SchemaVersion = 2
@@ -272,7 +272,7 @@ func TestFailureLedger_AccountingInvariantNormalizesZeroTimestamp(t *testing.T) 
 	path := filepath.Join(t.TempDir(), "run.wal")
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Journal: wal, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -294,7 +294,7 @@ func TestFailureLedger_AccountingInvariantNormalizesZeroTimestamp(t *testing.T) 
 
 func TestFailureLedger_AbandonRejectsUnknownOperationAndResult(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -307,7 +307,7 @@ func TestFailureLedger_AbandonRejectsUnknownOperationAndResult(t *testing.T) {
 
 func TestFailureLedger_ExpireSkipsClaimedOperation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -331,7 +331,7 @@ func TestFailureLedger_ExpireSkipsClaimedOperation(t *testing.T) {
 
 func TestFailureLedger_ExpireFinalizesReleasedClaim(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -347,7 +347,7 @@ func TestFailureLedger_ExpireFinalizesReleasedClaim(t *testing.T) {
 
 func TestFailureLedger_HistoryObservationReleasesClaimForAdmissionExpiry(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -372,7 +372,7 @@ func TestFailureLedger_HistoryObservationReleasesClaimForAdmissionExpiry(t *test
 
 func TestFailureLedger_ClaimDueReturnsEarliestDueOperation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -403,7 +403,7 @@ func TestFailureLedger_ClaimDueReturnsEarliestDueOperation(t *testing.T) {
 
 func TestFailureLedger_ClaimDueSkipsObservedHistory(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -418,7 +418,7 @@ func TestFailureLedger_ClaimDueSkipsObservedHistory(t *testing.T) {
 
 func TestFailureLedger_ClaimDueIgnoresOperationsWithoutHistoryObserver(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -432,7 +432,7 @@ func TestFailureLedger_ClaimDueIgnoresOperationsWithoutHistoryObserver(t *testin
 
 func TestFailureLedger_UnverifiedObservationDoesNotReportDataLoss(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -559,7 +559,7 @@ func TestFailureLedger_ReplayDegradesInsteadOfCrashLoopingOverCapacity(t *testin
 
 	wal, err := openFailureWAL(walPath)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Journal: wal, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -572,7 +572,7 @@ func TestFailureLedger_ReplayDegradesInsteadOfCrashLoopingOverCapacity(t *testin
 	// degrade the ledger rather than fail and crash-loop the pod.
 	reopenedWAL, err := openFailureWAL(walPath)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{
+	recovered, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Journal: reopenedWAL, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -591,7 +591,7 @@ func TestFailureLedger_ReplayDropsFollowUpEventsForDroppedOperations(t *testing.
 
 	wal, err := openFailureWAL(walPath)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Journal: wal, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -603,7 +603,7 @@ func TestFailureLedger_ReplayDropsFollowUpEventsForDroppedOperations(t *testing.
 
 	reopenedWAL, err := openFailureWAL(walPath)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{
+	recovered, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Journal: reopenedWAL, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)

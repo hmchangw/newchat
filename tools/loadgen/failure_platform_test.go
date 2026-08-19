@@ -77,7 +77,7 @@ func TestFailureLedger_Version2ReplayAndUnknownVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.wal")
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: wal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: wal})
 	require.NoError(t, err)
 	op := testFailureOperation("message-v2", now)
 	op.SchemaVersion = 2
@@ -92,7 +92,7 @@ func TestFailureLedger_Version2ReplayAndUnknownVersion(t *testing.T) {
 
 	reopened, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: reopened})
+	recovered, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: reopened})
 	require.NoError(t, err)
 	operation, ok := recovered.ClaimDue(now.Add(time.Minute))
 	require.True(t, ok)
@@ -142,7 +142,7 @@ func TestFailureLedger_CompactionRestoresTerminalCounters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.wal")
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, CompactEvery: 1, Journal: wal, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -155,7 +155,7 @@ func TestFailureLedger_CompactionRestoresTerminalCounters(t *testing.T) {
 
 	reopened, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: reopened})
+	recovered, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: reopened})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, recovered.Close()) })
 	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultGood])
@@ -184,7 +184,7 @@ func TestFailureLedger_ReplayRejectsDuplicateStartedOperation(t *testing.T) {
 		{Type: failureLedgerEventStarted, Operation: operation, At: now},
 		{Type: failureLedgerEventStarted, Operation: operation, At: now},
 	}}
-	_, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: journal})
+	_, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: journal})
 	assert.ErrorContains(t, err, "already active")
 }
 
@@ -199,7 +199,7 @@ func TestFailureWAL_HeaderlessLegacyIsAtomicallyUpgradedBeforeNewWrites(t *testi
 
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 3, Journal: wal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 3, Journal: wal})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(testFailureOperation("new", now)))
 	require.NoError(t, ledger.Close())
@@ -209,7 +209,7 @@ func TestFailureWAL_HeaderlessLegacyIsAtomicallyUpgradedBeforeNewWrites(t *testi
 	assert.Contains(t, string(contents), `"recordType":"header"`)
 	reopened, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{Capacity: 3, Journal: reopened})
+	recovered, err := newFailureLedger(&failureLedgerConfig{Capacity: 3, Journal: reopened})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, recovered.Close()) })
 	assert.Equal(t, 2, recovered.Snapshot().Active)
@@ -217,7 +217,7 @@ func TestFailureWAL_HeaderlessLegacyIsAtomicallyUpgradedBeforeNewWrites(t *testi
 
 func TestFailureLedger_DownstreamObservationAfterNotSentInvalidatesAccounting(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(testFailureOperation("not-sent", now)))
 	require.NoError(t, ledger.Abandon("not-sent", failureResultNotSent, now))
@@ -416,7 +416,7 @@ func TestFailureRecipientObserver_AppliesManifestDuplicatePolicy(t *testing.T) {
 func TestFailureRecipientObserver_QueueOverflowInvalidatesWithoutBlocking(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1, Recorder: newFailureLedgerPromRecorder(metrics)})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1, Recorder: newFailureLedgerPromRecorder(metrics)})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(ledger, metrics, 1, func() time.Time { return now })
 	observer.health.Set(true, now, "subscribed")
@@ -431,7 +431,7 @@ func TestFailureRecipientObserver_QueueOverflowInvalidatesWithoutBlocking(t *tes
 func TestFailureRecipientObserver_ProcessesExactSet(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	op := testFailureOperation("message-1", now)
 	op.SchemaVersion, op.RunID, op.OperationType = 2, "run-1", failureOperationMessageCreate
@@ -549,7 +549,7 @@ func TestFailureRecipientObserver_UsesBoundedRecipientConnectionPool(t *testing.
 
 func TestFailureRecipientObserver_RejectsSubscriptionAndMalformedEvidence(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(
 		ledger, NewMetrics(), 2, func() time.Time { return now },
@@ -641,7 +641,7 @@ func TestFailureRecipientObserver_BatchesDurableAnomaliesBeforeReturningPositive
 func TestFailureRecipientObserver_DowngradesPositiveClaimWhenDurabilityBarrierFails(t *testing.T) {
 	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	journal := &recordingFailureRecipientEvidenceJournal{err: assert.AnError}
 	observer := newFailureRecipientObserver(
@@ -663,7 +663,7 @@ func TestFailureRecipientObserver_DowngradesPositiveClaimWhenDurabilityBarrierFa
 
 func TestFailureRecipientObserver_IgnoresUnrelatedRoomEvents(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(ledger, NewMetrics(), 2, func() time.Time { return now })
 	payload, err := json.Marshal(model.RoomEvent{
@@ -697,7 +697,7 @@ func TestFailureRecipientObserver_RejectsWrongRoomAndEventType(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-			ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+			ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 			require.NoError(t, err)
 			observer := newFailureRecipientObserver(ledger, NewMetrics(), 2, func() time.Time { return now })
 			observer.health.Set(true, now, "subscribed")

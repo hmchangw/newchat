@@ -34,7 +34,7 @@ func (s *stubFailureHistoryVerifier) Verify(
 
 func newReviewReconcilerLedger(t *testing.T, now time.Time) *failureLedger {
 	t.Helper()
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestSoakFailureReconciler_MismatchAfterDeadlineIsCorruption(t *testing.T) {
 
 func TestSoakFailureReconciler_ReleasesMalformedClaim(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1, Now: func() time.Time { return now }})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1, Now: func() time.Time { return now }})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(reviewFailureOperation("malformed", now)))
 	ledger.mu.Lock()
@@ -173,7 +173,7 @@ func TestSoakFailureReconciler_ReleasesMalformedClaim(t *testing.T) {
 
 func TestSoakFailureTracker_AbandonMarksSendAsNeverPublished(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 2})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 2})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
@@ -195,7 +195,7 @@ func TestSoakFailureTracker_AbandonMarksSendAsNeverPublished(t *testing.T) {
 
 func TestSoakFailureTracker_ObserveReplyIgnoresUnmatchedReply(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },
@@ -208,7 +208,7 @@ func TestSoakFailureTracker_ObserveReplyIgnoresUnmatchedReply(t *testing.T) {
 
 func TestSoakFailureTracker_ObserveReplyToleratesUntrackedOperation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	metrics := NewMetrics()
 	tracker := newSoakFailureTracker(
@@ -225,7 +225,7 @@ func TestSoakFailureTracker_ObserveReplyToleratesUntrackedOperation(t *testing.T
 }
 
 func TestSoakFailureTracker_ObserveReplyStillRejectsMissingMessageID(t *testing.T) {
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(ledger, 0, time.Minute, time.Now)
 
@@ -262,7 +262,7 @@ func TestSoakShareGate_AdmitsConfiguredFraction(t *testing.T) {
 }
 
 func TestSoakFailureTracker_AbandonUnsentRejectsInvalidInput(t *testing.T) {
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 
 	require.Error(t, newSoakFailureTracker(nil, 0, time.Minute, nil).AbandonUnsent(nil))
@@ -274,7 +274,7 @@ func TestSoakFailureTracker_AbandonUnsentRejectsInvalidInput(t *testing.T) {
 
 func TestSoakFailureTracker_AbandonUnsentToleratesUntrackedOperation(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	metrics := NewMetrics()
 	tracker := newSoakFailureTracker(
@@ -292,7 +292,7 @@ func TestSoakFailureTracker_AbandonUnsentToleratesUntrackedOperation(t *testing.
 
 func TestSoakFailureTracker_AbandonUnsentSurfacesLedgerFailure(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(
 		ledger, 0, time.Minute, func() time.Time { return now },

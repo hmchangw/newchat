@@ -97,7 +97,7 @@ func TestFailureJournalGroupCommit_BatchesConcurrentDurableIntents(t *testing.T)
 func TestFailureLedger_StartAllowsConcurrentIntentsToShareDurabilityBarrier(t *testing.T) {
 	inner := newRecordingBufferedFailureJournal()
 	journal := newFailureJournalGroupCommit(inner, 100*time.Millisecond, 256)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: journal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: journal})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
 	errors := make(chan error, 2)
@@ -143,7 +143,7 @@ func TestFailureJournalGroupCommit_SyncFailureRejectsDurableIntentAndSticks(t *t
 func TestFailureLedger_DoesNotCompactAwayAConcurrentStartingIntent(t *testing.T) {
 	inner := newRecordingBufferedFailureJournal()
 	journal := newFailureJournalGroupCommit(inner, 100*time.Millisecond, 256)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, CompactEvery: 1, Journal: journal,
 	})
 	require.NoError(t, err)

@@ -23,7 +23,7 @@ func openSoakFailureObservationLedger(
 	if errors.Is(err, errFailureObserverContractMismatch) || cfg == nil {
 		return nil, false, err
 	}
-	fallback, fallbackErr := newFailureLedger(failureLedgerConfig{
+	fallback, fallbackErr := newFailureLedger(&failureLedgerConfig{
 		Capacity: cfg.LedgerCapacity,
 		Now:      now,
 		Recorder: newFailureLedgerPromRecorder(metrics),

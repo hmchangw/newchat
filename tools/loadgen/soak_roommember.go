@@ -774,7 +774,7 @@ func (l *soakRoomLanes) record(action soakRPCAction, outcome *soakRoomMutationOu
 	}
 	l.recorder.Record(soakMutationSample{
 		Action: action, Latency: outcome.Latency, Retries: outcome.Retries,
-		ErrorClass: outcome.ErrorClass,
+		ErrorClass: outcome.ErrorClass, ErrorReason: outcome.ErrorReason,
 	})
 }
 

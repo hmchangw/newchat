@@ -80,7 +80,7 @@ func TestFailureObservationRuntime_LegacyPendingOperationRejectsNewRecipientMode
 
 func TestSoakFailureTracker_RecipientEffectIsOptIn(t *testing.T) {
 	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 2})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 2})
 	require.NoError(t, err)
 	pending := &soakPendingSend{
 		MessageID: "message-1", RequestID: "request-1", PublishedAt: now,

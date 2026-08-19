@@ -82,9 +82,23 @@ type soakConfig struct {
 	LedgerDir                   string        `env:"LEDGER_DIR"                       envDefault:""`
 	LedgerEpoch                 string        `env:"LEDGER_EPOCH"                     envDefault:"v1"`
 	LedgerCapacity              int           `env:"LEDGER_CAPACITY"                  envDefault:"200000"`
-	ReconcileDeadline           time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
-	ReconcileRetryInterval      time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
-	ReconcileReadShare          float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
+	// LedgerCompactEvery and LedgerMaxBytes both bound the journal. The finalize
+	// count alone is not enough: a run whose operations all outlive their
+	// deadline never reaches it, and a process that restarts first loses the
+	// count entirely, so the file would only ever grow.
+	LedgerCompactEvery int   `env:"LEDGER_COMPACT_EVERY"             envDefault:"10000"`
+	LedgerMaxBytes     int64 `env:"LEDGER_MAX_BYTES"                 envDefault:"536870912"`
+	// LedgerExpireBatch bounds one expiry sweep, which otherwise holds the
+	// ledger lock while it journals every operation it retires. It defaults to
+	// unbounded because a bound below the rate operations arrive at is worse
+	// than the stall it prevents: the backlog then grows until Start hits
+	// LedgerCapacity and invalidates the ledger during the incident it exists
+	// to observe. Size it above (operations/sec x sweep interval), where the
+	// sweep runs every min(30s, max(1s, RECONCILE_DEADLINE/10)).
+	LedgerExpireBatch      int           `env:"LEDGER_EXPIRE_BATCH"              envDefault:"0"`
+	ReconcileDeadline      time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
+	ReconcileRetryInterval time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
+	ReconcileReadShare     float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
 	// EncryptionPreflight gates the one-message check that the encrypted write
 	// path reaches Cassandra and wraps the room DEK. It is on by default and
 	// may only be turned off outside staging and production: a run that skipped
@@ -104,6 +118,12 @@ type soakConfig struct {
 	TeardownBatchRooms           int           `env:"TEARDOWN_BATCH_ROOMS"              envDefault:"250"`
 	TeardownBatchDelay           time.Duration `env:"TEARDOWN_BATCH_DELAY"              envDefault:"100ms"`
 	TeardownBatchTimeout         time.Duration `env:"TEARDOWN_BATCH_TIMEOUT"            envDefault:"30s"`
+	// HeapProfileDir turns on periodic heap profiling. A pod being OOM-killed
+	// cannot be port-forwarded in time, so the profile has to already be on a
+	// volume when the process dies; point this at the ledger mount to keep it.
+	HeapProfileDir      string        `env:"HEAP_PROFILE_DIR"      envDefault:""`
+	HeapProfileInterval time.Duration `env:"HEAP_PROFILE_INTERVAL" envDefault:"5m"`
+	HeapProfileKeep     int           `env:"HEAP_PROFILE_KEEP"     envDefault:"3"`
 }
 
 // soakPayloadBudgetRatio is the share of max_payload a page of message bodies
@@ -229,6 +249,23 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if cfg.LedgerCapacity <= 0 {
 		return fmt.Errorf("SOAK_LEDGER_CAPACITY must be greater than zero")
+	}
+	if cfg.LedgerCompactEvery <= 0 {
+		return fmt.Errorf("SOAK_LEDGER_COMPACT_EVERY must be greater than zero")
+	}
+	if cfg.LedgerMaxBytes < 0 {
+		return fmt.Errorf("SOAK_LEDGER_MAX_BYTES must not be negative")
+	}
+	if cfg.LedgerExpireBatch < 0 {
+		return fmt.Errorf("SOAK_LEDGER_EXPIRE_BATCH must not be negative")
+	}
+	if cfg.HeapProfileDir != "" {
+		if cfg.HeapProfileInterval <= 0 {
+			return fmt.Errorf("SOAK_HEAP_PROFILE_INTERVAL must be greater than zero")
+		}
+		if cfg.HeapProfileKeep <= 0 {
+			return fmt.Errorf("SOAK_HEAP_PROFILE_KEEP must be greater than zero")
+		}
 	}
 	if !failureRunIDPattern.MatchString(cfg.LedgerEpoch) ||
 		cfg.LedgerEpoch == "." || cfg.LedgerEpoch == ".." {

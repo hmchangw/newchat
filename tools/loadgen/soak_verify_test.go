@@ -20,7 +20,7 @@ func TestSoakVerifier_GetMessageChecksPresenceRoomAuthorAndContent(t *testing.T)
 		name      string
 		response  cassandra.Message
 		wantClass soakVerifyClass
-		wantField string
+		wantField soakVerifyField
 	}{
 		{
 			name: "matches",

@@ -70,11 +70,30 @@ func runSoakFailureExpiry(
 			if !ok {
 				return
 			}
-			if _, err := ledger.Expire(at); err != nil && onError != nil {
-				onError(fmt.Errorf("expire failure operations: %w", err))
+			if _, err := ledger.Expire(at); err != nil {
+				reportSoakFailureSweepError(
+					onError, fmt.Errorf("expire failure operations: %w", err))
+			}
+			// Reclaiming on the same tick means a run that finalizes nothing
+			// still bounds the journal; the finalize counter alone would let it
+			// grow until the next restart made recovery more expensive.
+			if err := ledger.MaybeCompact(at); err != nil {
+				reportSoakFailureSweepError(
+					onError, fmt.Errorf("compact failure journal: %w", err))
 			}
 		}
 	}
+}
+
+// reportSoakFailureSweepError makes sure a sweep failure is seen. Both of these
+// invalidate the ledger, so losing one because no callback happened to be
+// configured would hide the moment the run stopped being trustworthy.
+func reportSoakFailureSweepError(onError func(error), err error) {
+	if onError != nil {
+		onError(err)
+		return
+	}
+	slog.Error("Cassandra soak failure sweep", "error", err)
 }
 
 // failureWALPath separates the two identities the journal name used to
@@ -158,8 +177,11 @@ func openSoakFailureLedger(
 			metrics,
 		)
 	}
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity:         cfg.LedgerCapacity,
+		CompactEvery:     cfg.LedgerCompactEvery,
+		MaxJournalBytes:  cfg.LedgerMaxBytes,
+		ExpireBatch:      cfg.LedgerExpireBatch,
 		Journal:          journal,
 		Now:              now,
 		Recorder:         newFailureLedgerPromRecorder(metrics),
@@ -462,8 +484,7 @@ func (v *soakFailureRPCVerifier) Verify(
 	expectedDeleted := false
 	if v.catalog != nil {
 		if current, ok := v.catalog.Get(roomID, operation.ID); ok {
-			currentHash := sha256.Sum256([]byte(current.Content))
-			expectedHash = hex.EncodeToString(currentHash[:])
+			expectedHash = current.ContentSHA256
 			expectedDeleted = current.Deleted
 		}
 	}
@@ -485,6 +506,7 @@ func (v *soakFailureRPCVerifier) Verify(
 	result.Retries = rpcResult.Retries
 	if err != nil {
 		result.RPCErrorClass = rpcResult.ErrorClass
+		result.RPCErrorReason = rpcResult.ErrorReason
 		if rpcResult.ErrorClass == soakErrorNotFound {
 			result.Class = soakVerifyMissing
 			v.record(&result)
@@ -503,19 +525,19 @@ func (v *soakFailureRPCVerifier) Verify(
 	switch {
 	case response.MessageID != operation.ID:
 		result.Class = soakVerifyMismatch
-		result.Field = "message_id"
+		result.Field = soakVerifyFieldMessageID
 	case response.RoomID != roomID:
 		result.Class = soakVerifyMismatch
-		result.Field = "room_id"
+		result.Field = soakVerifyFieldRoomID
 	case response.Sender.Account != account:
 		result.Class = soakVerifyMismatch
-		result.Field = "author"
+		result.Field = soakVerifyFieldAuthor
 	case response.Deleted != expectedDeleted:
 		result.Class = soakVerifyMismatch
-		result.Field = "deleted"
+		result.Field = soakVerifyFieldDeleted
 	case !expectedDeleted && hex.EncodeToString(actualHash[:]) != expectedHash:
 		result.Class = soakVerifyMismatch
-		result.Field = "content"
+		result.Field = soakVerifyFieldContent
 	default:
 		v.record(&result)
 		return soakFailureHistoryFound, nil

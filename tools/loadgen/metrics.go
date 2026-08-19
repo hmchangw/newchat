@@ -44,6 +44,7 @@ type Metrics struct {
 	SoakOperations            *prometheus.CounterVec
 	SoakRetries               *prometheus.CounterVec
 	SoakErrors                *prometheus.CounterVec
+	SoakErrorReasons          *prometheus.CounterVec
 	SoakRPCLatency            *prometheus.HistogramVec
 	SoakVerifications         *prometheus.CounterVec
 	SoakMutationTargetMissing prometheus.Counter
@@ -215,16 +216,23 @@ func NewMetrics() *Metrics {
 	m.SoakRetries = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_soak_retries_total",
-			Help: "Cassandra soak retries by bounded action.",
+			Help: "Cassandra soak retries by bounded action and run phase.",
 		},
-		[]string{"action"},
+		[]string{"action", "phase"},
 	)
 	m.SoakErrors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_soak_errors_total",
-			Help: "Cassandra soak failures by bounded action and error class.",
+			Help: "Cassandra soak failures by bounded action, error class, and run phase.",
 		},
-		[]string{"action", "class"},
+		[]string{"action", "class", "phase"},
+	)
+	m.SoakErrorReasons = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_error_reasons_total",
+			Help: "Cassandra soak failures by bounded action, error class, service-supplied reason, and run phase.",
+		},
+		[]string{"action", "class", "reason", "phase"},
 	)
 	m.SoakRPCLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -237,9 +245,9 @@ func NewMetrics() *Metrics {
 	m.SoakVerifications = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_soak_verifications_total",
-			Help: "Cassandra soak read-back results by bounded action and result class.",
+			Help: "Cassandra soak read-back results by bounded action, result class, and disagreeing field.",
 		},
-		[]string{"action", "class"},
+		[]string{"action", "class", "field"},
 	)
 	m.SoakMutationTargetMissing = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -524,7 +532,7 @@ func NewMetrics() *Metrics {
 		m.MemberE1Latency, m.MemberE2Latency, m.MemberRoomSize,
 		m.BotRoomPublished, m.BotRoomPublishErrors,
 		m.BotRoomE2ELatency, m.BotRoomReadLatency,
-		m.SoakOperations, m.SoakRetries, m.SoakErrors,
+		m.SoakOperations, m.SoakRetries, m.SoakErrors, m.SoakErrorReasons,
 		m.SoakRPCLatency, m.SoakVerifications,
 		m.SoakMutationTargetMissing, m.SoakConfiguredRate, m.SoakIntended,
 		m.SoakDispatched, m.SoakSchedulerUnderrun, m.SoakLaneSaturation, m.SoakGlobalSaturation,

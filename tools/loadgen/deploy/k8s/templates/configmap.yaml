@@ -13,6 +13,13 @@ data:
   CASSANDRA_KEYSPACE: {{ .Values.cassandra.keyspace | quote }}
   MESSAGE_BUCKET_HOURS: {{ .Values.cassandra.messageBucketHours | quote }}
   METRICS_ADDR: {{ printf ":%d" (.Values.metrics.port | int) | quote }}
+  PPROF_ADDR: {{ .Values.profiling.pprofAddr | quote }}
+  {{- if .Values.runtime.goMemLimit }}
+  GOMEMLIMIT: {{ .Values.runtime.goMemLimit | quote }}
+  {{- end }}
+  {{- if .Values.runtime.goGC }}
+  GOGC: {{ .Values.runtime.goGC | quote }}
+  {{- end }}
   MAX_IN_FLIGHT: {{ .Values.soak.maxInFlight | quote }}
   SOAK_RUN_ID: {{ .Values.runId | quote }}
   SOAK_ENVIRONMENT: {{ .Values.soak.environment | quote }}
@@ -72,6 +79,12 @@ data:
   SOAK_LEDGER_DIR: {{ ternary .Values.ledger.mountPath "" .Values.ledger.enabled | quote }}
   SOAK_LEDGER_EPOCH: {{ .Values.ledger.epoch | quote }}
   SOAK_LEDGER_CAPACITY: {{ .Values.ledger.capacity | quote }}
+  SOAK_LEDGER_COMPACT_EVERY: {{ .Values.ledger.compactEvery | quote }}
+  SOAK_LEDGER_MAX_BYTES: {{ .Values.ledger.maxBytes | quote }}
+  SOAK_LEDGER_EXPIRE_BATCH: {{ .Values.ledger.expireBatch | quote }}
+  SOAK_HEAP_PROFILE_DIR: {{ .Values.profiling.heapProfileDir | quote }}
+  SOAK_HEAP_PROFILE_INTERVAL: {{ .Values.profiling.heapProfileInterval | quote }}
+  SOAK_HEAP_PROFILE_KEEP: {{ .Values.profiling.heapProfileKeep | quote }}
   SOAK_RECONCILE_DEADLINE: {{ .Values.ledger.reconcileDeadline | quote }}
   SOAK_RECONCILE_RETRY_INTERVAL: {{ .Values.ledger.reconcileRetryInterval | quote }}
   SOAK_RECONCILE_READ_SHARE: {{ .Values.ledger.reconcileReadShare | quote }}

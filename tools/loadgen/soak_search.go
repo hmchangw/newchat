@@ -148,12 +148,15 @@ func (r *soakSearchReader) SearchRooms(ctx context.Context) error {
 // query to the message's own room so the answer does not depend on relevance
 // ranking across the whole corpus.
 //
+// term is the query the catalogue kept for this message; the catalogue reduces
+// each body to it so no verifier has to hold one.
+//
 // publishedAt gates the settle window. Before it elapses the probe returns
 // unknown without issuing a request, because an absent hit there is legal and
 // the query would only spend a read slot to learn nothing.
 func (r *soakSearchReader) IndexedAt(
 	ctx context.Context,
-	account, roomID, messageID, content string,
+	account, roomID, messageID, term string,
 	publishedAt time.Time,
 ) (soakSearchIndexResult, error) {
 	if account == "" || roomID == "" || messageID == "" {
@@ -169,7 +172,7 @@ func (r *soakSearchReader) IndexedAt(
 		Action:  soakRPCSearchIndexProbe,
 		Subject: subject.SearchMessages(account, r.cfg.SiteID),
 		Body: model.SearchMessagesRequest{
-			Query:   searchProbeTerm(content),
+			Query:   term,
 			RoomIDs: []string{roomID},
 			Size:    r.cfg.PageSize,
 		},
@@ -194,10 +197,13 @@ func (r *soakSearchReader) IndexedAt(
 // searchProbeTerm reduces a payload to a term the analyzer will match. The
 // bodies are generated filler, so the first whitespace-delimited token is both
 // stable and present in the indexed document.
+// The returned term is cloned: a substring shares the backing array of the
+// string it came from, so handing one to the catalogue would pin the whole body
+// it was meant to replace.
 func searchProbeTerm(content string) string {
 	for field := range strings.FieldsSeq(content) {
 		if len(field) >= 3 {
-			return field
+			return strings.Clone(field)
 		}
 	}
 	return "soak"
@@ -225,17 +231,18 @@ func (r *soakSearchReader) call(
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass
-		r.record(sample)
+		sample.ErrorReason = result.ErrorReason
+		r.record(&sample)
 		return fmt.Errorf("issue %s request: %w", request.Action, err)
 	}
 	if apply != nil {
 		apply(&sample)
 	}
-	r.record(sample)
+	r.record(&sample)
 	return nil
 }
 
-func (r *soakSearchReader) record(sample soakReadSample) {
+func (r *soakSearchReader) record(sample *soakReadSample) {
 	if r.recorder != nil {
 		r.recorder.Record(sample)
 	}
@@ -275,11 +282,11 @@ func (p *soakSearchIndexProbe) Indexed(
 		return soakSearchIndexUnknown, nil
 	}
 	message, known := p.catalog.Get(roomID, messageID)
-	if !known || message.Content == "" {
+	if !known || message.SearchTerm == "" {
 		return soakSearchIndexUnknown, nil
 	}
 	return p.reader.IndexedAt(
-		ctx, account, roomID, messageID, message.Content, operation.StartedAt,
+		ctx, account, roomID, messageID, message.SearchTerm, operation.StartedAt,
 	)
 }
 

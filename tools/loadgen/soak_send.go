@@ -86,12 +86,13 @@ const (
 )
 
 type soakSendReplyResult struct {
-	Status     soakSendReplyStatus
-	Kind       soakSendKind
-	RequestID  string
-	MessageID  string
-	Latency    time.Duration
-	ErrorClass soakErrorClass
+	Status      soakSendReplyStatus
+	Kind        soakSendKind
+	RequestID   string
+	MessageID   string
+	Latency     time.Duration
+	ErrorClass  soakErrorClass
+	ErrorReason soakErrorReason
 }
 
 type soakSendLifecycle interface {
@@ -310,6 +311,7 @@ func (s *soakSender) HandleReply(replySubject string, data []byte) soakSendReply
 	if responseErr := parseSoakErrorEnvelope(data); responseErr != nil {
 		s.rejectPending(pending)
 		result.ErrorClass = classifySoakRPCError(responseErr)
+		result.ErrorReason = classifySoakRPCReason(responseErr)
 		return result
 	}
 	var response model.Message

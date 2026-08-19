@@ -17,7 +17,9 @@
     "encryptionPreflight",
     "seed",
     "soak",
-    "teardown"
+    "teardown",
+    "profiling",
+    "runtime"
   ],
   "properties": {
     "phase": {
@@ -101,6 +103,9 @@
         "size",
         "mountPath",
         "capacity",
+        "compactEvery",
+        "maxBytes",
+        "expireBatch",
         "reconcileDeadline",
         "reconcileRetryInterval",
         "reconcileReadShare",
@@ -118,6 +123,9 @@
         "size": {"type": "string", "minLength": 1},
         "mountPath": {"type": "string", "pattern": "^/"},
         "capacity": {"type": "string", "minLength": 1},
+        "compactEvery": {"type": "string", "minLength": 1},
+        "maxBytes": {"type": "string", "minLength": 1},
+        "expireBatch": {"type": "string", "minLength": 1},
         "reconcileDeadline": {"type": "string", "minLength": 1},
         "reconcileRetryInterval": {"type": "string", "minLength": 1},
         "reconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
@@ -154,6 +162,31 @@
         "enabled": {"type": "boolean"},
         "queue": {"type": "integer", "minimum": 1, "maximum": 65536},
         "connections": {"type": "integer", "minimum": 1, "maximum": 256}
+      }
+    },
+    "profiling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pprofAddr",
+        "heapProfileDir",
+        "heapProfileInterval",
+        "heapProfileKeep"
+      ],
+      "properties": {
+        "pprofAddr": {"type": "string"},
+        "heapProfileDir": {"type": "string"},
+        "heapProfileInterval": {"type": "string", "minLength": 1},
+        "heapProfileKeep": {"type": ["integer", "string"]}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goMemLimit", "goGC"],
+      "properties": {
+        "goMemLimit": {"type": "string"},
+        "goGC": {"type": ["string", "integer"]}
       }
     },
     "seed": {

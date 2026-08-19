@@ -144,18 +144,27 @@ type soakReadCollectorRecorder struct {
 	now       func() time.Time
 }
 
-func (r *soakReadCollectorRecorder) Record(sample soakReadSample) {
+func (r *soakReadCollectorRecorder) Record(sample *soakReadSample) {
 	outcome := soakOutcomeSucceeded
 	if sample.Skipped {
 		outcome = soakOutcomeSkipped
 	} else if sample.ErrorClass != "" {
 		outcome = soakOutcomeFailed
 	}
-	_ = r.collector.Record(&soakOperationSample{
+	recordSoakSample(r.collector.Record(&soakOperationSample{
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
-		ErrorClass: sample.ErrorClass,
-	})
+		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
+	}))
+}
+
+// recordSoakSample surfaces a rejected sample. The collector validates every
+// label it is handed, so a value outside a bounded set drops the measurement —
+// and a silently missing metric is indistinguishable from a healthy run.
+func recordSoakSample(err error) {
+	if err != nil {
+		slog.Error("record Cassandra soak sample", "error", err)
+	}
 }
 
 type soakMutationCollectorRecorder struct {
@@ -170,11 +179,12 @@ func (r *soakMutationCollectorRecorder) Record(sample soakMutationSample) {
 	} else if sample.ErrorClass != "" {
 		outcome = soakOutcomeFailed
 	}
-	_ = r.collector.Record(&soakOperationSample{
+	recordSoakSample(r.collector.Record(&soakOperationSample{
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
-		ErrorClass: sample.ErrorClass, TargetMissing: sample.TargetMissing,
-	})
+		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
+		TargetMissing: sample.TargetMissing,
+	}))
 }
 
 type soakVerifyCollectorRecorder struct {
@@ -186,7 +196,7 @@ func (r *soakVerifyCollectorRecorder) Record(result *soakVerifyResult) {
 	if result == nil {
 		return
 	}
-	_ = r.collector.RecordVerification(result)
+	recordSoakSample(r.collector.RecordVerification(result))
 	outcome := soakOutcomeFailed
 	switch result.Class {
 	case soakVerifyOK:
@@ -197,11 +207,11 @@ func (r *soakVerifyCollectorRecorder) Record(result *soakVerifyResult) {
 		soakVerifyRetryable, soakVerifyRPCError:
 		outcome = soakOutcomeFailed
 	}
-	_ = r.collector.Record(&soakOperationSample{
+	recordSoakSample(r.collector.Record(&soakOperationSample{
 		Action: result.Action, Outcome: outcome, At: r.now(),
 		Latency: result.Latency, Retries: result.Retries,
-		ErrorClass: result.RPCErrorClass,
-	})
+		ErrorClass: result.RPCErrorClass, ErrorReason: result.RPCErrorReason,
+	}))
 }
 
 type soakCollectorRecorders struct {
@@ -447,6 +457,42 @@ func runSoakWorkload(
 		}
 	}()
 
+	pprofServer, pprofErr := startSoakPProfServer(cfg.PProfAddr)
+	if pprofErr != nil {
+		slog.Error("start Cassandra soak pprof server", "error", pprofErr)
+		return 2
+	}
+	if pprofServer != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := pprofServer.Shutdown(shutdownCtx); err != nil {
+				slog.Error("stop Cassandra soak pprof server", "error", err)
+			}
+		}()
+	}
+	heapProfiler, heapProfilerErr := newSoakHeapProfiler(soakHeapProfileConfig{
+		Dir: cfg.Soak.HeapProfileDir, Keep: cfg.Soak.HeapProfileKeep,
+	})
+	if heapProfilerErr != nil {
+		slog.Error("open Cassandra soak heap profiler", "error", heapProfilerErr)
+		return 2
+	}
+	if heapProfiler != nil {
+		profileCtx, stopProfiling := context.WithCancel(ctx)
+		profileTicker := time.NewTicker(cfg.Soak.HeapProfileInterval)
+		profileDone := make(chan struct{})
+		go func() {
+			defer close(profileDone)
+			defer profileTicker.Stop()
+			heapProfiler.Run(profileCtx, profileTicker.C)
+		}()
+		defer func() {
+			stopProfiling()
+			<-profileDone
+		}()
+	}
+
 	now := time.Now
 	collectorDuration := cfg.Soak.RunDuration
 	if cfg.Soak.RunMode == soakRunModeContinuous {
@@ -591,6 +637,7 @@ func runSoakWorkload(
 		cfg.Soak.PersistGrace,
 		nil,
 	)
+	catalog.RetainSearchTerms(cfg.Soak.SearchObserverEnabled)
 	scheduler := newSoakMutationScheduler(
 		cfg.Soak.SoftDeleteRatio,
 		rand.New(rand.NewSource(seed+3)),
@@ -624,17 +671,20 @@ func runSoakWorkload(
 			}
 			outcome := soakOutcomeFailed
 			errorClass := result.ErrorClass
+			errorReason := result.ErrorReason
 			if result.Status == soakSendReplyAccepted {
 				outcome = soakOutcomeSucceeded
 				errorClass = ""
+				errorReason = ""
 				scheduler.ObserveAcceptedSend()
 			} else if errorClass == "" {
 				errorClass = soakErrorInternal
 			}
-			_ = collector.Record(&soakOperationSample{
+			recordSoakSample(collector.Record(&soakOperationSample{
 				Action: action, Outcome: outcome, At: now(),
 				Latency: result.Latency, ErrorClass: errorClass,
-			})
+				ErrorReason: errorReason,
+			}))
 			if result.Status != soakSendReplyUnmatched {
 				if err := failureTracker.ObserveReply(&result); err != nil {
 					slog.Error("record Cassandra soak send observation", "error", err)
@@ -899,10 +949,11 @@ func runSoakWorkload(
 			if pending != nil && pending.Kind == soakSendThreadReply {
 				action = soakRPCThreadReply
 			}
-			_ = collector.Record(&soakOperationSample{
+			recordSoakSample(collector.Record(&soakOperationSample{
 				Action: action, Outcome: soakOutcomeFailed, At: now(),
-				ErrorClass: classifySoakRPCError(publishErr),
-			})
+				ErrorClass:  classifySoakRPCError(publishErr),
+				ErrorReason: classifySoakRPCReason(publishErr),
+			}))
 			// Publish classifies definite local rejections as not_sent. Ambiguous
 			// failures remain active for admission timeout and downstream
 			// reconciliation.

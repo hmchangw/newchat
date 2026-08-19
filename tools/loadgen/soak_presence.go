@@ -199,12 +199,13 @@ func (l *soakPresenceLane) Verify(ctx context.Context) error {
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass
-		l.record(sample)
+		sample.ErrorReason = result.ErrorReason
+		l.record(&sample)
 		l.countCheck(soakPresenceCheckUnknown, len(accounts))
 		return fmt.Errorf("query presence batch: %w", err)
 	}
 	sample.Messages = len(response.States)
-	l.record(sample)
+	l.record(&sample)
 
 	reported := make(map[string]model.PresenceStatus, len(response.States))
 	for i := range response.States {
@@ -365,7 +366,7 @@ func (l *soakPresenceLane) countCheck(result string, count int) {
 	l.metrics.SoakPresenceChecks.WithLabelValues(result).Add(float64(count))
 }
 
-func (l *soakPresenceLane) record(sample soakReadSample) {
+func (l *soakPresenceLane) record(sample *soakReadSample) {
 	if l.recorder != nil {
 		l.recorder.Record(sample)
 	}

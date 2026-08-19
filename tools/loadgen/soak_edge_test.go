@@ -585,7 +585,7 @@ func TestCompareSoakVerifiedMessage_ClassifiesEveryMismatch(t *testing.T) {
 	expected := soakCatalogMessage{
 		soakCatalogCandidate: soakCatalogCandidate{
 			ID: "message-1", RoomID: "room-1", Author: "alice",
-			Content: "hello",
+			ContentSHA256: soakContentDigest("hello"),
 		},
 		Edited: true,
 	}
@@ -597,7 +597,7 @@ func TestCompareSoakVerifiedMessage_ClassifiesEveryMismatch(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*soakVerifyMessage)
-		field  string
+		field  soakVerifyField
 	}{
 		{
 			name: "message ID",
@@ -681,7 +681,7 @@ func TestClassifySoakVerifyRPCError_CoversTerminalAndTransientClasses(t *testing
 	}
 	for _, tt := range tests {
 		result := soakVerifyResult{}
-		classifySoakVerifyRPCError(&result, tt.class)
+		classifySoakVerifyRPCError(&result, tt.class, "")
 		assert.Equal(t, tt.want, result.Class)
 		assert.Equal(t, tt.class, result.RPCErrorClass)
 	}

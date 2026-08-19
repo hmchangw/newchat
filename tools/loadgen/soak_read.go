@@ -39,16 +39,17 @@ type soakReadConfig struct {
 }
 
 type soakReadSample struct {
-	Action     soakRPCAction
-	Latency    time.Duration
-	Messages   int
-	ErrorClass soakErrorClass
-	Retries    int
-	Skipped    bool
+	Action      soakRPCAction
+	Latency     time.Duration
+	Messages    int
+	ErrorClass  soakErrorClass
+	ErrorReason soakErrorReason
+	Retries     int
+	Skipped     bool
 }
 
 type soakReadSampleRecorder interface {
-	Record(soakReadSample)
+	Record(*soakReadSample)
 }
 
 type soakReadOutcome struct {
@@ -167,9 +168,10 @@ func (r *soakReader) LoadHistory(
 			RetryMode: soakRetrySafe,
 		}, &response)
 		if err != nil {
-			r.record(soakReadSample{
+			r.record(&soakReadSample{
 				Action: soakRPCLoadHistory, Latency: latency,
-				ErrorClass: result.ErrorClass, Retries: result.Retries,
+				ErrorClass: result.ErrorClass, ErrorReason: result.ErrorReason,
+				Retries: result.Retries,
 			})
 			return outcome, err
 		}
@@ -181,28 +183,28 @@ func (r *soakReader) LoadHistory(
 			Messages: len(response.Messages), Retries: result.Retries,
 		}
 		if len(response.Messages) == 0 {
-			r.record(sample)
+			r.record(&sample)
 			return outcome, nil
 		}
 
 		oldest := oldestSoakMessageMillis(response.Messages)
 		if before != nil && oldest >= *before {
 			sample.ErrorClass = soakErrorAssertion
-			r.record(sample)
+			r.record(&sample)
 			return outcome, newSoakAssertionError(
 				"LoadHistory page did not make timestamp progress",
 			)
 		}
 		if oldest == math.MinInt64 {
 			sample.ErrorClass = soakErrorAssertion
-			r.record(sample)
+			r.record(&sample)
 			return outcome, newSoakAssertionError(
 				"LoadHistory oldest timestamp cannot advance",
 			)
 		}
 		nextBefore := oldest - 1
 		before = &nextBefore
-		r.record(sample)
+		r.record(&sample)
 	}
 	return outcome, nil
 }
@@ -240,9 +242,10 @@ func (r *soakReader) GetThreadMessages(
 			Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		}, &response)
 		if err != nil {
-			r.record(soakReadSample{
+			r.record(&soakReadSample{
 				Action: soakRPCGetThread, Latency: latency,
-				ErrorClass: result.ErrorClass, Retries: result.Retries,
+				ErrorClass: result.ErrorClass, ErrorReason: result.ErrorReason,
+				Retries: result.Retries,
 			})
 			return outcome, err
 		}
@@ -253,19 +256,19 @@ func (r *soakReader) GetThreadMessages(
 			Messages: len(response.Messages), Retries: result.Retries,
 		}
 		if !response.HasNext {
-			r.record(sample)
+			r.record(&sample)
 			return outcome, nil
 		}
 		if !advanceSoakCursor(cursor, response.NextCursor, seen) {
 			sample.ErrorClass = soakErrorAssertion
-			r.record(sample)
+			r.record(&sample)
 			return outcome, newSoakAssertionError(
 				"GetThreadMessages cursor did not make progress",
 			)
 		}
 		seen[response.NextCursor] = struct{}{}
 		cursor = response.NextCursor
-		r.record(sample)
+		r.record(&sample)
 	}
 	return outcome, nil
 }
@@ -296,9 +299,10 @@ func (r *soakReader) GetMessageByID(
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response)
 	if err != nil {
-		r.record(soakReadSample{
+		r.record(&soakReadSample{
 			Action: soakRPCGetMessage, Latency: latency,
-			ErrorClass: result.ErrorClass, Retries: result.Retries,
+			ErrorClass: result.ErrorClass, ErrorReason: result.ErrorReason,
+			Retries: result.Retries,
 		})
 		return outcome, err
 	}
@@ -308,7 +312,7 @@ func (r *soakReader) GetMessageByID(
 	}
 	if response.MessageID != message.ID {
 		sample.ErrorClass = soakErrorAssertion
-		r.record(sample)
+		r.record(&sample)
 		return outcome, newSoakAssertionError(
 			"GetMessageByID returned a different message ID",
 		)
@@ -316,7 +320,7 @@ func (r *soakReader) GetMessageByID(
 	outcome.Pages = 1
 	outcome.Messages = 1
 	outcome.MessageID = response.MessageID
-	r.record(sample)
+	r.record(&sample)
 	return outcome, nil
 }
 
@@ -344,9 +348,10 @@ func (r *soakReader) ListPinnedMessages(
 			Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		}, &response)
 		if err != nil {
-			r.record(soakReadSample{
+			r.record(&soakReadSample{
 				Action: soakRPCPinnedList, Latency: latency,
-				ErrorClass: result.ErrorClass, Retries: result.Retries,
+				ErrorClass: result.ErrorClass, ErrorReason: result.ErrorReason,
+				Retries: result.Retries,
 			})
 			return outcome, err
 		}
@@ -362,19 +367,19 @@ func (r *soakReader) ListPinnedMessages(
 			Messages: len(response.Messages), Retries: result.Retries,
 		}
 		if !response.HasNext {
-			r.record(sample)
+			r.record(&sample)
 			return outcome, nil
 		}
 		if !advanceSoakCursor(cursor, response.NextCursor, seen) {
 			sample.ErrorClass = soakErrorAssertion
-			r.record(sample)
+			r.record(&sample)
 			return outcome, newSoakAssertionError(
 				"ListPinnedMessages cursor did not make progress",
 			)
 		}
 		seen[response.NextCursor] = struct{}{}
 		cursor = response.NextCursor
-		r.record(sample)
+		r.record(&sample)
 	}
 	return outcome, nil
 }
@@ -391,11 +396,11 @@ func (r *soakReader) call(
 
 func (r *soakReader) skip(outcome soakReadOutcome) soakReadOutcome {
 	outcome.Skipped = true
-	r.record(soakReadSample{Action: outcome.Action, Skipped: true})
+	r.record(&soakReadSample{Action: outcome.Action, Skipped: true})
 	return outcome
 }
 
-func (r *soakReader) record(sample soakReadSample) {
+func (r *soakReader) record(sample *soakReadSample) {
 	if r.recorder != nil {
 		r.recorder.Record(sample)
 	}

@@ -59,6 +59,26 @@ func (g *failureJournalGroupCommit) Replay() ([]failureLedgerEvent, error) {
 	return g.journal.Replay()
 }
 
+// ReplayEach forwards the streaming recovery path when the wrapped journal has
+// one; a wrapper that swallowed it would silently reinstate buffering replay.
+func (g *failureJournalGroupCommit) ReplayEach(emit func(*failureLedgerEvent) error) error {
+	if streaming, ok := g.journal.(streamingFailureJournal); ok {
+		return streaming.ReplayEach(emit)
+	}
+	// A journal that cannot stream still has to recover; buffering here keeps
+	// the old behaviour for it rather than failing the run.
+	events, err := g.journal.Replay()
+	if err != nil {
+		return fmt.Errorf("replay group-commit failure journal: %w", err)
+	}
+	for i := range events {
+		if err := emit(&events[i]); err != nil {
+			return fmt.Errorf("apply group-commit failure journal event %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
 func (g *failureJournalGroupCommit) Append(event *failureLedgerEvent) error {
 	if event == nil {
 		return fmt.Errorf("failure journal event is required")

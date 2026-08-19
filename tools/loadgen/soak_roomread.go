@@ -348,19 +348,20 @@ func (r *soakRoomReader) call(
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass
-		r.record(sample)
+		sample.ErrorReason = result.ErrorReason
+		r.record(&sample)
 		return fmt.Errorf("issue %s request: %w", request.Action, err)
 	}
 	apply(&sample)
-	r.record(sample)
+	r.record(&sample)
 	return nil
 }
 
 func (r *soakRoomReader) recordSkip(action soakRPCAction) {
-	r.record(soakReadSample{Action: action, Skipped: true})
+	r.record(&soakReadSample{Action: action, Skipped: true})
 }
 
-func (r *soakRoomReader) record(sample soakReadSample) {
+func (r *soakRoomReader) record(sample *soakReadSample) {
 	if r.recorder != nil {
 		r.recorder.Record(sample)
 	}

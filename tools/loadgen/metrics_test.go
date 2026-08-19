@@ -34,7 +34,7 @@ func TestFailureLedgerPromRecorder_RecordsBoundedOutcomes(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
 	recorder := newFailureLedgerPromRecorder(metrics)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Recorder: recorder, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)

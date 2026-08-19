@@ -204,7 +204,7 @@ func TestSoakCollectorRecorders_MapComponentSamples(t *testing.T) {
 		return now.Add(time.Second)
 	})
 
-	recorders.read.Record(soakReadSample{
+	recorders.read.Record(&soakReadSample{
 		Action: soakRPCLoadHistory, Latency: 5 * time.Millisecond, Retries: 1,
 	})
 	recorders.mutation.Record(soakMutationSample{
