@@ -5,9 +5,17 @@
 **Supersedes (partially):** `2026-05-18-unread-badge-rpc-source-design.md`
 **Related:** `2026-08-02-thread-unread-badge-design.md`, `2026-08-10-badge-cache-invalidation-design.md`
 
+**Target surface:** the OS taskbar / dock badge. The OS wiring lives in the
+desktop shell, which is **not in this repo**. `chat-frontend` implements the
+badge *logic* to taskbar semantics — visibility-aware, push-consistent, single
+valued — and renders it in the existing header pill. The shell consumes the same
+number. Every rule below is written for the taskbar meaning of the badge even
+though nothing in this repo calls an OS API; §7 states the shell's side of the
+contract.
+
 ## 1. Problem
 
-The in-app unread badge is recomputed server-side on the message hot path.
+The unread badge is recomputed server-side on the message hot path.
 
 `useUnreadCount` (`chat-frontend/src/context/RoomEventsContext/useUnreadCount.js`)
 fires `subscription.count {unread:true}`:
@@ -22,10 +30,10 @@ Each call lands in `UserService.CountSubscriptions` → `unreadRooms()`
 2. fans out a `GetRoomsMeta` RPC **per remote site** for cross-site rooms.
 
 `BADGE_COUNT_CACHE_FIRST` defaults to `false` (`user-service/config/config.go:70`),
-so the Valkey badge set does not serve this path today. The
-2026-08-10 badge-cache design names the same gap in its own problem statement:
-*"Desktop count never uses the cache. Every desktop badge refresh pays the
-expensive path."*
+so the Valkey badge set does not serve this path today. The 2026-08-10
+badge-cache design names the same gap in its own problem statement: *"Desktop
+count never uses the cache. Every desktop badge refresh pays the expensive
+path."*
 
 Net: for an account in busy rooms, cost scales with **messages received**, and
 each unit of that cost is a Mongo aggregation plus a cross-site RPC fan-out.
@@ -40,10 +48,10 @@ decision was correct then and is worth restating accurately before reversing it.
 The RPC was served by `mock-user-service`, which returned a hardcoded `42`. The
 decision was about **where the contract lives** — sourcing the number from the
 backend rather than deriving it — and the compute cost was not observable,
-because there was no compute. Since then the real `user-service` landed, thread-aware
-counting was added (2026-08-02), and a Valkey cache was introduced specifically
-because the count became expensive (2026-08-10). The cost dimension that motivates
-this document did not exist when the original call was made.
+because there was no compute. Since then the real `user-service` landed,
+thread-aware counting was added (2026-08-02), and a Valkey cache was introduced
+specifically because the count became expensive (2026-08-10). The cost dimension
+that motivates this document did not exist when the original call was made.
 
 **What has not changed:** the two real bugs that decision fixed. Both are
 requirements on this design, not casualties of it:
@@ -53,7 +61,7 @@ requirements on this design, not casualties of it:
   sitting in. §4.3 makes this structurally impossible rather than merely patched.
 - **Read-race.** A refetch racing an uncommitted `markRoomRead` could latch a
   stale count with no resync. The fold has no such race — it reads local state
-  that the optimistic read already updated — and §4.5's reconcile is not
+  that the optimistic read already updated — and §4.6's reconcile is not
   triggered by reads at all.
 
 ## 3. What makes a client-side fold viable
@@ -80,17 +88,30 @@ client can fold from state it already holds.
 
 ### 4.1 Badge semantics
 
-Must match the server rule in `unreadRooms()` exactly. A room counts **once**
-iff all hold:
+Matches the server rule in `unreadRooms()`, with one deliberate deviation noted
+below. A room counts **once** iff all hold:
 
 - the subscription is active, and
 - `muted` is falsy, and
-- `room.lastMsgAt > lastSeenAt` (a null `lastSeenAt` with a set `lastMsgAt` counts
-  as unread) **or** `threadUnread` is non-empty.
+- `room.lastMsgAt > lastSeenAt` (a null `lastSeenAt` with a set `lastMsgAt`
+  counts as unread) **or** `threadUnread` is non-empty, and
+- it is not the *visibly* active room (§4.3).
 
-Not capped. The server's `subscription.count` is uncapped for display
-(`BADGE_COUNT_CAP` applies to the push path only); `UnreadBadge.jsx` keeps its
-existing `99+` render cap.
+The last condition is the deviation: the server has no concept of an open window
+and does count the active room. The two converge because `scheduleMarkActiveRead`
+advances `lastSeenAt` server-side, after which the server stops counting it too —
+but they disagree during the trailing-debounce window, which §4.6 must tolerate.
+
+**Cap.** The count is capped by a parameter, not hardcoded. Push counts are
+capped at `BADGE_COUNT_CAP` (default 10, rendered "9+") in `pkg/model/push.go:14`;
+`subscription.count` is uncapped. Since the OS badge has two writers (§7), the
+cap is what keeps them consistent — but there is no OS badge in this repo yet,
+and capping the header pill today would discard information for no benefit. So:
+`selectUnreadRoomIds` returns the uncapped ID set, the cap is applied at the
+consumer, and the in-repo default is uncapped (`UnreadBadge.jsx` keeps its `99+`
+render cap). Source the cap from `lib/runtimeConfig.js` following the existing
+`window.__APP_CONFIG__` / `VITE_*` pattern, so the shell can set it to
+`BADGE_COUNT_CAP` without a code change. Do not hardcode `10` in the frontend.
 
 ### 4.2 Component: the selector
 
@@ -103,22 +124,44 @@ This reintroduces a selector the 2026-05-18 change deleted, under a different
 rule: the old `selectUnreadTotal` was message-only and mute-blind. Name it
 distinctly to avoid implying a revert.
 
-### 4.3 Component: active-room suppression
+### 4.3 Component: visibility-gated active-room suppression
 
-The fold treats `state.activeRoomId` as read regardless of its stored
-`lastSeenAt`.
+The fold treats `state.activeRoomId` as read **only while
+`document.visibilityState === 'visible'`**. A hidden window has no active room
+for badge purposes.
 
-This is the structural fix for self-send inflation, and it also eliminates the
+Unconditional suppression would be correct for a header pill (nobody sees the
+pill of a hidden window) and wrong for a taskbar badge: leave the app minimized
+with a room open, and that room's messages would never badge — the exact case
+the taskbar badge exists to serve.
+
+With the gate, this remains the structural fix for self-send inflation (you
+cannot send to a room while the window is hidden), and it still eliminates the
 residual flicker the 2026-05-18 doc accepted as unavoidable ("an active-room
 message still bumps `msgRecvSeq` … the subsequent `readSeq` refetch corrects it
 within ~the same second. The clean elimination is server-side … out of repo").
-Client-side the room you are looking at is simply never counted, so there is
-nothing to flicker.
+Client-side, the room you are actually looking at is never counted.
 
-`scheduleMarkActiveRead` keeps firing on self-send exactly as today — the server
-`lastSeenAt` write is still required for other devices and for the reconcile.
+### 4.4 Component: visibility-gated mark-read (ships first, independently)
 
-### 4.4 Component: thread-unread in client state
+`scheduleMarkActiveRead` (`useRoomSubscriptions.js:157`) marks the active room
+read on every incoming message with **no visibility gate** — there is no
+`visibilityState` / `document.hidden` check anywhere in `chat-frontend`.
+
+So a minimized app with a room open silently marks that room's arriving messages
+read server-side. Under a header pill this is invisible. Under a taskbar badge it
+means those messages never badge and the user misses them outright — and because
+the mark-read is a real server write, §4.6's reconcile cannot detect it: server
+and client agree, and both are wrong.
+
+Gate the mark-read (and its trailing timer) on `visibilityState === 'visible'`.
+On becoming visible again, run the normal active-room read path once so
+reopening the window still clears the room.
+
+**This is a pre-existing bug that the new surface exposes, independent of the
+rest of this design.** It ships as its own change, ahead of everything else.
+
+### 4.5 Component: thread-unread in client state
 
 `threadUnread` is not tracked client-side today: `fanThreadReply`
 (`useRoomSubscriptions.js:266`) forwards thread replies to an optional
@@ -136,27 +179,36 @@ Maintain `state.subscriptions[roomId].threadUnread` from four sources:
 The `new_thread_message` fan-out is per-subscriber, so it arrives only for
 threads the user follows — matching the server's `ThreadUnread` producer.
 
-### 4.5 Component: reconcile
+### 4.6 Component: reconcile
 
 Replace the hot-path RPC with a low-frequency reconcile.
 
 **Removed triggers:** the `msgRecvSeq` debounced fetch and the `readSeq` fetch.
 
 The badge is the **only** consumer of both counters — they exist solely to
-trigger it (`reducer.js:65,72,588,641,833`; nothing outside
-`useUnreadCount` reads them). So they become dead code and are deleted along
-with the `ROOM_READ_SYNCED` action that exists only to bump `readSeq`,
-following the 2026-05-18 change's own precedent of deleting the derivation it
-replaced. `markRoomRead`'s `Promise<boolean>` contract is unchanged — the RPC
-must still fire, and callers may still sequence on it.
+trigger it (`reducer.js:65,72,588,641,833`; nothing outside `useUnreadCount`
+reads them). So they become dead code and are deleted along with the
+`ROOM_READ_SYNCED` action that exists only to bump `readSeq`, following the
+2026-05-18 change's own precedent of deleting the derivation it replaced.
+`markRoomRead`'s `Promise<boolean>` contract is unchanged — the RPC must still
+fire, and callers may still sequence on it.
 
-**Added triggers:** mount, `visibilitychange` → visible, window focus, and a slow
-interval (5 min) while the document is visible.
+**Added triggers — time-based first.** A taskbar badge is looked at precisely
+when the app is *not* focused, so a focus-triggered reconcile would run only when
+the badge stops mattering and never during the hours it matters most. Triggers:
 
-**Reconcile is a drift *detector*, not the displayed value.** The badge always
+1. a periodic interval (5 min) that runs **regardless of visibility** — the primary trigger;
+2. `visibilitychange` → visible, and window focus — additional, not sufficient alone;
+3. mount.
+
+The fold itself keeps working while hidden (the websocket stays up and events
+keep arriving), so this is drift *detection*, not correctness. Hidden-window
+timer throttling is a shell obligation — see §7.
+
+**Reconcile is a drift detector, not the displayed value.** The badge always
 renders the fold — one source of truth, so a corrected number can never silently
-diverge from the room state behind it. Reconcile calls `subscription.count`
-and compares:
+diverge from the room state behind it. Reconcile calls `subscription.count` and
+compares:
 
 - equal → no action (the overwhelmingly common case);
 - unequal → log, then re-run `fetchSidebarBuckets` to resync the underlying
@@ -166,24 +218,42 @@ Cheap detection, rare expensive correction. Comparing totals can mask
 compensating errors (one room wrongly counted, another wrongly missed); accepted
 — this is a backstop for rare dropped events, not a correctness primitive.
 
-### 4.6 Data flow
+Compare **uncapped** values. Comparing capped numbers would hide all drift above
+the cap (11 vs 40 both read as 10).
+
+**Tolerate the active-room window.** Per §4.1, between a message arriving in the
+visibly-active room and its trailing `markRoomRead` committing, the client
+suppresses that room and the server still counts it — a legitimate off-by-one
+that is not drift. Reconciling inside that window would trigger a pointless
+bucket refetch. Skip the reconcile while a mark-read is pending, and require two
+consecutive mismatches before refetching. (When the window is hidden, §4.4 stops
+the mark-read and §4.3 stops the suppression, so both sides count the room and
+the two agree.)
+
+### 4.7 Data flow
 
 ```
 bootstrap ──> fetchSidebarBuckets ──┐
-                                    ├──> state.summaries + state.subscriptions ──> selectUnreadRoomIds ──> UnreadBadge
-live events ────────────────────────┘         ▲                                             │
-  new_message / new_thread_message            │                                             └──> navigator.setAppBadge (§7)
-  subscription.update (read/mute/added/…)     │
-                                              │
-reconcile (focus / visible / 5min) ──> subscription.count ──> equal? ──no──> refetch buckets
+                                    ├─> state.summaries + state.subscriptions
+live events ────────────────────────┘                │
+  new_message / new_thread_message                   ▼
+  subscription.update (read/mute/added/…)   selectUnreadRoomIds  <── document.visibilityState
+                                                     │
+                                        ┌────────────┴────────────┐
+                                        ▼                         ▼
+                                  UnreadBadge (pill)     shell → OS badge (§7)
+                                                              (cap applied)
+
+reconcile (5min, any visibility │ focus │ visible │ mount)
+    └─> subscription.count ──> equal (uncapped)? ──no──> refetch buckets
 ```
 
-### 4.7 Error handling
+### 4.8 Error handling
 
 - **Reconcile RPC failure:** keep the folded value and retry on the next trigger.
-  Note this fixes a live bug — the current hook's `.catch()` sets the badge to
-  `0` on any transport error, so a transient failure silently blanks a non-zero
-  badge.
+  This fixes a live bug — the current hook's `.catch()` sets the badge to `0` on
+  any transport error, so a transient failure silently blanks a non-zero badge.
+  On a taskbar badge that reads as "all caught up" and is worse than stale.
 - **Bucket refetch failure:** `fetchSidebarBuckets` already degrades per bucket
   via `Promise.allSettled`; the fold keeps serving whatever state survived.
 - **Divergence source of truth:** the server. Reconcile never edits the number
@@ -191,7 +261,7 @@ reconcile (focus / visible / 5min) ──> subscription.count ──> equal? ─
 
 ## 5. What this does not fix
 
-Two drift sources survive by construction, which is why §4.5 exists:
+Two drift sources survive by construction, which is why §4.6 exists:
 
 1. **Silent reconnect.** `NatsContext.jsx:196` connects with default nats.ws
    reconnect and no `status()` monitoring anywhere in the codebase. On a
@@ -200,43 +270,73 @@ Two drift sources survive by construction, which is why §4.5 exists:
    Core-NATS events published during the gap are dropped, not replayed.
 2. **Thread-read has no per-user event.** `thread.read` fans out
    `thread_message_read` only when the room-wide *floor* changes, and
-   `thread.read.all` emits nothing to clients at all
-   (`docs/client-api.md:5937`). Clearing a thread on another device is invisible
-   here. See §8.
+   `thread.read.all` emits nothing to clients at all (`docs/client-api.md:5937`).
+   Clearing a thread on another device is invisible here. See §8.
 
 ## 6. Testing
 
 TDD per CLAUDE.md §4 — tests first, confirmed failing, then implementation.
 
 **Selector** (table-driven): unread by message; unread by thread only; muted
-excluded; active room excluded; null `lastSeenAt` with set `lastMsgAt` counts;
-null `lastMsgAt` does not; each room counted once when both message- and
-thread-unread; empty state → 0.
+excluded; visibly-active room excluded; **hidden-window active room included**;
+null `lastSeenAt` with set `lastMsgAt` counts; null `lastMsgAt` does not; each
+room counted once when both message- and thread-unread; empty state → 0.
+
+**Mark-read gate (§4.4):** no `message.read` RPC fires for an incoming
+active-room message while `visibilityState === 'hidden'`; the pending trailing
+timer does not fire across a visible→hidden transition; becoming visible again
+marks the active room read exactly once.
 
 **Reducer:** `threadUnread` seeded from bootstrap; replaced wholesale by
 `subscription.update action:"read"`; appended by `new_thread_message` (and
-deduped on redelivery); cleared optimistically on local thread read; preserved
-by unrelated actions.
+deduped on redelivery); cleared optimistically on local thread read; preserved by
+unrelated actions.
 
 **Hook:** folds without any RPC on message receipt (assert `subscription.count`
-is *not* called — this is the core regression guard); reconciles on mount,
-focus, and visibilitychange; equal count → no bucket refetch; unequal → exactly
-one refetch; RPC failure preserves the previous value rather than zeroing.
+is *not* called — the core regression guard); the periodic reconcile fires while
+`hidden` (use fake timers); reconciles on mount, focus, and visibilitychange;
+equal count → no bucket refetch; a single mismatch → no refetch; two consecutive
+mismatches → exactly one refetch; no reconcile fires while a mark-read is
+pending; RPC failure preserves the previous value rather than zeroing.
+
+**Cap:** an uncapped selector result is capped at the configured value by the
+consumer; the default configuration is uncapped; reconcile compares uncapped.
 
 **Component:** `UnreadBadge` hides at 0, renders the count, caps at `99+`.
 
-## 7. Scope note: "taskbar"
+## 7. Taskbar semantics and the shell contract
 
-Today's badge is a header pill (`AppHeader/UnreadBadge`). The same folded number
-can drive an OS-level badge via `navigator.setAppBadge()` / Electron
-`setBadgeCount` — a one-line consumer of the selector, listed here so the
-boundary is explicit.
+`chat-frontend` implements the logic; the desktop shell owns the OS surface.
+Obligations that the logic here depends on, recorded so they are not discovered
+later:
 
-That only holds **while the app is running**. An OS badge that must be correct
-with the app closed is inherently the push path (`badge.count.batch` →
-`notification-worker`) and cannot move client-side. This design does not touch
-that path; `CountSubscriptions` remains, it merely stops being called per
-message.
+- **Single writer, with precedence.** Push already carries `UnreadCounts` on
+  `PushNotificationEvent` (`pkg/model/push.go:17`) *"so the push gateway and
+  clients (desktop app icon, mobile) can render an up-to-date badge"*. The OS
+  badge therefore already has a writer. While the app is running with a live NATS
+  connection, **the fold wins**: the shell must overwrite push-set values, and a
+  push arriving while running must not clobber the folded number. With multiple
+  windows, one process owns the badge; renderers report their number to it rather
+  than writing directly.
+- **Cap consistency.** The shell applies `BADGE_COUNT_CAP` (§4.1) so the number
+  does not jump between an uncapped `47` while running and a capped `9+` after a
+  push.
+- **Background throttling.** The §4.6 interval must keep firing while the window
+  is hidden or minimized. Browsers throttle timers hard in hidden documents;
+  Electron needs `backgroundThrottling: false` on the window.
+- **Quit handoff.** Whatever value is on the icon at quit persists until a push
+  overwrites it. Clearing on quit is wrong (says zero when there are unread
+  rooms); leaving a stale uncapped number is also wrong. Write a final
+  push-consistent capped value on quit and let push correct from there.
+- **Platform matrix.** macOS dock and Linux (Unity) take a number directly.
+  Windows has no numeric taskbar badge — only `setOverlayIcon(image, …)`, so the
+  number must be rasterized and realistically fits one digit plus `+`. This is an
+  independent argument for the cap.
+
+**App closed is not in scope for the fold.** An OS badge that must be correct
+while the app is not running is inherently the push path (`badge.count.batch` →
+`notification-worker`). This design does not touch it; `CountSubscriptions`
+remains, it merely stops being called per message.
 
 ## 8. Follow-up (separate change)
 
@@ -249,9 +349,8 @@ Closing §5.2 at the source: emit a client event on `thread.read` and
   why inbox-worker deliberately does not republish client events. No federation
   or inbox-worker change is needed.
 - **No extra read.** `UpdateSubscriptionThreadRead` (`room-service/store.go:227`)
-  already returns the resulting `threadUnread` array;
-  `messageThreadRead` currently discards it. The handler already holds exactly
-  what the client needs.
+  already returns the resulting `threadUnread` array; `messageThreadRead`
+  currently discards it. The handler already holds exactly what the client needs.
 - **`thread.read.all` wants one account-scoped event**, not per-room:
   `ClearSubscriptionThreadUnreadForAccount` clears every affected subscription in
   one op and does not report which rooms it touched.
@@ -261,13 +360,20 @@ Closing §5.2 at the source: emit a client event on `thread.read` and
 - **Doc obligation:** touching a server→client event struct requires
   `docs/client-api.md` plus both derived views in the same PR.
 
-Sequencing: this design ships first and delivers the full load reduction on its
-own. The event work then lets the §4.5 reconcile interval stretch from
-"correctness backstop for a common user action" to "rare-drop backstop".
+## 9. Sequencing
 
-## 9. Out of scope
+1. **§4.4 mark-read visibility gate** — a live bug, independent of everything
+   else, ships on its own.
+2. **§4.2–4.3, 4.5–4.8** — the fold, thread-unread tracking, and the reconcile.
+   Delivers the full load reduction.
+3. **§8 server events** — lets the §4.6 interval stretch from "correctness
+   backstop for a common user action" to "rare-drop backstop".
+4. **Shell wiring (§7)** — out of this repo; unblocked once step 2 lands.
+
+## 10. Out of scope
 
 - The push badge path (`badge.count.batch`, `notification-worker`) — unchanged.
+- The OS badge call itself and the platform matrix — desktop shell, out of repo.
 - Flipping `BADGE_COUNT_CACHE_FIRST` — orthogonal, and less urgent once the
   desktop path is off the hot loop.
 - Mention-accent styling on the badge. The 2026-05-18 change dropped it because
