@@ -157,3 +157,47 @@ func TestSoakRoomReadConfigFrom_LeavesAnUnsetProbeUnset(t *testing.T) {
 	assert.Equal(t, soakRoomInfoBatchSize, got.BatchSize)
 	assert.Equal(t, soakRequestTimeout, got.RequestTimeout)
 }
+
+// Turning enrichment off must not be able to manufacture a finding. The lane
+// samples the row count and the room-state observer reads a different RPC
+// (subscription.getByRoomID), so nothing here consumes an enriched field — but
+// that is a property, not an accident, and a future row that starts reading one
+// has to fail here rather than report phantom mismatches in a probe run.
+func TestSoakRoomReader_SubscriptionListSamplesTheSameWithoutEnrichment(t *testing.T) {
+	disabled := false
+	enriched := `{"subscriptions":[
+		{"roomId":"room-1","muted":false,"lastMessage":{"id":"m1","msg":"hi"}},
+		{"roomId":"room-2","muted":true,"lastMessage":{"id":"m2","msg":"yo"}}
+	],"hasMore":false}`
+	bare := `{"subscriptions":[
+		{"roomId":"room-1","muted":false},
+		{"roomId":"room-2","muted":true}
+	],"hasMore":false}`
+
+	samples := map[string]soakReadSample{}
+	for name, reply := range map[string]string{"enriched": enriched, "bare": bare} {
+		pool, _ := newSoakRoomStateTestPool(t, 3, 8)
+		transport := &soakRoomOpsTransport{reply: []byte(reply)}
+		recorder := &soakRoomReadRecorder{}
+		reader := newSoakRoomReader(
+			soakRoomReadConfig{
+				SiteID: "site-a", RequestTimeout: time.Second,
+				SubscriptionListIncludeLastMessage: &disabled,
+			},
+			pool,
+			newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
+			recorder,
+			rand.New(rand.NewSource(11)),
+			nil,
+		)
+		require.NoError(t, reader.SubscriptionList(context.Background()))
+		require.Len(t, recorder.samples, 1)
+		samples[name] = recorder.samples[0]
+	}
+
+	assert.Equal(t, 2, samples["bare"].Messages)
+	assert.Equal(t, samples["enriched"].Messages, samples["bare"].Messages,
+		"a reply stripped of last-message data must sample identically")
+	assert.Empty(t, samples["bare"].ErrorClass,
+		"dropping enrichment must not turn a healthy reply into a failure")
+}
