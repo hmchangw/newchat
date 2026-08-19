@@ -623,6 +623,52 @@ func (c *captureCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	return nil, nil
 }
 
+func TestHandler_Take(t *testing.T) {
+	evt := model.MessageEvent{
+		Event: model.EventCreated,
+		Message: model.Message{
+			ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+			Content: "hello", CreatedAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		},
+		SiteID: "site-a", Timestamp: 100,
+	}
+
+	t.Run("detaches buffered work and empties the buffer", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		h := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 500)
+		h.Add(makeStubMsg(t, &evt))
+		h.Add(makeStubMsg(t, &evt))
+
+		batch := h.Take()
+
+		require.NotNil(t, batch)
+		assert.Len(t, batch.actions, 2, "detached batch carries the buffered actions")
+		assert.Len(t, batch.pending, 2, "detached batch carries the source messages for ack/nak")
+		assert.Equal(t, 0, h.ActionCount(), "buffer is empty immediately, before the bulk request runs")
+		assert.Equal(t, 0, h.MessageCount())
+	})
+
+	t.Run("returns nil when nothing is buffered", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		h := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 500)
+
+		assert.Nil(t, h.Take())
+	})
+}
+
+func TestHandler_FlushBatch_NilBatchDoesNotCallStore(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	// No store.EXPECT(): any Bulk call fails the test.
+	h := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 500)
+
+	h.FlushBatch(context.Background(), nil)
+}
+
+// Retry pacing is delegated to pkg/jsretry, the repo-wide settle helper. These
+// tests pin the schedule search-sync-worker selects, not jsretry's internals.
 func TestHandler_Flush_RetryPacing(t *testing.T) {
 	evt := model.MessageEvent{
 		Event: model.EventCreated,

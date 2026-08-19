@@ -193,18 +193,44 @@ func streamSequence(msg jetstream.Msg) uint64 {
 	return md.Sequence.Stream
 }
 
-// Flush sends all buffered actions to ES and acks/naks per source message.
-func (h *Handler) Flush(ctx context.Context) {
+// flushBatch is one detached unit of work: the buffered source messages and
+// the ES bulk actions they produced. Take hands it off so the consumer loop can
+// keep buffering the next batch while this one's bulk request is still in
+// flight.
+type flushBatch struct {
+	pending []pendingMsg
+	actions []searchengine.BulkAction
+}
+
+// Take detaches everything currently buffered and resets the buffer, returning
+// nil when there is nothing to flush. It never touches the search engine, so
+// the caller can hand the returned batch to a background flusher and keep
+// buffering immediately — ActionCount() reads 0 as soon as this returns.
+func (h *Handler) Take() *flushBatch {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if len(h.pending) == 0 {
-		h.mu.Unlock()
-		return
+		return nil
 	}
-	pending := h.pending
-	actions := h.actions
+	batch := &flushBatch{pending: h.pending, actions: h.actions}
 	h.pending = make([]pendingMsg, 0, h.bulkSize)
 	h.actions = make([]searchengine.BulkAction, 0, h.bulkSize)
-	h.mu.Unlock()
+	return batch
+}
+
+// Flush detaches the buffer and sends it to ES. Callers that want the bulk
+// request to overlap with the next batch use Take + FlushBatch instead.
+func (h *Handler) Flush(ctx context.Context) {
+	h.FlushBatch(ctx, h.Take())
+}
+
+// FlushBatch sends one detached batch to ES and acks/naks per source message.
+// A nil batch is a no-op.
+func (h *Handler) FlushBatch(ctx context.Context, batch *flushBatch) {
+	if batch == nil {
+		return
+	}
+	pending, actions := batch.pending, batch.actions
 
 	bulkCtx, span := h.startFlushSpan(ctx, pending, len(actions))
 	defer span.End()
