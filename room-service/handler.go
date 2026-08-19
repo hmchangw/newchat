@@ -52,14 +52,19 @@ type Handler struct {
 	dekProvisioner DEKProvisioner
 	// badge is the badge cache; nil (VALKEY_ADDRS unset) disables the
 	// invalidation hooks. Injected post-construction, mirroring dekProvisioner.
-	badge                    badgeCache
-	memberListClient         MemberListClient
-	msgReader                MessageReader
-	siteID                   string
-	maxRoomSize              int
-	maxBatchSize             int
-	memberListTimeout        time.Duration
-	publishToStream          func(ctx context.Context, subj string, data []byte, msgID string) error
+	badge             badgeCache
+	memberListClient  MemberListClient
+	msgReader         MessageReader
+	siteID            string
+	maxRoomSize       int
+	maxBatchSize      int
+	memberListTimeout time.Duration
+	publishToStream   func(ctx context.Context, subj string, data []byte, msgID string) error
+	// publishToFailoverStream publishes onto the buddy-hosted OUTBOX-FAILOVER
+	// stream. Nil unless a buddy connection was established; set via
+	// SetFailoverPublisher rather than the constructor, whose signature is
+	// already long enough that a 15th positional param would be a liability.
+	publishToFailoverStream  func(ctx context.Context, subj string, data []byte, msgID string) error
 	publishCore              func(ctx context.Context, subj string, data []byte) error
 	restrictedRoomMinMembers int
 	legacyRoomOrigins        map[string]string
@@ -81,11 +86,14 @@ type Handler struct {
 	teamsEmailDomain     string
 	roomMembersLimit     int
 	roomMembersCallLimit int
-	// routeMode gates the namespace(s) same-site room .event uses (ROOM_SUBJECT_MODE); cross-site is always global.
-	routeMode subject.RoomRouteMode
+	// routes gates the namespace(s) same-site room .event uses; cross-site is
+	// always global. Not a fixed RoomRouteMode: a request that arrived on the
+	// buddy connection must route global, because the client that sent it is on
+	// a peer cluster where chat.local.> is filtered from gateway interest.
+	routes subject.RouteResolver
 }
 
-func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, legacyRoomOrigins map[string]string, maxResponseBytes int64, routeMode subject.RoomRouteMode) *Handler {
+func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberListClient, msgReader MessageReader, siteID string, maxRoomSize, maxBatchSize int, memberListTimeout time.Duration, restrictedRoomMinMembers int, publishToStream func(context.Context, string, []byte, string) error, publishCore func(context.Context, string, []byte) error, legacyRoomOrigins map[string]string, maxResponseBytes int64, routes subject.RouteResolver) *Handler {
 	return &Handler{
 		store:                    store,
 		keyStore:                 keyStore,
@@ -100,7 +108,7 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 		publishCore:              publishCore,
 		legacyRoomOrigins:        legacyRoomOrigins,
 		maxResponseBytes:         maxResponseBytes,
-		routeMode:                routeMode,
+		routes:                   routes,
 	}
 }
 
@@ -855,7 +863,25 @@ func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action
 // outbox.
 func (h *Handler) federateOne(ctx context.Context, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupSeed string, ts int64) error {
 	dedupID := natsutil.InboxDedupID(ctx, destSiteID, dedupSeed)
-	return outbox.Publish(ctx, h.publishToStream, h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts)
+	err := outbox.PublishTo(ctx, h.publishToStream, h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts, false)
+	if err == nil || h.publishToFailoverStream == nil || !outbox.IsNoResponders(err) {
+		return err
+	}
+	// The local OUTBOX is unreachable — this site's own NATS is down. Republish
+	// onto the buddy-hosted failover outbox so the site keeps federating outward.
+	//
+	// Gated on no-responders alone: a timeout may already have landed, and the
+	// two outbox streams have independent dedup windows, so a shared
+	// Nats-Msg-Id would not collapse a duplicate across them.
+	return outbox.PublishTo(ctx, h.publishToFailoverStream, h.siteID, roomID, destSiteID,
+		eventType, payload, dedupID, ts, true)
+}
+
+// SetFailoverPublisher installs the buddy-lane publisher. Called from main once
+// the buddy connection is established; leaving it nil keeps federateOne on the
+// live lane only, which is the correct behaviour for a single-site deployment.
+func (h *Handler) SetFailoverPublisher(fn func(ctx context.Context, subj string, data []byte, msgID string) error) {
+	h.publishToFailoverStream = fn
 }
 
 func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest) (*model.StatusReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
@@ -1492,7 +1518,7 @@ func (h *Handler) publishChannelEvent(ctx context.Context, roomID string, crossS
 // sanctioned path enforced by .semgrep room-subject-publish-must-route. Best-effort.
 func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string, logArgs ...any) {
 	now := time.Now().UTC()
-	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
+	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, subject.ResolveMode(h.routes, now), now) {
 		if err := h.publishCore(ctx, subj, payload); err != nil {
 			args := append([]any{"error", err, "op", op, "roomId", roomID, "subject", subj}, logArgs...)
 			slog.Error("publish room event failed", args...)

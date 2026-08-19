@@ -613,7 +613,7 @@ func TestHandler_RemoveMember_SelfLeave_Success(t *testing.T) {
 		publishedSubj = subj
 		publishedData = data
 		return nil
-	}, nil, nil, 0, subject.RouteGlobal)
+	}, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 
 	resp, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 	require.NoError(t, err)
@@ -650,7 +650,7 @@ func TestHandler_RemoveMember_OrgOnly_Rejected(t *testing.T) {
 			store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 			store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "alice").
 				Return(&SubscriptionWithMembership{Subscription: sub, HasOrgMembership: true}, nil)
-			handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+			handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 			_, err := handler.removeMember(ctxParams(map[string]string{"account": tc.requester, "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: tc.target})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "org members cannot leave individually")
@@ -675,7 +675,7 @@ func TestHandler_RemoveMember_SelfLeave_NoOrgs_Allowed(t *testing.T) {
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(ctx context.Context, _ string, data []byte, _ string) error {
 		publishedData = data
 		return nil
-	}, nil, nil, 0, subject.RouteGlobal)
+	}, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 	require.NoError(t, err)
 	require.NotNil(t, publishedData)
@@ -709,7 +709,7 @@ func TestHandler_RemoveMember_LastOwner_Rejected(t *testing.T) {
 			}
 			store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
 				Return(&RoomCounts{MemberCount: 3, HumanCount: 3, OwnerCount: 1}, nil)
-			handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+			handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 			_, err := handler.removeMember(ctxParams(map[string]string{"account": tc.requester, "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "last owner")
@@ -729,7 +729,7 @@ func TestHandler_RemoveMember_LastMember_Rejected(t *testing.T) {
 		Return(&SubscriptionWithMembership{Subscription: sub, HasIndividualMembership: true}, nil)
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
 		Return(&RoomCounts{MemberCount: 1, HumanCount: 1, OwnerCount: 0}, nil)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "last member")
@@ -749,7 +749,7 @@ func TestHandler_RemoveMember_QAPUnderscore_CountsAsHuman(t *testing.T) {
 		Return(&SubscriptionWithMembership{Subscription: sub, HasIndividualMembership: true}, nil)
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
 		Return(&RoomCounts{MemberCount: 1, HumanCount: 1, OwnerCount: 0}, nil)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "p_qa1", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "p_qa1"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errCannotRemoveLastMember))
@@ -776,7 +776,7 @@ func TestHandler_RemoveMember_OwnerRemovesOther_Success(t *testing.T) {
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(ctx context.Context, subj string, data []byte, _ string) error {
 		publishedData = data
 		return nil
-	}, nil, nil, 0, subject.RouteGlobal)
+	}, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	resp, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "bob"})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -798,7 +798,7 @@ func TestHandler_RemoveMember_NonOwnerRemovesOther_Rejected(t *testing.T) {
 	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "bob").
 		Return(&SubscriptionWithMembership{Subscription: targetSub, HasIndividualMembership: true}, nil)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(requesterSub, nil)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "bob"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "only owners can remove members")
@@ -817,7 +817,7 @@ func TestHandler_RemoveMember_OwnerRemovesOrg_Success(t *testing.T) {
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(ctx context.Context, subj string, data []byte, _ string) error {
 		publishedData = data
 		return nil
-	}, nil, nil, 0, subject.RouteGlobal)
+	}, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	resp, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", OrgID: "eng-org"})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -830,7 +830,7 @@ func TestHandler_RemoveMember_BothAccountAndOrgID_Rejected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "bob", OrgID: "eng-org"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one")
@@ -840,7 +840,7 @@ func TestHandler_RemoveMember_NeitherAccountNorOrgID_Rejected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one")
@@ -849,7 +849,7 @@ func TestHandler_RemoveMember_NeitherAccountNorOrgID_Rejected(t *testing.T) {
 func TestHandler_RemoveMember_RoomIDMismatch(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r2", Account: "alice"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "room ID mismatch")
@@ -861,7 +861,7 @@ func TestHandler_RemoveMember_GetTargetError(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "alice").
 		Return(nil, fmt.Errorf("db down"))
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "get target subscription")
@@ -878,7 +878,7 @@ func TestHandler_RemoveMember_OwnerRemoves_RequesterLookupError(t *testing.T) {
 		Return(&SubscriptionWithMembership{Subscription: targetSub, HasIndividualMembership: true}, nil)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(nil, fmt.Errorf("db down"))
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "bob"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "get requester subscription")
@@ -895,7 +895,7 @@ func TestHandler_RemoveMember_CountsError(t *testing.T) {
 		Return(&SubscriptionWithMembership{Subscription: sub, HasIndividualMembership: true}, nil)
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
 		Return(nil, fmt.Errorf("db down"))
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "count members")
@@ -907,7 +907,7 @@ func TestHandler_RemoveMember_OrgPath_RequesterLookupError(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(nil, fmt.Errorf("db down"))
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", OrgID: "eng-org"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "get requester subscription")
@@ -926,7 +926,7 @@ func TestHandler_RemoveMember_PublishError(t *testing.T) {
 		Return(&RoomCounts{MemberCount: 3, HumanCount: 3, OwnerCount: 2}, nil)
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(_ context.Context, _ string, _ []byte, _ string) error {
 		return fmt.Errorf("nats down")
-	}, nil, nil, 0, subject.RouteGlobal)
+	}, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "publish to stream")
@@ -1150,7 +1150,7 @@ func TestHandler_AddMembers_RestrictedOwnerAllowed(t *testing.T) {
 	store := NewMockRoomStore(ctrl)
 
 	publish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
-	h := NewHandler(store, nil, nil, nil, "site-a", 100, 500, 5*time.Second, 5, publish, nil, nil, 0, subject.RouteGlobal)
+	h := NewHandler(store, nil, nil, nil, "site-a", 100, 500, 5*time.Second, 5, publish, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
 		Roles: []model.Role{model.RoleOwner},
@@ -1175,7 +1175,7 @@ func TestHandler_AddMembers_EmptyAfterResolve(t *testing.T) {
 	store := NewMockRoomStore(ctrl)
 
 	publish := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
-	h := NewHandler(store, nil, nil, nil, "site-a", 100, 500, 5*time.Second, 5, publish, nil, nil, 0, subject.RouteGlobal)
+	h := NewHandler(store, nil, nil, nil, "site-a", 100, 500, 5*time.Second, 5, publish, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
 		Roles: []model.Role{model.RoleMember},
@@ -1359,7 +1359,7 @@ func TestHandler_RemoveMember_BotOwnerTarget_LastOwnerGuardApplies(t *testing.T)
 	// Owner target → counts fetched; last-owner guard fires on OwnerCount<=1.
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
 		Return(&RoomCounts{MemberCount: 2, HumanCount: 1, OwnerCount: 1}, nil)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
 		model.RemoveMemberRequest{RoomID: "r1", Account: "weather.bot"})
 	require.Error(t, err)
@@ -1386,7 +1386,7 @@ func TestHandler_RemoveMember_BotTarget_SkipsMemberGuards(t *testing.T) {
 	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, func(_ context.Context, _ string, data []byte, _ string) error {
 		publishedData = data
 		return nil
-	}, nil, nil, 0, subject.RouteGlobal)
+	}, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	resp, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "weather.bot"})
 	require.NoError(t, err)
 	assert.Equal(t, "accepted", resp.Status)
@@ -1408,7 +1408,7 @@ func TestHandler_RemoveMember_LastHumanWithBotsPresent_Rejected(t *testing.T) {
 	// Two subs (alice + a bot) but one human: removing the last human is blocked.
 	store.EXPECT().CountMembersAndOwners(gomock.Any(), "r1").
 		Return(&RoomCounts{MemberCount: 2, HumanCount: 1, OwnerCount: 1}, nil)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errCannotRemoveLastMember))
@@ -1418,7 +1418,7 @@ func TestHandler_UpdateRole_BotPromotion_Rejected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
 	// The bot check fires before any store read, so no store expectations.
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
 		model.UpdateRoleRequest{RoomID: "r1", Account: "weather.bot", NewRole: model.RoleOwner})
 	require.Error(t, err)
@@ -1429,7 +1429,7 @@ func TestHandler_UpdateRole_BotPromotion_Rejected(t *testing.T) {
 func TestHandler_UpdateRole_PlatformAdminPromotion_Rejected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
-	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	handler := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := handler.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
 		model.UpdateRoleRequest{RoomID: "r1", Account: "p_adminsiteA", NewRole: model.RoleOwner})
 	require.Error(t, err)
@@ -4101,7 +4101,7 @@ func TestHandler_handleMessageReadReceipt(t *testing.T) {
 				tt.prep(setup{store: store, reader: reader})
 			}
 
-			h := NewHandler(store, nil, nil, reader, siteID, 1000, 1000, time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+			h := NewHandler(store, nil, nil, reader, siteID, 1000, 1000, time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 			got, err := h.messageReadReceipt(ctxParams(map[string]string{"account": account, "roomID": roomID}), tt.req)
 
 			if tt.wantErr != nil {
@@ -4139,7 +4139,7 @@ func TestHandler_MessageReadReceipt_UnavailablePreservesReason(t *testing.T) {
 		Return(MessageReadMeta{}, false, errcode.Unavailable("read receipts are temporarily unavailable",
 			errcode.WithReason(errcode.RoomReadReceiptsUnavailable)))
 
-	h := NewHandler(store, nil, nil, reader, siteID, 1000, 1000, time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	h := NewHandler(store, nil, nil, reader, siteID, 1000, 1000, time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	_, err := h.messageReadReceipt(ctxParams(map[string]string{"account": account, "roomID": roomID}),
 		model.ReadReceiptRequest{MessageID: messageID})
 
@@ -4849,7 +4849,7 @@ func newThreadChannelFloorMoveFixture(t *testing.T, crossSite bool) (*threadRead
 
 func TestHandler_MessageThreadRead_GlobalMode_AlwaysGlobal(t *testing.T) {
 	f, _ := newThreadChannelFloorMoveFixture(t, false)
-	f.handler.routeMode = subject.RouteGlobal
+	f.handler.routes = fixedRoutes(subject.RouteGlobal)
 
 	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
 	require.NoError(t, err)
@@ -4860,7 +4860,7 @@ func TestHandler_MessageThreadRead_GlobalMode_AlwaysGlobal(t *testing.T) {
 
 func TestHandler_MessageThreadRead_LocalMode_SameSiteUsesLocal(t *testing.T) {
 	f, _ := newThreadChannelFloorMoveFixture(t, false)
-	f.handler.routeMode = subject.RouteLocal
+	f.handler.routes = fixedRoutes(subject.RouteLocal)
 
 	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
 	require.NoError(t, err)
@@ -4871,7 +4871,7 @@ func TestHandler_MessageThreadRead_LocalMode_SameSiteUsesLocal(t *testing.T) {
 
 func TestHandler_MessageThreadRead_DualMode_SameSitePublishesBoth(t *testing.T) {
 	f, _ := newThreadChannelFloorMoveFixture(t, false)
-	f.handler.routeMode = subject.RouteDual
+	f.handler.routes = fixedRoutes(subject.RouteDual)
 
 	_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
 	require.NoError(t, err)
@@ -4885,7 +4885,7 @@ func TestHandler_MessageThreadRead_CrossSiteRoomAlwaysGlobal(t *testing.T) {
 	for _, mode := range []subject.RoomRouteMode{subject.RouteGlobal, subject.RouteDual, subject.RouteLocal} {
 		t.Run(fmt.Sprintf("mode=%d", mode), func(t *testing.T) {
 			f, _ := newThreadChannelFloorMoveFixture(t, true)
-			f.handler.routeMode = mode
+			f.handler.routes = fixedRoutes(mode)
 
 			_, err := f.handler.messageThreadRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.MessageThreadReadRequest{ThreadID: "p1"})
 			require.NoError(t, err)
@@ -5380,7 +5380,7 @@ func TestHandler_natsGetRoomKey(t *testing.T) {
 			ks := NewMockRoomKeyStore(ctrl)
 			tc.setup(t, store, ks)
 
-			h := NewHandler(store, ks, nil, nil, siteID, 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+			h := NewHandler(store, ks, nil, nil, siteID, 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 			c := ctxParams(map[string]string{"account": account, "roomID": roomID})
 			c.Msg = &nats.Msg{Data: tc.body}
 			resp, err := h.getRoomKey(c)
@@ -5416,7 +5416,7 @@ func TestHandler_GetRoomKey_EmptyBody(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), account, roomID).Return(nil)
 	ks.EXPECT().Get(gomock.Any(), roomID).Return(sampleVersioned, nil)
 
-	h := NewHandler(store, ks, nil, nil, siteID, 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, subject.RouteGlobal)
+	h := NewHandler(store, ks, nil, nil, siteID, 1000, 500, 5*time.Second, 5, nil, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 	c := ctxParams(map[string]string{"account": account, "roomID": roomID})
 	c.Msg = &nats.Msg{Data: nil}
 	resp, err := h.getRoomKey(c)
@@ -5541,7 +5541,7 @@ func TestHandleRoomRename_Validation(t *testing.T) {
 				tt.setupStore(store)
 			}
 			h := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
-				func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, nil, 0, subject.RouteGlobal)
+				func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, nil, nil, 0, fixedRoutes(subject.RouteGlobal))
 
 			resp, err := h.roomRename(
 				ctxParams(map[string]string{"account": tt.account, "roomID": tt.roomID}),
@@ -5701,7 +5701,7 @@ func TestHandleRoomRestricted_Validation(t *testing.T) {
 			h := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
 				func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
 				func(_ context.Context, _ string, _ []byte) error { return nil },
-				nil, 0, subject.RouteGlobal)
+				nil, 0, fixedRoutes(subject.RouteGlobal))
 
 			resp, err := h.roomRestricted(ctxParams(map[string]string{}), tt.req)
 			if tt.wantErr == nil {
@@ -5752,7 +5752,7 @@ func TestHandleRoomRestricted_PublishesEventNotSysMessage(t *testing.T) {
 		func(_ context.Context, subj string, data []byte) error {
 			cores = append(cores, corePub{subj: subj, data: append([]byte(nil), data...)})
 			return nil
-		}, nil, 0, subject.RouteGlobal)
+		}, nil, 0, fixedRoutes(subject.RouteGlobal))
 
 	_, err := h.roomRestricted(ctxParams(map[string]string{}), model.RoomRestrictedRequest{
 		RoomID: "r1", Account: "admin1", Restricted: true, ExternalAccess: true,
@@ -5825,7 +5825,7 @@ func TestHandleRoomRestricted_MultiSite_FederatesPerDestination(t *testing.T) {
 			return nil
 		},
 		func(_ context.Context, _ string, _ []byte) error { return nil },
-		nil, 0, subject.RouteGlobal)
+		nil, 0, fixedRoutes(subject.RouteGlobal))
 
 	req := model.RoomRestrictedRequest{RoomID: "r1", Account: "admin1", Restricted: false}
 	resp, err := h.roomRestricted(ctxParams(map[string]string{}), req)
@@ -7648,7 +7648,7 @@ func newChannelFloorMoveFixture(t *testing.T, crossSite bool) (*messageReadFixtu
 
 func TestHandler_MessageRead_GlobalMode_AlwaysGlobal(t *testing.T) {
 	f, _ := newChannelFloorMoveFixture(t, false)
-	f.handler.routeMode = subject.RouteGlobal
+	f.handler.routes = fixedRoutes(subject.RouteGlobal)
 
 	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	require.NoError(t, err)
@@ -7660,7 +7660,7 @@ func TestHandler_MessageRead_GlobalMode_AlwaysGlobal(t *testing.T) {
 
 func TestHandler_MessageRead_LocalMode_SameSiteUsesLocal(t *testing.T) {
 	f, _ := newChannelFloorMoveFixture(t, false)
-	f.handler.routeMode = subject.RouteLocal
+	f.handler.routes = fixedRoutes(subject.RouteLocal)
 
 	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	require.NoError(t, err)
@@ -7671,7 +7671,7 @@ func TestHandler_MessageRead_LocalMode_SameSiteUsesLocal(t *testing.T) {
 
 func TestHandler_MessageRead_DualMode_SameSitePublishesBoth(t *testing.T) {
 	f, _ := newChannelFloorMoveFixture(t, false)
-	f.handler.routeMode = subject.RouteDual
+	f.handler.routes = fixedRoutes(subject.RouteDual)
 
 	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	require.NoError(t, err)
@@ -7685,7 +7685,7 @@ func TestHandler_MessageRead_CrossSiteRoomAlwaysGlobal(t *testing.T) {
 	for _, mode := range []subject.RoomRouteMode{subject.RouteGlobal, subject.RouteDual, subject.RouteLocal} {
 		t.Run(fmt.Sprintf("mode=%d", mode), func(t *testing.T) {
 			f, _ := newChannelFloorMoveFixture(t, true)
-			f.handler.routeMode = mode
+			f.handler.routes = fixedRoutes(mode)
 
 			_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 			require.NoError(t, err)
@@ -7909,4 +7909,132 @@ func TestFederateOne_NoopWhenLocalOrEmpty(t *testing.T) {
 	require.NoError(t, h.federateOne(context.Background(), "r1", "", model.InboxSubscriptionRead, []byte(`{}`), "seed", 1))
 	require.NoError(t, h.federateOne(context.Background(), "r1", "site-a", model.InboxSubscriptionRead, []byte(`{}`), "seed", 1))
 	assert.False(t, called, "empty or local destination must not publish")
+}
+
+// When the local OUTBOX is unreachable — this site's own NATS is down — the
+// event is republished to the buddy-hosted failover outbox instead of failing.
+func TestFederateOne_RedirectsToFailoverOutboxOnNoResponders(t *testing.T) {
+	var subjects []string
+	h := &Handler{
+		siteID: "site-a",
+		publishToStream: func(_ context.Context, subj string, _ []byte, _ string) error {
+			subjects = append(subjects, subj)
+			return nats.ErrNoResponders
+		},
+	}
+	h.SetFailoverPublisher(func(_ context.Context, subj string, _ []byte, _ string) error {
+		subjects = append(subjects, subj)
+		return nil
+	})
+
+	require.NoError(t, h.federateOne(context.Background(), "r1", "site-b",
+		model.InboxSubscriptionMuteToggled, []byte(`{}`), "seed", 7))
+
+	assert.Equal(t, []string{
+		subject.Outbox("site-a", "site-b", model.InboxSubscriptionMuteToggled),
+		subject.FailoverOutbox("site-a", "site-b", model.InboxSubscriptionMuteToggled),
+	}, subjects)
+}
+
+// A timeout may already have landed, and the two outbox streams have
+// independent dedup windows — so an ambiguous failure must surface, not
+// double-publish.
+func TestFederateOne_TimeoutDoesNotRedirect(t *testing.T) {
+	var subjects []string
+	h := &Handler{
+		siteID: "site-a",
+		publishToStream: func(_ context.Context, subj string, _ []byte, _ string) error {
+			subjects = append(subjects, subj)
+			return nats.ErrTimeout
+		},
+	}
+	h.SetFailoverPublisher(func(_ context.Context, subj string, _ []byte, _ string) error {
+		subjects = append(subjects, subj)
+		return nil
+	})
+
+	err := h.federateOne(context.Background(), "r1", "site-b",
+		model.InboxSubscriptionMuteToggled, []byte(`{}`), "seed", 7)
+
+	require.Error(t, err)
+	assert.Len(t, subjects, 1, "an ambiguous failure must not double-publish")
+}
+
+// With no buddy configured the original error must surface unchanged.
+func TestFederateOne_NoBuddyReturnsOriginalError(t *testing.T) {
+	h := &Handler{
+		siteID: "site-a",
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error {
+			return nats.ErrNoResponders
+		},
+	}
+
+	err := h.federateOne(context.Background(), "r1", "site-b",
+		model.InboxSubscriptionMuteToggled, []byte(`{}`), "seed", 7)
+
+	require.Error(t, err)
+}
+
+// A request that arrived on the buddy connection must publish its room event to
+// the global root, for the same reason broadcast-worker does: the client that
+// sent it is on a peer cluster, and chat.local.> never crosses a gateway.
+func TestHandler_publishRoomEvent_FailoverConnectionForcesGlobal(t *testing.T) {
+	var got []string
+	h := &Handler{
+		publishCore: func(_ context.Context, subj string, _ []byte) error {
+			got = append(got, subj)
+			return nil
+		},
+		routes: subject.NewLaneRouter(subject.RouteLocal, subject.LaneFailover, nil,
+			subject.DefaultFailoverRevertGrace),
+	}
+
+	h.publishRoomEvent(context.Background(), "r1", ptrBool(false), nil, []byte("{}"), "test")
+
+	assert.Equal(t, []string{"chat.room.r1.event"}, got)
+}
+
+// The control: a home-connection request keeps the configured routing, so the
+// local namespace still saves gateway interest in steady state.
+func TestHandler_publishRoomEvent_HomeConnectionKeepsConfiguredRouting(t *testing.T) {
+	var got []string
+	h := &Handler{
+		publishCore: func(_ context.Context, subj string, _ []byte) error {
+			got = append(got, subj)
+			return nil
+		},
+		routes: subject.NewLaneRouter(subject.RouteLocal, subject.LaneHome, nil,
+			subject.DefaultFailoverRevertGrace),
+	}
+
+	h.publishRoomEvent(context.Background(), "r1", ptrBool(false), nil, []byte("{}"), "test")
+
+	assert.Equal(t, []string{"chat.local.room.r1.event"}, got)
+}
+
+// Inside the revert grace window the home connection must emit to BOTH roots, or
+// clients still on the buddy go silent during recovery.
+func TestHandler_publishRoomEvent_HomeConnectionDualPublishesInGraceWindow(t *testing.T) {
+	var got []string
+	restored := time.Now().UTC().Add(-1 * time.Minute)
+	h := &Handler{
+		publishCore: func(_ context.Context, subj string, _ []byte) error {
+			got = append(got, subj)
+			return nil
+		},
+		routes: subject.NewLaneRouter(subject.RouteLocal, subject.LaneHome,
+			func() time.Time { return restored }, subject.DefaultFailoverRevertGrace),
+	}
+
+	h.publishRoomEvent(context.Background(), "r1", ptrBool(false), nil, []byte("{}"), "test")
+
+	assert.Equal(t, []string{"chat.local.room.r1.event", "chat.room.r1.event"}, got)
+}
+
+// fixedRoutes pins a handler to one route mode, for tests that exercise routing
+// itself rather than the lane logic. Production code always passes a
+// subject.LaneRouter, so the constructor takes a resolver and a bare mode
+// cannot be wired in by accident.
+func fixedRoutes(mode subject.RoomRouteMode) subject.RouteResolver {
+	return subject.NewLaneRouter(mode, subject.LaneHome, nil, 0)
 }
