@@ -113,7 +113,7 @@ func TestHandler_HandleJetStreamMsg_RecordsAcceptedAndRetryOutcomes(t *testing.T
 			if tt.final {
 				msg.numDelivered = 1
 				consumer := natsmetrics.New(mp.Meter("shared")).Consumer(natsmetrics.ConsumerConfig{
-					ServiceName: "message-gatekeeper", Site: "site-a", Stream: "MESSAGES_site-a", Consumer: "message-gatekeeper",
+					Site: "site-a", Stream: "MESSAGES_site-a", Consumer: "message-gatekeeper",
 				})
 				consumer.LoopStarted(ctx)
 				tracked := consumer.Track(ctx, msg, natsmetrics.EventSend, 1)

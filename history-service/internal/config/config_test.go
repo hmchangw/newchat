@@ -183,17 +183,6 @@ func TestLoad_DefaultsReadPreferenceToSecondaryPreferred(t *testing.T) {
 	assert.Equal(t, "secondaryPreferred", cfg.Mongo.ReadPreference)
 }
 
-func TestLoad_ServiceName(t *testing.T) {
-	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
-	t.Setenv("CASSANDRA_HOSTS", "localhost")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("OTEL_SERVICE_NAME", "history-service-canary")
-
-	cfg, err := Load()
-	require.NoError(t, err)
-	require.Equal(t, "history-service-canary", cfg.ServiceName)
-}
-
 // unsetEnv removes key for the duration of the test and restores its prior
 // presence/value on cleanup, so a default-value test can't be perturbed by an
 // externally set variable.

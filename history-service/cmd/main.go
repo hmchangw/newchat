@@ -88,7 +88,7 @@ func main() {
 	}
 
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)

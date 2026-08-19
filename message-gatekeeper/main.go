@@ -26,7 +26,6 @@ import (
 )
 
 type config struct {
-	ServiceName        string                  `env:"OTEL_SERVICE_NAME" envDefault:"unknown-service"`
 	NatsURL            string                  `env:"NATS_URL,required"`
 	NatsCredsFile      string                  `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID             string                  `env:"SITE_ID,required"`
@@ -85,7 +84,7 @@ func main() {
 		os.Exit(1)
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	domainMetrics := newGatekeeperMetrics(sdk.MeterProvider().Meter("message-gatekeeper"))
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
@@ -168,7 +167,7 @@ func main() {
 	messagesCfg := stream.Messages(cfg.SiteID)
 	consumerCfg := buildConsumerConfig(cfg.Consumer)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Site:   cfg.SiteID,
 		Stream: messagesCfg.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)

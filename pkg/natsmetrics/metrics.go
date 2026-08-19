@@ -252,11 +252,15 @@ func New(meter metric.Meter) *Metrics {
 	return &Metrics{loop: loop, messages: messages, redeliveries: redeliveries, processingDuration: processing, publishAttempts: publishAttempts, publishRetries: publishRetries, terminalFailures: terminal, requests: requests, requestDuration: requestDuration, handledRequests: handledRequests, handlerDuration: handlerDuration}
 }
 
+// ConsumerConfig carries the per-consumer label base. Service identity is
+// deliberately NOT an inline label: the o11y Prometheus exporter renders the
+// resource's service.name as a constant `service_name` label on every series,
+// and an inline attribute with the same rendered name makes the registry
+// Gather fail with a duplicate-label error (HTTP 500 on /metrics).
 type ConsumerConfig struct {
-	ServiceName string
-	Site        string
-	Stream      string
-	Consumer    string
+	Site     string
+	Stream   string
+	Consumer string
 }
 
 // consumerKey and publishKey index the precomputed attribute sets. Struct map
@@ -303,7 +307,6 @@ type Consumer struct {
 
 func (m *Metrics) Consumer(cfg ConsumerConfig) *Consumer {
 	base := []attribute.KeyValue{
-		attribute.String("service_name", cfg.ServiceName),
 		attribute.String("site", cfg.Site),
 		attribute.String("stream", cfg.Stream),
 		attribute.String("consumer", cfg.Consumer),
@@ -504,8 +507,11 @@ type Publisher struct {
 	handled map[handledRequestKey]metric.MeasurementOption
 }
 
-func (m *Metrics) Publisher(serviceName, site string) Publisher {
-	base := []attribute.KeyValue{attribute.String("service_name", serviceName), attribute.String("site", site)}
+// Publisher builds the publish-side recorder. Like Consumer, it carries no
+// inline service identity — the resource-derived `service_name` constant
+// label supplies it, and duplicating it here breaks the /metrics endpoint.
+func (m *Metrics) Publisher(site string) Publisher {
+	base := []attribute.KeyValue{attribute.String("site", site)}
 	build := func(extra ...attribute.KeyValue) metric.MeasurementOption {
 		attrs := make([]attribute.KeyValue, 0, len(base)+len(extra))
 		attrs = append(attrs, base...)

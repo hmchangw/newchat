@@ -44,16 +44,6 @@ func TestConfig_Mode(t *testing.T) {
 	}
 }
 
-func TestConfig_ServiceName(t *testing.T) {
-	t.Setenv("VALKEY_ADDRS", "valkey:6379")
-	t.Setenv("MODE", "bot")
-	t.Setenv("OTEL_SERVICE_NAME", "bot-notification-worker")
-
-	cfg, err := env.ParseAs[config]()
-	require.NoError(t, err)
-	require.Equal(t, "bot-notification-worker", cfg.ServiceName)
-}
-
 func TestConfig_UserSettingsDefaults(t *testing.T) {
 	t.Setenv("VALKEY_ADDRS", "valkey:6379")
 	t.Setenv("MODE", "user")

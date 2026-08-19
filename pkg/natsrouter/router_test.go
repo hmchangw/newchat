@@ -71,7 +71,7 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 	nc := startTestNATS(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	metrics := natsmetrics.NewFromProvider(mp).Publisher("room-service", "site-a")
+	metrics := natsmetrics.NewFromProvider(mp).Publisher("site-a")
 	r := New(nc, "room-service", WithMetrics(metrics))
 
 	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.member.list",

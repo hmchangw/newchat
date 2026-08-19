@@ -49,36 +49,6 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 	}
 }
 
-// TestConfig_ServiceName covers both the explicit value and the documented
-// default. An empty service_name would orphan every chat.nats.* series this
-// worker emits, so the default has to be a real string rather than "".
-func TestConfig_ServiceName(t *testing.T) {
-	cases := []struct {
-		name string
-		env  string // "" means unset — exercise envDefault
-		want string
-	}{
-		{name: "default_when_unset", env: "", want: "unknown-service"},
-		{name: "explicit_default_deploy", env: "room-worker", want: "room-worker"},
-		{name: "explicit_teams_deploy", env: "teams-room-worker", want: "teams-room-worker"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Seed unconditionally so t.Setenv registers a restore of any
-			// inherited value; the default case unsets it below.
-			t.Setenv("OTEL_SERVICE_NAME", "seed")
-			if tc.env == "" {
-				require.NoError(t, os.Unsetenv("OTEL_SERVICE_NAME"))
-			} else {
-				t.Setenv("OTEL_SERVICE_NAME", tc.env)
-			}
-			cfg, err := env.ParseAs[config]()
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, cfg.ServiceName)
-		})
-	}
-}
-
 // TestDeploymentServiceNamesAreDistinct pins the two deploys of this binary to
 // separate telemetry identities. They share every stream config knob and differ
 // only by MODE, so a shared service_name makes the default and Teams pods

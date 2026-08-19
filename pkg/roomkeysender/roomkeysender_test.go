@@ -190,7 +190,7 @@ func TestSender_WithMetrics(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := sdkmetric.NewManualReader()
 			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-			metrics := natsmetrics.NewFromProvider(mp).Publisher("room-worker", "site-a")
+			metrics := natsmetrics.NewFromProvider(mp).Publisher("site-a")
 			sender := roomkeysender.NewSender(&mockPublisher{err: tt.publishErr}, roomkeysender.WithMetrics(metrics))
 
 			err := sender.SendDataContext(context.Background(), "alice", []byte("{}"))
@@ -227,7 +227,7 @@ func TestSender_WithMetrics(t *testing.T) {
 			assert.Equal(t, "recipient_event", gotAttrs["destination_kind"])
 			assert.Equal(t, "room_publish", gotAttrs["operation"])
 			assert.Equal(t, tt.wantOutcome, gotAttrs["outcome"])
-			assert.Equal(t, "room-worker", gotAttrs["service_name"])
+			assert.NotContains(t, gotAttrs, "service_name", "service identity comes from the resource, not an inline label")
 			assert.NotContains(t, gotAttrs, "account", "the account token must never become a label")
 		})
 	}
