@@ -90,7 +90,7 @@ These metrics do not replace database telemetry; they connect dependency behavio
 | `loadgen_soak_operations_total{action,outcome,phase}` | loadgen soak | Offered and completed Cassandra-path operations | Existing |
 | `loadgen_soak_retries_total{action,phase}` | loadgen soak | Harness retries; must be kept separate from application/driver retries. `phase` is `warmup` or `measured` | Existing |
 | `loadgen_soak_errors_total{action,class,phase}` | loadgen soak | Failure class by business action. `phase` is `warmup` or `measured` | Existing |
-| `loadgen_soak_error_reasons_total{action,class,reason}` | loadgen soak | Service-supplied errcode reason beside the class, which alone cannot separate answers that need different responses (`not_subscribed` vs `outside_access_window`) | Existing |
+| `loadgen_soak_error_reasons_total{action,class,reason,phase}` | loadgen soak | Service-supplied errcode reason beside the class, which alone cannot separate answers that need different responses (`not_subscribed` vs `outside_access_window`) | Existing |
 | `loadgen_soak_rpc_latency_seconds_*{action}` | loadgen soak | End-to-end latency through message/history paths | Existing |
 | `loadgen_soak_verifications_total{action,class,field}` | loadgen soak | Sampled Cassandra read-back correctness. `field` names what disagreed on a mismatch | Existing |
 | `loadgen_soak_mutation_target_missing_total` | loadgen soak | Persisted target still absent after the dedicated wait/retry policy | Existing |

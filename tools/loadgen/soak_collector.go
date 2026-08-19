@@ -250,6 +250,7 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 					action,
 					string(sample.ErrorClass),
 					sample.ErrorReason,
+					phase,
 				).Inc()
 			}
 		}

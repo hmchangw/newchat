@@ -657,9 +657,11 @@ func runSoakWorkload(
 			}
 			outcome := soakOutcomeFailed
 			errorClass := result.ErrorClass
+			errorReason := result.ErrorReason
 			if result.Status == soakSendReplyAccepted {
 				outcome = soakOutcomeSucceeded
 				errorClass = ""
+				errorReason = ""
 				scheduler.ObserveAcceptedSend()
 			} else if errorClass == "" {
 				errorClass = soakErrorInternal
@@ -667,6 +669,7 @@ func runSoakWorkload(
 			_ = collector.Record(&soakOperationSample{
 				Action: action, Outcome: outcome, At: now(),
 				Latency: result.Latency, ErrorClass: errorClass,
+				ErrorReason: errorReason,
 			})
 			if result.Status != soakSendReplyUnmatched {
 				if err := failureTracker.ObserveReply(&result); err != nil {

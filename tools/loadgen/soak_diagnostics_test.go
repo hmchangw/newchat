@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -176,7 +177,7 @@ func TestSoakCollector_CountsErrorReasonsSeparatelyFromClasses(t *testing.T) {
 
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.SoakErrorReasons.WithLabelValues(
-			string(soakRPCGetMessage), string(soakErrorForbidden), "not_subscribed"),
+			string(soakRPCGetMessage), string(soakErrorForbidden), "not_subscribed", "measured"),
 	))
 	// The existing error counter keeps its shape so dashboards built on it survive.
 	assert.Equal(t, float64(1), testutil.ToFloat64(
@@ -287,4 +288,46 @@ type soakMutationSampleCapture struct {
 
 func (c *soakMutationSampleCapture) Record(sample soakMutationSample) {
 	c.samples = append(c.samples, sample)
+}
+
+// The send lane carries the most traffic and is where the gatekeeper's own
+// refusals arrive, so a reason dropped here is the one most worth having.
+func TestSoakSendReply_CarriesTheGatekeeperReason(t *testing.T) {
+	envelope := []byte(`{"code":"forbidden","reason":"not_subscribed","error":"not subscribed to room"}`)
+
+	class := classifySoakRPCError(parseSoakErrorEnvelope(envelope))
+	reason := classifySoakRPCReason(parseSoakErrorEnvelope(envelope))
+
+	require.Equal(t, soakErrorForbidden, class)
+	require.Equal(t, soakErrorReason("not_subscribed"), reason)
+	assert.Contains(t, soakSendReplyResultFields(), "ErrorReason",
+		"soakSendReplyResult must have somewhere to put the reason")
+}
+
+func soakSendReplyResultFields() []string {
+	value := reflect.TypeOf(soakSendReplyResult{})
+	fields := make([]string, 0, value.NumField())
+	for i := range value.NumField() {
+		fields = append(fields, value.Field(i).Name)
+	}
+	return fields
+}
+
+// The reason counter has to line up with the error counter it sits beside, or
+// warm-up and measured traffic merge and the two cannot be reconciled.
+func TestSoakCollector_ErrorReasonsCarryThePhaseErrorsDo(t *testing.T) {
+	start := time.Unix(100, 0)
+	metrics := NewMetrics()
+	collector := NewSoakCollector(metrics, start, time.Minute, time.Hour)
+
+	require.NoError(t, collector.Record(&soakOperationSample{
+		Action: soakRPCGetMessage, Outcome: soakOutcomeFailed,
+		ErrorClass: soakErrorForbidden, ErrorReason: "not_subscribed",
+		At: start.Add(time.Second),
+	}))
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.SoakErrorReasons.WithLabelValues(
+			string(soakRPCGetMessage), string(soakErrorForbidden), "not_subscribed", "warmup"),
+	))
 }

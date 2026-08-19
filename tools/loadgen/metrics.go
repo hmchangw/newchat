@@ -230,9 +230,9 @@ func NewMetrics() *Metrics {
 	m.SoakErrorReasons = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_soak_error_reasons_total",
-			Help: "Cassandra soak failures by bounded action, error class, and service-supplied reason.",
+			Help: "Cassandra soak failures by bounded action, error class, service-supplied reason, and run phase.",
 		},
-		[]string{"action", "class", "reason"},
+		[]string{"action", "class", "reason", "phase"},
 	)
 	m.SoakRPCLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{

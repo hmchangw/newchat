@@ -155,15 +155,48 @@ func TestFailureLedger_DoesNotReclaimAJournalItCouldNotFullyRecover(t *testing.T
 		"the dropped operations only exist in the journal; compacting would erase them")
 }
 
-func TestFailureLedger_DoesNotReclaimOnSizeWhileOperationsWereDropped(t *testing.T) {
+// dropped only ever moves during replay, so gating every compaction on it
+// permanently disables reclamation for the process: the byte budget and the
+// finalize counter both become dead and the journal grows until the volume
+// fills. Recovery leaves the inherited journal alone so an immediate restart
+// with a raised capacity can still recover what was dropped, but the size
+// trigger has to keep working — a full volume takes the run down either way.
+func TestFailureLedger_StillReclaimsOnSizeAfterRecoveryDroppedOperations(t *testing.T) {
 	journal := &compactionCountingJournal{events: compactionTestEvents(t, 50), size: 1 << 20}
 	ledger, err := newFailureLedger(&failureLedgerConfig{
-		Capacity: 10, Journal: journal, MaxJournalBytes: 1,
+		Capacity: 10, Journal: journal, CompactEvery: 1000000, MaxJournalBytes: 4096,
 	})
 	require.NoError(t, err)
-	before := journal.compacts
+	require.Positive(t, ledger.dropped, "the fixture must exceed the capacity")
+	require.Equal(t, 0, journal.compacts, "recovery must leave the inherited journal alone")
 
 	require.NoError(t, ledger.MaybeCompact(time.Unix(2000, 0).UTC()))
 
-	assert.Equal(t, before, journal.compacts)
+	assert.Positive(t, journal.compacts,
+		"the byte budget must keep working, or the journal grows without bound")
+}
+
+// A journal that replayed cleanly is still good even if reclaiming it failed,
+// and discarding it downgrades the whole run to an invalid in-memory ledger.
+// Reclamation is an optimisation; it must not be able to void a run.
+func TestFailureLedger_SurvivesAFailedRecoveryReclamation(t *testing.T) {
+	journal := &compactFailingJournal{
+		compactionCountingJournal: compactionCountingJournal{
+			events: compactionTestEvents(t, 5), size: 1 << 20,
+		},
+	}
+
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 100, Journal: journal})
+
+	require.NoError(t, err, "a failed reclamation must not fail recovery")
+	assert.Len(t, ledger.active, 5, "the recovered state must survive")
+}
+
+type compactFailingJournal struct {
+	compactionCountingJournal
+}
+
+func (j *compactFailingJournal) Compact([]failureLedgerEvent) error {
+	j.compacts++
+	return fmt.Errorf("no space left on device")
 }

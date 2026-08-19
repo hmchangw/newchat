@@ -522,9 +522,19 @@ func newFailureLedger(cfg *failureLedgerConfig) (*failureLedger, error) {
 	// reclaims it until CompactEvery more operations finalize — which a process
 	// that keeps restarting never reaches, so the file would grow on every
 	// restart and make the next recovery more expensive than the last.
-	if !upgraded && ledger.recoveredEvents > 0 && ledger.canCompactLocked() {
+	// Skipped when replay dropped operations: they exist nowhere else, and
+	// leaving the file intact is what lets an operator raise the capacity,
+	// restart, and recover them. The size trigger still reclaims it later.
+	//
+	// A failure here is logged rather than returned. The journal replayed
+	// cleanly, so the recovered state is sound; failing would discard it and
+	// downgrade the run to an invalid in-memory ledger over what is only an
+	// optimisation.
+	if !upgraded && ledger.recoveredEvents > 0 && ledger.dropped == 0 &&
+		ledger.canCompactLocked() {
 		if err := ledger.compactLocked(cfg.Now().UTC()); err != nil {
-			return nil, fmt.Errorf("reclaim recovered failure ledger journal: %w", err)
+			slog.Error("could not reclaim recovered failure ledger journal",
+				"error", err)
 		}
 	}
 	ledger.recovered = len(ledger.active)
@@ -1240,18 +1250,20 @@ func (l *failureLedger) journalOverBudgetLocked() bool {
 	return l.journal.Size() >= l.maxJournalBytes
 }
 
-// canCompactLocked guards the two ways compaction can destroy evidence.
-//
-// An operation between claiming its slot and having its start record written is
+// canCompactLocked guards the way compaction can destroy live state: an
+// operation between claiming its slot and having its start record written is
 // not in the active set a compaction rewrites from, so compacting then erases
-// it. Operations replay dropped over capacity are in the same position for a
-// longer reason: the journal is the only place they still exist, and raising
-// SOAK_LEDGER_CAPACITY and restarting is how an operator gets them back.
-// Reclaiming the file would make that unrecoverable, so a ledger that dropped
-// anything keeps its journal — and grows it, loudly, until the capacity is
-// raised.
+// it.
+//
+// It deliberately does not consider l.dropped. Operations replay dropped over
+// capacity exist only in the journal, and recovery leaves the inherited file
+// alone so an immediate restart with a raised SOAK_LEDGER_CAPACITY can still
+// get them back — but that window cannot be indefinite. l.dropped only ever
+// moves during replay, so gating every compaction on it would disable
+// reclamation for the whole process and grow the journal until the volume
+// filled, which takes the run down as surely as losing the records does.
 func (l *failureLedger) canCompactLocked() bool {
-	return len(l.starting) == 0 && l.dropped == 0
+	return len(l.starting) == 0
 }
 
 func (l *failureLedger) replay(events []failureLedgerEvent) error {

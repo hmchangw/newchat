@@ -157,3 +157,45 @@ func TestSoakCatalog_ObservePinnedVerifiesCleanAgainstTheServiceReply(t *testing
 	assert.Equal(t, soakVerifyOK, result.Class)
 	assert.Empty(t, result.Field)
 }
+
+// A Go substring shares the backing array of the string it came from, so a term
+// taken out of a body pins the whole body even though only a few bytes are
+// wanted. The catalogue exists not to hold bodies; it must not hold them by
+// reference either. Bodies here are word-separated so the term is genuinely
+// short — with the soak's own filler payloads the term is the whole body and
+// nothing can be saved.
+func TestSoakCatalog_RetainedSearchTermDoesNotPinTheBody(t *testing.T) {
+	const messages = 5000
+	measure := func(bodySize int) float64 {
+		catalog := newSoakCatalog(messages, messages, 0, nil)
+		catalog.RetainSearchTerms(true)
+		runtime.GC()
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for i := range messages {
+			// A distinct body per message, as the send lane produces: one
+			// shared body would be pinned once however many terms point at it.
+			body := soakCatalogProbeID(i) + " " + strings.Repeat("ab ", bodySize/3)
+			candidate := soakCatalogCandidate{
+				ID: soakCatalogProbeID(i), RoomID: "room-1", Author: "user-1",
+				Content: body, CreatedAt: time.Unix(1000, 0).UTC(),
+			}
+			if err := catalog.TrackPublished(&candidate); err != nil {
+				t.Fatalf("track: %v", err)
+			}
+			catalog.Accept("room-1", candidate.ID)
+		}
+		runtime.GC()
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+		runtime.KeepAlive(catalog)
+		return float64(after.HeapAlloc-before.HeapAlloc) / (1 << 20)
+	}
+
+	small := measure(64)
+	large := measure(8192)
+
+	assert.Less(t, large, small*1.5,
+		"retaining terms from 8KB bodies cost %.1fMB against %.1fMB from 64B ones; "+
+			"the term is still a window onto the body", large, small)
+}
