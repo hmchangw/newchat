@@ -172,12 +172,21 @@ Maintain `state.subscriptions[roomId].threadUnread` from four sources:
 | Source | Effect |
 |---|---|
 | Bootstrap — `sub.threadUnread` from `subscription.list` | seed (already on the wire) |
-| `subscription.update` `action:"read"` — full `Subscription` | replace |
+| `subscription.update` `action:"read"` — full `Subscription` | merge (see below) |
 | `new_thread_message` on `chat.user.{account}.event.room` | add `threadParentMessageId` |
 | Local `thread.read` / `thread.read.all` RPC resolves | optimistic remove / clear |
 
 The `new_thread_message` fan-out is per-subscriber, so it arrives only for
 threads the user follows — matching the server's `ThreadUnread` producer.
+
+**The read event merges rather than replaces.** Reading a room does not clear
+its threads server-side (`docs/client-api.md:2126` — room-level read and
+thread-level read are separate), so `threadUnread` must survive a
+`SUBSCRIPTION_UPSERTED` from a read event. `threadUnread` is `omitempty`, so a
+replace would also drop the local list whenever the server's copy is empty. The
+existing merge in the reducer is therefore already correct here; the only case
+where local and server can legitimately diverge is a thread read on another
+device, which is §5.2's gap and §4.6's job.
 
 ### 4.6 Component: reconcile
 
@@ -224,11 +233,14 @@ the cap (11 vs 40 both read as 10).
 **Tolerate the active-room window.** Per §4.1, between a message arriving in the
 visibly-active room and its trailing `markRoomRead` committing, the client
 suppresses that room and the server still counts it — a legitimate off-by-one
-that is not drift. Reconciling inside that window would trigger a pointless
-bucket refetch. Skip the reconcile while a mark-read is pending, and require two
-consecutive mismatches before refetching. (When the window is hidden, §4.4 stops
-the mark-read and §4.3 stops the suppression, so both sides count the room and
-the two agree.)
+that is not drift. Requiring **two consecutive mismatches** before refetching
+covers it: that window is ~500ms wide against a 5-minute reconcile interval, so
+two reconciles both landing inside one is not a realistic event. An earlier
+draft also gated the reconcile on "no mark-read pending"; that was dropped
+because it means plumbing `useRoomSubscriptions`' timer state into the badge
+hook for no measurable gain. (When the window is hidden, §4.4 stops the
+mark-read and §4.3 stops the suppression, so both sides count the room and the
+two agree.)
 
 ### 4.7 Data flow
 
@@ -296,8 +308,8 @@ unrelated actions.
 is *not* called — the core regression guard); the periodic reconcile fires while
 `hidden` (use fake timers); reconciles on mount, focus, and visibilitychange;
 equal count → no bucket refetch; a single mismatch → no refetch; two consecutive
-mismatches → exactly one refetch; no reconcile fires while a mark-read is
-pending; RPC failure preserves the previous value rather than zeroing.
+mismatches → exactly one refetch; RPC failure preserves the previous value
+rather than zeroing.
 
 **Cap:** an uncapped selector result is capped at the configured value by the
 consumer; the default configuration is uncapped; reconcile compares uncapped.
@@ -374,8 +386,17 @@ Closing §5.2 at the source: emit a client event on `thread.read` and
 
 - The push badge path (`badge.count.batch`, `notification-worker`) — unchanged.
 - The OS badge call itself and the platform matrix — desktop shell, out of repo.
-- Flipping `BADGE_COUNT_CACHE_FIRST` — orthogonal, and less urgent once the
-  desktop path is off the hot loop.
+- Flipping `BADGE_COUNT_CACHE_FIRST` — complementary, not an alternative, and
+  worth doing on its own schedule. It reduces the *per-call* cost of
+  `subscription.count` (SCARD instead of the Mongo aggregation) but leaves the
+  *call volume* untouched: one NATS request/reply and one user-service goroutine
+  per message per connection either way. This design removes the calls. Volume is
+  the dominant term — per §7 of `docs/nats-traffic-estimation.md` the badge
+  refetch is roughly 1:1 with message deliveries (~19k per connection per day at
+  the modeled F=100/D=5), against a modeled `R_sub` of 10/day/connection for all
+  subscription R/R combined. That model line almost certainly predates the
+  message-driven badge refetch (added 2026-05-18) and should be revisited
+  separately.
 - Mention-accent styling on the badge. The 2026-05-18 change dropped it because
   the RPC carries no mention data; the fold restores `hasMention` locally, so it
   becomes possible again. Not included — separate UX decision.
