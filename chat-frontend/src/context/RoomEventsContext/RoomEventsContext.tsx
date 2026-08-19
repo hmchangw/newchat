@@ -12,7 +12,7 @@ import { useNats } from '@/context/NatsContext'
 import { useRoomKeys } from '@/context/RoomKeysContext'
 import { BUFFER_MODE, initialState, roomEventsReducer } from './reducer'
 import { useRoomSubscriptions } from './useRoomSubscriptions'
-import { useUnreadCount as useUnreadCountQuery } from './useUnreadCount'
+import { useUnreadCount as useUnreadCountFold } from './useUnreadCount'
 import {
   fetchMessageHistory,
   fetchSurroundingMessages,
@@ -440,15 +440,13 @@ export function useRoomSummaries() {
 /**
  * App-wide unread total for the header badge.
  *
- * Sourced from the `subscription.count` RPC (via `useUnreadCountQuery`),
- * not derived from `state.summaries`. Re-fetches whenever the active
- * room changes — opening/reading a room is when the server-side total
- * moves.
+ * Folded from local subscription state — no RPC. The client already holds
+ * every input the server's `subscription.count` computes over, and receives
+ * every delta live, so recomputing it server-side per message was redundant.
  */
 export function useUnreadCount(): number {
-  const nats = useNats() as unknown as Nats
   const { state } = useRoomEventsInternal()
-  return useUnreadCountQuery(nats, state.readSeq, state.msgRecvSeq)
+  return useUnreadCountFold(state)
 }
 
 export function useRoomDispatch(): RoomEventsContextValue['dispatch'] {

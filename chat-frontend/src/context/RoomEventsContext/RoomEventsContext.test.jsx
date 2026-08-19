@@ -3,7 +3,7 @@ import { render, screen, act, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { PAGE_LIMIT } from '@/api'
 import { NatsContext } from '../NatsContext/NatsContext'
-import { RoomEventsProvider, useRoomEvents, useRoomSummaries, useSidebarSections, useSubscription } from './RoomEventsContext'
+import { RoomEventsProvider, useRoomEvents, useRoomSummaries, useSidebarSections, useSubscription, useUnreadCount } from './RoomEventsContext'
 import { BUFFER_MODE } from './reducer'
 // jumpToMessage / resetToLiveTail tests — see suite below
 
@@ -2205,5 +2205,51 @@ describe('RoomEventsProvider message.read visibility gating', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('RoomEventsProvider unread badge is RPC-free', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('does NOT issue subscription.count when a message arrives', async () => {
+    // The core regression guard for the client-side fold: the badge used to
+    // refetch subscription.count on every received message.
+    const rooms = [
+      { id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+      { id: 'g2', name: 'random', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+    ]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      return Promise.resolve({})
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+
+    let badge
+    function Probe() {
+      badge = useUnreadCount()
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.room.g2.event')).toBe(true))
+
+    act(() => {
+      handlers.get('chat.room.g2.event')({
+        type: 'new_message',
+        roomId: 'g2',
+        message: { id: 'm1', roomId: 'g2', sender: { account: 'bob' }, content: 'hi', createdAt: '2026-08-19T12:00:00Z' },
+      })
+    })
+
+    const subjects = request.mock.calls.map((c) => c[0])
+    expect(subjects.some((s) => s.endsWith('.subscription.count'))).toBe(false)
+    // …and the badge still counts the room, folded locally.
+    await waitFor(() => expect(badge).toBe(1))
   })
 })

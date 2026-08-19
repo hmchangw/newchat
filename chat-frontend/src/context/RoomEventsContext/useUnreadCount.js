@@ -1,66 +1,36 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { getUnreadCount } from '@/api'
+import { useEffect, useMemo, useState } from 'react'
+import { selectUnreadRoomIds } from './selectUnread'
 
-/** Trailing-debounce window for the message-driven refetch. A burst of
- *  incoming messages collapses to one `subscription.count` RPC at the
- *  trailing edge — mirrors useRoomSubscriptions' markRoomRead debounce. */
-const MSG_REFETCH_DEBOUNCE_MS = 500
+/** Track whether the window is in front of the user. The badge counts the
+ *  active room while hidden (nobody is reading it) and suppresses it while
+ *  visible — see selectUnreadRoomIds. */
+function useDocumentVisible() {
+  const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden')
+  useEffect(() => {
+    const onChange = () => setVisible(document.visibilityState !== 'hidden')
+    document.addEventListener('visibilitychange', onChange)
+    return () => document.removeEventListener('visibilitychange', onChange)
+  }, [])
+  return visible
+}
 
 /**
- * App-wide unread total for the header badge, sourced from the
- * `subscription.count` RPC instead of derived from `state.summaries`.
+ * App-wide unread total, folded from subscription state the client already
+ * holds — no RPC. Every input (`lastMsgAt`, `lastSeenAt`, `muted`,
+ * `threadUnread`) arrives on the bucket bootstrap and is kept current by the
+ * live event stream, so the count moves at event speed rather than at
+ * request/reply speed.
  *
- * Refetch triggers:
- *   - mount / reconnect (`nats` identity) — fetched immediately;
- *   - `readSeq` bumps (a `markRoomRead` RPC has resolved, so the
- *     server `lastSeenAt` write is committed) — fetched immediately,
- *     AFTER the read rather than racing it;
- *   - `msgRecvSeq` bumps (a message was received) — debounced
- *     {@link MSG_REFETCH_DEBOUNCE_MS}ms so a chatty channel doesn't
- *     generate one RPC per message.
+ * Uncapped: the server's `subscription.count` is uncapped too (BADGE_COUNT_CAP
+ * applies to the push path). UnreadBadge owns its own render cap.
  *
- * A monotonic request id makes the latest fetch win: a slow earlier
- * request (or one resolving after unmount) is dropped.
- *
- * @param {{ user: { account: string, siteId: string } }} nats
- * @param {number} [readSeq] reducer's post-mark-read counter
- * @param {number} [msgRecvSeq] reducer's accepted-message counter
- * @returns {number} unread total (0 until the first fetch resolves)
+ * @param {object} state RoomEventsContext state
+ * @returns {number} count of unread rooms
  */
-export function useUnreadCount(nats, readSeq, msgRecvSeq) {
-  const [total, setTotal] = useState(0)
-  const reqIdRef = useRef(0)
-
-  const fetchNow = useCallback(() => {
-    const myId = ++reqIdRef.current
-    getUnreadCount(nats)
-      .then((resp) => {
-        if (myId === reqIdRef.current) setTotal(resp.count ?? 0)
-      })
-      .catch(() => {
-        if (myId === reqIdRef.current) setTotal(0)
-      })
-  }, [nats])
-
-  // Immediate: mount, reconnect, and after a mark-read RPC resolves
-  // (readSeq) — pulled once lastSeenAt is committed, not racing it.
-  useEffect(() => {
-    fetchNow()
-  }, [fetchNow, readSeq])
-
-  // Debounced: a received message moved the (possibly remote) unread
-  // total. Skip the seed value so this doesn't double-fire on mount.
-  // Gate on an actual msgRecvSeq change: `fetchNow` is also a dep (so
-  // the timeout calls the current one), but it's recreated on reconnect
-  // — without this guard a reconnect would re-arm a redundant debounced
-  // fetch on top of the immediate reconnect refetch.
-  const lastMsgRecvSeqRef = useRef(msgRecvSeq)
-  useEffect(() => {
-    if (!msgRecvSeq || msgRecvSeq === lastMsgRecvSeqRef.current) return undefined
-    lastMsgRecvSeqRef.current = msgRecvSeq
-    const t = setTimeout(fetchNow, MSG_REFETCH_DEBOUNCE_MS)
-    return () => clearTimeout(t)
-  }, [fetchNow, msgRecvSeq])
-
-  return total
+export function useUnreadCount(state) {
+  const visible = useDocumentVisible()
+  return useMemo(
+    () => selectUnreadRoomIds(state, visible).length,
+    [state, visible],
+  )
 }
