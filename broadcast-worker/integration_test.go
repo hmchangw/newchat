@@ -82,7 +82,7 @@ func TestBroadcastWorker_ChannelRoom_Integration(t *testing.T) {
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -128,7 +128,7 @@ func TestBroadcastWorker_ChannelRoom_MentionAll_Integration(t *testing.T) {
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -168,7 +168,7 @@ func TestBroadcastWorker_ChannelRoom_IndividualMention_Integration(t *testing.T)
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
 	keyStore := &fakeRoomKeyProvider{pair: key}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -218,7 +218,7 @@ func TestBroadcastWorker_DMRoom_Integration(t *testing.T) {
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	keyStore := &fakeRoomKeyProvider{pair: nil}
-	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -280,7 +280,7 @@ func TestBroadcastWorker_ChannelRoom_EncryptionDisabled_Integration(t *testing.T
 	pub := &recordingPublisher{}
 
 	// nil keyStore — encryption is disabled, handler must not consult it
-	handler := NewHandler(store, us, pub, nil, defaultParentFetcher, false, subject.RouteGlobal)
+	handler := NewHandler(store, us, pub, nil, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -331,7 +331,7 @@ func TestBroadcastWorker_PersistsLastMessage_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	pub := &recordingPublisher{}
-	h := NewHandler(cached, userstore.NewMongoStore(db.Collection("users")), pub, &fakeRoomKeyProvider{}, defaultParentFetcher, false, subject.RouteGlobal)
+	h := NewHandler(cached, userstore.NewMongoStore(db.Collection("users")), pub, &fakeRoomKeyProvider{}, defaultParentFetcher, false, fixedRoutes(subject.RouteGlobal))
 
 	msgTime := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
 	evt := model.MessageEvent{
