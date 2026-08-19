@@ -145,11 +145,15 @@ counter / unit suffixes. An instrument whose name already ends in `_total`
 keeps exactly one — the exporter strips the existing token before appending —
 so `nats_slow_consumer_events_total` exports under that name, not a doubled one.
 
-Consumer and publisher families share a base of `service_name` + `site`; the
-"labels" column lists what each adds on top. Every adopter reads `service_name`
-from `OTEL_SERVICE_NAME` so the label matches the OTel resource, and the bot and
-Teams deployments carry distinct identities while the package instrumentation
-scopes stay stable.
+Consumer and publisher families share a base of `site`; the "labels" column
+lists what each adds on top. Service identity is deliberately **not** an inline
+label: the SDK's Prometheus exporter renders the resource's `service.name`
+(from `OTEL_SERVICE_NAME`) as a constant `service_name` label on every series,
+so queries still slice by `service_name` and the bot and Teams deployments
+still carry distinct identities. An inline `service_name` attribute would
+collide with that constant label and fail the entire scrape — client_golang
+rejects the duplicate label name at gather time and promhttp turns it into an
+HTTP 500 on `/metrics` (this happened; fixed 2026-08-19).
 
 | Instrument | Type | Owner | Labels beyond the base |
 |---|---|---|---|
@@ -168,12 +172,11 @@ scopes stay stable.
 | `chat.nats.client.connection.events` | counter | `pkg/natsutil` | event |
 | `nats_slow_consumer_events_total` | counter | `pkg/natsutil` | subject, queue |
 
-The two `chat.nats.client.*` families are the exception: they carry no
-`service_name` or `site` at all, because they are emitted from the opt-in
-connection helper, which sits below the layer that knows the site. They are
-scoped by the OTel resource instead, so join them through `target_info` rather
-than expecting inline labels. `nats_slow_consumer_events_total` is scoped the
-same way.
+The two `chat.nats.client.*` families are the exception: they carry no `site`
+at all, because they are emitted from the opt-in connection helper, which sits
+below the layer that knows the site. They are scoped by the OTel resource
+instead, so join them through `target_info` rather than expecting inline
+labels. `nats_slow_consumer_events_total` is scoped the same way.
 
 All subject- and error-derived dimensions are closed enums. Inbound request
 `result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
@@ -185,9 +188,10 @@ families that do not map normalize to `unknown` rather than minting a label.
 Raw subjects, room IDs, account IDs, site IDs parsed out of subject tokens, and
 error strings are never labels.
 
-`service_name` and `site` are the exception: they are operator-supplied
-deployment identity, not closed enums, so deployment configuration is what
-constrains their cardinality to the real service and site inventory.
+`site` is the exception: it is operator-supplied deployment identity, not a
+closed enum, so deployment configuration is what constrains its cardinality to
+the real site inventory. (`service_name` is deployment identity too, but it
+arrives as a resource-derived constant label, never as an inline attribute.)
 
 Reconnect-buffer overflow is **not** a connection event: nats.go returns
 `ErrReconnectBufExceeded` synchronously from `publish()` and never routes it

@@ -76,7 +76,7 @@ func TestHandler_PublishToThreadAccounts_RecordsFanoutScenarios(t *testing.T) {
 			h := NewHandler(nil, nil, pub, nil, nil, false, subject.RouteGlobal, withBroadcastMetrics(metrics))
 			ctx := context.Background()
 			consumer := natsmetrics.New(mp.Meter("shared")).Consumer(natsmetrics.ConsumerConfig{
-				ServiceName: "broadcast-worker", Site: "site-a", Stream: "MESSAGES_CANONICAL_site-a", Consumer: "broadcast-worker",
+				Site: "site-a", Stream: "MESSAGES_CANONICAL_site-a", Consumer: "broadcast-worker",
 			})
 			consumer.LoopStarted(ctx)
 			tracked := consumer.Track(ctx, stubJSMsg{subject: "chat.msg.canonical.site-a.created"}, natsmetrics.EventCreated, 5)

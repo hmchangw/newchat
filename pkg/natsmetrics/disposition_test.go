@@ -37,7 +37,7 @@ func TestFinishDistinguishesCancellationFromAckWait(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, reader := newTestMetrics(t)
-			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+			c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			if tt.loopUp {
 				c.LoopStarted(context.Background())
 			}
@@ -60,7 +60,7 @@ func TestTermRecordsPermanentNotInternal(t *testing.T) {
 	for _, name := range []string{"Term", "TermWithReason"} {
 		t.Run(name, func(t *testing.T) {
 			m, reader := newTestMetrics(t)
-			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+			c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			tracked := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}}, EventCreated, 5)
 
 			if name == "Term" {
@@ -81,7 +81,7 @@ func TestTermRecordsPermanentNotInternal(t *testing.T) {
 // MarkTerminal wins, so Term must not overwrite `invalid_payload`.
 func TestTermDoesNotOverwriteHandlerClassification(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 	tracked := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}}, EventCreated, 5)
 
 	tracked.MarkTerminal(context.Background(), TerminalInvalidPayload)
@@ -105,7 +105,7 @@ func TestConsumeClassifiesOffTheDispatchPath(t *testing.T) {
 		&fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}},
 	}}
 	m, _ := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 	c.LoopStarted(context.Background())
 
 	var wg sync.WaitGroup

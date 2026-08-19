@@ -158,13 +158,3 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 		})
 	}
 }
-
-func TestConfig_ServiceName(t *testing.T) {
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
-	t.Setenv("OTEL_SERVICE_NAME", "room-service-canary")
-
-	cfg, err := env.ParseAs[config]()
-	require.NoError(t, err)
-	require.Equal(t, "room-service-canary", cfg.ServiceName)
-}

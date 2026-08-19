@@ -3384,7 +3384,7 @@ func terminalCountFor(t *testing.T, reason string, fn func(context.Context)) int
 	t.Helper()
 	m, reader := newTestBroadcastMetrics(t)
 	consumer := m.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: "broadcast-worker", Site: "s1",
+		Site:   "s1",
 		Stream: "MESSAGES-CANONICAL-s1", Consumer: "broadcast-worker",
 	})
 	tracked := consumer.Track(context.Background(), stubJSMsg{subject: "chat.msg.canonical.s1.created"}, natsmetrics.EventCreated, 5)

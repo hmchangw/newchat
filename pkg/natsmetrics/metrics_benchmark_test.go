@@ -16,10 +16,9 @@ var (
 func benchmarkConsumer() *Consumer {
 	metrics := New(noop.NewMeterProvider().Meter("benchmark"))
 	return metrics.Consumer(ConsumerConfig{
-		ServiceName: "benchmark-worker",
-		Site:        "site-a",
-		Stream:      "MESSAGES_CANONICAL_site-a",
-		Consumer:    "benchmark-worker",
+		Site:     "site-a",
+		Stream:   "MESSAGES_CANONICAL_site-a",
+		Consumer: "benchmark-worker",
 	})
 }
 

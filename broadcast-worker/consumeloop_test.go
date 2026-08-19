@@ -111,7 +111,7 @@ func TestConsume_PoisonMessageDoesNotBlockStream(t *testing.T) {
 
 	m, _ := newTestBroadcastMetrics(t)
 	consumer := m.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: "broadcast-worker", Site: "site-test",
+		Site:   "site-test",
 		Stream: "MESSAGES-CANONICAL-site-test", Consumer: "broadcast-worker",
 	})
 	consumer.LoopStarted(context.Background())
@@ -154,7 +154,7 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-metrics")
 	m, reader := newTestBroadcastMetrics(t)
 	consumer := m.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: "broadcast-worker", Site: "site-metrics",
+		Site:   "site-metrics",
 		Stream: "MESSAGES-CANONICAL-site-metrics", Consumer: "broadcast-worker",
 	})
 	consumer.LoopStarted(context.Background())
@@ -223,7 +223,7 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 	// The stream, subject and site carry a site id and a message body, but no
 	// message id, room id, account or subject may reach a label.
 	allowed := map[string]bool{
-		"service_name": true, "site": true, "stream": true,
+		"site": true, "stream": true,
 		"consumer": true, "event_type": true, "outcome": true, "reason": true,
 	}
 	for _, scope := range rm.ScopeMetrics {
