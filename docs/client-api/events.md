@@ -870,6 +870,11 @@ same-site room, depending on the deployment's room-subject routing mode (see
 [client-api.md §Subscriptions](../client-api.md#2-nats-subjects)). Subscribe to whichever
 subject you already use for that room's messages.
 
+**Failover override.** A client connected to a peer site MUST use
+`chat.room.{roomID}.event` for every room regardless of `crossSite`: the local root never
+crosses a gateway, so nothing would arrive on it. The server publishes globally for the
+duration of the outage and a grace window after recovery.
+
 | Field | Type | Notes |
 |---|---|---|
 | `type` | string | Always `"room_restricted"`. |
