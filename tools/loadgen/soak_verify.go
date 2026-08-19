@@ -22,6 +22,39 @@ const (
 	soakVerifyRPCError  soakVerifyClass = "rpc_error"
 )
 
+// soakVerifyField names the read-back field that disagreed. It is a metric
+// label, so the set is closed: a message_id/room_id/author mismatch is a
+// service-side correctness failure, while content/deleted usually means the
+// harness read a mutation the write path had not persisted yet, and the two
+// need different responses.
+type soakVerifyField = string
+
+const (
+	soakVerifyFieldNone       soakVerifyField = ""
+	soakVerifyFieldMessageID  soakVerifyField = "message_id"
+	soakVerifyFieldRoomID     soakVerifyField = "room_id"
+	soakVerifyFieldAuthor     soakVerifyField = "author"
+	soakVerifyFieldDeleted    soakVerifyField = "deleted"
+	soakVerifyFieldContent    soakVerifyField = "content"
+	soakVerifyFieldEditedAt   soakVerifyField = "edited_at"
+	soakVerifyFieldPagination soakVerifyField = "pagination"
+)
+
+var soakAllVerifyFields = [...]soakVerifyField{
+	soakVerifyFieldNone, soakVerifyFieldMessageID, soakVerifyFieldRoomID,
+	soakVerifyFieldAuthor, soakVerifyFieldDeleted, soakVerifyFieldContent,
+	soakVerifyFieldEditedAt, soakVerifyFieldPagination,
+}
+
+func validSoakVerifyField(field soakVerifyField) bool {
+	for _, known := range soakAllVerifyFields {
+		if field == known {
+			return true
+		}
+	}
+	return false
+}
+
 type soakVerifyConfig struct {
 	SiteID         string
 	PageLimit      int
@@ -49,8 +82,9 @@ type soakVerifyResult struct {
 	ExpectedAction soakRPCAction
 	RoomID         string
 	MessageID      string
-	Field          string
+	Field          soakVerifyField
 	RPCErrorClass  soakErrorClass
+	RPCErrorReason soakErrorReason
 	Retries        int
 	Pages          int
 	Latency        time.Duration
@@ -171,7 +205,7 @@ func (v *soakVerifier) VerifyByID(
 	result.Latency = v.now().Sub(startedAt)
 	result.Retries = rpcResult.Retries
 	if err != nil {
-		classifySoakVerifyRPCError(&result, rpcResult.ErrorClass)
+		classifySoakVerifyRPCError(&result, rpcResult.ErrorClass, rpcResult.ErrorReason)
 		v.record(&result)
 		return result
 	}
@@ -226,7 +260,7 @@ func (v *soakVerifier) VerifyHistory(
 		result.Retries += rpcResult.Retries
 		if err != nil {
 			result.Latency = totalLatency
-			classifySoakVerifyRPCError(&result, rpcResult.ErrorClass)
+			classifySoakVerifyRPCError(&result, rpcResult.ErrorClass, rpcResult.ErrorReason)
 			v.record(&result)
 			return result
 		}
@@ -250,7 +284,7 @@ func (v *soakVerifier) VerifyHistory(
 		oldest := oldestSoakVerifyMillis(response.Messages)
 		if before != nil && oldest >= *before {
 			result.Class = soakVerifyMismatch
-			result.Field = "pagination"
+			result.Field = soakVerifyFieldPagination
 			result.Latency = totalLatency
 			v.record(&result)
 			return result
@@ -286,8 +320,10 @@ func newSoakVerifyResult(
 func classifySoakVerifyRPCError(
 	result *soakVerifyResult,
 	class soakErrorClass,
+	reason soakErrorReason,
 ) {
 	result.RPCErrorClass = class
+	result.RPCErrorReason = reason
 	switch {
 	case class == soakErrorNotFound:
 		result.Class = soakVerifyMissing
@@ -308,25 +344,25 @@ func compareSoakVerifiedMessage(
 	switch {
 	case actual.MessageID != expected.ID:
 		result.Class = soakVerifyMismatch
-		result.Field = "message_id"
+		result.Field = soakVerifyFieldMessageID
 	case actual.RoomID != expected.RoomID:
 		result.Class = soakVerifyMismatch
-		result.Field = "room_id"
+		result.Field = soakVerifyFieldRoomID
 	case actual.Sender.Account != expected.Author:
 		result.Class = soakVerifyMismatch
-		result.Field = "author"
+		result.Field = soakVerifyFieldAuthor
 	case actual.Deleted != expected.Deleted:
 		result.Class = soakVerifyMismatch
-		result.Field = "deleted"
+		result.Field = soakVerifyFieldDeleted
 	case !expected.Deleted && actual.Msg != expected.Content:
 		result.Class = soakVerifyMismatch
-		result.Field = "content"
+		result.Field = soakVerifyFieldContent
 	case expected.Edited && actual.EditedAt == nil:
 		result.Class = soakVerifyMismatch
-		result.Field = "edited_at"
+		result.Field = soakVerifyFieldEditedAt
 	default:
 		result.Class = soakVerifyOK
-		result.Field = ""
+		result.Field = soakVerifyFieldNone
 	}
 }
 

@@ -161,6 +161,69 @@ func parseSoakErrorEnvelope(data []byte) error {
 // become an alias for it.
 const soakReasonResponseTooLarge errcode.Reason = "response_too_large"
 
+// soakErrorReason is the service-supplied errcode reason, kept beside the
+// collapsed class because the two forbidden answers a soak read can get need
+// opposite responses: "not_subscribed" means the harness verified with an
+// account the membership lane had already removed, "outside_access_window"
+// means that account rejoined and its own older message now predates its
+// history window.
+type soakErrorReason = string
+
+// soakErrorReasonUnknown absorbs any reason not listed below. errcode's own
+// registry lives in a _test.go file and cannot be imported, so this list is
+// maintained here; the unknown bucket counting up is the signal to extend it.
+const soakErrorReasonUnknown soakErrorReason = "unknown"
+
+var soakKnownErrorReasons = map[errcode.Reason]soakErrorReason{
+	errcode.MessageNotSubscribed:           string(errcode.MessageNotSubscribed),
+	errcode.MessageOutsideAccessWindow:     string(errcode.MessageOutsideAccessWindow),
+	errcode.MessageLargeRoomPostRestricted: string(errcode.MessageLargeRoomPostRestricted),
+	errcode.PinDisabled:                    string(errcode.PinDisabled),
+	errcode.PinLimitReached:                string(errcode.PinLimitReached),
+	errcode.PinRoomTooLarge:                string(errcode.PinRoomTooLarge),
+	errcode.RoomMaxSizeReached:             string(errcode.RoomMaxSizeReached),
+	errcode.RoomNotMember:                  string(errcode.RoomNotMember),
+	errcode.RoomNotOwner:                   string(errcode.RoomNotOwner),
+	errcode.RoomLastOwnerCannotLeave:       string(errcode.RoomLastOwnerCannotLeave),
+	errcode.RoomLastMemberCannotRemove:     string(errcode.RoomLastMemberCannotRemove),
+	errcode.RoomTargetNotMember:            string(errcode.RoomTargetNotMember),
+	errcode.RoomNonChannelOperation:        string(errcode.RoomNonChannelOperation),
+	errcode.RoomReadReceiptsUnavailable:    string(errcode.RoomReadReceiptsUnavailable),
+	errcode.RoomUserNotFound:               string(errcode.RoomUserNotFound),
+	errcode.RoomSelfDM:                     string(errcode.RoomSelfDM),
+	errcode.UserSubscriptionNotFound:       string(errcode.UserSubscriptionNotFound),
+	soakReasonResponseTooLarge:             string(soakReasonResponseTooLarge),
+}
+
+func validSoakErrorReason(reason soakErrorReason) bool {
+	if reason == "" || reason == soakErrorReasonUnknown {
+		return true
+	}
+	for _, known := range soakKnownErrorReasons {
+		if reason == known {
+			return true
+		}
+	}
+	return false
+}
+
+// classifySoakRPCReason returns the reason the service tagged the failure with,
+// or "" when the error carries no errcode envelope (a transport timeout has no
+// reason to report).
+func classifySoakRPCReason(err error) soakErrorReason {
+	if err == nil {
+		return ""
+	}
+	var envelope *errcode.Error
+	if !errors.As(err, &envelope) || envelope.Reason == "" {
+		return ""
+	}
+	if known, ok := soakKnownErrorReasons[envelope.Reason]; ok {
+		return known
+	}
+	return soakErrorReasonUnknown
+}
+
 func classifySoakRPCError(err error) soakErrorClass {
 	if err == nil {
 		return ""
@@ -263,6 +326,7 @@ type soakRPCResult struct {
 	Attempts          int
 	Retries           int
 	ErrorClass        soakErrorClass
+	ErrorReason       soakErrorReason
 	AmbiguityResolved bool
 }
 
@@ -346,19 +410,23 @@ func (c *soakRPCClient) Call(
 				}
 			}
 			result.ErrorClass = ""
+			result.ErrorReason = ""
 			return result, nil
 		}
 
 		class := classifySoakRPCError(requestErr)
 		result.ErrorClass = class
+		result.ErrorReason = classifySoakRPCReason(requestErr)
 		retry, resolved, resolveErr := c.shouldRetryAmbiguous(ctx, request, class)
 		if resolveErr != nil {
 			result.ErrorClass = classifySoakRPCError(resolveErr)
+			result.ErrorReason = classifySoakRPCReason(resolveErr)
 			return result, fmt.Errorf("resolve %s ambiguity: %w", request.Action, resolveErr)
 		}
 		if resolved {
 			result.AmbiguityResolved = true
 			result.ErrorClass = ""
+			result.ErrorReason = ""
 			return result, nil
 		}
 		if request.RetryMode != soakRetryAmbiguous {

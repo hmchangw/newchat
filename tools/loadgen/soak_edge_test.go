@@ -678,7 +678,7 @@ func TestClassifySoakVerifyRPCError_CoversTerminalAndTransientClasses(t *testing
 	}
 	for _, tt := range tests {
 		result := soakVerifyResult{}
-		classifySoakVerifyRPCError(&result, tt.class)
+		classifySoakVerifyRPCError(&result, tt.class, "")
 		assert.Equal(t, tt.want, result.Class)
 		assert.Equal(t, tt.class, result.RPCErrorClass)
 	}

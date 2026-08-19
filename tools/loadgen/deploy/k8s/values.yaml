@@ -30,6 +30,23 @@ metrics:
     prometheus.io/path: /metrics
     prometheus.io/port: "9099"
 
+# Profiling is off by default: a soak pod being OOM-killed cannot be
+# port-forwarded in time, so heapProfileDir (point it at the ledger mount) is
+# what makes a profile survive the kill. pprofAddr opens a separate listener so
+# turning it on never widens what the Prometheus scrape target exposes.
+profiling:
+  pprofAddr: ""
+  heapProfileDir: ""
+  heapProfileInterval: 5m
+  heapProfileKeep: 3
+
+# Go does not read the container memory limit, so without goMemLimit the GC
+# lets the heap grow to roughly twice the live set before collecting and the
+# pod is killed instead. Set it below resources.limits.memory.
+runtime:
+  goMemLimit: ""
+  goGC: ""
+
 ledger:
   enabled: true
   # The run ID owns the seeded topology; the epoch owns the evidence journal.
@@ -42,6 +59,11 @@ ledger:
   size: 20Gi
   mountPath: /var/lib/loadgen/ledger
   capacity: "200000"
+  # Both bound the journal. The finalize count alone is not enough: a run whose
+  # operations all outlive their deadline never reaches it, and a restart loses
+  # the count, so the file would only ever grow.
+  compactEvery: "10000"
+  maxBytes: "536870912"
   reconcileDeadline: 10m
   reconcileRetryInterval: 1s
   reconcileReadShare: 0.5

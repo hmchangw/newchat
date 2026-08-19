@@ -15,6 +15,26 @@ func (j *failureJournalMetrics) Replay() ([]failureLedgerEvent, error) {
 	return j.journal.Replay()
 }
 
+// ReplayEach forwards the streaming recovery path when the wrapped journal has
+// one; a wrapper that swallowed it would silently reinstate buffering replay.
+func (j *failureJournalMetrics) ReplayEach(emit func(*failureLedgerEvent) error) error {
+	if streaming, ok := j.journal.(streamingFailureJournal); ok {
+		return streaming.ReplayEach(emit)
+	}
+	// A journal that cannot stream still has to recover; buffering here keeps
+	// the old behaviour for it rather than failing the run.
+	events, err := j.journal.Replay()
+	if err != nil {
+		return err
+	}
+	for i := range events {
+		if err := emit(&events[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (j *failureJournalMetrics) Append(event *failureLedgerEvent) error {
 	startedAt := time.Now()
 	err := j.journal.Append(event)

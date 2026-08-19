@@ -347,6 +347,14 @@ const (
 	failureLedgerEventInvariant  = "accounting_invariant"
 )
 
+// streamingFailureJournal is the recovery path a journal should offer: the
+// buffering Replay holds the whole file, which is what turns a restart of a
+// long-lived run into an OOM. Journals that cannot stream still work through
+// Replay, so this stays an optional capability rather than a breaking change.
+type streamingFailureJournal interface {
+	ReplayEach(func(*failureLedgerEvent) error) error
+}
+
 type failureJournal interface {
 	Replay() ([]failureLedgerEvent, error)
 	Append(*failureLedgerEvent) error
@@ -356,7 +364,12 @@ type failureJournal interface {
 }
 
 type failureLedgerConfig struct {
-	Capacity         int
+	Capacity int
+	// MaxJournalBytes reclaims the journal once it passes this size, regardless
+	// of how many operations have finalized. Waiting on a finalize count alone
+	// means a run whose operations all outlive their deadline never compacts,
+	// and the file grows without bound. Zero disables the size trigger.
+	MaxJournalBytes  int64
 	CompactEvery     int
 	Journal          failureJournal
 	Now              func() time.Time
@@ -387,11 +400,12 @@ type failureLedger struct {
 	mu         sync.Mutex
 	startingWG sync.WaitGroup
 
-	capacity     int
-	compactEvery int
-	journal      failureJournal
-	now          func() time.Time
-	recorder     failureLedgerRecorder
+	capacity        int
+	compactEvery    int
+	maxJournalBytes int64
+	journal         failureJournal
+	now             func() time.Time
+	recorder        failureLedgerRecorder
 
 	active                map[string]*failureOperation
 	starting              map[string]struct{}
@@ -405,6 +419,7 @@ type failureLedger struct {
 	invalidReason         string
 	closed                bool
 	finalizedSinceCompact int
+	recoveredEvents       int
 }
 
 // failureVerifyQueue orders unclaimed operations by their next verification
@@ -454,26 +469,23 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 		cfg.CompactEvery = 10000
 	}
 	ledger := &failureLedger{
-		capacity:     cfg.Capacity,
-		compactEvery: cfg.CompactEvery,
-		journal:      cfg.Journal,
-		now:          cfg.Now,
-		recorder:     cfg.Recorder,
-		active:       make(map[string]*failureOperation, cfg.Capacity),
-		starting:     make(map[string]struct{}),
-		verifyQueues: make(map[string]*failureVerifyQueue),
-		results:      make(map[failureResult]uint64),
-		observations: make(map[failureObserver]map[failureObservation]uint64),
-		notSent:      make(map[string]struct{}),
+		capacity:        cfg.Capacity,
+		compactEvery:    cfg.CompactEvery,
+		maxJournalBytes: max(0, cfg.MaxJournalBytes),
+		journal:         cfg.Journal,
+		now:             cfg.Now,
+		recorder:        cfg.Recorder,
+		active:          make(map[string]*failureOperation, cfg.Capacity),
+		starting:        make(map[string]struct{}),
+		verifyQueues:    make(map[string]*failureVerifyQueue),
+		results:         make(map[failureResult]uint64),
+		observations:    make(map[failureObserver]map[failureObservation]uint64),
+		notSent:         make(map[string]struct{}),
 	}
 	if cfg.Journal == nil {
 		return ledger, nil
 	}
-	events, err := cfg.Journal.Replay()
-	if err != nil {
-		return nil, fmt.Errorf("replay failure ledger journal: %w", err)
-	}
-	if err := ledger.replay(events); err != nil {
+	if err := ledger.recoverFrom(cfg.Journal); err != nil {
 		return nil, err
 	}
 	if cfg.ObserverContract != nil {
@@ -491,9 +503,21 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 			return nil, fmt.Errorf("validate failure observer contract; start a new SOAK_RUN_ID: %w", err)
 		}
 	}
+	upgraded := false
 	if upgrade, ok := cfg.Journal.(interface{ NeedsUpgrade() bool }); ok && upgrade.NeedsUpgrade() {
 		if err := ledger.compactLocked(cfg.Now().UTC()); err != nil {
 			return nil, fmt.Errorf("upgrade legacy failure ledger journal: %w", err)
+		}
+		upgraded = true
+	}
+	// Reclaim the inherited journal once, before the run resumes. A journal that
+	// has been running for hours is mostly retired evidence, and nothing else
+	// reclaims it until CompactEvery more operations finalize — which a process
+	// that keeps restarting never reaches, so the file would grow on every
+	// restart and make the next recovery more expensive than the last.
+	if !upgraded && ledger.recoveredEvents > 0 {
+		if err := ledger.compactLocked(cfg.Now().UTC()); err != nil {
+			return nil, fmt.Errorf("reclaim recovered failure ledger journal: %w", err)
 		}
 	}
 	ledger.recovered = len(ledger.active)
@@ -1070,7 +1094,8 @@ func (l *failureLedger) finalizeLocked(
 		}
 	}
 	l.finalizedSinceCompact++
-	if l.journal != nil && len(l.starting) == 0 && l.finalizedSinceCompact >= l.compactEvery {
+	if l.journal != nil && len(l.starting) == 0 &&
+		(l.finalizedSinceCompact >= l.compactEvery || l.journalOverBudgetLocked()) {
 		if err := l.compactLocked(at); err != nil {
 			l.invalidateLocked("wal")
 			return fmt.Errorf("compact failure ledger: %w", err)
@@ -1147,6 +1172,64 @@ func (l *failureLedger) appendLocked(event *failureLedgerEvent) error {
 	return nil
 }
 
+// recoverFrom rebuilds ledger state from the journal, streaming the records
+// when the journal supports it. Streaming is what keeps a restart affordable: a
+// journal that has been growing for hours is mostly retired evidence, and
+// reading it into one slice costs roughly twice the file on the heap before the
+// surviving operations are even built.
+func (l *failureLedger) recoverFrom(journal failureJournal) error {
+	dropped := make(map[string]struct{})
+	if streaming, ok := journal.(streamingFailureJournal); ok {
+		index := 0
+		if err := streaming.ReplayEach(func(event *failureLedgerEvent) error {
+			err := l.replayEvent(index, event, dropped)
+			index++
+			return err
+		}); err != nil {
+			return fmt.Errorf("replay failure ledger journal: %w", err)
+		}
+		l.recoveredEvents = index
+		return l.finishReplay()
+	}
+	events, err := journal.Replay()
+	if err != nil {
+		return fmt.Errorf("replay failure ledger journal: %w", err)
+	}
+	l.recoveredEvents = len(events)
+	return l.replay(events)
+}
+
+// MaybeCompact reclaims the journal when it has outgrown its byte budget. The
+// caller drives it on a timer so a run that finalizes nothing still bounds the
+// file; it is a no-op when no budget is configured.
+func (l *failureLedger) MaybeCompact(at time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.ensureOpen(); err != nil {
+		return err
+	}
+	if !l.journalOverBudgetLocked() {
+		return nil
+	}
+	if err := l.compactLocked(at); err != nil {
+		l.invalidateLocked("wal")
+		return fmt.Errorf("compact failure ledger: %w", err)
+	}
+	l.finalizedSinceCompact = 0
+	return nil
+}
+
+// journalOverBudgetLocked also enforces the safety gate compaction has always
+// had: an operation between claiming its slot and having its start record
+// written is not in the active set a compaction rewrites from, so compacting
+// now would erase it.
+func (l *failureLedger) journalOverBudgetLocked() bool {
+	if l.journal == nil || l.maxJournalBytes <= 0 || len(l.starting) != 0 {
+		return false
+	}
+	return l.journal.Size() >= l.maxJournalBytes
+}
+
 func (l *failureLedger) replay(events []failureLedgerEvent) error {
 	// A retained volume outlives any single configuration, so a journal can
 	// legitimately hold more unresolved operations than the current capacity
@@ -1154,7 +1237,22 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 	// would crash-loop the pod with no way out.
 	dropped := make(map[string]struct{})
 	for index := range events {
-		event := &events[index]
+		if err := l.replayEvent(index, &events[index], dropped); err != nil {
+			return err
+		}
+	}
+	return l.finishReplay()
+}
+
+// replayEvent applies one journal record. It is split out of replay so recovery
+// can drive it straight off the reader and keep no more than one record alive
+// at a time.
+func (l *failureLedger) replayEvent(
+	index int,
+	event *failureLedgerEvent,
+	dropped map[string]struct{},
+) error {
+	{
 		switch event.Type {
 		case failureLedgerEventCheckpoint:
 			if index != 0 {
@@ -1194,14 +1292,14 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 			if len(l.active) >= l.capacity {
 				dropped[operation.ID] = struct{}{}
 				l.dropped++
-				continue
+				return nil
 			}
 			operation.nextVerifyAt = operation.VerifyAfter
 			operation.claimed = false
 			l.active[operation.ID] = operation
 		case failureLedgerEventActivated:
 			if _, skipped := dropped[event.OperationID]; skipped {
-				continue
+				return nil
 			}
 			operation := l.active[event.OperationID]
 			if operation == nil {
@@ -1217,7 +1315,7 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 			operation.LifecycleState = failureOperationActive
 		case failureLedgerEventObserved:
 			if _, skipped := dropped[event.OperationID]; skipped {
-				continue
+				return nil
 			}
 			operation := l.active[event.OperationID]
 			if operation == nil {
@@ -1246,7 +1344,7 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 			if _, skipped := dropped[event.OperationID]; skipped {
 				delete(dropped, event.OperationID)
 				l.dropped--
-				continue
+				return nil
 			}
 			operation, exists := l.active[event.OperationID]
 			if !exists {
@@ -1270,6 +1368,13 @@ func (l *failureLedger) replay(events []failureLedgerEvent) error {
 			return fmt.Errorf("replay failure ledger event %d: unknown type %q", index, event.Type)
 		}
 	}
+	return nil
+}
+
+// finishReplay runs once the last record has been applied: it reports whatever
+// the capacity forced us to drop and queues the surviving operations for
+// verification.
+func (l *failureLedger) finishReplay() error {
 	if l.dropped > 0 {
 		slog.Warn(
 			"failure ledger dropped recovered operations over capacity",
@@ -1581,12 +1686,30 @@ func openFailureWAL(path string) (*fileFailureWAL, error) {
 	}, nil
 }
 
+// Replay buffers the whole journal. It exists for tests and for callers that
+// genuinely want every record at once; recovery uses ReplayEach so a journal
+// that has been growing for hours does not have to fit in memory to be read.
 func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
+	events := make([]failureLedgerEvent, 0)
+	if err := w.ReplayEach(func(event *failureLedgerEvent) error {
+		events = append(events, *event)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// ReplayEach hands each durable record to emit in write order and keeps none of
+// them, so recovery costs what the surviving operations cost rather than what
+// the file weighs. A torn final record is repaired exactly as before, after the
+// last intact record has been emitted.
+func (w *fileFailureWAL) ReplayEach(emit func(*failureLedgerEvent) error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	file, err := os.Open(w.path)
 	if err != nil {
-		return nil, fmt.Errorf("open failure WAL for replay: %w", err)
+		return fmt.Errorf("open failure WAL for replay: %w", err)
 	}
 	closed := false
 	defer func() {
@@ -1595,7 +1718,6 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 		}
 	}()
 
-	events := make([]failureLedgerEvent, 0)
 	reader := bufio.NewReader(file)
 	line := 0
 	headerSeen := false
@@ -1612,13 +1734,13 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 			break
 		}
 		if readErr != nil {
-			return nil, fmt.Errorf("read failure WAL line %d: %w", line+1, readErr)
+			return fmt.Errorf("read failure WAL line %d: %w", line+1, readErr)
 		}
 		line++
 		var header failureWALHeader
 		if err := json.Unmarshal(encoded, &header); err == nil && header.RecordType != "" {
 			if line != 1 || header.RecordType != "header" || header.SchemaVersion != failureWALSchemaVersion {
-				return nil, fmt.Errorf("decode failure WAL line %d: unsupported header version %d", line, header.SchemaVersion)
+				return fmt.Errorf("decode failure WAL line %d: unsupported header version %d", line, header.SchemaVersion)
 			}
 			durableBytes += int64(len(encoded))
 			headerSeen = true
@@ -1630,53 +1752,55 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 		}
 		var event failureLedgerEvent
 		if err := json.Unmarshal(encoded, &event); err != nil {
-			return nil, fmt.Errorf("decode failure WAL line %d: %w", line, err)
+			return fmt.Errorf("decode failure WAL line %d: %w", line, err)
 		}
 		switch {
 		case headerSeen && event.SchemaVersion != failureWALSchemaVersion:
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"decode failure WAL line %d: versioned WAL requires record version %d",
 				line,
 				failureWALSchemaVersion,
 			)
 		case !headerSeen && event.SchemaVersion != 0:
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"decode failure WAL line %d: record version %d requires a versioned header",
 				line,
 				event.SchemaVersion,
 			)
 		}
-		events = append(events, event)
+		if err := emit(&event); err != nil {
+			return err
+		}
 		durableBytes += int64(len(encoded))
 	}
 	if line == 0 && !headerSeen {
 		w.legacy = false
 	}
 	if err := file.Close(); err != nil {
-		return nil, fmt.Errorf("close replayed failure WAL: %w", err)
+		return fmt.Errorf("close replayed failure WAL: %w", err)
 	}
 	closed = true
 	if tornFinalRecord {
 		if err := w.file.Close(); err != nil {
-			return nil, fmt.Errorf("close failure WAL before repair: %w", err)
+			return fmt.Errorf("close failure WAL before repair: %w", err)
 		}
 		w.file = nil
 		if err := os.Truncate(w.path, durableBytes); err != nil {
-			return nil, w.reopenAfterCompactFailure(
+			return w.reopenAfterCompactFailure(
 				fmt.Errorf("truncate torn failure WAL record: %w", err),
 			)
 		}
 		reopened, err := os.OpenFile(w.path, os.O_RDWR|os.O_APPEND, 0o600)
 		if err != nil {
-			return nil, fmt.Errorf("reopen repaired failure WAL: %w", err)
+			return fmt.Errorf("reopen repaired failure WAL: %w", err)
 		}
 		w.file = reopened
 		if err := w.file.Sync(); err != nil {
-			return nil, fmt.Errorf("sync repaired failure WAL: %w", err)
+			return fmt.Errorf("sync repaired failure WAL: %w", err)
 		}
 		w.size = durableBytes
 	}
-	return events, nil
+	return nil
 }
 
 func (w *fileFailureWAL) NeedsUpgrade() bool {
