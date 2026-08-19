@@ -369,7 +369,12 @@ type failureLedgerConfig struct {
 	// of how many operations have finalized. Waiting on a finalize count alone
 	// means a run whose operations all outlive their deadline never compacts,
 	// and the file grows without bound. Zero disables the size trigger.
-	MaxJournalBytes  int64
+	MaxJournalBytes int64
+	// ExpireBatch bounds one sweep. The sweep holds the ledger lock while it
+	// writes two or three journal records per expired operation, so an unbounded
+	// pass over a large backlog stalls every lane at once. Zero leaves it
+	// unbounded.
+	ExpireBatch      int
 	CompactEvery     int
 	Journal          failureJournal
 	Now              func() time.Time
@@ -403,6 +408,7 @@ type failureLedger struct {
 	capacity        int
 	compactEvery    int
 	maxJournalBytes int64
+	expireBatch     int
 	journal         failureJournal
 	now             func() time.Time
 	recorder        failureLedgerRecorder
@@ -472,6 +478,7 @@ func newFailureLedger(cfg failureLedgerConfig) (*failureLedger, error) {
 		capacity:        cfg.Capacity,
 		compactEvery:    cfg.CompactEvery,
 		maxJournalBytes: max(0, cfg.MaxJournalBytes),
+		expireBatch:     max(0, cfg.ExpireBatch),
 		journal:         cfg.Journal,
 		now:             cfg.Now,
 		recorder:        cfg.Recorder,
@@ -826,6 +833,9 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 	}
 	finalized := 0
 	for _, operation := range l.active {
+		if l.expireBatch > 0 && finalized >= l.expireBatch {
+			break
+		}
 		if now.Before(operation.Deadline) {
 			continue
 		}

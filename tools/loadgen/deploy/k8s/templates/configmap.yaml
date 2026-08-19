@@ -81,6 +81,7 @@ data:
   SOAK_LEDGER_CAPACITY: {{ .Values.ledger.capacity | quote }}
   SOAK_LEDGER_COMPACT_EVERY: {{ .Values.ledger.compactEvery | quote }}
   SOAK_LEDGER_MAX_BYTES: {{ .Values.ledger.maxBytes | quote }}
+  SOAK_LEDGER_EXPIRE_BATCH: {{ .Values.ledger.expireBatch | quote }}
   SOAK_HEAP_PROFILE_DIR: {{ .Values.profiling.heapProfileDir | quote }}
   SOAK_HEAP_PROFILE_INTERVAL: {{ .Values.profiling.heapProfileInterval | quote }}
   SOAK_HEAP_PROFILE_KEEP: {{ .Values.profiling.heapProfileKeep | quote }}

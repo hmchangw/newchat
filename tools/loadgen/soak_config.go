@@ -86,8 +86,12 @@ type soakConfig struct {
 	// count alone is not enough: a run whose operations all outlive their
 	// deadline never reaches it, and a process that restarts first loses the
 	// count entirely, so the file would only ever grow.
-	LedgerCompactEvery     int           `env:"LEDGER_COMPACT_EVERY"             envDefault:"10000"`
-	LedgerMaxBytes         int64         `env:"LEDGER_MAX_BYTES"                 envDefault:"536870912"`
+	LedgerCompactEvery int   `env:"LEDGER_COMPACT_EVERY"             envDefault:"10000"`
+	LedgerMaxBytes     int64 `env:"LEDGER_MAX_BYTES"                 envDefault:"536870912"`
+	// LedgerExpireBatch bounds one expiry sweep. The sweep holds the ledger lock
+	// while it journals every operation it retires, so an unbounded pass over a
+	// large backlog stalls every lane at once.
+	LedgerExpireBatch      int           `env:"LEDGER_EXPIRE_BATCH"              envDefault:"1000"`
 	ReconcileDeadline      time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
 	ReconcileRetryInterval time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
 	ReconcileReadShare     float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
@@ -247,6 +251,9 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if cfg.LedgerMaxBytes < 0 {
 		return fmt.Errorf("SOAK_LEDGER_MAX_BYTES must not be negative")
+	}
+	if cfg.LedgerExpireBatch < 0 {
+		return fmt.Errorf("SOAK_LEDGER_EXPIRE_BATCH must not be negative")
 	}
 	if cfg.HeapProfileDir != "" {
 		if cfg.HeapProfileInterval <= 0 {

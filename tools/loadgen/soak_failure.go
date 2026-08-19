@@ -168,6 +168,7 @@ func openSoakFailureLedger(
 		Capacity:         cfg.LedgerCapacity,
 		CompactEvery:     cfg.LedgerCompactEvery,
 		MaxJournalBytes:  cfg.LedgerMaxBytes,
+		ExpireBatch:      cfg.LedgerExpireBatch,
 		Journal:          journal,
 		Now:              now,
 		Recorder:         newFailureLedgerPromRecorder(metrics),

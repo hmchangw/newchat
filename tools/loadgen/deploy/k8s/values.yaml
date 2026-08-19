@@ -64,6 +64,9 @@ ledger:
   # the count, so the file would only ever grow.
   compactEvery: "10000"
   maxBytes: "536870912"
+  # One sweep holds the ledger lock while it journals everything it retires, so
+  # an unbounded pass over a large backlog stalls every lane at once.
+  expireBatch: "1000"
   reconcileDeadline: 10m
   reconcileRetryInterval: 1s
   reconcileReadShare: 0.5
