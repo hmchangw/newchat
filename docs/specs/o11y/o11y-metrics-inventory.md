@@ -121,7 +121,7 @@ missing beyond shared cache/key counters.
 | broadcast-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`broadcast_worker_fanout_recipients`**, **`broadcast_worker_recipient_deliveries_total`** | E2E-key hits |
 | notification-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`notification_worker_outcomes_total`** | — |
 | outbox-worker | — | — | — | — | spans | — | — | forwarded/dropped/retried events by destination and type |
-| search-sync-worker | — | — | — | — | spans (Fetch) | spans | — | bulk actions/flush, index vs delete, ES failures |
+| search-sync-worker | — | — | — | — | spans (Fetch) | spans | **`search_sync_worker_bulk_flush_duration_seconds`, `search_sync_worker_bulk_flush_actions`, `search_sync_worker_bulk_item_failures_total`, `search_sync_worker_messages_total`, `search_sync_worker_parent_resolve_duration_seconds`** (all labeled by `collection`) | (bulk outcomes covered 2026-08-19) |
 | search-service | — | ✅ | ✅ | — | spans | spans | **`search_service_requests_total`, `search_service_request_duration_seconds`, `search_service_es_duration_seconds`** | (well covered after request traffic) |
 | room-service | — | ✅ | ✅ | ✅ | spans + `chat_nats_*` | — | — | room create/join/leave outcomes |
 | room-worker | — | ✅ | ✅ | ✅ | spans + `chat_nats_*` | — | shared `cache_*_total`, `room_key_*_total` | member-add results, roomkey distributions, vault ops |
@@ -351,8 +351,8 @@ these exporters there (and to prod IaC) to cover Layer C.
    add to `docker-local/compose.o11y.yaml` + prod. *Infra, not app code.*
 2. **Hot-path domain counters (Layer B).** *Mostly done (2026-08-14).*
    Gatekeeper, message-worker, broadcast, and notification now own domain
-   counters (§2 table). Still open: **search-sync bulk outcomes**, and
-   broadcast's E2E-key hits.
+   counters (§2 table). Search-sync bulk outcomes closed 2026-08-19
+   (`search_sync_worker_*`, §2 table). Still open: broadcast's E2E-key hits.
 3. **ES client metrics (Layer A gap).** The NATS half of this item is closed —
    see §2.1 for the application-side families that replaced it. `searchengine`
    still emits spans but no metrics; decide whether app-side ES latency
