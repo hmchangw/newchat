@@ -506,15 +506,11 @@ func (s *MongoStore) DeleteThreadSubscriptions(ctx context.Context, roomID strin
 	return nil
 }
 
-// BulkCreateSubscriptions upserts each sub idempotently, keyed on
-// (roomId, u.account). Every field except joinedAt goes in $setOnInsert, so on
-// collision (a JetStream redelivery, or a migration replay) the persisted sub —
-// including its read state (lastSeenAt), roles and section — is preserved.
-// joinedAt is in $set so a replay converges it to the event's value: this
-// self-corrects a migrated sub whose joinedAt was stamped before the
-// createdDateTime fix. joinedAt is deterministic from the event/chat and is not
-// read-state, so overwriting it every write is safe. (A field cannot appear in
-// both $setOnInsert and $set, hence the marshal-then-remove.)
+// BulkCreateSubscriptions upserts each sub on (roomId, u.account). Everything but
+// joinedAt is $setOnInsert, so a redelivery/replay preserves the existing sub
+// (read state, roles, section). joinedAt is $set so a replay converges it —
+// self-correcting a sub stamped before the createdDateTime fix; it's deterministic
+// and not read-state, so overwriting is safe.
 func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error {
 	if len(subs) == 0 {
 		return nil
@@ -538,8 +534,8 @@ func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.
 	return nil
 }
 
-// bsonMExcept marshals v to a bson.M with the given top-level keys removed, so a
-// field can move from $setOnInsert to $set without a Mongo path conflict.
+// bsonMExcept marshals v to a bson.M without the given keys — lets a field move
+// from $setOnInsert to $set without a Mongo path conflict.
 func bsonMExcept(v any, keys ...string) (bson.M, error) {
 	raw, err := bson.Marshal(v)
 	if err != nil {
