@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { PAGE_LIMIT } from '@/api'
@@ -2078,6 +2078,132 @@ describe('stale-session guards (generation counter)', () => {
       expect(screen.getByTestId('count').textContent).toBe('0')
     } finally {
       currentRoomKeysMock = prevMock
+    }
+  })
+})
+
+describe('RoomEventsProvider message.read visibility gating', () => {
+  beforeEach(() => vi.clearAllMocks())
+  // Restore the property only — firing the event here would drive a
+  // mark-read in a still-mounted provider outside act().
+  afterEach(() => defineVisibility('visible'))
+
+  /** jsdom exposes document.visibilityState as a read-only getter, so drive
+   *  it by redefining the property. */
+  function defineVisibility(state) {
+    Object.defineProperty(document, 'visibilityState', { value: state, configurable: true })
+  }
+
+  /** Redefine + fire the event, as a real minimize / restore does. */
+  function setVisibility(state) {
+    defineVisibility(state)
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  function readSubjectFor(roomId, siteId = 'site-A') {
+    return `chat.user.alice.request.room.${roomId}.${siteId}.message.read`
+  }
+
+  function setupWithRooms(rooms) {
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      return Promise.resolve({})
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    return { nats: mockNats({ request, subscribe }), request, handlers }
+  }
+
+  const ROOMS = [
+    { id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+  ]
+
+  function newMessage(handlers, id) {
+    handlers.get('chat.room.g1.event')({
+      type: 'new_message',
+      roomId: 'g1',
+      message: { id, roomId: 'g1', sender: { account: 'bob' }, content: 'hi', createdAt: '2026-04-17T12:00:00Z' },
+    })
+  }
+
+  async function mountWithActiveRoom(nats, handlers) {
+    let setActive
+    function Probe() {
+      const { setActiveRoom } = useRoomSummaries()
+      setActive = setActiveRoom
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+    act(() => { setActive('g1') })
+  }
+
+  it('does NOT fire message.read for an active-room message while the document is hidden', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { nats, request, handlers } = setupWithRooms(ROOMS)
+      await mountWithActiveRoom(nats, handlers)
+
+      setVisibility('hidden')
+      request.mockClear()
+
+      act(() => { newMessage(handlers, 'm1') })
+      await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+
+      const subjects = request.mock.calls.map((c) => c[0])
+      expect(subjects.some((s) => s.endsWith('.message.read'))).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does NOT fire a pending trailing message.read when the document goes hidden mid-debounce', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { nats, request, handlers } = setupWithRooms(ROOMS)
+      await mountWithActiveRoom(nats, handlers)
+      request.mockClear()
+
+      // Arrives while visible, so the trailing read is scheduled…
+      act(() => { newMessage(handlers, 'm1') })
+      await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+      // …but the window is minimized before it fires.
+      setVisibility('hidden')
+      await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+
+      const subjects = request.mock.calls.map((c) => c[0])
+      expect(subjects.some((s) => s.endsWith('.message.read'))).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('fires message.read once for the active room when the document becomes visible again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { nats, request, handlers } = setupWithRooms(ROOMS)
+      await mountWithActiveRoom(nats, handlers)
+
+      setVisibility('hidden')
+      act(() => { newMessage(handlers, 'm1') })
+      await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+      request.mockClear()
+
+      setVisibility('visible')
+
+      // waitFor is act-wrapped, so the ROOM_READ_SYNCED dispatch that
+      // markRoomRead resolves into is settled before the assertion lands.
+      await waitFor(() => {
+        const reads = request.mock.calls.filter((c) => c[0] === readSubjectFor('g1'))
+        expect(reads).toHaveLength(1)
+      })
+    } finally {
+      vi.useRealTimers()
     }
   })
 })

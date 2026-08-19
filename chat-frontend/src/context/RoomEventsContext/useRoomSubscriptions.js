@@ -19,6 +19,14 @@ import {
  *  the server's lastSeenAt for the active user stays current. */
 const MARK_READ_DEBOUNCE_MS = 500
 
+/** Whether the window is actually in front of the user. A hidden window
+ *  (minimized, background tab) must NOT auto-mark its open room read —
+ *  those messages were never seen, and marking them read server-side
+ *  hides them from the unread badge for good. */
+function isDocumentVisible() {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden'
+}
+
 /**
  * Owns every backend subscription + the initial-room-list fetch that
  * keeps RoomEventsContext.state in sync with the server, AND owns the
@@ -145,6 +153,15 @@ export function useRoomSubscriptions(
       dispatch(action)
     }
 
+    // Fire the `message.read` RPC for one room now. The room's site is
+    // resolved at fire time so a trailing read can't carry a stale one.
+    const markReadNow = (roomId) => {
+      const summary = stateRef.current.summaries.find((r) => r.id === roomId)
+      markRoomRead(natsRef.current, { roomId, siteId: summary?.siteId ?? user.siteId }).then((ok) => {
+        if (ok) safeDispatch({ type: 'ROOM_READ_SYNCED' })
+      })
+    }
+
     // Schedule a trailing `message.read` for the active room with a
     // 500ms debounce. A burst of N messages in a chatty room produces
     // ONE RPC at the end of the burst instead of N. If the user
@@ -156,15 +173,14 @@ export function useRoomSubscriptions(
     // still mark the room read or the badge counts the room you're in.
     const scheduleMarkActiveRead = (evtRoomId) => {
       if (!evtRoomId) return
+      if (!isDocumentVisible()) return
       if (stateRef.current.activeRoomId !== evtRoomId) return
-      const summary = stateRef.current.summaries.find((r) => r.id === evtRoomId)
-      const siteId = summary?.siteId ?? user.siteId
       // Clear any prior pending timer FIRST, then write the new pending
       // entry. Defensive ordering: if future code ever introduces async
       // work between these two lines, the prior timer can't race with
       // the new pending entry it was never meant to operate on.
       if (markReadTimeoutRef.current) clearTimeout(markReadTimeoutRef.current)
-      pendingMarkReadRef.current = { roomId: evtRoomId, siteId }
+      pendingMarkReadRef.current = { roomId: evtRoomId }
       markReadTimeoutRef.current = setTimeout(() => {
         markReadTimeoutRef.current = null
         const pending = pendingMarkReadRef.current
@@ -175,9 +191,10 @@ export function useRoomSubscriptions(
         // mark-read for a room the user has already left.
         if (cancelledRef.current) return
         if (stateRef.current.activeRoomId !== pending.roomId) return
-        markRoomRead(natsRef.current, pending).then((ok) => {
-          if (ok) safeDispatch({ type: 'ROOM_READ_SYNCED' })
-        })
+        // Re-check: the window may have been hidden mid-debounce, in which
+        // case the user never saw these messages.
+        if (!isDocumentVisible()) return
+        markReadNow(pending.roomId)
       }, MARK_READ_DEBOUNCE_MS)
     }
 
@@ -573,8 +590,18 @@ export function useRoomSubscriptions(
         console.warn('sidebar bucket bootstrap failed:', err?.message ?? err)
       })
 
+    // Coming back to the front clears the room the user is returning to —
+    // the reads that scheduleMarkActiveRead skipped while hidden.
+    const onVisibilityChange = () => {
+      if (!isDocumentVisible() || !isCurrent()) return
+      const roomId = stateRef.current.activeRoomId
+      if (roomId) markReadNow(roomId)
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
     return () => {
       cancelledRef.current = true
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       dmSub.unsubscribe()
       subUpdate.unsubscribe()
       metaUpdate.unsubscribe()
