@@ -117,6 +117,10 @@ export function useRoomSubscriptions(
   const channelSubs = useRef(new Map())
   const cancelledRef = useRef(false)
 
+  // The current login's sidebar-bootstrap closure, republished as `resync`.
+  // A ref so the returned callback identity stays stable across logins.
+  const resyncRef = useRef(null)
+
   // Trailing-edge debounce for the per-active-room mark-read RPC.
   // A chatty room (10+ msg/sec) would otherwise generate one
   // `message.read` RPC per inbound message; with this debounce a
@@ -542,7 +546,7 @@ export function useRoomSubscriptions(
     // no separate `rooms.list` RPC is needed. Per-bucket failures
     // degrade to empty (fetchSidebarBuckets uses Promise.allSettled);
     // a total failure leaves the sidebar empty.
-    fetchSidebarBuckets(liveNats)
+    const loadSidebar = () => fetchSidebarBuckets(liveNats)
       .then((buckets) => {
         // Generation check, not just cancelledRef: a slow bootstrap from a
         // prior login must not seed keys or open subs into the new session.
@@ -590,6 +594,13 @@ export function useRoomSubscriptions(
         console.warn('sidebar bucket bootstrap failed:', err?.message ?? err)
       })
 
+    // Published as `resync` so callers can re-pull the authoritative
+    // subscription state — the badge fold's drift backstop. Held in a ref so
+    // the exposed callback stays stable while pointing at the CURRENT login's
+    // closure (liveNats, generation) rather than a stale one.
+    resyncRef.current = loadSidebar
+    loadSidebar()
+
     // Coming back to the front clears the room the user is returning to —
     // the reads that scheduleMarkActiveRead skipped while hidden.
     const onVisibilityChange = () => {
@@ -616,6 +627,7 @@ export function useRoomSubscriptions(
         markReadTimeoutRef.current = null
       }
       pendingMarkReadRef.current = null
+      resyncRef.current = null
       // RESET runs even when cancelled — it IS the cleanup.
       dispatch({ type: 'RESET' })
     }
@@ -628,5 +640,9 @@ export function useRoomSubscriptions(
   // depend on this value don't churn on every render.
   return useMemo(() => ({
     currentGeneration: () => generationRef.current,
+    // Re-runs the full sidebar bootstrap against the live connection. Resolves
+    // once the refreshed state is dispatched; a no-op before the first effect
+    // run (or after teardown), so callers can fire it unconditionally.
+    resync: () => resyncRef.current?.() ?? Promise.resolve(),
   }), [])
 }

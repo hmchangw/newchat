@@ -207,8 +207,18 @@ when the app is *not* focused, so a focus-triggered reconcile would run only whe
 the badge stops mattering and never during the hours it matters most. Triggers:
 
 1. a periodic interval (5 min) that runs **regardless of visibility** — the primary trigger;
-2. `visibilitychange` → visible, and window focus — additional, not sufficient alone;
-3. mount.
+2. `visibilitychange` → visible, and window focus — additional, not sufficient alone.
+
+**Not on mount.** An earlier draft listed mount as a third trigger; it was
+dropped during implementation because the bucket bootstrap *is* an
+authoritative pull, so reconciling against it immediately only duplicates it
+(and mismatches spuriously while the bootstrap is still in flight).
+
+**Resync path.** `useRoomSubscriptions` exposes `resync()` — the sidebar
+bootstrap, extracted into a callable and held in a ref so the published
+identity stays stable while pointing at the current login's connection. It is
+reused rather than badge-specific: a resync also picks up rooms whose
+membership events the client missed.
 
 The fold itself keeps working while hidden (the websocket stays up and events
 keep arriving), so this is drift *detection*, not correctness. Hidden-window

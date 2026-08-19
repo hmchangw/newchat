@@ -17,6 +17,7 @@ import {
   fetchMessageHistory,
   fetchSurroundingMessages,
   markRoomRead,
+  getUnreadCount,
   createChatlistSection,
   renameChatlistSection,
   deleteChatlistSection,
@@ -169,6 +170,10 @@ interface RoomEventsContextValue {
   setActiveRoom: (roomId: string | null) => void
   jumpToMessage: (roomId: string, messageId: string) => Promise<void> | void
   resetToLiveTail: (roomId: string) => void
+  /** Re-pull the authoritative subscription state from user-service (the
+   *  three `subscription.list` buckets). The badge fold's drift backstop;
+   *  also picks up rooms whose membership events the client missed. */
+  resync: () => Promise<unknown>
   /** Register a thread-reply event handler; returns an unsubscribe fn. */
   registerThreadReplyHandler: (h: ThreadReplyHandler) => () => void
   /** Register a handler for thread-message edit/delete; returns an unsubscribe fn. */
@@ -216,7 +221,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
 
   // useRoomSubscriptions reads `.current` on the ref slots when room-channel
   // events arrive, fanning them to ThreadEvents.
-  const { currentGeneration } = useRoomSubscriptions(
+  const { currentGeneration, resync } = useRoomSubscriptions(
     nats,
     dispatch,
     stateRef,
@@ -368,6 +373,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       setActiveRoom,
       jumpToMessage,
       resetToLiveTail,
+      resync,
       registerThreadReplyHandler,
       registerThreadMessageMutationHandler,
     }),
@@ -379,6 +385,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       setActiveRoom,
       jumpToMessage,
       resetToLiveTail,
+      resync,
       registerThreadReplyHandler,
       registerThreadMessageMutationHandler,
     ],
@@ -428,11 +435,12 @@ export function useRoomEvents(roomId: string | null | undefined) {
 }
 
 export function useRoomSummaries() {
-  const { state, setActiveRoom, jumpToMessage } = useRoomEventsInternal()
+  const { state, setActiveRoom, jumpToMessage, resync } = useRoomEventsInternal()
   return {
     summaries: state.summaries,
     setActiveRoom,
     jumpToMessage,
+    resync,
     error: state.roomsError,
   }
 }
@@ -445,8 +453,15 @@ export function useRoomSummaries() {
  * every delta live, so recomputing it server-side per message was redundant.
  */
 export function useUnreadCount(): number {
-  const { state } = useRoomEventsInternal()
-  return useUnreadCountFold(state)
+  const nats = useNats() as unknown as Nats
+  const { state, resync } = useRoomEventsInternal()
+  // Drift backstop — see useUnreadCount's reconcile. getUnreadCount is the
+  // ONLY remaining subscription.count call site: periodic, not per-message.
+  const reconcile = useMemo(
+    () => ({ getCount: () => getUnreadCount(nats), resync }),
+    [nats, resync],
+  )
+  return useUnreadCountFold(state, reconcile)
 }
 
 export function useRoomDispatch(): RoomEventsContextValue['dispatch'] {

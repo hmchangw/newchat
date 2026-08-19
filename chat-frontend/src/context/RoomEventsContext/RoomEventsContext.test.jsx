@@ -2253,3 +2253,68 @@ describe('RoomEventsProvider unread badge is RPC-free', () => {
     await waitFor(() => expect(badge).toBe(1))
   })
 })
+
+describe('RoomEventsProvider resync', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function setup(roomsByCall) {
+    let call = 0
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms') {
+        const rooms = roomsByCall[Math.min(call++, roomsByCall.length - 1)]
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      }
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      return Promise.resolve({})
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    return { nats: mockNats({ request, subscribe }), request, handlers }
+  }
+
+  const R1 = [{ id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null }]
+  const R2 = [
+    { id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+    { id: 'g2', name: 'later', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+  ]
+
+  it('refetches the sidebar buckets and picks up a room the client had missed', async () => {
+    const { nats, request } = setup([R1, R2])
+    let resync
+    let summaries
+    function Probe() {
+      const ctx = useRoomSummaries()
+      resync = ctx.resync
+      summaries = ctx.summaries
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(summaries.map((s) => s.id)).toEqual(['g1']))
+
+    const before = request.mock.calls.filter((c) => c[0].endsWith('.subscription.list')).length
+    await act(async () => { await resync() })
+
+    const after = request.mock.calls.filter((c) => c[0].endsWith('.subscription.list')).length
+    expect(after).toBeGreaterThan(before)
+    await waitFor(() => expect(summaries.map((s) => s.id).sort()).toEqual(['g1', 'g2']))
+  })
+
+  it('subscribes to room events for a channel discovered by the resync', async () => {
+    const { nats, handlers } = setup([R1, R2])
+    let resync
+    function Probe() {
+      resync = useRoomSummaries().resync
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+    expect(handlers.has('chat.room.g2.event')).toBe(false)
+
+    await act(async () => { await resync() })
+
+    expect(handlers.has('chat.room.g2.event')).toBe(true)
+  })
+})
