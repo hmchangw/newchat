@@ -225,17 +225,18 @@ func (r *soakSearchReader) call(
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass
-		r.record(sample)
+		sample.ErrorReason = result.ErrorReason
+		r.record(&sample)
 		return fmt.Errorf("issue %s request: %w", request.Action, err)
 	}
 	if apply != nil {
 		apply(&sample)
 	}
-	r.record(sample)
+	r.record(&sample)
 	return nil
 }
 
-func (r *soakSearchReader) record(sample soakReadSample) {
+func (r *soakSearchReader) record(sample *soakReadSample) {
 	if r.recorder != nil {
 		r.recorder.Record(sample)
 	}

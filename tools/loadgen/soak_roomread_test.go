@@ -18,8 +18,8 @@ type soakRoomReadRecorder struct {
 	samples []soakReadSample
 }
 
-func (r *soakRoomReadRecorder) Record(sample soakReadSample) {
-	r.samples = append(r.samples, sample)
+func (r *soakRoomReadRecorder) Record(sample *soakReadSample) {
+	r.samples = append(r.samples, *sample)
 }
 
 func newSoakRoomReadFixture(

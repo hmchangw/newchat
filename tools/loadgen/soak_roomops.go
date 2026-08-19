@@ -10,13 +10,14 @@ import (
 )
 
 type soakRoomMutationOutcome struct {
-	Action     soakRPCAction
-	Latency    time.Duration
-	Retries    int
-	ErrorClass soakErrorClass
-	Accepted   bool
-	RoomID     string
-	Muted      bool
+	Action      soakRPCAction
+	Latency     time.Duration
+	Retries     int
+	ErrorClass  soakErrorClass
+	ErrorReason soakErrorReason
+	Accepted    bool
+	RoomID      string
+	Muted       bool
 }
 
 // soakRoomMutator issues the room and member mutations the soak lanes track in
@@ -191,6 +192,7 @@ func (m *soakRoomMutator) call(
 	outcome.Latency = m.now().Sub(startedAt)
 	outcome.Retries = result.Retries
 	outcome.ErrorClass = result.ErrorClass
+	outcome.ErrorReason = result.ErrorReason
 	if err != nil {
 		return outcome, fmt.Errorf("issue %s request: %w", request.Action, err)
 	}

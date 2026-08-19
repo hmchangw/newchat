@@ -144,7 +144,7 @@ type soakReadCollectorRecorder struct {
 	now       func() time.Time
 }
 
-func (r *soakReadCollectorRecorder) Record(sample soakReadSample) {
+func (r *soakReadCollectorRecorder) Record(sample *soakReadSample) {
 	outcome := soakOutcomeSucceeded
 	if sample.Skipped {
 		outcome = soakOutcomeSkipped
@@ -154,7 +154,7 @@ func (r *soakReadCollectorRecorder) Record(sample soakReadSample) {
 	_ = r.collector.Record(&soakOperationSample{
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
-		ErrorClass: sample.ErrorClass,
+		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
 	})
 }
 
@@ -173,7 +173,8 @@ func (r *soakMutationCollectorRecorder) Record(sample soakMutationSample) {
 	_ = r.collector.Record(&soakOperationSample{
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
-		ErrorClass: sample.ErrorClass, TargetMissing: sample.TargetMissing,
+		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
+		TargetMissing: sample.TargetMissing,
 	})
 }
 
@@ -200,7 +201,7 @@ func (r *soakVerifyCollectorRecorder) Record(result *soakVerifyResult) {
 	_ = r.collector.Record(&soakOperationSample{
 		Action: result.Action, Outcome: outcome, At: r.now(),
 		Latency: result.Latency, Retries: result.Retries,
-		ErrorClass: result.RPCErrorClass,
+		ErrorClass: result.RPCErrorClass, ErrorReason: result.RPCErrorReason,
 	})
 }
 
@@ -445,6 +446,37 @@ func runSoakWorkload(
 			slog.Error("stop Cassandra soak metrics server", "error", err)
 		}
 	}()
+
+	if pprofServer := startSoakPProfServer(cfg.PProfAddr); pprofServer != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := pprofServer.Shutdown(shutdownCtx); err != nil {
+				slog.Error("stop Cassandra soak pprof server", "error", err)
+			}
+		}()
+	}
+	heapProfiler, heapProfilerErr := newSoakHeapProfiler(soakHeapProfileConfig{
+		Dir: cfg.Soak.HeapProfileDir, Keep: cfg.Soak.HeapProfileKeep,
+	})
+	if heapProfilerErr != nil {
+		slog.Error("open Cassandra soak heap profiler", "error", heapProfilerErr)
+		return 2
+	}
+	if heapProfiler != nil {
+		profileCtx, stopProfiling := context.WithCancel(ctx)
+		profileTicker := time.NewTicker(cfg.Soak.HeapProfileInterval)
+		profileDone := make(chan struct{})
+		go func() {
+			defer close(profileDone)
+			defer profileTicker.Stop()
+			heapProfiler.Run(profileCtx, profileTicker.C)
+		}()
+		defer func() {
+			stopProfiling()
+			<-profileDone
+		}()
+	}
 
 	now := time.Now
 	collectorDuration := cfg.Soak.RunDuration

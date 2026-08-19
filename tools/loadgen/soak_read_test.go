@@ -334,10 +334,10 @@ type soakReadRecorder struct {
 	samples []soakReadSample
 }
 
-func (r *soakReadRecorder) Record(sample soakReadSample) {
+func (r *soakReadRecorder) Record(sample *soakReadSample) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.samples = append(r.samples, sample)
+	r.samples = append(r.samples, *sample)
 }
 
 func (r *soakReadRecorder) snapshot() []soakReadSample {
