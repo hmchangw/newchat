@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -65,7 +64,6 @@ type Handler struct {
 	maxFileSize    int64
 	mimeFilter     *mediaTypeFilter
 	preview        previewFunc
-	nowMilli       func() int64
 	cacheMaxAge    int
 
 	setCookiePartitioned bool
@@ -82,7 +80,6 @@ func NewHandler(store Store, dc driveClient, s3 objectStore, maxImages, maxAttac
 		store: store, drive: dc, legacyDrive: legacyDrive, s3: s3, maxImages: maxImages, maxAttachments: maxAttachments,
 		maxImageSize: maxImageSize, maxFileSize: maxFileSize, mimeFilter: mimeFilter,
 		preview: preview, cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
-		nowMilli: func() int64 { return time.Now().UTC().UnixMilli() },
 	}
 }
 
@@ -186,7 +183,7 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 		return
 	}
 
-	results, fileHeaders, origNames := preprocessFiles(files, h.maxImageSize, h.nowMilli())
+	results, fileHeaders, origNames := preprocessFiles(files, h.maxImageSize)
 	defer func() {
 		for _, mf := range fileHeaders {
 			_ = mf.File.Close()
@@ -317,7 +314,7 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 	}
 
 	responses, err := h.drive.UploadGroupImages(user.Account, user.DisplayName(), user.Email, roomID, siteID,
-		[]drive.MultipartFile{{File: driveFile, Filename: uniqueName(fh.Filename, h.nowMilli(), 0)}})
+		[]drive.MultipartFile{{File: driveFile, Filename: fh.Filename}})
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("upload file to drive: %w", err))
 		return
@@ -474,12 +471,10 @@ func (h *Handler) requireMembership(ctx context.Context, c *gin.Context, roomID,
 
 // preprocessFiles runs the per-file size/extension/open checks. Rejected files
 // become failure result items; accepted files become MultipartFiles whose open
-// handles the caller is responsible for closing. Each accepted file is uploaded
-// under a unique name (timestamp + accepted-file index, so neither re-uploads
-// across requests nor duplicate names within a batch collide in Drive); origNames
-// lists the caller-facing originals in send order so the response can show them
-// (Drive echoes the unique name, and an empty name on a per-file failure).
-func preprocessFiles(files []*multipart.FileHeader, maxSize, milli int64) (results []uploadResultItem, fileHeaders []drive.MultipartFile, origNames []string) {
+// handles the caller is responsible for closing. Files keep their original name
+// (Drive addresses them by FileID); origNames lists them in send order so the
+// response can fall back to them when Drive returns an empty name on a per-file failure.
+func preprocessFiles(files []*multipart.FileHeader, maxSize int64) (results []uploadResultItem, fileHeaders []drive.MultipartFile, origNames []string) {
 	for _, fh := range files {
 		if fh.Size > maxSize {
 			results = append(results, uploadResultItem{Name: fh.Filename, Status: statusFailure, Error: "file size exceeds limit"})
@@ -494,7 +489,7 @@ func preprocessFiles(files []*multipart.FileHeader, maxSize, milli int64) (resul
 			results = append(results, uploadResultItem{Name: fh.Filename, Status: statusFailure, Error: "failed to open file"})
 			continue
 		}
-		fileHeaders = append(fileHeaders, drive.MultipartFile{File: f, Filename: uniqueName(fh.Filename, milli, len(origNames))})
+		fileHeaders = append(fileHeaders, drive.MultipartFile{File: f, Filename: fh.Filename})
 		origNames = append(origNames, fh.Filename)
 	}
 	return results, fileHeaders, origNames
@@ -508,18 +503,6 @@ func readMultipartFile(fh *multipart.FileHeader) ([]byte, error) {
 	}
 	defer f.Close()
 	return io.ReadAll(f)
-}
-
-// uniqueName inserts a millisecond timestamp and a per-batch index before the
-// file extension so uploads get distinct Drive object names:
-// "photo.png" -> "photo_1719312000000_0.png". The timestamp separates re-uploads
-// across requests; the index separates duplicate filenames within a single batch
-// (which are processed in the same millisecond). A name with no extension just
-// gets the suffix appended. Extension detection follows filepath.Ext semantics.
-func uniqueName(name string, milli int64, i int) string {
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
-	return fmt.Sprintf("%s_%d_%d%s", base, milli, i, ext)
 }
 
 // contentDisposition builds an attachment Content-Disposition value. A non-empty
