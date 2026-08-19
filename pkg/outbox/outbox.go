@@ -35,6 +35,11 @@ var ConcurrentEventTypes = []model.InboxEventType{
 	// thread_unread_added $addToSets one parent ID and thread_read $pulls one —
 	// per-ID set ops that commute across threads, so both ride this lane.
 	model.InboxThreadUnreadAdded,
+	// Teams migration joinedAt self-correction: sets joinedAt on an existing
+	// replica ($set, missing sub = no-op), targeting members added in a prior run.
+	// Idempotent + commutes with add/remove (a delete just makes it a no-op), so
+	// it rides the concurrent lane.
+	model.InboxMemberJoinedAtRefreshed,
 }
 
 // OrderedEventTypes are the OUTBOX event types forwarded by outbox-worker's

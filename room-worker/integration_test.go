@@ -400,6 +400,38 @@ func TestMongoStore_RemoveRole_Integration(t *testing.T) {
 	}
 }
 
+// TestMongoStore_BulkRefreshJoinedAt_Integration: refreshes joinedAt on existing
+// (roomId, account) subs while preserving _id, read state and roles; a missing
+// account is a no-op (never inserted).
+func TestMongoStore_BulkRefreshJoinedAt_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	seen := time.Date(2026, 2, 2, 2, 2, 2, 0, time.UTC)
+	stale := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: stale, LastSeenAt: &seen,
+	})
+
+	corrected := time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC)
+	err := store.BulkRefreshJoinedAt(ctx, "r1", map[string]time.Time{
+		"alice": corrected,
+		"ghost": corrected, // no such sub — must be a no-op, never inserted
+	})
+	require.NoError(t, err)
+
+	subs, err := store.ListByRoom(ctx, "r1")
+	require.NoError(t, err)
+	require.Len(t, subs, 1, "no sub inserted for the missing 'ghost' account")
+	assert.Equal(t, corrected, subs[0].JoinedAt.UTC(), "joinedAt refreshed")
+	assert.Equal(t, "s1", subs[0].ID, "_id preserved")
+	require.NotNil(t, subs[0].LastSeenAt)
+	assert.Equal(t, seen, subs[0].LastSeenAt.UTC(), "read state (lastSeenAt) preserved")
+	assert.Equal(t, []model.Role{model.RoleMember}, subs[0].Roles, "roles preserved")
+}
+
 func TestMongoStore_DeleteSubscription_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)

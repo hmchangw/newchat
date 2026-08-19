@@ -263,6 +263,98 @@ func TestProcessTeamsRoomCreate_IdempotentNoOp(t *testing.T) {
 	assert.Empty(t, *published, "converged room should publish nothing")
 }
 
+// TestProcessTeamsRoomCreate_RefreshesStaleJoinedAt: a re-run against an existing
+// member whose joinedAt predates the createdDateTime fix corrects it to the chat's
+// createdDateTime via the (roomId, account) upsert — no add, no delete, no member-
+// count churn.
+func TestProcessTeamsRoomCreate_RefreshesStaleJoinedAt(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, _ := newTeamsTestHandler(t, store)
+
+	chatCreated := time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC)
+	staleJoinedAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) // old migration-run time
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return([]model.Subscription{
+		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a", JoinedAt: staleJoinedAt},
+	}, nil)
+	store.EXPECT().BulkRefreshJoinedAt(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ string, byAccount map[string]time.Time) error {
+			assert.Equal(t, map[string]time.Time{"alice": chatCreated}, byAccount,
+				"refresh corrects alice's joinedAt to the chat createdDateTime")
+			return nil
+		})
+	// No BulkCreateSubscriptions / ReconcileMemberCounts / DeleteSubscriptionsByAccounts — refresh-only.
+
+	chat := model.TeamsRoomCreateChat{
+		ID:              "chat1",
+		Members:         []model.TeamsRoomCreateMember{{ID: "aad1", Account: "alice"}},
+		CreatedDateTime: chatCreated,
+	}
+	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+}
+
+// TestProcessTeamsRoomCreate_FederatesJoinedAtRefreshCrossSite: a stale existing
+// member whose home site differs from the room site gets a member_joinedat_refreshed
+// federated to that site (carrying the chat createdDateTime), on top of the local
+// room-site correction.
+func TestProcessTeamsRoomCreate_FederatesJoinedAtRefreshCrossSite(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, published := newTeamsTestHandler(t, store)
+
+	chatCreated := time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC)
+	stale := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return([]model.Subscription{
+		{User: model.SubscriptionUser{Account: "bob"}, RoomID: "chat1", SiteID: "site-b", JoinedAt: stale}, // remote home site
+	}, nil)
+	store.EXPECT().BulkRefreshJoinedAt(gomock.Any(), gomock.Any(),
+		map[string]time.Time{"bob": chatCreated}).Return(nil)
+
+	chat := model.TeamsRoomCreateChat{
+		ID:              "chat1",
+		Name:            "Project Sync",
+		Members:         []model.TeamsRoomCreateMember{{ID: "aad1", Account: "bob"}},
+		CreatedDateTime: chatCreated,
+	}
+	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+
+	fed := membershipEvents(t, *published, "chat.outbox.site-a.site-b.member_joinedat_refreshed")
+	require.Len(t, fed, 1, "cross-site member gets a joinedAt-refresh federated to their home site")
+	assert.Equal(t, []string{"bob"}, fed[0].Accounts)
+	assert.Equal(t, chatCreated.UnixMilli(), fed[0].JoinedAt, "federated refresh carries the chat createdDateTime")
+
+	local := membershipEvents(t, *published, "chat.inbox.site-a.internal.member_joinedat_refreshed")
+	require.Len(t, local, 1, "local internal event published for room-site spotlight")
+	assert.Equal(t, chatCreated.UnixMilli(), local[0].JoinedAt)
+	assert.NotEmpty(t, local[0].RoomName, "internal event carries roomName so spotlight re-index preserves it")
+}
+
+// TestProcessTeamsRoomCreate_NoRefreshWhenJoinedAtCurrent: a converged re-run whose
+// existing joinedAt already equals the chat createdDateTime writes nothing.
+func TestProcessTeamsRoomCreate_NoRefreshWhenJoinedAtCurrent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, _ := newTeamsTestHandler(t, store)
+
+	chatCreated := time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC)
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return([]model.Subscription{
+		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a", JoinedAt: chatCreated},
+	}, nil)
+	// No BulkCreateSubscriptions — joinedAt already current, nothing to write.
+
+	chat := model.TeamsRoomCreateChat{
+		ID:              "chat1",
+		Members:         []model.TeamsRoomCreateMember{{ID: "aad1", Account: "alice"}},
+		CreatedDateTime: chatCreated,
+	}
+	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+}
+
 // TestProcessTeamsRoomCreate_PerChatIsolation: one chat's reconcile error is
 // logged and skipped; the batch still succeeds (no Nak) and the sibling chat's
 // reconcile still runs.

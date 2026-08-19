@@ -68,6 +68,9 @@ type SubscriptionStore interface {
 	// membership write path (channel, DM, botDM, add-member); the
 	// re-subscribe semantic for botDM is owned by user-service.
 	BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error
+	// BulkRefreshJoinedAt sets joinedAt on existing (roomId, account) subs — the
+	// Teams migration's joinedAt self-correction; a missing sub is a no-op.
+	BulkRefreshJoinedAt(ctx context.Context, roomID string, joinedAtByAccount map[string]time.Time) error
 	// ReconcileMemberCounts recomputes Room.UserCount (non-bot subs) and
 	// Room.AppCount (bot subs) via index-backed counts on the denormalized
 	// u.isBot flag, then writes both back to the rooms collection in a single

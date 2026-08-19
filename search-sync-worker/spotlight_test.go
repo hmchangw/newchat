@@ -85,8 +85,10 @@ func TestSpotlightCollection_Metadata(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"chat.inbox.site-a.internal.member_added",
 		"chat.inbox.site-a.internal.member_removed",
+		"chat.inbox.site-a.internal.member_joinedat_refreshed",
 		"chat.inbox.site-a.external.member_added",
 		"chat.inbox.site-a.external.member_removed",
+		"chat.inbox.site-a.external.member_joinedat_refreshed",
 	}, filters)
 }
 
@@ -151,6 +153,26 @@ func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {
 	assert.Equal(t, "engineering", doc["roomName"])
 	assert.Equal(t, "channel", doc["roomType"])
 	assert.Equal(t, "site-a", doc["siteId"])
+}
+
+func TestSpotlightCollection_BuildAction_JoinedAtRefreshed(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.JoinedAt = time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC).UnixMilli()
+	data := makeInboxMemberEvent(t, model.InboxMemberJoinedAtRefreshed, payload, 2000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+
+	action := actions[0]
+	assert.Equal(t, searchengine.ActionIndex, action.Action, "refresh re-indexes the spotlight doc")
+	assert.Equal(t, "alice_r-eng", action.DocID)
+	assert.Equal(t, int64(2000), action.Version, "refresh's newer timestamp wins the version guard")
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(action.Doc, &doc))
+	assert.Equal(t, "2023-04-05T06:07:08Z", doc["joinedAt"], "joinedAt re-indexed to the corrected value")
+	assert.Equal(t, "engineering", doc["roomName"], "roomName preserved (event carries it)")
 }
 
 func TestSpotlightCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {

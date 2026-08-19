@@ -27,6 +27,12 @@ type roleUpdate struct {
 	updatedAt time.Time
 }
 
+type joinedAtRefresh struct {
+	roomID   string
+	account  string
+	joinedAt time.Time
+}
+
 type muteUpdate struct {
 	roomID    string
 	account   string
@@ -92,6 +98,7 @@ type stubInboxStore struct {
 	subscriptions         []model.Subscription
 	bulkSubscriptions     []*model.Subscription
 	bulkCreateErr         error
+	joinedAtRefreshes     []joinedAtRefresh
 	rooms                 []model.Room
 	roleUpdates           []roleUpdate
 	muteUpdates           []muteUpdate
@@ -267,6 +274,15 @@ func (s *stubInboxStore) BulkCreateSubscriptions(_ context.Context, subs []*mode
 	s.bulkSubscriptions = append(s.bulkSubscriptions, subs...)
 	for _, sub := range subs {
 		s.subscriptions = append(s.subscriptions, *sub)
+	}
+	return nil
+}
+
+func (s *stubInboxStore) BulkRefreshJoinedAt(_ context.Context, roomID string, joinedAtByAccount map[string]time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for account, joinedAt := range joinedAtByAccount {
+		s.joinedAtRefreshes = append(s.joinedAtRefreshes, joinedAtRefresh{roomID: roomID, account: account, joinedAt: joinedAt})
 	}
 	return nil
 }
@@ -563,6 +579,44 @@ func (s *stubInboxStore) getPermissionsApplies() []permissionsApply {
 }
 
 // --- Tests ---
+
+func TestHandleEvent_MemberJoinedAtRefreshed(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	joinedAt := time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC)
+	change := model.MemberAddEvent{
+		RoomID:   "room-1",
+		Accounts: []string{"alice", "bob"},
+		SiteID:   "site-a",
+		JoinedAt: joinedAt.UnixMilli(),
+	}
+	changeData, err := json.Marshal(change)
+	if err != nil {
+		t.Fatalf("marshal change: %v", err)
+	}
+	evt := model.InboxEvent{Type: model.InboxMemberJoinedAtRefreshed, SiteID: "site-a", DestSiteID: "site-b", Payload: changeData}
+	evtData, err := json.Marshal(evt)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+
+	if err := h.HandleEvent(context.Background(), evtData); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	if len(store.joinedAtRefreshes) != 2 {
+		t.Fatalf("expected 2 joinedAt refreshes, got %d", len(store.joinedAtRefreshes))
+	}
+	for _, r := range store.joinedAtRefreshes {
+		if r.roomID != "room-1" {
+			t.Errorf("refresh roomID = %q, want room-1", r.roomID)
+		}
+		if !r.joinedAt.Equal(joinedAt) {
+			t.Errorf("refresh joinedAt = %v, want %v", r.joinedAt, joinedAt)
+		}
+	}
+}
 
 func TestHandleEvent_MemberAdded(t *testing.T) {
 	store := &stubInboxStore{

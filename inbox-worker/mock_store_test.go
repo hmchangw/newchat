@@ -126,6 +126,20 @@ func (mr *MockInboxStoreMockRecorder) BulkCreateSubscriptions(ctx, subs any) *go
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BulkCreateSubscriptions", reflect.TypeOf((*MockInboxStore)(nil).BulkCreateSubscriptions), ctx, subs)
 }
 
+// BulkRefreshJoinedAt mocks base method.
+func (m *MockInboxStore) BulkRefreshJoinedAt(ctx context.Context, roomID string, joinedAtByAccount map[string]time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "BulkRefreshJoinedAt", ctx, roomID, joinedAtByAccount)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// BulkRefreshJoinedAt indicates an expected call of BulkRefreshJoinedAt.
+func (mr *MockInboxStoreMockRecorder) BulkRefreshJoinedAt(ctx, roomID, joinedAtByAccount any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BulkRefreshJoinedAt", reflect.TypeOf((*MockInboxStore)(nil).BulkRefreshJoinedAt), ctx, roomID, joinedAtByAccount)
+}
+
 // CreateSubscription mocks base method.
 func (m *MockInboxStore) CreateSubscription(ctx context.Context, sub *model.Subscription) error {
 	m.ctrl.T.Helper()

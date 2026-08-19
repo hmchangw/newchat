@@ -83,7 +83,10 @@ func (c *spotlightCollection) BuildAction(data []byte) ([]searchengine.BulkActio
 		docID := fmt.Sprintf("%s_%s", account, payload.RoomID)
 
 		switch evt.Type {
-		case model.InboxMemberAdded:
+		// A joinedAt refresh re-indexes the same doc with the corrected joinedAt;
+		// the event carries roomName/roomType so the full re-index preserves them,
+		// and its newer timestamp wins the version guard.
+		case model.InboxMemberAdded, model.InboxMemberJoinedAtRefreshed:
 			doc := newSpotlightSearchIndex(account, payload)
 			body, err := json.Marshal(doc)
 			if err != nil {

@@ -92,6 +92,10 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 				DocID:  account,
 				Doc:    body,
 			})
+		case model.InboxMemberJoinedAtRefreshed:
+			// joinedAt is not in the user-room index (only membership + the ordering
+			// guard); a refresh changes neither, so there's nothing to update here.
+			continue
 		default:
 			return nil, fmt.Errorf("build user-room action: unsupported event type %q", evt.Type)
 		}

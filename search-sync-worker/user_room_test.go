@@ -35,8 +35,10 @@ func TestUserRoomCollection_Metadata(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"chat.inbox.site-a.internal.member_added",
 		"chat.inbox.site-a.internal.member_removed",
+		"chat.inbox.site-a.internal.member_joinedat_refreshed",
 		"chat.inbox.site-a.external.member_added",
 		"chat.inbox.site-a.external.member_removed",
+		"chat.inbox.site-a.external.member_joinedat_refreshed",
 	}, filters)
 }
 
@@ -137,6 +139,16 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 	roomTimestamps := upsert["roomTimestamps"].(map[string]any)
 	assert.Equal(t, float64(ts), roomTimestamps["r-eng"])
 	assert.NotEmpty(t, upsert["createdAt"])
+}
+
+func TestUserRoomCollection_BuildAction_JoinedAtRefreshedIsNoOp(t *testing.T) {
+	coll := newUserRoomCollection("user-room-site-a", false)
+	payload := baseInboxMemberEvent()
+	data := makeInboxMemberEvent(t, model.InboxMemberJoinedAtRefreshed, payload, 2000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	assert.Empty(t, actions, "joinedAt is not in the user-room index; a refresh changes nothing here")
 }
 
 func TestUserRoomCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {

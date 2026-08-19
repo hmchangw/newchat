@@ -155,6 +155,7 @@ type InboxEventType = string
 const (
 	InboxMemberAdded                 InboxEventType = "member_added"
 	InboxMemberRemoved               InboxEventType = "member_removed"
+	InboxMemberJoinedAtRefreshed     InboxEventType = "member_joinedat_refreshed"
 	InboxRoleUpdated                 InboxEventType = "role_updated"
 	InboxSubscriptionRead            InboxEventType = "subscription_read"
 	InboxSubscriptionMuteToggled     InboxEventType = "subscription_mute_toggled"
