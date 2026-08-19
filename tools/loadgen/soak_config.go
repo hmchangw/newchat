@@ -95,10 +95,20 @@ type soakConfig struct {
 	// LedgerCapacity and invalidates the ledger during the incident it exists
 	// to observe. Size it above (operations/sec x sweep interval), where the
 	// sweep runs every min(30s, max(1s, RECONCILE_DEADLINE/10)).
-	LedgerExpireBatch      int           `env:"LEDGER_EXPIRE_BATCH"              envDefault:"0"`
-	ReconcileDeadline      time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
-	ReconcileRetryInterval time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
-	ReconcileReadShare     float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
+	LedgerExpireBatch int `env:"LEDGER_EXPIRE_BATCH"              envDefault:"0"`
+	// SubscriptionListLimit and SubscriptionListIncludeLastMessage shape the
+	// subscription-list request. Both are unset by default so the lane keeps
+	// sending exactly what it sent before they existed: user-service reads a
+	// missing limit as its own default and a missing includeLastMessage as
+	// true, and a baseline recorded without them has to stay comparable.
+	// Setting includeLastMessage to false drops the per-room fan-out to
+	// history-service, which is what separates that cost from the rest of the
+	// request without re-seeding anything.
+	SubscriptionListLimit              int           `env:"SUBSCRIPTION_LIST_LIMIT"          envDefault:"0"`
+	SubscriptionListIncludeLastMessage *bool         `env:"SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE"`
+	ReconcileDeadline                  time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
+	ReconcileRetryInterval             time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
+	ReconcileReadShare                 float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`
 	// EncryptionPreflight gates the one-message check that the encrypted write
 	// path reaches Cassandra and wraps the room DEK. It is on by default and
 	// may only be turned off outside staging and production: a run that skipped
@@ -258,6 +268,11 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if cfg.LedgerExpireBatch < 0 {
 		return fmt.Errorf("SOAK_LEDGER_EXPIRE_BATCH must not be negative")
+	}
+	// A negative limit reaches user-service's normalizePage, which swaps it for
+	// the default — the run would then report on a page size nobody chose.
+	if cfg.SubscriptionListLimit < 0 {
+		return fmt.Errorf("SOAK_SUBSCRIPTION_LIST_LIMIT must not be negative")
 	}
 	if cfg.HeapProfileDir != "" {
 		if cfg.HeapProfileInterval <= 0 {

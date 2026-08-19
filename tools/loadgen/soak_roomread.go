@@ -14,6 +14,31 @@ type soakRoomReadConfig struct {
 	SiteID         string
 	BatchSize      int
 	RequestTimeout time.Duration
+
+	// SubscriptionListLimit is the page size the subscription-list lane asks
+	// for. Zero leaves the service's own default in force, which is what the
+	// lane did before the knob existed — so an unset probe cannot move a
+	// baseline recorded without it.
+	SubscriptionListLimit int
+	// SubscriptionListIncludeLastMessage drives last-message enrichment, which
+	// fans every listed room out to history-service. nil sends nothing and the
+	// service enriches; false is what isolates that fan-out's cost from the
+	// rest of the request.
+	SubscriptionListIncludeLastMessage *bool
+}
+
+// soakRoomReadConfigFrom maps the run configuration onto the room-read lane. It
+// is a named function rather than a struct literal at the call site so the
+// mapping can be asserted: a probe that parses but never reaches the lane
+// leaves the run looking configured while it measures the old thing.
+func soakRoomReadConfigFrom(siteID string, cfg *soakConfig) soakRoomReadConfig {
+	return soakRoomReadConfig{
+		SiteID:                             siteID,
+		BatchSize:                          soakRoomInfoBatchSize,
+		RequestTimeout:                     soakRequestTimeout,
+		SubscriptionListLimit:              cfg.SubscriptionListLimit,
+		SubscriptionListIncludeLastMessage: cfg.SubscriptionListIncludeLastMessage,
+	}
 }
 
 // soakRoomMessageSource supplies a persisted message the read-receipt read can
@@ -203,7 +228,11 @@ func (r *soakRoomReader) SubscriptionList(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSubscriptionList,
 		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
-		Body:    soakSubscriptionListRequest{Type: soakSubscriptionListType},
+		Body: soakSubscriptionListRequest{
+			Type:               soakSubscriptionListType,
+			Limit:              r.cfg.SubscriptionListLimit,
+			IncludeLastMessage: r.cfg.SubscriptionListIncludeLastMessage,
+		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Subscriptions)

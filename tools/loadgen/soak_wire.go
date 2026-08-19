@@ -232,8 +232,14 @@ type soakSubscriptionListResponse struct {
 // callers silently failed every request before.
 const soakSubscriptionListType = "rooms"
 
+// Limit and IncludeLastMessage are both omitted when unset, which is not
+// cosmetic: user-service reads a missing limit as its own default and a missing
+// includeLastMessage as true, so sending a zero value would change the workload
+// rather than leave it alone.
 type soakSubscriptionListRequest struct {
-	Type string `json:"type"`
+	Type               string `json:"type"`
+	Limit              int    `json:"limit,omitempty"`
+	IncludeLastMessage *bool  `json:"includeLastMessage,omitempty"`
 }
 
 // user-service read carriers. Each decodes only the fields the read lane
