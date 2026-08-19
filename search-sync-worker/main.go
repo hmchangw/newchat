@@ -9,6 +9,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
@@ -168,6 +169,10 @@ func main() {
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 
+	// obs.Init installed the SDK's MeterProvider as the OTel global, so this
+	// resolves to real instruments when metrics are enabled and no-ops otherwise.
+	esMetrics := newSyncMetrics(otel.Meter(metricsScope))
+
 	// Mode gates which consumers this pod binds. "teams" runs only the
 	// MESSAGES-TEAMS migrated-history consumer; "default" runs everything else.
 	var collections []Collection
@@ -181,11 +186,15 @@ func main() {
 	} else {
 		msgColl := newMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, syncMessagesFrom, cfg.DevMode)
 		// search-service filters restricted-room access by threadParentMessageCreatedAt, so re-resolve it from the parent's indexed createdAt (the event omits it).
-		msgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
+		msgResolver := newESParentResolver(engine, cfg.MsgIndexPrefix)
+		msgResolver.metrics = esMetrics
+		msgColl.parentResolver = msgResolver
 
 		// Second consumer over messageCollection, bound to BOT-MESSAGES-CANONICAL. isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
 		botMsgColl := newBotMessageCollection(cfg.MsgIndexPrefix, cfg.DevMode)
-		botMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
+		botMsgResolver := newESParentResolver(engine, cfg.MsgIndexPrefix)
+		botMsgResolver.metrics = esMetrics
+		botMsgColl.parentResolver = botMsgResolver
 
 		collections = []Collection{
 			msgColl,
@@ -314,6 +323,7 @@ func main() {
 		}
 
 		handler := NewHandler(&engineAdapter{engine: engine}, coll, cfg.BulkBatchSize)
+		handler.metrics = esMetrics.forCollection(coll.ConsumerName())
 		doneCh := make(chan struct{})
 		doneChs = append(doneChs, doneCh)
 

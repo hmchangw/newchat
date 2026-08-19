@@ -20,6 +20,7 @@ type esReadFn func(ctx context.Context, messageID string) (time.Time, bool)
 type esParentResolver struct {
 	esRead  esReadFn
 	timeout time.Duration
+	metrics *syncMetrics // optional, set by main; nil-safe recording
 }
 
 // ResolveParentCreatedAt returns the parent's createdAt and ok=true when resolved.
@@ -27,7 +28,10 @@ type esParentResolver struct {
 func (r *esParentResolver) ResolveParentCreatedAt(ctx context.Context, messageID string) (time.Time, bool) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	return r.esRead(ctx, messageID)
+	start := time.Now()
+	createdAt, ok := r.esRead(ctx, messageID)
+	r.metrics.recordParentResolve(ctx, time.Since(start).Seconds(), ok)
+	return createdAt, ok
 }
 
 // esSearcher is the narrow search surface the ES self-lookup needs.
