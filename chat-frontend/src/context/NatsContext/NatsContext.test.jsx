@@ -34,10 +34,11 @@ vi.mock('nkeys.js', () => ({
   createUser: () => ({ getPublicKey: () => 'UPUBKEY', getSeed: () => new Uint8Array([7]) }),
 }))
 
-import { NatsProvider, useNats } from './NatsContext'
+import { NatsProvider, useNats, HOME_PROBE_BASE_MS } from './NatsContext'
 import { DebugProvider } from '@/context/DebugContext'
 import { useJwtRefresh } from './useJwtRefresh'
 import * as telemetry from '@/lib/telemetry'
+import { isFailoverMode, setFailoverMode } from '@/api/_transport/failover'
 
 function wrapper({ children }) {
   return (
@@ -386,5 +387,241 @@ describe('NatsProvider session (bot/admin) connect', () => {
     const { result } = renderHook(() => useNats(), { wrapper })
     await waitFor(() => expect(window.sessionStorage.getItem('chat.botSession')).toBeNull())
     expect(result.current.connected).toBe(false)
+  })
+})
+
+describe('NatsProvider site failover', () => {
+  const SETTINGS = {
+    apiVersion: 'v2',
+    sites: [
+      { siteId: 'site-a', natsUrl: 'ws://nats.site-a' },
+      { siteId: 'site-b', natsUrl: 'ws://nats.site-b' },
+    ],
+  }
+
+  // Failover mode is module-level state shared by the subject builders, so each
+  // test must start from a known value or ordering would decide the result.
+  beforeEach(() => {
+    setFailoverMode(false)
+    setCredentials.mockReset()
+    stop.mockReset()
+    natsConnect.mockReset()
+    global.fetch = vi.fn(async (url) => {
+      const u = String(url)
+      if (u.includes('/api/userInfo')) return { ok: true, json: async () => PORTAL_RESP }
+      if (u.includes('/api/settings')) return { ok: true, json: async () => SETTINGS }
+      return { ok: true, json: async () => ({ natsJwt: 'JWT123', user: { account: 'alice' } }) }
+    })
+  })
+  afterEach(() => {
+    setFailoverMode(false)
+    vi.restoreAllMocks()
+  })
+
+  const openConn = () => ({ closed: () => new Promise(() => {}), drain: async () => {} })
+
+  it('connects home and stays out of failover mode when home is up', async () => {
+    natsConnect.mockResolvedValue(openConn())
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+
+    expect(result.current.connected).toBe(true)
+    expect(isFailoverMode()).toBe(false)
+    // The peer list costs nothing in the common case: it is only fetched once
+    // home has actually refused.
+    expect(global.fetch.mock.calls.map((c) => String(c[0]))).not.toContain(
+      expect.stringContaining('/api/settings'),
+    )
+  })
+
+  it('falls back to a peer when home will not connect', async () => {
+    const attempts = []
+    natsConnect.mockImplementation(({ servers }) => {
+      attempts.push(servers)
+      if (servers === 'ws://nats.site-a') return Promise.reject(new Error('ECONNREFUSED'))
+      return Promise.resolve(openConn())
+    })
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+
+    expect(attempts[0]).toBe('ws://nats.site-a')
+    expect(attempts).toContain('ws://nats.site-b')
+    expect(result.current.connected).toBe(true)
+    // The client is on a peer, so every room subscription must use the global
+    // root — the server publishes there while this site's NATS is down.
+    expect(isFailoverMode()).toBe(true)
+  })
+
+  it('fails the connect when no site accepts, and stays out of failover mode', async () => {
+    natsConnect.mockRejectedValue(new Error('ECONNREFUSED'))
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await expect(
+      act(async () => {
+        await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+      }),
+    ).rejects.toThrow(/ECONNREFUSED/)
+
+    expect(isFailoverMode()).toBe(false)
+  })
+
+  // A peer list the portal cannot serve must not mask the original failure:
+  // the user sees "home is down", not a settings-parse error.
+  it('reports the connect failure when the peer list is unavailable', async () => {
+    natsConnect.mockRejectedValue(new Error('ECONNREFUSED'))
+    global.fetch = vi.fn(async (url) => {
+      const u = String(url)
+      if (u.includes('/api/userInfo')) return { ok: true, json: async () => PORTAL_RESP }
+      if (u.includes('/api/settings')) return { ok: false, status: 500, json: async () => ({}) }
+      return { ok: true, json: async () => ({ natsJwt: 'JWT123', user: { account: 'alice' } }) }
+    })
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await expect(
+      act(async () => {
+        await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+      }),
+    ).rejects.toThrow(/ECONNREFUSED/)
+    expect(isFailoverMode()).toBe(false)
+  })
+
+  it('does not treat a single-site deployment as a failover candidate', async () => {
+    natsConnect.mockRejectedValue(new Error('ECONNREFUSED'))
+    global.fetch = vi.fn(async (url) => {
+      const u = String(url)
+      if (u.includes('/api/userInfo')) return { ok: true, json: async () => PORTAL_RESP }
+      if (u.includes('/api/settings')) return { ok: true, json: async () => ({ apiVersion: 'v2' }) }
+      return { ok: true, json: async () => ({ natsJwt: 'JWT123', user: { account: 'alice' } }) }
+    })
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await expect(
+      act(async () => {
+        await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+      }),
+    ).rejects.toThrow(/ECONNREFUSED/)
+    expect(isFailoverMode()).toBe(false)
+  })
+
+  it('clears failover mode on disconnect so a fresh login starts home', async () => {
+    natsConnect.mockImplementation(({ servers }) =>
+      servers === 'ws://nats.site-a'
+        ? Promise.reject(new Error('down'))
+        : Promise.resolve(openConn()),
+    )
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+    expect(isFailoverMode()).toBe(true)
+
+    await act(async () => { await result.current.disconnect() })
+    expect(isFailoverMode()).toBe(false)
+  })
+})
+
+describe('NatsProvider home revert', () => {
+  const SETTINGS = {
+    sites: [
+      { siteId: 'site-a', natsUrl: 'ws://nats.site-a' },
+      { siteId: 'site-b', natsUrl: 'ws://nats.site-b' },
+    ],
+  }
+
+  beforeEach(() => {
+    setFailoverMode(false)
+    setCredentials.mockReset()
+    stop.mockReset()
+    natsConnect.mockReset()
+    global.fetch = vi.fn(async (url) => {
+      const u = String(url)
+      if (u.includes('/api/userInfo')) return { ok: true, json: async () => PORTAL_RESP }
+      if (u.includes('/api/settings')) return { ok: true, json: async () => SETTINGS }
+      return { ok: true, json: async () => ({ natsJwt: 'JWT123', user: { account: 'alice' } }) }
+    })
+  })
+  afterEach(() => {
+    setFailoverMode(false)
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  const openConn = () => ({ closed: () => new Promise(() => {}), drain: vi.fn(async () => {}) })
+
+  // Servers revert the instant their own lane delivers again; a client only
+  // finds out by asking. Without this probe a displaced user stays on the peer
+  // until they reload the tab.
+  it('returns home once home accepts again, and leaves failover mode', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let homeUp = false
+    const peerConn = openConn()
+    natsConnect.mockImplementation(({ servers }) => {
+      if (servers === 'ws://nats.site-a') {
+        return homeUp ? Promise.resolve(openConn()) : Promise.reject(new Error('down'))
+      }
+      return Promise.resolve(peerConn)
+    })
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+    expect(isFailoverMode()).toBe(true)
+
+    homeUp = true
+    await act(async () => { await vi.advanceTimersByTimeAsync(HOME_PROBE_BASE_MS + 10) })
+
+    await waitFor(() => expect(isFailoverMode()).toBe(false))
+    // The peer link is drained rather than left dangling.
+    expect(peerConn.drain).toHaveBeenCalled()
+  })
+
+  it('keeps probing while home stays down', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    natsConnect.mockImplementation(({ servers }) =>
+      servers === 'ws://nats.site-a'
+        ? Promise.reject(new Error('down'))
+        : Promise.resolve(openConn()),
+    )
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+    const afterConnect = natsConnect.mock.calls.length
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(HOME_PROBE_BASE_MS * 8) })
+
+    expect(natsConnect.mock.calls.length).toBeGreaterThan(afterConnect)
+    expect(isFailoverMode()).toBe(true)
+  })
+
+  // A probe that outlives its session is a leak, and a late success would
+  // clobber a newer connection.
+  it('stops probing after disconnect', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    natsConnect.mockImplementation(({ servers }) =>
+      servers === 'ws://nats.site-a'
+        ? Promise.reject(new Error('down'))
+        : Promise.resolve(openConn()),
+    )
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+    await act(async () => { await result.current.disconnect() })
+
+    const afterDisconnect = natsConnect.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(HOME_PROBE_BASE_MS * 8) })
+
+    expect(natsConnect.mock.calls.length).toBe(afterDisconnect)
   })
 })

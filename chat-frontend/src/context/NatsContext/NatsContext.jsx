@@ -6,6 +6,8 @@ import { PORTAL_URL } from '@/lib/runtimeConfig'
 import { injectTraceHeaders, natsSpanName, withLinkedSpan, withSpan } from '@/lib/telemetry'
 import { useDebug } from '@/context/DebugContext'
 import { useJwtRefresh } from './useJwtRefresh'
+import { setFailoverMode } from '@/api/_transport/failover'
+import { shufflePeers } from '@/api/_transport/peers'
 import {
   requestWithAsyncResult as asyncJobRequest,
   requestSync as asyncJobRequestSync,
@@ -20,6 +22,16 @@ const sc = StringCodec()
 // Persisted bot/admin login bundle. sessionStorage (not localStorage) scopes it
 // to the tab lifetime so a reload auto-reconnects but closing the tab logs out.
 const BOT_SESSION_KEY = 'chat.botSession'
+
+// Home re-probe backoff while connected to a peer.
+//
+// HOME_PROBE_MAX_MS is COUPLED to the server's FAILOVER_REVERT_GRACE (default
+// 30m): while any client may still be on a peer, publishers keep emitting room
+// events to BOTH subject roots. Raising this cap without raising that window
+// reopens the silent recovery gap, where servers have reverted to local routing
+// and the stragglers hear nothing.
+export const HOME_PROBE_BASE_MS = 5_000
+const HOME_PROBE_MAX_MS = 300_000
 
 function readStoredBotSession() {
   try {
@@ -42,6 +54,22 @@ async function throwEnvelopeError(resp, fallbackMsg) {
     ASYNC_JOB_ERROR_KINDS.SyncError,
     { code: errBody.code, reason: errBody.reason, metadata: errBody.metadata },
   )
+}
+
+// fetchPeerSites reads the failover peer list from the portal. Called only
+// after home has actually refused, so the common path pays nothing for it — and
+// the portal is reachable during the outage this exists for, since only NATS is
+// down. A portal that cannot serve the list yields no candidates rather than
+// masking the original connect failure.
+async function fetchPeerSites() {
+  try {
+    const resp = await tracedFetch('GET', `${PORTAL_URL}/api/settings`)
+    if (!resp.ok) return []
+    const settings = await resp.json()
+    return Array.isArray(settings.sites) ? settings.sites : []
+  } catch {
+    return []
+  }
 }
 
 function tracedFetch(method, url, init = {}) {
@@ -69,6 +97,10 @@ export function NatsProvider({ children }) {
   // long-lived nc.closed() callback can detect it is stale and drop its write
   // (codebase "stale-cycle protection" convention).
   const connectGenRef = useRef(0)
+  // Pending home re-probe while connected to a peer. Cleared on every teardown:
+  // a probe that outlives its session leaks a timer, and a late success would
+  // clobber a newer connection.
+  const homeProbeRef = useRef(null)
   const [connected, setConnected] = useState(false)
   const [user, setUser] = useState(null)
   const [error, setError] = useState(null)
@@ -100,17 +132,73 @@ export function NatsProvider({ children }) {
     return h
   }, [])
 
+  const clearHomeProbe = useCallback(() => {
+    if (homeProbeRef.current) {
+      clearTimeout(homeProbeRef.current)
+      homeProbeRef.current = null
+    }
+  }, [])
+
   // Terminal session-token failure: no IdP to bounce to, so tear the link down
   // and clear the stash. App then renders the login form.
   const onSessionLost = useCallback(() => {
     clearStoredBotSession()
+    setFailoverMode(false)
+    clearHomeProbe()
     connectGenRef.current += 1
     if (ncRef.current) { ncRef.current.drain().catch(() => {}); ncRef.current = null }
     setConnected(false)
     setUser(null)
-  }, [])
+  }, [clearHomeProbe])
 
   const { authenticator, setCredentials, stop } = useJwtRefresh({ getAuthUrl, ncRef, onSessionLost })
+
+  // watchClosed reports a server-initiated close, ignoring links superseded by a
+  // newer connect (or by the home revert below).
+  const watchClosed = useCallback((nc, myGen) => {
+    nc.closed().then((err) => {
+      if (myGen !== connectGenRef.current || ncRef.current !== nc) return
+      if (err) setError(`Disconnected: ${err.message}`)
+      setConnected(false)
+    })
+  }, [])
+
+  /**
+   * While connected to a peer, retry home on exponential backoff and swap back
+   * the moment it accepts. Servers revert as soon as their own lane delivers
+   * again, so a client only finds out by asking — without this a displaced user
+   * stays on the peer until they reload the tab.
+   *
+   * The JWT is account-scoped and every site's NATS shares that account, so the
+   * credentials already staged for the peer dial work for home unchanged.
+   */
+  const startHomeProbe = useCallback((portal, myGen) => {
+    let delay = HOME_PROBE_BASE_MS
+    const attempt = async () => {
+      homeProbeRef.current = null
+      if (myGen !== connectGenRef.current) return
+      let home
+      try {
+        home = await natsConnect({ servers: portal.natsUrl, authenticator })
+      } catch {
+        delay = Math.min(delay * 2, HOME_PROBE_MAX_MS)
+        homeProbeRef.current = setTimeout(attempt, delay)
+        return
+      }
+      // The session moved on while we were dialling — drop the probe link
+      // rather than install it over a newer connection.
+      if (myGen !== connectGenRef.current) {
+        home.drain().catch(() => {})
+        return
+      }
+      const peer = ncRef.current
+      ncRef.current = home
+      setFailoverMode(false)
+      watchClosed(home, myGen)
+      if (peer) peer.drain().catch(() => {})
+    }
+    homeProbeRef.current = setTimeout(attempt, delay)
+  }, [authenticator, watchClosed])
 
   /**
    * Resolve the user's home site via the portal lookup, authenticate
@@ -192,11 +280,37 @@ export function NatsProvider({ children }) {
         ...(mode === 'session' ? { mode: 'session', authToken: bundle.authToken } : {}),
       })
 
-      // 3) Dial the resolved site's NATS.
-      const nc = await natsConnect({
-        servers: portal.natsUrl,
-        authenticator,
-      })
+      // 3) Dial the resolved site's NATS, falling back to a peer if home
+      // refuses. Home is tried first and alone in the common case; the peer
+      // list is only fetched once home has actually failed.
+      let nc = null
+      let landedOn = null
+      let homeErr = null
+      try {
+        nc = await natsConnect({ servers: portal.natsUrl, authenticator })
+        landedOn = portal.siteId
+      } catch (err) {
+        homeErr = err
+        // A peer that is also down is just the next failed attempt — there is
+        // no liveness tracking anywhere, by design.
+        for (const peer of shufflePeers(await fetchPeerSites(), portal.siteId)) {
+          try {
+            nc = await natsConnect({ servers: peer.natsUrl, authenticator })
+            landedOn = peer.siteId
+            break
+          } catch { /* next candidate */ }
+        }
+      }
+      // Nothing accepted: surface HOME's error, not a generic one. Home is the
+      // site the user belongs to, so its failure is the actual diagnosis; the
+      // peers were only ever a fallback.
+      if (!nc) throw homeErr
+
+      // Failover mode is on exactly when we are not on our home site. It makes
+      // every room subscription use the global subject root, matching the
+      // server, which publishes there while this site's own NATS is down.
+      const onFailover = landedOn !== portal.siteId
+      setFailoverMode(onFailover)
 
       authUrlRef.current = nextAuthUrl
       ncRef.current = nc
@@ -211,20 +325,17 @@ export function NatsProvider({ children }) {
         try { window.sessionStorage.setItem(BOT_SESSION_KEY, JSON.stringify(bundle)) } catch { /* storage unavailable */ }
       }
 
-      nc.closed().then((err) => {
-        // A newer connect or a disconnect bumped the generation; this old
-        // link's close must not clobber the live session's state.
-        if (myGen !== connectGenRef.current) return
-        if (err) {
-          setError(`Disconnected: ${err.message}`)
-        }
-        setConnected(false)
-      })
+      // A newer connect, a disconnect, or a home revert supersedes this link;
+      // its close must not clobber the live session's state.
+      watchClosed(nc, myGen)
+
+      // On a peer: keep asking whether home is back, and swap over when it is.
+      if (onFailover) startHomeProbe(portal, myGen)
     } catch (err) {
       stop()
       throw err
     }
-  }, [authenticator, setCredentials, stop])
+  }, [authenticator, setCredentials, stop, watchClosed, startHomeProbe, clearHomeProbe])
 
   // On mount, resume a persisted bot/admin session (sessionStorage survives a
   // tab reload). Best-effort: a failed resume clears the stash and falls back
@@ -368,6 +479,8 @@ export function NatsProvider({ children }) {
     // Invalidate any in-flight connect and the live link's closed() callback so
     // a late close can't resurrect error/connected state after we tore down.
     clearStoredBotSession()
+    setFailoverMode(false)
+    clearHomeProbe()
     connectGenRef.current += 1
     stop()
     if (ncRef.current) {
@@ -376,7 +489,7 @@ export function NatsProvider({ children }) {
     }
     setConnected(false)
     setUser(null)
-  }, [stop])
+  }, [stop, clearHomeProbe])
 
   // Memoise so consumers that only read stable callbacks don't re-render
   // on every provider render. The value identity flips only when one of
