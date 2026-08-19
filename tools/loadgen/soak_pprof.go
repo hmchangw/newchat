@@ -19,16 +19,20 @@ import (
 // startSoakPProfServer serves the profiling endpoints on their own listener,
 // separate from the metrics endpoint Prometheus scrapes, so turning profiling
 // on never widens what the scrape target exposes. An empty address leaves it
-// off. The listener is bound before returning so the caller sees the resolved
-// address (port 0 in tests) rather than racing the goroutine.
-func startSoakPProfServer(addr string) *http.Server {
+// off; anything else is an error the caller must act on, because a configured
+// diagnostic that quietly does not exist is worse than one that was never
+// asked for. The listener is bound before returning so the caller sees the
+// resolved address (port 0 in tests) rather than racing the goroutine.
+func startSoakPProfServer(addr string) (*http.Server, error) {
 	if addr == "" {
-		return nil
+		return nil, nil
+	}
+	if err := requireLoopbackPProfAddr(addr); err != nil {
+		return nil, err
 	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		slog.Error("Cassandra soak pprof listener", "addr", addr, "error", err)
-		return nil
+		return nil, fmt.Errorf("listen for soak pprof on %s: %w", addr, err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", httppprof.Index)
@@ -37,9 +41,15 @@ func startSoakPProfServer(addr string) *http.Server {
 	mux.HandleFunc("/debug/pprof/symbol", httppprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", httppprof.Trace)
 	server := &http.Server{
-		Addr:              listener.Addr().String(),
-		Handler:           mux,
+		Addr:    listener.Addr().String(),
+		Handler: mux,
+		// A profile or trace streams for the duration the caller asked for, and
+		// net/http/pprof extends the write deadline by that duration, so a
+		// WriteTimeout bounds stalled responses without truncating real ones.
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       60 * time.Second,
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil &&
@@ -48,7 +58,29 @@ func startSoakPProfServer(addr string) *http.Server {
 		}
 	}()
 	slog.Info("Cassandra soak pprof server listening", "addr", server.Addr)
-	return server
+	return server, nil
+}
+
+// requireLoopbackPProfAddr keeps the profiling endpoints off every other
+// interface. They are unauthenticated and serve heap, goroutine, command-line,
+// CPU-profile and trace data, and binding ":6060" or "0.0.0.0:6060" hands all
+// of it to any peer that can reach the pod. Loopback still serves kubectl
+// port-forward, which connects inside the pod's own network namespace.
+func requireLoopbackPProfAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("parse soak pprof address %q: %w", addr, err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf(
+			"soak pprof address %q must bind a loopback host: the endpoints are "+
+				"unauthenticated, and port-forward reaches loopback anyway", addr)
+	}
+	return nil
 }
 
 type soakHeapProfileConfig struct {
@@ -79,7 +111,7 @@ func newSoakHeapProfiler(cfg soakHeapProfileConfig) (*soakHeapProfiler, error) {
 	// one instead — inverting what keeping them is for.
 	sequence, err := highestSoakProfileSequence(cfg.Dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resume soak heap profile numbering: %w", err)
 	}
 	return &soakHeapProfiler{dir: cfg.Dir, keep: max(1, cfg.Keep), sequence: sequence}, nil
 }
@@ -138,8 +170,10 @@ func (p *soakHeapProfiler) WriteProfile() error {
 		return fmt.Errorf("create soak heap profile %s: %w", path, err)
 	}
 	if err := runtimepprof.Lookup("heap").WriteTo(file, 0); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write soak heap profile %s: %w", path, err)
+		return errors.Join(
+			fmt.Errorf("write soak heap profile %s: %w", path, err),
+			file.Close(),
+		)
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close soak heap profile %s: %w", path, err)

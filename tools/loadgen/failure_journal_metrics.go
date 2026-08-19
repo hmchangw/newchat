@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type failureJournalMetrics struct {
 	journal failureJournal
@@ -25,11 +28,11 @@ func (j *failureJournalMetrics) ReplayEach(emit func(*failureLedgerEvent) error)
 	// the old behaviour for it rather than failing the run.
 	events, err := j.journal.Replay()
 	if err != nil {
-		return err
+		return fmt.Errorf("replay metrics-wrapped failure journal: %w", err)
 	}
 	for i := range events {
 		if err := emit(&events[i]); err != nil {
-			return err
+			return fmt.Errorf("apply metrics-wrapped failure journal event %d: %w", i, err)
 		}
 	}
 	return nil

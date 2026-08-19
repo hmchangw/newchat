@@ -69,11 +69,11 @@ func (g *failureJournalGroupCommit) ReplayEach(emit func(*failureLedgerEvent) er
 	// the old behaviour for it rather than failing the run.
 	events, err := g.journal.Replay()
 	if err != nil {
-		return err
+		return fmt.Errorf("replay group-commit failure journal: %w", err)
 	}
 	for i := range events {
 		if err := emit(&events[i]); err != nil {
-			return err
+			return fmt.Errorf("apply group-commit failure journal event %d: %w", i, err)
 		}
 	}
 	return nil

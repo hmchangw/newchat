@@ -27,7 +27,7 @@ const (
 // service-side correctness failure, while content/deleted usually means the
 // harness read a mutation the write path had not persisted yet, and the two
 // need different responses.
-type soakVerifyField = string
+type soakVerifyField string
 
 const (
 	soakVerifyFieldNone       soakVerifyField = ""
@@ -98,7 +98,7 @@ func (r soakVerifyResult) String() string {
 		"message_id=" + r.MessageID,
 	}
 	if r.Field != "" {
-		fields = append(fields, "field="+r.Field)
+		fields = append(fields, "field="+string(r.Field))
 	}
 	return strings.Join(fields, " ")
 }

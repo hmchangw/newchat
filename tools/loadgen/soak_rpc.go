@@ -167,7 +167,7 @@ const soakReasonResponseTooLarge errcode.Reason = "response_too_large"
 // account the membership lane had already removed, "outside_access_window"
 // means that account rejoined and its own older message now predates its
 // history window.
-type soakErrorReason = string
+type soakErrorReason string
 
 // soakErrorReasonUnknown absorbs any reason not listed below. errcode's own
 // registry lives in a _test.go file and cannot be imported, so this list is
@@ -175,24 +175,24 @@ type soakErrorReason = string
 const soakErrorReasonUnknown soakErrorReason = "unknown"
 
 var soakKnownErrorReasons = map[errcode.Reason]soakErrorReason{
-	errcode.MessageNotSubscribed:           string(errcode.MessageNotSubscribed),
-	errcode.MessageOutsideAccessWindow:     string(errcode.MessageOutsideAccessWindow),
-	errcode.MessageLargeRoomPostRestricted: string(errcode.MessageLargeRoomPostRestricted),
-	errcode.PinDisabled:                    string(errcode.PinDisabled),
-	errcode.PinLimitReached:                string(errcode.PinLimitReached),
-	errcode.PinRoomTooLarge:                string(errcode.PinRoomTooLarge),
-	errcode.RoomMaxSizeReached:             string(errcode.RoomMaxSizeReached),
-	errcode.RoomNotMember:                  string(errcode.RoomNotMember),
-	errcode.RoomNotOwner:                   string(errcode.RoomNotOwner),
-	errcode.RoomLastOwnerCannotLeave:       string(errcode.RoomLastOwnerCannotLeave),
-	errcode.RoomLastMemberCannotRemove:     string(errcode.RoomLastMemberCannotRemove),
-	errcode.RoomTargetNotMember:            string(errcode.RoomTargetNotMember),
-	errcode.RoomNonChannelOperation:        string(errcode.RoomNonChannelOperation),
-	errcode.RoomReadReceiptsUnavailable:    string(errcode.RoomReadReceiptsUnavailable),
-	errcode.RoomUserNotFound:               string(errcode.RoomUserNotFound),
-	errcode.RoomSelfDM:                     string(errcode.RoomSelfDM),
-	errcode.UserSubscriptionNotFound:       string(errcode.UserSubscriptionNotFound),
-	soakReasonResponseTooLarge:             string(soakReasonResponseTooLarge),
+	errcode.MessageNotSubscribed:           soakErrorReason(errcode.MessageNotSubscribed),
+	errcode.MessageOutsideAccessWindow:     soakErrorReason(errcode.MessageOutsideAccessWindow),
+	errcode.MessageLargeRoomPostRestricted: soakErrorReason(errcode.MessageLargeRoomPostRestricted),
+	errcode.PinDisabled:                    soakErrorReason(errcode.PinDisabled),
+	errcode.PinLimitReached:                soakErrorReason(errcode.PinLimitReached),
+	errcode.PinRoomTooLarge:                soakErrorReason(errcode.PinRoomTooLarge),
+	errcode.RoomMaxSizeReached:             soakErrorReason(errcode.RoomMaxSizeReached),
+	errcode.RoomNotMember:                  soakErrorReason(errcode.RoomNotMember),
+	errcode.RoomNotOwner:                   soakErrorReason(errcode.RoomNotOwner),
+	errcode.RoomLastOwnerCannotLeave:       soakErrorReason(errcode.RoomLastOwnerCannotLeave),
+	errcode.RoomLastMemberCannotRemove:     soakErrorReason(errcode.RoomLastMemberCannotRemove),
+	errcode.RoomTargetNotMember:            soakErrorReason(errcode.RoomTargetNotMember),
+	errcode.RoomNonChannelOperation:        soakErrorReason(errcode.RoomNonChannelOperation),
+	errcode.RoomReadReceiptsUnavailable:    soakErrorReason(errcode.RoomReadReceiptsUnavailable),
+	errcode.RoomUserNotFound:               soakErrorReason(errcode.RoomUserNotFound),
+	errcode.RoomSelfDM:                     soakErrorReason(errcode.RoomSelfDM),
+	errcode.UserSubscriptionNotFound:       soakErrorReason(errcode.UserSubscriptionNotFound),
+	soakReasonResponseTooLarge:             soakErrorReason(soakReasonResponseTooLarge),
 }
 
 func validSoakErrorReason(reason soakErrorReason) bool {

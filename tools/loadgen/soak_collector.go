@@ -249,7 +249,7 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 				c.metrics.SoakErrorReasons.WithLabelValues(
 					action,
 					string(sample.ErrorClass),
-					sample.ErrorReason,
+					string(sample.ErrorReason),
 					phase,
 				).Inc()
 			}
@@ -293,7 +293,7 @@ func (c *SoakCollector) RecordVerification(
 		c.metrics.SoakVerifications.WithLabelValues(
 			string(result.Action),
 			string(result.Class),
-			result.Field,
+			string(result.Field),
 		).Inc()
 	}
 	return nil

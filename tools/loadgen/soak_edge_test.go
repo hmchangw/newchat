@@ -597,7 +597,7 @@ func TestCompareSoakVerifiedMessage_ClassifiesEveryMismatch(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*soakVerifyMessage)
-		field  string
+		field  soakVerifyField
 	}{
 		{
 			name: "message ID",

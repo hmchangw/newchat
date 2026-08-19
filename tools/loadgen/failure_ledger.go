@@ -1731,7 +1731,7 @@ func (w *fileFailureWAL) Replay() ([]failureLedgerEvent, error) {
 		events = append(events, *event)
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("buffer replayed failure WAL: %w", err)
 	}
 	return events, nil
 }
@@ -1750,6 +1750,8 @@ func (w *fileFailureWAL) ReplayEach(emit func(*failureLedgerEvent) error) error 
 	closed := false
 	defer func() {
 		if !closed {
+			// Discarded deliberately: this path only runs when replay already
+			// failed, and the close error would mask the one worth reporting.
 			_ = file.Close()
 		}
 	}()
@@ -1805,7 +1807,7 @@ func (w *fileFailureWAL) ReplayEach(emit func(*failureLedgerEvent) error) error 
 			)
 		}
 		if err := emit(&event); err != nil {
-			return err
+			return fmt.Errorf("apply failure WAL line %d: %w", line, err)
 		}
 		durableBytes += int64(len(encoded))
 	}

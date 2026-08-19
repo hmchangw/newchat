@@ -70,17 +70,30 @@ func runSoakFailureExpiry(
 			if !ok {
 				return
 			}
-			if _, err := ledger.Expire(at); err != nil && onError != nil {
-				onError(fmt.Errorf("expire failure operations: %w", err))
+			if _, err := ledger.Expire(at); err != nil {
+				reportSoakFailureSweepError(
+					onError, fmt.Errorf("expire failure operations: %w", err))
 			}
 			// Reclaiming on the same tick means a run that finalizes nothing
 			// still bounds the journal; the finalize counter alone would let it
 			// grow until the next restart made recovery more expensive.
-			if err := ledger.MaybeCompact(at); err != nil && onError != nil {
-				onError(fmt.Errorf("compact failure journal: %w", err))
+			if err := ledger.MaybeCompact(at); err != nil {
+				reportSoakFailureSweepError(
+					onError, fmt.Errorf("compact failure journal: %w", err))
 			}
 		}
 	}
+}
+
+// reportSoakFailureSweepError makes sure a sweep failure is seen. Both of these
+// invalidate the ledger, so losing one because no callback happened to be
+// configured would hide the moment the run stopped being trustworthy.
+func reportSoakFailureSweepError(onError func(error), err error) {
+	if onError != nil {
+		onError(err)
+		return
+	}
+	slog.Error("Cassandra soak failure sweep", "error", err)
 }
 
 // failureWALPath separates the two identities the journal name used to

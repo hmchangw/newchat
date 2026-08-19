@@ -159,7 +159,7 @@ func (j *bufferOnlyFailureJournal) Close() error                             { r
 // slice deliberately alive, so the comparison is real rather than a GC artefact.
 func TestFileFailureWAL_StreamedReplayRetainsNothingItHasEmitted(t *testing.T) {
 	wal := writeSoakReplayJournal(t, t.TempDir()+"/retain.wal", 60000, 0)
-	t.Cleanup(func() { _ = wal.Close() })
+	t.Cleanup(func() { require.NoError(t, wal.Close()) })
 
 	base := soakHeapAllocMB()
 	buffered, err := wal.Replay()
@@ -227,7 +227,7 @@ func TestFailureJournal_WrappersBufferWhenTheInnerJournalCannotStream(t *testing
 
 func TestFileFailureWAL_ReplayEachYieldsEveryRecordInOrder(t *testing.T) {
 	wal := writeSoakReplayJournal(t, t.TempDir()+"/order.wal", 3, 2)
-	t.Cleanup(func() { _ = wal.Close() })
+	t.Cleanup(func() { require.NoError(t, wal.Close()) })
 
 	var streamed []string
 	require.NoError(t, wal.ReplayEach(func(event *failureLedgerEvent) error {
@@ -246,7 +246,7 @@ func TestFileFailureWAL_ReplayEachYieldsEveryRecordInOrder(t *testing.T) {
 
 func TestFileFailureWAL_ReplayEachStopsOnTheFirstApplyError(t *testing.T) {
 	wal := writeSoakReplayJournal(t, t.TempDir()+"/stop.wal", 3, 0)
-	t.Cleanup(func() { _ = wal.Close() })
+	t.Cleanup(func() { require.NoError(t, wal.Close()) })
 
 	seen := 0
 	err := wal.ReplayEach(func(*failureLedgerEvent) error {

@@ -69,11 +69,11 @@ func TestSoakCollector_RejectsAnUnboundedVerificationField(t *testing.T) {
 // Every field the verifiers can assign must be accepted, or a real mismatch is
 // dropped instead of reported.
 func TestSoakCollector_AcceptsEveryFieldTheVerifiersAssign(t *testing.T) {
-	for _, field := range []string{
+	for _, field := range []soakVerifyField{
 		"", "message_id", "room_id", "author", "deleted", "content",
 		"edited_at", "pagination",
 	} {
-		t.Run("field="+field, func(t *testing.T) {
+		t.Run("field="+string(field), func(t *testing.T) {
 			collector := NewSoakCollector(NewMetrics(), time.Unix(100, 0), 0, time.Minute)
 			require.NoError(t, collector.RecordVerification(&soakVerifyResult{
 				Class: soakVerifyMismatch, Action: soakRPCGetMessage, Field: field,
