@@ -416,6 +416,52 @@ export function roomEventsReducer(state, action) {
       )
       return { ...state, summaries, subscriptions }
     }
+    // threadUnread mirrors the server's Subscription.ThreadUnread — the parent
+    // message IDs of followed threads with unread replies. Seeded by the
+    // bucket bootstrap, then maintained locally: the server has no per-user
+    // client event for thread reads (see the design doc's §5.2), so the badge
+    // fold depends on these three deltas plus the periodic reconcile.
+    case 'THREAD_REPLY_RECEIVED': {
+      const sub = state.subscriptions[action.roomId]
+      if (!sub) return state
+      const prev = sub.threadUnread ?? []
+      // Redelivery of the same reply must not double-count the thread.
+      if (prev.includes(action.parentMessageId)) return state
+      return {
+        ...state,
+        subscriptions: {
+          ...state.subscriptions,
+          [action.roomId]: { ...sub, threadUnread: [...prev, action.parentMessageId] },
+        },
+      }
+    }
+    case 'THREAD_READ': {
+      const sub = state.subscriptions[action.roomId]
+      if (!sub?.threadUnread?.includes(action.parentMessageId)) return state
+      return {
+        ...state,
+        subscriptions: {
+          ...state.subscriptions,
+          [action.roomId]: {
+            ...sub,
+            threadUnread: sub.threadUnread.filter((id) => id !== action.parentMessageId),
+          },
+        },
+      }
+    }
+    case 'THREAD_READ_ALL': {
+      let changed = false
+      const subscriptions = {}
+      for (const [roomId, sub] of Object.entries(state.subscriptions)) {
+        if (sub.threadUnread?.length) {
+          subscriptions[roomId] = { ...sub, threadUnread: [] }
+          changed = true
+        } else {
+          subscriptions[roomId] = sub
+        }
+      }
+      return changed ? { ...state, subscriptions } : state
+    }
     case 'SUBSCRIPTION_SECTION_MOVED': {
       // A chat's chatlist section membership/order changed (subscription.update
       // action "section_moved"). Unlike SUBSCRIPTION_UPSERTED's spread-merge,
