@@ -187,13 +187,13 @@ func main() {
 		msgColl := newMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, syncMessagesFrom, cfg.DevMode)
 		// search-service filters restricted-room access by threadParentMessageCreatedAt, so re-resolve it from the parent's indexed createdAt (the event omits it).
 		msgResolver := newESParentResolver(engine, cfg.MsgIndexPrefix)
-		msgResolver.metrics = esMetrics
+		msgResolver.metrics = esMetrics.forCollection(msgColl.ConsumerName())
 		msgColl.parentResolver = msgResolver
 
 		// Second consumer over messageCollection, bound to BOT-MESSAGES-CANONICAL. isBot is derived per-doc from model.IsBot(UserAccount) so bots reuse the same index.
 		botMsgColl := newBotMessageCollection(cfg.MsgIndexPrefix, cfg.DevMode)
 		botMsgResolver := newESParentResolver(engine, cfg.MsgIndexPrefix)
-		botMsgResolver.metrics = esMetrics
+		botMsgResolver.metrics = esMetrics.forCollection(botMsgColl.ConsumerName())
 		botMsgColl.parentResolver = botMsgResolver
 
 		collections = []Collection{

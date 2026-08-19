@@ -138,7 +138,7 @@ func (h *Handler) Flush(ctx context.Context) {
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
 		slog.Error("bulk request failed", "error", err, "actions", len(actions))
-		h.metrics.recordFlush(bulkCtx, flushRequestError, elapsed, len(actions))
+		h.metrics.recordFlush(bulkCtx, flushRequestFailed, elapsed, len(actions))
 		h.metrics.recordMessages(bulkCtx, dispNakkedRequestFailed, len(pending))
 		nakAll(pending, "bulk request failed")
 		return

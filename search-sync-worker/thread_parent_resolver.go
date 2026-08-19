@@ -20,7 +20,7 @@ type esReadFn func(ctx context.Context, messageID string) (time.Time, bool)
 type esParentResolver struct {
 	esRead  esReadFn
 	timeout time.Duration
-	metrics *syncMetrics // optional, set by main; nil-safe recording
+	metrics *collectionMetrics // optional, set by main; nil-safe recording
 }
 
 // ResolveParentCreatedAt returns the parent's createdAt and ok=true when resolved.

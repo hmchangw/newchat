@@ -20,11 +20,11 @@ type flushOutcome string
 
 const (
 	flushSuccess        flushOutcome = "success"
-	flushRequestError   flushOutcome = "request_error"
+	flushRequestFailed  flushOutcome = "request_failed"
 	flushResultMismatch flushOutcome = "result_mismatch"
 )
 
-var allFlushOutcomes = []flushOutcome{flushSuccess, flushRequestError, flushResultMismatch}
+var allFlushOutcomes = []flushOutcome{flushSuccess, flushRequestFailed, flushResultMismatch}
 
 // msgDisposition is a terminal (outcome, reason) pair for one source JetStream
 // message. Every label value is a closed enum so attribute sets are precomputed
@@ -56,8 +56,6 @@ type syncMetrics struct {
 	itemFailures  metric.Int64Counter
 	messages      metric.Int64Counter
 	parentResolve metric.Float64Histogram
-	resolvedOpt   metric.MeasurementOption
-	unresolvedOpt metric.MeasurementOption
 }
 
 func newSyncMetrics(meter metric.Meter) *syncMetrics {
@@ -66,31 +64,31 @@ func newSyncMetrics(meter metric.Meter) *syncMetrics {
 	// latency histograms carry the shared boundaries as an instrument advisory.
 	latency := metric.WithExplicitBucketBoundaries(o11y.DefaultLatencyBuckets()...)
 
-	flushDuration, err := meter.Float64Histogram("chat.search.sync.bulk.flush.duration",
+	flushDuration, err := meter.Float64Histogram("search_sync_worker_bulk_flush_duration",
 		metric.WithDescription("ES bulk flush round-trip duration by outcome."), metric.WithUnit("s"), latency)
 	if err != nil {
-		flushDuration, _ = noopMeter.Float64Histogram("chat.search.sync.bulk.flush.duration")
+		flushDuration, _ = noopMeter.Float64Histogram("search_sync_worker_bulk_flush_duration")
 	}
-	flushActions, err := meter.Int64Histogram("chat.search.sync.bulk.flush.actions",
+	flushActions, err := meter.Int64Histogram("search_sync_worker_bulk_flush_actions",
 		metric.WithDescription("ES bulk actions attempted per flush."),
 		metric.WithExplicitBucketBoundaries(1, 10, 50, 100, 250, 500, 1000, 2000))
 	if err != nil {
-		flushActions, _ = noopMeter.Int64Histogram("chat.search.sync.bulk.flush.actions")
+		flushActions, _ = noopMeter.Int64Histogram("search_sync_worker_bulk_flush_actions")
 	}
-	itemFailures, err := meter.Int64Counter("chat.search.sync.bulk.item.failures",
+	itemFailures, err := meter.Int64Counter("search_sync_worker_bulk_item_failures",
 		metric.WithDescription("ES bulk items that failed, by action type and bounded status."))
 	if err != nil {
-		itemFailures, _ = noopMeter.Int64Counter("chat.search.sync.bulk.item.failures")
+		itemFailures, _ = noopMeter.Int64Counter("search_sync_worker_bulk_item_failures")
 	}
-	messages, err := meter.Int64Counter("chat.search.sync.messages",
-		metric.WithDescription("Source JetStream messages by terminal disposition."))
+	messages, err := meter.Int64Counter("search_sync_worker_messages",
+		metric.WithDescription("JetStream delivery attempts by disposition; a nakked delivery recurs on each redelivery."))
 	if err != nil {
-		messages, _ = noopMeter.Int64Counter("chat.search.sync.messages")
+		messages, _ = noopMeter.Int64Counter("search_sync_worker_messages")
 	}
-	parentResolve, err := meter.Float64Histogram("chat.search.sync.parent.resolve.duration",
+	parentResolve, err := meter.Float64Histogram("search_sync_worker_parent_resolve_duration",
 		metric.WithDescription("Thread-parent createdAt ES self-lookup duration."), metric.WithUnit("s"), latency)
 	if err != nil {
-		parentResolve, _ = noopMeter.Float64Histogram("chat.search.sync.parent.resolve.duration")
+		parentResolve, _ = noopMeter.Float64Histogram("search_sync_worker_parent_resolve_duration")
 	}
 
 	return &syncMetrics{
@@ -99,30 +97,18 @@ func newSyncMetrics(meter metric.Meter) *syncMetrics {
 		itemFailures:  itemFailures,
 		messages:      messages,
 		parentResolve: parentResolve,
-		resolvedOpt:   metric.WithAttributeSet(attribute.NewSet(attribute.String("outcome", "resolved"))),
-		unresolvedOpt: metric.WithAttributeSet(attribute.NewSet(attribute.String("outcome", "unresolved"))),
 	}
-}
-
-// recordParentResolve is nil-safe so an unwired resolver stays a no-op.
-func (m *syncMetrics) recordParentResolve(ctx context.Context, seconds float64, resolved bool) {
-	if m == nil {
-		return
-	}
-	opt := m.unresolvedOpt
-	if resolved {
-		opt = m.resolvedOpt
-	}
-	m.parentResolve.Record(ctx, seconds, opt)
 }
 
 // collectionMetrics binds syncMetrics to one collection's bounded label sets.
 type collectionMetrics struct {
-	m          *syncMetrics
-	collection string
-	actionsOpt metric.MeasurementOption
-	flushOpts  map[flushOutcome]metric.MeasurementOption
-	msgOpts    map[msgDisposition]metric.MeasurementOption
+	m             *syncMetrics
+	collection    string
+	actionsOpt    metric.MeasurementOption
+	resolvedOpt   metric.MeasurementOption
+	unresolvedOpt metric.MeasurementOption
+	flushOpts     map[flushOutcome]metric.MeasurementOption
+	msgOpts       map[msgDisposition]metric.MeasurementOption
 }
 
 func (m *syncMetrics) forCollection(name string) *collectionMetrics {
@@ -145,9 +131,25 @@ func (m *syncMetrics) forCollection(name string) *collectionMetrics {
 		m:          m,
 		collection: name,
 		actionsOpt: metric.WithAttributeSet(attribute.NewSet(attribute.String("collection", name))),
-		flushOpts:  flushOpts,
-		msgOpts:    msgOpts,
+		resolvedOpt: metric.WithAttributeSet(attribute.NewSet(
+			attribute.String("collection", name), attribute.String("outcome", "resolved"))),
+		unresolvedOpt: metric.WithAttributeSet(attribute.NewSet(
+			attribute.String("collection", name), attribute.String("outcome", "unresolved"))),
+		flushOpts: flushOpts,
+		msgOpts:   msgOpts,
 	}
+}
+
+// recordParentResolve is nil-safe so an unwired resolver stays a no-op.
+func (c *collectionMetrics) recordParentResolve(ctx context.Context, seconds float64, resolved bool) {
+	if c == nil {
+		return
+	}
+	opt := c.unresolvedOpt
+	if resolved {
+		opt = c.resolvedOpt
+	}
+	c.m.parentResolve.Record(ctx, seconds, opt)
 }
 
 // recordFlush records one bulk flush round-trip and the batch size it attempted.

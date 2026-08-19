@@ -119,7 +119,7 @@ func TestSyncMetrics_FlushSuccess(t *testing.T) {
 
 	rm := collectMetrics(t, reader)
 
-	durations := histPoints[float64](t, rm, "chat.search.sync.bulk.flush.duration")
+	durations := histPoints[float64](t, rm, "search_sync_worker_bulk_flush_duration")
 	require.Len(t, durations, 1)
 	assert.Equal(t, uint64(1), durations[0].Count)
 	assert.Equal(t, map[string]string{
@@ -127,12 +127,12 @@ func TestSyncMetrics_FlushSuccess(t *testing.T) {
 		"outcome":    "success",
 	}, attrMap(durations[0].Attributes))
 
-	actions := histPoints[int64](t, rm, "chat.search.sync.bulk.flush.actions")
+	actions := histPoints[int64](t, rm, "search_sync_worker_bulk_flush_actions")
 	require.Len(t, actions, 1)
 	assert.Equal(t, int64(1), actions[0].Sum)
 	assert.Equal(t, map[string]string{"collection": "message-sync"}, attrMap(actions[0].Attributes))
 
-	messages := sumPoints(t, rm, "chat.search.sync.messages")
+	messages := sumPoints(t, rm, "search_sync_worker_messages")
 	assert.Equal(t, int64(1), sumValue(messages, map[string]string{
 		"collection": "message-sync", "outcome": "acked", "reason": "success",
 	}))
@@ -150,14 +150,14 @@ func TestSyncMetrics_FlushRequestError(t *testing.T) {
 
 	rm := collectMetrics(t, reader)
 
-	durations := histPoints[float64](t, rm, "chat.search.sync.bulk.flush.duration")
+	durations := histPoints[float64](t, rm, "search_sync_worker_bulk_flush_duration")
 	require.Len(t, durations, 1)
 	assert.Equal(t, map[string]string{
 		"collection": "message-sync",
-		"outcome":    "request_error",
+		"outcome":    "request_failed",
 	}, attrMap(durations[0].Attributes))
 
-	messages := sumPoints(t, rm, "chat.search.sync.messages")
+	messages := sumPoints(t, rm, "search_sync_worker_messages")
 	assert.Equal(t, int64(1), sumValue(messages, map[string]string{
 		"collection": "message-sync", "outcome": "nakked", "reason": "request_failed",
 	}))
@@ -175,17 +175,17 @@ func TestSyncMetrics_FlushItemFailure(t *testing.T) {
 
 	rm := collectMetrics(t, reader)
 
-	failures := sumPoints(t, rm, "chat.search.sync.bulk.item.failures")
+	failures := sumPoints(t, rm, "search_sync_worker_bulk_item_failures")
 	assert.Equal(t, int64(1), sumValue(failures, map[string]string{
 		"collection": "message-sync", "action": "index", "status": "429",
 	}))
 
-	messages := sumPoints(t, rm, "chat.search.sync.messages")
+	messages := sumPoints(t, rm, "search_sync_worker_messages")
 	assert.Equal(t, int64(1), sumValue(messages, map[string]string{
 		"collection": "message-sync", "outcome": "nakked", "reason": "item_failed",
 	}))
 
-	durations := histPoints[float64](t, rm, "chat.search.sync.bulk.flush.duration")
+	durations := histPoints[float64](t, rm, "search_sync_worker_bulk_flush_duration")
 	require.Len(t, durations, 1)
 	assert.Equal(t, "success", attrMap(durations[0].Attributes)["outcome"],
 		"per-item failures nak their own messages but the flush round-trip itself succeeded")
@@ -203,11 +203,11 @@ func TestSyncMetrics_FlushResultMismatch(t *testing.T) {
 
 	rm := collectMetrics(t, reader)
 
-	durations := histPoints[float64](t, rm, "chat.search.sync.bulk.flush.duration")
+	durations := histPoints[float64](t, rm, "search_sync_worker_bulk_flush_duration")
 	require.Len(t, durations, 1)
 	assert.Equal(t, "result_mismatch", attrMap(durations[0].Attributes)["outcome"])
 
-	messages := sumPoints(t, rm, "chat.search.sync.messages")
+	messages := sumPoints(t, rm, "search_sync_worker_messages")
 	assert.Equal(t, int64(1), sumValue(messages, map[string]string{
 		"collection": "message-sync", "outcome": "nakked", "reason": "result_mismatch",
 	}))
@@ -220,7 +220,7 @@ func TestSyncMetrics_AddPoisonAcked(t *testing.T) {
 	h.Add(&stubMsg{data: []byte("{invalid")})
 
 	rm := collectMetrics(t, reader)
-	messages := sumPoints(t, rm, "chat.search.sync.messages")
+	messages := sumPoints(t, rm, "search_sync_worker_messages")
 	assert.Equal(t, int64(1), sumValue(messages, map[string]string{
 		"collection": "message-sync", "outcome": "acked", "reason": "poison",
 	}))
@@ -237,7 +237,7 @@ func TestSyncMetrics_AddFilteredAcked(t *testing.T) {
 	h.Add(makeStubMsg(t, metricsTestEvent()))
 
 	rm := collectMetrics(t, reader)
-	messages := sumPoints(t, rm, "chat.search.sync.messages")
+	messages := sumPoints(t, rm, "search_sync_worker_messages")
 	assert.Equal(t, int64(1), sumValue(messages, map[string]string{
 		"collection": "message-sync", "outcome": "acked", "reason": "filtered",
 	}))
@@ -294,7 +294,7 @@ func TestESParentResolver_RecordsResolveDuration(t *testing.T) {
 			return time.Time{}, false
 		},
 		timeout: time.Second,
-		metrics: sm,
+		metrics: sm.forCollection("message-sync"),
 	}
 
 	_, ok := r.ResolveParentCreatedAt(context.Background(), "hit")
@@ -303,11 +303,14 @@ func TestESParentResolver_RecordsResolveDuration(t *testing.T) {
 	require.False(t, ok)
 
 	rm := collectMetrics(t, reader)
-	points := histPoints[float64](t, rm, "chat.search.sync.parent.resolve.duration")
+	points := histPoints[float64](t, rm, "search_sync_worker_parent_resolve_duration")
 	require.Len(t, points, 2)
 	byOutcome := map[string]uint64{}
 	for _, p := range points {
-		byOutcome[attrMap(p.Attributes)["outcome"]] = p.Count
+		attrs := attrMap(p.Attributes)
+		assert.Equal(t, "message-sync", attrs["collection"],
+			"the two message resolvers share the instruments, so the series must split by collection")
+		byOutcome[attrs["outcome"]] = p.Count
 	}
 	assert.Equal(t, uint64(1), byOutcome["resolved"])
 	assert.Equal(t, uint64(1), byOutcome["unresolved"])
