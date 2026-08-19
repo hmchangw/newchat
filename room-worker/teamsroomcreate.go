@@ -97,9 +97,9 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	wantAccounts := make(map[string]struct{}, len(chat.Members))
 	memberSite := make(map[string]string, len(chat.Members)) // account -> home site, for federation
 	var newSubs []*model.Subscription
-	var refreshSubs []*model.Subscription // existing members whose joinedAt needs correcting
-	var addedUsers []model.User           // for the room-key fan-out
-	teamsSection := model.SectionTeams    // addressable built-in section id for every migrated sub
+	joinedAtFixes := map[string]time.Time{} // existing members whose joinedAt is stale
+	var addedUsers []model.User             // for the room-key fan-out
+	teamsSection := model.SectionTeams      // addressable built-in section id for every migrated sub
 
 	for _, member := range chat.Members {
 		if member.Account == "" {
@@ -111,13 +111,10 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		}
 		wantAccounts[member.Account] = struct{}{}
 		if existing, ok := existingByAccount[member.Account]; ok {
-			// Already a member — no add. But self-correct a joinedAt stamped before
-			// the createdDateTime fix: refresh it to the chat's createdDateTime via the
-			// same (roomId, account) upsert, without re-adding or re-fanning-out.
+			// Already a member — no add. But self-correct a joinedAt stamped before the
+			// createdDateTime fix: a joinedAt-only refresh, no re-add or re-fanout.
 			if want := chat.CreatedDateTime.UTC(); !existing.JoinedAt.Equal(want) {
-				s := *existing
-				s.JoinedAt = want
-				refreshSubs = append(refreshSubs, &s)
+				joinedAtFixes[member.Account] = want
 			}
 			continue
 		}
@@ -163,10 +160,8 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 			return fmt.Errorf("bulk create subs: %w", err)
 		}
 	}
-	if len(refreshSubs) > 0 {
-		// The (roomId, account) doc exists, so the upsert's $setOnInsert is a no-op
-		// and only joinedAt ($set) is corrected — read state stays untouched.
-		if err := h.store.BulkCreateSubscriptions(ctx, refreshSubs); err != nil {
+	if len(joinedAtFixes) > 0 {
+		if err := h.store.BulkRefreshJoinedAt(ctx, room.ID, joinedAtFixes); err != nil {
 			return fmt.Errorf("refresh migrated joinedAt: %w", err)
 		}
 	}

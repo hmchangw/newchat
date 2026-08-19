@@ -279,14 +279,13 @@ func TestProcessTeamsRoomCreate_RefreshesStaleJoinedAt(t *testing.T) {
 	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return([]model.Subscription{
 		{User: model.SubscriptionUser{Account: "alice"}, RoomID: "chat1", SiteID: "site-a", JoinedAt: staleJoinedAt},
 	}, nil)
-	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, subs []*model.Subscription) error {
-			require.Len(t, subs, 1)
-			assert.Equal(t, "alice", subs[0].User.Account)
-			assert.Equal(t, chatCreated, subs[0].JoinedAt, "refresh sub carries the chat createdDateTime")
+	store.EXPECT().BulkRefreshJoinedAt(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ string, byAccount map[string]time.Time) error {
+			assert.Equal(t, map[string]time.Time{"alice": chatCreated}, byAccount,
+				"refresh corrects alice's joinedAt to the chat createdDateTime")
 			return nil
 		})
-	// No ReconcileMemberCounts / DeleteSubscriptionsByAccounts — refresh-only, converged.
+	// No BulkCreateSubscriptions / ReconcileMemberCounts / DeleteSubscriptionsByAccounts — refresh-only.
 
 	chat := model.TeamsRoomCreateChat{
 		ID:              "chat1",

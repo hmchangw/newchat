@@ -506,26 +506,20 @@ func (s *MongoStore) DeleteThreadSubscriptions(ctx context.Context, roomID strin
 	return nil
 }
 
-// BulkCreateSubscriptions upserts each sub on (roomId, u.account). Everything but
-// joinedAt is $setOnInsert, so a redelivery/replay preserves the existing sub
-// (read state, roles, section). joinedAt is $set so a replay converges it —
-// self-correcting a sub stamped before the createdDateTime fix; it's deterministic
-// and not read-state, so overwriting is safe.
+// BulkCreateSubscriptions upserts each sub idempotently, keyed on
+// (roomId, u.account). On collision with an existing document (e.g. a
+// JetStream redelivery of the same create/add-member event), $setOnInsert
+// is a no-op so the persisted sub is preserved unchanged — preserving the
+// insert-only contract for channel/DM/add-member paths while avoiding
+// the duplicate-key error path entirely.
 func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error {
 	if len(subs) == 0 {
 		return nil
 	}
 	models := make([]mongo.WriteModel, 0, len(subs))
 	for _, sub := range subs {
-		onInsert, err := bsonMExcept(sub, "joinedAt")
-		if err != nil {
-			return fmt.Errorf("marshal subscription for upsert: %w", err)
-		}
 		filter := bson.M{"roomId": sub.RoomID, "u.account": sub.User.Account}
-		models = append(models, mongoutil.UpsertModel(filter, bson.M{
-			"$setOnInsert": onInsert,
-			"$set":         bson.M{"joinedAt": sub.JoinedAt},
-		}))
+		models = append(models, mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": sub}))
 	}
 	opts := options.BulkWrite().SetOrdered(false)
 	if _, err := s.subscriptions.BulkWrite(ctx, models, opts); err != nil {
@@ -534,21 +528,25 @@ func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.
 	return nil
 }
 
-// bsonMExcept marshals v to a bson.M without the given keys — lets a field move
-// from $setOnInsert to $set without a Mongo path conflict.
-func bsonMExcept(v any, keys ...string) (bson.M, error) {
-	raw, err := bson.Marshal(v)
-	if err != nil {
-		return nil, err
+// BulkRefreshJoinedAt sets joinedAt on existing (roomId, account) subs — the
+// Teams migration's self-correction for a member migrated before the
+// createdDateTime fix. joinedAt only: read state, roles and section are left
+// untouched, so this does NOT relax the insert-only contract of
+// BulkCreateSubscriptions (a missing sub is a no-op, not an insert).
+func (s *MongoStore) BulkRefreshJoinedAt(ctx context.Context, roomID string, joinedAtByAccount map[string]time.Time) error {
+	if len(joinedAtByAccount) == 0 {
+		return nil
 	}
-	var m bson.M
-	if err := bson.Unmarshal(raw, &m); err != nil {
-		return nil, err
+	models := make([]mongo.WriteModel, 0, len(joinedAtByAccount))
+	for account, joinedAt := range joinedAtByAccount {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"roomId": roomID, "u.account": account}).
+			SetUpdate(bson.M{"$set": bson.M{"joinedAt": joinedAt}}))
 	}
-	for _, k := range keys {
-		delete(m, k)
+	if _, err := s.subscriptions.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("bulk refresh joinedAt for %d subs: %w", len(models), err)
 	}
-	return m, nil
+	return nil
 }
 
 // BulkCreateRoomMembers upserts each row on the (rid, member.type, member.id) unique key. $setOnInsert
