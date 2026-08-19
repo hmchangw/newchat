@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -182,6 +183,83 @@ func TestBuildSoakTopology_IsDeterministicWithSeededIdentitySource(t *testing.T)
 	require.NoError(t, err)
 
 	assert.Equal(t, a, b)
+}
+
+func TestBuildSoakSubscriptions_LeavesBotDMOnlyFlagUnset(t *testing.T) {
+	members := makeSoakUsers(2, "site-a")
+
+	for _, roomType := range []model.RoomType{model.RoomTypeChannel, model.RoomTypeDM} {
+		t.Run(string(roomType), func(t *testing.T) {
+			subscriptions := buildSoakSubscriptions(
+				&model.Room{ID: "room-1", SiteID: "site-a", Type: roomType, Name: "room"},
+				members,
+				newSequenceSoakIDs(),
+				time.Unix(1, 0),
+			)
+
+			require.Len(t, subscriptions, 2)
+			for i := range subscriptions {
+				assert.False(t, subscriptions[i].IsSubscribed,
+					"channel and DM seed rows must match production membership documents")
+			}
+		})
+	}
+}
+
+func TestIsActiveSoakSubscription_UsesExistingRoomRowsAsMembership(t *testing.T) {
+	active := map[string]struct{}{"u-1": {}}
+
+	tests := []struct {
+		name string
+		sub  *model.Subscription
+		want bool
+	}{
+		{
+			name: "active channel row",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeChannel,
+				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+			want: true,
+		},
+		{
+			name: "active DM row",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeDM,
+				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+			want: true,
+		},
+		{
+			name: "inactive user",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeChannel,
+				User:     model.SubscriptionUser{ID: "u-2", Account: "bob"},
+			},
+		},
+		{
+			name: "unsubscribed bot DM",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeBotDM,
+				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+		},
+		{
+			name: "subscribed bot DM",
+			sub: &model.Subscription{
+				RoomType:     model.RoomTypeBotDM,
+				IsSubscribed: true,
+				User:         model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isActiveSoakSubscription(tt.sub, active))
+		})
+	}
 }
 
 func TestBuildSoakTopology_RejectsImpossibleRoomShape(t *testing.T) {

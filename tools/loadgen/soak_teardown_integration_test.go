@@ -42,7 +42,9 @@ func TestTeardownSoak_DeletesOnlySelectedMongoRun(t *testing.T) {
 			bson.D{{Key: "_id", Value: "room-b"}, {Key: "soakRunId", Value: "run-b"}},
 		},
 		"subscriptions": {
-			bson.D{{Key: "_id", Value: "sub-a"}, {Key: "roomId", Value: "room-a"}, {Key: "soakRunId", Value: "run-a"}},
+			// room-service writes create-lane subscriptions without loadgen's
+			// private ownership marker. The owned room still defines their scope.
+			bson.D{{Key: "_id", Value: "sub-a"}, {Key: "roomId", Value: "room-a"}},
 			bson.D{{Key: "_id", Value: "sub-b"}, {Key: "roomId", Value: "room-b"}, {Key: "soakRunId", Value: "run-b"}},
 		},
 		"thread_rooms": {

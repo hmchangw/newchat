@@ -495,8 +495,8 @@ func TestFailureRecipientObserver_SubscriptionsAreAttributedAndFlushedBeforeHeal
 	topology := &soakTopology{
 		Rooms: []model.Room{{ID: "channel-1", Type: model.RoomTypeChannel}},
 		Subscriptions: []model.Subscription{
-			{RoomID: "channel-1", RoomType: model.RoomTypeChannel, IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
-			{RoomID: "channel-1", RoomType: model.RoomTypeChannel, IsSubscribed: true, User: model.SubscriptionUser{Account: "bob"}},
+			{RoomID: "channel-1", RoomType: model.RoomTypeChannel, User: model.SubscriptionUser{Account: "alice"}},
+			{RoomID: "channel-1", RoomType: model.RoomTypeChannel, User: model.SubscriptionUser{Account: "bob"}},
 		},
 	}
 	subscriptions, err := startFailureRecipientSubscriptions(source, topology, observer)
@@ -925,14 +925,13 @@ func TestFailureRecipientConnection_DrainWrapsTimeout(t *testing.T) {
 	assert.ErrorIs(t, err, nats.ErrDrainTimeout)
 }
 
-func TestSoakRuntimeSelector_RecipientSetsExcludeBots(t *testing.T) {
+func TestSoakRuntimeSelector_RecipientSetsUseExistingRowsAndExcludeBots(t *testing.T) {
 	topology := &soakTopology{
 		ActiveUsers: []model.User{{ID: "u-alice", Account: "alice"}},
 		Subscriptions: []model.Subscription{
-			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
-			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "borrowed-subscriber"}},
-			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "bot", IsBot: true}},
-			{RoomID: "room-1", IsSubscribed: false, User: model.SubscriptionUser{Account: "departed"}},
+			{RoomID: "room-1", User: model.SubscriptionUser{Account: "alice"}},
+			{RoomID: "room-1", User: model.SubscriptionUser{Account: "borrowed-subscriber"}},
+			{RoomID: "room-1", User: model.SubscriptionUser{Account: "bot", IsBot: true}},
 		}}
 
 	assert.Equal(t, map[string][]string{"room-1": {"alice", "borrowed-subscriber"}}, soakRecipientSets(topology))

@@ -286,7 +286,7 @@ func isActiveSoakSubscription(
 	subscription *model.Subscription,
 	active map[string]struct{},
 ) bool {
-	if subscription == nil || !subscription.IsSubscribed {
+	if !isSoakRoomMember(subscription) {
 		return false
 	}
 	if len(active) == 0 {
@@ -294,6 +294,16 @@ func isActiveSoakSubscription(
 	}
 	_, ok := active[subscription.User.ID]
 	return ok
+}
+
+// isSoakRoomMember follows the production subscription model: channel and DM
+// membership is represented by row existence because leave deletes the row.
+// Only botDM keeps the row and uses IsSubscribed as a soft toggle.
+func isSoakRoomMember(subscription *model.Subscription) bool {
+	if subscription == nil {
+		return false
+	}
+	return subscription.RoomType != model.RoomTypeBotDM || subscription.IsSubscribed
 }
 
 func reserveSoakPair(a, b *model.User, used map[string]struct{}) bool {
@@ -333,14 +343,13 @@ func buildSoakSubscriptions(
 				ID:      members[i].ID,
 				Account: members[i].Account,
 			},
-			RoomID:       room.ID,
-			SiteID:       room.SiteID,
-			Roles:        roles,
-			Name:         name,
-			RoomType:     room.Type,
-			IsSubscribed: true,
-			Open:         true,
-			JoinedAt:     joinedAt,
+			RoomID:   room.ID,
+			SiteID:   room.SiteID,
+			Roles:    roles,
+			Name:     name,
+			RoomType: room.Type,
+			Open:     true,
+			JoinedAt: joinedAt,
 		}
 	}
 	return subscriptions

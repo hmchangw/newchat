@@ -394,12 +394,21 @@ func (s *mongoSoakStore) loadOwnedTopologyPage(
 	if err := roomCursor.Close(ctx); err != nil {
 		return nil, nil, fmt.Errorf("close owned soak room cursor: %w", err)
 	}
+	ownedRoomIDs := make([]string, len(rooms))
+	for i := range rooms {
+		ownedRoomIDs[i] = rooms[i].ID
+	}
+	if len(ownedRoomIDs) == 0 {
+		return rooms, nil, nil
+	}
 
 	subscriptionCursor, err := s.db.Collection("subscriptions").Find(
 		ctx,
 		bson.D{
-			{Key: "roomId", Value: bson.D{{Key: "$in", Value: roomIDs}}},
-			{Key: "soakRunId", Value: runID},
+			// room-service writes create/member-lane subscriptions without
+			// loadgen's private soakRunId marker. The rooms query above has
+			// already narrowed this scope to rooms owned by the run.
+			{Key: "roomId", Value: bson.D{{Key: "$in", Value: ownedRoomIDs}}},
 			{Key: "siteId", Value: siteID},
 		},
 		options.Find().
@@ -678,11 +687,7 @@ func (s *mongoSoakStore) DeleteOwnedRoomBatch(
 	); err != nil {
 		return fmt.Errorf("delete wrapped DEKs for soak run %q: %w", runID, err)
 	}
-	ownedFilter := bson.D{
-		{Key: "soakRunId", Value: runID},
-		{Key: "roomId", Value: bson.D{{Key: "$in", Value: ownedRoomIDs}}},
-	}
-	if _, err := s.db.Collection("subscriptions").DeleteMany(ctx, ownedFilter); err != nil {
+	if _, err := s.db.Collection("subscriptions").DeleteMany(ctx, roomFilter); err != nil {
 		return fmt.Errorf("delete subscriptions for soak run %q: %w", runID, err)
 	}
 	roomOwnedFilter := bson.D{

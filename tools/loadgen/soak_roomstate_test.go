@@ -33,11 +33,11 @@ func soakRoomStateTestTopology(candidates int) *soakTopology {
 		Subscriptions: []model.Subscription{
 			{
 				RoomID: "room-1", User: model.SubscriptionUser{ID: users[0].ID, Account: users[0].Account},
-				Roles: []model.Role{model.RoleOwner}, IsSubscribed: true, RoomType: model.RoomTypeChannel,
+				Roles: []model.Role{model.RoleOwner}, RoomType: model.RoomTypeChannel,
 			},
 			{
 				RoomID: "room-1", User: model.SubscriptionUser{ID: users[1].ID, Account: users[1].Account},
-				Roles: []model.Role{model.RoleMember}, IsSubscribed: true, RoomType: model.RoomTypeChannel,
+				Roles: []model.Role{model.RoleMember}, RoomType: model.RoomTypeChannel,
 			},
 		},
 	}
