@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/redis/go-redis/v9"
@@ -44,7 +45,8 @@ type config struct {
 	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
-	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+	AdminAcctPrefix string               `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+	Buddy           natsutil.BuddyConfig `envPrefix:"BUDDY_"`
 	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
 	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
 	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
@@ -640,6 +642,105 @@ type laneMsg struct {
 	msg jetstream.Msg
 }
 
+// startInboxLane wires the two-lane pull pattern described at the call site:
+// membership events serialized on one worker, everything else fanned out across
+// a bounded pool. The home connection and the buddy connection each run this
+// same pipeline over their own consumer — the handler, the membership
+// serialization and the Ack/Nak disposition are identical on both, because a
+// redirected event is still this site's event.
+func startInboxLane(ctx context.Context, cons o11ynats.Consumer, cfg *config, handler *Handler,
+	sem chan struct{}, wg *sync.WaitGroup,
+) (*natsutil.Lane, error) {
+	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	if err != nil {
+		return nil, fmt.Errorf("bind consumer messages: %w", err)
+	}
+
+	membershipCh := make(chan laneMsg, cfg.MaxWorkers)
+
+	process := func(m laneMsg) {
+		// jobguard recovers handler panics — both the membership lane and the
+		// fan-out goroutines run outside natsrouter's Recovery middleware, so an
+		// unrecovered panic would crash the worker and crash-loop on JetStream
+		// redelivery. On panic it Acks (poison drop).
+		jobguard.Run(m.msg, func() {
+			msg := m.msg
+			handlerCtx, _ := natsutil.StampRequestID(m.ctx, msg.Headers(), msg.Subject())
+			if err := handler.HandleEvent(handlerCtx, msg.Data()); err != nil {
+				// Permanent failures (poison messages) Ack so JetStream stops
+				// redelivering; transient infra errors Nak for redelivery.
+				if _, isPermanent := errcode.IsPermanent(err); isPermanent {
+					slog.Warn("permanent event failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
+					if err := msg.Ack(); err != nil {
+						slog.Error("failed to ack permanent message", "error", err)
+					}
+					return
+				}
+				slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
+				if err := msg.Nak(); err != nil {
+					slog.Error("failed to nak message", "error", err)
+				}
+				return
+			}
+			if err := msg.Ack(); err != nil {
+				slog.Error("failed to ack message", "error", err)
+			}
+		})
+	}
+
+	// Membership lane: a single worker drains membershipCh in FIFO order, so
+	// add/remove for the same (room, account) are applied in arrival order.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for msg := range membershipCh {
+			process(msg)
+		}
+	}()
+
+	go func() {
+		defer close(membershipCh)
+		for {
+			msgCtx, msg, err := iter.Next()
+			if err != nil {
+				return
+			}
+			m := laneMsg{ctx: msgCtx, msg: msg}
+			if isMembershipSubject(msg.Subject(), cfg.SiteID) {
+				membershipCh <- m
+				continue
+			}
+			sem <- struct{}{}
+			wg.Add(1)
+			go func() {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				process(m)
+			}()
+		}
+	}()
+
+	return natsutil.NewLane(iter, wg), nil
+}
+
+// startFailoverLane binds the buddy-hosted INBOX-FAILOVER consumer, feeding the
+// same two-lane pattern as the home lane — a failover-lane event is still this
+// site's event.
+func startFailoverLane(ctx context.Context, js o11ynats.JetStream, cfg *config, handler *Handler,
+	binder *natsutil.FailoverBinder, sem chan struct{}, wg *sync.WaitGroup,
+) (*natsutil.Lane, error) {
+	cons, err := binder.BindConsumer(ctx, js, &natsutil.LaneSpec{
+		Stream:   stream.InboxFailover(cfg.SiteID),
+		Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return startInboxLane(ctx, cons, cfg, handler, sem, wg)
+}
+
 func main() {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
@@ -750,79 +851,33 @@ func main() {
 	// Membership traffic is a tiny fraction of the lane, so serializing it
 	// costs negligible throughput while the read-receipt path keeps its full
 	// MaxWorkers concurrency.
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	// One pool shared by both lanes: a buddy lane with its own semaphore would
+	// take this worker to 2×MAX_WORKERS in-flight handlers against the same
+	// MongoDB, even though the two lanes carry the same site's events.
+	sem := make(chan struct{}, cfg.MaxWorkers)
+	var wg sync.WaitGroup
+
+	homeLane, err := startInboxLane(ctx, cons, &cfg, handler, sem, &wg)
 	if err != nil {
-		slog.Error("messages failed", "error", err)
+		slog.Error("bind INBOX lane failed", "error", err)
 		os.Exit(1)
 	}
 
-	sem := make(chan struct{}, cfg.MaxWorkers)
-	membershipCh := make(chan laneMsg, cfg.MaxWorkers)
-	var wg sync.WaitGroup
-
-	process := func(m laneMsg) {
-		// jobguard recovers handler panics — both the membership lane and the
-		// fan-out goroutines run outside natsrouter's Recovery middleware, so an
-		// unrecovered panic would crash the worker and crash-loop on JetStream
-		// redelivery. On panic it Acks (poison drop).
-		jobguard.Run(m.msg, func() {
-			msg := m.msg
-			handlerCtx, _ := natsutil.StampRequestID(m.ctx, msg.Headers(), msg.Subject())
-			if err := handler.HandleEvent(handlerCtx, msg.Data()); err != nil {
-				// Permanent failures (poison messages) Ack so JetStream stops
-				// redelivering; transient infra errors Nak for redelivery.
-				if _, isPermanent := errcode.IsPermanent(err); isPermanent {
-					slog.Warn("permanent event failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-					if err := msg.Ack(); err != nil {
-						slog.Error("failed to ack permanent message", "error", err)
-					}
-					return
-				}
-				slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-				if err := msg.Nak(); err != nil {
-					slog.Error("failed to nak message", "error", err)
-				}
-				return
-			}
-			if err := msg.Ack(); err != nil {
-				slog.Error("failed to ack message", "error", err)
-			}
-		})
+	// Buddy lane. BindBuddy never fails startup — on any failure buddyLane stays
+	// nil and the service runs home-only, which beats refusing to boot over a
+	// peer cluster we only need during an outage.
+	var buddyLane *natsutil.Lane
+	binder := natsutil.FailoverBinder{
+		Service: "inbox-worker", SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
 	}
-
-	// Membership lane: a single worker drains membershipCh in FIFO order, so
-	// add/remove for the same (room, account) are applied in arrival order.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for msg := range membershipCh {
-			process(msg)
-		}
-	}()
-
-	go func() {
-		defer close(membershipCh)
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				return
-			}
-			m := laneMsg{ctx: msgCtx, msg: msg}
-			if isMembershipSubject(msg.Subject(), cfg.SiteID) {
-				membershipCh <- m
-				continue
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func() {
-				defer func() {
-					<-sem
-					wg.Done()
-				}()
-				process(m)
-			}()
-		}
-	}()
+	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy, cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+			var bErr error
+			buddyLane, bErr = startFailoverLane(ctx, bjs, &cfg, handler, &binder, sem, &wg)
+			return bErr
+		})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -835,21 +890,21 @@ func main() {
 	slog.Info("inbox-worker started", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error {
-			iter.Stop()
+		// Stop both iterators before draining either, so neither lane pulls new
+		// work while the other is still finishing.
+		func(_ context.Context) error {
+			homeLane.Stop()
+			buddyLane.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
+			if err := homeLane.Wait(ctx); err != nil {
+				return err
 			}
+			return buddyLane.Wait(ctx)
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error {
 			if valkeyClient == nil {
@@ -880,5 +935,19 @@ func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.Con
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "inbox-worker"
 	cc.FilterSubjects = []string{subject.InboxExternalAll(siteID)}
+	return cc
+}
+
+// buildFailoverConsumerConfig returns the durable consumer config for the
+// buddy-hosted INBOX-FAILOVER lane, which carries federation events peers
+// redirected here because this site's own NATS was unreachable.
+//
+// The durable name differs from the home lane's so the two keep independent
+// cursors — in a single-server dev setup both streams live on one server, and a
+// shared durable would have them clobber each other.
+func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "inbox-worker-failover"
+	cc.FilterSubjects = []string{subject.FailoverInboxExternalAll(siteID)}
 	return cc
 }

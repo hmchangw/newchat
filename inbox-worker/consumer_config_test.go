@@ -116,3 +116,21 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 256, cc.MaxWaiting)
 	})
 }
+
+func TestBuildFailoverConsumerConfig(t *testing.T) {
+	cc := buildFailoverConsumerConfig(stream.ConsumerSettings{}, "site-a")
+
+	assert.Equal(t, "inbox-worker-failover", cc.Durable,
+		"distinct durable name so the two lanes keep independent cursors")
+	assert.Equal(t, []string{"chat.failover.inbox.site-a.external.>"}, cc.FilterSubjects)
+}
+
+// The two lanes must never share a durable, or one lane's cursor would clobber
+// the other's when both streams live on the same server (dev, single NATS).
+func TestFailoverConsumerDurable_DiffersFromPrimary(t *testing.T) {
+	primary := buildConsumerConfig(stream.ConsumerSettings{}, "site-a")
+	failover := buildFailoverConsumerConfig(stream.ConsumerSettings{}, "site-a")
+
+	assert.NotEqual(t, primary.Durable, failover.Durable)
+	assert.NotEqual(t, primary.FilterSubjects, failover.FilterSubjects)
+}
