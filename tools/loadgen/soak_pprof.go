@@ -73,7 +73,31 @@ func newSoakHeapProfiler(cfg soakHeapProfileConfig) (*soakHeapProfiler, error) {
 	if err := os.MkdirAll(cfg.Dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create soak heap profile directory: %w", err)
 	}
-	return &soakHeapProfiler{dir: cfg.Dir, keep: max(1, cfg.Keep)}, nil
+	// Resume numbering past whatever the previous process left. The volume
+	// survives an OOM-kill, and a counter that restarted at zero would make
+	// prune read the survivors as the newest profiles and delete every fresh
+	// one instead — inverting what keeping them is for.
+	sequence, err := highestSoakProfileSequence(cfg.Dir)
+	if err != nil {
+		return nil, err
+	}
+	return &soakHeapProfiler{dir: cfg.Dir, keep: max(1, cfg.Keep), sequence: sequence}, nil
+}
+
+func highestSoakProfileSequence(dir string) (int, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "heap-*.pprof"))
+	if err != nil {
+		return 0, fmt.Errorf("list soak heap profiles: %w", err)
+	}
+	highest := 0
+	for _, match := range matches {
+		var sequence int
+		if _, err := fmt.Sscanf(filepath.Base(match), "heap-%d.pprof", &sequence); err != nil {
+			continue
+		}
+		highest = max(highest, sequence)
+	}
+	return highest, nil
 }
 
 // Run writes one profile per tick and returns when the ticks stop or the

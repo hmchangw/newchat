@@ -88,10 +88,14 @@ type soakConfig struct {
 	// count entirely, so the file would only ever grow.
 	LedgerCompactEvery int   `env:"LEDGER_COMPACT_EVERY"             envDefault:"10000"`
 	LedgerMaxBytes     int64 `env:"LEDGER_MAX_BYTES"                 envDefault:"536870912"`
-	// LedgerExpireBatch bounds one expiry sweep. The sweep holds the ledger lock
-	// while it journals every operation it retires, so an unbounded pass over a
-	// large backlog stalls every lane at once.
-	LedgerExpireBatch      int           `env:"LEDGER_EXPIRE_BATCH"              envDefault:"1000"`
+	// LedgerExpireBatch bounds one expiry sweep, which otherwise holds the
+	// ledger lock while it journals every operation it retires. It defaults to
+	// unbounded because a bound below the rate operations arrive at is worse
+	// than the stall it prevents: the backlog then grows until Start hits
+	// LedgerCapacity and invalidates the ledger during the incident it exists
+	// to observe. Size it above (operations/sec x sweep interval), where the
+	// sweep runs every min(30s, max(1s, RECONCILE_DEADLINE/10)).
+	LedgerExpireBatch      int           `env:"LEDGER_EXPIRE_BATCH"              envDefault:"0"`
 	ReconcileDeadline      time.Duration `env:"RECONCILE_DEADLINE"               envDefault:"10m"`
 	ReconcileRetryInterval time.Duration `env:"RECONCILE_RETRY_INTERVAL"         envDefault:"1s"`
 	ReconcileReadShare     float64       `env:"RECONCILE_READ_SHARE"             envDefault:"0.5"`

@@ -264,3 +264,27 @@ type soakVerifyResultCapture struct {
 func (c *soakVerifyResultCapture) Record(result *soakVerifyResult) {
 	c.results = append(c.results, *result)
 }
+
+// Every lane that records an error class must record the reason beside it, or
+// the reason counter is silently empty for that lane and the label looks like
+// the service never sends one.
+func TestSoakSamples_EveryLaneThatCarriesAnErrorClassAlsoCarriesItsReason(t *testing.T) {
+	roomOutcome := soakRoomMutationOutcome{
+		ErrorClass: soakErrorForbidden, ErrorReason: "not_room_member",
+	}
+	roomRecorder := &soakMutationSampleCapture{}
+	lanes := &soakRoomLanes{recorder: roomRecorder}
+	lanes.record(soakRPCMemberAdd, &roomOutcome)
+
+	require.Len(t, roomRecorder.samples, 1)
+	assert.Equal(t, soakErrorReason("not_room_member"), roomRecorder.samples[0].ErrorReason,
+		"the room and member mutation lanes must report the service reason")
+}
+
+type soakMutationSampleCapture struct {
+	samples []soakMutationSample
+}
+
+func (c *soakMutationSampleCapture) Record(sample soakMutationSample) {
+	c.samples = append(c.samples, sample)
+}

@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
 func trackAcceptedSoakMessage(t *testing.T, catalog *soakCatalog, roomID, id, content string) {
@@ -112,4 +114,46 @@ func soakCatalogProbeID(index int) string {
 		index /= 10
 	}
 	return string(id)
+}
+
+// A pinned message the harness learns about from the wire has to arrive with a
+// digest like any other. Without one every read-back of it compares an empty
+// digest against a real one and reports a content mismatch for a message the
+// service returned correctly.
+func TestSoakCatalog_ObservePinnedRecordsTheContentDigest(t *testing.T) {
+	catalog := newSoakCatalog(16, 64, 0, nil)
+	body := "pinned announcement body"
+
+	require.True(t, catalog.ObservePinned(&soakWireMessage{
+		MessageID: "msg-1", RoomID: "room-1", Msg: body,
+		Sender:    cassandra.Participant{Account: "user-1"},
+		CreatedAt: time.Unix(1000, 0).UTC(),
+	}))
+
+	message, known := catalog.Get("room-1", "msg-1")
+	require.True(t, known)
+	assert.Equal(t, soakContentDigest(body), message.ContentSHA256)
+	assert.Equal(t, len(body), message.ContentLength)
+	assert.Empty(t, message.Content)
+}
+
+func TestSoakCatalog_ObservePinnedVerifiesCleanAgainstTheServiceReply(t *testing.T) {
+	catalog := newSoakCatalog(16, 64, 0, nil)
+	body := "pinned announcement body"
+	require.True(t, catalog.ObservePinned(&soakWireMessage{
+		MessageID: "msg-1", RoomID: "room-1", Msg: body,
+		Sender:    cassandra.Participant{Account: "user-1"},
+		CreatedAt: time.Unix(1000, 0).UTC(),
+	}))
+	expected, known := catalog.Get("room-1", "msg-1")
+	require.True(t, known)
+
+	result := soakVerifyResult{}
+	compareSoakVerifiedMessage(&result, &expected, &soakVerifyMessage{
+		MessageID: "msg-1", RoomID: "room-1", Msg: body,
+		Sender: modelParticipant("user-1"),
+	})
+
+	assert.Equal(t, soakVerifyOK, result.Class)
+	assert.Empty(t, result.Field)
 }

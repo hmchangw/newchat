@@ -138,3 +138,32 @@ func TestFailureLedger_DefersCompactionWhileAnOperationIsMidStart(t *testing.T) 
 	assert.Equal(t, before, journal.compacts,
 		"compacting now would drop the operation whose start record is still in flight")
 }
+
+// Replay drops operations it has no capacity for rather than crash-looping the
+// pod, and the journal is the only thing that still holds them: raise the
+// capacity, restart, and they come back. Compacting rewrites the journal from
+// the active set alone, so reclaiming a journal that dropped anything would
+// destroy the evidence the operator restarts to recover.
+func TestFailureLedger_DoesNotReclaimAJournalItCouldNotFullyRecover(t *testing.T) {
+	journal := &compactionCountingJournal{events: compactionTestEvents(t, 50), size: 1 << 20}
+
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 10, Journal: journal})
+	require.NoError(t, err)
+
+	require.Positive(t, ledger.dropped, "the fixture must exceed the capacity")
+	assert.Equal(t, 0, journal.compacts,
+		"the dropped operations only exist in the journal; compacting would erase them")
+}
+
+func TestFailureLedger_DoesNotReclaimOnSizeWhileOperationsWereDropped(t *testing.T) {
+	journal := &compactionCountingJournal{events: compactionTestEvents(t, 50), size: 1 << 20}
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 10, Journal: journal, MaxJournalBytes: 1,
+	})
+	require.NoError(t, err)
+	before := journal.compacts
+
+	require.NoError(t, ledger.MaybeCompact(time.Unix(2000, 0).UTC()))
+
+	assert.Equal(t, before, journal.compacts)
+}

@@ -72,6 +72,17 @@ func setSoakCatalogContent(candidate *soakCatalogCandidate, body string) {
 	candidate.SearchTerm = searchProbeTerm(body)
 }
 
+// reduceContentLocked is the single place a body enters the catalogue. Every
+// path that admits a message goes through it, so none of them can forget to
+// record the digest and leave later read-backs comparing against an empty one.
+func (c *soakCatalog) reduceContentLocked(candidate *soakCatalogCandidate, body string) {
+	setSoakCatalogContent(candidate, body)
+	candidate.Content = ""
+	if !c.retainSearchTerms {
+		candidate.SearchTerm = ""
+	}
+}
+
 // soakContentDigest is the form every read-back comparison uses, so a verifier
 // never has to hold a body to check one.
 func soakContentDigest(body string) string {
@@ -177,11 +188,7 @@ func (c *soakCatalog) TrackPublished(candidate *soakCatalogCandidate) error {
 	tracked := *candidate
 	// Reduce the body here so nothing downstream — not the pending entry, not
 	// the stored one — ever holds it.
-	setSoakCatalogContent(&tracked, tracked.Content)
-	tracked.Content = ""
-	if !c.retainSearchTerms {
-		tracked.SearchTerm = ""
-	}
+	c.reduceContentLocked(&tracked, tracked.Content)
 	if tracked.ThreadReplyLimit <= 0 {
 		tracked.ThreadReplyLimit = soakThreadReplyHardCap
 	}
@@ -478,11 +485,7 @@ func (c *soakCatalog) MarkEdited(roomID, messageID, content string) bool {
 			return false
 		}
 		entry.edited = true
-		setSoakCatalogContent(&entry.soakCatalogCandidate, content)
-		entry.Content = ""
-		if !c.retainSearchTerms {
-			entry.SearchTerm = ""
-		}
+		c.reduceContentLocked(&entry.soakCatalogCandidate, content)
 		return true
 	})
 }
@@ -537,6 +540,7 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 		pinned:     true,
 		reactions:  make(map[string]map[string]struct{}),
 	}
+	c.reduceContentLocked(&entry.soakCatalogCandidate, message.Msg)
 	if entry.ThreadParentID == "" {
 		entry.threadFollowers = map[string]struct{}{entry.Author: {}}
 		entry.threadFollowersComplete = false

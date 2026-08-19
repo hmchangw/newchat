@@ -199,6 +199,7 @@ func (l *soakPresenceLane) Verify(ctx context.Context) error {
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass
+		sample.ErrorReason = result.ErrorReason
 		l.record(&sample)
 		l.countCheck(soakPresenceCheckUnknown, len(accounts))
 		return fmt.Errorf("query presence batch: %w", err)

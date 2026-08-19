@@ -522,7 +522,7 @@ func newFailureLedger(cfg *failureLedgerConfig) (*failureLedger, error) {
 	// reclaims it until CompactEvery more operations finalize — which a process
 	// that keeps restarting never reaches, so the file would grow on every
 	// restart and make the next recovery more expensive than the last.
-	if !upgraded && ledger.recoveredEvents > 0 {
+	if !upgraded && ledger.recoveredEvents > 0 && ledger.canCompactLocked() {
 		if err := ledger.compactLocked(cfg.Now().UTC()); err != nil {
 			return nil, fmt.Errorf("reclaim recovered failure ledger journal: %w", err)
 		}
@@ -1104,7 +1104,7 @@ func (l *failureLedger) finalizeLocked(
 		}
 	}
 	l.finalizedSinceCompact++
-	if l.journal != nil && len(l.starting) == 0 &&
+	if l.journal != nil && l.canCompactLocked() &&
 		(l.finalizedSinceCompact >= l.compactEvery || l.journalOverBudgetLocked()) {
 		if err := l.compactLocked(at); err != nil {
 			l.invalidateLocked("wal")
@@ -1234,10 +1234,24 @@ func (l *failureLedger) MaybeCompact(at time.Time) error {
 // written is not in the active set a compaction rewrites from, so compacting
 // now would erase it.
 func (l *failureLedger) journalOverBudgetLocked() bool {
-	if l.journal == nil || l.maxJournalBytes <= 0 || len(l.starting) != 0 {
+	if l.journal == nil || l.maxJournalBytes <= 0 || !l.canCompactLocked() {
 		return false
 	}
 	return l.journal.Size() >= l.maxJournalBytes
+}
+
+// canCompactLocked guards the two ways compaction can destroy evidence.
+//
+// An operation between claiming its slot and having its start record written is
+// not in the active set a compaction rewrites from, so compacting then erases
+// it. Operations replay dropped over capacity are in the same position for a
+// longer reason: the journal is the only place they still exist, and raising
+// SOAK_LEDGER_CAPACITY and restarting is how an operator gets them back.
+// Reclaiming the file would make that unrecoverable, so a ledger that dropped
+// anything keeps its journal — and grows it, loudly, until the capacity is
+// raised.
+func (l *failureLedger) canCompactLocked() bool {
+	return len(l.starting) == 0 && l.dropped == 0
 }
 
 func (l *failureLedger) replay(events []failureLedgerEvent) error {
