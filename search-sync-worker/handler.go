@@ -121,7 +121,7 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 		}
 	}
 
-	actions, err := h.collection.BuildAction(data)
+	actions, err := h.buildActions(msg, data)
 	if err != nil {
 		// Every BuildAction error is parse/validation poison — Ack drops it for
 		// good, so this line is the only trace; keep it identifying the message.
@@ -170,6 +170,27 @@ func itemBackoff(result searchengine.BulkResult) []time.Duration {
 		return jsretry.BackpressureBackoff
 	}
 	return jsretry.DefaultBackoff
+}
+
+// buildActions converts one payload, handing collections that guard on stream order
+// the message's sequence (see sequencedCollection).
+func (h *Handler) buildActions(msg jetstream.Msg, data []byte) ([]searchengine.BulkAction, error) {
+	sc, ok := h.collection.(sequencedCollection)
+	if !ok {
+		return h.collection.BuildAction(data)
+	}
+	return sc.BuildActionSeq(data, streamSequence(msg))
+}
+
+// streamSequence returns the message's position in its stream, or 0 when the metadata
+// can't be read. Zero is the fail-closed value: it loses to any stored sequence, so a
+// message we can't order is skipped rather than allowed to overwrite a newer row.
+func streamSequence(msg jetstream.Msg) uint64 {
+	md, err := msg.Metadata()
+	if err != nil || md == nil {
+		return 0
+	}
+	return md.Sequence.Stream
 }
 
 // Flush sends all buffered actions to ES and acks/naks per source message.

@@ -33,6 +33,7 @@ type stubMsg struct {
 	nakedBare    bool
 	nakDelay     time.Duration
 	numDelivered uint64
+	streamSeq    uint64
 }
 
 func (m *stubMsg) Data() []byte                       { return m.data }
@@ -43,10 +44,12 @@ func (m *stubMsg) InProgress() error                  { return nil }
 func (m *stubMsg) Term() error                        { return nil }
 func (m *stubMsg) TermWithReason(string) error        { return nil }
 func (m *stubMsg) Metadata() (*jetstream.MsgMetadata, error) {
-	if m.numDelivered == 0 {
+	if m.numDelivered == 0 && m.streamSeq == 0 {
 		return nil, nil // mirrors a message whose metadata can't be parsed
 	}
-	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
+	md := &jetstream.MsgMetadata{NumDelivered: m.numDelivered}
+	md.Sequence.Stream = m.streamSeq
+	return md, nil
 }
 func (m *stubMsg) Subject() string                 { return "" }
 func (m *stubMsg) Reply() string                   { return "" }
@@ -713,5 +716,50 @@ func TestHandler_Flush_RetryPacing(t *testing.T) {
 		assert.True(t, msg.nacked)
 		assert.False(t, msg.nakedBare)
 		assertJitteredDelay(t, 5*time.Second, msg.nakDelay)
+	})
+}
+
+// sequencedStubCollection records the stream sequence Handler hands it.
+type sequencedStubCollection struct {
+	stubCollection
+	gotSeq uint64
+	called bool
+}
+
+func (c *sequencedStubCollection) BuildActionSeq(data []byte, streamSeq uint64) ([]searchengine.BulkAction, error) {
+	c.gotSeq, c.called = streamSeq, true
+	return c.BuildAction(data)
+}
+
+// The ordering guard is only as good as the sequence reaching it, and the routing runs
+// through a type assertion — so pin it.
+func TestHandler_Add_RoutesSequenceToSequencedCollection(t *testing.T) {
+	t.Run("hands over the message's stream sequence", func(t *testing.T) {
+		coll := &sequencedStubCollection{stubCollection: stubCollection{action: searchengine.ActionUpdate}}
+		h := NewHandler(NewMockStore(gomock.NewController(t)), coll, 500)
+
+		h.Add(&stubMsg{data: []byte(`{}`), streamSeq: 909})
+
+		assert.True(t, coll.called, "a sequenced collection must not fall through to BuildAction")
+		assert.Equal(t, uint64(909), coll.gotSeq)
+		assert.Equal(t, 1, h.ActionCount())
+	})
+
+	t.Run("unreadable metadata yields sequence 0", func(t *testing.T) {
+		coll := &sequencedStubCollection{stubCollection: stubCollection{action: searchengine.ActionUpdate}}
+		h := NewHandler(NewMockStore(gomock.NewController(t)), coll, 500)
+
+		h.Add(&stubMsg{data: []byte(`{}`)})
+
+		assert.True(t, coll.called)
+		assert.Zero(t, coll.gotSeq, "0 loses to any stored sequence, so the write is skipped not applied")
+	})
+
+	t.Run("plain collections still go through BuildAction", func(t *testing.T) {
+		h := NewHandler(NewMockStore(gomock.NewController(t)), newStubIndexCollection(), 500)
+
+		h.Add(&stubMsg{data: []byte(`{}`), streamSeq: 5})
+
+		assert.Equal(t, 1, h.ActionCount())
 	})
 }
