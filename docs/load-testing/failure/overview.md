@@ -199,7 +199,7 @@ All subsystem plans depend on the same loadgen foundations:
    - NATS / JetStream stream and consumer state, advisories, and reconnect behavior.
    - MongoDB topology, election, pool, command, replication-lag, and write/read outcomes.
    - Cassandra host state, consistency failures, timeouts, hints/repair state, and partition-level read-back.
-   - Shared metric names, gaps, labels, and dashboard rows are defined in the [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md).
+   - Shared metric names, gaps, labels, and dashboard rows are defined in the [Storage Dependency Metrics and Dashboard Contract](../../specs/o11y/storage-dependency-metrics.md).
 
 4. **Business reconciliation**
    - Mongo operational state.
@@ -209,7 +209,7 @@ All subsystem plans depend on the same loadgen foundations:
 Existing modes should be combined into a production-calibrated profile rather than relying on built-in default ratios. Until coverage gaps are closed, every report must state which product lanes were not exercised.
 
 The first implementation of this foundation is documented in
-[Loadgen Failure Observation Runtime](loadgen-failure-observation.md). It
+[Loadgen Failure Observation Runtime](../loadgen/observation.md). It
 covers the Cassandra soak user-message admission-to-history lane and does not
 imply that the remaining subsystem lanes are complete.
 
@@ -240,10 +240,10 @@ Each combined campaign must preserve single-fault attribution through exact time
 
 | Subsystem | Detailed plan | Status |
 |---|---|---|
-| NATS / JetStream | [NATS / JetStream Failure Testing and Loadgen Coverage Plan](nats-jetstream-failure-test-plan.md) | Initial inventory and campaign plan available |
-| MongoDB | [MongoDB Failure Testing and Loadgen Coverage Plan](mongodb-failure-test-plan.md) | Code-evidenced service/store inventory and campaign plan available |
-| Cassandra | [Cassandra Failure Testing and Loadgen Coverage Plan](cassandra-failure-test-plan.md) | Code-evidenced message/history/migration inventory and campaign plan available |
-| Storage observability | [Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md) | Existing/missing metric inventory and shared production/failure-test dashboard contract available |
+| NATS / JetStream | [NATS / JetStream Failure Testing and Loadgen Coverage Plan](nats-jetstream.md) | Initial inventory and campaign plan available |
+| MongoDB | [MongoDB Failure Testing and Loadgen Coverage Plan](mongodb.md) | Code-evidenced service/store inventory and campaign plan available |
+| Cassandra | [Cassandra Failure Testing and Loadgen Coverage Plan](cassandra.md) | Code-evidenced message/history/migration inventory and campaign plan available |
+| Storage observability | [Storage Dependency Metrics and Dashboard Contract](../../specs/o11y/storage-dependency-metrics.md) | Existing/missing metric inventory and shared production/failure-test dashboard contract available |
 
 The subsystem documents own detailed fault injection, service-by-service behavior, observability queries, recovery objectives, and test cases. This overview owns shared terminology, lifecycle, loadgen requirements, cross-dependency boundaries, and combined campaigns.
 

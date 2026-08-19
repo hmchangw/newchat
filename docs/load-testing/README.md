@@ -1,60 +1,98 @@
 # Load Testing Documentation
 
-This directory is the entry point for newchat load and performance testing.
-It keeps shared workload assumptions and operational guidance separate from
-component-specific and system-wide test plans.
-
-## Current Plans
-
-- [`failure-testing-overview.md`](failure-testing-overview.md) defines the
-  shared NATS, MongoDB, and Cassandra failure-test program.
-- [`loadgen-failure-observation.md`](loadgen-failure-observation.md) documents
-  the deployable persistent operation ledger and Cassandra message vertical
-  slice implemented by the continuous soak workload.
-- [`nats-jetstream-failure-test-plan.md`](nats-jetstream-failure-test-plan.md),
-  [`mongodb-failure-test-plan.md`](mongodb-failure-test-plan.md), and
-  [`cassandra-failure-test-plan.md`](cassandra-failure-test-plan.md) own the
-  dependency-specific inventories and remaining coverage gaps.
-- [`system/sli-slo.md`](system/sli-slo.md) is the platform's user-facing
-  SLI/SLO specification — the acceptance criteria all system-level load tests
-  assert against.
-- [`cassandra/soak-test-plan.md`](cassandra/soak-test-plan.md) is the
-  authoritative specification for the Cassandra Run A pre-production soak.
-- [`cassandra/run-a-implementation-plan.md`](cassandra/run-a-implementation-plan.md)
-  is the task-by-task engineering plan for the Run A load generator and its
-  Kubernetes deployment assets.
-
-## Intended Structure
-
-As the test program grows, shared inputs and system-level contracts should be
-added without merging them into the Cassandra component plan:
+Entry point for newchat load, performance, and failure testing. Documents are
+organized by **what kind of test they describe**, so the shared inputs and the
+loadgen implementation contracts stay separate from the programs that consume
+them.
 
 ```text
 docs/load-testing/
-|-- README.md
-|-- common/
-|   |-- workload-model.md
-|   |-- environments-and-data-ownership.md
-|   |-- kubernetes-runbook.md
-|   `-- result-report-template.md
-|-- cassandra/
-|   |-- soak-test-plan.md
-|   `-- run-a-implementation-plan.md
-`-- system/
-    |-- sli-slo.md
-    |-- end-to-end-load-test-plan.md
-    |-- capacity-test-plan.md
-    `-- resilience-test-plan.md
+|-- common/       shared inputs and acceptance criteria (used by every program)
+|-- soak/         sustained realistic load, non-destructive
+|-- failure/      dependency fault campaigns under continuous load
+|-- performance/  end-to-end SLO validation and ramp-to-breach capacity
+`-- loadgen/      the load generator's own implementation contracts
 ```
 
-The directories under `common/` and `system/` should be created only when
-their first real document is ready. In particular, user-facing SLI/SLO
-definitions belong under `system/`; the Cassandra plan has component-level
-acceptance criteria and must not be treated as an end-to-end SLO
-certification.
+## Start Here
 
-Run B/C pathological and direct-CQL experiments remain deferred and are not
-part of the Run A implementation plan.
+| You want to know | Read |
+|---|---|
+| What "pass" means for any run | [`common/sli-slo.md`](common/sli-slo.md) |
+| What traffic we model | [`common/workload-model.md`](common/workload-model.md) |
+| What may be pushed, and how hard | [`common/environments-and-data-ownership.md`](common/environments-and-data-ownership.md) |
+| Does the system meet its SLOs at expected load, and where is the ceiling | [`performance/end-to-end-plan.md`](performance/end-to-end-plan.md) |
+| Does the Cassandra schema hold up under sustained realistic load | [`soak/cassandra-soak-plan.md`](soak/cassandra-soak-plan.md) |
+| Does the system stay correct and recoverable when a dependency breaks | [`failure/overview.md`](failure/overview.md) |
+| How the load generator records evidence | [`loadgen/observation.md`](loadgen/observation.md) |
+
+## The Three Programs
+
+All three assert against the same acceptance criteria in
+[`common/sli-slo.md`](common/sli-slo.md); they differ in the question they ask.
+
+| Program | Question | Plans |
+|---|---|---|
+| **Soak** | Does a component hold up under sustained realistic load? | [`soak/cassandra-soak-plan.md`](soak/cassandra-soak-plan.md) |
+| **Performance / capacity** | Does the system meet its SLOs at expected load, and at what load does an SLO first break? | [`performance/end-to-end-plan.md`](performance/end-to-end-plan.md), [`performance/capacity-test-plan.md`](performance/capacity-test-plan.md) |
+| **Failure** | When a dependency dies, degrades, or slows, does the system stay correct, observable, and recoverable? | [`failure/overview.md`](failure/overview.md) |
+
+**Recovery surge** — the backlog replay after a fault is removed — is the one
+scenario both the failure and capacity programs can claim. Its mechanics
+(redelivery, hinted handoff, retry storms) belong to
+[`failure/overview.md`](failure/overview.md) §6; whether the drain exceeds what
+storage and downstream services absorb is a capacity question. Owner assignment
+for that overlap is still open.
+
+## Failure Testing
+
+- [`failure/overview.md`](failure/overview.md) — the shared NATS/JetStream,
+  MongoDB, and Cassandra program: service coverage, campaign lifecycle, evidence
+  model, acceptance gates.
+- Dependency plans — [`failure/nats-jetstream.md`](failure/nats-jetstream.md),
+  [`failure/mongodb.md`](failure/mongodb.md),
+  [`failure/cassandra.md`](failure/cassandra.md), and the
+  [NATS/JetStream failure-test topology](failure/topology.drawio).
+- NATS campaign readiness —
+  [`failure/nats-metrics-contract.md`](failure/nats-metrics-contract.md) (required
+  infrastructure, service, advisory, and loadgen metrics),
+  [`failure/observability-deployment.md`](failure/observability-deployment.md)
+  (scraping, recording rules, dashboards, annotations, preflight, retention), and
+  [`failure/nats-campaign-runbook.md`](failure/nats-campaign-runbook.md) (the first
+  operator-ready campaign, scenarios F01/F02/F03/F04/F07).
+
+The shared MongoDB and Cassandra metric inventory stays in the observability
+specification area:
+[Storage Dependency Metrics and Dashboard Contract](../specs/o11y/storage-dependency-metrics.md).
+Those metrics are a service-side emission contract, read by whoever instruments
+the service, not only by whoever runs a campaign.
+
+**Ownership boundary.** Loadgen generates continuous production-shaped traffic
+and records observable effects. It does **not** inject or schedule dependency
+faults. The campaign operator performs the declared fault independently and
+records its timestamps; loadgen continues through baseline, disruption, and
+recovery without changing traffic merely because the dependency state changed.
+
+## Load Generator Contracts
+
+`tools/loadgen` is the single driver for every program. Its own contracts live
+under [`loadgen/`](loadgen/):
+
+- [`loadgen/observation.md`](loadgen/observation.md) — the durable evidence
+  ledger and the workload lanes implemented today.
+- [`loadgen/evidence-platform.md`](loadgen/evidence-platform.md) — the
+  generalized operation, observer, manifest, timeline, verdict, and report
+  contracts required to close the remaining gaps.
+- [`loadgen/dashboard-contract.md`](loadgen/dashboard-contract.md) — the
+  query-time evidence/impact/correctness dimensions a dashboard must report.
+- [`loadgen/runtime-api.md`](loadgen/runtime-api.md) — the disabled-by-default
+  runtime `pause`/`resume`/`status` skeleton.
+- [`loadgen/run-a-implementation-plan.md`](loadgen/run-a-implementation-plan.md)
+  — the task-by-task engineering plan for the Run A harness and its Kubernetes
+  deployment assets.
+
+Run B/C pathological and direct-CQL experiments remain deferred and are not part
+of the Run A implementation plan.
 
 ## Open Prerequisites
 
@@ -64,20 +102,20 @@ application code.
 
 ### Observability parity between the local overlay and the real test cluster
 
-`tools/loadgen/deploy/prometheus/prometheus.yml` scrapes three sources beyond
-loadgen's own series: the `prometheus-nats-exporter` sidecar on `:7777`
-(JetStream consumer backlog), the o11y SDK endpoint on `:2112` via Docker
-service discovery, and per-service counters on `:9090`.
+The Helm chart under `tools/loadgen/deploy/k8s/` carries **no scrape config of
+its own**. It relies on `prometheus.io/scrape` pod annotations plus a
+cluster-wide Prometheus, and those annotations cover the loadgen pod (`:9099`)
+only — not the services under test, and not the NATS server.
 
-**That covers the docker-compose path only.** The Helm chart under
-`tools/loadgen/deploy/k8s/` carries no scrape config of its own — it relies on
-`prometheus.io/scrape` pod annotations and a cluster-wide Prometheus, and those
-annotations cover the loadgen pod (`:9099`), not the services under test or the
-NATS server.
+> The Prometheus config under `tools/loadgen/deploy/prometheus/` is the local
+> docker-compose overlay for developing loadgen. It is **not** a model of the
+> real test cluster and must not be cited as evidence of what staging or
+> production scrapes. The requirements below stand on the Helm chart and on the
+> campaign contract, not on that file.
 
 So a run executed in Kubernetes has **no consumer-backlog signal** unless the
 cluster is separately configured for it. That matters more than it sounds:
-`docs/load-testing/system/sli-slo.md` §0.1 and §7 make consumer backlog the *primary*
+`docs/load-testing/common/sli-slo.md` §0.1 and §7 make consumer backlog the *primary*
 enforcement signal for every asynchronous SLO (1a/1b/2/6/9), because the event
 ratios behind those SLOs stay approximate until an exact outcome ledger exists.
 A Kubernetes run without it can report healthy latency while a worker falls

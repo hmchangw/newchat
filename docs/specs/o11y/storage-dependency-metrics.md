@@ -79,7 +79,15 @@ Direct Cassandra session coverage is:
 | Instrumented | message-worker; bot-message-worker; history-service |
 | Missing instrumentation | data-migration/es-index-migrator; loadgen direct-Cassandra seed/teardown and legacy direct modes |
 
-All current production batch call sites use `session.ExecuteBatch` directly. The o11y integration documents that batch spans/metrics require its `ExecuteBatch` seam, so message fan-out, bot message fan-out, reaction, pin/unpin, and other Cassandra batches are a metric blind spot even inside otherwise instrumented services.
+Batch call sites need o11y's `ExecuteBatch` seam to produce spans/metrics; a direct `session.ExecuteBatch` is a blind spot even inside an otherwise instrumented service. Current coverage:
+
+| Batch call site | Seam | Status |
+|---|---|---|
+| `message-worker` message and thread-message writes (4 sites, plaintext and encrypted) | `o11ycassandra.ExecuteBatch` | Instrumented |
+| `history-service` reactions (4 sites) and pin/unpin (2 sites) | `session.ExecuteBatch` | Missing |
+| `bot-message-worker` bot message fan-out (4 sites) | `session.ExecuteBatch` | Missing |
+
+The message-worker sites cover the first core-message campaign's write path. The remaining sites must move to the seam before a campaign claims Cassandra coverage for reactions, pin/unpin, or the bot lane.
 
 ## 5. Existing Storage-Relevant Application and Loadgen Metrics
 
@@ -275,6 +283,10 @@ Current repository provisioning is insufficient for a complete storage dashboard
 - `tools/observability/prometheus/prometheus.yml` scrapes cAdvisor, NATS exporter, and a stale fixed subset of application endpoints; it also has no storage exporters.
 - Local MongoDB and Cassandra are single-node. Local tests can validate total outage/restart and client recovery, but not Mongo primary election/majority loss or Cassandra replica/quorum/hinted-handoff behavior.
 - Production/staging exporter deployment and recording rules are not represented in this repository, so their presence must be a campaign preflight gate rather than an assumption.
+
+The concrete deployment, scrape, recording-rule, dashboard overlay,
+annotation, security, retention, and preflight contract is defined in
+[Failure-Test Observability Deployment](../../load-testing/failure/observability-deployment.md).
 
 ## 9. Implementation Order
 

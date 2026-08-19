@@ -77,6 +77,13 @@ limit      = max(3, ceil(0.001 * eligible))
 invalid    = unverified > limit
 ```
 
+This block is **pseudocode, not a PromQL query**. Only the right-hand sides of
+`eligible` and `unverified` are PromQL; `limit` and `invalid` are computed from
+those two named scalars by the evaluating code. `max` here is a two-argument
+maximum over scalars, matching the reference implementation in
+`tools/loadgen/failure_dashboard_contract_test.go`; it is not the PromQL `max`
+aggregation operator and must not be rewritten as `clamp_min`.
+
 The numerator and denominator must both be displayed. An observer blind
 interval overlapping an operation observation window invalidates an absence
 claim for that operation. Startup-down time, disconnects, queue overflow,
@@ -84,6 +91,14 @@ truncated health history, and stale health all count as blind evidence. A
 healthy authoritative not-found at or after deadline may produce
 `missing_after_deadline`; timeout or observer unavailability produces
 `unverified`.
+
+**`loadgen_dispatch_enabled` has no producer today.** The runtime-control
+contract ([`runtime-api.md`](runtime-api.md)) requires every interval where
+`loadgen_dispatch_enabled == 0` to be `INCONCLUSIVE`, but no loadgen code emits
+that series, and it is absent from the reused and added metric lists below.
+Until a producer exists the pause rule cannot be evaluated, and a dashboard
+must not treat its absence as "dispatch enabled". Adding the producer is a
+loadgen change and is tracked outside this document.
 
 ## Result interpretation
 

@@ -5,7 +5,7 @@ amended after confirming that company Jobs are limited to one day and
 production releases are reconciled by Argo CD.
 
 **Authoritative specification:**
-[`soak-test-plan.md`](soak-test-plan.md)
+[`cassandra-soak-plan.md`](../soak/cassandra-soak-plan.md)
 
 **Goal:** Extend the existing `tools/loadgen` binary with a Kubernetes-ready
 Run A harness that drives the real message and history service paths for a

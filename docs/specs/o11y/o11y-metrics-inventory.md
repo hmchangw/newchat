@@ -138,7 +138,7 @@ The shared consumer, request, and publisher helpers are adopted by
 `message-gatekeeper`, `message-worker`, `broadcast-worker`,
 `notification-worker`, `history-service`, `room-service`, and
 `room-worker` — the seven services in the NATS failure-test scope
-(`docs/load-testing/nats-jetstream-failure-test-plan.md`). Connection
+(`docs/load-testing/failure/nats-jetstream.md`). Connection
 lifecycle metrics are opt-in through `natsutil.ConnectWithMetrics`. Names are
 OTel instrument names; Prometheus renders them with `_` separators and adds
 counter / unit suffixes. An instrument whose name already ends in `_total`
@@ -194,7 +194,7 @@ Reconnect-buffer overflow is **not** a connection event: nats.go returns
 through `ErrorHandler`, so it is counted as
 `chat_nats_publish_attempts_total{outcome="buffer_full"}`. The full semantics,
 label enums, and the alerts these drive are specified in the NATS failure
-metrics contract under `docs/load-testing/failure-testing/`.
+metrics contract under `docs/load-testing/failure/`.
 
 ### 2.2 Services not previously inventoried (2026-08-14)
 
