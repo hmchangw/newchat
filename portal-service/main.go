@@ -89,8 +89,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse OTEL base URL: %w", err)
 	}
-	settings := settingsResponse{APIVersion: cfg.APIVersion, OTELBaseURL: otelBaseURL, BotLoginEnabled: cfg.BotLoginEnabled}
-	slog.Info("settings config", "apiVersion", settings.APIVersion, "otelBaseUrl", settings.OTELBaseURL, "botLoginEnabled", settings.BotLoginEnabled)
+	// The peer list is built once here: the registry is fixed at startup and the
+	// response is identical for every caller, so there is nothing to recompute
+	// per request.
+	settings := settingsResponse{
+		APIVersion:      cfg.APIVersion,
+		OTELBaseURL:     otelBaseURL,
+		BotLoginEnabled: cfg.BotLoginEnabled,
+		Sites:           buildPeerList(sites),
+	}
+	slog.Info("settings config", "apiVersion", settings.APIVersion, "otelBaseUrl", settings.OTELBaseURL,
+		"botLoginEnabled", settings.BotLoginEnabled, "failover_peers", len(settings.Sites))
 
 	ctx := context.Background()
 
