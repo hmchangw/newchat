@@ -543,3 +543,34 @@ func TestProcessTeamsRoomCreate_StampsMigrationHeader(t *testing.T) {
 	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
 	assert.True(t, gotHeader, "processTeamsRoomCreate must stamp X-Migration: live on publishes")
 }
+
+// TestProcessTeamsRoomCreate_JoinedAtIsChatCreatedDateTime: the migrated sub's
+// JoinedAt is the chat's createdDateTime (a historical time), not the migration
+// event timestamp (teamsCreateEvent stamps 1000ms). #302.
+func TestProcessTeamsRoomCreate_JoinedAtIsChatCreatedDateTime(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	h, _ := newTeamsTestHandler(t, store)
+
+	chatCreated := time.Date(2024, 3, 15, 9, 0, 0, 0, time.UTC)
+
+	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, subs []*model.Subscription) error {
+			require.Len(t, subs, 1)
+			assert.Equal(t, chatCreated, subs[0].JoinedAt, "JoinedAt must be the chat createdDateTime, not the migration timestamp")
+			assert.NotEqual(t, time.UnixMilli(1000).UTC(), subs[0].JoinedAt, "JoinedAt must not be the migration event timestamp")
+			return nil
+		})
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
+
+	chat := model.TeamsRoomCreateChat{
+		ID:              "chat1",
+		Name:            "Project Sync",
+		Members:         []model.TeamsRoomCreateMember{{ID: "aad1", Account: "alice"}},
+		CreatedDateTime: chatCreated,
+	}
+	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+}
