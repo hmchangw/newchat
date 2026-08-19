@@ -316,6 +316,7 @@ func TestProcessTeamsRoomCreate_FederatesJoinedAtRefreshCrossSite(t *testing.T) 
 
 	chat := model.TeamsRoomCreateChat{
 		ID:              "chat1",
+		Name:            "Project Sync",
 		Members:         []model.TeamsRoomCreateMember{{ID: "aad1", Account: "bob"}},
 		CreatedDateTime: chatCreated,
 	}
@@ -325,6 +326,11 @@ func TestProcessTeamsRoomCreate_FederatesJoinedAtRefreshCrossSite(t *testing.T) 
 	require.Len(t, fed, 1, "cross-site member gets a joinedAt-refresh federated to their home site")
 	assert.Equal(t, []string{"bob"}, fed[0].Accounts)
 	assert.Equal(t, chatCreated.UnixMilli(), fed[0].JoinedAt, "federated refresh carries the chat createdDateTime")
+
+	local := membershipEvents(t, *published, "chat.inbox.site-a.internal.member_joinedat_refreshed")
+	require.Len(t, local, 1, "local internal event published for room-site spotlight")
+	assert.Equal(t, chatCreated.UnixMilli(), local[0].JoinedAt)
+	assert.NotEmpty(t, local[0].RoomName, "internal event carries roomName so spotlight re-index preserves it")
 }
 
 // TestProcessTeamsRoomCreate_NoRefreshWhenJoinedAtCurrent: a converged re-run whose

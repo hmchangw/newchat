@@ -317,8 +317,10 @@ func InboxMemberEventSubjects(siteID string) []string {
 	return []string{
 		InboxInternal(siteID, "member_added"),
 		InboxInternal(siteID, "member_removed"),
+		InboxInternal(siteID, "member_joinedat_refreshed"),
 		InboxExternal(siteID, "member_added"),
 		InboxExternal(siteID, "member_removed"),
+		InboxExternal(siteID, "member_joinedat_refreshed"),
 	}
 }
 

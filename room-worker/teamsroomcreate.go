@@ -325,31 +325,62 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 	return nil
 }
 
-// federateJoinedAtRefresh fans the joinedAt correction to each cross-site member's
-// home site so the replica matches the room-site copy (just updated locally).
-// Local-site members are skipped. joinedAt is uniform per room (chat createdDateTime);
-// the remote apply is a no-op if the replica is absent.
+// federateJoinedAtRefresh propagates the joinedAt correction beyond the room-site
+// Mongo copy (updated locally): a local internal event so search-sync refreshes the
+// room-site spotlight joinedAt, plus one federated event per cross-site member's
+// home site so their Mongo replica + home-site spotlight match. joinedAt is uniform
+// per room (chat createdDateTime); every apply is a no-op if the target is absent.
 func (h *Handler) federateJoinedAtRefresh(ctx context.Context, room *model.Room, joinedAtByAccount map[string]time.Time, memberSite map[string]string, acceptedAt time.Time) error {
+	accounts := make([]string, 0, len(joinedAtByAccount))
+	for account := range joinedAtByAccount {
+		accounts = append(accounts, account)
+	}
+	evt := model.InboxMemberEvent{
+		RoomID:    room.ID,
+		RoomName:  room.Name,
+		RoomType:  room.Type,
+		SiteID:    h.siteID,
+		Accounts:  accounts,
+		JoinedAt:  room.CreatedAt.UnixMilli(),
+		Timestamp: acceptedAt.UnixMilli(),
+		Origin:    model.OriginTeams,
+	}
+	seed := fmt.Sprintf("%s:%s:%d", room.ID, model.InboxMemberJoinedAtRefreshed, acceptedAt.UnixMilli())
+
+	allPayload, err := json.Marshal(evt)
+	if err != nil {
+		return fmt.Errorf("marshal joinedAt-refresh event: %w", err)
+	}
+	// Local internal lane → room-site spotlight (inbox-worker doesn't consume it;
+	// the room-site Mongo copy was already updated by the caller).
+	internalData, err := json.Marshal(model.InboxEvent{
+		Type:       model.InboxMemberJoinedAtRefreshed,
+		SiteID:     h.siteID,
+		DestSiteID: h.siteID,
+		Payload:    allPayload,
+		Timestamp:  acceptedAt.UnixMilli(),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal internal joinedAt-refresh envelope: %w", err)
+	}
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberJoinedAtRefreshed), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
+		return fmt.Errorf("local inbox joinedAt-refresh publish: %w", err)
+	}
+
+	// Per cross-site home site → replica Mongo (inbox-worker) + home-site spotlight.
 	bySite := make(map[string][]string)
 	for account := range joinedAtByAccount {
 		if site := memberSite[account]; site != "" && site != h.siteID {
 			bySite[site] = append(bySite[site], account)
 		}
 	}
-	for destSite, accounts := range bySite {
-		evt := model.InboxMemberEvent{
-			RoomID:    room.ID,
-			SiteID:    h.siteID,
-			Accounts:  accounts,
-			JoinedAt:  room.CreatedAt.UnixMilli(),
-			Timestamp: acceptedAt.UnixMilli(),
-			Origin:    model.OriginTeams,
-		}
-		payload, err := json.Marshal(evt)
+	for destSite, siteAccounts := range bySite {
+		siteEvt := evt
+		siteEvt.Accounts = siteAccounts
+		payload, err := json.Marshal(siteEvt)
 		if err != nil {
 			return fmt.Errorf("marshal joinedAt-refresh event (dest %s): %w", destSite, err)
 		}
-		seed := fmt.Sprintf("%s:%s:%d", room.ID, model.InboxMemberJoinedAtRefreshed, acceptedAt.UnixMilli())
 		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
 		if err := h.federate(ctx, room.ID, destSite, model.InboxMemberJoinedAtRefreshed, payload, dedupID, acceptedAt.UnixMilli()); err != nil {
 			return fmt.Errorf("federate joinedAt refresh to %s: %w", destSite, err)
