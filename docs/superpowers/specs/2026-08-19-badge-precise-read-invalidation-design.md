@@ -522,8 +522,23 @@ rejections; marker expiry ⇒ `Count` stale ⇒ recompute + `Reseed`.
 - **Closing race 2 structurally** — giving one component ownership of both the
   `threadUnread` write and the badge write, so they stop being two unordered
   consumers of the same message. This is the only fix that eliminates (rather
-  than narrows) race 2, and it is the "move badge writes into broadcast-worker"
-  consolidation the superseded spec already parked in its own §9.
+  than narrows) race 2.
+
+  **It is not the same as the "move badge writes into broadcast-worker"
+  consolidation** parked in the superseded spec's §9, and doing that alone would
+  not close this race. `threadUnread` is written by `message-worker`
+  (`handler.go:663` → `AddThreadUnread`), and `broadcast-worker` is a *separate*
+  MESSAGES-CANONICAL consumer (`main.go:193`) — so moving the badge write there
+  swaps which pair of unordered consumers races without removing the race. The
+  badge write has to land in `message-worker`, or `threadUnread` has to move
+  alongside it.
+
+  Two constraints bind whichever component takes it. The badge set lives in the
+  **user's home-site** Valkey while these workers run at the **room's** site, so
+  a direct Valkey write only covers same-site members and federated members still
+  need the `badge.count.batch` RPC. And the miss path (`Seed` from the Mongo
+  unread aggregation) lives in `user-service`, so a new writer can bump but must
+  never stamp the marker — only Mongo-verifying paths may, per §6.2.
 - Any client change (piggybacked counts, refetch cadence): server-side only by
   constraint. Optimistic local decrement on mark-read — the client adjusting its
   own badge instantly and reconciling with the server's number — is the shape to
