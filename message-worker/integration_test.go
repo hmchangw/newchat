@@ -2115,6 +2115,75 @@ func TestAdvanceThreadSubscriptionLastSeen_OnlyAdvances(t *testing.T) {
 	require.NoError(t, store.AdvanceThreadSubscriptionLastSeen(ctx, "no-room", "nobody", t2))
 }
 
+// Restored from main: this PR does not change GetHistorySharedSince or
+// SaveThreadMessage, so their coverage should not have been dropped with it.
+func TestThreadStoreMongo_GetHistorySharedSince(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := newThreadStoreMongo(db)
+
+	shared := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []interface{}{
+		model.Subscription{ID: "hss-al", User: model.SubscriptionUser{ID: "u-al", Account: "alice"}, RoomID: "r-hss", HistorySharedSince: &shared},
+		model.Subscription{ID: "hss-bo", User: model.SubscriptionUser{ID: "u-bo", Account: "bob"}, RoomID: "r-hss"},
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetHistorySharedSince(ctx, "r-hss", []string{"alice", "bob", "carol"})
+	require.NoError(t, err)
+	require.NotNil(t, got["alice"])
+	assert.Equal(t, shared.UnixMilli(), got["alice"].UTC().UnixMilli())
+	bobWindow, bobPresent := got["bob"]
+	require.True(t, bobPresent, "member with a nil window must still be present in the map")
+	assert.Nil(t, bobWindow, "member without window decodes to nil")
+	_, present := got["carol"]
+	assert.False(t, present, "non-member is absent from the map")
+
+	empty, err := store.GetHistorySharedSince(ctx, "r-hss", nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+func TestCassandraStore_SaveThreadMessage_TShowWritesAllTables(t *testing.T) {
+	cassSession := setupCassandra(t)
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(cassSession, bucket, nil)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	parentCreatedAt := now.Add(-time.Hour)
+	sender := &cassParticipant{ID: "u-1", Account: "alice"}
+	msg := &model.Message{
+		ID:                           "m-tshow",
+		RoomID:                       "r-tshow",
+		UserID:                       "u-1",
+		UserAccount:                  "alice",
+		Content:                      "visible reply",
+		CreatedAt:                    now,
+		ThreadParentMessageID:        "m-parent",
+		ThreadParentMessageCreatedAt: &parentCreatedAt,
+		TShow:                        true,
+	}
+
+	_, err := store.SaveThreadMessage(ctx, msg, sender, "site-a", "tr-tshow-1")
+	require.NoError(t, err)
+
+	// The batch must land in all three tables. Assert the reply's own rows by exact
+	// key so the parent's tcount-UPDATE upsert (same partitions) can't interfere.
+	var count int
+	require.NoError(t, cassSession.Query(`SELECT COUNT(*) FROM messages_by_id WHERE message_id = ?`, "m-tshow").WithContext(ctx).Scan(&count))
+	assert.Equal(t, 1, count, "messages_by_id reply row written")
+
+	require.NoError(t, cassSession.Query(`SELECT COUNT(*) FROM thread_messages_by_thread WHERE thread_room_id = ?`, "tr-tshow-1").WithContext(ctx).Scan(&count))
+	assert.Equal(t, 1, count, "thread_messages_by_thread row written")
+
+	var gotTShow bool
+	require.NoError(t, cassSession.Query(
+		`SELECT tshow FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		"r-tshow", bucket.Of(now), now, "m-tshow").WithContext(ctx).Scan(&gotTShow))
+	assert.True(t, gotTShow, "tshow mirror row written to messages_by_room with tshow=true")
+}
+
 func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
