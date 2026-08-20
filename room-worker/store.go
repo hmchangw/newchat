@@ -77,6 +77,13 @@ type SubscriptionStore interface {
 	// update. It also stamps countsReconciledAt, resetting the per-room TTL
 	// clock that ApplyMemberCountDelta consults.
 	ReconcileMemberCounts(ctx context.Context, roomID string) error
+	// TeamsMigrationDone reports whether a prior Teams-migration pass fully
+	// reconciled this room (marked via MarkTeamsMigrationDone). TEAMS_SKIP_EXISTING
+	// skips only rooms marked done — a room that exists but failed mid-reconcile is
+	// not done, so it gets completed on redelivery instead of stranded.
+	TeamsMigrationDone(ctx context.Context, roomID string) (bool, error)
+	// MarkTeamsMigrationDone stamps the room complete after a successful reconcile.
+	MarkTeamsMigrationDone(ctx context.Context, roomID string) error
 	// ApplyMemberCountDelta atomically applies userDelta/appDelta to the room's
 	// counters ($inc, O(1)) and reports whether a full ReconcileMemberCounts is
 	// now due — i.e. the room has never been reconciled or its countsReconciledAt

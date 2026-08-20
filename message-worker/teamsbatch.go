@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/bytedance/sonic"
@@ -33,6 +34,12 @@ type teamsBatchHandler struct {
 	resolver identityResolver
 	tr       MessageTransformer
 	metrics  *persistenceMetrics
+	// teamsSkipExisting (TEAMS_SKIP_EXISTING) skips a batched message whose id is
+	// already persisted instead of upserting over it — for a newest→oldest replay
+	// where an older batch must not clobber a newer record. Safe because a given
+	// id is migrated with stable content (edits are never re-migrated), so a
+	// concurrent redelivery is byte-identical; the skip is de-dup, not correctness.
+	teamsSkipExisting bool
 }
 
 func newTeamsBatchHandler(store Store, hrStore HRIdentityStore, siteID string, publishUsers func(ctx context.Context, users []model.IUserWithChange) error, injectedMetrics ...*persistenceMetrics) *teamsBatchHandler {
@@ -116,14 +123,31 @@ func (h *teamsBatchHandler) migrateOne(ctx context.Context, raw json.RawMessage)
 		return res, nil
 	}
 
+	// Teams ids are unique only per conversation → scope by roomId to avoid collisions.
+	id := teamsmigrate.DeterministicMessageID(head.RoomID, head.ID)
+
+	// Probe before Transform: the id needs only the header, so an already-persisted
+	// duplicate is skipped even if its body no longer transforms. Best-effort read —
+	// a concurrent writer can still race SaveMessage, but the deterministic id makes
+	// the upsert convergent for identical migrated content.
+	if h.teamsSkipExisting {
+		if _, found, err := h.store.GetMessageCreatedAt(ctx, id); err != nil {
+			// A transient read is not proof of absence — surface it so the batch replays.
+			return model.TeamsBatchResult{TeamsMsgID: head.ID}, fmt.Errorf("get message created at: %w", err)
+		} else if found {
+			slog.InfoContext(ctx, "TEAMS_SKIP_EXISTING: message already persisted, skipping", "teamsMsgId", head.ID, "messageId", id)
+			res.Status = model.TeamsBatchSkipped
+			return res, nil
+		}
+	}
+
 	msg, err := h.tr.Transform(ctx, raw)
 	if err != nil {
 		slog.WarnContext(ctx, "teams batch: skip message, transform failed", "teamsMsgId", head.ID, "error", err)
 		res.Status, res.Error = model.TeamsBatchError, "transform failed"
 		return res, nil //nolint:nilerr // per-message transform error is isolated, not a batch Nak
 	}
-	// Teams ids are unique only per conversation → scope by roomId to avoid collisions.
-	msg.ID = teamsmigrate.DeterministicMessageID(head.RoomID, head.ID)
+	msg.ID = id
 
 	// Cache hit after Transform (same sender key), so it adds no store round trip.
 	sender, err := h.resolver.resolve(ctx, head.From.ID, head.From.DisplayName)
