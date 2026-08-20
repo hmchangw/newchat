@@ -1267,7 +1267,7 @@ state. Can always **remove** from a soft-deleted message; cannot **add** to one.
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | Required. |
-| `shortcode` | string | Required. Bare shortcode without colons (`thumbsup`, `acme_party`). Must match `^[a-z0-9_+-]{1,32}$` after NFC normalisation. Format-only validation — no registration check; clients offer only picker-sourced shortcodes (standard set + local [`emoji.list`](#emojilist)). |
+| `shortcode` | string | Required. The reaction emoji — a bare shortcode without colons (`thumbsup`, `acme_party`) or a raw-unicode emoji (`👍`, ZWJ sequence, flag). No support check: NFC-normalised, rejects only >64 bytes (resource guard) or a value with no visible character (empty / whitespace / control / zero-width / combining-mark only) — no character-set, registration, or standard-set check. Stored as an opaque key with no shortcode↔unicode aliasing (`thumbsup` ≠ `👍`); FE sends one consistent representation and decides renderability. |
 
 #### Success response
 
@@ -1280,8 +1280,7 @@ state. Can always **remove** from a soft-deleted message; cannot **add** to one.
 
 #### Errors
 
-`"messageId is required"`, `"shortcode is required"`, `"invalid reaction shortcode"`
-(malformed format), `"message not found"`, `"not subscribed to room"`.
+`"messageId is required"`, `"shortcode is required"`, `"reaction emoji too large"`, `"reaction emoji is required"`, `"message not found"`, `"not subscribed to room"`.
 
 **Emits:** [`message_reacted`](events.md#message_reacted-reactroomevent) (channel `chat.room.{roomID}.event`; DM `chat.user.{account}.event.room` per non-bot member), [`notification`](events.md#notification--reaction-notification) (to message author on add only) → [events.md](events.md)
 
