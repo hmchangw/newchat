@@ -37,6 +37,10 @@ type resourceIDFunc func(c *gin.Context) string
 
 // botIdempotency is a Valkey-backed sentinel: SET NX per opID, then Del on non-5xx (5xx keeps
 // the sentinel so a retry can't race the still-running original). Response body is not cached.
+//
+// Fails OPEN: an unreachable Valkey admits the request. The sentinel only ever guarded
+// overlapping retries — it releases on non-5xx, and the 60s bucket re-keys later retries —
+// so failing open widens an already-open window rather than dropping durable dedup.
 func botIdempotency(
 	client sentinelClient,
 	siteID, endpoint string,
@@ -70,12 +74,13 @@ func botIdempotency(
 		key := "idem:" + opID
 
 		acquired, err := client.SetNX(ctx, key, "processing", sentinelTTL)
-		if err != nil {
-			errhttp.Write(ctx, c, errcode.Internal("bot idempotency: acquire", errcode.WithCause(err)))
-			c.Abort()
+		switch {
+		case err != nil:
+			// Admit without a sentinel; skip the release below since nothing was acquired.
+			bypassControl(ctx, "idempotency", controlIdempotency, err, "endpoint", endpoint)
+			c.Next()
 			return
-		}
-		if !acquired {
+		case !acquired:
 			c.Header("Retry-After", "1")
 			errhttp.Write(ctx, c, errBotInFlight)
 			c.Abort()

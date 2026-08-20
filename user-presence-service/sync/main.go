@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
@@ -88,9 +88,14 @@ func run() error {
 		}
 	}()
 
-	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{
-		Addrs: cfg.ValkeyAddrs, Password: cfg.ValkeyPassword,
-	})
+	// Raw client (the in-call index and ID map issue sorted-set commands outside
+	// the Client facade), built through valkeyutil so this path gets the same
+	// StoreProfile budget and o11y hooks as the presence store it writes through.
+	clusterClient, err := valkeyutil.NewClusterClient(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkeyutil.WithProfile(valkeyutil.StoreProfile), valkeyutil.WithObservability(sdk))
+	if err != nil {
+		return fmt.Errorf("build valkey client: %w", err)
+	}
 	defer func() {
 		if err := clusterClient.Close(); err != nil {
 			slog.Warn("valkey close", "error", err)

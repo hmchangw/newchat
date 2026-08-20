@@ -41,7 +41,8 @@ func TestInstrumentCluster_RecordsCommandSpan(t *testing.T) {
 	// Exercise the exact instrumentation path ConnectCluster uses. The
 	// container client is built with a ClusterSlots override (ConnectCluster's
 	// auto-discovery can't reach it), so wrap it directly here.
-	require.NoError(t, instrumentCluster(c, newConnectConfig(WithObservability(recorderObs{tp: tp}))))
+	cfg := newConnectConfig(WithObservability(recorderObs{tp: tp}))
+	require.NoError(t, instrumentCluster(c, &cfg))
 	client := &clusterClient{c: c}
 
 	ctx := context.Background()
@@ -71,10 +72,11 @@ func TestInstrumentCluster_RequireParentSpan(t *testing.T) {
 	tp := trace.NewTracerProvider(trace.WithSyncer(exporter))
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
-	require.NoError(t, instrumentCluster(c, newConnectConfig(
+	cfg := newConnectConfig(
 		WithObservability(recorderObs{tp: tp}),
 		WithRequireParentSpan(true),
-	)))
+	)
+	require.NoError(t, instrumentCluster(c, &cfg))
 	client := &clusterClient{c: c}
 
 	require.NoError(t, client.Set(context.Background(), "obs-no-parent", "v", time.Hour))

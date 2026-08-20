@@ -92,3 +92,51 @@ func TestClusterRedisClient_Integration_IncrEx(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), n)
 }
+
+// TestClusterRedisClient_Integration_IncrEx_RepairsMissingTTL: a counter left
+// without an expiry — the exact state a succeeded INCR + failed EXPIRE leaves —
+// must get its TTL repaired by the next increment. Without the repair the fixed
+// window never resets, the counter climbs forever, and the caller is throttled
+// permanently once it passes the ceiling, long after Valkey recovers.
+func TestClusterRedisClient_Integration_IncrEx_RepairsMissingTTL(t *testing.T) {
+	raw := testutil.SharedValkeyCluster(t)
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	client := &clusterClient{c: raw}
+	ctx := context.Background()
+
+	require.NoError(t, raw.Incr(ctx, "rl:poisoned").Err())
+	ttl, err := raw.TTL(ctx, "rl:poisoned").Result()
+	require.NoError(t, err)
+	require.Equal(t, -1*time.Nanosecond, ttl, "precondition: key exists with no expiry")
+
+	n, err := client.IncrEx(ctx, "rl:poisoned", 30*time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+
+	ttl, err = raw.TTL(ctx, "rl:poisoned").Result()
+	require.NoError(t, err)
+	assert.Greater(t, ttl, time.Duration(0), "missing TTL must be repaired by the next increment")
+}
+
+// TestClusterRedisClient_Integration_IncrEx_DoesNotExtendWindow: repairing a
+// missing TTL must not become a sliding window — an increment against a key that
+// already has an expiry leaves that expiry alone, or a caller could hold its
+// window open forever by keeping up a steady request rate.
+func TestClusterRedisClient_Integration_IncrEx_DoesNotExtendWindow(t *testing.T) {
+	raw := testutil.SharedValkeyCluster(t)
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+	client := &clusterClient{c: raw}
+	ctx := context.Background()
+
+	_, err := client.IncrEx(ctx, "rl:window", 30*time.Second)
+	require.NoError(t, err)
+	// Shorten the live window, then increment again with the original long TTL.
+	require.NoError(t, raw.Expire(ctx, "rl:window", 5*time.Second).Err())
+
+	_, err = client.IncrEx(ctx, "rl:window", 30*time.Second)
+	require.NoError(t, err)
+
+	ttl, err := raw.TTL(ctx, "rl:window").Result()
+	require.NoError(t, err)
+	assert.LessOrEqual(t, ttl, 5*time.Second, "an existing window must not be extended")
+}

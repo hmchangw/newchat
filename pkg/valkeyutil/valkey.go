@@ -21,8 +21,9 @@ type Client interface {
 	// SetNX atomically sets key to value with ttl iff key is absent: (true,nil) acquired,
 	// (false,nil) refused, (false,err) transport failure. ttl must be > 0 — a zero ttl stores without expiry.
 	SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)
-	// IncrEx atomically increments key by 1, returning the post-increment count. ttl applies only
-	// on the 0->1 transition (standard fixed-window rate-limit recipe), via INCR + conditional EXPIRE.
+	// IncrEx increments key by 1, returning the post-increment count. ttl opens a fixed window
+	// via INCR + EXPIRE NX: the first increment sets the expiry, later ones leave a live window
+	// alone but repair a missing one, so a counter can never outlive its window.
 	IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error)
 	Del(ctx context.Context, keys ...string) error
 	Close() error
@@ -35,34 +36,112 @@ type clusterClient struct {
 	c *redis.ClusterClient
 }
 
-// ConnectCluster dials a Valkey cluster via the provided seed addresses, verifies connectivity with PING, and returns a Client.
-func ConnectCluster(ctx context.Context, addrs []string, password string, opts ...Option) (Client, error) {
-	c := redis.NewClusterClient(&redis.ClusterOptions{
-		Addrs:    addrs,
-		Password: password,
-	})
-	if err := instrumentCluster(c, newConnectConfig(opts...)); err != nil {
+// buildCluster constructs and instruments the raw cluster client. Callers own
+// closing c on any error path that follows.
+func buildCluster(addrs []string, password string, cc *connectConfig) (*redis.ClusterClient, error) {
+	c := redis.NewClusterClient(ClusterOptionsFor(addrs, password, cc.profile))
+	if err := instrumentCluster(c, cc); err != nil {
 		if closeErr := c.Close(); closeErr != nil {
 			slog.Warn("valkey cluster close after failed instrument", "error", closeErr)
 		}
 		return nil, err
 	}
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	return c, nil
+}
+
+// wrap applies the circuit breaker unless disabled via WithoutCircuitBreaker.
+func wrap(c *redis.ClusterClient, cc *connectConfig) Client {
+	base := Client(&clusterClient{c: c})
+	if !cc.breaker {
+		return base
+	}
+	return NewBreakerClient(base, cc.breakerName)
+}
+
+// pingTimeout bounds the startup reachability probe. Note the effective socket
+// deadline is min(pingTimeout, Profile.ReadTimeout) — go-redis takes the earlier
+// of the two — so in practice the profile governs and this is only a ceiling.
+const pingTimeout = 5 * time.Second
+
+// connect builds, instruments and probes a cluster client, returning it with the
+// resolved config. failFast decides the sole difference between the exported
+// constructors: whether an unreachable cluster is fatal or merely logged.
+func connect(ctx context.Context, addrs []string, password string, failFast bool, opts ...Option) (*redis.ClusterClient, *connectConfig, error) {
+	cc := newConnectConfig(opts...)
+	c, err := buildCluster(addrs, password, &cc)
+	if err != nil {
+		return nil, nil, err
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
-	if err := c.Ping(pingCtx).Err(); err != nil {
-		// Close the half-constructed client on the ping-failure path so unreachable addrs don't leak internal go-redis pool state.
+	switch pingErr := c.Ping(pingCtx).Err(); {
+	case pingErr == nil:
+		slog.Info("connected to Valkey cluster", "addrs", addrs)
+	case failFast:
+		// Close the half-constructed client so unreachable addrs don't leak internal go-redis pool state.
 		if closeErr := c.Close(); closeErr != nil {
 			slog.Warn("valkey cluster close after failed connect", "error", closeErr)
 		}
-		return nil, fmt.Errorf("valkey cluster connect: %w", err)
+		return nil, nil, fmt.Errorf("valkey cluster connect: %w", pingErr)
+	default:
+		slog.Warn("valkey cluster unreachable at startup; continuing with lazy connect",
+			"addrs", addrs, "error", pingErr)
 	}
-	slog.Info("connected to Valkey cluster", "addrs", addrs)
-	return &clusterClient{c: c}, nil
+	return c, &cc, nil
+}
+
+// ConnectCluster dials a Valkey cluster via the provided seed addresses, verifies connectivity with PING, and returns a Client.
+// It fails fast when Valkey is unreachable.
+//
+// Long-running services must use ConnectClusterLazy instead — a fatal startup
+// probe crashloops the pod during a Valkey outage. ConnectCluster remains for
+// one-shot CLI tools (tools/seed-sample-data), where failing fast is correct.
+func ConnectCluster(ctx context.Context, addrs []string, password string, opts ...Option) (Client, error) {
+	c, cc, err := connect(ctx, addrs, password, true, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return wrap(c, cc), nil
+}
+
+// ConnectClusterLazy builds an instrumented cluster client without gating on
+// reachability. The startup PING becomes a non-fatal probe: an unreachable
+// Valkey is logged and a usable Client is still returned.
+//
+// This is what long-running services must use. go-redis dials lazily and
+// self-heals per call, so a Valkey outage no longer prevents a pod from
+// starting — which otherwise turns any rollout, autoscale, or node drain
+// during the outage into a CrashLoopBackOff on the message path.
+//
+// The returned error covers construction and instrumentation failures only;
+// it is never returned because Valkey happens to be unreachable.
+func ConnectClusterLazy(ctx context.Context, addrs []string, password string, opts ...Option) (Client, error) {
+	c, cc, err := connect(ctx, addrs, password, false, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return wrap(c, cc), nil
+}
+
+// NewClusterClient returns the raw instrumented cluster client, for consumers
+// whose commands fall outside the Client facade — Lua scripting, sorted sets,
+// pipelines. It applies the same options (profile, observability) and the same
+// non-fatal startup probe as ConnectClusterLazy, so those consumers no longer
+// have to re-implement construction and silently lose the o11y hooks.
+//
+// The circuit breaker is not available here: it decorates the Client facade, so
+// a raw-client consumer sees timeouts rather than short-circuits.
+//
+// The returned error covers construction and instrumentation only; it is never
+// returned because Valkey happens to be unreachable.
+func NewClusterClient(ctx context.Context, addrs []string, password string, opts ...Option) (*redis.ClusterClient, error) {
+	c, _, err := connect(ctx, addrs, password, false, opts...)
+	return c, err
 }
 
 // instrumentCluster attaches o11y/redis tracing+metrics hooks when observability is configured.
 // o11yredis.Wrap mutates the client in place and is idempotent, registering its own teardown — Disconnect needs no extra handling.
-func instrumentCluster(c *redis.ClusterClient, cc connectConfig) error {
+func instrumentCluster(c *redis.ClusterClient, cc *connectConfig) error {
 	if cc.obs == nil {
 		return nil
 	}
@@ -119,17 +198,27 @@ func (r *clusterClient) SetNX(ctx context.Context, key, value string, ttl time.D
 }
 
 func (r *clusterClient) IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error) {
-	n, err := r.c.Incr(ctx, key).Result()
-	if err != nil {
+	if ttl <= 0 {
+		n, err := r.c.Incr(ctx, key).Result()
+		if err != nil {
+			return 0, fmt.Errorf("valkey incr: %w", err)
+		}
+		return n, nil
+	}
+	// EXPIRE NX on every increment, not a bare EXPIRE on the 0->1 transition: if a
+	// prior call's INCR landed and its EXPIRE did not, the counter is left with no
+	// expiry, never resets, and permanently throttles the caller once it passes the
+	// ceiling. NX repairs that on the next increment while leaving a live window
+	// alone, so this stays a fixed window rather than becoming a sliding one.
+	// Pipelined to keep the pair at one round trip; both commands share a key, so
+	// cluster routing keeps them on one node.
+	pipe := r.c.Pipeline()
+	incr := pipe.Incr(ctx, key)
+	pipe.ExpireNX(ctx, key, ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, fmt.Errorf("valkey incr: %w", err)
 	}
-	if n == 1 && ttl > 0 {
-		// Only the 0->1 caller sets TTL; failure would let the key persist past the window, so surface it.
-		if err := r.c.Expire(ctx, key, ttl).Err(); err != nil {
-			return n, fmt.Errorf("valkey incr expire: %w", err)
-		}
-	}
-	return n, nil
+	return incr.Val(), nil
 }
 
 func (r *clusterClient) Del(ctx context.Context, keys ...string) error {
