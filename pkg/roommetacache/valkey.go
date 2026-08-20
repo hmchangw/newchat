@@ -2,6 +2,7 @@ package roommetacache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -98,12 +99,25 @@ func readThroughAt(ctx context.Context, client valkeyutil.Client, rooms *mongo.C
 		if valkeyutil.Fresh(entry.CachedAt, now, ttl) {
 			return entry.Meta, nil
 		}
-		// Stale: re-validate. On failure keep serving and re-arm the deadline —
-		// broadcast-worker treats a room-meta failure as fatal, so letting the
-		// entry lapse mid-outage stops delivery for the room entirely. EXPIRE
-		// rather than SET so an entry busted since the read stays busted.
+		// Stale: re-validate. The three outcomes are not interchangeable.
+		//
+		//   - Confirmed gone: Mongo answered, and the room no longer exists.
+		//     Serving the cached entry here would keep a deleted room alive
+		//     indefinitely, because every later read lands on this same branch and
+		//     re-arms the deadline again — the entry outlives its TTL for as long
+		//     as anyone reads it. Evict and fail, which is what the cold path
+		//     below already does with the same error.
+		//   - Unreachable: keep serving and re-arm the deadline. broadcast-worker
+		//     treats a room-meta failure as fatal, so letting the entry lapse
+		//     mid-outage stops delivery for the room entirely. EXPIRE rather than
+		//     SET so an entry busted since the read stays busted.
+		//   - Healthy: rewrite, picking up whatever a missed bust left behind.
 		meta, err := fetchGuarded(ctx, &o, rooms, roomID)
-		if err != nil {
+		switch {
+		case errors.Is(err, mongo.ErrNoDocuments):
+			BustMeta(ctx, client, roomID)
+			return Meta{}, fmt.Errorf("l2 read-through: %w", err)
+		case err != nil:
 			slideL2(ctx, client, roomID, ttl)
 			return entry.Meta, nil //nolint:nilerr // fail-open by design; see above
 		}

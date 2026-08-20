@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -298,4 +299,50 @@ func TestReadThroughAt_StaleEntryRefreshesWhenFetchHealthy(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fresh, got)
 	assert.False(t, fetched, "the rewrite must reset the refresh window")
+}
+
+// A room Mongo confirms is gone must be evicted, not served from the stale
+// entry. The stale branch re-arms the deadline on every failure, so treating a
+// confirmed deletion like an outage keeps the deleted room alive for as long as
+// anyone keeps reading it — indefinitely, not merely until the TTL. The cold
+// path already fails closed on the same error; this makes the warm path agree.
+func TestReadThroughAt_ConfirmedDeletionEvictsRatherThanServingStale(t *testing.T) {
+	client := newFakeValkey()
+	ctx := context.Background()
+	now := time.Now()
+	meta := Meta{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	writeL2(ctx, client, "r1", &meta, time.Hour, now)
+
+	stale := now.Add(59 * time.Minute)
+	_, err := readThroughAt(ctx, client, nil, "r1", time.Hour, &fakeRecorder{}, stale,
+		withFetcherForTest(func(context.Context, *mongo.Collection, string) (Meta, error) {
+			return Meta{}, fmt.Errorf("fetch room meta r1: %w", mongo.ErrNoDocuments)
+		}))
+	require.Error(t, err, "a confirmed deletion must not be answered from cache")
+	require.ErrorIs(t, err, mongo.ErrNoDocuments, "the sentinel must survive for callers to branch on")
+
+	if _, found := readL2(ctx, client, "r1", &fakeRecorder{}); found {
+		t.Fatal("the deleted room's entry must be evicted, or the next read resurrects it")
+	}
+}
+
+// The counterpart guard: an unreachable Mongo is NOT a confirmed deletion, so it
+// must still slide and serve. Without this, the fix above would turn every
+// outage into a cache wipe.
+func TestReadThroughAt_OutageStillSlidesAndServes(t *testing.T) {
+	client := newFakeValkey()
+	ctx := context.Background()
+	now := time.Now()
+	meta := Meta{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	writeL2(ctx, client, "r1", &meta, time.Hour, now)
+
+	got, err := readThroughAt(ctx, client, nil, "r1", time.Hour, &fakeRecorder{}, now.Add(59*time.Minute),
+		withFetcherForTest(func(context.Context, *mongo.Collection, string) (Meta, error) {
+			return Meta{}, errors.New("server selection error: context deadline exceeded")
+		}))
+	require.NoError(t, err)
+	assert.Equal(t, meta, got)
+	if _, found := readL2(ctx, client, "r1", &fakeRecorder{}); !found {
+		t.Fatal("an outage must not evict the entry it exists to preserve")
+	}
 }
