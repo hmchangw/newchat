@@ -350,7 +350,7 @@ func (s *stubInboxStore) getOpenUpdates() []openUpdate {
 	return cp
 }
 
-func (s *stubInboxStore) UpdateSubscriptionRead(_ context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+func (s *stubInboxStore) UpdateSubscriptionRead(_ context.Context, roomID, account string, lastSeenAt time.Time, alert bool) (bool, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.subReads = append(s.subReads, subRead{roomID, account, lastSeenAt, alert})
@@ -358,15 +358,16 @@ func (s *stubInboxStore) UpdateSubscriptionRead(_ context.Context, roomID, accou
 		if s.subscriptions[i].RoomID == roomID && s.subscriptions[i].User.Account == account {
 			// Order-safe: skip if stored lastSeenAt is not strictly earlier.
 			if s.subscriptions[i].LastSeenAt != nil && !s.subscriptions[i].LastSeenAt.Before(lastSeenAt) {
-				return nil
+				return false, 0, nil
 			}
 			ls := lastSeenAt
 			s.subscriptions[i].LastSeenAt = &ls
 			s.subscriptions[i].Alert = alert
-			return nil
+			// A room read does not drain threadUnread — only thread.read does.
+			return true, len(s.subscriptions[i].ThreadUnread), nil
 		}
 	}
-	return nil // missing-subscription → no-op
+	return false, 0, nil // missing-subscription → no-op
 }
 
 func (s *stubInboxStore) getSubReads() []subRead {
@@ -1493,15 +1494,12 @@ func subscriptionReadInboxPayload(t *testing.T, account, roomID string) []byte {
 	return data
 }
 
-// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearAll: a federated
-// read invalidates the account's WHOLE badge set — no post-apply thread-state
-// check; the next count/push recomputes from Mongo.
-func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearAll(t *testing.T) {
+// A fully-read room is removed exactly; the set and its freshness marker survive.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearsRoomOnly(t *testing.T) {
 	store := &stubInboxStore{}
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions, model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
-		ThreadUnread: []string{"p1"}, // remaining threads must NOT prevent the drop
 	})
 	store.mu.Unlock()
 	h := NewHandler(store)
@@ -1510,8 +1508,48 @@ func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearAll(t *testing.T) 
 
 	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
 
-	assert.Equal(t, []string{"alice"}, badge.getClearAlls())
+	assert.Equal(t, []clearRoomCall{{account: "alice", roomID: "r1"}}, badge.getClearRooms())
+	assert.Empty(t, badge.getClearAlls(), "a read must never drop the whole set")
+}
+
+// Unread followed threads remain, so the room was and stays unread — no edit.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ThreadUnreadRemains(t *testing.T) {
+	store := &stubInboxStore{}
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		ThreadUnread: []string{"p1"},
+	})
+	store.mu.Unlock()
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
+
 	assert.Empty(t, badge.getClearRooms())
+	assert.Empty(t, badge.getClearAlls())
+}
+
+// A replayed / out-of-order event the $lt guard rejects wrote nothing, so it
+// must not disturb the set either.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_GuardRejected(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour)
+	store := &stubInboxStore{}
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		LastSeenAt: &future, // already read past the incoming event
+	})
+	store.mu.Unlock()
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
+
+	assert.Empty(t, badge.getClearRooms())
+	assert.Empty(t, badge.getClearAlls())
 }
 
 // TestHandler_HandleEvent_SubscriptionRead_BadgeCache_NilBadgeNoPanic: a

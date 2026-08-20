@@ -294,7 +294,9 @@ func TestInbox_UpdateSubscriptionRead_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now, true))
+	applied, _, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", now, true)
+	require.NoError(t, err)
+	assert.True(t, applied)
 
 	var got model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
@@ -321,7 +323,9 @@ func TestInbox_UpdateSubscriptionRead_OutOfOrderSkipped(t *testing.T) {
 	require.NoError(t, err)
 
 	t1 := t2.Add(-time.Minute)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", t1, false))
+	applied, _, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", t1, false)
+	require.NoError(t, err)
+	assert.False(t, applied)
 
 	var got model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
@@ -347,7 +351,9 @@ func TestInbox_UpdateSubscriptionRead_EqualTimestampSkipped(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", t1, false))
+	applied, _, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", t1, false)
+	require.NoError(t, err)
+	assert.False(t, applied)
 
 	var got model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
@@ -360,9 +366,33 @@ func TestInbox_UpdateSubscriptionRead_MissingSubscriptionErrors(t *testing.T) {
 
 	// No subscription seeded — a genuinely missing sub must error so the event redelivers until
 	// member_added lands (field events can race ahead of member_added on the worker pool).
-	err := store.UpdateSubscriptionRead(ctx, "missing-room", "ghost", time.Now().UTC(), false)
+	applied, _, err := store.UpdateSubscriptionRead(ctx, "missing-room", "ghost", time.Now().UTC(), false)
 	require.Error(t, err)
+	assert.False(t, applied)
 	assert.Contains(t, err.Error(), "subscription not found")
+}
+
+func TestInbox_UpdateSubscriptionRead_ReturnsPostUpdateThreadUnread(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := &mongoInboxStore{
+		subCol:       db.Collection("subscriptions"),
+		roomCol:      db.Collection("rooms"),
+		userCol:      db.Collection("users"),
+		threadSubCol: db.Collection("thread_subscriptions"),
+	}
+
+	_, err := store.subCol.InsertOne(ctx, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", JoinedAt: time.Now().UTC().Add(-time.Hour),
+		ThreadUnread: []string{"p1"},
+	})
+	require.NoError(t, err)
+
+	applied, n, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", time.Now().UTC().Truncate(time.Millisecond), false)
+	require.NoError(t, err)
+	assert.True(t, applied)
+	assert.Equal(t, 1, n, "a room read must not drain threadUnread")
 }
 
 func TestInbox_UpdateSubscriptionMute_MissingSubscriptionErrors(t *testing.T) {
