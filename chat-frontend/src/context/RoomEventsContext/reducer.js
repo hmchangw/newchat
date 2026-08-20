@@ -401,10 +401,21 @@ export function roomEventsReducer(state, action) {
         // RPCs (the real user-service embeds room metadata inline). Build
         // summaries from scratch and merge in the per-room subscription
         // for server-canonical hasMention / subscriptionName.
+        // resync re-runs this action, so `toSummary`'s zero-init would wipe
+        // counters that exist only client-side (accumulated from live
+        // messages, absent from the subscription record). Carry them over
+        // for rooms we already know about; a genuinely new room starts at 0.
+        const prevById = new Map(state.summaries.map((s) => [s.id, s]))
         summaries = sortByLastMsgDesc(
-          action.rooms.map((r) =>
-            mergeSubscriptionIntoSummary(toSummary(r), subs[r.id])
-          )
+          action.rooms.map((r) => {
+            const base = toSummary(r)
+            const prev = prevById.get(r.id)
+            if (prev) {
+              base.unreadCount = prev.unreadCount ?? 0
+              base.mentionAll = prev.mentionAll ?? false
+            }
+            return mergeSubscriptionIntoSummary(base, subs[r.id])
+          })
         )
       } else {
         // Partial-update path (e.g. tests, future bucket-refresh): no
@@ -444,6 +455,26 @@ export function roomEventsReducer(state, action) {
         s.id === sub.roomId ? mergeSubscriptionIntoSummary(s, sub) : s
       )
       return { ...state, summaries, subscriptions }
+    }
+    // threadUnread mirrors the server's Subscription.ThreadUnread — the parent
+    // message IDs of followed threads with unread replies. Seeded by the
+    // bucket bootstrap and grown by this action; it SHRINKS only on a resync,
+    // because this client has no thread-read RPC to clear it optimistically.
+    // Named ROOM_THREAD_* to stay clear of ThreadEventsContext's own
+    // THREAD_REPLY_RECEIVED, which is a different action with a different payload.
+    case 'ROOM_THREAD_UNREAD_ADDED': {
+      const sub = state.subscriptions[action.roomId]
+      if (!sub) return state
+      const prev = sub.threadUnread ?? []
+      // Redelivery of the same reply must not double-count the thread.
+      if (prev.includes(action.parentMessageId)) return state
+      return {
+        ...state,
+        subscriptions: {
+          ...state.subscriptions,
+          [action.roomId]: { ...sub, threadUnread: [...prev, action.parentMessageId] },
+        },
+      }
     }
     case 'SUBSCRIPTION_SECTION_MOVED': {
       // A chat's chatlist section membership/order changed (subscription.update

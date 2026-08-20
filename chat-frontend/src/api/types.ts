@@ -74,6 +74,15 @@ export interface Subscription {
   lastSeenAt?: string
   hasMention: boolean
   alert: boolean
+  /** Whether the user muted the room. Muted rooms are excluded from the
+   *  unread badge (mirrors user-service's `unreadRooms()`). Always present
+   *  on the wire — `json:"muted"` carries no omitempty. */
+  muted?: boolean
+  /** Parent-message IDs of followed threads in this room with unread
+   *  replies. Mirrors `model.Subscription.ThreadUnread`; omitted from the
+   *  wire (not sent as an empty array) once it drains. A room counts toward
+   *  the unread badge when this is non-empty, even if its messages are read. */
+  threadUnread?: string[]
   /** Whether the user favorited the room. Drives the derived Favorites
    *  section. Optional on the wire (absent = false). */
   favorite?: boolean

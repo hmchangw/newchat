@@ -19,6 +19,14 @@ import {
  *  the server's lastSeenAt for the active user stays current. */
 const MARK_READ_DEBOUNCE_MS = 500
 
+/** Whether the window is actually in front of the user. A hidden window
+ *  (minimized, background tab) must NOT auto-mark its open room read —
+ *  those messages were never seen, and marking them read server-side
+ *  hides them from the unread badge for good. */
+function isDocumentVisible() {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden'
+}
+
 /** Which `SidebarBuckets` id-array each bucket owns. A bucket that failed
  *  is OMITTED from the merge action rather than sent empty — the reducer
  *  reads presence as "this bucket is authoritative". */
@@ -130,6 +138,10 @@ export function useRoomSubscriptions(
   const channelSubs = useRef(new Map())
   const cancelledRef = useRef(false)
 
+  // The current login's sidebar-bootstrap closure, republished as `resync`.
+  // A ref so the returned callback identity stays stable across logins.
+  const resyncRef = useRef(null)
+
   // Trailing-edge debounce for the per-active-room mark-read RPC.
   // A chatty room (10+ msg/sec) would otherwise generate one
   // `message.read` RPC per inbound message; with this debounce a
@@ -166,6 +178,15 @@ export function useRoomSubscriptions(
       dispatch(action)
     }
 
+    // Fire the `message.read` RPC for one room now. The room's site is
+    // resolved at fire time so a trailing read can't carry a stale one.
+    const markReadNow = (roomId) => {
+      const summary = stateRef.current.summaries.find((r) => r.id === roomId)
+      markRoomRead(natsRef.current, { roomId, siteId: summary?.siteId ?? user.siteId }).then((ok) => {
+        if (ok) safeDispatch({ type: 'ROOM_READ_SYNCED' })
+      })
+    }
+
     // Schedule a trailing `message.read` for the active room with a
     // 500ms debounce. A burst of N messages in a chatty room produces
     // ONE RPC at the end of the burst instead of N. If the user
@@ -177,15 +198,14 @@ export function useRoomSubscriptions(
     // still mark the room read or the badge counts the room you're in.
     const scheduleMarkActiveRead = (evtRoomId) => {
       if (!evtRoomId) return
+      if (!isDocumentVisible()) return
       if (stateRef.current.activeRoomId !== evtRoomId) return
-      const summary = stateRef.current.summaries.find((r) => r.id === evtRoomId)
-      const siteId = summary?.siteId ?? user.siteId
       // Clear any prior pending timer FIRST, then write the new pending
       // entry. Defensive ordering: if future code ever introduces async
       // work between these two lines, the prior timer can't race with
       // the new pending entry it was never meant to operate on.
       if (markReadTimeoutRef.current) clearTimeout(markReadTimeoutRef.current)
-      pendingMarkReadRef.current = { roomId: evtRoomId, siteId }
+      pendingMarkReadRef.current = { roomId: evtRoomId }
       markReadTimeoutRef.current = setTimeout(() => {
         markReadTimeoutRef.current = null
         const pending = pendingMarkReadRef.current
@@ -196,9 +216,10 @@ export function useRoomSubscriptions(
         // mark-read for a room the user has already left.
         if (cancelledRef.current) return
         if (stateRef.current.activeRoomId !== pending.roomId) return
-        markRoomRead(natsRef.current, pending).then((ok) => {
-          if (ok) safeDispatch({ type: 'ROOM_READ_SYNCED' })
-        })
+        // Re-check: the window may have been hidden mid-debounce, in which
+        // case the user never saw these messages.
+        if (!isDocumentVisible()) return
+        markReadNow(pending.roomId)
       }, MARK_READ_DEBOUNCE_MS)
     }
 
@@ -287,6 +308,16 @@ export function useRoomSubscriptions(
     const fanThreadReply = (evt) => {
       const msg = evt?.message
       if (!msg?.threadParentMessageId) return
+      // Badge first, and unconditionally: the room's unread state must move
+      // whether or not a thread panel happens to be open. Own replies don't
+      // count — the server doesn't add the author to ThreadUnread either.
+      if (msg.sender?.account !== user.account) {
+        safeDispatch({
+          type: 'ROOM_THREAD_UNREAD_ADDED',
+          roomId: evt.roomId,
+          parentMessageId: msg.threadParentMessageId,
+        })
+      }
       const handler = threadReplyHandlerRef?.current
       if (!handler) return
       try {
@@ -555,7 +586,7 @@ export function useRoomSubscriptions(
     // RPCs (favorites / apps / channel+dm). Each reply embeds the room
     // metadata inline, so `buckets.rooms` is the canonical full list —
     // no separate `rooms.list` RPC is needed.
-    fetchSidebarBuckets(liveNats)
+    const loadSidebar = () => fetchSidebarBuckets(liveNats)
       .then((buckets) => {
         // Generation check, not just cancelledRef: a slow bootstrap from a
         // prior login must not seed keys or open subs into the new session.
@@ -614,8 +645,33 @@ export function useRoomSubscriptions(
         console.warn('sidebar bucket bootstrap failed:', err?.message ?? err)
       })
 
+    // Published as `resync` so callers can re-pull the authoritative
+    // subscription state — the badge fold's drift backstop. Held in a ref so
+    // the exposed callback stays stable while pointing at the CURRENT login's
+    // closure (liveNats, generation) rather than a stale one.
+    resyncRef.current = loadSidebar
+    loadSidebar()
+
+    // Coming back to the front clears the room the user is returning to —
+    // the reads that scheduleMarkActiveRead skipped while hidden.
+    const onVisibilityChange = () => {
+      if (!isDocumentVisible() || !isCurrent()) return
+      const roomId = stateRef.current.activeRoomId
+      if (!roomId) return
+      // Disarm any trailing read this foregrounding supersedes, or it fires a
+      // second, redundant message.read a moment later.
+      if (markReadTimeoutRef.current) {
+        clearTimeout(markReadTimeoutRef.current)
+        markReadTimeoutRef.current = null
+      }
+      pendingMarkReadRef.current = null
+      markReadNow(roomId)
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
     return () => {
       cancelledRef.current = true
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       dmSub.unsubscribe()
       subUpdate.unsubscribe()
       metaUpdate.unsubscribe()
@@ -630,6 +686,7 @@ export function useRoomSubscriptions(
         markReadTimeoutRef.current = null
       }
       pendingMarkReadRef.current = null
+      resyncRef.current = null
       // RESET runs even when cancelled — it IS the cleanup.
       dispatch({ type: 'RESET' })
     }
@@ -642,5 +699,9 @@ export function useRoomSubscriptions(
   // depend on this value don't churn on every render.
   return useMemo(() => ({
     currentGeneration: () => generationRef.current,
+    // Re-runs the full sidebar bootstrap against the live connection. Resolves
+    // once the refreshed state is dispatched; a no-op before the first effect
+    // run (or after teardown), so callers can fire it unconditionally.
+    resync: () => resyncRef.current?.() ?? Promise.resolve(),
   }), [])
 }
