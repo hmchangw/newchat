@@ -1,0 +1,42 @@
+name: dr-oplog-worker
+
+# Local dev only. Stands up a JetStream-enabled NATS, a backup (target) Mongo, and the DR applier.
+# The DR applier is self-contained: the producer-side connector uses updateLookup, so events carry
+# the full post-image and this service needs NO source Mongo. In prod the DR-OPLOG stream and the
+# cross-gateway routing that lands a remote origin site's publish here are ops/IaC-owned; this
+# compose sets BOOTSTRAP_STREAMS=true only to stand up a fresh NATS locally.
+
+services:
+  target-mongo:
+    image: mongo:7
+    networks:
+      - dr-oplog-local
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--http_port", "8222"]
+    networks:
+      - dr-oplog-local
+
+  dr-oplog-worker:
+    build:
+      context: ../..
+      dockerfile: dr-oplog-worker/deploy/Dockerfile
+    depends_on:
+      target-mongo:
+        condition: service_started
+      nats:
+        condition: service_started
+    environment:
+      - SITE_ID=site-local
+      - NATS_URL=nats://nats:4222
+      - TARGET_MONGO_URI=mongodb://target-mongo:27017/
+      - TARGET_DB_PREFIX=chat_dr_
+      - DR_COLLECTIONS=rooms,subscriptions,room_members,thread_rooms,thread_subscriptions,users
+      - BOOTSTRAP_STREAMS=true
+    networks:
+      - dr-oplog-local
+
+networks:
+  dr-oplog-local:
+    driver: bridge

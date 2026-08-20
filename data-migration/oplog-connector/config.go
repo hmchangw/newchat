@@ -40,12 +40,29 @@ type config struct {
 	StartAtTime      string `env:"START_AT_TIME"      envDefault:""`    // RFC3339 or unix-ms
 	StartResumeToken string `env:"START_RESUME_TOKEN" envDefault:""`    // _data hex, one-off seed override
 
+	// Mode selects the CDC target lane. "migration" (default) tails the legacy source Mongo and
+	// publishes to MIGRATION_OPLOG on the chat.migration.oplog.> subjects — the original behavior,
+	// with native oplog only (no post-image on updates). "dr" ships a site's operational state to
+	// the shared backup: it publishes to DR-OPLOG on chat.dr.oplog.> and opens the change stream
+	// with updateLookup so update events carry the full post-image inline (the dr-oplog-worker
+	// applier is self-contained and never reads back to the origin Mongo).
+	Mode string `env:"MODE" envDefault:"migration"`
+
 	Bootstrap bootstrapConfig `envPrefix:"BOOTSTRAP_"`
 
 	// HealthAddr binds the /healthz listener (k8s probe target). Application and
 	// runtime metrics are exported by the o11y SDK on its own Prometheus endpoint.
 	HealthAddr string `env:"HEALTH_ADDR" envDefault:":9090"`
 }
+
+// modeMigration and modeDR are the valid values of config.Mode.
+const (
+	modeMigration = "migration"
+	modeDR        = "dr"
+)
+
+// isDR reports whether this deployment runs the disaster-recovery lane.
+func (c *config) isDR() bool { return c.Mode == modeDR }
 
 // parseConfig parses and validates the environment configuration.
 func parseConfig() (config, error) {
@@ -64,6 +81,12 @@ func parseConfig() (config, error) {
 		trimmed = append(trimmed, coll)
 	}
 	cfg.WatchCollections = trimmed
+	cfg.Mode = strings.TrimSpace(cfg.Mode)
+	switch cfg.Mode {
+	case modeMigration, modeDR:
+	default:
+		return config{}, fmt.Errorf("invalid MODE %q (want %s|%s)", cfg.Mode, modeMigration, modeDR)
+	}
 	switch cfg.StartMode {
 	case "now", "time":
 	default:

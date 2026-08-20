@@ -12,6 +12,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 const (
@@ -80,6 +82,7 @@ type watcher struct {
 	maxBackoff       time.Duration
 	now              func() int64 // unix ms; injectable for tests
 	metrics          *metrics     // nil-safe; set by start(), nil in unit tests
+	subjectFor       subjectFunc  // publish-subject builder; defaults to the migration lane
 	log              *slog.Logger
 }
 
@@ -98,6 +101,7 @@ func newWatcher(siteID, collection string, src changeSource, pub publisher, stor
 		initialBackoff:   defaultInitialBackoff,
 		maxBackoff:       defaultMaxBackoff,
 		now:              func() int64 { return time.Now().UTC().UnixMilli() },
+		subjectFor:       subject.MigrationOplog, // migration lane by default; start() overrides for DR
 		log:              slog.With("collection", collection),
 	}
 }
@@ -180,7 +184,7 @@ func (w *watcher) run(ctx context.Context) error {
 
 // publishWithRetry publishes one event synchronously, retrying with capped backoff until pub-ack or ctx cancel. EventID (the dedup id) is guaranteed non-empty upstream; a field that fails to encode is published degraded (not dropped) so the stream stays lossless.
 func (w *watcher) publishWithRetry(ctx context.Context, ev *changeEvent) error {
-	subj, msgID, evt := buildEnvelope(ev, w.siteID, w.now())
+	subj, msgID, evt := buildEnvelope(ev, w.siteID, w.now(), w.subjectFor)
 	data, err := json.Marshal(evt)
 	if err != nil {
 		// This event is DROPPED (never reaches the stream), so name the op — eventId alone

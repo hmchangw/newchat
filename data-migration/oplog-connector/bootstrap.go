@@ -22,20 +22,27 @@ type streamManager interface {
 	Stream(ctx context.Context, name string) (o11ynats.Stream, error)
 }
 
-// bootstrapStreams owns the MIGRATION-OPLOG-{siteID} stream — enabled it creates from schema (Name+Subjects), disabled it verifies existence and fails fast. Federation config stays ops/IaC-owned.
-func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled bool) error {
+// bootstrapStreams owns the connector's target stream — MIGRATION-OPLOG-{siteID} in migration mode,
+// DR-OPLOG-{siteID} in DR mode. Enabled it creates from schema (Name+Subjects); disabled it verifies
+// existence and fails fast. Federation / cross-gateway routing stays ops/IaC-owned.
+func bootstrapStreams(ctx context.Context, js streamManager, siteID string, enabled, drMode bool) error {
 	cfg := stream.MigrationOplog(siteID)
+	label := "MIGRATION-OPLOG"
+	if drMode {
+		cfg = stream.DROplog(siteID)
+		label = "DR-OPLOG"
+	}
 	if enabled {
 		if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     cfg.Name,
 			Subjects: cfg.Subjects,
 		}); err != nil {
-			return fmt.Errorf("create MIGRATION-OPLOG stream: %w", err)
+			return fmt.Errorf("create %s stream: %w", label, err)
 		}
 		return nil
 	}
 	if _, err := js.Stream(ctx, cfg.Name); err != nil {
-		return fmt.Errorf("verify MIGRATION-OPLOG stream: %w", err)
+		return fmt.Errorf("verify %s stream: %w", label, err)
 	}
 	return nil
 }
