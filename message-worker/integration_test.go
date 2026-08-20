@@ -2135,8 +2135,10 @@ func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen(t *testing.T
 		UpdatedAt:       now,
 	}
 
-	// Each subtest owns a distinct threadRoomId and seeds its own starting state, so
-	// none depends on another having run (or on the order they run in).
+	// Each subtest owns a distinct threadRoomId AND _id, and seeds its own starting state,
+	// so none depends on another having run (or on the order they run in). The _id needs to
+	// differ too: it carries its own unique index, so a shared one collides across subtests
+	// independently of the (threadRoomId, userAccount) key.
 	read := func(threadRoomID string) model.ThreadSubscription {
 		var got model.ThreadSubscription
 		require.NoError(t, db.Collection("thread_subscriptions").
@@ -2151,10 +2153,10 @@ func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen(t *testing.T
 	}
 
 	t.Run("insert seeds the subscription with lastSeenAt=at", func(t *testing.T) {
-		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-insert", "ts-comb"), now))
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-insert", "ts-comb-insert"), now))
 
 		got := read("tr-comb-insert")
-		assert.Equal(t, "ts-comb", got.ID)
+		assert.Equal(t, "ts-comb-insert", got.ID)
 		assert.Equal(t, "u-comb", got.UserID)
 		require.NotNil(t, got.LastSeenAt, "lastSeenAt must be seeded by $max on insert")
 		assert.WithinDuration(t, now, got.LastSeenAt.UTC(), time.Millisecond)
@@ -2162,23 +2164,23 @@ func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen(t *testing.T
 	})
 
 	t.Run("advances lastSeenAt forward on an existing subscription without overwriting identity", func(t *testing.T) {
-		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-advance", "ts-comb"), now))
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-advance", "ts-comb-advance"), now))
 
 		later := now.Add(time.Minute)
 		// A redelivered/duplicate insert attempt with a fresh ID must not replace the original.
-		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-advance", "ts-comb-dup"), later))
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-advance", "ts-comb-advance-dup"), later))
 
 		got := read("tr-comb-advance")
-		assert.Equal(t, "ts-comb", got.ID, "$setOnInsert must not overwrite the original _id")
+		assert.Equal(t, "ts-comb-advance", got.ID, "$setOnInsert must not overwrite the original _id")
 		require.NotNil(t, got.LastSeenAt)
 		assert.WithinDuration(t, later, got.LastSeenAt.UTC(), time.Millisecond, "newer time advances")
 	})
 
 	t.Run("never regresses lastSeenAt", func(t *testing.T) {
-		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-regress", "ts-comb"), now))
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-regress", "ts-comb-regress"), now))
 
 		earlier := now.Add(-time.Minute)
-		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-regress", "ts-comb"), earlier))
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, subFor("tr-comb-regress", "ts-comb-regress"), earlier))
 
 		got := read("tr-comb-regress")
 		require.NotNil(t, got.LastSeenAt)

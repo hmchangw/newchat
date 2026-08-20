@@ -190,8 +190,16 @@ func (s *threadStoreMongo) UpsertThreadSubscriptionAdvancingLastSeen(ctx context
 		// (threadRoomId, userAccount) index rejected this one). The sub now exists, so
 		// replay the $max alone — without it the reply would NAK and the replier's
 		// lastSeenAt would ride on redelivery.
-		if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, bson.M{"$max": bson.M{"lastSeenAt": at}}); err != nil {
-			return fmt.Errorf("advance thread subscription lastSeen after upsert race: %w", err)
+		res, raceErr := s.threadSubscriptions.UpdateOne(ctx, filter, bson.M{"$max": bson.M{"lastSeenAt": at}})
+		if raceErr != nil {
+			return fmt.Errorf("advance thread subscription lastSeen after upsert race: %w", raceErr)
+		}
+		// Nothing matched (threadRoomId, userAccount), so the duplicate came from some
+		// other unique key — an _id already owned by an unrelated subscription, say — and
+		// this is a genuine conflict rather than the race above. Swallowing it would drop
+		// the write silently.
+		if res.MatchedCount == 0 {
+			return fmt.Errorf("upsert thread subscription advancing lastSeen: %w", err)
 		}
 	}
 	return nil
