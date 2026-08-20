@@ -380,9 +380,7 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 		),
 		Attributes: attributes,
 	}); err != nil {
-		if t.recipient != nil {
-			t.recipient.evidence.Forget(pending.MessageID)
-		}
+		t.forgetRecipientExpectation(pending.MessageID)
 		return fmt.Errorf("start soak failure operation: %w", err)
 	}
 	return nil
@@ -413,13 +411,28 @@ func (t *soakFailureTracker) AbandonUnsent(pending *soakPendingSend) error {
 	}
 	err := t.ledger.Abandon(pending.MessageID, failureResultNotSent, t.now().UTC())
 	if errors.Is(err, errFailureOperationNotActive) {
+		// Already finalized, so no sweep will ever report this ID again.
+		t.forgetRecipientExpectation(pending.MessageID)
 		t.countUntracked(failureUntrackedReasonAbandon)
 		return nil
 	}
 	if err != nil {
+		// The operation may still be active and reconcilable, and its evidence
+		// is the only record of what was delivered.
 		return fmt.Errorf("abandon unsent soak operation: %w", err)
 	}
+	// Abandoning finalizes the operation out of the ledger, which puts it
+	// beyond the reach of the expiry sweep that releases evidence by ID.
+	t.forgetRecipientExpectation(pending.MessageID)
 	return nil
+}
+
+// forgetRecipientExpectation releases an expectation the ledger will never
+// report, on the paths that retire an operation without going through expiry.
+func (t *soakFailureTracker) forgetRecipientExpectation(operationID string) {
+	if t.recipient != nil {
+		t.recipient.evidence.Forget(operationID)
+	}
 }
 
 func (t *soakFailureTracker) ObserveReply(result *soakSendReplyResult) error {

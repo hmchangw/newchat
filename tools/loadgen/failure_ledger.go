@@ -887,12 +887,19 @@ func (l *failureLedger) Expire(now time.Time) ([]string, error) {
 		}
 		result := failureOperationResult(operation)
 		operationID := operation.ID
-		if err := l.finalizeLocked(
+		err := l.finalizeLocked(
 			operation, result, failureOperationFinalReason(operation, result), now,
-		); err != nil {
+		)
+		// Report by what left the ledger, not by whether the call succeeded.
+		// finalizeLocked drops the operation from l.active and compacts
+		// afterwards, so it can fail on one it has already retired — and an ID
+		// this loop does not report can never be reported by a later sweep.
+		if _, stillActive := l.active[operationID]; !stillActive {
+			finalized = append(finalized, operationID)
+		}
+		if err != nil {
 			return finalized, err
 		}
-		finalized = append(finalized, operationID)
 	}
 	return finalized, nil
 }

@@ -247,3 +247,50 @@ func TestFailureRecipientObserver_EvidenceCarriesHeadroomOverTheLedger(t *testin
 		"an evidence map sized exactly like the ledger rejects during the cleanup lag")
 	assert.Equal(t, 20, observer.evidence.capacity)
 }
+
+// finalizeLocked removes the operation from l.active and compacts afterwards,
+// so a compaction failure returns an error on an operation that has already
+// been retired. Returning before recording that ID strands its evidence for the
+// life of the run: nothing is left in l.active for any later sweep to report.
+func TestFailureLedger_ExpireReportsAnOperationRetiredBeforeTheFailure(t *testing.T) {
+	at := time.Unix(1000, 0).UTC()
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 16, CompactEvery: 1,
+		Journal: &compactFailingJournal{},
+		Now:     func() time.Time { return at },
+	})
+	require.NoError(t, err)
+	evidence := newRecipientEvidence(false)
+	startExpiryOperation(t, ledger, evidence, "op", at)
+
+	expired, err := ledger.Expire(at.Add(2 * time.Minute))
+
+	require.Error(t, err, "a failed compaction must still surface")
+	assert.NotContains(t, ledger.active, "op",
+		"the operation was retired before the compaction failed")
+	assert.Equal(t, []string{"op"}, expired,
+		"an operation that left the ledger must be reported or its evidence is stranded")
+}
+
+// AbandonUnsent finalizes the operation, which removes it from l.active — so no
+// later Expire can report it either. The expectation registered before the
+// publish attempt would then outlive the run that created it.
+func TestSoakFailureTracker_AbandonUnsentReleasesTheRecipientExpectation(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 4})
+	require.NoError(t, err)
+	observer := newFailureRecipientObserver(ledger, nil, 4, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, time.Minute, func() time.Time { return now },
+		withSoakFailureRecipientObserver(observer),
+	)
+	pending := testSoakFailurePending(now)
+	pending.Target.Recipients = []string{"alice"}
+	require.NoError(t, tracker.Start(pending))
+	require.Equal(t, 1, observer.evidence.Len())
+
+	require.NoError(t, tracker.AbandonUnsent(pending))
+
+	assert.Zero(t, observer.evidence.Len(),
+		"an abandoned operation leaves the ledger, so its expectation must go with it")
+}
