@@ -382,6 +382,53 @@ func TestHandleHealth(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "ok")
 }
 
+// A multi-file batch must keep the fileHeaders[i]/responses[i] pairing: each
+// result carries the name of the file at the same index, in send order.
+func TestHandleUploadImages_MultiFileBatch_ResultsMatchSendOrder(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	fd := &fakeDrive{
+		baseURL: "https://drive.example.com",
+		uploadResp: []drive.UploadGroupImageResponse{
+			{Status: "success", File: drive.GroupImageObject{FileID: "img-0", GroupID: "r1", Filename: "a.png"}},
+			{Status: "failure", Error: "drive exploded", File: drive.GroupImageObject{}},
+			{Status: "success", File: drive.GroupImageObject{FileID: "img-2", GroupID: "r1", Filename: "c.png"}},
+		},
+	}
+	h := newHandler(store, fd)
+
+	// Build parts in a fixed order (multipartBody's map would randomize it).
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	for _, name := range []string{"a.png", "b.png", "c.png"} {
+		fw, err := mw.CreateFormFile("images", name)
+		require.NoError(t, err)
+		_, _ = fw.Write([]byte("x"))
+	}
+	require.NoError(t, mw.Close())
+
+	c, w := newUploadCtx(t, "r1", body, mw.FormDataContentType(), okUser())
+	h.HandleUploadImages(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, []string{"a.png", "b.png", "c.png"}, fd.uploadGot.filenames, "all files sent in order under original names")
+
+	var got struct {
+		Results []uploadResultItem `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	require.Len(t, got.Results, 3, "one result per submitted file")
+	assert.Equal(t, "a.png", got.Results[0].Name)
+	assert.Equal(t, "success", got.Results[0].Status)
+	assert.Equal(t, "b.png", got.Results[1].Name, "failed file keeps its own name, not a neighbor's")
+	assert.Equal(t, "failure", got.Results[1].Status)
+	assert.Equal(t, "c.png", got.Results[2].Name)
+	assert.Equal(t, "success", got.Results[2].Status)
+	assert.Equal(t, "api/v1/file/rooms/r1/file/img-2?drive_host=https://drive.example.com", got.Results[2].RelativePath)
+}
+
 func TestHandleUploadImages_SendsOriginalName(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
