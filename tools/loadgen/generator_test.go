@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -368,78 +369,66 @@ func dispatchPeak(t *testing.T, maxInFlight, rate int, window time.Duration, tri
 	return best
 }
 
-// pacedCeilingProbeRate is only used to measure what the serial ticker manages
-// on this host; the rate the two paths are then compared at is derived from
-// that measurement. pacedCeilingHeadroom is how far past the measured plateau
-// that derived rate sits.
 const (
-	pacedCeilingProbeRate = 100_000
-	pacedCeilingHeadroom  = 20
-	pacedCeilingWindow    = 200 * time.Millisecond
-	pacedCeilingTrials    = 3
+	pacedMeasureRate   = 100_000
+	pacedMeasureWindow = 200 * time.Millisecond
+	pacedMeasureTrials = 3
 )
 
-// pacedCeilingRateFrom turns a dispatch count measured over window into a rate
-// headroom times higher, falling back to the probe rate when the measurement
-// was empty.
-func pacedCeilingRateFrom(measured int, window time.Duration, headroom int) int {
-	if measured <= 0 {
-		return pacedCeilingProbeRate
-	}
-	return int(float64(measured)/window.Seconds()) * headroom
-}
-
-// Regression for the single-ticker RPS ceiling: the legacy serial path
-// (MaxInFlight=0) releases one event per delivered tick, and the runtime cannot
-// deliver a tick per microsecond, so it plateaus far below target. The batched
-// pacer releases rate*interval events per coarse tick and must out-dispatch it
-// by a wide margin. A relative comparison (same process, back to back) cancels
-// host-speed and race-detector overhead.
+// The regression that produced the batched pacer: the serial path releases one
+// event per delivered tick, and the runtime cannot deliver a tick per
+// microsecond, so it plateaus far below any high target. This is that property
+// with the timer taken out of it. pacedDispatchRateWithTicks accepts the tick
+// channel, so one tick can be shown to release the whole batch the rate is owed
+// — 200 events here — where a one-per-tick regression releases exactly one.
 //
-// The rate they are compared at is measured, not chosen. Both counts are only
-// ceilings while the target stays out of reach — a target the paced path can
-// reach reports the target instead, and the comparison stops being about the
-// pacer (see TestGenerator_PacedDispatchReportsAReachableTarget). A constant
-// cannot hold that open: the fastest host observed drove the serial ticker to
-// 78k/s, which is above the rate the slowest one could dispatch at all, so no
-// single number is simultaneously out of reach on one and in reach on the
-// other. Deriving it from this host's own plateau is.
-func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
-	plateau := dispatchPeak(t, 0, pacedCeilingProbeRate, pacedCeilingWindow, pacedCeilingTrials)
-	require.Positive(t, plateau, "the serial ticker dispatched nothing to scale from")
-	rate := pacedCeilingRateFrom(plateau, pacedCeilingWindow, pacedCeilingHeadroom)
+// This is the blocking assertion. The comparison against the serial path can
+// only be measured on real timers, and no measurement of it is safe to assert
+// on: the two paths degrade at completely different rates under load, so their
+// ratio has no upper bound to write a threshold against.
+func TestPacedDispatch_ReleasesTheWholeBatchOnOneTick(t *testing.T) {
+	start := time.Unix(0, 0).UTC()
+	pacer := newPacer(pacedMeasureRate, start)
+	require.Equal(t, minEmitInterval, pacer.interval,
+		"a target this high must clamp to the tick floor for a batch to exist")
+	require.Greater(t, pacer.perTick, 1.0)
 
-	serial := dispatchPeak(t, 0, rate, pacedCeilingWindow, pacedCeilingTrials)
-	paced := dispatchPeak(t, 5000, rate, pacedCeilingWindow, pacedCeilingTrials)
+	var dispatched atomic.Int64
+	ticks := make(chan time.Time)
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer close(done)
+		pacedDispatchRateWithTicks(ctx, pacer, ticks, 4096,
+			func(int) {}, func() {},
+			func(context.Context) { dispatched.Add(1) })
+	}()
 
-	require.Positive(t, serial)
-	t.Logf("plateau=%d derived rate=%d serial=%d paced=%d", plateau, rate, serial, paced)
-	require.Less(t, paced, int(float64(rate)*pacedCeilingWindow.Seconds()),
-		"this host dispatches more than %dx what its own serial ticker manages, so the margin below measures the target rather than the pacer: raise pacedCeilingHeadroom",
-		pacedCeilingHeadroom)
-	assert.Greater(t, float64(paced), float64(serial)*1.3,
-		"batched pacer (%d) should out-dispatch the serial ticker (%d) at %d rps",
-		paced, serial, rate)
+	// Unbuffered: the send returns only once the dispatch loop has taken the
+	// tick, so cancelling afterwards cannot race ahead of the batch it owes.
+	ticks <- start.Add(pacer.interval)
+	cancel()
+	<-done
+
+	assert.Equal(t, int64(pacer.perTick), dispatched.Load(),
+		"one tick must release the events the rate owes for that interval")
 }
 
-// The pacer releases rate*elapsed events and no more, so a target the host can
-// reach is what the count reports — the path's own ceiling stays invisible, and
-// the two paths converge on the same number. That is how the ceiling assertion
-// above failed on CI at 100k rps: the paced count clipped at exactly 20000
-// while the runner drove the serial ticker to 15586, which no 1.3x margin can
-// sit above. The failure mode belongs to a *faster* host, so it needs a test
-// that does not depend on host speed to surface it.
-func TestGenerator_PacedDispatchReportsAReachableTarget(t *testing.T) {
-	const rate = 5000
-	window := 200 * time.Millisecond
-	target := int(float64(rate) * window.Seconds())
+// A measurement, not an assertion. Both counts are host-dependent and the
+// review history of this file is three attempts to find a threshold that holds
+// across machines: a fixed target is reachable on a fast host and unreachable
+// on a slow one, and a target scaled from the serial plateau fails too, because
+// under load the serial ticker collapses far harder than the pool does
+// (observed: plateau 400, paced 8000 — a ratio of 20 where an idle host shows
+// 2.2). The numbers are logged because they are useful when tuning the pacer;
+// the only thing asserted is that both paths dispatched at all.
+func TestGenerator_MeasuresBothDispatchPaths(t *testing.T) {
+	serial := dispatchPeak(t, 0, pacedMeasureRate, pacedMeasureWindow, pacedMeasureTrials)
+	paced := dispatchPeak(t, 5000, pacedMeasureRate, pacedMeasureWindow, pacedMeasureTrials)
 
-	paced := dispatchPeak(t, 5000, rate, window, 2)
-
-	assert.LessOrEqual(t, paced, target,
-		"the pacer must never release more than the target rate allows")
-	assert.InDelta(t, target, paced, float64(target)*0.1,
-		"a reachable target caps the count, leaving nothing of the pacer's own ceiling to compare")
+	t.Logf("at %d rps over %s: serial=%d paced=%d", pacedMeasureRate, pacedMeasureWindow, serial, paced)
+	require.Positive(t, serial, "the serial ticker dispatched nothing")
+	require.Positive(t, paced, "the batched pacer dispatched nothing")
 }
 
 func TestParseInjectMode(t *testing.T) {
@@ -462,32 +451,6 @@ func TestParseInjectMode(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
-// The rate the ceiling comparison runs at is derived from what the serial
-// ticker managed on the host running the test, so the target scales with the
-// machine instead of being a constant that is too high on one and too low on
-// the next.
-func TestPacedCeilingRateFrom_ScalesPastTheMeasuredPlateau(t *testing.T) {
-	window := 200 * time.Millisecond
-
-	tests := []struct {
-		name     string
-		measured int
-		headroom int
-		want     int
-	}{
-		{name: "slow host", measured: 3000, headroom: 20, want: 300_000},
-		{name: "fast host", measured: 15586, headroom: 20, want: 1_558_600},
-		{name: "headroom of one is the plateau itself", measured: 3000, headroom: 1, want: 15_000},
-		{name: "a host that dispatched nothing still yields a usable rate",
-			measured: 0, headroom: 20, want: pacedCeilingProbeRate},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, pacedCeilingRateFrom(tc.measured, window, tc.headroom))
 		})
 	}
 }
