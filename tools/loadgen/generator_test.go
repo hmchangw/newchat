@@ -337,51 +337,87 @@ func TestGenerator_PoolSaturationCountedAsError(t *testing.T) {
 	assert.Greater(t, saturated, float64(0), "expected saturated counter to increment under pool-full conditions")
 }
 
-func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
-	// Regression for the single-ticker RPS ceiling: the legacy serial path
-	// (MaxInFlight=0) releases one event per delivered tick, and the runtime
-	// cannot deliver 100k sub-millisecond ticks/sec, so it plateaus far below
-	// target. The batched pacer releases rate*interval events per coarse tick
-	// and must out-dispatch it by a wide margin. A relative comparison (same
-	// process, back to back) cancels host-speed and race-detector overhead.
-	//
-	// Both quantities are ceilings — the *most* each path can dispatch — so we
-	// measure the peak over a few short trials. A single 200ms sample is one
-	// GC pause or scheduler stall away from under-counting, which on a loaded
-	// CI runner can briefly compress the ratio below the margin; taking the
-	// best-of-N cancels those transient dips without changing what is asserted.
-	runAt := func(maxInFlight int) int {
+// dispatchPeak returns the highest number of publishes the generator completes
+// in window over trials short runs, at the given rate and MaxInFlight.
+//
+// Both callers measure a ceiling — the *most* a dispatch path can do — so the
+// peak, not the mean, is the meaningful sample: a single run is one GC pause or
+// scheduler stall away from under-counting.
+func dispatchPeak(t *testing.T, maxInFlight, rate int, window time.Duration, trials int) int {
+	t.Helper()
+	best := 0
+	for i := 0; i < trials; i++ {
 		p, _ := BuiltinPreset("small")
 		f := BuildFixtures(&p, 42, "site-local")
 		rp := &recordingPublisher{}
 		m := NewMetrics()
 		g := NewGenerator(&GeneratorConfig{
 			Preset: &p, Fixtures: f, SiteID: "site-local",
-			Rate: 100000, Inject: InjectFrontdoor,
+			Rate: rate, Inject: InjectFrontdoor,
 			Publisher: rp, Metrics: m, Collector: NewCollector(m, p.Name),
 			MaxInFlight: maxInFlight,
 		}, 1)
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer cancel()
-		require.NoError(t, g.Run(ctx))
-		return rp.count()
-	}
-	// peakOf returns the highest dispatch count over trials short runs.
-	peakOf := func(maxInFlight, trials int) int {
-		best := 0
-		for i := 0; i < trials; i++ {
-			if c := runAt(maxInFlight); c > best {
-				best = c
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), window)
+		err := g.Run(ctx)
+		cancel()
+		require.NoError(t, err)
+		if c := rp.count(); c > best {
+			best = c
 		}
-		return best
 	}
+	return best
+}
 
-	serial := peakOf(0, 3)   // legacy one-per-tick ceiling
-	paced := peakOf(5000, 3) // batched pacer
+// pacedCeilingRate has to stay out of reach of the host: only then does each
+// path report its own ceiling instead of the target they share. See
+// TestGenerator_PacedDispatchReportsAReachableTarget for what a reachable
+// target turns this measurement into.
+const (
+	pacedCeilingRate   = 1_000_000
+	pacedCeilingWindow = 200 * time.Millisecond
+	pacedCeilingTrials = 3
+)
+
+func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
+	// Regression for the single-ticker RPS ceiling: the legacy serial path
+	// (MaxInFlight=0) releases one event per delivered tick, and the runtime
+	// cannot deliver a tick per microsecond, so it plateaus far below target.
+	// The batched pacer releases rate*interval events per coarse tick and must
+	// out-dispatch it by a wide margin. A relative comparison (same process,
+	// back to back) cancels host-speed and race-detector overhead.
+	serial := dispatchPeak(t, 0, pacedCeilingRate, pacedCeilingWindow, pacedCeilingTrials)
+	paced := dispatchPeak(t, 5000, pacedCeilingRate, pacedCeilingWindow, pacedCeilingTrials)
+
 	require.Positive(t, serial)
+	require.Less(t, paced, pacedCeilingTarget(),
+		"the target is within this host's reach, so the margin below measures the target, not the pacer: raise pacedCeilingRate")
 	assert.Greater(t, float64(paced), float64(serial)*1.3,
-		"batched pacer (%d) should out-dispatch the serial ticker (%d) at 100k rps", paced, serial)
+		"batched pacer (%d) should out-dispatch the serial ticker (%d) at %d rps",
+		paced, serial, pacedCeilingRate)
+}
+
+func pacedCeilingTarget() int {
+	return int(float64(pacedCeilingRate) * pacedCeilingWindow.Seconds())
+}
+
+// The pacer releases rate*elapsed events and no more, so a target the host can
+// reach is what the count reports — the path's own ceiling stays invisible, and
+// the two paths converge on the same number. That is how the ceiling assertion
+// above failed on CI at 100k rps: the paced count clipped at exactly 20000
+// while the runner drove the serial ticker to 15586, which no 1.3x margin can
+// sit above. The failure mode belongs to a *faster* host, so it needs a test
+// that does not depend on host speed to surface it.
+func TestGenerator_PacedDispatchReportsAReachableTarget(t *testing.T) {
+	const rate = 5000
+	window := 200 * time.Millisecond
+	target := int(float64(rate) * window.Seconds())
+
+	paced := dispatchPeak(t, 5000, rate, window, 2)
+
+	assert.LessOrEqual(t, paced, target,
+		"the pacer must never release more than the target rate allows")
+	assert.InDelta(t, target, paced, float64(target)*0.1,
+		"a reachable target caps the count, leaving nothing of the pacer's own ceiling to compare")
 }
 
 func TestParseInjectMode(t *testing.T) {
