@@ -100,7 +100,7 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 
 	var chats []Chat
 	for next != "" {
-		body, err := g.getThrottled(ctx, token, next, "list user chats")
+		body, err := g.getThrottled(ctx, token, next, "list user chats", 1<<26) // 64 MiB
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +124,7 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 // attempt so the rest of the pool still backs off after this user fails. Each
 // throttle response emits a WARN log (operation identifies the caller) carrying
 // the status, Retry-After, and computed backoff — never the token or endpoint.
-func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operation string) ([]byte, error) {
+func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operation string, maxBytes int64) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
 		if err := g.waitThrottle(ctx); err != nil {
 			return nil, err
@@ -140,7 +140,7 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operati
 		}
 		// Bound the read so a runaway or hostile response can't exhaust memory;
 		// real Graph pages are far smaller.
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<26)) // 64 MiB
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			return nil, fmt.Errorf("close %s response: %w", operation, closeErr)
 		}

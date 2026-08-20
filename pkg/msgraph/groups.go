@@ -53,7 +53,7 @@ func (g *graphClient) GetGroup(ctx context.Context, groupID string) (*GroupProfi
 
 	// getThrottled retries 429/503 per Retry-After and shares the tenant-wide
 	// throttle gate, so an hr-sync run survives a Graph throttle/hiccup.
-	body, err := g.getThrottled(ctx, token, endpoint, "get group")
+	body, err := g.getThrottled(ctx, token, endpoint, "get group", 1<<20) // 1 MiB
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func (g *graphClient) ListGroupMembers(ctx context.Context, groupID string, page
 
 func (g *graphClient) fetchMembersPage(ctx context.Context, token, endpoint string) (*membersPage, error) {
 	// Shares getThrottled's 429/503 retry + tenant throttle gate (see GetGroup).
-	body, err := g.getThrottled(ctx, token, endpoint, "list group members")
+	body, err := g.getThrottled(ctx, token, endpoint, "list group members", 1<<22) // 4 MiB
 	if err != nil {
 		return nil, err
 	}
