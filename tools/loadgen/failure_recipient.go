@@ -822,14 +822,26 @@ func withFailureRecipientEvidenceDir(directory string) failureRecipientObserverO
 	return func(observer *failureRecipientObserver) { observer.evidenceDir = directory }
 }
 
+// recipientEvidenceCapacityFactor is the headroom the expectation map keeps over
+// the ledger's own capacity.
+//
+// The sweep frees ledger slots inside Expire and frees the matching evidence
+// afterwards, in ForgetAll, so between the two the ledger has room the evidence
+// does not. Sized exactly like the ledger, a send arriving in that window is
+// refused registration even though the ledger would have admitted its
+// operation. One extra generation closes the window by construction: an
+// unbounded sweep can retire at most the whole ledger before cleanup runs, so
+// the lag can never exceed one capacity.
+const recipientEvidenceCapacityFactor = 2
+
 // withFailureRecipientEvidenceCapacity bounds the expectation map. Callers pass
 // the ledger's own capacity: an expectation exists per ledger operation, so the
 // ledger's admission limit binds first in a healthy run and this only engages
-// when expiry has stopped working.
+// once expiry has stopped working.
 func withFailureRecipientEvidenceCapacity(capacity int) failureRecipientObserverOption {
 	return func(o *failureRecipientObserver) {
 		if capacity > 0 {
-			o.evidence.capacity = capacity
+			o.evidence.capacity = capacity * recipientEvidenceCapacityFactor
 		}
 	}
 }

@@ -233,3 +233,17 @@ func TestRunSoakFailureExpiry_PublishesTheRetainedExpectationCount(t *testing.T)
 
 	assert.Equal(t, float64(3), testutil.ToFloat64(metrics.FailureRecipientExpectations))
 }
+
+// The sweep frees ledger slots before ForgetAll frees the matching evidence, so
+// for a moment the ledger has room the evidence does not. Sized equal, that
+// window refuses to register a send the ledger would have admitted. Headroom of
+// one full ledger generation closes it by construction: even a sweep that
+// finalizes every operation before cleanup runs cannot fill the gap.
+func TestFailureRecipientObserver_EvidenceCarriesHeadroomOverTheLedger(t *testing.T) {
+	observer := newFailureRecipientObserver(nil, nil, 1, nil,
+		withFailureRecipientEvidenceCapacity(10))
+
+	require.Greater(t, observer.evidence.capacity, 10,
+		"an evidence map sized exactly like the ledger rejects during the cleanup lag")
+	assert.Equal(t, 20, observer.evidence.capacity)
+}
