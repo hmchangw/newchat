@@ -131,21 +131,21 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operati
 		}
 		req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
-			return nil, fmt.Errorf("build chats request: %w", err)
+			return nil, fmt.Errorf("build %s request: %w", operation, err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := g.httpClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("get chats: %w", err)
+			return nil, fmt.Errorf("%s: %w", operation, err)
 		}
 		// Bound the read so a runaway or hostile response can't exhaust memory;
-		// real list-chats pages ($top=50, members expanded) are far smaller.
+		// real Graph pages are far smaller.
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<26)) // 64 MiB
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			return nil, fmt.Errorf("close chats response: %w", closeErr)
+			return nil, fmt.Errorf("close %s response: %w", operation, closeErr)
 		}
 		if readErr != nil {
-			return nil, fmt.Errorf("read chats response: %w", readErr)
+			return nil, fmt.Errorf("read %s response: %w", operation, readErr)
 		}
 		throttled := resp.StatusCode == http.StatusTooManyRequests ||
 			resp.StatusCode == http.StatusServiceUnavailable
@@ -179,9 +179,9 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operati
 			}
 			_ = json.Unmarshal(body, &graphErr)
 			if graphErr.Error.Code != "" {
-				return nil, fmt.Errorf("get chats: graph returned status %d (%s)", resp.StatusCode, graphErr.Error.Code)
+				return nil, fmt.Errorf("%s: graph returned status %d (%s)", operation, resp.StatusCode, graphErr.Error.Code)
 			}
-			return nil, fmt.Errorf("get chats: graph returned status %d", resp.StatusCode)
+			return nil, fmt.Errorf("%s: graph returned status %d", operation, resp.StatusCode)
 		}
 	}
 }

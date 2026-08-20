@@ -149,3 +149,46 @@ func TestListGroupMembers_RejectsCrossOriginNextLink(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "deviates from configured graph origin")
 }
+
+func TestGetGroup_RetriesOn429(t *testing.T) {
+	tokenSrv := newTokenServer(t)
+	var calls int
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0") // keep the test fast
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(GroupProfile{ID: "g1", DisplayName: "Engineering"})
+	}))
+	defer graphSrv.Close()
+
+	got, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).GetGroup(context.Background(), "g1")
+	require.NoError(t, err)
+	assert.Equal(t, 2, calls, "a 429 must be retried, not surfaced")
+	assert.Equal(t, "g1", got.ID)
+}
+
+func TestListGroupMembers_RetriesOn429(t *testing.T) {
+	tokenSrv := newTokenServer(t)
+	var calls int
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusServiceUnavailable) // 503 also retried
+			return
+		}
+		_, _ = w.Write([]byte(`{"value":[{"@odata.type":"#microsoft.graph.user","id":"u1","displayName":"Alice"}]}`))
+	}))
+	defer graphSrv.Close()
+
+	var got []GraphUser
+	_, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).
+		ListGroupMembers(context.Background(), "g1", 500, func(users []GraphUser) error { got = append(got, users...); return nil })
+	require.NoError(t, err)
+	assert.Equal(t, 2, calls, "a 503 must be retried, not surfaced")
+	require.Len(t, got, 1)
+	assert.Equal(t, "u1", got[0].ID)
+}
