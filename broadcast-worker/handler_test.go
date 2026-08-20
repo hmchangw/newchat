@@ -835,6 +835,41 @@ func TestHandleUpdated_ChannelRoomScopedPublish(t *testing.T) {
 	assert.True(t, roomEvt.UpdatedAt.Equal(edited))
 }
 
+func TestHandleUpdated_AttachesMentionsToEditEvent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	roomID := "r1"
+	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(&model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
+	store.EXPECT().SetSubscriptionMentions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"bob"}), gomock.Any()).Return(nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+		Return([]model.User{{ID: "u-bob", Account: "bob", EngName: "Bob"}}, nil)
+
+	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Event: model.EventUpdated, SiteID: "site-a", Timestamp: edited.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+			Content: "morning team @bob", CreatedAt: edited.Add(-time.Hour),
+			EditedAt: &edited, UpdatedAt: &edited,
+		},
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.Len(t, pub.records, 1)
+	var roomEvt model.EditRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	require.Len(t, roomEvt.Mentions, 1, "edit event must carry the resolved mention")
+	assert.Equal(t, "bob", roomEvt.Mentions[0].Account)
+}
+
 func TestHandleUpdated_RelaysPreviewObject(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -989,6 +1024,8 @@ func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
 			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
 			if tc.wantSetMentions != nil {
 				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.InAnyOrder(tc.wantSetMentions), edited).Return(nil)
+				// The edit event now also resolves participants for its mentions[] (mirrors create).
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil)
 			}
 
 			evt := model.MessageEvent{
@@ -2881,6 +2918,8 @@ func TestHandleThreadUpdated_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	// The edit event resolves participants for its mentions[] (mirrors create).
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil)
 	// bob: member full access → included. carol: joined after parent → excluded.
 	// dave: absent → non-member → excluded.
 	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", gomock.Any()).

@@ -333,6 +333,7 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	edit := buildEditRoomEvent(room, evt)
+	edit.Mentions = h.resolveMentionParticipants(ctx, msg.Content)
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
@@ -353,6 +354,23 @@ func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string
 	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
 }
 
+// resolveMentionParticipants resolves the @-mentions in edited content to
+// participants (account + display info) for the edit event, mirroring the create
+// path so an edit-added mention renders like a fresh one. Falls back to accounts
+// on lookup error; nil when there are none.
+func (h *Handler) resolveMentionParticipants(ctx context.Context, content string) []model.Participant {
+	parsed := mention.Parse(content)
+	if len(parsed.Accounts) == 0 {
+		return nil
+	}
+	users, err := h.userStore.FindUsersByAccounts(ctx, parsed.Accounts)
+	if err != nil {
+		slog.WarnContext(ctx, "user lookup failed resolving edit mentions, falling back to account",
+			"error", err, "request_id", natsutil.RequestIDFromContext(ctx))
+	}
+	return mention.ResolveFromParsed(parsed, usersByAccount(users)).Participants
+}
+
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.EditedAt == nil || msg.UpdatedAt == nil {
@@ -369,6 +387,7 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 	}
 
 	edit := buildEditRoomEvent(room, evt)
+	edit.Mentions = h.resolveMentionParticipants(ctx, msg.Content)
 
 	switch room.Type {
 	case model.RoomTypeChannel:
