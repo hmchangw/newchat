@@ -19,6 +19,7 @@ services:
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       # Valkey cluster backing the badge cache; empty disables it.
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
+      - BADGE_MARKER_TTL=${BADGE_MARKER_TTL:-10m}
       - MAX_SUBSCRIPTION_LIMIT=${MAX_SUBSCRIPTION_LIMIT:-1000}
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}

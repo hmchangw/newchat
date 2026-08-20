@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -324,4 +325,46 @@ func TestLoad_SSORefreshWindowMustBePositive(t *testing.T) {
 	t.Setenv("SSO_REFRESH_WINDOW", "0s")
 	_, err := Load()
 	require.ErrorContains(t, err, "SSO_REFRESH_WINDOW")
+}
+
+func TestLoad_BadgeMarkerTTLDefault(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Minute, cfg.BadgeMarkerTTL)
+}
+
+func TestLoad_BadgeMarkerTTLValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		cacheTTL  string
+		markerTTL string
+		wantErr   string
+	}{
+		{"zero is rejected", "24h", "0s", "BADGE_MARKER_TTL"},
+		{"negative is rejected", "24h", "-1m", "BADGE_MARKER_TTL"},
+		{"sub-second is rejected", "24h", "500ms", "BADGE_MARKER_TTL"},
+		{"exactly one second is accepted", "24h", "1s", ""},
+		{"longer than cache ttl is rejected", "10m", "1h", "BADGE_MARKER_TTL"},
+		{"equal to cache ttl is accepted", "10m", "10m", ""},
+		{"shorter than cache ttl is accepted", "24h", "10m", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MONGO_URI", "mongodb://x")
+			t.Setenv("NATS_URL", "nats://x")
+			t.Setenv("SITE_ID", "site-a")
+			t.Setenv("BADGE_CACHE_TTL", tt.cacheTTL)
+			t.Setenv("BADGE_MARKER_TTL", tt.markerTTL)
+			_, err := Load()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
