@@ -158,14 +158,14 @@ func main() {
 		msg := natsutil.NewMsg(ctx, subj, data)
 		if msgID == "" {
 			err := nc.PublishMsg(ctx, msg)
-			publishMetrics.Attempt(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount, err)
+			publishMetrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount, err)
 			if err != nil {
 				return fmt.Errorf("publish nats message to %s: %w", subj, err)
 			}
 			return nil
 		}
 		_, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
-		publishMetrics.Attempt(ctx, natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish, err)
+		publishMetrics.Failure(ctx, natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish, err)
 		if err != nil {
 			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
 		}
@@ -218,7 +218,7 @@ func main() {
 				return fmt.Errorf("marshal user identity fanout: %w", err)
 			}
 			_, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subject.OrgSyncUsersUpsert(cfg.SiteID), data))
-			publishMetrics.Attempt(ctx, natsmetrics.DestinationUserSync, natsmetrics.OperationTeamsUserUpsert, err)
+			publishMetrics.Failure(ctx, natsmetrics.DestinationUserSync, natsmetrics.OperationTeamsUserUpsert, err)
 			if err != nil {
 				return fmt.Errorf("publish user identity fanout: %w", err)
 			}

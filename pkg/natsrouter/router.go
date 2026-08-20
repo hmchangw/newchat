@@ -115,7 +115,7 @@ type routerResponder struct {
 
 func (r routerResponder) Respond(ctx context.Context, msg *nats.Msg, data []byte) error {
 	err := r.nc.Respond(ctx, msg, data)
-	r.metrics.Attempt(ctx, natsmetrics.DestinationClientResponse, natsmetrics.OperationClientResponse, err)
+	r.metrics.Failure(ctx, natsmetrics.DestinationClientResponse, natsmetrics.OperationClientResponse, err)
 	return err
 }
 

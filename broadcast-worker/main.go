@@ -312,7 +312,7 @@ type natsPublisher struct {
 
 func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte) error {
 	err := p.nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subject, data))
-	p.metrics.Attempt(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish, err)
+	p.metrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish, err)
 	if err != nil {
 		return fmt.Errorf("publish to %q: %w", subject, err)
 	}
