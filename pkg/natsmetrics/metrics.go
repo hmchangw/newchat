@@ -197,6 +197,22 @@ type Metrics struct {
 // Prefer it over New so every caller in a process lands on one scope.
 func NewFromProvider(mp metric.MeterProvider) *Metrics { return New(mp.Meter(ScopeName)) }
 
+// NewFromProviderIfEnabled returns nil when metrics are toggled off, so the
+// recorders collapse to their zero value instead of to no-op instruments.
+//
+// The distinction matters on the hot path. o11y installs no-op providers when
+// O11Y_ENABLED is false, but a no-op instrument is still a live interface: the
+// recording call does its map lookup and the SDK's Add still allocates. Only
+// the nil path skips that work entirely. Callers pass sdk.Toggles.Metrics, so
+// enablement stays an operator decision rather than a second compile-time gate
+// each service has to remember to wire.
+func NewFromProviderIfEnabled(mp metric.MeterProvider, enabled bool) *Metrics {
+	if !enabled {
+		return nil
+	}
+	return NewFromProvider(mp)
+}
+
 func New(meter metric.Meter) *Metrics {
 	noopMeter := noop.NewMeterProvider().Meter("natsmetrics-fallback")
 	// Latency instruments carry the SDK's shared boundaries as an instrument
@@ -306,6 +322,13 @@ type Consumer struct {
 }
 
 func (m *Metrics) Consumer(cfg ConsumerConfig) *Consumer {
+	// A nil Metrics means metrics are toggled off. Return a live Consumer with
+	// no instruments rather than nil: the worker loops call Track and Finish
+	// unconditionally, and every recorder below already guards on a nil
+	// metrics field.
+	if m == nil {
+		return &Consumer{}
+	}
 	base := []attribute.KeyValue{
 		attribute.String("site", cfg.Site),
 		attribute.String("stream", cfg.Stream),
@@ -336,14 +359,29 @@ func (m *Metrics) Consumer(cfg ConsumerConfig) *Consumer {
 	return c
 }
 
+// enabled reports whether this Consumer carries live instruments. A Consumer
+// built from a nil Metrics (metrics toggled off) keeps its loop-state flag so
+// IsUp still answers correctly, but records nothing.
+func (c *Consumer) enabled() bool { return c != nil && c.metrics != nil }
+
 func (c *Consumer) LoopStarted(ctx context.Context) {
-	if c.up.CompareAndSwap(false, true) {
+	if c == nil {
+		return
+	}
+	if c.up.CompareAndSwap(false, true) && c.enabled() {
 		c.metrics.loop.Add(ctx, 1, c.loopOpt)
 	}
 }
 
 func (c *Consumer) LoopStopped(ctx context.Context) {
-	if c.up.CompareAndSwap(true, false) {
+	if c == nil {
+		return
+	}
+	wasUp := c.up.CompareAndSwap(true, false)
+	if !c.enabled() {
+		return
+	}
+	if wasUp {
 		c.metrics.loop.Add(ctx, -1, c.loopOpt)
 		return
 	}
@@ -378,7 +416,7 @@ func (c *Consumer) Track(ctx context.Context, msg jetstream.Msg, eventType Event
 	tracked := &Message{Msg: msg, consumer: c, ctx: ctx, eventType: eventType, maxDeliver: maxDeliver, started: time.Now()}
 	if meta, err := msg.Metadata(); err == nil && meta != nil {
 		tracked.numDelivered = meta.NumDelivered
-		if meta.NumDelivered > 1 {
+		if meta.NumDelivered > 1 && c.enabled() {
 			c.metrics.redeliveries.Add(ctx, 1, c.redeliv[eventType])
 		}
 	}
@@ -386,6 +424,9 @@ func (c *Consumer) Track(ctx context.Context, msg jetstream.Msg, eventType Event
 }
 
 func (c *Consumer) Terminal(ctx context.Context, eventType EventType, reason TerminalReason) {
+	if !c.enabled() {
+		return
+	}
 	key := terminalKey{NormalizeEventType(string(eventType)), normalizeTerminalReason(reason)}
 	c.metrics.terminalFailures.Add(ctx, 1, c.termOpt[key])
 }
@@ -497,6 +538,9 @@ func (m *Message) finish(want Outcome, err error) {
 
 func (m *Message) finishWithOutcome(ctx context.Context, outcome Outcome) {
 	m.disposeOnce.Do(func() {
+		if !m.consumer.enabled() {
+			return
+		}
 		opt := m.consumer.message[consumerKey{m.eventType, outcome}]
 		m.consumer.metrics.messages.Add(ctx, 1, opt)
 		m.consumer.metrics.processingDuration.Record(ctx, time.Since(m.started).Seconds(), opt)
@@ -515,6 +559,11 @@ type Publisher struct {
 // inline service identity — the resource-derived `service_name` constant
 // label supplies it, and duplicating it here breaks the /metrics endpoint.
 func (m *Metrics) Publisher(site string) Publisher {
+	// Toggled off: hand back the zero value so Attempt/Request/HandledRequest
+	// take their nil short-circuit instead of recording into no-op instruments.
+	if m == nil {
+		return Publisher{}
+	}
 	base := []attribute.KeyValue{attribute.String("site", site)}
 	build := func(extra ...attribute.KeyValue) metric.MeasurementOption {
 		attrs := make([]attribute.KeyValue, 0, len(base)+len(extra))

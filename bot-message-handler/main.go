@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -74,7 +75,8 @@ func run() error {
 	pub := JetStreamPublisher{JS: js}
 	h := newHandler(store, pub, cfg.SiteID)
 
-	router := natsrouter.New(nc, "bot-message-handler", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency), natsrouter.WithSiteID(cfg.SiteID))
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.New(nc, "bot-message-handler", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency), natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	h.Register(router)
 
