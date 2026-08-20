@@ -49,6 +49,20 @@ func (b *inboxMemberCollection) MappingUpdate() (string, json.RawMessage) {
 	return "", nil
 }
 
+// peekInboxEventType returns just the InboxEvent type tag without decoding the
+// payload, so a collection can route/skip by type before the full member-event
+// parse. Returns "" on a malformed envelope — the caller's normal parse path
+// then surfaces the decode error.
+func peekInboxEventType(data []byte) model.InboxEventType {
+	var evt struct {
+		Type model.InboxEventType `json:"type"`
+	}
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return ""
+	}
+	return evt.Type
+}
+
 // parseMemberEvent decodes an INBOX message into an InboxEvent + its
 // InboxMemberEvent payload and validates the common preconditions shared by
 // all inbox-member collections.

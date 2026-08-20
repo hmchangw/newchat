@@ -309,18 +309,22 @@ func InboxExternalAll(siteID string) string {
 	return fmt.Sprintf("chat.inbox.%s.external.>", siteID)
 }
 
-// InboxMemberEventSubjects returns the subject filters a consumer should use to
-// receive member_added/member_removed events on both the internal (same-site)
-// and external (cross-site) lanes for the given site. Use with
+// InboxMemberEventSubjects returns the subject filters a search-sync consumer
+// should use to receive the room-index-affecting events on both the internal
+// (same-site) and external (cross-site) lanes for the given site:
+// member_added/member_removed (per-member docs) and room_renamed (re-index the
+// room name across every member's doc). Use with
 // jetstream.ConsumerConfig.FilterSubjects (NATS 2.10+).
 func InboxMemberEventSubjects(siteID string) []string {
 	return []string{
 		InboxInternal(siteID, "member_added"),
 		InboxInternal(siteID, "member_removed"),
 		InboxInternal(siteID, "member_joinedat_refreshed"),
+		InboxInternal(siteID, "room_renamed"),
 		InboxExternal(siteID, "member_added"),
 		InboxExternal(siteID, "member_removed"),
 		InboxExternal(siteID, "member_joinedat_refreshed"),
+		InboxExternal(siteID, "room_renamed"),
 	}
 }
 

@@ -11,6 +11,7 @@ package main
 
 import (
 	context "context"
+	json "encoding/json"
 	reflect "reflect"
 
 	searchengine "github.com/hmchangw/chat/pkg/searchengine"
@@ -54,4 +55,18 @@ func (m *MockStore) Bulk(ctx context.Context, actions []searchengine.BulkAction)
 func (mr *MockStoreMockRecorder) Bulk(ctx, actions any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Bulk", reflect.TypeOf((*MockStore)(nil).Bulk), ctx, actions)
+}
+
+// UpdateByQuery mocks base method.
+func (m *MockStore) UpdateByQuery(ctx context.Context, index string, body json.RawMessage) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateByQuery", ctx, index, body)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateByQuery indicates an expected call of UpdateByQuery.
+func (mr *MockStoreMockRecorder) UpdateByQuery(ctx, index, body any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateByQuery", reflect.TypeOf((*MockStore)(nil).UpdateByQuery), ctx, index, body)
 }

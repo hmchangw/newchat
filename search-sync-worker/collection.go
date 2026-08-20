@@ -41,3 +41,13 @@ type Collection interface {
 	// e.g. filtered).
 	BuildAction(data []byte) ([]searchengine.BulkAction, error)
 }
+
+// ByQueryCollection is an optional Collection capability for events that mutate
+// many documents keyed by a field rather than by DocID — a shape the DocID-keyed
+// Bulk API can't express. A collection implementing it gets first crack at a
+// message: ok=true means "I handled it as one _update_by_query against index";
+// ok=false falls through to the normal BuildAction bulk path. Spotlight uses it
+// for room_renamed (re-index roomName across every member's doc).
+type ByQueryCollection interface {
+	BuildByQuery(data []byte) (index string, body json.RawMessage, ok bool, err error)
+}

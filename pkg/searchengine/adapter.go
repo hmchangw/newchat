@@ -242,6 +242,60 @@ func (a *httpAdapter) UpdateMapping(ctx context.Context, indexPattern string, bo
 	return nil
 }
 
+// UpdateByQuery POSTs a painless `_update_by_query` to a single index with
+// conflicts=proceed (a concurrent version bump skips that doc, not the batch).
+func (a *httpAdapter) UpdateByQuery(ctx context.Context, index string, body json.RawMessage) error {
+	if index == "" {
+		return fmt.Errorf("update by query: index required")
+	}
+	path := fmt.Sprintf("/%s/_update_by_query?conflicts=proceed", url.PathEscape(index))
+	resp, err := a.do(ctx, "update_by_query", index, func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
+	if err != nil {
+		return fmt.Errorf("update by query: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Bound the response read: a large per-doc failures array or a rogue proxy
+	// body shouldn't let io.ReadAll allocate without limit.
+	const maxRespBytes = 1 << 20 // 1 MiB
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
+	if readErr != nil {
+		return fmt.Errorf("update by query: status %d, read body: %w", resp.StatusCode, readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("update by query: status %d, body: %s", resp.StatusCode, respBody)
+	}
+	// A 200 can still carry per-doc failures, a server-side timeout, or (with
+	// conflicts=proceed) documents skipped on a concurrent version bump — surface
+	// all three so the caller Naks and retries. The retry is safe because the
+	// script guards on roomNameUpdatedAt (idempotent + order-independent).
+	var r struct {
+		TimedOut         bool              `json:"timed_out"`
+		VersionConflicts int64             `json:"version_conflicts"`
+		Failures         []json.RawMessage `json:"failures"`
+	}
+	if err := json.Unmarshal(respBody, &r); err != nil {
+		return fmt.Errorf("update by query: decode response: %w", err)
+	}
+	if r.TimedOut {
+		return fmt.Errorf("update by query: timed out")
+	}
+	if r.VersionConflicts > 0 {
+		return fmt.Errorf("update by query: %d version conflict(s)", r.VersionConflicts)
+	}
+	if len(r.Failures) > 0 {
+		return fmt.Errorf("update by query: %d failure(s): %s", len(r.Failures), respBody)
+	}
+	return nil
+}
+
 func (a *httpAdapter) PutScript(ctx context.Context, id string, body json.RawMessage) error {
 	resp, err := a.do(ctx, "put_script", "", func(ctx context.Context) (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("/_scripts/%s", id), bytes.NewReader(body))

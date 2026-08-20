@@ -6727,6 +6727,50 @@ func TestProcessRoomRename_PublishesRoomRenamedEvent(t *testing.T) {
 	assert.Positive(t, renamed.Timestamp)
 }
 
+// The same-site search feed (internal INBOX lane) must carry room_renamed so
+// search-sync re-indexes the spotlight room name even when there are no remote
+// members — mirrors the member_added/removed internal publish.
+func TestProcessRoomRename_PublishesInternalSearchFeed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store := NewMockSubscriptionStore(ctrl)
+
+	const roomID, newName = "r1", "renamed"
+	requestID := testRequestID
+	ts := int64(1700000000000)
+
+	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
+	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(&model.Room{ID: roomID}, nil)
+
+	var feed [][]byte
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		if subj == subject.InboxInternal("site-a", model.InboxRoomRenamed) {
+			feed = append(feed, data)
+		}
+		return nil
+	}
+
+	h := &Handler{store: store, siteID: "site-a", publish: publish}
+	ctx := natsutil.WithRequestID(context.Background(), requestID)
+	body, _ := json.Marshal(model.RenameRoomRequest{RoomID: roomID, NewName: newName, Account: "alice", Timestamp: ts})
+
+	require.NoError(t, h.processRoomRename(ctx, body))
+
+	require.Len(t, feed, 1, "same-site search feed must carry exactly one room_renamed")
+	var evt model.InboxEvent
+	require.NoError(t, json.Unmarshal(feed[0], &evt))
+	assert.Equal(t, model.InboxRoomRenamed, evt.Type)
+	assert.Equal(t, "site-a", evt.SiteID)
+	var p model.RoomRenamedInboxPayload
+	require.NoError(t, json.Unmarshal(evt.Payload, &p))
+	assert.Equal(t, roomID, p.RoomID)
+	assert.Equal(t, newName, p.NewName)
+	assert.Equal(t, ts, p.Timestamp)
+}
+
 // Test 7: Happy path no remote sites.
 func TestProcessRoomRename_HappyPathNoRemoteSites(t *testing.T) {
 	ctrl := gomock.NewController(t)

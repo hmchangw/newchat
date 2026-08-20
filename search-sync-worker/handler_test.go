@@ -79,6 +79,42 @@ func TestHandler_Add_MalformedJSON(t *testing.T) {
 	assert.True(t, msg.acked)
 }
 
+func TestHandler_Add_RoomRenamed_UpdateByQuery(t *testing.T) {
+	renameData := func(t *testing.T) []byte {
+		t.Helper()
+		p, err := json.Marshal(model.RoomRenamedInboxPayload{RoomID: "r-eng", NewName: "platform", Timestamp: 9000})
+		require.NoError(t, err)
+		evt := model.InboxEvent{Type: model.InboxRoomRenamed, SiteID: "site-a", DestSiteID: "site-a", Payload: p, Timestamp: 9000}
+		data, err := json.Marshal(evt)
+		require.NoError(t, err)
+		return data
+	}
+
+	t.Run("applies update-by-query and acks, bypassing the bulk buffer", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		h := NewHandler(store, newSpotlightCollection("spotlight-site-a-v1", false), 500)
+		store.EXPECT().UpdateByQuery(gomock.Any(), "spotlight-site-a-v1", gomock.Any()).Return(nil)
+
+		msg := &stubMsg{data: renameData(t)}
+		h.Add(msg)
+		assert.True(t, msg.acked)
+		assert.False(t, msg.nacked)
+		assert.Equal(t, 0, h.MessageCount(), "by-query path must not buffer a bulk action")
+	})
+
+	t.Run("naks on update-by-query error for redelivery", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		h := NewHandler(store, newSpotlightCollection("spotlight-site-a-v1", false), 500)
+		store.EXPECT().UpdateByQuery(gomock.Any(), gomock.Any(), gomock.Any()).Return(assert.AnError)
+
+		msg := &stubMsg{data: renameData(t)}
+		h.Add(msg)
+		assert.True(t, msg.nacked)
+	})
+}
+
 func TestHandler_Flush(t *testing.T) {
 	ts := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
 	baseEvt := model.MessageEvent{
