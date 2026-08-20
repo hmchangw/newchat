@@ -98,7 +98,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -120,23 +121,13 @@ func main() {
 	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	ssoTokenRepo := mongorepo.NewSSOTokenRepo(db)
-	if err := subRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
-	}
-	if err := userRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
-	}
-	if err := appRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
-	}
-	if err := threadSubRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
-	}
-	if err := ssoTokenRepo.EnsureIndexes(ctx); err != nil {
+	if err := mongoutil.EnsureIndexes(ctx,
+		mongoutil.Step("user-service subscriptions", subRepo.EnsureIndexes),
+		mongoutil.Step("user-service users", userRepo.EnsureIndexes),
+		mongoutil.Step("user-service apps", appRepo.EnsureIndexes),
+		mongoutil.Step("user-service thread_subscriptions", threadSubRepo.EnsureIndexes),
+		mongoutil.Step("user-service sso_tokens", ssoTokenRepo.EnsureIndexes),
+	); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
 	}

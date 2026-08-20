@@ -195,7 +195,7 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref), mongoutil.WithLazyConnect())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -213,13 +213,10 @@ func main() {
 	cache := newValkeyCache(valkey)
 	mongoStore := newMongoStore(mongoDB)
 
-	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := mongoStore.ensureIndexes(ensureCtx); err != nil {
-		ensureCancel()
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("search-service store", mongoStore.ensureIndexes)); err != nil {
 		slog.Error("ensure mongo indexes failed", "error", err)
 		os.Exit(1)
 	}
-	ensureCancel()
 	handler := newHandler(store, mongoStore, usersClient, cache, &handlerConfig{
 		SiteID:                  cfg.SiteID,
 		DocCounts:               cfg.Search.DocCounts,

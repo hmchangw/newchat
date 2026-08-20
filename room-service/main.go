@@ -176,7 +176,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -203,14 +204,10 @@ func main() {
 	slog.Info("mongo secondary-read preference configured", "readPreference", readPref.Mode().String())
 
 	store := NewMongoStore(db, WithReadPreference(readPref))
-	// Bounded timeout so a hung createIndexes surfaces at startup.
-	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := store.EnsureIndexes(ensureCtx); err != nil {
-		ensureCancel()
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("room-service store", store.EnsureIndexes)); err != nil {
 		slog.Error("ensure store indexes failed", "error", err)
 		os.Exit(1)
 	}
-	ensureCancel()
 
 	// Read receipts resolve the target message through history-service (which
 	// owns message history) over NATS, so room-service has no direct Cassandra

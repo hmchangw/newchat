@@ -47,19 +47,20 @@ func run() error {
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 
 	db := mongoClient.Database(cfg.MongoDB)
 	st := newStoreMongo(db)
-	if err := st.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure indexes: %w", err)
-	}
 	sessStore := session.NewMongoStore(db)
-	if err := sessStore.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure session indexes: %w", err)
+	if err := mongoutil.EnsureIndexes(ctx,
+		mongoutil.Step("admin-service store", st.EnsureIndexes),
+		mongoutil.Step("admin-service sessions", sessStore.EnsureIndexes),
+	); err != nil {
+		return fmt.Errorf("ensure indexes: %w", err)
 	}
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)

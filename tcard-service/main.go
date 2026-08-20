@@ -62,13 +62,14 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 
 	store := newMongoCardStore(mongoClient.Database(cfg.MongoDB))
-	if err := store.EnsureIndexes(ctx); err != nil {
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("tcard-service cards", store.EnsureIndexes)); err != nil {
 		return fmt.Errorf("ensure cards indexes: %w", err)
 	}
 

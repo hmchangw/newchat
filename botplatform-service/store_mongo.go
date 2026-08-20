@@ -58,10 +58,3 @@ func (s *storeMongo) DeleteSessionsBeyondCap(ctx context.Context, account string
 	}
 	return s.sessions.DeleteBeyondCap(ctx, account, max)
 }
-
-func (s *storeMongo) Ping(ctx context.Context) error {
-	if err := s.users.Database().Client().Ping(ctx, nil); err != nil {
-		return fmt.Errorf("ping mongo: %w", err)
-	}
-	return nil
-}

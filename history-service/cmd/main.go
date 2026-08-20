@@ -111,6 +111,7 @@ func main() {
 		mongoutil.WithReadPreference(readPref),
 		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
 		mongoutil.WithMinPoolSize(cfg.Mongo.MinPoolSize),
+		mongoutil.WithLazyConnect(),
 	)
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
@@ -157,12 +158,11 @@ func main() {
 	userStore := userstore.NewMongoStore(db.Collection("users"))
 	appRepo := mongorepo.NewAppRepo(db)
 
-	if err := threadRoomRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure thread_rooms indexes failed", "error", err)
-		os.Exit(1)
-	}
-	if err := threadSubRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure thread_subscriptions indexes failed", "error", err)
+	if err := mongoutil.EnsureIndexes(ctx,
+		mongoutil.Step("history-service thread_rooms", threadRoomRepo.EnsureIndexes),
+		mongoutil.Step("history-service thread_subscriptions", threadSubRepo.EnsureIndexes),
+	); err != nil {
+		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
 	}
 

@@ -162,7 +162,8 @@ func main() {
 	}
 
 	// Mongo backs the migrated-Teams-history author lookup (teams_user → account → user _id).
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		slog.Error("mongodb connect failed", "error", err)
 		os.Exit(1)

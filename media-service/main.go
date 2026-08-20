@@ -54,14 +54,17 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 	store := newMongoStore(mongoClient.Database(cfg.MongoDB))
 	defer mongoutil.Disconnect(ctx, mongoClient)
 
-	if err := store.EnsureEmojiIndexes(ctx); err != nil {
+	if err := mongoutil.EnsureIndexes(ctx,
+		mongoutil.Step("media-service emoji", store.EnsureEmojiIndexes),
+	); err != nil {
 		return fmt.Errorf("ensure emoji indexes: %w", err)
 	}
 

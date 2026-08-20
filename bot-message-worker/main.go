@@ -98,7 +98,8 @@ func run() error {
 		if cfg.MongoURI == "" {
 			return fmt.Errorf("ATREST_ENABLED=true requires MONGO_URI for the DEK collection")
 		}
-		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+			mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 		if err != nil {
 			return fmt.Errorf("connect mongo: %w", err)
 		}

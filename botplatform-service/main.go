@@ -49,15 +49,18 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 
 	db := mongoClient.Database(cfg.MongoDB)
 	sessionStore := session.NewMongoStore(db)
-	if err := sessionStore.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure session indexes: %w", err)
+	if err := mongoutil.EnsureIndexes(ctx,
+		mongoutil.Step("botplatform-service sessions", sessionStore.EnsureIndexes),
+	); err != nil {
+		return fmt.Errorf("ensure indexes: %w", err)
 	}
 	st := newStoreMongo(db)
 	subStore := newMongoSubscriptionStore(db)

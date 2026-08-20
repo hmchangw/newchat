@@ -116,7 +116,7 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref), mongoutil.WithLazyConnect())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -136,7 +136,7 @@ func main() {
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL)
-	if err := store.EnsureIndexes(ctx); err != nil {
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("broadcast-worker store", store.EnsureIndexes)); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
 	}

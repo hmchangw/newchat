@@ -454,19 +454,22 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 // userId is site-local, so keying on it would let federated upserts miss
 // existing documents and collide on this unique index.
 func (s *mongoInboxStore) ensureIndexes(ctx context.Context) error {
-	// Best-effort: drop the legacy (threadRoomId, userId) unique index so the
-	// (threadRoomId, userAccount) index can be created without a key conflict.
-	// Mirrors message-worker's threadStoreMongo.EnsureIndexes; the index may not
-	// exist (fresh deploy / test container), so ignore all errors.
-	_ = s.threadSubCol.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-
+	// Create the new index before dropping the old one. Failing to create it no
+	// longer stops the service starting, so if we dropped first and the create
+	// then failed, the collection would be left with no unique index at all
+	// while the service carried on serving.
 	if _, err := s.threadSubCol.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
 		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
 	}
-	return nil
+
+	// Remove the old (threadRoomId, userId) unique index, same as message-worker
+	// does. Finding it already gone is the normal case; any other failure is
+	// reported, because it means the old index is still there rejecting writes
+	// that come from another site.
+	return mongoutil.DropIndexIfExists(ctx, s.threadSubCol, "threadRoomId_1_userId_1")
 }
 
 // UpsertThreadSubscription inserts the subscription on first event for a
@@ -679,7 +682,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk), mongoutil.WithLazyConnect())
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -691,7 +695,7 @@ func main() {
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	if err := store.ensureIndexes(ctx); err != nil {
+	if err := mongoutil.EnsureIndexes(ctx, mongoutil.Step("inbox-worker thread_subscriptions", store.ensureIndexes)); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
 	}

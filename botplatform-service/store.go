@@ -30,7 +30,4 @@ type BotplatformStore interface {
 	// DeleteSessionsBeyondCap drops every session row for account beyond the
 	// `max` newest, ordered by issuedAt DESC. Returns the number deleted.
 	DeleteSessionsBeyondCap(ctx context.Context, account string, max int) (int64, error)
-
-	// Ping is the readiness probe target.
-	Ping(ctx context.Context) error
 }
