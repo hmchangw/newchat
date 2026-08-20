@@ -526,6 +526,7 @@ func runSoakWorkload(
 		ledger,
 		metrics,
 		cfg.Soak.RecipientObserverQueue,
+		cfg.Soak.LedgerCapacity,
 		cfg.Soak.LedgerDir,
 		now,
 	)

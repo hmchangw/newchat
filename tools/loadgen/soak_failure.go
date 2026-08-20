@@ -89,7 +89,9 @@ func runSoakFailureExpiry(
 			if !ok {
 				return
 			}
+			ledgerExpired := true
 			if _, err := ledger.Expire(at); err != nil {
+				ledgerExpired = false
 				reportSoakFailureSweepError(
 					onError, fmt.Errorf("expire failure operations: %w", err))
 			}
@@ -107,11 +109,16 @@ func runSoakFailureExpiry(
 			// route map per recipient, which is what made this the largest
 			// object graph in the run. Sweeping here bounds the evidence by the
 			// same deadline that bounds the ledger.
+			// Only after the ledger finalized what was due. A failed expiry
+			// leaves those operations live and still reconcilable, so
+			// releasing their evidence on the same tick would destroy the only
+			// record of what was delivered. The next tick retries both.
+			//
 			// A zero window would put the cutoff at now and release every
 			// expectation, including operations still inside their deadline.
 			// Config validation forbids a zero SOAK_RECONCILE_DEADLINE, so
 			// this guards a caller mistake rather than a reachable setting.
-			if retention > 0 {
+			if ledgerExpired && retention > 0 {
 				evidence.ExpireBefore(at.Add(-retention))
 			}
 			if settings.metrics != nil {
@@ -363,6 +370,10 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 			Route:       route,
 			Source:      source,
 			Complete:    complete,
+			// The same deadline this operation is about to be started with, so
+			// the sweep releases the evidence exactly when the ledger releases
+			// the operation.
+			Deadline: startedAt.Add(t.deadline),
 		}); err != nil {
 			return fmt.Errorf("register soak recipient expectation: %w", err)
 		}

@@ -98,7 +98,7 @@ func TestSoakFailureTracker_RecipientEffectIsOptIn(t *testing.T) {
 }
 
 func TestFailureObservationRuntime_DisabledCreatesNoRecipientRuntime(t *testing.T) {
-	runtime := newSoakFailureObservationRuntime(false, nil, NewMetrics(), 1, t.TempDir(), time.Now)
+	runtime := newSoakFailureObservationRuntime(false, nil, NewMetrics(), 1, 0, t.TempDir(), time.Now)
 	assert.Nil(t, runtime.Recipient())
 	require.NoError(t, runtime.StartRecipient(nil, nil, nil))
 	require.NoError(t, runtime.Close())

@@ -54,6 +54,7 @@ func newSoakFailureObservationRuntime(
 	ledger *failureLedger,
 	metrics *Metrics,
 	queue int,
+	evidenceCapacity int,
 	evidenceDirectory string,
 	now func() time.Time,
 ) *soakFailureObservationRuntime {
@@ -61,7 +62,8 @@ func newSoakFailureObservationRuntime(
 	if !enabled {
 		return runtime
 	}
-	options := make([]failureRecipientObserverOption, 0, 1)
+	options := make([]failureRecipientObserverOption, 0, 2)
+	options = append(options, withFailureRecipientEvidenceCapacity(evidenceCapacity))
 	if evidenceDirectory != "" {
 		options = append(options, withFailureRecipientEvidenceDir(evidenceDirectory))
 	}

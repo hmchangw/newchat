@@ -187,3 +187,80 @@ func TestRunSoakFailureExpiry_DoesNotExpireWithoutARetentionWindow(t *testing.T)
 	assert.Equal(t, 1, evidence.Len(),
 		"no retention window means no basis to expire, not expire everything")
 }
+
+// Registration time plus the *current* retention is not the same bound the
+// ledger uses. The ledger honours each operation's persisted deadline, so an
+// operation accepted under a 60m deadline and recovered into a process
+// configured for 10m stays live in the ledger while a retention-only sweep
+// releases its evidence after 10m — and a delivery arriving in between is
+// treated as untracked. An expectation that knows its own deadline must be held
+// to that one.
+func TestRecipientEvidence_HoldsAnExpectationToItsOwnDeadline(t *testing.T) {
+	clock := time.Unix(1000, 0).UTC()
+	evidence := newExpiryTestEvidence(&clock)
+	require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: "recovered", Recipients: []string{"a"}, Complete: true,
+		Deadline: clock.Add(time.Hour),
+	}))
+
+	// A ten-minute retention would release a ten-minute-old registration.
+	assert.Zero(t, evidence.ExpireBefore(clock.Add(-10*time.Minute)))
+	assert.Equal(t, 1, evidence.Len(),
+		"its own deadline outranks the sweep's retention window")
+
+	clock = clock.Add(time.Hour + time.Second)
+	assert.Equal(t, 1, evidence.ExpireBefore(clock.Add(-10*time.Minute)))
+}
+
+// The ledger's expiry is what finalizes the operation the evidence belongs to.
+// If that write fails the operation is still live and still reconcilable, so
+// releasing its evidence on the same tick destroys the only record of what was
+// delivered.
+func TestRunSoakFailureExpiry_KeepsEvidenceWhenLedgerExpiryFails(t *testing.T) {
+	clock := time.Unix(1000, 0).UTC()
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 16, Now: func() time.Time { return clock },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Close())
+
+	evidence := newExpiryTestEvidence(&clock)
+	require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: "op", Recipients: []string{"a"}, Complete: true,
+	}))
+
+	var swept []error
+	ticks := make(chan time.Time, 1)
+	ticks <- clock.Add(time.Hour)
+	close(ticks)
+	runSoakFailureExpiry(context.Background(), ledger, evidence, 10*time.Minute, ticks,
+		func(err error) { swept = append(swept, err) })
+
+	require.NotEmpty(t, swept, "a failed ledger expiry must be reported")
+	assert.Equal(t, 1, evidence.Len(),
+		"evidence for an operation the ledger could not finalize must survive the tick")
+}
+
+// Gating expiry on the ledger reinstates the leak if the ledger keeps failing,
+// so the map needs a ceiling of its own — the ledger has LEDGER_CAPACITY and
+// this had nothing.
+func TestRecipientEvidence_RefusesToGrowPastItsCapacity(t *testing.T) {
+	clock := time.Unix(1000, 0).UTC()
+	evidence := newExpiryTestEvidence(&clock)
+	evidence.capacity = 2
+
+	require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: "op-1", Recipients: []string{"a"}, Complete: true,
+	}))
+	require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: "op-2", Recipients: []string{"a"}, Complete: true,
+	}))
+
+	err := evidence.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: "op-3", Recipients: []string{"a"}, Complete: true,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "capacity")
+	assert.Equal(t, 2, evidence.Len())
+}

@@ -351,10 +351,19 @@ type recipientExpectationConfig struct {
 	Route       recipientExpectedRoute
 	Source      recipientSetSource
 	Complete    bool
+	// Deadline is the operation's own deadline when the caller knows it. The
+	// ledger honours each operation's persisted deadline, so an entry expired
+	// on the sweep's current retention alone can be released while its
+	// operation is still live — a recovered operation accepted under a longer
+	// deadline is the reachable case. Optional: without it the sweep falls back
+	// to registration time, which matches for operations started in this
+	// process under this configuration.
+	Deadline time.Time
 }
 
 type recipientExpectation struct {
 	registeredAt      time.Time
+	deadline          time.Time
 	expected          map[string]struct{}
 	observed          map[string]map[recipientDeliveryRoute]int
 	mismatches        map[string]struct{}
@@ -373,6 +382,10 @@ type recipientEvidence struct {
 	mu              sync.Mutex
 	allowDuplicates bool
 	operations      map[string]*recipientExpectation
+	// capacity bounds the map when expiry cannot run — a ledger that keeps
+	// failing to expire would otherwise reinstate the growth this file exists
+	// to stop. Zero means unbounded.
+	capacity int
 	// now is injectable so expiry can be asserted without sleeping.
 	now func() time.Time
 }
@@ -455,8 +468,14 @@ func (r *recipientEvidence) ExpectDelivery(config *recipientExpectationConfig) e
 	if _, exists := r.operations[config.OperationID]; exists {
 		return fmt.Errorf("recipient expectation %q already exists", config.OperationID)
 	}
+	if r.capacity > 0 && len(r.operations) >= r.capacity {
+		return fmt.Errorf(
+			"recipient expectation capacity %d exceeded; evidence is not being expired",
+			r.capacity)
+	}
 	r.operations[config.OperationID] = &recipientExpectation{
 		registeredAt: r.clock(),
+		deadline:     config.Deadline,
 		expected:     expected, observed: make(map[string]map[recipientDeliveryRoute]int), mismatches: make(map[string]struct{}),
 		roomID: config.RoomID, eventType: config.EventType,
 		route: config.Route, source: config.Source, complete: config.Complete,
@@ -640,7 +659,12 @@ func (r *recipientEvidence) ExpireBefore(cutoff time.Time) int {
 	defer r.mu.Unlock()
 	expired := 0
 	for operationID, expectation := range r.operations {
-		if expectation.registeredAt.IsZero() || expectation.registeredAt.After(cutoff) {
+		if !expectation.deadline.IsZero() {
+			// It knows when its operation ends, so nothing else may release it.
+			if !expectation.deadline.Before(r.clock()) {
+				continue
+			}
+		} else if expectation.registeredAt.IsZero() || expectation.registeredAt.After(cutoff) {
 			continue
 		}
 		delete(r.operations, operationID)
@@ -836,6 +860,18 @@ func withFailureRecipientEvidenceDir(directory string) failureRecipientObserverO
 	return func(observer *failureRecipientObserver) { observer.evidenceDir = directory }
 }
 
+// withFailureRecipientEvidenceCapacity bounds the expectation map. Callers pass
+// the ledger's own capacity: an expectation exists per ledger operation, so the
+// ledger's admission limit binds first in a healthy run and this only engages
+// when expiry has stopped working.
+func withFailureRecipientEvidenceCapacity(capacity int) failureRecipientObserverOption {
+	return func(o *failureRecipientObserver) {
+		if capacity > 0 {
+			o.evidence.capacity = capacity
+		}
+	}
+}
+
 func withFailureRecipientDuplicatePolicy(allow bool) failureRecipientObserverOption {
 	return func(observer *failureRecipientObserver) {
 		observer.evidence.allowDuplicates = allow
@@ -937,12 +973,17 @@ func (o *failureRecipientObserver) Recover(operations []failureOperation) error 
 			err = o.ExpectDelivery(&recipientExpectationConfig{
 				OperationID: operation.ID, Recipients: recipients,
 				Route: recipientExpectedRouteAny, Source: recipientSetSourceLegacy, Complete: false,
+				Deadline: operation.Deadline,
 			})
 		} else {
 			err = o.ExpectDelivery(&recipientExpectationConfig{
 				OperationID: operation.ID, Recipients: recipients,
 				RoomID: operation.Targets["roomId"], EventType: eventType,
 				Route: route, Source: source, Complete: complete,
+				// The persisted deadline, not this process's retention: the
+				// ledger keeps the operation until this instant regardless of
+				// how SOAK_RECONCILE_DEADLINE was changed between runs.
+				Deadline: operation.Deadline,
 			})
 		}
 		if err != nil {
