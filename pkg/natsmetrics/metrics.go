@@ -198,10 +198,8 @@ var allOperations = []Operation{
 type Metrics struct {
 	loop               metric.Int64UpDownCounter
 	messages           metric.Int64Counter
-	redeliveries       metric.Int64Counter
 	processingDuration metric.Float64Histogram
 	publishFailures    metric.Int64Counter
-	publishRetries     metric.Int64Counter
 	terminalFailures   metric.Int64Counter
 	requests           metric.Int64Counter
 	requestDuration    metric.Float64Histogram
@@ -245,10 +243,6 @@ func New(meter metric.Meter) *Metrics {
 	if err != nil {
 		messages, _ = noopMeter.Int64Counter("chat.nats.consumer.messages")
 	}
-	redeliveries, err := meter.Int64Counter("chat.nats.consumer.redeliveries", metric.WithDescription("JetStream delivery attempts whose delivery count is greater than one."))
-	if err != nil {
-		redeliveries, _ = noopMeter.Int64Counter("chat.nats.consumer.redeliveries")
-	}
 	processing, err := meter.Float64Histogram("chat.nats.consumer.processing.duration", metric.WithDescription("Time from handler start through the disposition attempt."), metric.WithUnit("s"), latency)
 	if err != nil {
 		processing, _ = noopMeter.Float64Histogram("chat.nats.consumer.processing.duration")
@@ -256,10 +250,6 @@ func New(meter metric.Meter) *Metrics {
 	publishFailures, err := meter.Int64Counter("chat.nats.publish.failures", metric.WithDescription("Publishes that failed, by bounded cause. Successes are not recorded."))
 	if err != nil {
 		publishFailures, _ = noopMeter.Int64Counter("chat.nats.publish.failures")
-	}
-	publishRetries, err := meter.Int64Counter("chat.nats.publish.retries", metric.WithDescription("Application-managed publish attempts after the first."))
-	if err != nil {
-		publishRetries, _ = noopMeter.Int64Counter("chat.nats.publish.retries")
 	}
 	terminal, err := meter.Int64Counter("chat.nats.terminal.failures", metric.WithDescription("Work that will receive no further application attempt."))
 	if err != nil {
@@ -281,7 +271,7 @@ func New(meter metric.Meter) *Metrics {
 	if err != nil {
 		handlerDuration, _ = noopMeter.Float64Histogram("chat.nats.request.handler.duration")
 	}
-	return &Metrics{loop: loop, messages: messages, redeliveries: redeliveries, processingDuration: processing, publishFailures: publishFailures, publishRetries: publishRetries, terminalFailures: terminal, requests: requests, requestDuration: requestDuration, handledRequests: handledRequests, handlerDuration: handlerDuration}
+	return &Metrics{loop: loop, messages: messages, processingDuration: processing, publishFailures: publishFailures, terminalFailures: terminal, requests: requests, requestDuration: requestDuration, handledRequests: handledRequests, handlerDuration: handlerDuration}
 }
 
 // ConsumerConfig carries the per-consumer label base. Service identity is
@@ -313,11 +303,6 @@ type publishKey struct {
 	outcome     PublishOutcome
 }
 
-type retryKey struct {
-	destination DestinationKind
-	operation   Operation
-}
-
 type requestKey struct {
 	operation Operation
 	outcome   PublishOutcome
@@ -332,7 +317,6 @@ type Consumer struct {
 	metrics *Metrics
 	loopOpt metric.MeasurementOption
 	message map[consumerKey]metric.MeasurementOption
-	redeliv map[EventType]metric.MeasurementOption
 	termOpt map[terminalKey]metric.MeasurementOption
 	up      atomic.Bool
 }
@@ -360,11 +344,9 @@ func (m *Metrics) Consumer(cfg ConsumerConfig) *Consumer {
 		metrics: m,
 		loopOpt: metric.WithAttributes(base...),
 		message: make(map[consumerKey]metric.MeasurementOption, len(allEventTypes)*len(allOutcomes)),
-		redeliv: make(map[EventType]metric.MeasurementOption, len(allEventTypes)),
 		termOpt: make(map[terminalKey]metric.MeasurementOption, len(allEventTypes)*len(allTerminalReasons)),
 	}
 	for _, event := range allEventTypes {
-		c.redeliv[event] = metric.WithAttributes(withEvent(event)...)
 		for _, outcome := range allOutcomes {
 			c.message[consumerKey{event, outcome}] = metric.WithAttributes(withEvent(event, attribute.String("outcome", string(outcome)))...)
 		}
@@ -430,11 +412,11 @@ func (c *Consumer) LoopFailed(ctx context.Context, err error) {
 func (c *Consumer) Track(ctx context.Context, msg jetstream.Msg, eventType EventType, maxDeliver int) *Message {
 	eventType = NormalizeEventType(string(eventType))
 	tracked := &Message{Msg: msg, consumer: c, ctx: ctx, eventType: eventType, maxDeliver: maxDeliver, started: time.Now()}
+	// numDelivered still drives IsFinalDelivery. The redelivery count itself is
+	// the broker's jetstream_consumer_num_redelivered, and which event type is
+	// failing is already carried by the nak disposition below.
 	if meta, err := msg.Metadata(); err == nil && meta != nil {
 		tracked.numDelivered = meta.NumDelivered
-		if meta.NumDelivered > 1 && c.enabled() {
-			c.metrics.redeliveries.Add(ctx, 1, c.redeliv[eventType])
-		}
 	}
 	return tracked
 }
@@ -566,7 +548,6 @@ func (m *Message) finishWithOutcome(ctx context.Context, outcome Outcome) {
 type Publisher struct {
 	metrics *Metrics
 	attempt map[publishKey]metric.MeasurementOption
-	retry   map[retryKey]metric.MeasurementOption
 	request map[requestKey]metric.MeasurementOption
 	handled map[handledRequestKey]metric.MeasurementOption
 }
@@ -589,7 +570,6 @@ func (m *Metrics) Publisher(site string) Publisher {
 	p := Publisher{
 		metrics: m,
 		attempt: make(map[publishKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)*len(allPublishOutcomes)),
-		retry:   make(map[retryKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)),
 		request: make(map[requestKey]metric.MeasurementOption, len(allOperations)*len(allRequestOutcomes)),
 		handled: make(map[handledRequestKey]metric.MeasurementOption, len(allOperations)*len(allRequestResults)),
 	}
@@ -597,7 +577,6 @@ func (m *Metrics) Publisher(site string) Publisher {
 		dst := attribute.String("destination_kind", string(destination))
 		for _, operation := range allOperations {
 			op := attribute.String("operation", string(operation))
-			p.retry[retryKey{destination, operation}] = build(dst, op)
 			for _, outcome := range allPublishOutcomes {
 				p.attempt[publishKey{destination, operation, outcome}] = build(dst, op, attribute.String("outcome", string(outcome)))
 			}
@@ -635,17 +614,6 @@ func (p Publisher) Failure(ctx context.Context, destination DestinationKind, ope
 	}
 	key := publishKey{normalizeDestination(destination), normalizeOperation(operation), ClassifyPublishError(err)}
 	p.metrics.publishFailures.Add(ctx, 1, p.attempt[key])
-}
-
-// Retry counts an application-managed publish attempt after the first. It is
-// only meaningful for a caller that loops around its own publish; JetStream's
-// internal PubAck retries and the consumer Nak path are not application retries
-// and must not be counted here.
-func (p Publisher) Retry(ctx context.Context, destination DestinationKind, operation Operation) {
-	if p.metrics == nil {
-		return
-	}
-	p.metrics.publishRetries.Add(ctx, 1, p.retry[retryKey{normalizeDestination(destination), normalizeOperation(operation)}])
 }
 
 func (p Publisher) Request(ctx context.Context, operation Operation, duration time.Duration, err error) {

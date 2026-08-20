@@ -65,9 +65,6 @@ func TestConsume_TracksAndDisposesMessage(t *testing.T) {
 	require.Len(t, points, 1)
 	assert.Equal(t, int64(1), points[0].Value)
 	assert.Equal(t, string(OutcomeAck), attrs(points[0])["outcome"])
-	redeliveries := metricPoints[int64](t, rm, "chat.nats.consumer.redeliveries")
-	require.Len(t, redeliveries, 1)
-	assert.Equal(t, int64(1), redeliveries[0].Value)
 	assert.Equal(t, 1, msg.acks)
 }
 

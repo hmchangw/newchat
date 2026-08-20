@@ -216,8 +216,11 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.loop.up", nil), "loop must be up")
 	assert.Equal(t, int64(3), sumOf(t, rm, "chat.nats.consumer.messages", map[string]string{"outcome": "ack", "event_type": "created"}))
+	// The nak above is the redelivery signal. A nakked delivery is what makes
+	// JetStream redeliver, and this counter already carries the event type, so
+	// "which kind of message keeps failing" is answered here; "how many times it
+	// was redelivered" is the broker's jetstream_consumer_num_redelivered.
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.messages", map[string]string{"outcome": "nak", "event_type": "created"}))
-	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.redeliveries", map[string]string{"event_type": "created"}))
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": "invalid_payload"}))
 
 	// The stream, subject and site carry a site id and a message body, but no
