@@ -93,6 +93,16 @@ func (r *soakFailureObservationRuntime) StartRecipient(
 	return nil
 }
 
+// Evidence exposes the recipient expectation map so the failure sweep can bound
+// it by the same deadline the ledger uses. nil when the observer is off, which
+// ExpireBefore handles.
+func (r *soakFailureObservationRuntime) Evidence() *recipientEvidence {
+	if r == nil || r.recipient == nil {
+		return nil
+	}
+	return r.recipient.evidence
+}
+
 func (r *soakFailureObservationRuntime) Recipient() *failureRecipientObserver {
 	if r == nil {
 		return nil

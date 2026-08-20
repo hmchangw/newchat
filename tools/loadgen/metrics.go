@@ -71,6 +71,7 @@ type Metrics struct {
 	FailureObservations          *prometheus.CounterVec
 	FailureObservationReasons    *prometheus.CounterVec
 	FailureInflight              *prometheus.GaugeVec
+	FailureRecipientExpectations prometheus.Gauge
 	FailureRecovered             prometheus.Counter
 	FailureInvalidations         *prometheus.CounterVec
 	FailureJournalBytes          prometheus.Gauge
@@ -381,6 +382,12 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"scenario", "lane"},
 	)
+	m.FailureRecipientExpectations = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "loadgen_failure_recipient_expectations",
+			Help: "Recipient expectations retained in memory; healthy runs track loadgen_failure_inflight.",
+		},
+	)
 	m.FailureRecovered = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_recovered_operations_total",
@@ -542,6 +549,7 @@ func NewMetrics() *Metrics {
 		m.SoakLaneAttempts,
 		m.SoakPresenceSignals, m.SoakPresenceChecks, m.SoakPresenceConnections,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
+		m.FailureRecipientExpectations,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
 		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,
 		m.FailureWALAppendDuration, m.FailureWALAppends,

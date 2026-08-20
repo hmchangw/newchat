@@ -53,12 +53,31 @@ func soakFailureExpiryInterval(deadline time.Duration) time.Duration {
 	return min(30*time.Second, max(time.Second, deadline/10))
 }
 
+// soakFailureExpiryOption configures the sweep. Metrics are optional so the
+// tests that only assert expiry do not have to build a registry.
+type soakFailureExpiryOption func(*soakFailureExpirySettings)
+
+type soakFailureExpirySettings struct {
+	metrics *Metrics
+}
+
+func withSoakFailureExpiryMetrics(metrics *Metrics) soakFailureExpiryOption {
+	return func(s *soakFailureExpirySettings) { s.metrics = metrics }
+}
+
 func runSoakFailureExpiry(
 	ctx context.Context,
 	ledger *failureLedger,
+	evidence *recipientEvidence,
+	retention time.Duration,
 	ticks <-chan time.Time,
 	onError func(error),
+	options ...soakFailureExpiryOption,
 ) {
+	settings := soakFailureExpirySettings{}
+	for _, option := range options {
+		option(&settings)
+	}
 	if ledger == nil || ticks == nil {
 		return
 	}
@@ -80,6 +99,17 @@ func runSoakFailureExpiry(
 			if err := ledger.MaybeCompact(at); err != nil {
 				reportSoakFailureSweepError(
 					onError, fmt.Errorf("compact failure journal: %w", err))
+			}
+			// The ledger's expiry removes the operation and never tells the
+			// recipient evidence, whose only other exit is Finalize inside the
+			// reconciler. Anything the reconciler never reaches was therefore
+			// retained for the life of the process — and each entry holds one
+			// route map per recipient, which is what made this the largest
+			// object graph in the run. Sweeping here bounds the evidence by the
+			// same deadline that bounds the ledger.
+			evidence.ExpireBefore(at.Add(-retention))
+			if settings.metrics != nil {
+				settings.metrics.FailureRecipientExpectations.Set(float64(evidence.Len()))
 			}
 		}
 	}

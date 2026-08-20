@@ -354,6 +354,7 @@ type recipientExpectationConfig struct {
 }
 
 type recipientExpectation struct {
+	registeredAt      time.Time
 	expected          map[string]struct{}
 	observed          map[string]map[recipientDeliveryRoute]int
 	mismatches        map[string]struct{}
@@ -372,6 +373,15 @@ type recipientEvidence struct {
 	mu              sync.Mutex
 	allowDuplicates bool
 	operations      map[string]*recipientExpectation
+	// now is injectable so expiry can be asserted without sleeping.
+	now func() time.Time
+}
+
+func (r *recipientEvidence) clock() time.Time {
+	if r.now == nil {
+		return time.Now().UTC()
+	}
+	return r.now().UTC()
 }
 
 type recipientEvidenceDisposition string
@@ -385,7 +395,11 @@ const (
 )
 
 func newRecipientEvidence(allowDuplicates bool) *recipientEvidence {
-	return &recipientEvidence{allowDuplicates: allowDuplicates, operations: make(map[string]*recipientExpectation)}
+	return &recipientEvidence{
+		allowDuplicates: allowDuplicates,
+		operations:      make(map[string]*recipientExpectation),
+		now:             func() time.Time { return time.Now().UTC() },
+	}
 }
 
 func (r *recipientEvidence) Expect(operationID string, recipients []string) error {
@@ -442,7 +456,8 @@ func (r *recipientEvidence) ExpectDelivery(config *recipientExpectationConfig) e
 		return fmt.Errorf("recipient expectation %q already exists", config.OperationID)
 	}
 	r.operations[config.OperationID] = &recipientExpectation{
-		expected: expected, observed: make(map[string]map[recipientDeliveryRoute]int), mismatches: make(map[string]struct{}),
+		registeredAt: r.clock(),
+		expected:     expected, observed: make(map[string]map[recipientDeliveryRoute]int), mismatches: make(map[string]struct{}),
 		roomID: config.RoomID, eventType: config.EventType,
 		route: config.Route, source: config.Source, complete: config.Complete,
 		durableMissing: make(map[string]struct{}), durableUnexpected: make(map[string]struct{}),
@@ -595,6 +610,48 @@ func (r *recipientEvidence) Forget(operationID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.operations, operationID)
+}
+
+// ExpireBefore releases every expectation registered at or before cutoff and
+// returns how many went. The caller passes now minus the operation deadline, so
+// an expectation cannot outlive the operation it describes. It exists because the ledger's own expiry finalizes an
+// operation and forgets it without telling the evidence: Finalize is the only
+// other way out of this map and it runs inside the reconciler, so anything the
+// reconciler does not reach was retained for the life of the process. The
+// per-recipient route maps incrementRecipientRoute allocates make that the
+// largest object graph in the run.
+//
+// It is deliberately not driven from the ledger's finalize path. That would put
+// the evidence lock underneath the ledger lock, while the observer already
+// takes them the other way round; a sweep that holds neither cannot deadlock
+// however those paths change.
+func (r *recipientEvidence) ExpireBefore(cutoff time.Time) int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	expired := 0
+	for operationID, expectation := range r.operations {
+		if expectation.registeredAt.IsZero() || expectation.registeredAt.After(cutoff) {
+			continue
+		}
+		delete(r.operations, operationID)
+		expired++
+	}
+	return expired
+}
+
+// Len reports how many expectations are retained. The run needs this as a gauge:
+// a count that tracks the ledger's own in-flight number is healthy, one that
+// climbs past it is this map leaking again.
+func (r *recipientEvidence) Len() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.operations)
 }
 
 func (r *recipientEvidence) Complete(operationID string) bool {

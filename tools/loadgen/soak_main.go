@@ -521,15 +521,31 @@ func runSoakWorkload(
 			slog.Error("close Cassandra soak failure ledger", "error", err)
 		}
 	}()
+	observationRuntime := newSoakFailureObservationRuntime(
+		cfg.Soak.RecipientObserverEnabled,
+		ledger,
+		metrics,
+		cfg.Soak.RecipientObserverQueue,
+		cfg.Soak.LedgerDir,
+		now,
+	)
 	expiryCtx, stopExpiry := context.WithCancel(ctx)
 	expiryTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
 	expiryDone := make(chan struct{})
 	go func() {
 		defer close(expiryDone)
 		defer expiryTicker.Stop()
-		runSoakFailureExpiry(expiryCtx, ledger, expiryTicker.C, func(err error) {
-			slog.Error("expire Cassandra soak failure evidence", "error", err)
-		})
+		runSoakFailureExpiry(
+			expiryCtx,
+			ledger,
+			observationRuntime.Evidence(),
+			cfg.Soak.ReconcileDeadline,
+			expiryTicker.C,
+			func(err error) {
+				slog.Error("expire Cassandra soak failure evidence", "error", err)
+			},
+			withSoakFailureExpiryMetrics(metrics),
+		)
 	}()
 	var expiryShutdownOnce sync.Once
 	shutdownExpiry := func() {
@@ -577,14 +593,6 @@ func runSoakWorkload(
 		})
 	}
 	defer shutdownConsumerSamplers()
-	observationRuntime := newSoakFailureObservationRuntime(
-		cfg.Soak.RecipientObserverEnabled,
-		ledger,
-		metrics,
-		cfg.Soak.RecipientObserverQueue,
-		cfg.Soak.LedgerDir,
-		now,
-	)
 	if cfg.Soak.RecipientObserverEnabled {
 		recipientObserver := observationRuntime.Recipient()
 		recipientSource := newPooledNATSFailureRecipientSource(
