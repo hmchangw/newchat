@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -311,7 +309,7 @@ func (h *Handler) processRemoveMember(ctx context.Context, data []byte) (err err
 	// Accepted as a documented limitation; see docs/superpowers/specs/2026-05-08-room-encryption-keys-design.md.
 	currentPair, err := h.keyStore.Get(ctx, req.RoomID)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+		roomkeymetrics.RecordStoreError(ctx, "Get")
 		return fmt.Errorf("get room key: %w", err)
 	}
 
@@ -999,7 +997,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		var err error
 		pair, err = h.keyStore.Get(ctx, req.RoomID)
 		if err != nil {
-			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+			roomkeymetrics.RecordStoreError(ctx, "Get")
 			return fmt.Errorf("get room key for subscription fan-out: %w", err)
 		}
 		// A keyless "added" event would leave the new member unable to decrypt with no retry.
@@ -1640,7 +1638,7 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPair *roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
 	pair, err := h.keyStore.Get(ctx, roomID)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+		roomkeymetrics.RecordStoreError(ctx, "Get")
 		return nil, fmt.Errorf("get room key: %w", err)
 	}
 	if pair != nil {
@@ -1648,7 +1646,7 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 	}
 	ver, err := h.keyStore.Set(ctx, roomID, *fallbackPair)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Set")))
+		roomkeymetrics.RecordStoreError(ctx, "Set")
 		return nil, fmt.Errorf("store room key: %w", err)
 	}
 	return &roomkeystore.VersionedKeyPair{Version: ver, KeyPair: *fallbackPair}, nil
@@ -2539,7 +2537,7 @@ func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 		// no recipient can be served, so count the whole batch and bail. The
 		// caller treats fan-out as best-effort and JetStream redelivers.
 		slog.Error("marshal room key for fan-out", "error", err, "roomId", roomID, "accounts", len(accounts))
-		roomkeymetrics.FanoutErrors.Add(ctx, int64(len(accounts)), metric.WithAttributes(attribute.String("roomId", roomID)))
+		roomkeymetrics.RecordFanoutErrors(ctx, int64(len(accounts)))
 		return
 	}
 	workers := h.keyFanoutWorkers
@@ -2565,7 +2563,7 @@ func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 			}()
 			if err := h.keySender.SendDataContext(ctx, acct, data); err != nil {
 				slog.ErrorContext(ctx, "send room key", "error", err, "account", acct, "roomId", roomID)
-				roomkeymetrics.FanoutErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("roomId", roomID)))
+				roomkeymetrics.RecordFanoutErrors(ctx, 1)
 				failed.Add(1)
 				return
 			}

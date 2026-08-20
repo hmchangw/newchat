@@ -3,7 +3,10 @@
 package roomkeymetrics
 
 import (
+	"context"
+
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 )
@@ -47,4 +50,42 @@ func init() {
 	if err != nil {
 		KeyAbsentErrors, _ = noop.NewMeterProvider().Meter("room-key").Int64Counter("room_key_absent_errors_total")
 	}
+}
+
+// storeOpAttrs pre-builds the bounded op attribute sets so the recording path
+// does not construct one per call. The set is closed: these are the only
+// operations the room-key store exposes.
+var storeOpAttrs = func() map[string]metric.MeasurementOption {
+	ops := []string{"Get", "Set", "SetWithVersion", "Rotate"}
+	built := make(map[string]metric.MeasurementOption, len(ops))
+	for _, op := range ops {
+		built[op] = metric.WithAttributes(attribute.String("op", op))
+	}
+	return built
+}()
+
+// RecordFanoutErrors counts failed RoomKeyEvent sends.
+//
+// It deliberately takes no label. The counter was previously called with the
+// room id as an attribute from inside the per-account fan-out loop, which is
+// one series per room — unbounded — and rebuilt the attribute set on every
+// iteration. The room a fan-out failed for is already on the log line and the
+// span next to each call, where high cardinality is free; a counter is not the
+// place for it.
+func RecordFanoutErrors(ctx context.Context, count int64) {
+	if count <= 0 {
+		return
+	}
+	FanoutErrors.Add(ctx, count)
+}
+
+// RecordStoreError counts a room-key store failure against its bounded
+// operation name. An unrecognised op is recorded without the label rather than
+// minting a new series.
+func RecordStoreError(ctx context.Context, op string) {
+	if opt, ok := storeOpAttrs[op]; ok {
+		StoreErrors.Add(ctx, 1, opt)
+		return
+	}
+	StoreErrors.Add(ctx, 1)
 }
