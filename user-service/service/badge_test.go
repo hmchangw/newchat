@@ -206,6 +206,28 @@ func TestBadgeCountBatch_CacheFullyDown_CappedUnionFallback(t *testing.T) {
 	assert.Equal(t, 3, resp.Counts["alice"], "r1 (trigger) + r2 + r3, cache down entirely")
 }
 
+// A failing cross-site RPC still answers from the best-effort ids ∪ trigger,
+// but must not Seed the cache — that would stamp the freshness marker on a
+// knowingly-incomplete set.
+func TestBadgeCountBatch_Degraded_NoSeed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	rooms := mocks.NewMockRoomClient(ctrl)
+	badge := &fakeBadgeCache{}
+	svc := newBadgeService(t, subs, badge)
+	svc.rooms = rooms
+	failingRoomClient(rooms, "site-b")
+
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return(
+		[]model.EnrichedSubscription{crossSiteSub("r-remote", "site-b")}, nil)
+
+	resp, err := svc.BadgeCountBatch(ctx("alice", "site-a"),
+		model.BadgeCountBatchRequest{RoomID: "r-trigger", Accounts: []string{"alice"}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Counts["alice"], "still answers from ids ∪ trigger")
+	assert.Empty(t, badge.seedCalls, "a degraded compute must not stamp the marker")
+}
+
 func TestCappedUnion(t *testing.T) {
 	cases := []struct {
 		name    string

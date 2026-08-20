@@ -661,7 +661,7 @@ func TestCountUnread_FailedSiteSkipped(t *testing.T) {
 			{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer}, // local unread
 			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-b", LastSeenAt: &seen}},                    // cross-site, site fails
 		}, nil)
-	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).Return(nil, errors.New("down"))
+	failingRoomClient(rooms, "site-b")
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -753,7 +753,8 @@ func TestCountUnread_GateOff_NoCacheRead(t *testing.T) {
 }
 
 // TestCountUnread_CacheFirst_Fresh: gate on + fresh marker → served from the
-// cache with no repo call and no reseed.
+// cache with no repo call and no reseed. A fresh marker means the set was
+// verified against Mongo within BADGE_MARKER_TTL, so no re-verification is due.
 func TestCountUnread_CacheFirst_Fresh(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
 	svc.badgeCacheFirst = true
@@ -783,17 +784,16 @@ func TestCountUnread_CacheFirst_FreshZero(t *testing.T) {
 }
 
 // TestCountUnread_CacheFirst_Stale_Computes: gate on + stale → today's
-// compute-from-Mongo path, which reseeds (writing the marker).
+// compute-from-Mongo path, which reseeds (writing the marker). A stale marker
+// here stands in for BADGE_MARKER_TTL expiry: the marker is stamped only by
+// Seed/Reseed and never refreshed by bumps, so its TTL is what bounds how long
+// this recompute-and-reseed self-heal can be deferred.
 func TestCountUnread_CacheFirst_Stale_Computes(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	svc.badgeCacheFirst = true
 	badge := svc.badge.(*fakeBadgeCache) // count defaults to (0, false) — stale
-	seen := time.UnixMilli(100).UTC()
-	newer := time.UnixMilli(200).UTC()
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer},
-		}, nil)
+		Return([]model.EnrichedSubscription{localUnreadSub("alice", "r1", "site-a")}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -829,9 +829,46 @@ func TestUnreadRooms_ContextCancelled_SkipsRPC(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	c.SetContext(cancelled)
-	ids, err := svc.unreadRooms(c, "alice")
+	ids, degraded, err := svc.unreadRooms(c, "alice")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"r1"}, ids, "cross-site site skipped on cancel; local unread still counts")
+	assert.True(t, degraded, "a cancelled fan-out must never be treated as complete")
+}
+
+// TestUnreadRooms_ContextCancelledMultiSite_AllSitesDegraded extends the single-site
+// cancellation case to 2+ cross-sites, so the break path's degradation-marking runs
+// over a slice with more than one element (len(sites) > 1) instead of the degenerate
+// single-element case where "mark just the current index" and "mark the current index
+// through the end of the slice" are indistinguishable by construction (index 0 is both
+// the first and the last element). Deliberately uses an already-cancelled context
+// (rather than cancelling mid-flight from inside a GetRoomsMeta stub): sites is derived
+// from map iteration order (crossBySite is a map) and the launch loop's semaphore does
+// not block for a handful of sites, so an in-flight cancel races the loop's own
+// per-iteration c.Err() checks against goroutine scheduling with no way to pin which
+// site's stub runs first — not deterministic, and not fixable without either sleeping
+// (forbidden) or adding synchronization the production code doesn't have. Cancelling up
+// front instead makes the very first loop iteration observe c.Err() != nil before any
+// goroutine is launched, deterministically exercising the multi-element branch of the
+// break-path marking with zero reliance on scheduling.
+func TestUnreadRooms_ContextCancelledMultiSite_AllSitesDegraded(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return(
+		[]model.EnrichedSubscription{
+			crossSiteSub("r1", "site-b"),
+			crossSiteSub("r2", "site-c"),
+			crossSiteSub("r3", "site-d"),
+		}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	c := ctx("alice", "site-a")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.SetContext(cancelled)
+
+	ids, degraded, err := svc.unreadRooms(c, "alice")
+	require.NoError(t, err)
+	assert.Empty(t, ids, "no cross-site can be counted once the context is already cancelled")
+	assert.True(t, degraded, "a cancelled fan-out across multiple sites must never be cached as complete")
 }
 
 func TestUnreadRooms_CrossSiteDeletedRoomNotCounted(t *testing.T) {
@@ -839,36 +876,72 @@ func TestUnreadRooms_CrossSiteDeletedRoomNotCounted(t *testing.T) {
 	// stale lastMsgAt over the RPC; it must NOT inflate the unread count — the list
 	// path surfaces it room-less, and the badge must agree.
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
-	seen := time.UnixMilli(100).UTC()
 	stale := int64(200) // newer than seen → WOULD count if the Del- room weren't skipped
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "rd", SiteID: "site-b", LastSeenAt: &seen}},
-		}, nil)
+		Return([]model.EnrichedSubscription{crossSiteSub("rd", "site-b")}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
 		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &stale}}, nil)
 
-	ids, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
+	ids, degraded, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
 	require.NoError(t, err)
 	assert.Empty(t, ids, "a soft-deleted cross-site room must not be counted as unread")
+	assert.False(t, degraded, "a successful RPC that simply excludes the room is not degraded")
 }
 
 func TestUnreadRooms_CrossSiteDeletedRoomThreadNotCounted(t *testing.T) {
 	// A soft-deleted cross-site room must not become a thread candidate either — its
 	// stale ThreadUnread must not resurrect it via the thread phase.
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
-	seen := time.UnixMilli(100).UTC()
 	stale := int64(50) // older than seen → read at the message level
+	sub := crossSiteSub("rd", "site-b")
+	sub.ThreadUnread = []string{"p1"}
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "rd", SiteID: "site-b", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}},
-		}, nil)
+		Return([]model.EnrichedSubscription{sub}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
 		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &stale}}, nil)
 
-	ids, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
+	ids, degraded, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
 	require.NoError(t, err)
 	assert.Empty(t, ids, "a soft-deleted cross-site room's ThreadUnread must not count")
+	assert.False(t, degraded, "a successful RPC that simply excludes the room is not degraded")
+}
+
+// A failing cross-site RPC still yields a best-effort count, but nothing may be
+// written to the cache — a partial set must never be stamped as verified.
+func TestCountSubscriptions_Degraded_NoReseed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	rooms := mocks.NewMockRoomClient(ctrl)
+	badge := &fakeBadgeCache{}
+	svc := newBadgeService(t, subs, badge)
+	svc.rooms = rooms
+	failingRoomClient(rooms, "site-b")
+
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1000).Return(
+		[]model.EnrichedSubscription{crossSiteSub("r-remote", "site-b")}, nil)
+
+	unread := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &unread})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count, "the unreachable site's rooms drop out")
+	assert.Empty(t, badge.reseedCalls, "a degraded compute must not stamp the marker")
+}
+
+// The non-degraded path is unchanged: it still writes through to the cache.
+func TestCountSubscriptions_NotDegraded_StillReseeds(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	badge := &fakeBadgeCache{}
+	svc := newBadgeService(t, subs, badge)
+
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1000).Return(
+		[]model.EnrichedSubscription{localUnreadSub("alice", "r1", "site-a")}, nil)
+
+	unread := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &unread})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count)
+	assert.Equal(t, []string{"alice"}, badge.reseedCalls)
 }
 
 // TestCountUnread_ReadRoomBumpedByUnreadThread: a message-read room whose subscription

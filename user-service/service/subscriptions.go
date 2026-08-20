@@ -562,28 +562,35 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 			return &models.CountResponse{Count: n}, nil
 		}
 	}
-	ids, err := s.unreadRooms(c, account)
+	ids, degraded, err := s.unreadRooms(c, account)
 	if err != nil {
 		return nil, err
 	}
-	// Best-effort reconciliation from the Mongo source of truth (fail-open).
-	s.badge.Reseed(c, account, ids)
+	// Best-effort reconciliation from the Mongo source of truth (fail-open) —
+	// skipped when degraded, since caching a partial set would stamp the
+	// freshness marker on data we already know is incomplete.
+	if !degraded {
+		s.badge.Reseed(c, account, ids)
+	}
 	return &models.CountResponse{Count: len(ids)}, nil
 }
 
-// unreadRooms returns the account's active room IDs with unread activity: a
-// room counts iff its messages are unread or its subscription carries an
-// unread followed thread (ThreadUnread is federated home, so no thread RPC).
+// unreadRooms returns the account's active room IDs with unread activity, and
+// whether the result is degraded — true when at least one cross-site
+// GetRoomsMeta RPC failed (or was skipped because the client disconnected)
+// and that site's rooms were dropped. A degraded result is still returned
+// (best-effort, as before) but must not be cached: writing it would stamp
+// the freshness marker on a knowingly-incomplete set.
 // Local subs read lastMsgAt from the $lookup; cross-site subs fetch it via
 // per-site GetRoomsMeta (not-found/soft-deleted rooms are excluded entirely).
-// Best-effort — an unreachable site is skipped, not fatal.
-func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]string, error) {
+func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]string, bool, error) {
 	subs, err := s.subs.GetActiveSubscriptions(c, account, s.maxSubs)
 	if err != nil {
-		return nil, fmt.Errorf("unread rooms: %w", err)
+		return nil, false, fmt.Errorf("unread rooms: %w", err)
 	}
 
 	var ids []string
+	degraded := false
 	crossBySite := map[string][]model.EnrichedSubscription{}
 	roomIDsBySite := map[string][]string{}
 	for i := range subs {
@@ -605,13 +612,21 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 		}
 		// Per-site degradation (matches the list path's enrichCrossSite): a failed site is
 		// SKIPPED — its subs drop out of the result — while local subs and the sites that
-		// did respond still contribute. results[i] is written by exactly one goroutine.
+		// did respond still contribute. results[i] and failed[i] are each written by
+		// exactly one goroutine (or, for the break path below, by the launching loop
+		// itself before any goroutine for that index exists).
 		results := make([][]string, len(sites))
+		failed := make([]bool, len(sites))
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, maxSiteFanout) // bound concurrent per-site RPCs
 		for i, site := range sites {
-			// Client already gone — stop firing further ~5s RPCs.
+			// Client already gone — stop firing further ~5s RPCs. The remaining sites'
+			// rooms will never be counted, so mark them (and this one) degraded rather
+			// than let a cancelled request be cached as if it were complete.
 			if c.Err() != nil {
+				for j := i; j < len(sites); j++ {
+					failed[j] = true
+				}
 				break
 			}
 			wg.Add(1)
@@ -620,12 +635,14 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 				defer wg.Done()
 				defer func() { <-sem }()
 				if c.Err() != nil {
+					failed[i] = true
 					return
 				}
 				infos, err := s.rooms.GetRoomsMeta(c, site, roomIDsBySite[site])
 				if err != nil {
 					// Skip this site rather than nuking the whole result.
 					slog.WarnContext(c, "unread count degraded for site", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
+					failed[i] = true
 					return
 				}
 				lastMsg := make(map[string]*int64, len(infos))
@@ -657,7 +674,10 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 		wg.Wait()
 		for i := range results {
 			ids = append(ids, results[i]...)
+			if failed[i] {
+				degraded = true
+			}
 		}
 	}
-	return ids, nil
+	return ids, degraded, nil
 }
