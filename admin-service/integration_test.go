@@ -47,6 +47,14 @@ func TestIntegration_CreateUser_And_UniqueIndex(t *testing.T) {
 	st := newStoreMongo(db)
 	require.NoError(t, st.EnsureIndexes(context.Background()))
 
+	// users.account unique is owned by user-service; create it here so admin's
+	// duplicate-account path (ErrAccountExists) is exercised.
+	_, ierr := db.Collection("users").Indexes().CreateOne(context.Background(), mongo.IndexModel{
+		Keys:    bson.D{{Key: "account", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, ierr)
+
 	u := &model.User{
 		ID:      idgen.GenerateUUIDv7(),
 		Account: "alice",
@@ -586,8 +594,7 @@ func TestIntegration_EnsureIndexes_Keys(t *testing.T) {
 	require.NoError(t, st.EnsureIndexes(context.Background()))
 
 	userKeys := testutil.IndexSpecs(t, db.Collection("users"))
-	require.Contains(t, userKeys, "account:1")
-	assert.True(t, userKeys["account:1"], "(account) must stay unique — shared with botplatform/user-service")
+	// users.account unique is owned by user-service now, not created here.
 	require.Contains(t, userKeys, "siteId:1,account:1")
 
 	auditKeys := testutil.IndexSpecs(t, db.Collection("admin_audit"))
