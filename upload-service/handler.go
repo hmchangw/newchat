@@ -183,7 +183,7 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 		return
 	}
 
-	results, fileHeaders, origNames := preprocessFiles(files, h.maxImageSize)
+	results, fileHeaders := preprocessFiles(files, h.maxImageSize)
 	defer func() {
 		for _, mf := range fileHeaders {
 			_ = mf.File.Close()
@@ -203,9 +203,11 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 
 	driveHost := h.drive.GetBaseURLFromRoomOrigin(siteID)
 	for i, resp := range responses {
+		// The name we sent is the source of truth (Drive echoes it on success and
+		// returns an empty name on a per-file failure).
 		name := resp.File.Filename
-		if i < len(origNames) {
-			name = origNames[i]
+		if i < len(fileHeaders) {
+			name = fileHeaders[i].Filename
 		}
 		item := uploadResultItem{Name: name, Status: resp.Status, Error: resp.Error}
 		if resp.Status == driveStatusSuccess {
@@ -472,9 +474,8 @@ func (h *Handler) requireMembership(ctx context.Context, c *gin.Context, roomID,
 // preprocessFiles runs the per-file size/extension/open checks. Rejected files
 // become failure result items; accepted files become MultipartFiles whose open
 // handles the caller is responsible for closing. Files keep their original name
-// (Drive addresses them by FileID); origNames lists them in send order so the
-// response can fall back to them when Drive returns an empty name on a per-file failure.
-func preprocessFiles(files []*multipart.FileHeader, maxSize int64) (results []uploadResultItem, fileHeaders []drive.MultipartFile, origNames []string) {
+// (Drive addresses them by FileID).
+func preprocessFiles(files []*multipart.FileHeader, maxSize int64) (results []uploadResultItem, fileHeaders []drive.MultipartFile) {
 	for _, fh := range files {
 		if fh.Size > maxSize {
 			results = append(results, uploadResultItem{Name: fh.Filename, Status: statusFailure, Error: "file size exceeds limit"})
@@ -490,9 +491,8 @@ func preprocessFiles(files []*multipart.FileHeader, maxSize int64) (results []up
 			continue
 		}
 		fileHeaders = append(fileHeaders, drive.MultipartFile{File: f, Filename: fh.Filename})
-		origNames = append(origNames, fh.Filename)
 	}
-	return results, fileHeaders, origNames
+	return results, fileHeaders
 }
 
 // readMultipartFile opens, reads, and closes a multipart file header's content.

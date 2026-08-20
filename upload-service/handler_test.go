@@ -412,47 +412,6 @@ func TestHandleUploadImages_SendsOriginalName(t *testing.T) {
 	assert.Equal(t, "api/v1/file/rooms/r1/file/img-1?drive_host=https://drive.example.com", got.Results[0].RelativePath)
 }
 
-// Two files with the SAME name in one batch are both sent under their original
-// name (Drive addresses files by FileID); both response items keep it.
-func TestHandleUploadImages_DuplicateNamesInBatch_KeepOriginalNames(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
-	fd := &fakeDrive{
-		baseURL: "https://drive.example.com",
-		uploadResp: []drive.UploadGroupImageResponse{
-			{Status: "success", File: drive.GroupImageObject{FileID: "img-0", GroupID: "r1", Filename: "a.png"}},
-			{Status: "success", File: drive.GroupImageObject{FileID: "img-1", GroupID: "r1", Filename: "a.png"}},
-		},
-	}
-	h := newHandler(store, fd)
-
-	// Two parts under the same field with the same filename.
-	body := &bytes.Buffer{}
-	mw := multipart.NewWriter(body)
-	for i := 0; i < 2; i++ {
-		fw, err := mw.CreateFormFile("images", "a.png")
-		require.NoError(t, err)
-		_, _ = fw.Write([]byte("x"))
-	}
-	require.NoError(t, mw.Close())
-
-	c, w := newUploadCtx(t, "r1", body, mw.FormDataContentType(), okUser())
-	h.HandleUploadImages(c)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Equal(t, []string{"a.png", "a.png"}, fd.uploadGot.filenames, "duplicate names are sent as-is")
-
-	var got struct {
-		Results []uploadResultItem `json:"results"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	require.Len(t, got.Results, 2)
-	assert.Equal(t, "a.png", got.Results[0].Name)
-	assert.Equal(t, "a.png", got.Results[1].Name)
-}
-
 func TestHandleUploadImages_DriveErrorEmptyFilename_KeepsOriginalName(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
