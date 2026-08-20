@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -73,4 +74,36 @@ func TestDisabledConsumer_TracksWithoutRecording(t *testing.T) {
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(ctx, &rm))
 	assert.Empty(t, rm.ScopeMetrics, "a disabled Consumer must not record dispositions")
+}
+
+// Two instruments were removed because the platform already answers what they
+// asked, and both cost us on the hot path.
+//
+//   - chat.nats.publish.retries had no producer at all: no path in this repo
+//     loops around its own publish, so it never left zero.
+//   - chat.nats.consumer.redeliveries duplicated the broker. How many times a
+//     message was redelivered is jetstream_consumer_num_redelivered, and which
+//     event type keeps failing is already carried by
+//     chat.nats.consumer.messages{event_type, outcome="nak"} — a nak is what
+//     causes the redelivery.
+func TestRemovedInstrumentsAreNotRegistered(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	consumer := m.Consumer(ConsumerConfig{Site: "s1", Stream: "ST", Consumer: "dur"})
+
+	ctx := context.Background()
+	tracked := consumer.Track(ctx, &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 3}}, EventMemberAdd, 5)
+	require.NoError(t, tracked.Nak())
+	tracked.Finish(ctx)
+
+	rm := collect(t, reader)
+	for _, gone := range []string{"chat.nats.publish.retries", "chat.nats.consumer.redeliveries"} {
+		assert.Empty(t, metricPoints[int64](t, rm, gone), "%s must no longer be recorded", gone)
+	}
+
+	// The replacement is the disposition counter, which still carries the
+	// event type a redelivery would have pointed at.
+	naks := metricPoints[int64](t, rm, "chat.nats.consumer.messages")
+	require.Len(t, naks, 1)
+	assert.Equal(t, "nak", attrs(naks[0])["outcome"])
+	assert.Equal(t, "member_add", attrs(naks[0])["event_type"])
 }

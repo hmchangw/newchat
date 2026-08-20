@@ -184,13 +184,6 @@ func TestTrackedMessageDispositionAndRedelivery(t *testing.T) {
 			require.Len(t, points, 1)
 			assert.Equal(t, int64(1), points[0].Value)
 			assert.Equal(t, string(tt.want), attrs(points[0])["outcome"])
-			redeliveries := metricPoints[int64](t, rm, "chat.nats.consumer.redeliveries")
-			if tt.redelivery == 0 {
-				assert.Empty(t, redeliveries)
-			} else {
-				require.Len(t, redeliveries, 1)
-				assert.Equal(t, tt.redelivery, redeliveries[0].Value)
-			}
 			durations := histogramPoints(t, rm, "chat.nats.consumer.processing.duration")
 			require.Len(t, durations, 1)
 			assert.Equal(t, uint64(1), durations[0].Count)
@@ -247,12 +240,10 @@ func TestPublishAndRequestMetrics(t *testing.T) {
 	// A successful publish records nothing; only the failure lands.
 	p.Failure(context.Background(), DestinationPush, OperationPushPublish, nil)
 	p.Failure(context.Background(), DestinationPush, OperationPushPublish, nats.ErrNoResponders)
-	p.Retry(context.Background(), DestinationPush, OperationPushPublish)
 	p.Request(context.Background(), OperationPresenceLookup, 25*time.Millisecond, nats.ErrTimeout)
 
 	rm := collect(t, reader)
 	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.failures"), 1)
-	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.retries"), 1)
 	requestPoints := metricPoints[int64](t, rm, "chat.nats.requests")
 	require.Len(t, requestPoints, 1)
 	assert.Equal(t, "timeout", attrs(requestPoints[0])["outcome"])
@@ -278,7 +269,6 @@ func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 func TestZeroValuePublisherDoesNotAffectBusinessFlow(t *testing.T) {
 	var publisher Publisher
 	publisher.Failure(context.Background(), DestinationPush, OperationPushPublish, errors.New("publish failed"))
-	publisher.Retry(context.Background(), DestinationPush, OperationPushPublish)
 	publisher.Request(context.Background(), OperationPresenceLookup, time.Millisecond, errors.New("request failed"))
 }
 
