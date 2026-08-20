@@ -3374,6 +3374,120 @@ func newMessageReadFixture(t *testing.T) *messageReadFixture {
 	return f
 }
 
+// A fully-read room (no unread followed threads) is removed exactly; the rest of
+// the set — and the freshness marker — survive.
+func TestHandler_MessageRead_NoThreadUnread_ClearsRoomOnly(t *testing.T) {
+	f := newMessageReadFixture(t)
+	joined := time.Now().UTC().Add(-2 * time.Hour)
+	lastSeen := joined.Add(time.Hour)
+
+	f.store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
+	}, nil)
+	f.store.EXPECT().
+		UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).
+		Return(0, nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
+	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil)
+
+	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.NoError(t, err)
+
+	assert.Equal(t, []clearRoomCall{{account: "alice", roomID: "r1"}}, f.badge.clearRooms)
+	assert.Empty(t, f.badge.clearAlls, "a read must never drop the whole set")
+}
+
+// The room still has unread followed threads, so it was unread before the read
+// and remains unread after it — an exact set needs no edit at all.
+func TestHandler_MessageRead_ThreadUnreadRemains_NoBadgeWrite(t *testing.T) {
+	f := newMessageReadFixture(t)
+	joined := time.Now().UTC().Add(-2 * time.Hour)
+	lastSeen := joined.Add(time.Hour)
+
+	f.store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
+	}, nil)
+	f.store.EXPECT().
+		UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).
+		Return(2, nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
+	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil)
+
+	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+	require.NoError(t, err)
+
+	assert.Empty(t, f.badge.clearRooms)
+	assert.Empty(t, f.badge.clearAlls)
+}
+
+// The decision must follow the POST-UPDATE value, not the pre-write snapshot:
+// threadUnread is written by another service on an unordered path, so a stale
+// snapshot can be wrong in either direction.
+func TestHandler_MessageRead_UsesPostUpdateThreadUnread(t *testing.T) {
+	tests := []struct {
+		name          string
+		snapshot      []string
+		postUpdate    int
+		wantClearRoom bool
+	}{
+		{"snapshot empty, post-update non-empty ⇒ no write", nil, 3, false},
+		{"snapshot non-empty, post-update empty ⇒ clear room", []string{"p1"}, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newMessageReadFixture(t)
+			joined := time.Now().UTC().Add(-2 * time.Hour)
+			lastSeen := joined.Add(time.Hour)
+
+			f.store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+				User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+				RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
+				ThreadUnread: tt.snapshot,
+			}, nil)
+			f.store.EXPECT().
+				UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).
+				Return(tt.postUpdate, nil)
+			f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
+			f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil)
+
+			_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+			require.NoError(t, err)
+
+			if tt.wantClearRoom {
+				assert.Equal(t, []clearRoomCall{{account: "alice", roomID: "r1"}}, f.badge.clearRooms)
+			} else {
+				assert.Empty(t, f.badge.clearRooms)
+			}
+			assert.Empty(t, f.badge.clearAlls)
+		})
+	}
+}
+
+// A cross-site reader's home replica is inbox-worker's job — the room site must
+// not touch the local set.
+func TestHandler_MessageRead_CrossSiteActor_NoLocalBadgeWrite(t *testing.T) {
+	f := newMessageReadFixture(t)
+	joined := time.Now().UTC().Add(-2 * time.Hour)
+	lastSeen := joined.Add(time.Hour)
+
+	f.store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
+		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
+	}, nil)
+	f.store.EXPECT().
+		UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).
+		Return(0, nil)
+	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-b", nil)
+	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil)
+
+	_, _ = f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+
+	assert.Empty(t, f.badge.clearRooms)
+	assert.Empty(t, f.badge.clearAlls)
+}
+
 func TestHandler_MessageRead_NotMember(t *testing.T) {
 	f := newMessageReadFixture(t)
 	f.store.EXPECT().
@@ -3396,7 +3510,7 @@ func TestHandler_MessageRead_HappyLocal_AlertClears(t *testing.T) {
 	}, nil)
 	f.store.EXPECT().
 		UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).
-		Return(nil)
+		Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	minT := lastSeen
@@ -3420,7 +3534,7 @@ func TestHandler_MessageRead_AlwaysClearsAlert(t *testing.T) {
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 		Alert: true,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(&lastSeen, nil)
@@ -3442,7 +3556,7 @@ func TestHandler_MessageRead_LastSeenNil_RecomputesAnyway(t *testing.T) {
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, // LastSeenAt nil
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	// Recompute MUST run (no JoinedAt fallback for the early-return). The stored
@@ -3461,7 +3575,7 @@ func TestHandler_MessageRead_RoomLastMsgNil_EarlyReturn(t *testing.T) {
 	f.store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", JoinedAt: joined,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: nil}, nil)
 
@@ -3479,7 +3593,7 @@ func TestHandler_MessageRead_CrossSite_PublishesInbox(t *testing.T) {
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 		Alert: true,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-b", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(&lastSeen, nil)
@@ -3515,7 +3629,7 @@ func TestHandler_MessageRead_CrossSite_PublishFailureAborts(t *testing.T) {
 	f.store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", JoinedAt: joined,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-b", nil)
 	// GetRoom may run concurrently with GetUserSiteID via errgroup; allow it.
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil).AnyTimes()
@@ -3535,7 +3649,7 @@ func TestHandler_MessageRead_GetUserSiteIDEmpty_NoPublish(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(&lastSeen, nil)
@@ -3552,7 +3666,7 @@ func TestHandler_MessageRead_GetUserSiteIDError_Aborts(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: time.Now().UTC().Add(-time.Hour),
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("", errors.New("mongo down"))
 	// GetRoom may run concurrently via errgroup; allow it.
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil).AnyTimes()
@@ -3571,7 +3685,7 @@ func TestHandler_MessageRead_MinNil_ClearsRoomField(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	// Room currently carries a non-nil floor; recompute returns nil, so the field
 	// is genuinely cleared via UpdateRoomMinUserLastSeenAt(nil).
@@ -3592,7 +3706,7 @@ func TestHandler_MessageRead_UpdateSubscriptionReadError(t *testing.T) {
 		JoinedAt: time.Now().UTC().Add(-time.Hour),
 	}, nil)
 	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).
-		Return(errors.New("mongo down"))
+		Return(0, errors.New("mongo down"))
 	// The read-position write runs concurrently with these lookups; they may or
 	// may not fire before the errgroup observes the write failure.
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil).AnyTimes()
@@ -3608,7 +3722,7 @@ func TestHandler_MessageRead_GetRoomError(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: time.Now().UTC().Add(-time.Hour),
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, errors.New("mongo down"))
 
@@ -3625,7 +3739,7 @@ func TestHandler_MessageRead_MinSubscriptionError(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(nil, errors.New("agg failed"))
@@ -3643,7 +3757,7 @@ func TestHandler_MessageRead_UpdateRoomMinError(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(&lastSeen, nil)
@@ -3666,7 +3780,7 @@ func TestHandler_MessageRead_FloorUnchanged_SkipsWrite(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	// stored and computed floors carry the same instant via distinct pointers,
 	// so a correct implementation must compare by value, not pointer identity.
@@ -3695,7 +3809,7 @@ func TestHandler_MessageRead_FloorNilStoredNil_SkipsWrite(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	var nilTime *time.Time
@@ -3719,7 +3833,7 @@ func TestHandler_MessageRead_FloorChanged_Writes(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: joined, LastSeenAt: &oldFloor,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
 		ID: "r1", LastMsgAt: &lastMsg, MinUserLastSeenAt: &oldFloor,
@@ -3745,7 +3859,7 @@ func TestHandler_MessageRead_PublishesSubscriptionUpdate_Local(t *testing.T) {
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(&lastSeen, nil)
@@ -3798,7 +3912,7 @@ func TestHandler_MessageRead_PublishesSubscriptionUpdate_HasGroupMention(t *test
 				RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 				HasMention: true, // pre-read state; read must clear it on the event
 			}, nil)
-			f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+			f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 			f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 			f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
 				ID: "r1", LastMsgAt: &lastMsg, LastMentionAllAt: tc.lastMentionAt(time.Now().UTC()),
@@ -3827,7 +3941,7 @@ func TestHandler_MessageRead_NoPublish_BotAccount(t *testing.T) {
 		User:   model.SubscriptionUser{ID: "b1", Account: "bot.bot"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "bot.bot", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "bot.bot", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "bot.bot").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil)
 	// Room has no LastMsgAt → early return; no floor recompute calls expected.
@@ -3846,7 +3960,7 @@ func TestHandler_MessageRead_NoPublish_EarlyReturnNoContent(t *testing.T) {
 	f.store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(&model.Subscription{
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", JoinedAt: joined,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: nil}, nil)
 
@@ -3867,7 +3981,7 @@ func TestHandler_MessageRead_NoPublish_EarlyReturnAlreadyRead(t *testing.T) {
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 
@@ -3889,7 +4003,7 @@ func TestHandler_MessageRead_PublishFailure_NonFatal(t *testing.T) {
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(&lastSeen, nil)
@@ -3911,7 +4025,7 @@ func TestHandler_MessageRead_CrossSite_AlsoPublishesSubscriptionUpdate(t *testin
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-b", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(&lastSeen, nil)
@@ -4250,24 +4364,30 @@ func messageReadHappyExpectStore(f *messageReadFixture, threadUnread []string, u
 		User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
 		JoinedAt: time.Now().UTC().Add(-2 * time.Hour), ThreadUnread: threadUnread,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	// The post-update return mirrors the fetched ThreadUnread snapshot; this
+	// fixture doesn't model the concurrent message-worker write the real
+	// handler guards against (see TestHandler_MessageRead_UsesPostUpdateThreadUnread
+	// for that case).
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(len(threadUnread), nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return(userSiteID, nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", LastMsgAt: &lastMsg}, nil)
 	f.store.EXPECT().MinSubscriptionLastSeenByRoomID(gomock.Any(), "r1").Return(nil, nil)
 }
 
-// TestHandler_MessageRead_BadgeCache_ClearAll_EvenWithThreadUnread: reading the
-// main room invalidates the reader's WHOLE badge set — no thread-state guard;
-// the next count/push recomputes from Mongo.
-func TestHandler_MessageRead_BadgeCache_ClearAll_EvenWithThreadUnread(t *testing.T) {
+// TestHandler_MessageRead_BadgeCache_NoClearWhenThreadUnreadRemains: reading the
+// main room must NOT touch the badge set when a followed thread is still
+// unread post-update — the room was and remains unread, so an exact set needs
+// no edit. (Renamed from ...ClearAll_EvenWithThreadUnread: that name asserted
+// the old ClearAll-always behavior this task replaces.)
+func TestHandler_MessageRead_BadgeCache_NoClearWhenThreadUnreadRemains(t *testing.T) {
 	f := newMessageReadFixture(t)
 	messageReadHappyExpectStore(f, []string{"p1"}, "site-a")
 
 	_, err := f.handler.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	require.NoError(t, err)
 
-	assert.Equal(t, []string{"alice"}, f.badge.clearAlls, "read must drop the whole set regardless of ThreadUnread")
-	assert.Empty(t, f.badge.clearRooms)
+	assert.Empty(t, f.badge.clearAlls, "a read must never drop the whole set")
+	assert.Empty(t, f.badge.clearRooms, "a followed thread is still unread, so the room stays unread")
 }
 
 // TestHandler_MessageRead_BadgeCache_NoClearWhenCrossSite: a non-home-local
@@ -7601,7 +7721,7 @@ func TestHandler_MessageRead_ChannelFloorMoves_PublishesRoomEvent(t *testing.T) 
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, LastMsgAt: &lastMsg}, nil)
 	minT := lastSeen
@@ -7637,7 +7757,7 @@ func newChannelFloorMoveFixture(t *testing.T, crossSite bool) (*messageReadFixtu
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, LastMsgAt: &lastMsg, CrossSite: ptrBool(crossSite)}, nil)
 	minT := lastSeen
@@ -7706,7 +7826,7 @@ func TestHandler_MessageRead_DMFloorMoves_PublishesPerSubscriber(t *testing.T) {
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeDM, LastMsgAt: &lastMsg}, nil)
 	minT := lastSeen
@@ -7742,7 +7862,7 @@ func TestHandler_MessageRead_ChannelNilFloor_OmitsFloorField(t *testing.T) {
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
 		ID: "r1", Type: model.RoomTypeChannel, LastMsgAt: &lastMsg, MinUserLastSeenAt: &storedFloor,
@@ -7771,7 +7891,7 @@ func TestHandler_MessageRead_ChannelPublishError_StillAccepted(t *testing.T) {
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, LastMsgAt: &lastMsg}, nil)
 	minT := lastSeen
@@ -7793,7 +7913,7 @@ func TestHandler_MessageRead_DMListSubscriptionsError_StillAccepted(t *testing.T
 		User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a", JoinedAt: joined, LastSeenAt: &lastSeen,
 	}, nil)
-	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(nil)
+	f.store.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).Return(0, nil)
 	f.store.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil)
 	f.store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeDM, LastMsgAt: &lastMsg}, nil)
 	minT := lastSeen

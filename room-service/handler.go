@@ -1354,14 +1354,17 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 	// The read-position write no longer depends on the fetched sub (alert is
 	// cleared unconditionally), so it runs concurrently with the two lookups.
 	var (
-		userSiteID string
-		room       *model.Room
+		userSiteID   string
+		room         *model.Room
+		threadUnread int
 	)
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		if err := h.store.UpdateSubscriptionRead(gctx, roomID, account, now); err != nil {
+		n, err := h.store.UpdateSubscriptionRead(gctx, roomID, account, now)
+		if err != nil {
 			return fmt.Errorf("update subscription read: %w", err)
 		}
+		threadUnread = n
 		return nil
 	})
 	g.Go(func() error {
@@ -1384,11 +1387,12 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil, err
 	}
 
-	// A read shrinks the unread set — drop it and recompute on next count.
-	// Home-local only; inbox-worker clears cross-site replicas when the
-	// federated subscription_read lands.
-	if userSiteID == h.siteID && h.badge != nil {
-		h.badge.ClearAll(ctx, account)
+	// A read settles message-unread (lastSeenAt = now), so the room stays unread
+	// only if a followed thread is unread. None ⇒ exact removal, freshness marker
+	// survives. Some ⇒ the room was and remains unread, so the set needs no edit.
+	// Home-local only; inbox-worker handles cross-site replicas.
+	if userSiteID == h.siteID && h.badge != nil && threadUnread == 0 {
+		h.badge.ClearRoom(ctx, account, roomID)
 	}
 
 	switch {

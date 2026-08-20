@@ -1981,7 +1981,8 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now))
+	_, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", now)
+	require.NoError(t, err)
 
 	got, err := store.GetSubscription(ctx, "alice", "r1")
 	require.NoError(t, err)
@@ -1989,7 +1990,7 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	require.NotNil(t, got.LastSeenAt)
 	assert.WithinDuration(t, now, *got.LastSeenAt, time.Second)
 
-	err = store.UpdateSubscriptionRead(ctx, "r1", "missing", now)
+	_, err = store.UpdateSubscriptionRead(ctx, "r1", "missing", now)
 	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
@@ -2011,13 +2012,41 @@ func TestMongoStore_UpdateSubscriptionRead_ClearsHasMention(t *testing.T) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now))
+	_, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", now)
+	require.NoError(t, err)
 
 	var raw model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "s1"}).Decode(&raw))
 	assert.False(t, raw.HasMention)
 	require.NotNil(t, raw.LastSeenAt)
 	assert.WithinDuration(t, now, *raw.LastSeenAt, time.Second)
+}
+
+func TestMongoStore_UpdateSubscriptionRead_ReturnsPostUpdateThreadUnread(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("subscriptions").InsertOne(ctx, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", JoinedAt: time.Now().UTC().Add(-time.Hour),
+		ThreadUnread: []string{"p1", "p2"},
+	})
+	require.NoError(t, err)
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	n, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", now)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "reading the room must not drain threadUnread")
+
+	var got model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
+	require.NotNil(t, got.LastSeenAt)
+	assert.WithinDuration(t, now, *got.LastSeenAt, time.Second)
+	assert.False(t, got.Alert)
+
+	_, err = store.UpdateSubscriptionRead(ctx, "r1", "nobody", now)
+	require.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
 func TestMongoStore_GetUserSiteID_Integration(t *testing.T) {
