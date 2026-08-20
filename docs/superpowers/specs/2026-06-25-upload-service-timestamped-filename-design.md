@@ -2,7 +2,10 @@
 
 **Date:** 2026-06-25
 **Service:** `upload-service`
-**Status:** Approved
+**Status:** Superseded (2026-08-20) — uploads now send the original filename
+as-is; `uniqueName` was removed because the mangled name leaked to users via
+download `Content-Disposition`, and product accepted the duplicate-name
+trade-off. See commit f54b8e45.
 
 ## Problem
 
