@@ -1,7 +1,11 @@
 # Permission Bulk Update & Resend (admin-frontend round) — Design
 
 **Status:** Approved, ready for planning
-**Date:** 2026-08-13 (resend mechanism revised same day: re-POST → minimal resync)
+**Date:** 2026-08-13 (resend mechanism revised same day: re-POST → minimal resync);
+amended 2026-08-17 (post-merge review round: chunk 5,000 → 1,000 accounts/event for the
+128KB broker `max_payload`; per-destination fanout lanes; resync hands every state group
+to one fanout call; fanout budget `FANOUT_TIMEOUT` 30s, validated at startup below the 40s
+HTTP write timeout)
 **Builds on:** `2026-08-10-user-permission-whitelist-design.md` (as amended 2026-08-12).
 This is the admin-frontend round that spec deferred, plus the request-limit removals and
 fanout chunking that the bulk requirement forced onto the backend.
@@ -31,7 +35,7 @@ changes are the deleted `MaxSubjects` constant and one new admin endpoint (§5).
 | Bulk input | **Paste-list mode** toggle beside the existing AccountPicker | CSV upload; both |
 | Subject count cap | **Removed** (`MaxSubjects` deleted) | keep 200; raise to 1,000 or 10,000 |
 | Request body cap | **Removed** (1MB middleware deleted) — user decision 2026-08-13, **against the recorded recommendation**; risk §9.1 | keep 1MB |
-| NATS payload ceiling | **Chunked fanout**, 5,000 accounts per event | single event (would cap a batch at ~20k accounts) |
+| NATS payload ceiling | **Chunked fanout**, 1,000 accounts per event (5,000 until 2026-08-17 — the brokers run a 128KB `max_payload`, not NATS's 1MB default) | single event (would cap a batch at ~20k accounts) |
 | Mongo transaction | **Single transaction kept** — all-or-nothing preserved at any N | chunked transaction (loses atomicity) |
 
 Consequence the resend choice accepts (unchanged by the revision): the failure
@@ -71,16 +75,21 @@ against an accidental whole-company paste is the visible count in the console (�
 ## 4. Chunked fanout (admin-service)
 
 ```go
-// ≈320KB per event at 64 bytes/account — 3× margin under NATS's default 1MB max_payload.
-const fanoutChunkSize = 5000
+// ≈90KB per INBOX envelope at 64 bytes/account (the envelope base64-encodes the payload)
+// under the 128KB max_payload our brokers run — retuned from 5000 on 2026-08-17.
+const fanoutChunkSize = 1000
 ```
 
-- The publish loop becomes: for each remote site × each chunk of ≤5,000 accounts → one
+- The publish loop becomes: for each remote site × each chunk of ≤1,000 accounts → one
   `UserPermissionsUpdated` event. Same event shape; `Accounts` carries the chunk;
   `Permission`, `State`, and `Timestamp` are identical across all chunks of one batch.
-- A failed publish marks the destination in `syncFailures` (listed once) and the loop
-  **continues** through the remaining chunks and destinations — maximize delivery,
-  aggregate failures per destination. The response shape is unchanged.
+- 2026-08-17: each destination walks every chunk in its **own goroutine lane** under one
+  shared budget (`FANOUT_TIMEOUT`, default 30s, validated at startup to stay below the
+  40s HTTP write timeout so `syncFailures` is always deliverable). A stalled peer burns
+  only its own lane; once the budget is gone the lane stops and is reported once.
+- A failed publish marks the destination in `syncFailures` (listed once) and the lane
+  **continues** through its remaining chunks — maximize delivery, aggregate failures per
+  destination. The response shape is unchanged.
 - Partial chunk delivery is safe by construction: remote applies are per-account guarded
   and idempotent, so chunks may arrive in any order, duplicated, or not at all; a resync
   re-publishes every chunk and already-applied accounts no-op.
@@ -101,8 +110,10 @@ permission routes.
 **Semantics: re-delivery, not re-recording.** The endpoint reads each account's current
 materialized state from the local `users` collection (one batch read, projection
 `{account, permissions.<field>}`), groups the accounts by identical state — one group per
-original batch in the common case; more if another write landed in between — and re-runs
-the chunked fanout (§4) once per group. It always delivers the **current** truth, never
+original batch in the common case; more if another write landed in between — and hands
+every group to **one** chunked fanout call (§4; 2026-08-17: it used to call the fanout
+once per group, which let a peer stalled on the first group starve healthy peers of the
+later ones). It always delivers the **current** truth, never
 the original request's possibly-stale state. It writes nothing: no ledger rows, no audit
 entries, no user-doc updates.
 
@@ -177,8 +188,8 @@ expandable list instead of dumping thousands of rows.
 | Area | Cases |
 |---|---|
 | admin-service validation | empty list still rejected (`invalid_subject_count`); a large list (e.g. 10,001 accounts) accepted; body-limit middleware tests removed |
-| chunked fanout (unit, captured publish func) | N ≤ 5,000 → one event per dest; 5,001 → two; chunk boundaries exact and complete; a dest failing on any chunk → listed once in `syncFailures` while other chunks/dests are still attempted; per-chunk payload shape (same state/timestamp, chunked accounts) |
-| resync handler (unit) | groups accounts by identical state and fans out once per group; accounts with no doc/state are skipped; **no ledger/audit/user-doc writes** (store mock asserts no mutating calls); unknown key → `unknown_permission`; empty accounts → `invalid_subject_count`; `syncFailures` aggregation matches the write path |
+| chunked fanout (unit, captured publish func) | N ≤ 1,000 → one event per dest; 1,001 → two; a worst-case chunk envelope stays under 128KB; a stalled peer consumes only its own lane; chunk boundaries exact and complete; a dest failing on any chunk → listed once in `syncFailures` while other chunks/dests are still attempted; per-chunk payload shape (same state/timestamp, chunked accounts) |
+| resync handler (unit) | groups accounts by identical state and fans out all groups in one call (one shared deadline); accounts with no doc/state are skipped; **no ledger/audit/user-doc writes** (store mock asserts no mutating calls); unknown key → `unknown_permission`; empty accounts → `invalid_subject_count`; `syncFailures` aggregation matches the write path |
 | admin-frontend (Vitest, existing dialog patterns) | paste parsing (separators, trim, dedup, count); zero-parse disables submit; mode badges + active-mode-wins payload; submit-label count; `syncFailures` banner + button posts `{permission, accounts}` to resync (not the original body) + in-flight lock + banner update from the resync response; strip action filters both input modes; long-list collapse |
 
 ## 8. Documentation

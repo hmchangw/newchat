@@ -9,7 +9,12 @@ audit-only; admin-frontend changes deferred to the next round; single-admin-site
 deployment assumption — `SiteID` dropped from the ledger, subjects company-wide, reason
 wording clarified as optional), amended 2026-08-13 (bulk round: `MaxSubjects` and the
 request-body limit removed, fanout chunked at 5,000 accounts/event, console bulk-paste +
-resend — see `2026-08-13-permission-bulk-frontend-design.md`)
+resend — see `2026-08-13-permission-bulk-frontend-design.md`), amended 2026-08-17
+(post-merge review round: chunk retuned to 1,000 accounts/event for the 128KB broker
+`max_payload`; fanout budget is `FANOUT_TIMEOUT` (30s) validated at startup below the 40s
+HTTP write timeout; each destination walks every chunk in its own lane so a stalled peer
+cannot starve healthy ones; resync hands all state groups to one fanout call — see the
+2026-08-13 spec's amendment)
 
 ## 1. Overview
 
@@ -378,19 +383,21 @@ const InboxUserPermissionsUpdated InboxEventType = "user_permissions_updated"
 // guard (State.UpdatedAt), so delivery may be duplicated or reordered safely.
 type UserPermissionsUpdated struct {
     Permission PermissionKey   `json:"permission" bson:"permission"`
-    Accounts   []string        `json:"accounts"   bson:"accounts"`   // ≤ 5,000 per event (chunked, 2026-08-13)
+    Accounts   []string        `json:"accounts"   bson:"accounts"`   // ≤ 1,000 per event (chunked 2026-08-13; retuned 2026-08-17)
     State      PermissionState `json:"state"      bson:"state"`
     Timestamp  int64           `json:"timestamp"  bson:"timestamp"`  // event publish time
 }
 ```
 
-One POST → one event per remote site **per chunk of ≤5,000 accounts** (2026-08-13: the
-batch is chunked to stay under NATS's `max_payload`; each site has its own INBOX
-stream), published to
+One POST → one event per remote site **per chunk of ≤1,000 accounts** (2026-08-13: the
+batch is chunked to stay under the brokers' `max_payload`; 2026-08-17: retuned from 5,000
+because our brokers run 128KB, not NATS's 1MB default, and the `InboxEvent` envelope
+base64-encodes the payload; each site has its own INBOX stream), published to
 `subject.InboxExternal(dest, model.InboxUserPermissionsUpdated)` =
 `chat.inbox.{dest}.external.user_permissions_updated`, wrapped in the standard
-`InboxEvent` envelope, skipping self and blank entries of `ALL_SITE_IDS`. The payload is
-marshaled once. No `Nats-Msg-Id` dedup — the guarded apply is idempotent, the same
+`InboxEvent` envelope, skipping self, blank, and repeated entries of `ALL_SITE_IDS`. The
+payload is marshaled once; each destination publishes every chunk in its own goroutine
+lane under one shared budget: `FANOUT_TIMEOUT` capped by the request's absolute deadline (handler entry + 38s, i.e. the 40s HTTP write timeout minus a response margin), so local work that already spent part of the write window can't let the fanout outlive the connection (2026-08-18). No `Nats-Msg-Id` dedup — the guarded apply is idempotent, the same
 rationale user-service's publisher documents for status/settings.
 
 **Success means the destination stream acknowledged the publish** — the event is in that

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -730,7 +731,7 @@ func TestHandler_createPermissions(t *testing.T) {
 // fanoutTestCfg is the 3-site fixture used by every fanout scenario below:
 // site-a (this site) publishing to remotes site-b and site-c.
 func fanoutTestCfg() Config {
-	return Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b", "site-c"}}
+	return Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b", "site-c"}, FanoutTimeout: 5 * time.Second}
 }
 
 // fanoutRequestBody returns a valid grant request for the given subject accounts.
@@ -909,13 +910,55 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 
 		assert.NoError(t, callErr, "publish ctx must not already be canceled/expired at call time — it must be severed from the client's cancellation (context.WithoutCancel)")
 		require.True(t, callHasDeadline, "publish ctx must carry the fanout's own deadline, not run unbounded")
-		assert.WithinDuration(t, time.Now().Add(5*time.Second), callDeadline, 2*time.Second, "fanout deadline must be ~5s, not per-publish and not unbounded")
+		assert.WithinDuration(t, time.Now().Add(h.cfg.FanoutTimeout), callDeadline, 2*time.Second, "fanout deadline must be the configured fanout budget, not per-publish and not unbounded")
 	})
 
-	t.Run("chunking: 5001 accounts split into 5000+1 per destination", func(t *testing.T) {
+	t.Run("fanout deadline is capped by the whole-request budget, not a fresh FANOUT_TIMEOUT", func(t *testing.T) {
+		// net/http's WriteTimeout runs from the request, not from the fanout: local work
+		// (Mongo tx, audit) that runs first eats into it. A fanout budget that always
+		// starts fresh could finish after net/http closed the connection, losing
+		// syncFailures. So the handler pins one absolute request deadline at entry and
+		// the fanout takes the earlier of it and now+FanoutTimeout.
 		ctrl := gomock.NewController(t)
 		m := NewMockAdminStore(ctrl)
-		accounts := manyAccounts(5001)
+		accounts := []string{"alice"}
+		mockPermissionStoreOK(m, accounts)
+
+		var mu sync.Mutex
+		var callDeadline time.Time
+		publish := func(ctx context.Context, _ string, _ []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			callDeadline, _ = ctx.Deadline()
+			return nil
+		}
+		cfg := fanoutTestCfg()
+		cfg.FanoutTimeout = time.Hour // far past the request budget: the request budget must win
+		h := newHandler(m, emptySessionStore(), cfg, nil, publish)
+		start := time.Now()
+		require.Equal(t, http.StatusCreated, postPermissions(h, fanoutRequestBody(accounts), t).Code)
+
+		mu.Lock()
+		defer mu.Unlock()
+		assert.WithinDuration(t, start.Add(requestBudget), callDeadline, 2*time.Second,
+			"fanout deadline must be bounded by the request budget measured from handler entry")
+		assert.Less(t, requestBudget, httpWriteTimeout, "the request budget must leave room to write the response before net/http's WriteTimeout")
+	})
+
+	t.Run("an already-spent request budget reports every destination without publishing", func(t *testing.T) {
+		var log publishLog
+		h := newHandler(nil, emptySessionStore(), fanoutTestCfg(), nil, log.publish)
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		failures := h.publishPermissionFanout(ctx, model.PermissionExternalImageView, []fanoutBatch{{accounts: []string{"alice"}, state: model.PermissionState{Granted: true}}})
+		assert.Equal(t, []string{"site-b", "site-c"}, failures)
+		assert.Empty(t, log.subjects, "no publish may run on an expired budget")
+	})
+
+	t.Run("chunking: one account over the chunk size splits into a full chunk plus one per destination", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		accounts := manyAccounts(fanoutChunkSize + 1)
 		mockPermissionStoreOK(m, accounts)
 
 		var log publishLog
@@ -943,7 +986,7 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 		}
 
 		for _, dest := range []string{"site-b", "site-c"} {
-			assert.ElementsMatch(t, []int{5000, 1}, chunkSizesByDest[dest], "dest %s chunk sizes", dest)
+			assert.ElementsMatch(t, []int{fanoutChunkSize, 1}, chunkSizesByDest[dest], "dest %s chunk sizes", dest)
 			assert.ElementsMatch(t, accounts, accountsByDest[dest], "dest %s account union must be complete, no dupes", dest)
 		}
 		for _, ts := range timestamps {
@@ -1033,6 +1076,7 @@ func TestRemoteSites(t *testing.T) {
 		{"filters out self and blank entries", []string{"", "site-a", "site-b", "site-c"}, "site-a", []string{"site-b", "site-c"}},
 		{"empty AllSiteIDs → nil", nil, "site-a", nil},
 		{"only self → nil", []string{"site-a"}, "site-a", nil},
+		{"a repeated peer gets ONE lane, first-occurrence order kept", []string{"site-c", "site-b", "site-c", "site-a", "site-b"}, "site-a", []string{"site-c", "site-b"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1055,6 +1099,37 @@ func postResync(h *Handler, body map[string]any, t *testing.T) *httptest.Respons
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	return w
+}
+
+// brokerMaxPayload is the max_payload our NATS brokers are configured with. The chunk
+// size is a compile-time guess at how many accounts fit under it, so this pins the
+// worst case the guess assumes — with the old 5000-account chunk this test fails.
+const brokerMaxPayload = 128 << 10
+
+func TestFanoutChunk_FitsBrokerMaxPayload(t *testing.T) {
+	// Worst case: a full chunk of long accounts with every state bound set. The INBOX
+	// envelope base64-encodes the inner event (InboxEvent.Payload is []byte), so the
+	// bytes on the wire are ~4/3 of the event JSON — measure the envelope, not the event.
+	accounts := make([]string, fanoutChunkSize)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("%064d", i) // 64-char accounts, well past any real directory id
+	}
+	state := model.PermissionState{
+		Granted:       true,
+		EffectiveFrom: timePtr(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
+		ExpiresAt:     timePtr(time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)),
+		UpdatedAt:     time.Date(2026, 6, 1, 8, 30, 0, 0, time.UTC),
+	}
+
+	var log publishLog
+	h := newHandler(nil, emptySessionStore(), fanoutTestCfg(), nil, log.publish)
+	failures := h.publishPermissionFanout(context.Background(), model.PermissionExternalImageView, []fanoutBatch{{accounts: accounts, state: state}})
+
+	require.Nil(t, failures)
+	require.Len(t, log.data, 2, "one full chunk -> one envelope per remote dest")
+	for _, data := range log.data {
+		assert.Less(t, len(data), brokerMaxPayload, "a worst-case chunk envelope must clear the broker max_payload")
+	}
 }
 
 func TestHandler_resyncPermissions(t *testing.T) {
@@ -1117,6 +1192,22 @@ func TestHandler_resyncPermissions(t *testing.T) {
 		w := postResync(h, map[string]any{"permission": knownPermission, "accounts": []string{"alice"}}, t)
 
 		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("no requested account has a stored state → 200, nothing published, syncFailures omitted", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		perms := map[string]*model.UserPermissions{"alice": {}} // doc exists, permission never recorded; carol has no doc
+		m.EXPECT().GetUserPermissionsForAccounts(gomock.Any(), gomock.Any()).Return(perms, nil)
+
+		var log publishLog
+		h := newHandler(m, emptySessionStore(), fanoutTestCfg(), nil, log.publish)
+		w := postResync(h, map[string]any{"permission": knownPermission, "accounts": []string{"alice", "carol"}}, t)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, log.data, "nothing to re-deliver → no publish, even with remotes and a live publisher")
+		_, has := respBody(t, w)["syncFailures"]
+		assert.False(t, has, "syncFailures is omitted when no destination was attempted")
 	})
 
 	t.Run("two accounts sharing one stored state → one fanout group, one event per dest, stored UpdatedAt preserved", func(t *testing.T) {
@@ -1247,9 +1338,9 @@ func TestHandler_resyncPermissions(t *testing.T) {
 
 	t.Run("every group shares ONE fanout budget — the deadline does not restart per group", func(t *testing.T) {
 		// Regression pin: the budget used to be established inside publishPermissionFanout,
-		// which resync calls once PER state group. Groups are keyed on UpdatedAt, so N admin
+		// which resync called once PER state group. Groups are keyed on UpdatedAt, so N admin
 		// submits yield N groups and one unreachable peer cost N × the budget in wall time —
-		// past httpWriteTimeout (30s) at N ≥ 6, so net/http dropped the connection before the
+		// past httpWriteTimeout at small N, so net/http dropped the connection before the
 		// handler could report syncFailures. One shared budget = one shared deadline instant.
 		ctrl := gomock.NewController(t)
 		m := NewMockAdminStore(ctrl)
@@ -1280,12 +1371,65 @@ func TestHandler_resyncPermissions(t *testing.T) {
 
 		require.Len(t, deadlines, 4, "2 groups x 2 remote dests")
 		require.True(t, allHaveDeadline, "every publish ctx must carry the fanout budget's deadline")
-		assert.WithinDuration(t, time.Now().Add(fanoutTimeout), deadlines[0], 2*time.Second, "the shared budget must be the ~5s fanout budget")
+		assert.WithinDuration(t, time.Now().Add(h.cfg.FanoutTimeout), deadlines[0], 2*time.Second, "the shared budget must be the configured fanout budget")
 		for i, d := range deadlines {
 			assert.True(t, d.Equal(deadlines[0]),
 				"publish %d saw a different deadline (%v) than the first (%v) — each group got a fresh budget instead of sharing the request's one",
 				i, d, deadlines[0])
 		}
+	})
+
+	t.Run("a stalled peer consumes only its own lane — healthy peers still receive every group", func(t *testing.T) {
+		// Regression pin for PR review: resync used to invoke the fanout once per state
+		// group, sequentially, under the shared budget. A peer that blocked until the
+		// deadline on the first group handed every later group an already-expired ctx,
+		// so healthy peers missed those groups and were reported as sync failures too.
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		stateB := model.PermissionState{Granted: false, UpdatedAt: time.Date(2025, 7, 15, 9, 0, 0, 0, time.UTC)}
+		perms := map[string]*model.UserPermissions{
+			"alice": {ExternalImageView: &storedState},
+			"bob":   {ExternalImageView: &stateB},
+		}
+		m.EXPECT().GetUserPermissionsForAccounts(gomock.Any(), gomock.Any()).Return(perms, nil)
+
+		var log publishLog
+		var siteBPublishes atomic.Int32
+		publish := func(ctx context.Context, subj string, data []byte) error {
+			if strings.Contains(subj, ".site-b.") {
+				siteBPublishes.Add(1)
+				<-ctx.Done() // site-b stalls until the fanout budget expires
+				return ctx.Err()
+			}
+			if err := ctx.Err(); err != nil { // a real publish fails on an expired budget
+				return err
+			}
+			return log.publish(ctx, subj, data)
+		}
+
+		cfg := fanoutTestCfg()
+		cfg.FanoutTimeout = 150 * time.Millisecond // keep the stalled lane short in tests
+		h := newHandler(m, emptySessionStore(), cfg, nil, publish)
+
+		w := postResync(h, map[string]any{"permission": knownPermission, "accounts": []string{"alice", "bob"}}, t)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		body := respBody(t, w)
+		assert.Equal(t, []any{"site-b"}, body["syncFailures"],
+			"only the stalled peer may be reported — site-c must not inherit an expired ctx from site-b's lane")
+		assert.Equal(t, int32(1), siteBPublishes.Load(),
+			"once the budget is gone the stalled lane must stop, not fail (and log) every remaining chunk")
+
+		var siteCAccounts []string
+		for _, data := range log.data {
+			var evt model.InboxEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			var payload model.UserPermissionsUpdated
+			require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+			siteCAccounts = append(siteCAccounts, payload.Accounts...)
+		}
+		assert.ElementsMatch(t, []string{"alice", "bob"}, siteCAccounts,
+			"site-c must receive BOTH state groups despite site-b stalling")
 	})
 
 	t.Run("nil bounds vs bounds set exactly at the Unix epoch are distinct states — must not collide into one group", func(t *testing.T) {
