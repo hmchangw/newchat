@@ -415,6 +415,20 @@ func (mr *MockSubscriptionStoreMockRecorder) ListNewMembersForNewRoom(ctx, orgID
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListNewMembersForNewRoom", reflect.TypeOf((*MockSubscriptionStore)(nil).ListNewMembersForNewRoom), ctx, orgIDs, accounts, excludeAccount)
 }
 
+// MarkTeamsMigrationDone mocks base method.
+func (m *MockSubscriptionStore) MarkTeamsMigrationDone(ctx context.Context, roomID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkTeamsMigrationDone", ctx, roomID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkTeamsMigrationDone indicates an expected call of MarkTeamsMigrationDone.
+func (mr *MockSubscriptionStoreMockRecorder) MarkTeamsMigrationDone(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkTeamsMigrationDone", reflect.TypeOf((*MockSubscriptionStore)(nil).MarkTeamsMigrationDone), ctx, roomID)
+}
+
 // PullThreadFollowers mocks base method.
 func (m *MockSubscriptionStore) PullThreadFollowers(ctx context.Context, roomID string, accounts []string) error {
 	m.ctrl.T.Helper()
@@ -469,6 +483,21 @@ func (m *MockSubscriptionStore) SetRoomCrossSite(ctx context.Context, roomID str
 func (mr *MockSubscriptionStoreMockRecorder) SetRoomCrossSite(ctx, roomID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRoomCrossSite", reflect.TypeOf((*MockSubscriptionStore)(nil).SetRoomCrossSite), ctx, roomID)
+}
+
+// TeamsMigrationDone mocks base method.
+func (m *MockSubscriptionStore) TeamsMigrationDone(ctx context.Context, roomID string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TeamsMigrationDone", ctx, roomID)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// TeamsMigrationDone indicates an expected call of TeamsMigrationDone.
+func (mr *MockSubscriptionStoreMockRecorder) TeamsMigrationDone(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TeamsMigrationDone", reflect.TypeOf((*MockSubscriptionStore)(nil).TeamsMigrationDone), ctx, roomID)
 }
 
 // UpdateRoomName mocks base method.

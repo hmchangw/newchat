@@ -45,9 +45,11 @@ func (echoResolver) resolve(_ context.Context, teamsUserID, displayName string) 
 // captureStore records each SaveMessage; err (if set) fails every call. Only SaveMessage
 // is exercised by the batch path — the rest satisfy the Store interface.
 type captureStore struct {
-	saved   []*model.Message
-	senders []*cassParticipant
-	err     error
+	saved    []*model.Message
+	senders  []*cassParticipant
+	err      error
+	existing map[string]bool // ids GetMessageCreatedAt reports as already persisted
+	probeErr error           // if set, GetMessageCreatedAt fails
 }
 
 func (c *captureStore) SaveMessage(_ context.Context, msg *model.Message, sender *cassParticipant, _ string) error {
@@ -68,8 +70,11 @@ func (*captureStore) GetMessageSender(context.Context, string) (*cassParticipant
 func (*captureStore) GetQuotedParentSnapshot(context.Context, string) (*cassandra.QuotedParentMessage, bool, error) {
 	panic("unused")
 }
-func (*captureStore) GetMessageCreatedAt(context.Context, string) (time.Time, bool, error) {
-	panic("unused")
+func (c *captureStore) GetMessageCreatedAt(_ context.Context, id string) (time.Time, bool, error) {
+	if c.probeErr != nil {
+		return time.Time{}, false, c.probeErr
+	}
+	return time.Time{}, c.existing[id], nil
 }
 func (*captureStore) UpdateParentMessageThreadRoomID(context.Context, string, string, time.Time, string) error {
 	panic("unused")
@@ -135,4 +140,51 @@ func mustJSON(v any) json.RawMessage {
 		panic(err)
 	}
 	return b
+}
+
+// TestMigrateOne_SkipExisting covers TEAMS_SKIP_EXISTING on the batch path: an
+// already-persisted message is skipped (no SaveMessage), a transient probe error
+// surfaces so the batch Naks, and the flag off keeps the upsert behavior.
+func TestMigrateOne_SkipExisting(t *testing.T) {
+	from := teamsmigrate.User{ID: "u1"}
+	raw := mustJSON(teamsmigrate.Message{ID: "m1", RoomID: "r1", From: from, Body: teamsmigrate.Body{Content: "hi"}})
+	msgID := teamsmigrate.DeterministicMessageID("r1", "m1")
+
+	t.Run("flag on + exists -> skipped, no SaveMessage", func(t *testing.T) {
+		store := &captureStore{existing: map[string]bool{msgID: true}}
+		h := newTestHandler(store, fakeTransformer{})
+		h.teamsSkipExisting = true
+		res, err := h.migrateOne(context.Background(), raw)
+		require.NoError(t, err)
+		assert.Equal(t, model.TeamsBatchSkipped, res.Status)
+		assert.Empty(t, store.saved, "an existing message must not be re-persisted")
+	})
+
+	t.Run("flag on + absent -> persists", func(t *testing.T) {
+		store := &captureStore{}
+		h := newTestHandler(store, fakeTransformer{})
+		h.teamsSkipExisting = true
+		res, err := h.migrateOne(context.Background(), raw)
+		require.NoError(t, err)
+		assert.Equal(t, model.TeamsBatchPersisted, res.Status)
+		assert.Len(t, store.saved, 1)
+	})
+
+	t.Run("flag on + probe error -> surfaces (batch Naks), no SaveMessage", func(t *testing.T) {
+		store := &captureStore{probeErr: errors.New("cassandra timeout")}
+		h := newTestHandler(store, fakeTransformer{})
+		h.teamsSkipExisting = true
+		_, err := h.migrateOne(context.Background(), raw)
+		require.Error(t, err)
+		assert.Empty(t, store.saved)
+	})
+
+	t.Run("flag off -> persists without probing", func(t *testing.T) {
+		store := &captureStore{existing: map[string]bool{msgID: true}}
+		h := newTestHandler(store, fakeTransformer{})
+		res, err := h.migrateOne(context.Background(), raw)
+		require.NoError(t, err)
+		assert.Equal(t, model.TeamsBatchPersisted, res.Status)
+		assert.Len(t, store.saved, 1)
+	})
 }

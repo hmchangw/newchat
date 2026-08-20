@@ -79,6 +79,10 @@ type Handler struct {
 	publishUsers func(ctx context.Context, users []model.IUserWithChange) error
 	// routeMode (ROOM_SUBJECT_MODE) gates same-site room .event namespaces; cross-site always global.
 	routeMode subject.RoomRouteMode
+	// teamsSkipExisting (TEAMS_SKIP_EXISTING) makes a migration replay skip a chat
+	// whose room already exists instead of upserting over it — for a newest→oldest
+	// replay where an older batch must not clobber a newer record.
+	teamsSkipExisting bool
 }
 
 func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender, routeMode subject.RoomRouteMode) *Handler {

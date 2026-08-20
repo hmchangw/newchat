@@ -35,6 +35,7 @@ type config struct {
 	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
 	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
 	Mode              string                  `env:"MODE"            envDefault:"default"`
+	TeamsSkipExisting bool                    `env:"TEAMS_SKIP_EXISTING" envDefault:"false"`
 	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
 	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
@@ -233,6 +234,7 @@ func main() {
 		return nil
 	}, keyStore, keySender, roomRouteMode)
 	handler.SetKeyFanoutWorkers(cfg.KeyFanoutWorkers)
+	handler.teamsSkipExisting = cfg.TeamsSkipExisting
 	// Teams room-reconcile's external-user-identity fanout (chat.hr.{siteID}.users.upsert),
 	// mirroring message-worker's Teams sender-resolver publish (feat/migrated-user-fanout).
 	handler.publishUsers = func(ctx context.Context, users []model.IUserWithChange) error {

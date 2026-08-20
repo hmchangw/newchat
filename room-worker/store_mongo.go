@@ -133,6 +133,31 @@ func (s *MongoStore) ReconcileMemberCounts(ctx context.Context, roomID string) e
 	return nil
 }
 
+// TeamsMigrationDone reports whether teamsMigrationDoneAt is set on the room.
+func (s *MongoStore) TeamsMigrationDone(ctx context.Context, roomID string) (bool, error) {
+	var doc struct {
+		DoneAt *time.Time `bson:"teamsMigrationDoneAt"`
+	}
+	err := s.rooms.FindOne(ctx, bson.M{"_id": roomID},
+		options.FindOne().SetProjection(bson.M{"teamsMigrationDoneAt": 1})).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read teams migration marker: %w", err)
+	}
+	return doc.DoneAt != nil, nil
+}
+
+// MarkTeamsMigrationDone stamps teamsMigrationDoneAt after a successful reconcile.
+func (s *MongoStore) MarkTeamsMigrationDone(ctx context.Context, roomID string) error {
+	if _, err := s.rooms.UpdateOne(ctx, bson.M{"_id": roomID},
+		bson.M{"$set": bson.M{"teamsMigrationDoneAt": time.Now().UTC()}}); err != nil {
+		return fmt.Errorf("mark teams migration done: %w", err)
+	}
+	return nil
+}
+
 // ApplyMemberCountDelta atomically $inc's userCount/appCount and reports whether
 // a full recompute is now due. The $inc is O(1); the delta is the actual number
 // of subscriptions created/removed by the caller, so it stays correct under
