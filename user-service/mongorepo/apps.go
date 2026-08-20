@@ -64,11 +64,10 @@ func NewAppRepo(db *mongo.Database, opts ...Option) *AppRepo {
 // to avoid IndexOptionsConflict) and the fab_domain_mapping {name, _id} index —
 // compound so it can back the {name:1, _id:1} sort, which a lone {name:1} cannot.
 func (r *AppRepo) EnsureIndexes(ctx context.Context) error {
-	appsIndex := mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, r.apps.Raw(), mongo.IndexModel{
 		Keys:    bson.D{{Key: "assistant.name", Value: 1}},
 		Options: options.Index().SetName("assistant_name_idx"),
-	}
-	if _, err := r.apps.Raw().Indexes().CreateOne(ctx, appsIndex); err != nil {
+	}); err != nil {
 		return fmt.Errorf("ensure apps index: %w", err)
 	}
 	categoryIndex := mongo.IndexModel{

@@ -80,7 +80,8 @@ func TestUserEnsureIndexes_DuplicateAccounts_Integration(t *testing.T) {
 	require.Contains(t, err.Error(), "dedupe preflight")
 }
 
-// A pre-existing non-unique account_1 index conflicts (code 85); error must tell the operator to drop it.
+// A pre-existing non-unique account_1 index is self-healed: EnsureIndexes drops it
+// and recreates it unique (the #159 conflict no longer needs operator action).
 func TestUserEnsureIndexes_NonUniqueAccountConflict_Integration(t *testing.T) {
 	db := testutil.MongoDB(t, "user-service")
 	ctx := context.Background()
@@ -88,9 +89,14 @@ func TestUserEnsureIndexes_NonUniqueAccountConflict_Integration(t *testing.T) {
 		Keys: bson.D{{Key: "account", Value: 1}},
 	})
 	require.NoError(t, err)
-	err = NewUserRepo(db).EnsureIndexes(ctx)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "drop the old non-unique account_1 index")
+
+	require.NoError(t, NewUserRepo(db).EnsureIndexes(ctx), "a non-unique account_1 must be repaired, not fatal")
+
+	// account_1 is now unique: a duplicate account insert must fail.
+	_, err = db.Collection(usersCollection).InsertOne(ctx, bson.M{"_id": "u1", "account": "dup"})
+	require.NoError(t, err)
+	_, err = db.Collection(usersCollection).InsertOne(ctx, bson.M{"_id": "u2", "account": "dup"})
+	require.True(t, mongo.IsDuplicateKeyError(err), "account_1 must be unique after repair")
 }
 
 // The apps index backs assistant.name lookups (GetAppsByAssistants / the bot-DM

@@ -109,14 +109,14 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	// ($setOnInsert keyed on (rid, member.type, member.id), see BulkCreateRoomMembers),
 	// so a redelivered or re-requested member.add matches the existing row and no-ops.
 	// Without this constraint a fresh _id per retry would silently insert duplicates.
-	if _, err := s.roomMembers.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.roomMembers, mongo.IndexModel{
 		Keys:    bson.D{{Key: "rid", Value: 1}, {Key: "member.type", Value: 1}, {Key: "member.id", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
 		return fmt.Errorf("ensure room_members (rid,member.type,member.id) unique index: %w", err)
 	}
 	// Unique logical key for subscriptions. Same retry-idempotency rationale as room_members above.
-	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.subscriptions, mongo.IndexModel{
 		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
@@ -183,7 +183,7 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	// legacy (threadRoomId, userId) index first so (threadRoomId, userAccount) creates
 	// without a key conflict; it may not exist (fresh deploy) — ignore all errors.
 	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.threadSubscriptions, mongo.IndexModel{
 		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
