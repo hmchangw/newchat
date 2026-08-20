@@ -1242,7 +1242,7 @@ state. Can always **remove** from a soft-deleted message; cannot **add** to one.
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | Required. |
-| `shortcode` | string | Required. Bare shortcode without colons (`thumbsup`, `acme_party`). Must match `^[a-z0-9_+-]{1,32}$` after NFC normalisation. Format-only validation — no registration check; clients offer only picker-sourced shortcodes (standard set + local [`emoji.list`](#emojilist)). |
+| `shortcode` | string | Required. The reaction emoji — a bare shortcode without colons (`thumbsup`, `acme_party`) or a raw-unicode emoji (`👍`, ZWJ sequence, flag). No support check: NFC-normalised, rejects only >64 bytes (resource guard) — no character-set, registration, or standard-set check. FE decides renderability. |
 
 #### Success response
 
