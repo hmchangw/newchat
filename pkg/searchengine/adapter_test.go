@@ -433,6 +433,15 @@ func TestAdapter_UpdateByQuery(t *testing.T) {
 		assert.Contains(t, err.Error(), "failure")
 	})
 
+	t.Run("200 with version_conflicts errors (Nak + retry)", func(t *testing.T) {
+		ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			return jsonResponse(200, `{"updated":2,"version_conflicts":1,"timed_out":false,"failures":[]}`), nil
+		}}
+		err := newAdapter(ft).UpdateByQuery(context.Background(), "spotlight-site1", json.RawMessage(okBody))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "version conflict")
+	})
+
 	t.Run("empty index rejected", func(t *testing.T) {
 		a := newAdapter(&fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
 			t.Fatal("no request expected for empty index")

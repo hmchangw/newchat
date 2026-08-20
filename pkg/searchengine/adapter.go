@@ -262,24 +262,33 @@ func (a *httpAdapter) UpdateByQuery(ctx context.Context, index string, body json
 	}
 	defer resp.Body.Close()
 
-	respBody, readErr := io.ReadAll(resp.Body)
+	// Bound the response read: a large per-doc failures array or a rogue proxy
+	// body shouldn't let io.ReadAll allocate without limit.
+	const maxRespBytes = 1 << 20 // 1 MiB
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	if readErr != nil {
 		return fmt.Errorf("update by query: status %d, read body: %w", resp.StatusCode, readErr)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("update by query: status %d, body: %s", resp.StatusCode, respBody)
 	}
-	// A 200 can still carry per-doc failures or a server-side timeout; surface
-	// them so the caller Naks and retries (idempotent), matching the bulk path.
+	// A 200 can still carry per-doc failures, a server-side timeout, or (with
+	// conflicts=proceed) documents skipped on a concurrent version bump — surface
+	// all three so the caller Naks and retries. The retry is safe because the
+	// script guards on roomNameUpdatedAt (idempotent + order-independent).
 	var r struct {
-		TimedOut bool              `json:"timed_out"`
-		Failures []json.RawMessage `json:"failures"`
+		TimedOut         bool              `json:"timed_out"`
+		VersionConflicts int64             `json:"version_conflicts"`
+		Failures         []json.RawMessage `json:"failures"`
 	}
 	if err := json.Unmarshal(respBody, &r); err != nil {
 		return fmt.Errorf("update by query: decode response: %w", err)
 	}
 	if r.TimedOut {
 		return fmt.Errorf("update by query: timed out")
+	}
+	if r.VersionConflicts > 0 {
+		return fmt.Errorf("update by query: %d version conflict(s)", r.VersionConflicts)
 	}
 	if len(r.Failures) > 0 {
 		return fmt.Errorf("update by query: %d failure(s): %s", len(r.Failures), respBody)

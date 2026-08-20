@@ -438,8 +438,13 @@ func TestSpotlightCollection_BuildByQuery_RoomRenamed(t *testing.T) {
 	assert.Equal(t, "r-eng", term["roomId"], "update-by-query must be keyed on roomId")
 	script := req["script"].(map[string]any)
 	assert.Equal(t, "painless", script["lang"])
-	assert.Equal(t, "ctx._source.roomName = params.name", script["source"])
-	assert.Equal(t, "platform", script["params"].(map[string]any)["name"], "the new room name must ride the script params")
+	src := script["source"].(string)
+	assert.Contains(t, src, "roomNameUpdatedAt", "script must guard on the LWW clock")
+	assert.Contains(t, src, "params.ts > stored", "only a strictly-newer rename wins")
+	assert.Contains(t, src, "ctx.op = 'noop'", "a stale rename must no-op")
+	params := script["params"].(map[string]any)
+	assert.Equal(t, "platform", params["name"], "the new room name must ride the script params")
+	assert.EqualValues(t, 5000, params["ts"], "the rename timestamp must ride the script params for the guard")
 }
 
 func TestSpotlightCollection_BuildByQuery_MemberEventFallsThrough(t *testing.T) {
@@ -473,6 +478,13 @@ func TestSpotlightCollection_BuildByQuery_Errors(t *testing.T) {
 		data := makeInboxRenameEvent(t, model.InboxRoomRenamed, model.RoomRenamedInboxPayload{RoomID: "r-eng", Timestamp: 1}, 1)
 		_, _, ok, err := coll.BuildByQuery(data)
 		assert.Error(t, err)
+		assert.False(t, ok)
+	})
+
+	t.Run("missing timestamp", func(t *testing.T) {
+		data := makeInboxRenameEvent(t, model.InboxRoomRenamed, model.RoomRenamedInboxPayload{RoomID: "r-eng", NewName: "x"}, 1)
+		_, _, ok, err := coll.BuildByQuery(data)
+		assert.Error(t, err, "a rename with no timestamp can't guard ordering — reject it")
 		assert.False(t, ok)
 	})
 }

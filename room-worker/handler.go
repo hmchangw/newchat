@@ -2354,9 +2354,17 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 		Payload:    renamedPayload,
 		Timestamp:  now,
 	}
-	internalRenameData, _ := json.Marshal(internalRename)
+	internalRenameData, err := json.Marshal(internalRename)
+	if err != nil {
+		return fmt.Errorf("marshal internal rename event: %w", err)
+	}
+	// Return on failure so the ROOMS message redelivers rather than silently
+	// losing the spotlight re-index (for a single-site room there is no OUTBOX
+	// federate to cover it). Safe to retry: the publish carries a requestID-keyed
+	// dedup id, the sys message a deterministic id, and UpdateRoomName is an
+	// idempotent set — a redelivery re-runs them all without duplicating.
 	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxRoomRenamed), internalRenameData, natsutil.InboxDedupID(ctx, h.siteID, requestID)); err != nil {
-		slog.ErrorContext(ctx, "local inbox room_renamed publish failed", "error", err, "room_id", req.RoomID)
+		return fmt.Errorf("publish local inbox room_renamed: %w", err)
 	}
 	// Relay room_renamed through the OUTBOX ordered lane (not a direct INBOX
 	// publish) so it shares the per-destination FIFO consumer with member_added
