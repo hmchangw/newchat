@@ -100,7 +100,7 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 
 	var chats []Chat
 	for next != "" {
-		body, err := g.getThrottled(ctx, token, next, "list user chats")
+		body, err := g.getThrottled(ctx, token, next, "list user chats", 1<<26) // 64 MiB
 		if err != nil {
 			return nil, err
 		}
@@ -124,28 +124,28 @@ func (g *graphClient) ListUserChats(ctx context.Context, userID string, from, to
 // attempt so the rest of the pool still backs off after this user fails. Each
 // throttle response emits a WARN log (operation identifies the caller) carrying
 // the status, Retry-After, and computed backoff — never the token or endpoint.
-func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operation string) ([]byte, error) {
+func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operation string, maxBytes int64) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
 		if err := g.waitThrottle(ctx); err != nil {
 			return nil, err
 		}
 		req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
-			return nil, fmt.Errorf("build chats request: %w", err)
+			return nil, fmt.Errorf("build %s request: %w", operation, err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := g.httpClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("get chats: %w", err)
+			return nil, fmt.Errorf("%s: %w", operation, err)
 		}
 		// Bound the read so a runaway or hostile response can't exhaust memory;
-		// real list-chats pages ($top=50, members expanded) are far smaller.
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<26)) // 64 MiB
+		// real Graph pages are far smaller.
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			return nil, fmt.Errorf("close chats response: %w", closeErr)
+			return nil, fmt.Errorf("close %s response: %w", operation, closeErr)
 		}
 		if readErr != nil {
-			return nil, fmt.Errorf("read chats response: %w", readErr)
+			return nil, fmt.Errorf("read %s response: %w", operation, readErr)
 		}
 		throttled := resp.StatusCode == http.StatusTooManyRequests ||
 			resp.StatusCode == http.StatusServiceUnavailable
@@ -179,9 +179,9 @@ func (g *graphClient) getThrottled(ctx context.Context, token, endpoint, operati
 			}
 			_ = json.Unmarshal(body, &graphErr)
 			if graphErr.Error.Code != "" {
-				return nil, fmt.Errorf("get chats: graph returned status %d (%s)", resp.StatusCode, graphErr.Error.Code)
+				return nil, fmt.Errorf("%s: graph returned status %d (%s)", operation, resp.StatusCode, graphErr.Error.Code)
 			}
-			return nil, fmt.Errorf("get chats: graph returned status %d", resp.StatusCode)
+			return nil, fmt.Errorf("%s: graph returned status %d", operation, resp.StatusCode)
 		}
 	}
 }
