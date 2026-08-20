@@ -342,42 +342,19 @@ func (h *Handler) federate(ctx context.Context, roomID, destSiteID string, event
 	return outbox.Publish(ctx, h.publish, h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts)
 }
 
-// rotateAndFanOut generates v+1, fans it out to survivors, then commits via Rotate.
-// Fan-out before Rotate is intentional so survivors hold v+1 before broadcast-worker switches.
-// survivorAccounts is a pre-computed post-deletion snapshot of the room's member accounts.
+// rotateAndFanOut commits before fan-out; a predicted current+1 mislabels keys when removals race.
 func (h *Handler) rotateAndFanOut(ctx context.Context, roomID string, currentPair *roomkeystore.VersionedKeyPair, survivorAccounts []string) error {
 	newPair, err := roomkeystore.GenerateKeyPair()
 	if err != nil {
 		return fmt.Errorf("generate room key: %w", err)
 	}
-	predictedVersion := 0
-	if currentPair != nil {
-		predictedVersion = currentPair.Version + 1
-	}
-	versioned := &roomkeystore.VersionedKeyPair{Version: predictedVersion, KeyPair: *newPair}
-	h.fanOutRoomKeyToSurvivors(ctx, roomID, versioned, survivorAccounts)
 
-	if currentPair == nil {
-		if _, err := h.keyStore.Set(ctx, roomID, *newPair); err != nil {
-			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Set")))
-			return fmt.Errorf("store room key (no prior): %w", err)
-		}
-		return nil
+	committed, err := roomkeystore.CommitRotation(ctx, h.keyStore, roomID, currentPair, newPair)
+	if err != nil {
+		return err
 	}
-	if _, err := h.keyStore.Rotate(ctx, roomID, *newPair); err != nil {
-		if errors.Is(err, roomkeystore.ErrNoCurrentKey) {
-			// Fan-out already committed survivors to predictedVersion; persist at
-			// the same version so broadcast-worker reads under the same key clients
-			// hold. Using Set here would stamp v0 and create a version mismatch.
-			if setErr := h.keyStore.SetWithVersion(ctx, roomID, *newPair, predictedVersion); setErr != nil {
-				roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "SetWithVersion")))
-				return fmt.Errorf("store room key (fallback): %w", setErr)
-			}
-			return nil
-		}
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Rotate")))
-		return fmt.Errorf("rotate room key: %w", err)
-	}
+
+	h.fanOutRoomKeyToSurvivors(ctx, roomID, committed, survivorAccounts)
 	return nil
 }
 

@@ -35,6 +35,9 @@ type config struct {
 	// RoomKeyGracePeriod governs how long a rotated-out room key stays readable (roomkeystore.NewMongoStore); matches room-service/room-worker.
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
 
+	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
+	RoomKeyRetiredTTL time.Duration `env:"ROOM_KEY_RETIRED_TTL" envDefault:"20m"`
+
 	MaxConcurrency int    `env:"MAX_CONCURRENCY" envDefault:"200"`
 	HealthAddr     string `env:"HEALTH_ADDR"     envDefault:":8081"`
 	PProfEnabled   bool   `env:"PPROF_ENABLED"   envDefault:"false"`
@@ -80,10 +83,10 @@ func run() error {
 		return fmt.Errorf("ensure store indexes: %w", err)
 	}
 
-	if cfg.RoomKeyGracePeriod <= 0 {
-		return fmt.Errorf("ROOM_KEY_GRACE_PERIOD must be a positive duration, got %s", cfg.RoomKeyGracePeriod)
+	keyStore, err := roomkeystore.OpenMongo(ctx, mc.Database(cfg.MongoDB), cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL)
+	if err != nil {
+		return fmt.Errorf("open room key store: %w", err)
 	}
-	keyStore := roomkeystore.NewMongoStore(mc.Database(cfg.MongoDB).Collection("rooms"), cfg.RoomKeyGracePeriod)
 	keySender := roomkeysender.NewSender(nc.NatsConn())
 
 	// pkg/outbox.Publish wants a raw NATS publish with msgID as Nats-Msg-Id header.

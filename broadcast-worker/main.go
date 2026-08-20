@@ -47,16 +47,18 @@ type config struct {
 	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: reads only; writes always hit the primary. secondaryPreferred
 	// offloads reads (a just-joined member is recovered via history).
-	MongoReadPreference  string          `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
-	MaxWorkers           int             `env:"MAX_WORKERS"               envDefault:"100"`
-	LastMsgFlushInterval time.Duration   `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
-	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL         time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	RoomMetaCacheSize    int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL     time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomKeyGracePeriod   time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	RoomKeyCacheTTL      time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
-	RoomKeyCacheSize     int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	MongoReadPreference  string        `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	MaxWorkers           int           `env:"MAX_WORKERS"               envDefault:"100"`
+	LastMsgFlushInterval time.Duration `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
+	UserCacheSize        int           `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL         time.Duration `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	RoomMetaCacheSize    int           `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL     time.Duration `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomKeyGracePeriod   time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	RoomKeyCacheTTL      time.Duration `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
+	RoomKeyCacheSize     int           `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	// RoomKeyRetiredTTL: read only to fail fast when too short for this cache's TTL.
+	RoomKeyRetiredTTL    time.Duration   `env:"ROOM_KEY_RETIRED_TTL" envDefault:"20m"`
 	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
 	ValkeyAddrs          []string        `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
@@ -217,6 +219,11 @@ func main() {
 		// Caching beyond the grace period could serve a rotated-out key that clients can no longer decrypt; refuse to cache rather than risk it.
 		slog.Warn("room-key cache disabled: TTL must be below key grace period",
 			"ttl", cfg.RoomKeyCacheTTL, "grace_period", cfg.RoomKeyGracePeriod)
+	case !retiredTTLSafe(cfg.RoomKeyRetiredTTL, cfg.RoomKeyCacheTTL):
+		// Too short a retention breaks the client's later fetch; refuse to start.
+		slog.Error("ROOM_KEY_RETIRED_TTL must be at least twice ROOM_KEY_CACHE_TTL",
+			"retired_ttl", cfg.RoomKeyRetiredTTL, "cache_ttl", cfg.RoomKeyCacheTTL)
+		os.Exit(1)
 	default:
 		keyCache = NewCachedKeyProvider(keyStore, cfg.RoomKeyCacheSize, cfg.RoomKeyCacheTTL)
 		keyProvider = keyCache
