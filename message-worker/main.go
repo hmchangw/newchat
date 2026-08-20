@@ -30,7 +30,6 @@ import (
 )
 
 type config struct {
-	ServiceName string `env:"OTEL_SERVICE_NAME"    envDefault:"unknown-service"`
 	// Mode selects which stream/consumer this pod binds: "default" runs the live
 	// .created feed off MESSAGES-CANONICAL; "teams" runs the Teams-migration batch
 	// feed off MESSAGES-TEAMS. Two deploys of the same binary, gated by env only.
@@ -93,7 +92,7 @@ func main() {
 		os.Exit(1)
 	}
 	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	domainMetrics := newPersistenceMetrics(sdk.MeterProvider().Meter("message-worker"))
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
@@ -186,7 +185,7 @@ func main() {
 
 	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode, cfg.SiteID)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Site:   cfg.SiteID,
 		Stream: streamName, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)

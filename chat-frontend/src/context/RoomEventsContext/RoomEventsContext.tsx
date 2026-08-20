@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useReducer,
   useRef,
@@ -24,8 +25,10 @@ import {
   reorderChatlistSections,
   setChatlistSectionSortMode,
   moveChat,
+  subToRoom,
 } from '@/api'
 import { deriveSidebarSections } from '@/lib/chatlist'
+import { loadSubscriptionCache, saveSubscriptionCache } from '@/lib/subscriptionCache'
 import type {
   ChatlistState,
   ChatlistSortMode,
@@ -182,6 +185,42 @@ interface RoomEventsContextValue {
 
 const RoomEventsContext = createContext<RoomEventsContextValue | null>(null)
 
+/** Trailing-debounce window for the cache write. The persisted slices only
+ *  change on subscription/chatlist events, not on message traffic, so this
+ *  mostly just coalesces a burst of `subscription.update`s into one write. */
+const CACHE_WRITE_DEBOUNCE_MS = 1000
+
+/**
+ * Seed the reducer from the browser cache so the sidebar's first paint
+ * already has rooms.
+ *
+ * Replays the cached data through the SAME actions the network bootstrap
+ * uses, rather than assembling a state object by hand — cached state and
+ * fetched state are then identical in shape by construction, with no
+ * parallel hydration path to drift. Two consequences fall out of that:
+ * `unreadCount` zero-inits (it's a session-local counter no fetch would
+ * ever correct, so a persisted value would be stale forever) and
+ * `hasMention` comes from the subscription record, which is server-canonical.
+ */
+function hydrateFromCache(user: Nats['user']): RoomEventsState {
+  const cached = loadSubscriptionCache(user)
+  if (!cached) return initialState as RoomEventsState
+  const rooms = Object.values(cached.subscriptions).map((s) => subToRoom(s, user.siteId))
+  const seeded = roomEventsReducer(initialState, {
+    type: 'BUCKETS_LOADED',
+    favoriteIds: cached.favoriteIds,
+    appIds: cached.appIds,
+    channelDmIds: cached.channelDmIds,
+    subscriptions: cached.subscriptions,
+    rooms,
+  })
+  if (!cached.chatlist) return seeded as RoomEventsState
+  return roomEventsReducer(seeded, {
+    type: 'CHATLIST_LOADED',
+    chatlist: cached.chatlist,
+  }) as RoomEventsState
+}
+
 export function RoomEventsProvider({ children }: { children: ReactNode }) {
   // `useNats()` returns `never` to TS because NatsContext.jsx does
   // `createContext(null)` without annotations. Cast here so downstream
@@ -191,7 +230,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
   const nats = useNats() as unknown as Nats
   const { user } = nats
   const { decrypt, ensureKey, seedKeys } = useRoomKeys()
-  const [state, dispatch] = useReducer(roomEventsReducer, initialState) as unknown as [
+  const [state, dispatch] = useReducer(roomEventsReducer, user, hydrateFromCache) as unknown as [
     RoomEventsState,
     Dispatch<{ type: string; [k: string]: unknown }>,
   ]
@@ -231,6 +270,23 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
     ensureKey,
     seedKeys,
   )
+
+  // Write-through to the browser cache. Keyed by reference on the five
+  // persisted slices: message traffic churns roomState / summaries /
+  // msgRecvSeq but never these, so this stays quiet during a busy session.
+  //
+  // The identity check is the teardown guard. `RESET` returns the
+  // `initialState` OBJECT, so `=== initialState.subscriptions` is an exact
+  // "we've been reset" test — without it, logout (and StrictMode's
+  // double-mount) would persist the empty post-RESET state over a good cache.
+  const { subscriptions, favoriteIds, appIds, channelDmIds, chatlist } = state
+  useEffect(() => {
+    if (subscriptions === initialState.subscriptions) return undefined
+    const timer = setTimeout(() => {
+      saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds, channelDmIds, chatlist })
+    }, CACHE_WRITE_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [user, subscriptions, favoriteIds, appIds, channelDmIds, chatlist])
 
   const loadHistory = useCallback(
     async (roomId: string) => {

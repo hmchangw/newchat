@@ -155,7 +155,7 @@ func requestMetricFor(t *testing.T) (natsmetrics.Publisher, func(outcome string)
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	pub := natsmetrics.NewFromProvider(mp).Publisher("message-gatekeeper", "s1")
+	pub := natsmetrics.NewFromProvider(mp).Publisher("s1")
 	return pub, func(outcome string) int64 {
 		t.Helper()
 		var rm metricdata.ResourceMetrics

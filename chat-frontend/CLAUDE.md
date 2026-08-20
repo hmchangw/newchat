@@ -233,8 +233,20 @@ dispatch({ type: 'SOMETHING_LOADED', data: resp })
 ### Subscription state
 
 `state.subscriptions[roomId]` is the canonical per-user-per-room record (mirrors `pkg/model.Subscription` / `DMSubscription`). Populated by:
+- **Cache hydration** (first render — `lib/subscriptionCache` replayed through `BUCKETS_LOADED` + `CHATLIST_LOADED` in `useReducer`'s lazy initializer)
 - `BUCKETS_LOADED` (initial — three user-service RPCs in parallel via `fetchSidebarBuckets`)
 - `SUBSCRIPTION_UPSERTED` (live deltas from `subscription.update` events — merges partial payloads into the prior record)
+
+### Subscription cache (warm start)
+
+`lib/subscriptionCache` persists `subscriptions` + the three bucket id sets + `chatlist` to localStorage under one key, stamped with the owning `account`/`siteId`. localStorage (not IndexedDB) because the read must be **synchronous** — hydration runs inside `useReducer`'s lazy initializer so the sidebar's first paint already has rooms. An async store would push hydration into an effect and reintroduce the empty first frame.
+
+- Hydration replays cached data through the **same actions** the network path uses, so cached and fetched state are identical in shape by construction. `summaries` are derived (via `subToRoom`), never persisted.
+- `room.privateKey` is stripped before writing — room E2E keys stay memory-only in `RoomKeysContext`. Warm-painted encrypted rooms show the decryption placeholder until the fetch re-seeds keys.
+- Write-through is a 1s trailing debounce keyed by reference on the five persisted slices, guarded by `state.subscriptions === initialState.subscriptions` (an exact "we've been RESET" test) so logout and StrictMode remounts can't blank the cache.
+- The cache survives logout, keyed per account; a different account overwrites it.
+
+**Failed fetches are never destructive.** `fetchSidebarBuckets` reports a `failures: SidebarBucket[]` array (an RPC rejected, a later page failed, or the server never cleared `hasMore`). `useRoomSubscriptions` branches on it: all three failed → `ROOMS_FAILED` only, keeping what's on screen; one or two failed → `BUCKETS_LOADED` with `merge: true`, **omitting** the failed buckets' id arrays (the reducer reads presence as "this bucket is authoritative"); none failed → replace wholesale, which is the only path allowed to delete rooms.
 
 Consumers read via `useSubscription(roomId): DMSubscription | undefined`. Use it for:
 - Permission gating (`sub.roles.includes('owner')`)

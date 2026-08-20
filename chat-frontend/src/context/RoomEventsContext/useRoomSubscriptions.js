@@ -27,6 +27,27 @@ function isDocumentVisible() {
   return typeof document === 'undefined' || document.visibilityState !== 'hidden'
 }
 
+/** Which `SidebarBuckets` id-array each bucket owns. A bucket that failed
+ *  is OMITTED from the merge action rather than sent empty — the reducer
+ *  reads presence as "this bucket is authoritative". */
+const BUCKET_ID_FIELD = {
+  favorites: 'favoriteIds',
+  apps: 'appIds',
+  rooms: 'channelDmIds',
+}
+
+const BUCKET_COUNT = Object.keys(BUCKET_ID_FIELD).length
+
+/** Build the BUCKETS_LOADED action for a bootstrap result. A clean fetch
+ *  replaces wholesale (so rooms left while away disappear); a partial one
+ *  merges and drops the failed buckets' id arrays. */
+function bucketsLoadedAction({ failures: _failures, ...buckets }, failures) {
+  if (failures.length === 0) return { type: 'BUCKETS_LOADED', ...buckets }
+  const action = { type: 'BUCKETS_LOADED', merge: true, ...buckets }
+  for (const bucket of failures) delete action[BUCKET_ID_FIELD[bucket]]
+  return action
+}
+
 /**
  * Owns every backend subscription + the initial-room-list fetch that
  * keeps RoomEventsContext.state in sync with the server, AND owns the
@@ -550,17 +571,37 @@ export function useRoomSubscriptions(
       })
     })
 
+    // Rooms restored from the browser cache are on screen already, but
+    // nothing is listening to them yet — the channel-sub loop below only
+    // runs once the bootstrap resolves. Open them now so a warm-painted
+    // channel receives live messages immediately. openChannelSub is
+    // idempotent per (roomId, crossSite), so the bootstrap's loop no-ops
+    // for these and re-opens any whose crossSite it corrects.
+    for (const sub of Object.values(stateRef.current.subscriptions)) {
+      if (sub.roomType !== 'channel') continue
+      openChannelSub(sub.roomId, subToRoom(sub, user.siteId).crossSite)
+    }
+
     // Bootstrap the sidebar via the three user-service subscription
     // RPCs (favorites / apps / channel+dm). Each reply embeds the room
     // metadata inline, so `buckets.rooms` is the canonical full list —
-    // no separate `rooms.list` RPC is needed. Per-bucket failures
-    // degrade to empty (fetchSidebarBuckets uses Promise.allSettled);
-    // a total failure leaves the sidebar empty.
+    // no separate `rooms.list` RPC is needed.
     const loadSidebar = () => fetchSidebarBuckets(liveNats)
       .then((buckets) => {
         // Generation check, not just cancelledRef: a slow bootstrap from a
         // prior login must not seed keys or open subs into the new session.
         if (!isCurrent()) return
+
+        // A degraded bucket returns whatever it managed to fetch, which is
+        // indistinguishable from "the user has no rooms" — so an incomplete
+        // result must never be allowed to delete anything. Nothing at all
+        // came back: keep what's on screen (cache or a prior fetch) and
+        // report the failure instead of blanking the sidebar.
+        const failures = buckets.failures ?? []
+        if (failures.length === BUCKET_COUNT) {
+          safeDispatch({ type: 'ROOMS_FAILED', error: 'Could not load your chats.' })
+          return
+        }
         // Dev-only: seed sample sections + membership onto the loaded subs so
         // the grouped sidebar has populated custom sections to demo. No-op in
         // the live path (seedChatlistDemo returns null unless CHATLIST_MOCK).
@@ -573,7 +614,7 @@ export function useRoomSubscriptions(
             if (buckets.subscriptions[roomId]) buckets.subscriptions[roomId].favorite = true
           }
         }
-        safeDispatch({ type: 'BUCKETS_LOADED', ...buckets })
+        safeDispatch(bucketsLoadedAction(buckets, failures))
         // Load the section-definition overlay (chatlist.get). In mock mode
         // this returns the seeded sections; live, the backend's overlay.
         // Wrapped in Promise.resolve so it never blocks the channel-sub setup

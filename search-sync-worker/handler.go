@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
@@ -46,6 +47,7 @@ type Handler struct {
 	collection Collection
 	bulkSize   int // soft cap on buffered actions; callers drive flush via ActionCount()
 	tracer     trace.Tracer
+	metrics    *collectionMetrics // optional, set by main; nil-safe methods make an unwired handler a no-op
 	mu         sync.Mutex
 	pending    []pendingMsg
 	actions    []searchengine.BulkAction
@@ -85,6 +87,7 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 	if err != nil {
 		slog.ErrorContext(ctx, "decode payload", "error", err, "subject", msg.Subject(), "consumer", h.collection.ConsumerName())
 		natsutil.Ack(msg, "decode payload failed")
+		h.metrics.recordMessages(ctx, dispAckedPoison, 1)
 		return
 	}
 	actions, err := h.collection.BuildAction(data)
@@ -93,11 +96,13 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 		// good, so this line is the only trace; keep it identifying the message.
 		slog.ErrorContext(ctx, "build action", "error", err, "subject", msg.Subject(), "consumer", h.collection.ConsumerName())
 		natsutil.Ack(msg, "build action failed")
+		h.metrics.recordMessages(ctx, dispAckedPoison, 1)
 		return
 	}
 
 	if len(actions) == 0 {
 		natsutil.Ack(msg, "filtered, no actions")
+		h.metrics.recordMessages(ctx, dispAckedFiltered, 1)
 		return
 	}
 
@@ -128,9 +133,13 @@ func (h *Handler) Flush(ctx context.Context) {
 	bulkCtx, span := h.startFlushSpan(ctx, pending, len(actions))
 	defer span.End()
 
+	start := time.Now()
 	results, err := h.store.Bulk(bulkCtx, actions)
+	elapsed := time.Since(start).Seconds()
 	if err != nil {
 		slog.Error("bulk request failed", "error", err, "actions", len(actions))
+		h.metrics.recordFlush(bulkCtx, flushRequestFailed, elapsed, len(actions))
+		h.metrics.recordMessages(bulkCtx, dispNakkedRequestFailed, len(pending))
 		nakAll(pending, "bulk request failed")
 		return
 	}
@@ -148,31 +157,44 @@ func (h *Handler) Flush(ctx context.Context) {
 		//     is at worst a no-op.
 		// No duplicate processing, no lost events.
 		slog.Error("bulk result count mismatch", "expected", len(actions), "actual", len(results))
+		h.metrics.recordFlush(bulkCtx, flushResultMismatch, elapsed, len(actions))
+		h.metrics.recordMessages(bulkCtx, dispNakkedResultMismatch, len(pending))
 		nakAll(pending, "bulk result count mismatch")
 		return
 	}
 
+	h.metrics.recordFlush(bulkCtx, flushSuccess, elapsed, len(actions))
+
+	var acked, nakked int
 	for _, p := range pending {
 		allOK := true
 		for i := p.actionStart; i < p.actionStart+p.actionCount; i++ {
 			if searchengine.IsBulkItemSuccess(actions[i].Action, results[i]) {
 				continue
 			}
+			h.metrics.recordItemFailure(bulkCtx, string(actions[i].Action), results[i].Status)
+			if allOK {
+				// Log only the first failed item per message; the counter above still
+				// sees every failed action.
+				slog.Error("bulk item failed",
+					"status", results[i].Status,
+					"error", results[i].Error,
+					"docID", actions[i].DocID,
+					"index", actions[i].Index,
+				)
+			}
 			allOK = false
-			slog.Error("bulk item failed",
-				"status", results[i].Status,
-				"error", results[i].Error,
-				"docID", actions[i].DocID,
-				"index", actions[i].Index,
-			)
-			break
 		}
 		if allOK {
+			acked++
 			natsutil.Ack(p.jsMsg, "bulk actions succeeded")
 		} else {
+			nakked++
 			natsutil.Nak(p.jsMsg, "bulk action failed")
 		}
 	}
+	h.metrics.recordMessages(bulkCtx, dispAckedSuccess, acked)
+	h.metrics.recordMessages(bulkCtx, dispNakkedItemFailed, nakked)
 }
 
 func (h *Handler) startFlushSpan(ctx context.Context, pending []pendingMsg, actionCount int) (context.Context, trace.Span) {

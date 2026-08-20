@@ -96,7 +96,7 @@ func attrs(dp metricdata.DataPoint[int64]) map[string]string {
 
 func TestConsumerLoopGaugeTransitions(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "broadcast-worker", Site: "s1", Stream: "MESSAGES_CANONICAL_s1", Consumer: "broadcast-worker"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "MESSAGES_CANONICAL_s1", Consumer: "broadcast-worker"})
 
 	c.LoopStopped(context.Background()) // iterator creation failure must expose zero
 	c.LoopStarted(context.Background())
@@ -127,7 +127,7 @@ func TestConsumerLoopFailureUsesBoundedReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, reader := newTestMetrics(t)
-			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+			c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			c.LoopStarted(context.Background())
 
 			c.LoopFailed(context.Background(), tt.err)
@@ -145,7 +145,7 @@ func TestConsumerLoopFailureUsesBoundedReason(t *testing.T) {
 
 func TestConsumerLoopFailureAfterShutdownDoesNotReportTerminalFailure(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 	c.LoopStopped(context.Background())
 
 	c.LoopFailed(context.Background(), jetstream.ErrConsumerDeleted)
@@ -174,7 +174,7 @@ func TestTrackedMessageDispositionAndRedelivery(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, reader := newTestMetrics(t)
-			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+			c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			tracked := c.Track(context.Background(), tt.msg, EventCreated, 5)
 			_ = tt.dispose(tracked)
 			tracked.Finish(context.Background()) // must not double count
@@ -200,7 +200,7 @@ func TestTrackedMessageDispositionAndRedelivery(t *testing.T) {
 
 func TestTrackedMessageContextAndCancellation(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 	tracked := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 5}}, EventCreated, 5)
 	ctx := tracked.Context(context.Background())
 
@@ -223,7 +223,7 @@ func TestTrackedMessageContextAndCancellation(t *testing.T) {
 
 func TestTerminalFailureAndMaxDeliver(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "message-worker", Site: "s1", Stream: "MESSAGES_CANONICAL_s1", Consumer: "message-worker"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "MESSAGES_CANONICAL_s1", Consumer: "message-worker"})
 
 	permanent := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}}, EventUnknown, 5)
 	permanent.MarkTerminal(context.Background(), TerminalPermanent)
@@ -243,7 +243,7 @@ func TestTerminalFailureAndMaxDeliver(t *testing.T) {
 
 func TestPublishAndRequestMetrics(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	p := m.Publisher("notification-worker", "s1")
+	p := m.Publisher("s1")
 	p.Attempt(context.Background(), DestinationPush, OperationPushPublish, nil)
 	p.Attempt(context.Background(), DestinationPush, OperationPushPublish, nats.ErrNoResponders)
 	p.Retry(context.Background(), DestinationPush, OperationPushPublish)
@@ -260,7 +260,7 @@ func TestPublishAndRequestMetrics(t *testing.T) {
 
 func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	p := m.Publisher("notification-worker", "s1")
+	p := m.Publisher("s1")
 	p.Attempt(context.Background(), DestinationKind("dynamic.destination"), Operation("dynamic.operation"), nil)
 	p.Request(context.Background(), Operation("another.dynamic.operation"), time.Millisecond, nil)
 

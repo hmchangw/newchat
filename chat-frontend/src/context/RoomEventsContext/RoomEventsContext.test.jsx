@@ -24,6 +24,11 @@ vi.mock('@/context/RoomKeysContext', () => ({
   useRoomKeys: () => currentRoomKeysMock,
 }))
 
+// The provider now write-throughs its subscription state to localStorage and
+// hydrates from it on mount. Without this, one test's persisted sidebar would
+// warm-start the next one's provider.
+beforeEach(() => window.localStorage.clear())
+
 /** Turn an inline "room-shaped" fixture into a subscription record that
  *  the new bootstrap (3 subscription RPCs) returns. The real user-service
  *  now embeds room metadata under `room` (not top-level), so this helper
