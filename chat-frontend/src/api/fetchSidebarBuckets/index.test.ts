@@ -163,3 +163,65 @@ describe('fetchSidebarBuckets', () => {
     expect(warn).toHaveBeenCalled()
   })
 })
+
+describe('fetchSidebarBuckets: failure reporting', () => {
+  it('reports no failures when every bucket resolves', async () => {
+    const request = pagingRequest({
+      current: [{ subscriptions: [sub('r1')], hasMore: false }],
+      apps: [{ subscriptions: [], hasMore: false }],
+      rooms: [{ subscriptions: [sub('r1')], hasMore: false }],
+    })
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures).toEqual([])
+  })
+
+  it('names the bucket whose first page rejects', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const request = vi.fn(async (_subject: string, body: Record<string, unknown>) => {
+      if (body.type === 'apps') throw new Error('nats timeout')
+      return { subscriptions: [sub('r1')], hasMore: false }
+    })
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures).toEqual(['apps'])
+  })
+
+  it('names every bucket when the whole bootstrap fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const request = vi.fn(async () => {
+      throw new Error('disconnected')
+    })
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures.sort()).toEqual(['apps', 'favorites', 'rooms'])
+  })
+
+  it('marks a bucket degraded when a LATER page rejects', async () => {
+    // The pages already fetched are kept, but a truncated bucket must not be
+    // allowed to delete the rooms its missing pages would have listed.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const request = vi.fn(async (_subject: string, body: Record<string, unknown>) => {
+      if (body.type !== 'rooms') return { subscriptions: [], hasMore: false }
+      if ((body.offset as number) === 0) return { subscriptions: [sub('r1')], hasMore: true }
+      throw new Error('page 2 died')
+    })
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures).toEqual(['rooms'])
+    expect(buckets.channelDmIds).toEqual(['r1'])
+  })
+
+  it('marks a bucket degraded when the server never clears hasMore', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const request = vi.fn(async () => ({ subscriptions: [sub('r1')], hasMore: true }))
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures.sort()).toEqual(['apps', 'favorites', 'rooms'])
+  }, 20000)
+})

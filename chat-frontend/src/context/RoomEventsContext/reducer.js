@@ -354,6 +354,47 @@ export function roomEventsReducer(state, action) {
     }
     case 'BUCKETS_LOADED': {
       const subs = action.subscriptions ?? {}
+      // Seed only rooms with no preview yet. A live message can land before
+      // fetchSidebarBuckets resolves (the DM subscription goes live first), and
+      // that message is NEWER than this list snapshot — overwriting it would show
+      // an older message in the sidebar than the room itself displays.
+      // Shared by both paths: a degraded bootstrap still carries real previews
+      // for the buckets it did reach.
+      let previews = state.previews
+      for (const [roomId, sub] of Object.entries(subs)) {
+        if (previews[roomId]) continue
+        const preview = previewFromWire(sub?.room?.previewMessage)
+        if (!preview) continue
+        if (previews === state.previews) previews = { ...state.previews }
+        previews[roomId] = preview
+      }
+      if (action.merge) {
+        // Degraded-bootstrap path: one or two `subscription.list` buckets
+        // failed, so this payload is INCOMPLETE and must not be read as
+        // "everything else is gone". Upsert what arrived and leave the
+        // rest — only a complete fetch (replace, below) may delete.
+        const byId = new Map(state.summaries.map((s) => [s.id, s]))
+        for (const r of action.rooms ?? []) {
+          const prev = byId.get(r.id)
+          // Room metadata is server-fresh; unread bookkeeping is
+          // session-local and the payload has no opinion on it.
+          const base = prev
+            ? { ...toSummary(r), unreadCount: prev.unreadCount, hasMention: prev.hasMention, mentionAll: prev.mentionAll }
+            : toSummary(r)
+          byId.set(r.id, mergeSubscriptionIntoSummary(base, subs[r.id]))
+        }
+        return {
+          ...state,
+          summaries: sortByLastMsgDesc([...byId.values()]),
+          // A failed bucket is OMITTED by the caller rather than sent
+          // empty, so presence alone marks a bucket authoritative.
+          favoriteIds: action.favoriteIds ? new Set(action.favoriteIds) : state.favoriteIds,
+          appIds: action.appIds ? new Set(action.appIds) : state.appIds,
+          channelDmIds: action.channelDmIds ? new Set(action.channelDmIds) : state.channelDmIds,
+          subscriptions: { ...state.subscriptions, ...subs },
+          previews,
+        }
+      }
       let summaries
       if (action.rooms) {
         // Cold-start path: rooms are derived from the three subscription
@@ -372,18 +413,6 @@ export function roomEventsReducer(state, action) {
         summaries = state.summaries.map((s) =>
           subs[s.id] ? mergeSubscriptionIntoSummary(s, subs[s.id]) : s
         )
-      }
-      // Seed only rooms with no preview yet. A live message can land before
-      // fetchSidebarBuckets resolves (the DM subscription goes live first), and
-      // that message is NEWER than this list snapshot — overwriting it would show
-      // an older message in the sidebar than the room itself displays.
-      let previews = state.previews
-      for (const [roomId, sub] of Object.entries(subs)) {
-        if (previews[roomId]) continue
-        const preview = previewFromWire(sub?.room?.previewMessage)
-        if (!preview) continue
-        if (previews === state.previews) previews = { ...state.previews }
-        previews[roomId] = preview
       }
       return {
         ...state,
