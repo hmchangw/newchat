@@ -368,15 +368,26 @@ func dispatchPeak(t *testing.T, maxInFlight, rate int, window time.Duration, tri
 	return best
 }
 
-// pacedCeilingRate has to stay out of reach of the host: only then does each
-// path report its own ceiling instead of the target they share. See
-// TestGenerator_PacedDispatchReportsAReachableTarget for what a reachable
-// target turns this measurement into.
+// pacedCeilingProbeRate is only used to measure what the serial ticker manages
+// on this host; the rate the two paths are then compared at is derived from
+// that measurement. pacedCeilingHeadroom is how far past the measured plateau
+// that derived rate sits.
 const (
-	pacedCeilingRate   = 1_000_000
-	pacedCeilingWindow = 200 * time.Millisecond
-	pacedCeilingTrials = 3
+	pacedCeilingProbeRate = 100_000
+	pacedCeilingHeadroom  = 20
+	pacedCeilingWindow    = 200 * time.Millisecond
+	pacedCeilingTrials    = 3
 )
+
+// pacedCeilingRateFrom turns a dispatch count measured over window into a rate
+// headroom times higher, falling back to the probe rate when the measurement
+// was empty.
+func pacedCeilingRateFrom(measured int, window time.Duration, headroom int) int {
+	if measured <= 0 {
+		return pacedCeilingProbeRate
+	}
+	return int(float64(measured)/window.Seconds()) * headroom
+}
 
 // Regression for the single-ticker RPS ceiling: the legacy serial path
 // (MaxInFlight=0) releases one event per delivered tick, and the runtime cannot
@@ -384,18 +395,31 @@ const (
 // pacer releases rate*interval events per coarse tick and must out-dispatch it
 // by a wide margin. A relative comparison (same process, back to back) cancels
 // host-speed and race-detector overhead.
+//
+// The rate they are compared at is measured, not chosen. Both counts are only
+// ceilings while the target stays out of reach — a target the paced path can
+// reach reports the target instead, and the comparison stops being about the
+// pacer (see TestGenerator_PacedDispatchReportsAReachableTarget). A constant
+// cannot hold that open: the fastest host observed drove the serial ticker to
+// 78k/s, which is above the rate the slowest one could dispatch at all, so no
+// single number is simultaneously out of reach on one and in reach on the
+// other. Deriving it from this host's own plateau is.
 func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
-	target := int(float64(pacedCeilingRate) * pacedCeilingWindow.Seconds())
+	plateau := dispatchPeak(t, 0, pacedCeilingProbeRate, pacedCeilingWindow, pacedCeilingTrials)
+	require.Positive(t, plateau, "the serial ticker dispatched nothing to scale from")
+	rate := pacedCeilingRateFrom(plateau, pacedCeilingWindow, pacedCeilingHeadroom)
 
-	serial := dispatchPeak(t, 0, pacedCeilingRate, pacedCeilingWindow, pacedCeilingTrials)
-	paced := dispatchPeak(t, 5000, pacedCeilingRate, pacedCeilingWindow, pacedCeilingTrials)
+	serial := dispatchPeak(t, 0, rate, pacedCeilingWindow, pacedCeilingTrials)
+	paced := dispatchPeak(t, 5000, rate, pacedCeilingWindow, pacedCeilingTrials)
 
 	require.Positive(t, serial)
-	require.Less(t, paced, target,
-		"the target is within this host's reach, so the margin below measures the target rather than the pacer: raise pacedCeilingRate")
+	t.Logf("plateau=%d derived rate=%d serial=%d paced=%d", plateau, rate, serial, paced)
+	require.Less(t, paced, int(float64(rate)*pacedCeilingWindow.Seconds()),
+		"this host dispatches more than %dx what its own serial ticker manages, so the margin below measures the target rather than the pacer: raise pacedCeilingHeadroom",
+		pacedCeilingHeadroom)
 	assert.Greater(t, float64(paced), float64(serial)*1.3,
 		"batched pacer (%d) should out-dispatch the serial ticker (%d) at %d rps",
-		paced, serial, pacedCeilingRate)
+		paced, serial, rate)
 }
 
 // The pacer releases rate*elapsed events and no more, so a target the host can
@@ -438,6 +462,32 @@ func TestParseInjectMode(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// The rate the ceiling comparison runs at is derived from what the serial
+// ticker managed on the host running the test, so the target scales with the
+// machine instead of being a constant that is too high on one and too low on
+// the next.
+func TestPacedCeilingRateFrom_ScalesPastTheMeasuredPlateau(t *testing.T) {
+	window := 200 * time.Millisecond
+
+	tests := []struct {
+		name     string
+		measured int
+		headroom int
+		want     int
+	}{
+		{name: "slow host", measured: 3000, headroom: 20, want: 300_000},
+		{name: "fast host", measured: 15586, headroom: 20, want: 1_558_600},
+		{name: "headroom of one is the plateau itself", measured: 3000, headroom: 1, want: 15_000},
+		{name: "a host that dispatched nothing still yields a usable rate",
+			measured: 0, headroom: 20, want: pacedCeilingProbeRate},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, pacedCeilingRateFrom(tc.measured, window, tc.headroom))
 		})
 	}
 }
