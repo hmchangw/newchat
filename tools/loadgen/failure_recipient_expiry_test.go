@@ -160,3 +160,30 @@ func TestRunSoakFailureExpiry_PublishesTheRetainedExpectationCount(t *testing.T)
 
 	assert.Equal(t, float64(3), testutil.ToFloat64(metrics.FailureRecipientExpectations))
 }
+
+// A zero retention makes the cutoff equal to now, which would release every
+// expectation registered so far — including operations still inside their
+// deadline, turning verifiable deliveries into unverified ones. Config
+// validation forbids a zero SOAK_RECONCILE_DEADLINE, so this is a guard against
+// a caller mistake rather than a reachable configuration, and the sweep must
+// decline to expire rather than guess a window.
+func TestRunSoakFailureExpiry_DoesNotExpireWithoutARetentionWindow(t *testing.T) {
+	clock := time.Unix(1000, 0).UTC()
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 16, Now: func() time.Time { return clock },
+	})
+	require.NoError(t, err)
+
+	evidence := newExpiryTestEvidence(&clock)
+	require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
+		OperationID: "op", Recipients: []string{"a"}, Complete: true,
+	}))
+
+	ticks := make(chan time.Time, 1)
+	ticks <- clock.Add(time.Hour)
+	close(ticks)
+	runSoakFailureExpiry(context.Background(), ledger, evidence, 0, ticks, nil)
+
+	assert.Equal(t, 1, evidence.Len(),
+		"no retention window means no basis to expire, not expire everything")
+}

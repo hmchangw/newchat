@@ -613,13 +613,20 @@ func (r *recipientEvidence) Forget(operationID string) {
 }
 
 // ExpireBefore releases every expectation registered at or before cutoff and
-// returns how many went. The caller passes now minus the operation deadline, so
-// an expectation cannot outlive the operation it describes. It exists because the ledger's own expiry finalizes an
-// operation and forgets it without telling the evidence: Finalize is the only
-// other way out of this map and it runs inside the reconciler, so anything the
-// reconciler does not reach was retained for the life of the process. The
-// per-recipient route maps incrementRecipientRoute allocates make that the
-// largest object graph in the run.
+// returns how many went. Callers pass now minus the operation deadline, so an
+// expectation cannot outlive the operation it describes.
+//
+// It exists because the ledger's own expiry finalizes an operation and forgets
+// it without telling the evidence, while Finalize — the only other way out of
+// this map — runs inside the reconciler. Anything the reconciler never reaches
+// was therefore retained for the life of the process, and each entry holds one
+// route map per recipient, which made this the largest object graph in the run.
+//
+// A recovered expectation is registered when the restart replays it rather than
+// when its operation started, so it can outlive that operation by up to one
+// deadline. That over-retention is bounded and costs one deadline of entries
+// once per restart; treating a replayed entry as already aged would expire
+// evidence the run can still resolve.
 //
 // It is deliberately not driven from the ledger's finalize path. That would put
 // the evidence lock underneath the ledger lock, while the observer already

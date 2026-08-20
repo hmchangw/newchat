@@ -107,7 +107,13 @@ func runSoakFailureExpiry(
 			// route map per recipient, which is what made this the largest
 			// object graph in the run. Sweeping here bounds the evidence by the
 			// same deadline that bounds the ledger.
-			evidence.ExpireBefore(at.Add(-retention))
+			// A zero window would put the cutoff at now and release every
+			// expectation, including operations still inside their deadline.
+			// Config validation forbids a zero SOAK_RECONCILE_DEADLINE, so
+			// this guards a caller mistake rather than a reachable setting.
+			if retention > 0 {
+				evidence.ExpireBefore(at.Add(-retention))
+			}
 			if settings.metrics != nil {
 				settings.metrics.FailureRecipientExpectations.Set(float64(evidence.Len()))
 			}
