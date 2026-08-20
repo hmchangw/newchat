@@ -3842,7 +3842,7 @@ Toggles a reaction on a message. Any subscribed room member may react — the se
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `messageId` | string | yes | The message to react to. |
-| `shortcode` | string | yes | The bare reaction shortcode without surrounding colons (e.g. `thumbsup`, `acme_party`). Must match `^[a-z0-9_+-]{1,32}$` after NFC normalisation. The server validates **format only** — it does not check the shortcode against the standard-emoji set or the site's registered custom emoji. Clients are expected to offer only shortcodes from their picker (built-in standard set + the local site's [`emoji.list`](#emojilist--list-a-sites-custom-emoji)). |
+| `shortcode` | string | yes | The reaction emoji — either a bare shortcode without surrounding colons (e.g. `thumbsup`, `acme_party`) or a raw-unicode emoji (e.g. `👍`, a ZWJ sequence, a flag). The server applies **no support check**: it NFC-normalises the value and rejects only a value over 64 bytes (a resource guard, ~20× any real emoji) — it does **not** check the character set, the standard-emoji set, or the site's registered custom emoji. The **FE decides renderability**. Clients typically offer shortcodes from their picker (built-in standard set + the local site's [`emoji.list`](#emojilist--list-a-sites-custom-emoji)), but any emoji is accepted (e.g. a migrated one the picker doesn't list). |
 
 ```json
 {

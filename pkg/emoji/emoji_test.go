@@ -104,3 +104,42 @@ func TestIsStandard(t *testing.T) {
 	assert.False(t, emoji.IsStandard("acme_party"))
 	assert.False(t, emoji.IsStandard(""))
 }
+
+func TestCanonicalizeReaction(t *testing.T) {
+	// Accepts any emoji (no support check); the only reject is an oversized blob.
+	accepted := []struct{ name, in, want string }{
+		{"ascii shortcode", "party_parrot", "party_parrot"},
+		{"uppercase allowed", "Party", "Party"},
+		{"raw unicode thumbsup", "👍", "👍"},
+		{"raw unicode with VS16", "❤️", "❤️"},
+		{"zwj family sequence", "👨‍👩‍👧‍👦", "👨‍👩‍👧‍👦"},
+		{"flag", "🇹🇼", "🇹🇼"},
+		{"colons allowed (opaque text)", ":thumbsup:", ":thumbsup:"},
+		{"64 bytes ok", strings.Repeat("a", 64), strings.Repeat("a", 64)},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := emoji.CanonicalizeReaction(tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	t.Run("over 64 bytes rejected", func(t *testing.T) {
+		got, err := emoji.CanonicalizeReaction(strings.Repeat("a", 65))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reaction emoji too large")
+		assert.Empty(t, got)
+	})
+}
+
+// TestCanonicalizeReaction_NFC_CollapsesForms: the same emoji in two normalization
+// forms canonicalizes to one key, so it can't create two separate reactions.
+func TestCanonicalizeReaction_NFC_CollapsesForms(t *testing.T) {
+	// U+00E9 (é precomposed) vs U+0065 U+0301 (e + combining acute).
+	a, err := emoji.CanonicalizeReaction("é")
+	require.NoError(t, err)
+	b, err := emoji.CanonicalizeReaction("é")
+	require.NoError(t, err)
+	assert.Equal(t, a, b, "NFC must collapse equivalent forms to one storage key")
+}
