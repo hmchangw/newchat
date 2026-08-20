@@ -100,142 +100,71 @@ func NewMongoStore(db *mongo.Database, opts ...StoreOption) *MongoStore {
 // Must be invoked once at startup. Mongo treats index creation as idempotent
 // when the key spec and options match.
 func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
-	if _, err := s.roomMembers.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "rid", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure room_members (rid) index: %w", err)
+	// Each index is attempted independently; a failure is collected (and surfaced via
+	// the joined return) but never skips the rest — one transient error must not starve
+	// a later unique/correctness index this service solely owns.
+	var errs []error
+	create := func(coll *mongo.Collection, name string, keys bson.D) {
+		if _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: keys}); err != nil {
+			errs = append(errs, fmt.Errorf("ensure %s index: %w", name, err))
+		}
 	}
-	// Unique logical key — room-worker upserts room_members on this key
-	// ($setOnInsert keyed on (rid, member.type, member.id), see BulkCreateRoomMembers),
-	// so a redelivered or re-requested member.add matches the existing row and no-ops.
-	// Without this constraint a fresh _id per retry would silently insert duplicates.
-	if err := mongoutil.EnsureIndexWithRepair(ctx, s.roomMembers, mongo.IndexModel{
-		Keys:    bson.D{{Key: "rid", Value: 1}, {Key: "member.type", Value: 1}, {Key: "member.id", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure room_members (rid,member.type,member.id) unique index: %w", err)
+	unique := func(coll *mongo.Collection, name string, keys bson.D) {
+		if err := mongoutil.EnsureIndexWithRepair(ctx, coll,
+			mongo.IndexModel{Keys: keys, Options: options.Index().SetUnique(true)}); err != nil {
+			errs = append(errs, fmt.Errorf("ensure %s unique index: %w", name, err))
+		}
 	}
-	// Unique logical key for subscriptions. Same retry-idempotency rationale as room_members above.
-	if err := mongoutil.EnsureIndexWithRepair(ctx, s.subscriptions, mongo.IndexModel{
-		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (roomId,u.account) unique index: %w", err)
-	}
-	// users.account (unique) is owned by user-service; verify + warn only, never create.
+
+	create(s.roomMembers, "room_members (rid)", bson.D{{Key: "rid", Value: 1}})
+	// Unique logical key — room-worker upserts room_members with $setOnInsert on
+	// (rid, member.type, member.id), so a redelivered member.add no-ops instead of
+	// inserting a duplicate under a fresh _id.
+	unique(s.roomMembers, "room_members (rid,member.type,member.id)",
+		bson.D{{Key: "rid", Value: 1}, {Key: "member.type", Value: 1}, {Key: "member.id", Value: 1}})
+	// Unique logical key for subscriptions. Same retry-idempotency rationale.
+	unique(s.subscriptions, "subscriptions (roomId,u.account)",
+		bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}})
+	// users.account + apps.assistant_name_idx are owned by user-service; verify + warn only.
 	mongoutil.WarnMissingIndexes(ctx, s.users, "account_1")
-	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "sectId", Value: 1}, {Key: "account", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure users (sectId,account) index: %w", err)
-	}
-	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "deptId", Value: 1}, {Key: "account", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure users (deptId,account) index: %w", err)
-	}
-	// apps.assistant_name_idx is owned by user-service; verify + warn only, never create.
 	mongoutil.WarnMissingIndexes(ctx, s.apps, "assistant_name_idx")
-	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "lastSeenAt", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (roomId,lastSeenAt) index: %w", err)
-	}
-	// Backs room-worker's ReconcileMemberCounts, which counts bot vs non-bot
-	// subs per room off u.isBot — keeps both CountDocuments index-only instead
-	// of scanning every subscription in the room.
-	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "u.isBot", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (roomId,u.isBot) index: %w", err)
-	}
-	// Lookup index for FindDMSubscription (filters on u.account+name).
-	// Without this index, FindDMSubscription falls back to a collection scan.
-	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "u.account", Value: 1}, {Key: "name", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (u.account,name) index: %w", err)
-	}
-	// Backs ComputeSectionOrder + section rebalance (filter u.account+sectionId,
-	// sort sectionOrder); without it, section moves fall back to an in-memory sort.
-	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "u.account", Value: 1}, {Key: "sectionId", Value: 1}, {Key: "sectionOrder", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (u.account,sectionId,sectionOrder) index: %w", err)
-	}
-	// Backs getRoomSubscriptions: filter roomId, sort {joinedAt, _id} with
-	// skip/limit pagination. Including the sort keys lets Mongo return ordered
-	// pages from the index instead of an in-memory sort that risks the 32MB
-	// sort limit on large rooms.
-	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "joinedAt", Value: 1}, {Key: "_id", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (roomId,joinedAt,_id) index: %w", err)
-	}
-	// Backs CountOwners (filters on roomId+roles) so owner counts stay
-	// index-only instead of scanning every subscription in the room.
-	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "roles", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (roomId,roles) index: %w", err)
-	}
-	// room-service owns the thread_subscriptions unique key. Best-effort drop of the
-	// legacy (threadRoomId, userId) index first so (threadRoomId, userAccount) creates
-	// without a key conflict; it may not exist (fresh deploy) — ignore all errors.
+	create(s.users, "users (sectId,account)", bson.D{{Key: "sectId", Value: 1}, {Key: "account", Value: 1}})
+	create(s.users, "users (deptId,account)", bson.D{{Key: "deptId", Value: 1}, {Key: "account", Value: 1}})
+	create(s.subscriptions, "subscriptions (roomId,lastSeenAt)", bson.D{{Key: "roomId", Value: 1}, {Key: "lastSeenAt", Value: 1}})
+	// Backs ReconcileMemberCounts (bot vs non-bot counts) index-only.
+	create(s.subscriptions, "subscriptions (roomId,u.isBot)", bson.D{{Key: "roomId", Value: 1}, {Key: "u.isBot", Value: 1}})
+	// Lookup for FindDMSubscription (u.account+name); else a collection scan.
+	create(s.subscriptions, "subscriptions (u.account,name)", bson.D{{Key: "u.account", Value: 1}, {Key: "name", Value: 1}})
+	// Backs ComputeSectionOrder + section rebalance (filter u.account+sectionId, sort sectionOrder).
+	create(s.subscriptions, "subscriptions (u.account,sectionId,sectionOrder)",
+		bson.D{{Key: "u.account", Value: 1}, {Key: "sectionId", Value: 1}, {Key: "sectionOrder", Value: 1}})
+	// Backs getRoomSubscriptions paginated {joinedAt,_id} sort from the index (avoids the 32MB sort limit).
+	create(s.subscriptions, "subscriptions (roomId,joinedAt,_id)",
+		bson.D{{Key: "roomId", Value: 1}, {Key: "joinedAt", Value: 1}, {Key: "_id", Value: 1}})
+	// Backs CountOwners (roomId+roles) index-only.
+	create(s.subscriptions, "subscriptions (roomId,roles)", bson.D{{Key: "roomId", Value: 1}, {Key: "roles", Value: 1}})
+	// room-service owns the thread_subscriptions unique key. Best-effort legacy
+	// (threadRoomId, userId) drop first so the userAccount index creates without a
+	// key conflict; it may not exist (fresh deploy) — ignore all errors.
 	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-	if err := mongoutil.EnsureIndexWithRepair(ctx, s.threadSubscriptions, mongo.IndexModel{
-		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) unique index: %w", err)
-	}
-	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "parentMessageId", Value: 1}, {Key: "userAccount", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (parentMessageId,userAccount) index: %w", err)
-	}
-	// Backs MinThreadSubscriptionLastSeenByThreadRoomID: covered index seek on
-	// (threadRoomId, lastSeenAt ASC) returns the subscriber with the smallest
-	// lastSeenAt in one seek — same algorithm as the (roomId, lastSeenAt) index
-	// on subscriptions that backs MinSubscriptionLastSeenByRoomID.
-	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "threadRoomId", Value: 1}, {Key: "lastSeenAt", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,lastSeenAt) index: %w", err)
-	}
-	// Backs per-user, per-site thread_subscriptions lookups on {userAccount,
-	// siteId}. No existing thread_subscriptions index has userAccount as a prefix.
-	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "userAccount", Value: 1}, {Key: "siteId", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (userAccount,siteId) index: %w", err)
-	}
-	if _, err := s.apps.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "channelTab.default", Value: 1},
-			{Key: "channelTab.enabled", Value: 1},
-			{Key: "channelTab.name", Value: 1},
-		},
-	}); err != nil {
-		return fmt.Errorf("ensure apps (channelTab.default,enabled,name) index: %w", err)
-	}
-	if _, err := s.botCmdMenus.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "activeStatus", Value: 1}, {Key: "name", Value: 1}},
-	}); err != nil {
-		return fmt.Errorf("ensure bot_cmd_menu (activeStatus,name) index: %w", err)
-	}
-	// Unique logical key for teams_meetings — the per-room idempotency record for
-	// the meetings RPC. A concurrent second create hits this constraint and the
-	// loser reads back the winner's record instead of inserting a duplicate (and
-	// thus publishing a second teams_meet_started system message). Same retry-safe
-	// rationale as the room_members / subscriptions unique indexes above.
-	if err := mongoutil.EnsureIndexWithRepair(ctx, s.teamsMeetings, mongo.IndexModel{
-		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "siteId", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure teams_meetings (roomId,siteId) unique index: %w", err)
-	}
-	return nil
+	unique(s.threadSubscriptions, "thread_subscriptions (threadRoomId,userAccount)",
+		bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}})
+	create(s.threadSubscriptions, "thread_subscriptions (parentMessageId,userAccount)",
+		bson.D{{Key: "parentMessageId", Value: 1}, {Key: "userAccount", Value: 1}})
+	// Backs MinThreadSubscriptionLastSeenByThreadRoomID (covered seek on threadRoomId,lastSeenAt).
+	create(s.threadSubscriptions, "thread_subscriptions (threadRoomId,lastSeenAt)",
+		bson.D{{Key: "threadRoomId", Value: 1}, {Key: "lastSeenAt", Value: 1}})
+	// Backs per-user, per-site lookups; no other thread_subscriptions index prefixes userAccount.
+	create(s.threadSubscriptions, "thread_subscriptions (userAccount,siteId)",
+		bson.D{{Key: "userAccount", Value: 1}, {Key: "siteId", Value: 1}})
+	create(s.apps, "apps (channelTab.default,enabled,name)",
+		bson.D{{Key: "channelTab.default", Value: 1}, {Key: "channelTab.enabled", Value: 1}, {Key: "channelTab.name", Value: 1}})
+	create(s.botCmdMenus, "bot_cmd_menu (activeStatus,name)", bson.D{{Key: "activeStatus", Value: 1}, {Key: "name", Value: 1}})
+	// Unique per-room idempotency record for the meetings RPC: a concurrent second
+	// create reads back the winner instead of publishing a duplicate teams_meet_started.
+	unique(s.teamsMeetings, "teams_meetings (roomId,siteId)", bson.D{{Key: "roomId", Value: 1}, {Key: "siteId", Value: 1}})
+
+	return errors.Join(errs...)
 }
 
 // GetTeamsMeeting fast-path reads the room's existing Teams meeting record.
