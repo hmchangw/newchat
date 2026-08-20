@@ -48,13 +48,16 @@ var DefaultBackoff = []time.Duration{
 }
 
 // LowLatencyBackoff suits fan-out / delivery workers where the first retry must
-// be near-immediate so a sub-second hiccup isn't user-visible, while a genuine
-// outage is still spaced out.
+// be near-immediate so a sub-second hiccup isn't user-visible. It differs from
+// DefaultBackoff only in the head: both tail at 2m, because the tail is what
+// the consumer's MaxDeliver budget is spent on and so sets the outage the
+// worker rides out (~30m at MaxDeliver=20), not the first-retry latency.
 var LowLatencyBackoff = []time.Duration{
 	200 * time.Millisecond,
 	1 * time.Second,
 	5 * time.Second,
 	30 * time.Second,
+	2 * time.Minute,
 }
 
 // Settle resolves a processed message and logs the business error once:
@@ -100,12 +103,27 @@ func settle(ctx context.Context, msg Msg, backoff []time.Duration, err error, lo
 	}
 }
 
+// Delayer is the subset of the message API the schedule lookup needs. Both
+// jetstream.Msg and the Msg the settle path takes satisfy it.
+type Delayer interface {
+	Metadata() (*jetstream.MsgMetadata, error)
+}
+
+// Delay returns the redelivery delay for this message's next attempt. Use it at
+// the call sites that can't use Settle because they own their own ack/nak
+// disposition, metrics, or logging — every NAK still needs a delay, since
+// nats-server queues a delay-less NAK for *immediate* redelivery and a
+// consumer's BackOff config applies only to AckWait expiry, never to a NAK.
+func Delay(msg Delayer, backoff []time.Duration) time.Duration {
+	return backoffFor(msg, backoff)
+}
+
 // backoffFor selects the delay for the next redelivery, indexed by how many
 // times the message has already been delivered; the last entry is reused once
 // attempts exceed the schedule. Falls back to the first entry when metadata is
 // unavailable. The uint64 counter is walked rather than converted to int,
 // avoiding any narrowing-overflow concern.
-func backoffFor(msg Msg, backoff []time.Duration) time.Duration {
+func backoffFor(msg Delayer, backoff []time.Duration) time.Duration {
 	meta, err := msg.Metadata()
 	if err != nil || meta == nil {
 		return backoff[0]

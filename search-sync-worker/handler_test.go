@@ -17,22 +17,24 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/searchengine"
 )
 
 // stubMsg implements jetstream.Msg for testing.
 type stubMsg struct {
-	data    []byte
-	headers nats.Header
-	acked   bool
-	nacked  bool
+	data     []byte
+	headers  nats.Header
+	acked    bool
+	nacked   bool
+	nakDelay time.Duration
 }
 
 func (m *stubMsg) Data() []byte                              { return m.data }
 func (m *stubMsg) Ack() error                                { m.acked = true; return nil }
 func (m *stubMsg) Nak() error                                { m.nacked = true; return nil }
-func (m *stubMsg) NakWithDelay(time.Duration) error          { return nil }
+func (m *stubMsg) NakWithDelay(d time.Duration) error        { m.nacked = true; m.nakDelay = d; return nil }
 func (m *stubMsg) InProgress() error                         { return nil }
 func (m *stubMsg) Term() error                               { return nil }
 func (m *stubMsg) TermWithReason(string) error               { return nil }
@@ -158,6 +160,11 @@ func TestHandler_Flush(t *testing.T) {
 
 		assert.True(t, msg1.nacked)
 		assert.True(t, msg2.nacked)
+		// A delay-less NAK is queued for immediate redelivery, which burns the
+		// delivery budget in milliseconds instead of spacing retries over an outage.
+		// Metadata() is nil on the stub, so jsretry falls back to the head of the schedule.
+		assert.Equal(t, jsretry.DefaultBackoff[0], msg1.nakDelay, "the nak must carry the jsretry backoff delay")
+		assert.Equal(t, jsretry.DefaultBackoff[0], msg2.nakDelay, "the nak must carry the jsretry backoff delay")
 		assert.Equal(t, 0, h.MessageCount())
 	})
 

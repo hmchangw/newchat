@@ -17,8 +17,8 @@ func setRequiredEnv(t *testing.T) {
 }
 
 // MaxDeliver is matched to the shared pkg/stream default so one service isn't
-// quietly stricter than the rest. Note this is an attempt budget, not a time
-// window: handler.go NAKs without a delay, so redelivery is immediate.
+// quietly stricter than the rest. Paired with the jsretry.DefaultBackoff delay
+// handler.go NAKs with, 20 deliveries park a message ~32m before it is dropped.
 func TestConfig_Defaults(t *testing.T) {
 	setRequiredEnv(t)
 

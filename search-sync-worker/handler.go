@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/searchengine"
 )
@@ -190,7 +191,7 @@ func (h *Handler) Flush(ctx context.Context) {
 			natsutil.Ack(p.jsMsg, "bulk actions succeeded")
 		} else {
 			nakked++
-			natsutil.Nak(p.jsMsg, "bulk action failed")
+			natsutil.Nak(p.jsMsg, "bulk action failed", jsretry.Delay(p.jsMsg, jsretry.DefaultBackoff))
 		}
 	}
 	h.metrics.recordMessages(bulkCtx, dispAckedSuccess, acked)
@@ -230,7 +231,7 @@ func (h *Handler) startFlushSpan(ctx context.Context, pending []pendingMsg, acti
 // operator grepping by cause sees all of them together.
 func nakAll(pending []pendingMsg, reason string) {
 	for _, p := range pending {
-		natsutil.Nak(p.jsMsg, reason)
+		natsutil.Nak(p.jsMsg, reason, jsretry.Delay(p.jsMsg, jsretry.DefaultBackoff))
 	}
 }
 

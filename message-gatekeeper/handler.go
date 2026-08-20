@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
@@ -203,7 +204,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 			// flow terminal for the infra path; the Error line below carries the cause.
 			slog.Log(ctx, logctx.LevelFlow, "gatekeeper nak", "phase", "nak", "request_id", req.RequestID)
 			slog.ErrorContext(ctx, "process message failed (infra)", "error", err, "account", account, "room_id", roomID)
-			if err := msg.Nak(); err != nil {
+			if err := msg.NakWithDelay(jsretry.Delay(msg, jsretry.LowLatencyBackoff)); err != nil {
 				slog.ErrorContext(ctx, "failed to nack message", "error", err, "request_id", req.RequestID)
 			}
 		}

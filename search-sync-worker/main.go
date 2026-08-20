@@ -505,8 +505,8 @@ type consumerSource interface {
 	FilterSubjects(siteID string) []string
 }
 
-// buildConsumerConfig returns the durable consumer config for one collection. The BackOff ladder
-// spaces AckWait-expiry redeliveries only; natsutil.Nak sends no delay, so an explicit NAK is immediate.
+// buildConsumerConfig returns the durable consumer config for one collection. This BackOff ladder
+// spaces AckWait expiry (a dead or wedged handler); an explicit NAK carries its own jsretry delay.
 func buildConsumerConfig(s stream.ConsumerSettings, coll consumerSource, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = coll.ConsumerName()

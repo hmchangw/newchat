@@ -36,6 +36,10 @@ Concrete, citable facts that ground the analysis below:
 - **JetStream consumers** (`pkg/stream/consumer.go`): `AckExplicitPolicy`, `DeliverAllPolicy`, `AckWait` 30s
   (`CONSUMER_ACK_WAIT`), `MaxDeliver` 20 (`CONSUMER_MAX_DELIVER`), `MaxAckPending` 1000, `MaxWaiting` 512.
   With `jsretry.DefaultBackoff` (tail 2m) that is a ~32m retry window per message before JetStream drops it.
+- **NAK spacing:** every worker NAK carries an explicit delay from `pkg/jsretry` — via `Settle`, or
+  `jsretry.Delay` where the call site owns its own metrics/logging. A delay-less NAK is redelivered
+  **immediately**: `processNak` in nats-server queues it straight onto the redelivery queue, and a
+  consumer's `BackOff` is consulted only on AckWait expiry, never on a NAK.
 - **Stream schema** (`pkg/stream/stream.go`) defines **only `Name + Subjects`** — Replicas/Storage/Retention/MaxAge
   are **ops/IaC-controlled, not in code**. Dev bootstrap (`<service>/bootstrap.go`) calls `CreateOrUpdateStream`
   with minimal config.

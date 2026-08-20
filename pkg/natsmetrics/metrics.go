@@ -439,6 +439,9 @@ func (m *Message) DoubleAck(ctx context.Context) error {
 	m.finish(OutcomeAck, err)
 	return err
 }
+
+// Nak exists to satisfy jetstream.Msg. Prefer NakWithDelay in worker code: a
+// delay-less NAK is redelivered immediately and burns MaxDeliver in milliseconds.
 func (m *Message) Nak() error { err := m.Msg.Nak(); m.finish(OutcomeNak, err); return err }
 func (m *Message) NakWithDelay(delay time.Duration) error {
 	err := m.Msg.NakWithDelay(delay)

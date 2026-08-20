@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -150,6 +151,10 @@ func TestHandleJetStreamMsg_TransientErrorNaks(t *testing.T) {
 
 	assert.Equal(t, int32(0), atomic.LoadInt32(&jsm.acks), "transient must NOT ack")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&jsm.naks), "transient naks so JS backoff redelivers")
+	// A delay-less NAK is queued for immediate redelivery, which burns the
+	// delivery budget in milliseconds instead of spacing retries over an outage.
+	// Metadata() is nil on the fake, so jsretry falls back to the head of the schedule.
+	assert.Equal(t, jsretry.DefaultBackoff[0], jsm.nakDelay, "the nak must carry the jsretry backoff delay")
 }
 
 func TestHandleJetStreamMsg_PermanentErrorAcks(t *testing.T) {

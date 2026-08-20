@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -37,9 +38,10 @@ func (f *fakeDispatcher) Dispatch(_ context.Context, evt *model.PushNotification
 }
 
 type fakeJSMsg struct {
-	data []byte
-	acks int32
-	naks int32
+	data     []byte
+	acks     int32
+	naks     int32
+	nakDelay time.Duration
 }
 
 func (f *fakeJSMsg) Metadata() (*jetstream.MsgMetadata, error) { return nil, nil }
@@ -50,10 +52,14 @@ func (f *fakeJSMsg) Reply() string                             { return "" }
 func (f *fakeJSMsg) Ack() error                                { atomic.AddInt32(&f.acks, 1); return nil }
 func (f *fakeJSMsg) DoubleAck(_ context.Context) error         { return nil }
 func (f *fakeJSMsg) Nak() error                                { atomic.AddInt32(&f.naks, 1); return nil }
-func (f *fakeJSMsg) NakWithDelay(_ time.Duration) error        { atomic.AddInt32(&f.naks, 1); return nil }
-func (f *fakeJSMsg) InProgress() error                         { return nil }
-func (f *fakeJSMsg) Term() error                               { return nil }
-func (f *fakeJSMsg) TermWithReason(_ string) error             { return nil }
+func (f *fakeJSMsg) NakWithDelay(d time.Duration) error {
+	atomic.AddInt32(&f.naks, 1)
+	f.nakDelay = d
+	return nil
+}
+func (f *fakeJSMsg) InProgress() error             { return nil }
+func (f *fakeJSMsg) Term() error                   { return nil }
+func (f *fakeJSMsg) TermWithReason(_ string) error { return nil }
 
 func encode(t *testing.T, evt *model.PushNotificationEvent) []byte {
 	t.Helper()
@@ -90,6 +96,10 @@ func TestDispatchTransientNaks(t *testing.T) {
 
 	assert.Equal(t, int32(0), atomic.LoadInt32(&jsm.acks))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&jsm.naks))
+	// A delay-less NAK is queued for immediate redelivery, which burns the
+	// delivery budget in milliseconds instead of spacing retries over an outage.
+	// Metadata() is nil on the fake, so jsretry falls back to the head of the schedule.
+	assert.Equal(t, jsretry.DefaultBackoff[0], jsm.nakDelay, "the nak must carry the jsretry backoff delay")
 }
 
 func TestDispatchPermanentAcks(t *testing.T) {

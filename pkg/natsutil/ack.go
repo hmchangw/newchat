@@ -1,6 +1,9 @@
 package natsutil
 
-import "log/slog"
+import (
+	"log/slog"
+	"time"
+)
 
 // Acker is the minimal JetStream message interface the Ack helper needs.
 // Both `jetstream.Msg` (nats.go) and otel-wrapped variants
@@ -10,9 +13,10 @@ type Acker interface {
 }
 
 // Naker is the minimal JetStream message interface the Nak helper needs.
-// Same compatibility story as Acker.
+// Same compatibility story as Acker. It requires the delayed form: a NAK with
+// no delay is queued for immediate redelivery.
 type Naker interface {
-	Nak() error
+	NakWithDelay(time.Duration) error
 }
 
 // Ack acks `msg` and logs any failure under a consistent structured-log
@@ -31,12 +35,17 @@ func Ack(msg Acker, reason string) {
 	}
 }
 
-// Nak naks `msg` for redelivery and logs any failure under the same
-// structured-log shape as Ack. `reason` describes WHY the message is being
+// Nak naks `msg` for redelivery after `delay` and logs any failure under the
+// same structured-log shape as Ack. `reason` describes WHY the message is being
 // redelivered — e.g. "handler error", "bulk index failure", "transient
 // downstream error".
-func Nak(msg Naker, reason string) {
-	if err := msg.Nak(); err != nil {
+//
+// `delay` is required rather than optional: nats-server redelivers a delay-less
+// NAK immediately, which burns the consumer's MaxDeliver budget in milliseconds
+// and drops the message. Callers get the delay from jsretry.Delay (passed in
+// rather than looked up here — jsretry imports this package).
+func Nak(msg Naker, reason string, delay time.Duration) {
+	if err := msg.NakWithDelay(delay); err != nil {
 		slog.Error("nak failed", "reason", reason, "error", err)
 	}
 }

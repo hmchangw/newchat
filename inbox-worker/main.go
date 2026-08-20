@@ -21,6 +21,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -798,7 +799,7 @@ func main() {
 					return
 				}
 				slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-				if err := msg.Nak(); err != nil {
+				if err := msg.NakWithDelay(jsretry.Delay(msg, jsretry.DefaultBackoff)); err != nil {
 					slog.Error("failed to nak message", "error", err)
 				}
 				return

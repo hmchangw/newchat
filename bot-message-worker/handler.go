@@ -8,6 +8,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -41,9 +42,9 @@ func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		}
 		slog.WarnContext(ctx, "bot-message-worker transient error — nak",
 			"messageID", m.ID, "roomID", m.RoomID, "error", err)
-		// A delay-less NAK redelivers immediately: the consumer's BackOff
-		// applies only on AckWait expiry, never to an explicit NAK.
-		if nakErr := msg.NakWithDelay(0); nakErr != nil {
+		// The delay is required: the consumer's BackOff spaces only AckWait
+		// expiry, so a delay-less NAK would redeliver immediately.
+		if nakErr := msg.NakWithDelay(jsretry.Delay(msg, jsretry.DefaultBackoff)); nakErr != nil {
 			slog.WarnContext(ctx, "bot-message-worker nak failed", "error", nakErr)
 		}
 		return

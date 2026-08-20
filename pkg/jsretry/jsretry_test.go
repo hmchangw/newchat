@@ -174,3 +174,48 @@ func TestSettle_NetworkErrors(t *testing.T) {
 		})
 	}
 }
+
+// Delay is the schedule lookup the settle path uses, exported for call sites
+// that own their own ack/nak logging and metrics but still need spaced
+// redelivery. A delay-less NAK is redelivered immediately by the server, so
+// every NAK in the repo must carry one of these.
+func TestDelay(t *testing.T) {
+	tests := []struct {
+		name         string
+		numDelivered uint64
+		metaErr      error
+		want         time.Duration
+	}{
+		{name: "first delivery uses the head", numDelivered: 1, want: 1 * time.Second},
+		{name: "second delivery", numDelivered: 2, want: 5 * time.Second},
+		{name: "third delivery", numDelivered: 3, want: 30 * time.Second},
+		{name: "past the schedule reuses the tail", numDelivered: 9, want: 30 * time.Second},
+		{name: "unavailable metadata falls back to the head", metaErr: errors.New("no meta"), want: 1 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Delay(&fakeMsg{numDelivered: tt.numDelivered, metaErr: tt.metaErr}, testSchedule)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// Both schedules must end on a tail long enough to span a real outage: with
+// MaxDeliver=20 the window is the tail times the attempts that reuse it. A
+// short tail turns the raised delivery budget into a fast spin that still drops.
+func TestBackoffSchedules_OutageTail(t *testing.T) {
+	for name, schedule := range map[string][]time.Duration{
+		"DefaultBackoff":    DefaultBackoff,
+		"LowLatencyBackoff": LowLatencyBackoff,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, 2*time.Minute, schedule[len(schedule)-1], "tail")
+
+			var window time.Duration
+			for n := uint64(1); n < 20; n++ {
+				window += Delay(&fakeMsg{numDelivered: n}, schedule)
+			}
+			assert.Greater(t, window, 30*time.Minute, "retry window at MaxDeliver=20")
+		})
+	}
+}

@@ -3,6 +3,7 @@ package natsutil_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -14,6 +15,7 @@ import (
 type stubMsg struct {
 	ackCalled bool
 	nakCalled bool
+	nakDelay  time.Duration
 	ackErr    error
 	nakErr    error
 }
@@ -23,8 +25,9 @@ func (s *stubMsg) Ack() error {
 	return s.ackErr
 }
 
-func (s *stubMsg) Nak() error {
+func (s *stubMsg) NakWithDelay(d time.Duration) error {
 	s.nakCalled = true
+	s.nakDelay = d
 	return s.nakErr
 }
 
@@ -43,15 +46,19 @@ func TestAck_ErrorIsLoggedNotReturned(t *testing.T) {
 	assert.True(t, msg.ackCalled)
 }
 
-func TestNak_Success(t *testing.T) {
+// The delay is mandatory, not optional: a NAK carrying no delay is queued for
+// immediate redelivery by the server, which burns the consumer's delivery
+// budget in milliseconds instead of spacing retries across an outage.
+func TestNak_ForwardsDelay(t *testing.T) {
 	msg := &stubMsg{}
-	natsutil.Nak(msg, "handler error")
-	assert.True(t, msg.nakCalled, "Nak() should be invoked on the message")
+	natsutil.Nak(msg, "handler error", 30*time.Second)
+	assert.True(t, msg.nakCalled, "NakWithDelay() should be invoked on the message")
+	assert.Equal(t, 30*time.Second, msg.nakDelay)
 }
 
 func TestNak_ErrorIsLoggedNotReturned(t *testing.T) {
 	msg := &stubMsg{nakErr: errors.New("consumer deleted")}
-	natsutil.Nak(msg, "bulk failure")
+	natsutil.Nak(msg, "bulk failure", time.Second)
 	assert.True(t, msg.nakCalled)
 }
 
