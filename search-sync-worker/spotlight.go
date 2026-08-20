@@ -162,8 +162,11 @@ func buildSpotlightRenameByQuery(roomID, newName string, ts int64) (json.RawMess
 		"query": map[string]any{"term": map[string]any{"roomId": roomID}},
 		"script": map[string]any{
 			"lang": "painless",
+			// >= (not >) so two renames sharing a millisecond both apply (last
+			// processed wins the tie) instead of dropping the second, and a
+			// redelivery of the same rename re-applies its own name idempotently.
 			"source": "long stored = ctx._source.roomNameUpdatedAt == null ? 0L : ((Number)ctx._source.roomNameUpdatedAt).longValue(); " +
-				"if (params.ts > stored) { ctx._source.roomName = params.name; ctx._source.roomNameUpdatedAt = params.ts; } else { ctx.op = 'noop'; }",
+				"if (params.ts >= stored) { ctx._source.roomName = params.name; ctx._source.roomNameUpdatedAt = params.ts; } else { ctx.op = 'noop'; }",
 			"params": map[string]any{"name": newName, "ts": ts},
 		},
 	})

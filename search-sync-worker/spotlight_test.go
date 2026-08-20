@@ -440,7 +440,7 @@ func TestSpotlightCollection_BuildByQuery_RoomRenamed(t *testing.T) {
 	assert.Equal(t, "painless", script["lang"])
 	src := script["source"].(string)
 	assert.Contains(t, src, "roomNameUpdatedAt", "script must guard on the LWW clock")
-	assert.Contains(t, src, "params.ts > stored", "only a strictly-newer rename wins")
+	assert.Contains(t, src, "params.ts >= stored", "a newer-or-equal rename wins (>= handles same-ms + redelivery)")
 	assert.Contains(t, src, "ctx.op = 'noop'", "a stale rename must no-op")
 	params := script["params"].(map[string]any)
 	assert.Equal(t, "platform", params["name"], "the new room name must ride the script params")

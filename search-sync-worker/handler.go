@@ -102,15 +102,18 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 			// Parse/validation poison — Ack drops it (same as BuildAction).
 			slog.ErrorContext(ctx, "build by-query", "error", bqErr, "subject", msg.Subject(), "consumer", h.collection.ConsumerName())
 			natsutil.Ack(msg, "build by-query failed")
+			h.metrics.recordMessages(ctx, dispAckedPoison, 1)
 			return
 		}
 		if ok {
 			if err := h.store.UpdateByQuery(ctx, index, body); err != nil {
 				slog.ErrorContext(ctx, "update-by-query failed", "error", err, "index", index, "consumer", h.collection.ConsumerName())
 				natsutil.Nak(msg, "update-by-query failed")
+				h.metrics.recordMessages(ctx, dispNakkedRequestFailed, 1)
 				return
 			}
 			natsutil.Ack(msg, "update-by-query succeeded")
+			h.metrics.recordMessages(ctx, dispAckedSuccess, 1)
 			return
 		}
 	}
