@@ -378,26 +378,24 @@ const (
 	pacedCeilingTrials = 3
 )
 
+// Regression for the single-ticker RPS ceiling: the legacy serial path
+// (MaxInFlight=0) releases one event per delivered tick, and the runtime cannot
+// deliver a tick per microsecond, so it plateaus far below target. The batched
+// pacer releases rate*interval events per coarse tick and must out-dispatch it
+// by a wide margin. A relative comparison (same process, back to back) cancels
+// host-speed and race-detector overhead.
 func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
-	// Regression for the single-ticker RPS ceiling: the legacy serial path
-	// (MaxInFlight=0) releases one event per delivered tick, and the runtime
-	// cannot deliver a tick per microsecond, so it plateaus far below target.
-	// The batched pacer releases rate*interval events per coarse tick and must
-	// out-dispatch it by a wide margin. A relative comparison (same process,
-	// back to back) cancels host-speed and race-detector overhead.
+	target := int(float64(pacedCeilingRate) * pacedCeilingWindow.Seconds())
+
 	serial := dispatchPeak(t, 0, pacedCeilingRate, pacedCeilingWindow, pacedCeilingTrials)
 	paced := dispatchPeak(t, 5000, pacedCeilingRate, pacedCeilingWindow, pacedCeilingTrials)
 
 	require.Positive(t, serial)
-	require.Less(t, paced, pacedCeilingTarget(),
-		"the target is within this host's reach, so the margin below measures the target, not the pacer: raise pacedCeilingRate")
+	require.Less(t, paced, target,
+		"the target is within this host's reach, so the margin below measures the target rather than the pacer: raise pacedCeilingRate")
 	assert.Greater(t, float64(paced), float64(serial)*1.3,
 		"batched pacer (%d) should out-dispatch the serial ticker (%d) at %d rps",
 		paced, serial, pacedCeilingRate)
-}
-
-func pacedCeilingTarget() int {
-	return int(float64(pacedCeilingRate) * pacedCeilingWindow.Seconds())
 }
 
 // The pacer releases rate*elapsed events and no more, so a target the host can
