@@ -170,8 +170,8 @@ func main() {
 			slog.Error("valkey connect failed", "error", err)
 			os.Exit(1)
 		}
-		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, cfg.BadgeCountCap)
-		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL, "count_cap", cfg.BadgeCountCap)
+		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, cfg.BadgeCountCap, badgecache.WithMarkerTTL(cfg.BadgeMarkerTTL))
+		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL, "marker_ttl", cfg.BadgeMarkerTTL, "count_cap", cfg.BadgeCountCap)
 	} else {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}

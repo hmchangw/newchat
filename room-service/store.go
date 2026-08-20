@@ -124,9 +124,11 @@ type RoomStore interface {
 	FindExistingAccounts(ctx context.Context, accounts []string) ([]string, error)
 	// UpdateSubscriptionRead sets lastSeenAt on the subscription keyed by
 	// (roomID, account), clearing alert and hasMention (reading the room
-	// dismisses both). Returns model.ErrSubscriptionNotFound (wrapped) when
-	// no subscription matches.
-	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) error
+	// clears both), and returns the number of unread followed threads left on
+	// the subscription AFTER the write — the badge hook's exactness depends on
+	// the post-update value, not on a pre-write snapshot.
+	// Returns model.ErrSubscriptionNotFound when no subscription matches.
+	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) (int, error)
 	// ToggleSubscriptionMute atomically flips muted via a single FindOneAndUpdate,
 	// stamping muteUpdatedAt so the origin doc carries the same high-water mark the
 	// federated event publishes (inbox-worker guards remote applies against it).

@@ -427,7 +427,7 @@ func (s *mongoInboxStore) UpdateSubscriptionOpen(ctx context.Context, roomID, ac
 	return nil
 }
 
-func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) (bool, int, error) {
 	filter := bson.M{
 		"roomId":    roomID,
 		"u.account": account,
@@ -437,14 +437,22 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 		},
 	}
 	update := bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": alert}}
-	res, err := s.subCol.UpdateOne(ctx, filter, update)
+	var out struct {
+		ThreadUnread []string `bson:"threadUnread"`
+	}
+	opts := options.FindOneAndUpdate().
+		SetProjection(bson.D{{Key: "threadUnread", Value: 1}}).
+		SetReturnDocument(options.After)
+	err := s.subCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&out)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		// Either the subscription is missing (NAK to retry) or the order guard
+		// rejected a stale event (a no-op, not a failure).
+		return false, 0, s.naksIfSubscriptionMissing(ctx, account, roomID)
+	}
 	if err != nil {
-		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
+		return false, 0, fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
 	}
-	if res.MatchedCount == 0 {
-		return s.naksIfSubscriptionMissing(ctx, account, roomID)
-	}
-	return nil
+	return true, len(out.ThreadUnread), nil
 }
 
 // ensureIndexes creates the unique index on (threadRoomId, userAccount) used by

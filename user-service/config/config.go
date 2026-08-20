@@ -58,8 +58,18 @@ type Config struct {
 	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
 	// BadgeCacheTTL bounds how long an account's badge unread-room set survives
 	// without a BumpBatch/Seed/Reseed refresh. Keep identical across the badge
-	// cache's writers (user-service, room-service, inbox-worker).
+	// cache's writers (user-service, room-service, inbox-worker). Must be >= 1s
+	// — pkg/badgecache truncates to whole seconds for Lua's EXPIRE, and a
+	// sub-second value reaches Redis as EX 0, which errors after the script's
+	// DEL/SADD have already run, silently disabling the cache.
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
+	// BadgeMarkerTTL bounds how long the badge set may go without verification
+	// against Mongo: the freshness marker is stamped only by Seed/Reseed (which
+	// compute from Mongo) and is never refreshed by bumps, so its lifetime is
+	// the maximum badge staleness. Must be <= BADGE_CACHE_TTL — a marker
+	// outliving its set would read as a fresh zero and show an empty badge.
+	// Must also be >= 1s for the same EX-0 reason as BadgeCacheTTL.
+	BadgeMarkerTTL time.Duration `env:"BADGE_MARKER_TTL" envDefault:"10m"`
 	// BadgeCountCap caps every badge unread-room count returned to clients and
 	// the push pipeline (the UI renders the cap as "N-1+", e.g. 10 → "9+").
 	BadgeCountCap int `env:"BADGE_COUNT_CAP" envDefault:"10"`
@@ -106,8 +116,14 @@ func Load() (Config, error) {
 	if cfg.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)
 	}
-	if cfg.BadgeCacheTTL <= 0 {
-		return Config{}, fmt.Errorf("BADGE_CACHE_TTL must be > 0, got %s", cfg.BadgeCacheTTL)
+	if cfg.BadgeCacheTTL < time.Second {
+		return Config{}, fmt.Errorf("BADGE_CACHE_TTL must be >= 1s, got %s", cfg.BadgeCacheTTL)
+	}
+	if cfg.BadgeMarkerTTL < time.Second {
+		return Config{}, fmt.Errorf("BADGE_MARKER_TTL must be >= 1s, got %s", cfg.BadgeMarkerTTL)
+	}
+	if cfg.BadgeMarkerTTL > cfg.BadgeCacheTTL {
+		return Config{}, fmt.Errorf("BADGE_MARKER_TTL (%s) must be <= BADGE_CACHE_TTL (%s)", cfg.BadgeMarkerTTL, cfg.BadgeCacheTTL)
 	}
 	if cfg.BadgeCountCap < 1 {
 		return Config{}, fmt.Errorf("BADGE_COUNT_CAP must be >= 1, got %d", cfg.BadgeCountCap)

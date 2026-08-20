@@ -40,11 +40,11 @@ type InboxStore interface {
 	DeleteThreadSubscriptions(ctx context.Context, roomID string, accounts []string) error
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error)
 	// UpdateSubscriptionRead sets lastSeenAt and alert on the subscription
-	// keyed by (roomID, account). Idempotent and order-safe: the write
-	// only applies when the stored lastSeenAt is missing or strictly
-	// earlier than the supplied value. Older or duplicate events are silent no-ops.
-	// A genuinely missing sub returns an error (Nak) so the event redelivers until member_added lands.
-	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error
+	// keyed by (roomID, account), guarded so an out-of-order or replayed event
+	// cannot regress the read position. Returns applied=false when that guard
+	// matched nothing (no write happened), and the number of unread followed
+	// threads left on the subscription after the write.
+	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) (bool, int, error)
 	UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error
 	// ApplyThreadRead advances the home-replica ThreadSubscription read state
 	// under a $lt guard and, when the guard matches, $pulls parentMessageID
@@ -358,12 +358,15 @@ func (h *Handler) handleSubscriptionRead(ctx context.Context, evt *model.InboxEv
 		return fmt.Errorf("unmarshal subscription_read payload: %w", err)
 	}
 	lastSeenAt := time.UnixMilli(e.LastSeenAt).UTC()
-	if err := h.store.UpdateSubscriptionRead(ctx, e.RoomID, e.Account, lastSeenAt, e.Alert); err != nil {
+	applied, threadUnread, err := h.store.UpdateSubscriptionRead(ctx, e.RoomID, e.Account, lastSeenAt, e.Alert)
+	if err != nil {
 		return fmt.Errorf("update subscription read for %q in room %q: %w", e.Account, e.RoomID, err)
 	}
-	// A read shrinks the unread set — drop it and recompute on next count.
-	if h.badge != nil {
-		h.badge.ClearAll(ctx, e.Account)
+	// The read settles message-unread, so the room stays unread only via an
+	// unread followed thread. Skip entirely when the order guard rejected the
+	// event — nothing was written, so nothing should be invalidated.
+	if applied && h.badge != nil && threadUnread == 0 {
+		h.badge.ClearRoom(ctx, e.Account, e.RoomID)
 	}
 	return nil
 }

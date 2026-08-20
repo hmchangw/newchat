@@ -1093,20 +1093,29 @@ func (s *MongoStore) FindExistingAccounts(ctx context.Context, accounts []string
 }
 
 // UpdateSubscriptionRead sets lastSeenAt on the subscription keyed by
-// (roomID, account), clearing alert and hasMention. Returns
-// model.ErrSubscriptionNotFound when no subscription matches.
-func (s *MongoStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) error {
-	res, err := s.subscriptions.UpdateOne(ctx,
+// (roomID, account), clearing alert and hasMention, and returns the post-update
+// unread-thread count. FindOneAndUpdate rather than UpdateOne: the same single
+// round trip also yields the post-state the badge hook needs.
+// Returns model.ErrSubscriptionNotFound when no subscription matches.
+func (s *MongoStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) (int, error) {
+	var out struct {
+		ThreadUnread []string `bson:"threadUnread"`
+	}
+	opts := options.FindOneAndUpdate().
+		SetProjection(bson.D{{Key: "threadUnread", Value: 1}}).
+		SetReturnDocument(options.After)
+	err := s.subscriptions.FindOneAndUpdate(ctx,
 		bson.M{"roomId": roomID, "u.account": account},
 		bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": false, "hasMention": false}},
-	)
+		opts,
+	).Decode(&out)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return 0, fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, model.ErrSubscriptionNotFound)
+	}
 	if err != nil {
-		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
+		return 0, fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
 	}
-	if res.MatchedCount == 0 {
-		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, model.ErrSubscriptionNotFound)
-	}
-	return nil
+	return len(out.ThreadUnread), nil
 }
 
 // ToggleSubscriptionMute atomically flips muted via FindOneAndUpdate.

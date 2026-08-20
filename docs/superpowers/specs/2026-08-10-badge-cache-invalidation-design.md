@@ -1,5 +1,11 @@
 # Badge Cache: ClearAll Invalidation, Full-Audience Bumps, Cache-First Count
 
+> **Partially superseded** by `2026-08-19-badge-precise-read-invalidation-design.md`:
+> the read rows of §4 (reads now remove exactly the room read rather than
+> dropping the set) and the §7 accuracy model (drift is now bounded by the
+> marker TTL). §4's ClearAll choice rested on the recompute being unconditional,
+> which stopped being true when `BADGE_COUNT_CACHE_FIRST` was flipped to `true`.
+
 **Status:** Approved (pending implementation)
 **Date:** 2026-08-10
 **Depends on:** 2026-08-02-thread-unread-badge-design.md (implemented)

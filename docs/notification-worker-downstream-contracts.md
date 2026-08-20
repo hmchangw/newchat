@@ -147,16 +147,24 @@ Request / reply (`pkg/model/subscription.go`):
 `SADD` is atomic with the size read. The set is maintained on both edges:
 every message bumps the **full badge audience** (all members past the
 sender/muted/restricted/thread-scope filters — including members who won't be
-pushed), and every read / thread-read / unmute drops the account's whole set
-(plus its `badge:fresh` marker) so the next count or push recomputes from
-Mongo; a mute and a member-removal remove exactly that room. Residual drift
-(a missed bump, a drop racing a concurrent bump) is bounded by the next
-read-driven recompute, reseed-on-`subscription.count`, and the set's TTL
-(`BADGE_CACHE_TTL`, default 24h, identical across its writers) — failure
-direction is undercount-until-recompute, never a stuck overcount.
-`subscription.count` (unread=true) may itself be served from this set when
-user-service's `BADGE_COUNT_CACHE_FIRST` is enabled — flip it to true only
-after all badge writers run the marker-aware `pkg/badgecache`, or an old
+pushed), and a read removes exactly the room read (`ClearRoom`) — a room with
+unread followed threads stays counted, so the cache is left untouched in that
+case; a mute-on transition and a member-removal are the same exact `ClearRoom`. Thread-read,
+`thread.read.all`, and unmute still drop the account's whole set (`ClearAll`,
+plus its `badge:fresh` marker), since their post-state is genuinely ambiguous.
+Drift is now bounded by the freshness marker's own TTL
+(`BADGE_MARKER_TTL`, user-service only) rather than the set's TTL
+(`BADGE_CACHE_TTL`): the marker is stamped only by the Mongo-verifying
+seed/reseed paths and is never refreshed by a bump, so its expiry is the
+upper bound on how long the cached set can go unverified before the next
+count or push recomputes from Mongo and re-stamps it. A degraded computation
+— a cross-site `GetRoomsMeta` RPC failed and that site's rooms
+were dropped — is never cached: the best-effort count is still returned, but
+the marker is not stamped, so a knowingly-incomplete set is never blessed as
+verified. Failure direction is undercount-until-recompute, never a stuck
+overcount. `subscription.count` (unread=true) may itself be served from this
+set when user-service's `BADGE_COUNT_CACHE_FIRST` is enabled — flip it to true
+only after all badge writers run the marker-aware `pkg/badgecache`, or an old
 writer's set-only clear can leave a marker reading as a stale "fresh zero".
 
 ### Payload decoding

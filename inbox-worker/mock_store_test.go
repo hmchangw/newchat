@@ -254,11 +254,13 @@ func (mr *MockInboxStoreMockRecorder) UpdateSubscriptionOpen(ctx, roomID, accoun
 }
 
 // UpdateSubscriptionRead mocks base method.
-func (m *MockInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+func (m *MockInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) (bool, int, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateSubscriptionRead", ctx, roomID, account, lastSeenAt, alert)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(int)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // UpdateSubscriptionRead indicates an expected call of UpdateSubscriptionRead.

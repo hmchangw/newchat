@@ -10,6 +10,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/service/mocks"
@@ -42,6 +43,39 @@ func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *moc
 // by handlers — site isolation is structural at the subject level.
 func ctx(account, siteID string) *natsrouter.Context {
 	return natsrouter.NewContext(map[string]string{"account": account, "siteID": siteID})
+}
+
+// localUnreadSub returns an EnrichedSubscription for a room on siteID with an
+// unread baseline: LastMsgAt is newer than LastSeenAt and already populated by
+// the $lookup, so the caller's own-site rows count with no cross-site RPC.
+// account is accepted for call-site readability (it mirrors the account the
+// surrounding GetActiveSubscriptions mock is scoped to) though the fixture
+// itself carries no per-account field.
+func localUnreadSub(account, roomID, siteID string) model.EnrichedSubscription {
+	_ = account
+	seen := time.UnixMilli(100).UTC()
+	newer := time.UnixMilli(200).UTC()
+	return model.EnrichedSubscription{
+		Subscription: model.Subscription{RoomID: roomID, SiteID: siteID, LastSeenAt: &seen},
+		LastMsgAt:    &newer,
+	}
+}
+
+// crossSiteSub returns an EnrichedSubscription for a room on a remote siteID
+// with no LastMsgAt baseline — unlike localUnreadSub, read state is unknown
+// until unreadRooms RPCs that site's RoomClient.GetRoomsMeta.
+func crossSiteSub(roomID, siteID string) model.EnrichedSubscription {
+	seen := time.UnixMilli(100).UTC()
+	return model.EnrichedSubscription{
+		Subscription: model.Subscription{RoomID: roomID, SiteID: siteID, LastSeenAt: &seen},
+	}
+}
+
+// failingRoomClient stubs rooms.GetRoomsMeta for siteID to return an error,
+// as if that remote site were unreachable — the cross-site fan-out must skip
+// it rather than fail the whole count.
+func failingRoomClient(rooms *mocks.MockRoomClient, siteID string) {
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), siteID, gomock.Any()).Return(nil, errors.New("down"))
 }
 
 func requireCode(t *testing.T, err error, code errcode.Code) {
