@@ -42,6 +42,11 @@ services:
       - USER_SETTINGS_BATCH_SIZE=${USER_SETTINGS_BATCH_SIZE:-512}
       - USER_SETTINGS_TIMEOUT=${USER_SETTINGS_TIMEOUT:-2s}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (stream readiness, consumer bind, dual-lane drain) still runs.
+      # Placement is not asserted here — a single-server NATS reports no cluster.
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
     volumes:
       - ../../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

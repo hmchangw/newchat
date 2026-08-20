@@ -73,7 +73,7 @@ func TestHandler_PublishToThreadAccounts_RecordsFanoutScenarios(t *testing.T) {
 			for _, account := range tt.failedAccounts {
 				pub.failOn[subject.UserRoomEvent(account)] = errors.New("publish failed")
 			}
-			h := NewHandler(nil, nil, pub, nil, nil, false, subject.RouteGlobal, withBroadcastMetrics(metrics))
+			h := NewHandler(nil, nil, pub, nil, nil, false, fixedRoutes(subject.RouteGlobal), withBroadcastMetrics(metrics))
 			ctx := context.Background()
 			consumer := natsmetrics.New(mp.Meter("shared")).Consumer(natsmetrics.ConsumerConfig{
 				Site: "site-a", Stream: "MESSAGES_CANONICAL_site-a", Consumer: "broadcast-worker",

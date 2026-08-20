@@ -13,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 func testRoomKey(t *testing.T) *roomkeystore.VersionedKeyPair {
@@ -59,4 +60,12 @@ func decryptClientMessage(t *testing.T, data []byte, key *roomkeystore.Versioned
 	var msg model.ClientMessage
 	require.NoError(t, json.Unmarshal([]byte(plaintext), &msg))
 	return evt, &msg
+}
+
+// fixedRoutes pins a handler to one route mode, for tests that exercise routing
+// itself rather than the lane logic. Production code always passes a
+// subject.LaneRouter, so the constructor takes a resolver and a bare mode
+// cannot be wired in by accident.
+func fixedRoutes(mode subject.RoomRouteMode) subject.RouteResolver {
+	return subject.NewLaneRouter(mode, subject.LaneHome, nil, 0)
 }

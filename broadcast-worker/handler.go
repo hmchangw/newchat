@@ -69,8 +69,12 @@ type Handler struct {
 	parentFetcher ParentFetcher
 	encrypt       bool
 	encoder       *roomcrypto.Encoder
-	routeMode     subject.RoomRouteMode
-	metrics       *broadcastMetrics
+	// routes resolves the room-route mode per publish. Not a fixed
+	// RoomRouteMode: the answer depends on which lane delivered the work, and on
+	// the home lane on how recently the home connection was restored. One
+	// handler per lane, so the lane never enters a call signature.
+	routes  subject.RouteResolver
+	metrics *broadcastMetrics
 }
 
 type handlerOption func(*handlerOptions)
@@ -83,7 +87,7 @@ func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
 	return func(opts *handlerOptions) { opts.metrics = metrics }
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
+func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routes subject.RouteResolver, options ...handlerOption) *Handler {
 	var opts handlerOptions
 	for _, option := range options {
 		option(&opts)
@@ -99,7 +103,7 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		parentFetcher: parentFetcher,
 		encrypt:       encrypt,
 		encoder:       roomcrypto.NewEncoder(),
-		routeMode:     routeMode,
+		routes:        routes,
 		metrics:       opts.metrics,
 	}
 }
@@ -886,7 +890,7 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 	ctx = withBroadcastMetricLabels(ctx, roomChannel, labels.eventType)
 	now := time.Now().UTC()
 	var pubErr error
-	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
+	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, subject.ResolveMode(h.routes, now), now) {
 		if err := h.pub.Publish(ctx, subj, payload); err != nil {
 			pubErr = fmt.Errorf("publish %s for room %s to %s: %w", op, roomID, subj, err)
 		}

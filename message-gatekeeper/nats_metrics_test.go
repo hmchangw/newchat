@@ -70,7 +70,7 @@ func TestHandler_HandleJetStreamMsg_RecordsRejectedOutcome(t *testing.T) {
 	h := NewHandler(nil, nil, nil, func(context.Context, *nats.Msg) error { return nil }, "site-a", nil, 500, 1, 8192, "", withGatekeeperMetrics(metrics))
 	msg := &fakeJSMsg{subject: "chat.invalid", data: []byte(`{}`)}
 
-	h.HandleJetStreamMsg(context.Background(), msg)
+	h.HandleJetStreamMsg(context.Background(), msg, false)
 
 	assert.True(t, msg.acked)
 	assert.False(t, msg.naked)
@@ -121,7 +121,7 @@ func TestHandler_HandleJetStreamMsg_RecordsAcceptedAndRetryOutcomes(t *testing.T
 				ctx = tracked.Context(ctx)
 			}
 
-			h.HandleJetStreamMsg(ctx, delivery)
+			h.HandleJetStreamMsg(ctx, delivery, false)
 
 			assert.Equal(t, tt.wantAck, msg.acked)
 			assert.Equal(t, tt.wantNak, msg.naked)

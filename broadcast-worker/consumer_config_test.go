@@ -56,3 +56,21 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, "chat.bot.msg.canonical.site-a.>", cc.FilterSubject)
 	})
 }
+
+// The failover lane reuses buildConsumerConfig — it is already parameterized by
+// durable and filter — so what needs asserting is that the derived durable and
+// filter differ from the home lane's. A shared durable would have the two lanes
+// clobber each other's cursor in a single-server dev setup.
+func TestFailoverConsumerConfig_DiffersFromPrimary(t *testing.T) {
+	w := stream.Resolve(stream.PipelineUser, "site-a")
+
+	primary := buildConsumerConfig(stream.ConsumerSettings{},
+		stream.PipelineUser.ConsumerName("broadcast-worker"), w.CanonicalWildcard)
+	failover := buildConsumerConfig(stream.ConsumerSettings{},
+		stream.PipelineUser.FailoverConsumerName("broadcast-worker"), w.CanonicalFailoverWildcard)
+
+	assert.Equal(t, "broadcast-worker-failover", failover.Durable)
+	assert.Equal(t, "chat.failover.msg.canonical.site-a.>", failover.FilterSubject)
+	assert.NotEqual(t, primary.Durable, failover.Durable)
+	assert.NotEqual(t, primary.FilterSubject, failover.FilterSubject)
+}

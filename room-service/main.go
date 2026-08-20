@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go/jetstream"
@@ -27,6 +28,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -43,15 +45,16 @@ type config struct {
 	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference routes the store's display/list reads to secondaries; the
 	// client stays on primary for authz/dedup/read-after-write.
-	MongoReadPreference      string          `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
-	MaxRoomSize              int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
-	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
-	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
-	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
-	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
-	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
+	MongoReadPreference      string               `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	MaxRoomSize              int                  `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
+	MaxBatchSize             int                  `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
+	MemberListTimeout        time.Duration        `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
+	RoomKeyGracePeriod       time.Duration        `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	HealthAddr               string               `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled             bool                 `env:"PPROF_ENABLED" envDefault:"false"`
+	Bootstrap                bootstrapConfig      `envPrefix:"BOOTSTRAP_"`
+	Buddy                    natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	RestrictedRoomMinMembers int                  `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
 	// meetings RPC (Graph onlineMeeting create); the deep-link RPCs use only
 	// EmailDomain. When TenantID/ClientID/ClientSecret are unset the meetings RPC
@@ -92,6 +95,10 @@ type config struct {
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
+	// FailoverRevertGrace: post-restoration dual-publish window. Must outlast the
+	// client revert backoff (capped at 5m) — raising the client cap without
+	// raising this reopens the silent recovery gap dual-publishing exists to close.
+	FailoverRevertGrace time.Duration `env:"FAILOVER_REVERT_GRACE" envDefault:"30m"`
 	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
 	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
 	// disables the cap (unbounded spawn).
@@ -212,13 +219,6 @@ func main() {
 	}
 	ensureCancel()
 
-	// Read receipts resolve the target message through history-service (which
-	// owns message history) over NATS, so room-service has no direct Cassandra
-	// dependency. A history-service outage degrades only read receipts
-	// (errcode.Unavailable); core room/membership/subscription operations are
-	// all MongoDB-backed and unaffected.
-	msgReader := newHistoryMessageReader(nc, cfg.SiteID, withHistoryMetrics(publishMetrics))
-
 	// Graph clients back the meetings RPC. Constructed only when the Azure app
 	// credentials are present; otherwise the meetings RPC reports not-configured
 	// while the deep-link RPCs keep working. One app-only client serves both the
@@ -291,50 +291,121 @@ func main() {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
-	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics))
-	handler := NewHandler(store, keyStore, memberListClient, msgReader, cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
-		func(ctx context.Context, subj string, data []byte, msgID string) error {
+	// jsPublisher / corePublisher bind the two publish paths to ONE connection,
+	// so the buddy-side handler publishes on the buddy: a request that reached
+	// this service over the buddy did so because the home cluster is down, and
+	// its reply events have to go back out the way they came. Both lanes report
+	// to the same publish metrics — a failover publish is still a publish.
+	jsPublisher := func(pjs o11ynats.JetStream) func(context.Context, string, []byte, string) error {
+		return func(ctx context.Context, subj string, data []byte, msgID string) error {
 			msg := natsutil.NewMsg(ctx, subj, data)
 			var opts []jetstream.PublishOpt
 			if msgID != "" {
 				opts = append(opts, jetstream.WithMsgID(msgID))
 			}
-			_, err := js.PublishMsg(ctx, msg, opts...)
+			_, err := pjs.PublishMsg(ctx, msg, opts...)
 			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
 			publishMetrics.Attempt(ctx, destination, operation, err)
 			if err != nil {
 				return fmt.Errorf("publish to %q: %w", subj, err)
 			}
 			return nil
-		},
-		func(ctx context.Context, subj string, data []byte) error {
-			err := nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
+		}
+	}
+	corePublisher := func(pnc *o11ynats.Conn) func(context.Context, string, []byte) error {
+		return func(ctx context.Context, subj string, data []byte) error {
+			err := pnc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
 			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
 			publishMetrics.Attempt(ctx, destination, operation, err)
 			if err != nil {
 				return fmt.Errorf("publish core to %q: %w", subj, err)
 			}
 			return nil
-		},
-		cfg.LegacyRoomOrigins.byID,
-		nc.NatsConn().MaxPayload(),
-		roomRouteMode,
-	)
-	handler.dekProvisioner = dekProvisioner
-	handler.badge = badge
-	handler.graphClient = graphClient
-	handler.directoryClient = directoryClient
-	handler.teamsMeetingStore = store
-	handler.teamsEmailDomain = cfg.TeamsEmailDomain
-	handler.roomMembersLimit = cfg.RoomMembersLimit
-	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
+		}
+	}
+
+	// buildHandler assembles a handler bound to one connection and one route
+	// resolver. Two are built — home and buddy — sharing every store and client,
+	// because the only thing that differs between the lanes is where events go.
+	buildHandler := func(pjs o11ynats.JetStream, pnc *o11ynats.Conn, routes subject.RouteResolver) *Handler {
+		// The request/reply clients bind to the same connection as the
+		// publishers: a member list or history read issued while serving a
+		// buddy-lane request must not go out over the connection whose cluster
+		// is the reason the request came in on the buddy.
+		//
+		// Read receipts resolve the target message through history-service
+		// (which owns message history) over NATS, so room-service has no direct
+		// Cassandra dependency. A history-service outage degrades only read
+		// receipts (errcode.Unavailable); core room/membership/subscription
+		// operations are all MongoDB-backed and unaffected.
+		h := NewHandler(store, keyStore,
+			NewNATSMemberListClient(pnc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics)),
+			newHistoryMessageReader(pnc, cfg.SiteID, withHistoryMetrics(publishMetrics)),
+			cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
+			jsPublisher(pjs),
+			corePublisher(pnc),
+			cfg.LegacyRoomOrigins.byID,
+			nc.NatsConn().MaxPayload(),
+			routes,
+		)
+		h.dekProvisioner = dekProvisioner
+		h.badge = badge
+		h.graphClient = graphClient
+		h.directoryClient = directoryClient
+		h.teamsMeetingStore = store
+		h.teamsEmailDomain = cfg.TeamsEmailDomain
+		h.roomMembersLimit = cfg.RoomMembersLimit
+		h.roomMembersCallLimit = cfg.RoomMembersCallLimit
+		return h
+	}
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
+	// Shared by both routers so the buddy lane is shed on the same terms.
 	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
+
+	homeRestores := natsutil.TrackRestores(ctx, nc)
+	handler := buildHandler(js, nc,
+		subject.NewLaneRouter(roomRouteMode, subject.LaneHome, homeRestores.RestoredAt, cfg.FailoverRevertGrace))
+	// Buddy lane: keeps this site federating OUTWARD, and answering displaced
+	// clients' RPCs, while its own NATS is down.
+	var buddyRouter *natsrouter.Router
+	// BindBuddy never fails startup — on any failure no failover publisher is
+	// installed and federateOne stays on the live lane only, which is also the
+	// correct single-site behaviour.
+	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy, cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+			if err := stream.EnsureFailoverStream(ctx, stream.FailoverJS(bjs),
+				stream.OutboxFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+				return err
+			}
+			failoverPublish := jsPublisher(bjs)
+			handler.SetFailoverPublisher(failoverPublish)
+
+			// A displaced client sends its RPCs to the buddy cluster, so this
+			// service has to be listening there too. The subjects are already
+			// site-scoped (subject.*Pattern(cfg.SiteID)), so the buddy site's own
+			// room-service is not subscribed to them — this site's request can
+			// only be answered by this site's instance, against this site's Mongo.
+			//
+			// Both routers share the "room-service" queue group, and a queue
+			// group spans the supercluster with local subscribers preferred, so
+			// a request is answered once. In steady state that is the home
+			// router; should the buddy router take one, the only difference is
+			// that its events route global — over-delivery, never loss.
+			buddyHandler := buildHandler(bjs, bconn,
+				subject.NewLaneRouter(roomRouteMode, subject.LaneFailover, nil, cfg.FailoverRevertGrace))
+			buddyHandler.SetFailoverPublisher(failoverPublish)
+			buddyRouter = natsrouter.New(bconn, "room-service", routerOpts...)
+			buddyRouter.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+			buddyHandler.Register(buddyRouter)
+			return nil
+		})
+
 	router := natsrouter.New(nc, "room-service", routerOpts...)
 	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
 	handler.Register(router)
@@ -351,7 +422,14 @@ func main() {
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
+		func(ctx context.Context) error {
+			if buddyRouter == nil {
+				return nil
+			}
+			return buddyRouter.Shutdown(ctx)
+		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error {
 			if closer, ok := keyStore.(interface{ Close() error }); ok {
 				return closer.Close()

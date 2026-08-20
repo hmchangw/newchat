@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
@@ -54,6 +55,7 @@ type config struct {
 	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string                  `env:"METRICS_ADDR"         envDefault:":9090"`
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Buddy              natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Atrest             atrest.Config
 	Vault              atrest.VaultConfig
@@ -227,48 +229,47 @@ func main() {
 		}, domainMetrics)
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
 
-	wg.Add(1)
-	go func() {
-		// The loop itself is counted so shutdown, which stops the iterator and
-		// then waits on wg, cannot pass through while a message Next already
-		// returned is still on its way to a worker.
-		defer wg.Done()
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				consumerMetrics.LoopFailed(context.Background(), err)
+	dispatch := func(msgCtx context.Context, msg jetstream.Msg) {
+		// jobguard recovers handler panics — this goroutine runs outside
+		// natsrouter's Recovery middleware, so an unrecovered panic would
+		// crash the worker and crash-loop on JetStream redelivery.
+		jobguard.Run(msg, func() {
+			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+			// Dispatch by subject: the one-time .teams.batch migration
+			// writes straight to Cassandra; the live .created feed runs the
+			// normal pipeline.
+			if msg.Subject() == teamsBatchSubj {
+				teamsMigration.consume(handlerCtx, msg)
 				return
 			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func(msgCtx context.Context, msg jetstream.Msg) {
-				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
-				msg = tracked
-				msgCtx = tracked.Context(msgCtx)
-				defer func() {
-					tracked.Finish(msgCtx)
-					<-sem
-					wg.Done()
-				}()
-				// jobguard recovers handler panics — this goroutine runs outside
-				// natsrouter's Recovery middleware, so an unrecovered panic would
-				// crash the worker and crash-loop on JetStream redelivery.
-				jobguard.Run(msg, func() {
-					handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-					handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-					// Dispatch by subject: the one-time .teams.batch migration
-					// writes straight to Cassandra; the live .created feed runs the
-					// normal pipeline.
-					if msg.Subject() == teamsBatchSubj {
-						teamsMigration.consume(handlerCtx, msg)
-						return
-					}
-					logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
-					handler.HandleJetStreamMsg(handlerCtx, msg)
-				})
-			}(msgCtx, msg)
-		}
-	}()
+			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+			handler.HandleJetStreamMsg(handlerCtx, msg)
+		})
+	}
+
+	natsutil.RunPool(iter, sem, &wg, dispatch,
+		natsutil.WithLaneMetrics(consumerMetrics, consumerCfg.MaxDeliver))
+
+	// Buddy lane. BindBuddy never fails startup — on any failure buddyLane stays
+	// nil and the service runs home-only. Default mode only: teams is a one-time
+	// migration path with no standby stream.
+	binder := natsutil.FailoverBinder{
+		Service: cfg.ServiceName, SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
+		Sem: sem, WG: &wg, Metrics: sharedMetrics,
+	}
+	var buddyLane *natsutil.Lane
+	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+			var bErr error
+			buddyLane, bErr = binder.Bind(ctx, bjs, &natsutil.LaneSpec{
+				Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
+				Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
+			}, dispatch)
+			return bErr
+		})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -281,22 +282,19 @@ func main() {
 	slog.Info("message-worker running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
+		// Stop both iterators before draining, so neither lane pulls new work
+		// while the other is still finishing. Both feed one WaitGroup.
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
+			buddyLane.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
-			}
+			return natsutil.WaitPool(ctx, &wg)
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error {
@@ -313,6 +311,10 @@ func main() {
 // buildConsumerConfig returns the durable consumer config for the given mode.
 // default mode binds only the live .created feed on MESSAGES-CANONICAL (.updated/
 // .deleted are excluded — history-service already wrote Cassandra synchronously for
+// runLane drains one pull iterator across a bounded worker pool. Shared by the
+// home and buddy lanes so both get identical concurrency and panic handling —
+// a failover-lane message is still this site's message.
+
 // those, so re-processing would duplicate writes). teams mode binds only the Teams
 // migration batch subject on MESSAGES-TEAMS, its own durable.
 func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstream.ConsumerConfig {
@@ -324,5 +326,20 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 	}
 	cc.Durable = "message-worker"
 	cc.FilterSubjects = []string{subject.MsgCanonicalCreated(siteID)}
+	return cc
+}
+
+// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// MESSAGES-CANONICAL-FAILOVER lane. Distinct durable from the home lane so the
+// two keep independent cursors; the handler and the Cassandra writes are
+// identical, because a failover-lane message is still this site's message and
+// still belongs in this site's keyspace.
+//
+// Default mode only — teams mode is a one-time migration path with no failover
+// lane.
+func buildFailoverConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "message-worker-failover"
+	cc.FilterSubjects = []string{subject.FailoverMsgCanonicalCreated(siteID)}
 	return cc
 }

@@ -33,6 +33,15 @@ services:
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - ROOM_META_L2_TTL=${ROOM_META_L2_TTL:-15m}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (stream readiness, consumer bind, dual-lane drain) still runs.
+      # Placement is not asserted here — a single-server NATS reports no cluster.
+      # Post-restoration dual-publish window. Must outlast the client revert
+      # backoff (capped at 5m); raising the client cap without raising this
+      # reopens the silent recovery gap dual-publishing exists to close.
+      - FAILOVER_REVERT_GRACE=${FAILOVER_REVERT_GRACE:-30m}
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
       - ENCRYPTION_ENABLED=${ENCRYPTION_ENABLED:-false}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).

@@ -43,3 +43,24 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 256, cc.MaxWaiting)
 	})
 }
+
+func TestBuildFailoverConsumerConfig(t *testing.T) {
+	cc := buildFailoverConsumerConfig(stream.ConsumerSettings{})
+
+	assert.Equal(t, "message-gatekeeper-failover", cc.Durable,
+		"distinct durable so the two lanes keep independent cursors")
+}
+
+func TestFailoverConsumerDurable_DiffersFromPrimary(t *testing.T) {
+	assert.NotEqual(t,
+		buildConsumerConfig(stream.ConsumerSettings{}).Durable,
+		buildFailoverConsumerConfig(stream.ConsumerSettings{}).Durable)
+}
+
+// A message that arrived on the failover lane must be published to the failover
+// canonical subject. Publishing to the live one would target a stream on the
+// cluster that is down, so the message would go nowhere.
+func TestCanonicalSubjectForLane(t *testing.T) {
+	assert.Equal(t, "chat.msg.canonical.site-a.created", canonicalSubjectForLane("site-a", false))
+	assert.Equal(t, "chat.failover.msg.canonical.site-a.created", canonicalSubjectForLane("site-a", true))
+}

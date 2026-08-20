@@ -176,6 +176,8 @@ Permissions and connection limits come from the auth-service account's scoped si
 - `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, subscription updates, and settings updates.
 - the room-event subject for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel. Pick the subject by the room's `crossSite` flag (from `subscription.list`): `chat.room.{roomID}.event` when `crossSite: true`, `chat.local.room.{roomID}.event` when `crossSite: false`. **Absent/unknown `crossSite` defaults to the global `chat.room.{roomID}.event`** (fail-safe — a global room misrouted to the local subject would silently miss cross-site delivery).
 
+**Failover override.** A client connected to a **peer site** MUST ignore `crossSite` entirely and subscribe to `chat.room.{roomID}.event` for **every** room. `chat.local.room.>` is filtered at the leaf node and never crosses a gateway, so a client sitting on another cluster would receive nothing on it — silently, and for the same-site rooms that are most of its traffic. The server flips on the same condition and publishes those events globally for the duration, plus a grace window after the home site recovers, so late-reverting clients are still covered.
+
 The exact event subjects a client may receive as a result of an RPC are listed under each method's "Triggered events" sections in §2.2, §3, and §4.
 
 ### 2.2 HTTP — POST /api/v1/auth
@@ -808,7 +810,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 **Endpoint:** `GET /api/settings`
 **Reply:** synchronous HTTP response
 
-Deployment-level frontend configuration, served from the portal's environment. Called before login — same discovery-tier trust as §2.3: no input, no token validated. Both values are static per deployment and required at portal startup (the OTEL URL is additionally validated and normalized there), so the endpoint has no runtime error path.
+Deployment-level frontend configuration, served from the portal's environment. Called before login — same discovery-tier trust as §2.3: no input, no token validated. Every value is static per deployment and fixed at portal startup (the OTEL URL is additionally validated and normalized there), so the endpoint has no runtime error path.
 
 #### Request
 
@@ -826,17 +828,33 @@ GET /api/settings
 |---|---|---|
 | `apiVersion` | string | Backend API generation the client should target (e.g. `v2`). Opaque string — compare, don't parse. |
 | `otelBaseUrl` | string | Base URL for client OTEL telemetry, never with a trailing slash. The client appends `/trace` and `/log`. |
+| `botLoginEnabled` | boolean | Whether bot-role accounts may log in through this client. |
+| `sites` | [SitePeer](#sitepeer)[] | Federation peer list for NATS failover. Absent in a single-site deployment. Includes the caller's own site — which site is "home" differs per caller, while this payload is identical for all of them, so the client filters its own out. Sorted by `siteId`; the client shuffles it, so the order carries no selection meaning. |
+
+##### SitePeer
+
+| Field | Type | Notes |
+|---|---|---|
+| `siteId` | string | The peer's site identifier. |
+| `natsUrl` | string | The peer's NATS WebSocket URL, to connect to when the client's home site's NATS is unreachable. |
+
+A peer's `baseUrl` is deliberately **not** exposed: a displaced client relocates its NATS connection only — its HTTP calls still go to its own home gateway, which is up.
 
 ```json
 {
   "apiVersion": "v2",
-  "otelBaseUrl": "https://otel.example.com/v1"
+  "otelBaseUrl": "https://otel.example.com/v1",
+  "botLoginEnabled": true,
+  "sites": [
+    { "siteId": "site-a", "natsUrl": "wss://nats.site-a.example.com" },
+    { "siteId": "site-b", "natsUrl": "wss://nats.site-b.example.com" }
+  ]
 }
 ```
 
 #### Error response
 
-The handler has no error path (both values are validated at portal startup). The only possible non-200 is a framework-level `500` from panic recovery, which returns an **empty body** — the [error envelope](#6-error-envelope-reference) does not apply here.
+The handler has no error path (every value is validated at portal startup). The only possible non-200 is a framework-level `500` from panic recovery, which returns an **empty body** — the [error envelope](#6-error-envelope-reference) does not apply here.
 
 #### Triggered events — success path
 
@@ -6233,9 +6251,11 @@ See [Error envelope](#6-error-envelope-reference). The reply carries the `{ code
 ### Send Message
 
 **Subject:** `chat.user.{account}.room.{roomID}.{siteID}.msg.send`
+**Failover subject:** `chat.user.{account}.room.{roomID}.{siteID}.failover.msg.send`
 **Reply subject:** `chat.user.{account}.response.{requestID}` — the client must subscribe to `chat.user.{account}.>` (the user wildcard) to receive it. The `{requestID}` value is the `requestId` field from the request body.
 
 - `{siteID}` must be the room's **origin `siteID`** (the site that owns the room), not the caller's own site.
+- A client connected to a **peer site** (because its own site's NATS is unreachable — see [`sites`](#25-http--get-apisettings-portal-service)) publishes to the **failover subject** instead. Same payload, same reply subject, same error envelope; only the subject differs. The live subject's stream lives on the cluster that is down, so a send published there would be accepted by nothing. Both subjects sit inside the account's existing JWT scope (`chat.user.{account}.>`), so no additional permission is involved.
 
 This RPC uses the **publish + async-reply** pattern, not the standard NATS request/reply. The client publishes to the `msg.send` subject (no `_INBOX.>` reply expected). `message-gatekeeper` validates the request, publishes the canonical message to `MESSAGES-CANONICAL`, and replies to `chat.user.{account}.response.{requestID}` with the persisted `Message` (or an error envelope on failure).
 

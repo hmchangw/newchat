@@ -10,11 +10,14 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// PublishFunc publishes data; non-empty msgID sets Nats-Msg-Id for JetStream stream-level dedup.
-type PublishFunc func(ctx context.Context, subj string, data []byte, msgID string) error
+// PublishFunc publishes data; non-empty msgID sets Nats-Msg-Id for JetStream
+// stream-level dedup. Aliased to the pkg/outbox type so the handler and
+// ForwardWithFailover cannot drift apart.
+type PublishFunc = outbox.PublishFunc
 
 // Handler forwards federation relay events off the OUTBOX stream to their
 // destination sites' INBOX. It holds no store — it is a pure NATS→NATS relay.
@@ -56,7 +59,7 @@ func (h *Handler) HandleEvent(ctx context.Context, subj string, data []byte) err
 	// Redelivery is idempotent (DedupID), so a timed-out-but-delivered forward re-forwards safely.
 	pubCtx, cancel := context.WithTimeout(ctx, federationForwardTimeout)
 	defer cancel()
-	if err := h.publish(pubCtx, subject.InboxExternal(destSiteID, eventType), evt.Envelope, evt.DedupID); err != nil {
+	if err := outbox.ForwardWithFailover(pubCtx, h.publish, destSiteID, eventType, evt.Envelope, evt.DedupID); err != nil {
 		return fmt.Errorf("forward outbox event to %s: %w", destSiteID, err)
 	}
 	return nil

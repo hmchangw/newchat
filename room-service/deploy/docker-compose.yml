@@ -40,6 +40,15 @@ services:
       - ROOM_MEMBERS_LIMIT=${ROOM_MEMBERS_LIMIT:-500}
       - ROOM_MEMBERS_CALL_LIMIT=${ROOM_MEMBERS_CALL_LIMIT:-20}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (stream readiness, consumer bind, dual-lane drain) still runs.
+      # Placement is not asserted here — a single-server NATS reports no cluster.
+      # Post-restoration dual-publish window. Must outlast the client revert
+      # backoff (capped at 5m); raising the client cap without raising this
+      # reopens the silent recovery gap dual-publishing exists to close.
+      - FAILOVER_REVERT_GRACE=${FAILOVER_REVERT_GRACE:-30m}
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
       - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}

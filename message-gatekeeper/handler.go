@@ -107,7 +107,9 @@ func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyF
 }
 
 // HandleJetStreamMsg processes a JetStream message from the MESSAGES stream.
-func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
+// failoverLane is fixed by which consumer delivered the message, so the caller
+// passes it rather than having every message re-derive it from its own subject.
+func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg, failoverLane bool) {
 	// Parse the body once; reused for log enrichment, reply routing, and
 	// processMessage validation (was triple-decoded on the hot path).
 	rawData := msg.Data()
@@ -167,7 +169,10 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	// encoded token. processMessage needs the requester's real account for
 	// data-key lookups (subscription, history), keyed on the original dotted
 	// account — so decode here. No-op for every non-bot account.
-	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req)
+	// The lane is fixed by the consumer that delivered this message, so a
+	// failover send cannot be misattributed to the live canonical stream (which
+	// is on the cluster that is down).
+	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req, failoverLane)
 	if err != nil {
 		// Typed *errcode.Error → client-facing validation/permanence: reply + Ack.
 		// Bare error (raw fmt.Errorf) → transient infra failure: Nak for redelivery.
@@ -289,7 +294,7 @@ func accountFromSubject(subj string) string {
 // processMessage validates a SendMessageRequest and publishes a MessageEvent
 // to MESSAGES-CANONICAL. Validation errors are typed *errcode.Error (reply +
 // Ack); transient infra failures are bare fmt.Errorf (Nak for redelivery).
-func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID string, req *model.SendMessageRequest) ([]byte, error) {
+func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID string, req *model.SendMessageRequest, failoverLane bool) ([]byte, error) {
 	// Validate siteID matches this service's siteID
 	if siteID != h.siteID {
 		return nil, errcode.BadRequest(fmt.Sprintf("siteID mismatch: got %s, want %s", siteID, h.siteID))
@@ -468,7 +473,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, fmt.Errorf("marshal message event: %w", err)
 	}
 
-	canonicalSubj := subject.MsgCanonicalCreated(siteID)
+	canonicalSubj := canonicalSubjectForLane(siteID, failoverLane)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
 		return nil, fmt.Errorf("publish to MESSAGES-CANONICAL: %w", errors.Join(errCanonicalPublish, err))
