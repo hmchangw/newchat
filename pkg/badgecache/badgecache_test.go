@@ -89,6 +89,7 @@ func TestMarkerTTLSeconds_NeverZero(t *testing.T) {
 		name      string
 		markerTTL time.Duration
 	}{
+		{"sub-second truncates to 0s and must still floor to 1", 500 * time.Millisecond},
 		{"1s floors via early return", time.Second},
 		{"2s must be floored, not truncated to 0", 2 * time.Second},
 	}

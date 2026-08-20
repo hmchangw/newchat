@@ -331,6 +331,10 @@ func TestLoad_BadgeMarkerTTLDefault(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
 	t.Setenv("SITE_ID", "site-a")
+	// An inherited BADGE_MARKER_TTL would change the asserted default, and an
+	// inherited short BADGE_CACHE_TTL would make that default invalid.
+	unsetEnv(t, "BADGE_CACHE_TTL")
+	unsetEnv(t, "BADGE_MARKER_TTL")
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.Equal(t, 10*time.Minute, cfg.BadgeMarkerTTL)

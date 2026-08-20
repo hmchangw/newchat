@@ -2044,6 +2044,10 @@ func TestMongoStore_UpdateSubscriptionRead_ReturnsPostUpdateThreadUnread(t *test
 	require.NotNil(t, got.LastSeenAt)
 	assert.WithinDuration(t, now, *got.LastSeenAt, time.Second)
 	assert.False(t, got.Alert)
+	// The stored array must survive untouched, not just the returned count: an
+	// implementation that drained threadUnread while returning the pre-update
+	// count would otherwise pass.
+	assert.Equal(t, []string{"p1", "p2"}, got.ThreadUnread)
 
 	_, err = store.UpdateSubscriptionRead(ctx, "r1", "nobody", now)
 	require.ErrorIs(t, err, model.ErrSubscriptionNotFound)

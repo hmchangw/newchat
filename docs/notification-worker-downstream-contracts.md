@@ -149,7 +149,7 @@ every message bumps the **full badge audience** (all members past the
 sender/muted/restricted/thread-scope filters — including members who won't be
 pushed), and a read removes exactly the room read (`ClearRoom`) — a room with
 unread followed threads stays counted, so the cache is left untouched in that
-case; a mute and a member-removal are the same exact `ClearRoom`. Thread-read,
+case; a mute-on transition and a member-removal are the same exact `ClearRoom`. Thread-read,
 `thread.read.all`, and unmute still drop the account's whole set (`ClearAll`,
 plus its `badge:fresh` marker), since their post-state is genuinely ambiguous.
 Drift is now bounded by the freshness marker's own TTL

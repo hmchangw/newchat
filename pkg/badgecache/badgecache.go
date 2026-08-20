@@ -287,11 +287,14 @@ func ttlSeconds(ttl time.Duration) int64 {
 // Downward-only, so the result never exceeds markerTTL and the
 // markerTTL <= ttl invariant holds without re-checking it. Never returns 0 —
 // a zero EX aborts the script mid-execution, leaving the set rewritten but
-// unmarked and the cache permanently missing.
+// unmarked and the cache permanently missing. That floor is enforced here
+// rather than left to config validation: a sub-second markerTTL truncates to
+// zero seconds, and this package is shared, so it cannot assume every caller
+// validates the way user-service does.
 func (c *Cache) markerTTLSeconds(account string) int64 {
 	sec := ttlSeconds(c.markerTTL)
 	if sec <= 1 {
-		return sec
+		return 1
 	}
 	span := sec*jitterPercent/100 + 1
 	h := fnv.New32a()
