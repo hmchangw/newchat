@@ -177,7 +177,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
@@ -341,7 +341,8 @@ func main() {
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
-	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard)
+	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	handler.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

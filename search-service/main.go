@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -242,7 +243,9 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	router := natsrouter.New(nc, "search-service", cfg.Guard.Options()...)
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.New(nc, "search-service",
+		append(cfg.Guard.Options(), natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())

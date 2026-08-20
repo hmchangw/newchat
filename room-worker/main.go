@@ -137,7 +137,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
@@ -272,7 +272,8 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard)
+	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
