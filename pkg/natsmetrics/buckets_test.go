@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/flywindy/o11y"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,7 +36,7 @@ func TestNewFromProviderUsesPackageScope(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	m := NewFromProvider(mp)
-	m.Publisher("s1").Attempt(context.Background(), DestinationCanonical, OperationCanonicalPublish, nil)
+	m.Publisher("s1").Failure(context.Background(), DestinationCanonical, OperationCanonicalPublish, nats.ErrTimeout)
 
 	rm := collect(t, reader)
 	var scopes []string

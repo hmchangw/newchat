@@ -68,8 +68,9 @@ var allEventTypes = []EventType{
 
 type PublishOutcome string
 
+// PublishOutcome is a bounded failure cause. There is deliberately no success
+// value: a successful publish is not recorded (see Publisher.Failure).
 const (
-	PublishSuccess         PublishOutcome = "success"
 	PublishTimeout         PublishOutcome = "timeout"
 	PublishNoResponders    PublishOutcome = "no_responders"
 	PublishDisconnected    PublishOutcome = "disconnected"
@@ -80,8 +81,23 @@ const (
 )
 
 var allPublishOutcomes = []PublishOutcome{
-	PublishSuccess, PublishTimeout, PublishNoResponders, PublishDisconnected,
+	PublishTimeout, PublishNoResponders, PublishDisconnected,
 	PublishBufferFull, PublishPermission, PublishPayloadTooLarge, PublishOtherError,
+}
+
+// RequestSucceeded is the request family's success value. Outbound
+// request/reply keeps both halves because nothing else counts a Core NATS
+// exchange — unlike a publish, where the broker owns the success side.
+const RequestSucceeded PublishOutcome = "success"
+
+var allRequestOutcomes = append([]PublishOutcome{RequestSucceeded}, allPublishOutcomes...)
+
+// classifyRequestOutcome keeps success meaningful for the request family.
+func classifyRequestOutcome(err error) PublishOutcome {
+	if err == nil {
+		return RequestSucceeded
+	}
+	return ClassifyPublishError(err)
 }
 
 type TerminalReason string
@@ -184,7 +200,7 @@ type Metrics struct {
 	messages           metric.Int64Counter
 	redeliveries       metric.Int64Counter
 	processingDuration metric.Float64Histogram
-	publishAttempts    metric.Int64Counter
+	publishFailures    metric.Int64Counter
 	publishRetries     metric.Int64Counter
 	terminalFailures   metric.Int64Counter
 	requests           metric.Int64Counter
@@ -237,9 +253,9 @@ func New(meter metric.Meter) *Metrics {
 	if err != nil {
 		processing, _ = noopMeter.Float64Histogram("chat.nats.consumer.processing.duration")
 	}
-	publishAttempts, err := meter.Int64Counter("chat.nats.publish.attempts", metric.WithDescription("Actual Core NATS or JetStream publish attempts."))
+	publishFailures, err := meter.Int64Counter("chat.nats.publish.failures", metric.WithDescription("Publishes that failed, by bounded cause. Successes are not recorded."))
 	if err != nil {
-		publishAttempts, _ = noopMeter.Int64Counter("chat.nats.publish.attempts")
+		publishFailures, _ = noopMeter.Int64Counter("chat.nats.publish.failures")
 	}
 	publishRetries, err := meter.Int64Counter("chat.nats.publish.retries", metric.WithDescription("Application-managed publish attempts after the first."))
 	if err != nil {
@@ -265,7 +281,7 @@ func New(meter metric.Meter) *Metrics {
 	if err != nil {
 		handlerDuration, _ = noopMeter.Float64Histogram("chat.nats.request.handler.duration")
 	}
-	return &Metrics{loop: loop, messages: messages, redeliveries: redeliveries, processingDuration: processing, publishAttempts: publishAttempts, publishRetries: publishRetries, terminalFailures: terminal, requests: requests, requestDuration: requestDuration, handledRequests: handledRequests, handlerDuration: handlerDuration}
+	return &Metrics{loop: loop, messages: messages, redeliveries: redeliveries, processingDuration: processing, publishFailures: publishFailures, publishRetries: publishRetries, terminalFailures: terminal, requests: requests, requestDuration: requestDuration, handledRequests: handledRequests, handlerDuration: handlerDuration}
 }
 
 // ConsumerConfig carries the per-consumer label base. Service identity is
@@ -574,7 +590,7 @@ func (m *Metrics) Publisher(site string) Publisher {
 		metrics: m,
 		attempt: make(map[publishKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)*len(allPublishOutcomes)),
 		retry:   make(map[retryKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)),
-		request: make(map[requestKey]metric.MeasurementOption, len(allOperations)*len(allPublishOutcomes)),
+		request: make(map[requestKey]metric.MeasurementOption, len(allOperations)*len(allRequestOutcomes)),
 		handled: make(map[handledRequestKey]metric.MeasurementOption, len(allOperations)*len(allRequestResults)),
 	}
 	for _, destination := range allDestinations {
@@ -589,7 +605,7 @@ func (m *Metrics) Publisher(site string) Publisher {
 	}
 	for _, operation := range allOperations {
 		op := attribute.String("operation", string(operation))
-		for _, outcome := range allPublishOutcomes {
+		for _, outcome := range allRequestOutcomes {
 			p.request[requestKey{operation, outcome}] = build(op, attribute.String("outcome", string(outcome)))
 		}
 		for _, result := range allRequestResults {
@@ -599,20 +615,26 @@ func (m *Metrics) Publisher(site string) Publisher {
 	return p
 }
 
-// Attempt records one actual publish call.
+// Failure records a publish that did not succeed, by bounded cause. A nil err
+// records nothing, so callers pass the publish result directly.
 //
-// For Core NATS a nil error means the message entered the client's write or
-// reconnect buffer, NOT that the broker accepted it: nats.go buffers publishes
-// across a disconnect and only fails once the reconnect buffer overflows. Treat
-// `outcome="success"` on a Core NATS destination as "handed to the client", and
-// read it alongside the connection-state metrics in pkg/natsutil. JetStream
-// destinations wait for a PubAck, so their success is broker-confirmed.
-func (p Publisher) Attempt(ctx context.Context, destination DestinationKind, operation Operation, err error) {
-	if p.metrics == nil {
+// Successes are deliberately not counted. For a JetStream destination the
+// broker already counts every acceptance as jetstream_stream_total_messages,
+// which is the denominator any failure ratio needs. For a Core NATS
+// destination a nil error only means the message entered the client's write or
+// reconnect buffer — nats.go buffers publishes across a disconnect and fails
+// only once the reconnect buffer overflows — so a success there never meant
+// delivery and was never worth a series. Read this family alongside the
+// connection-state metrics in pkg/natsutil.
+//
+// The cost mattered: the fan-out paths in broadcast-worker and
+// pkg/roomkeysender call this once per recipient.
+func (p Publisher) Failure(ctx context.Context, destination DestinationKind, operation Operation, err error) {
+	if err == nil || p.metrics == nil {
 		return
 	}
 	key := publishKey{normalizeDestination(destination), normalizeOperation(operation), ClassifyPublishError(err)}
-	p.metrics.publishAttempts.Add(ctx, 1, p.attempt[key])
+	p.metrics.publishFailures.Add(ctx, 1, p.attempt[key])
 }
 
 // Retry counts an application-managed publish attempt after the first. It is
@@ -630,7 +652,7 @@ func (p Publisher) Request(ctx context.Context, operation Operation, duration ti
 	if p.metrics == nil {
 		return
 	}
-	opt := p.request[requestKey{normalizeOperation(operation), ClassifyPublishError(err)}]
+	opt := p.request[requestKey{normalizeOperation(operation), classifyRequestOutcome(err)}]
 	p.metrics.requests.Add(ctx, 1, opt)
 	p.metrics.requestDuration.Record(ctx, duration.Seconds(), opt)
 }
@@ -705,7 +727,9 @@ func ClassifyPublishError(err error) PublishOutcome {
 	var jsErr jetstream.JetStreamError
 	switch {
 	case err == nil:
-		return PublishSuccess
+		// Unreachable through Publisher.Failure, which returns before
+		// classifying a nil error. Kept total for direct callers.
+		return PublishOtherError
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, nats.ErrTimeout):
 		return PublishTimeout
 	case errors.Is(err, nats.ErrNoResponders), errors.Is(err, jetstream.ErrNoStreamResponse):

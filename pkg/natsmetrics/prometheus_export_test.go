@@ -53,7 +53,7 @@ func TestPrometheusExport_GatherSucceedsWithResourceConstantLabels(t *testing.T)
 	require.NoError(t, c.Track(ctx, msg, EventCreated, 5).Ack())
 
 	p := m.Publisher("s1")
-	p.Attempt(ctx, DestinationCanonical, OperationCanonicalPublish, nil)
+	p.Failure(ctx, DestinationCanonical, OperationCanonicalPublish, nil)
 	p.Request(ctx, OperationPresenceLookup, time.Millisecond, nil)
 	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
 

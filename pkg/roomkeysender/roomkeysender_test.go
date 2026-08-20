@@ -172,16 +172,16 @@ func TestSender_WithoutMetrics(t *testing.T) {
 	assert.Equal(t, "chat.user.alice.event.room.key", pub.subject)
 }
 
-// TestSender_WithMetrics records one bounded publish attempt per send. The key
-// subject carries an account token, so the recorded labels must come from the
-// classifier rather than the subject itself.
+// TestSender_WithMetrics records a bounded failure per failed send, and
+// nothing at all when the send succeeds — the broker owns the success side and
+// a Core NATS success only means the message reached the write buffer.
 func TestSender_WithMetrics(t *testing.T) {
 	tests := []struct {
 		name        string
 		publishErr  error
-		wantOutcome string
+		wantOutcome string // "" means nothing is recorded
 	}{
-		{name: "success", wantOutcome: "success"},
+		{name: "success records nothing", wantOutcome: ""},
 		{name: "publish failure", publishErr: errors.New("connection lost"), wantOutcome: "other_error"},
 		{name: "disconnected", publishErr: nats.ErrConnectionClosed, wantOutcome: "disconnected"},
 	}
@@ -203,11 +203,11 @@ func TestSender_WithMetrics(t *testing.T) {
 			var rm metricdata.ResourceMetrics
 			require.NoError(t, reader.Collect(context.Background(), &rm))
 
-			var attempts int64
+			var failures int64
 			var gotAttrs map[string]string
 			for _, scope := range rm.ScopeMetrics {
 				for _, m := range scope.Metrics {
-					if m.Name != "chat.nats.publish.attempts" {
+					if m.Name != "chat.nats.publish.failures" {
 						continue
 					}
 					sum, ok := m.Data.(metricdata.Sum[int64])
@@ -217,18 +217,46 @@ func TestSender_WithMetrics(t *testing.T) {
 						for _, kv := range point.Attributes.ToSlice() {
 							attrs[string(kv.Key)] = kv.Value.AsString()
 						}
-						attempts += point.Value
+						failures += point.Value
 						gotAttrs = attrs
 					}
 				}
 			}
 
-			require.Equal(t, int64(1), attempts, "exactly one publish attempt per send")
+			if tt.wantOutcome == "" {
+				assert.Zero(t, failures, "a successful send must not record a failure")
+				return
+			}
+			require.Equal(t, int64(1), failures, "exactly one failure per failed send")
 			assert.Equal(t, "recipient_event", gotAttrs["destination_kind"])
 			assert.Equal(t, "room_publish", gotAttrs["operation"])
 			assert.Equal(t, tt.wantOutcome, gotAttrs["outcome"])
-			assert.NotContains(t, gotAttrs, "service_name", "service identity comes from the resource, not an inline label")
 			assert.NotContains(t, gotAttrs, "account", "the account token must never become a label")
 		})
 	}
+}
+
+// TestSender_MetricsAddNoAllocationOnSuccess pins the fan-out hot path.
+// fanOutKey calls SendDataContext once per room member, so enabling metrics
+// must not add work to a successful send. The subject builder allocates on its
+// own, so the contract is the delta: an instrumented Sender must allocate
+// exactly as much as an un-instrumented one when the publish succeeds.
+func TestSender_MetricsAddNoAllocationOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	payload := []byte("{}")
+
+	plain := roomkeysender.NewSender(&mockPublisher{})
+	baseline := testing.AllocsPerRun(200, func() {
+		_ = plain.SendDataContext(ctx, "alice", payload)
+	})
+
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader()))
+	instrumented := roomkeysender.NewSender(&mockPublisher{},
+		roomkeysender.WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+	withMetrics := testing.AllocsPerRun(200, func() {
+		_ = instrumented.SendDataContext(ctx, "alice", payload)
+	})
+
+	assert.Equal(t, baseline, withMetrics,
+		"instrumenting a successful room-key send must not add allocations")
 }

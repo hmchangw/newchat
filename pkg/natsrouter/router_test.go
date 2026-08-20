@@ -116,7 +116,7 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 							return false
 						}
 						results[attrs["result"]] += point.Value
-					case "chat.nats.publish.attempts":
+					case "chat.nats.publish.failures":
 						if attrs["destination_kind"] == "client_response" && attrs["operation"] == "client_response" {
 							replyAttempts += point.Value
 						}
@@ -124,10 +124,12 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 				}
 			}
 		}
-		return assert.ObjectsAreEqual(wantResults, results) && replyAttempts == 3
+		return assert.ObjectsAreEqual(wantResults, results)
 	}, time.Second, 10*time.Millisecond)
 	assert.Equal(t, wantResults, results)
-	assert.Equal(t, int64(3), replyAttempts)
+	// Every reply in this test is delivered, and a successful client response
+	// is no longer counted — the family exists only to attribute failures.
+	assert.Zero(t, replyAttempts, "successful replies must not be recorded")
 }
 
 func TestRegister_ParamsExtraction(t *testing.T) {
