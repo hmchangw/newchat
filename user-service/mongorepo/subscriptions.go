@@ -432,10 +432,16 @@ func (r *SubscriptionRepo) GetSubscriptionByRoomID(ctx context.Context, account,
 // endpoints' notion of active). Unlike the list endpoints, the count EXCLUDES muted subs — mute
 // keeps a room visible in lists but out of the active/badge count.
 func activeSubscriptionFilter(account string) bson.M {
-	return bson.M{"u.account": account, "muted": bson.M{"$ne": true}, "$or": bson.A{
-		bson.M{"roomType": bson.M{"$in": bson.A{"dm", "channel"}}},
-		bson.M{"roomType": "botDM", "isSubscribed": true},
-	}}
+	return bson.M{"u.account": account, "muted": bson.M{"$ne": true},
+		// Rooms the user closed are hidden from subscription.list, so counting
+		// them here would put the two endpoints permanently out of step — and
+		// a client folding its badge from the list could never reconcile.
+		// Missing field (legacy docs) and open:true both pass, as in the list.
+		"open": bson.M{"$ne": false},
+		"$or": bson.A{
+			bson.M{"roomType": bson.M{"$in": bson.A{"dm", "channel"}}},
+			bson.M{"roomType": "botDM", "isSubscribed": true},
+		}}
 }
 
 // CountActiveSubscriptions counts the deleted-filtered active set via $count over the enriched pipeline (CountDocuments cannot see the join).

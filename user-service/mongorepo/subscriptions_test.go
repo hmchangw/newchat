@@ -667,6 +667,7 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		bson.M{"_id": "r-noisy", "name": "Noisy", "siteId": "site-a"},
 		bson.M{"_id": "r-bot", "name": "helper.bot", "siteId": "site-a"},
 		bson.M{"_id": "r-del", "name": "Del-Gone", "siteId": "site-a"}, // soft-deleted
+		bson.M{"_id": "r-closed", "name": "Closed", "siteId": "site-a"},
 	)
 	seed(t, db, "subscriptions",
 		// active dm
@@ -696,12 +697,30 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		// cross-site sub: no local room doc, kept by the room filter
 		bson.M{"_id": "x-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Remote", "roomId": "rx",
 			"roomType": "channel", "siteId": "site-b"},
+		// closed by the user (open:false) — excluded, matching subscription.list
+		bson.M{"_id": "closed-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Closed", "roomId": "r-closed",
+			"roomType": "channel", "siteId": "site-a", "open": false},
+		// explicitly open — included (guards against an over-broad exclusion)
+		bson.M{"_id": "open-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Opened", "roomId": "r-ch",
+			"roomType": "channel", "siteId": "site-a", "open": true},
 	)
 
 	t.Run("count excludes unsubscribed, muted, and Del- rooms; keeps missing-room and cross-site", func(t *testing.T) {
 		n, err := r.CountActiveSubscriptions(ctx, "alice")
 		require.NoError(t, err)
-		assert.Equal(t, 5, n) // a-dm, a-ch, a-bot, x-ch, gone-ch (muted m-ch excluded; gone-ch kept: missing room passes $not-regex deleted-filter)
+		assert.Equal(t, 6, n) // a-dm, a-ch, a-bot, x-ch, gone-ch, open-ch (muted m-ch excluded; closed-ch excluded; gone-ch kept: missing room passes $not-regex deleted-filter)
+	})
+
+	t.Run("closed rooms are excluded from both count and get, matching subscription.list", func(t *testing.T) {
+		subs, err := r.GetActiveSubscriptions(ctx, "alice", 100)
+		require.NoError(t, err)
+		got := map[string]bool{}
+		for _, sub := range subs {
+			got[sub.ID] = true
+		}
+		assert.False(t, got["closed-ch"], "open:false must not count")
+		assert.True(t, got["open-ch"], "open:true must count")
+		assert.True(t, got["a-ch"], "a sub with no open field must count")
 	})
 
 	t.Run("get active returns the same set", func(t *testing.T) {
