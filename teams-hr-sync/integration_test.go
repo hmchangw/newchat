@@ -156,7 +156,8 @@ func TestRunSync_EndToEnd(t *testing.T) {
 	assert.Equal(t, "carol", employees[1].Account)
 	assert.Equal(t, model.IChangeTypeNewHire, employees[1].ChangeType)
 	var qb model.IHRSyncEmployeeQuitBatch
-	require.NoError(t, json.Unmarshal(msgs["chat.hr.site-a.employees.quit"], &qb))
+	// quit publishes on the CENTRAL subject; the batch's site rides the payload.
+	require.NoError(t, json.Unmarshal(msgs["chat.hr.central.employees.quit"], &qb))
 	assert.Equal(t, "site-a", qb.SiteID)
 	assert.Equal(t, []string{"alice"}, qb.Accounts, "only the teams-sourced departure quits; the legacy row never does")
 }
