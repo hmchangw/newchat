@@ -230,14 +230,7 @@ func TestSubjectBuilders(t *testing.T) {
 			"chat.inbox.site-a.external.member_joinedat_refreshed",
 			"chat.inbox.site-a.external.room_renamed",
 		}
-		if len(got) != len(want) {
-			t.Fatalf("got %d subjects, want %d", len(got), len(want))
-		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
-			}
-		}
+		require.Equal(t, want, got)
 	})
 }
 
