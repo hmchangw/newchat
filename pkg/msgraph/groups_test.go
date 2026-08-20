@@ -170,7 +170,7 @@ func TestGetGroup_RetriesOn429(t *testing.T) {
 	assert.Equal(t, "g1", got.ID)
 }
 
-func TestListGroupMembers_RetriesOn429(t *testing.T) {
+func TestListGroupMembers_RetriesOn503(t *testing.T) {
 	tokenSrv := newTokenServer(t)
 	var calls int
 	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
