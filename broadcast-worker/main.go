@@ -137,8 +137,7 @@ func main() {
 	}
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL)
 	if err := store.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	cachedStore, err := newCachedMetaStore(store, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {

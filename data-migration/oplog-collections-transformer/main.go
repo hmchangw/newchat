@@ -92,10 +92,7 @@ func main() {
 	}
 	target := NewMongoTargetStore(targetClient.Database(cfg.TargetDB))
 	if err := target.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure target indexes failed", "error", err)
-		mongoutil.Disconnect(ctx, targetClient)
-		mongoutil.Disconnect(ctx, source)
-		os.Exit(1)
+		slog.Warn("ensure target indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)

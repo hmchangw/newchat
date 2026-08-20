@@ -206,9 +206,7 @@ func main() {
 	// Bounded timeout so a hung createIndexes surfaces at startup.
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := store.EnsureIndexes(ensureCtx); err != nil {
-		ensureCancel()
-		slog.Error("ensure store indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
 

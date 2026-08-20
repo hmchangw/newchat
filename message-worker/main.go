@@ -150,8 +150,7 @@ func main() {
 	store := NewCassandraStore(cassSession, bucketSizer, cipher)
 	threadStore := newThreadStoreMongo(db)
 	if err := threadStore.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure thread store indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure thread store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	handler := NewHandler(store, us, threadStore, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and

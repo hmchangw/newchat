@@ -77,7 +77,7 @@ func run() error {
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer ensureCancel()
 	if err := store.EnsureIndexes(ensureCtx); err != nil {
-		return fmt.Errorf("ensure store indexes: %w", err)
+		slog.Warn("ensure store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	if cfg.RoomKeyGracePeriod <= 0 {

@@ -122,30 +122,8 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure subscriptions (roomId,u.account) unique index: %w", err)
 	}
-	// Unique: account is a user's identity, so at most one users doc per account.
-	// findUsersForDisplay already folds results into a map keyed by account, and
-	// user-service declares this index unique on the shared collection — both must
-	// agree or the second service's CreateOne hits IndexOptionsConflict.
-	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "account", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		// E11000 here means pre-existing duplicate account values (populated env
-		// pre-rollout) — point operators at the one-time dedupe preflight.
-		if mongo.IsDuplicateKeyError(err) {
-			return fmt.Errorf("ensure users (account) unique index: duplicate account values exist in the users "+
-				"collection — run the one-time dedupe preflight (group users by account, resolve n>1) before "+
-				"starting this service: %w", err)
-		}
-		// A pre-existing non-unique account_1 conflicts (85 IndexOptionsConflict /
-		// 86 IndexKeySpecsConflict); Mongo won't upgrade it — the operator must drop it.
-		if se := mongo.ServerError(nil); errors.As(err, &se) && (se.HasErrorCode(85) || se.HasErrorCode(86)) {
-			return fmt.Errorf("ensure users (account) unique index: a non-unique account_1 index already exists on "+
-				"the users collection — drop the old non-unique account_1 index (db.users.dropIndex(\"account_1\")) "+
-				"before starting this service so it can be recreated as unique: %w", err)
-		}
-		return fmt.Errorf("ensure users (account) unique index: %w", err)
-	}
+	// users.account (unique) is owned by user-service; verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, s.users, "account_1")
 	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "sectId", Value: 1}, {Key: "account", Value: 1}},
 	}); err != nil {
@@ -156,14 +134,8 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure users (deptId,account) index: %w", err)
 	}
-	// Lookup index for botDM creation: GetApp filters by assistant.name.
-	appsIndex := mongo.IndexModel{
-		Keys:    bson.D{{Key: "assistant.name", Value: 1}},
-		Options: options.Index().SetName("assistant_name_idx"),
-	}
-	if _, err := s.apps.Indexes().CreateOne(ctx, appsIndex); err != nil {
-		return fmt.Errorf("ensure apps index: %w", err)
-	}
+	// apps.assistant_name_idx is owned by user-service; verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, s.apps, "assistant_name_idx")
 	if _, err := s.subscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "lastSeenAt", Value: 1}},
 	}); err != nil {
@@ -207,7 +179,10 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure subscriptions (roomId,roles) index: %w", err)
 	}
-	// Mirrors the unique index created by message-worker / history-service so per-service test DBs also enforce it.
+	// room-service owns the thread_subscriptions unique key. Best-effort drop of the
+	// legacy (threadRoomId, userId) index first so (threadRoomId, userAccount) creates
+	// without a key conflict; it may not exist (fresh deploy) — ignore all errors.
+	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
 	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
 		Options: options.Index().SetUnique(true),

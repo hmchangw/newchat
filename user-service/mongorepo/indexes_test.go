@@ -60,25 +60,11 @@ func TestEnsureIndexes_Integration(t *testing.T) {
 	// {u.account, roomType} serves the account+roomType match on every list/count
 	// path. (The retention window keys on room.lastMsgAt, not a subscription field.)
 	require.Contains(t, subKeys, "u.account:1,roomType:1")
-	require.Contains(t, subKeys, "roomId:1,u.account:1")
 	require.Contains(t, subKeys, "name:1,roomType:1")
+	// roomId:1,u.account:1 (unique) is owned by room-service now, not created here.
 
 	userKeys := indexKeySpecs(t, userRepo.users.Raw())
 	require.Contains(t, userKeys, "account:1")
-}
-
-// A user holds at most one subscription per room — (roomId, u.account) is the unique key shared with room-service.
-func TestSubscriptionUniqueIndex_Integration(t *testing.T) {
-	subRepo, _ := newTestSubscriptionRepo(t)
-	ctx := context.Background()
-	col := subRepo.subscriptions.Raw()
-	doc := func(id string) bson.M {
-		return bson.M{"_id": id, "roomId": "r1", "u": bson.M{"account": "alice"}}
-	}
-	_, err := col.InsertOne(ctx, doc("sub-1"))
-	require.NoError(t, err)
-	_, err = col.InsertOne(ctx, doc("sub-2"))
-	require.True(t, mongo.IsDuplicateKeyError(err), "expected duplicate-key error, got %v", err)
 }
 
 // Duplicate accounts cause E11000 on unique-index creation; error must point the operator at the dedupe preflight.
