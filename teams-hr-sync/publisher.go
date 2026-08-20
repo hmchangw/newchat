@@ -60,7 +60,11 @@ func (p *publisher) publishSync(ctx context.Context, d diffResult) (emitResult, 
 	}
 	sort.Strings(siteIDs)
 	for _, siteID := range siteIDs {
-		if err := p.publishZstd(ctx, subject.EmployeesQuit(siteID),
+		// Publish on the CENTRAL HR subject (like upsert/users) — the departed
+		// employee's site rides the payload's SiteID. A per-site subject
+		// (chat.hr.{siteID}.employees.quit) has no owning stream unless that site
+		// was provisioned, so it fails with "no response from stream".
+		if err := p.publishZstd(ctx, subject.EmployeesQuit(p.central),
 			model.IHRSyncEmployeeQuitBatch{Timestamp: time.Now().UTC().UnixMilli(), SiteID: siteID, Accounts: d.Quits[siteID]}); err != nil {
 			return res, fmt.Errorf("publish employees.quit for site %s: %w", siteID, err)
 		}

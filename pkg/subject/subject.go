@@ -1740,7 +1740,10 @@ func OrgSyncUsersUpsert(centralSiteID string) string {
 	return fmt.Sprintf("chat.hr.%s.users.upsert", centralSiteID)
 }
 
-// EmployeesQuit is the per-site subject for departed-employee batches.
+// EmployeesQuit is the departed-employee-batch subject on a site's HR feed.
+// Publishers use the CENTRAL site id (like employees/users upsert) — the batch's
+// own site rides the payload's SiteID; a per-site subject has no owning stream
+// unless that site is provisioned.
 func EmployeesQuit(siteID string) string {
 	return fmt.Sprintf("chat.hr.%s.employees.quit", siteID)
 }
