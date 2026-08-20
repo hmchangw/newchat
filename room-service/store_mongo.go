@@ -229,7 +229,7 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	// loser reads back the winner's record instead of inserting a duplicate (and
 	// thus publishing a second teams_meet_started system message). Same retry-safe
 	// rationale as the room_members / subscriptions unique indexes above.
-	if _, err := s.teamsMeetings.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.teamsMeetings, mongo.IndexModel{
 		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "siteId", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {

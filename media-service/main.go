@@ -62,7 +62,7 @@ func run() error {
 	defer mongoutil.Disconnect(ctx, mongoClient)
 
 	if err := store.EnsureEmojiIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure emoji indexes: %w", err)
+		slog.Warn("ensure emoji indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey, minioutil.WithObservability(sdk))

@@ -38,7 +38,7 @@ func newThreadStoreMongo(db *mongo.Database) *threadStoreMongo {
 
 // EnsureIndexes creates the unique indexes required by the thread store.
 func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
-	if _, err := s.threadRooms.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.threadRooms, mongo.IndexModel{
 		Keys:    bson.D{{Key: "parentMessageId", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {

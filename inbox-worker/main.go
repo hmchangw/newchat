@@ -460,9 +460,8 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 // room-service (which also drops the legacy threadRoomId_1_userId_1 index); this
 // worker only warns if it is missing, never creates it — a divergent spec would
 // crashloop the shared collection, and a missing index must not take the worker down.
-func (s *mongoInboxStore) ensureIndexes(ctx context.Context) error {
+func (s *mongoInboxStore) ensureIndexes(ctx context.Context) {
 	mongoutil.WarnMissingIndexes(ctx, s.threadSubCol, "threadRoomId_1_userAccount_1")
-	return nil
 }
 
 // UpsertThreadSubscription inserts the subscription on first event for a
@@ -687,9 +686,7 @@ func main() {
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	if err := store.ensureIndexes(ctx); err != nil {
-		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
-	}
+	store.ensureIndexes(ctx)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {

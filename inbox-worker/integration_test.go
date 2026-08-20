@@ -434,7 +434,7 @@ func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T)
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store.ensureIndexes(ctx)
 
 	handler := NewHandler(store)
 
@@ -483,7 +483,7 @@ func TestInboxWorker_ThreadSubscription_DedupByUserAccount_Integration(t *testin
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store.ensureIndexes(ctx)
 
 	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	first := model.ThreadSubscription{
@@ -520,7 +520,7 @@ func TestInboxWorker_ThreadSubscriptionUpserted_MonotonicMention_Integration(t *
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store.ensureIndexes(ctx)
 
 	handler := NewHandler(store)
 	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
@@ -1229,7 +1229,7 @@ func TestInboxStore_UpsertThreadSubscription_DedupesByUserAccount_Integration(t 
 	ctx := context.Background()
 	threadSubs := db.Collection("thread_subscriptions")
 	store := &mongoInboxStore{threadSubCol: threadSubs}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store.ensureIndexes(ctx)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 

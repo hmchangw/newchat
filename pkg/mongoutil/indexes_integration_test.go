@@ -17,13 +17,7 @@ import (
 
 func repairTestColl(t *testing.T, dbName string) *mongo.Collection {
 	t.Helper()
-	ctx := context.Background()
-	client, err := ConnectRead(ctx, testutil.MongoURI(t), "", "")
-	require.NoError(t, err)
-	t.Cleanup(func() { Disconnect(context.Background(), client) })
-	db := client.Database(dbName)
-	t.Cleanup(func() { _ = db.Drop(context.Background()) })
-	return db.Collection("users")
+	return testutil.MongoDB(t, dbName).Collection("users")
 }
 
 // EnsureIndexWithRepair upgrades a pre-existing non-unique index to the unique
@@ -65,4 +59,27 @@ func TestEnsureIndexWithRepair_DuplicateDataReturnsError(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.True(t, mongo.IsDuplicateKeyError(err), "duplicate data must surface E11000, not be silently repaired")
+}
+
+// The #159 dirty env — a non-unique index AND duplicate data — must not leave the
+// collection index-less: the unique recreate fails E11000, but the old index is
+// restored, and the error still surfaces so the caller shows dedupe guidance.
+func TestEnsureIndexWithRepair_DirtyDataRestoresOldIndex(t *testing.T) {
+	ctx := context.Background()
+	coll := repairTestColl(t, "mongoutil_index_repair_dirty_test")
+
+	_, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "account", Value: 1}}})
+	require.NoError(t, err)
+	_, err = coll.InsertMany(ctx, []any{
+		bson.M{"_id": "a", "account": "dup"}, bson.M{"_id": "b", "account": "dup"},
+	})
+	require.NoError(t, err)
+
+	err = EnsureIndexWithRepair(ctx, coll, mongo.IndexModel{
+		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),
+	})
+	require.Error(t, err)
+	assert.True(t, mongo.IsDuplicateKeyError(err), "duplicate data must surface E11000")
+	assert.Equal(t, "account_1", indexNameByKeys(ctx, coll, bson.D{{Key: "account", Value: 1}}),
+		"the old account index must be restored, not left dropped")
 }

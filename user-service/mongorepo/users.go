@@ -35,11 +35,9 @@ func NewUserRepo(db *mongo.Database, opts ...Option) *UserRepo {
 	}
 }
 
-// EnsureIndexes creates the unique users.account index (user-service owns it). A
-// pre-existing non-unique account_1 — the #159 conflict that used to crashloop the
-// service — is self-healed: EnsureIndexWithRepair drops it and recreates it unique.
-// Duplicate account VALUES (E11000) can't be fixed by dropping an index, so that
-// case surfaces the one-time dedupe preflight.
+// EnsureIndexes creates the unique users.account index (user-service owns it).
+// A pre-existing non-unique account_1 (the #159 conflict) self-heals; duplicate
+// account VALUES surface the dedupe-preflight error.
 func (r *UserRepo) EnsureIndexes(ctx context.Context) error {
 	err := mongoutil.EnsureIndexWithRepair(ctx, r.users.Raw(), mongo.IndexModel{
 		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),

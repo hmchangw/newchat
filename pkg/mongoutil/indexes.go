@@ -9,15 +9,14 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// WarnMissingIndexes logs a warning for each named index absent from coll and
-// never returns an error. It is for services that DEPEND on an index another
-// service owns: a dependent must not create the shared index (a divergent spec
-// crashloops whichever service starts second) nor die when the owner has not
-// built it yet. names are the owner's resolved index names (e.g. "account_1",
-// "assistant_name_idx"); a name that drifts from the owner's spec only costs a
-// spurious warning, never a failure.
+// WarnMissingIndexes warns (never errors) for each named index absent from coll.
+// For a service that DEPENDS on an index another owns: creating the shared index
+// with a divergent spec crashloops whichever service starts second, and a
+// not-yet-built index must not take the dependent down. names are the owner's
+// resolved names (e.g. "account_1").
 func WarnMissingIndexes(ctx context.Context, coll *mongo.Collection, names ...string) {
 	cur, err := coll.Indexes().List(ctx)
 	if err != nil {
@@ -45,18 +44,13 @@ func WarnMissingIndexes(ctx context.Context, coll *mongo.Collection, names ...st
 }
 
 // EnsureIndexWithRepair creates model on coll and self-heals a pre-existing index
-// that has the SAME keys but a conflicting spec/options — e.g. a non-unique index
-// where model is unique (the IndexOptionsConflict/IndexKeySpecsConflict, codes
-// 85/86, that used to crashloop the service). On that conflict it drops the
-// conflicting index and recreates it from model, so an environment carrying the
-// old wrong index converges to the expected spec on startup.
+// with the SAME keys but a conflicting spec (e.g. a non-unique index where model
+// is unique): it drops the conflicting index and recreates it from model.
 //
-// A duplicate-key error (E11000: the DATA holds duplicate values) is returned
-// unchanged — dropping an index cannot fix duplicate data, and recreating a
-// unique index over it would fail the same way; the caller surfaces the
-// dedupe-preflight guidance. The drop+recreate runs at startup before the service
-// serves traffic; the drop is best-effort so a concurrent replica that already
-// dropped the index doesn't abort the repair.
+// If the recreate fails — typically E11000 when the DATA holds duplicate values a
+// unique index can't be built over — the old index is restored so the collection
+// is never left without one, and the E11000 is returned so the caller can surface
+// the dedupe-preflight guidance.
 func EnsureIndexWithRepair(ctx context.Context, coll *mongo.Collection, model mongo.IndexModel) error {
 	_, err := coll.Indexes().CreateOne(ctx, model)
 	if err == nil || !isIndexSpecConflict(err) {
@@ -70,6 +64,15 @@ func EnsureIndexWithRepair(ctx context.Context, coll *mongo.Collection, model mo
 	// is the real check.
 	_ = coll.Indexes().DropOne(ctx, name) //nolint:errcheck
 	if _, cerr := coll.Indexes().CreateOne(ctx, model); cerr != nil {
+		// Recreate failed (e.g. E11000: duplicate values block a unique index).
+		// Restore the old index so the collection is never left without one; the
+		// returned error still carries the cause so the caller surfaces its guidance.
+		if _, rerr := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: model.Keys, Options: options.Index().SetName(name),
+		}); rerr != nil {
+			slog.WarnContext(ctx, "mongo: index repair failed and the old index could not be restored",
+				"collection", coll.Name(), "index", name, "error", rerr)
+		}
 		return fmt.Errorf("repair index %q on %s: %w", name, coll.Name(), cerr)
 	}
 	slog.WarnContext(ctx, "mongo: repaired a conflicting index (dropped and recreated to the expected spec)",

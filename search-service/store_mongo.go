@@ -45,7 +45,7 @@ func (s *mongoStore) ensureIndexes(ctx context.Context) error {
 		return fmt.Errorf("ensure subscriptions (u.account, roomId) index: %w", err)
 	}
 	// users.account (unique) and apps.assistant_name_idx are owned by user-service;
-	// verify + warn only, never create (a divergent spec would crashloop the shared collection).
+	// verify + warn only, never create.
 	mongoutil.WarnMissingIndexes(ctx, s.users, "account_1")
 	mongoutil.WarnMissingIndexes(ctx, s.apps, "assistant_name_idx")
 	return nil

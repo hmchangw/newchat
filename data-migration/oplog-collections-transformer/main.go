@@ -91,8 +91,13 @@ func main() {
 		os.Exit(1)
 	}
 	target := NewMongoTargetStore(targetClient.Database(cfg.TargetDB))
+	// A one-shot migration must have its dedup index — availability doesn't apply,
+	// so this stays fatal (unlike the long-running services).
 	if err := target.EnsureIndexes(ctx); err != nil {
-		slog.Warn("ensure target indexes failed; continuing (indexes are best-effort)", "error", err)
+		slog.Error("ensure target indexes failed", "error", err)
+		mongoutil.Disconnect(ctx, targetClient)
+		mongoutil.Disconnect(ctx, source)
+		os.Exit(1)
 	}
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
