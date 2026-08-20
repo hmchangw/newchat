@@ -668,6 +668,7 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		bson.M{"_id": "r-bot", "name": "helper.bot", "siteId": "site-a"},
 		bson.M{"_id": "r-del", "name": "Del-Gone", "siteId": "site-a"}, // soft-deleted
 		bson.M{"_id": "r-closed", "name": "Closed", "siteId": "site-a"},
+		bson.M{"_id": "r-open", "name": "Opened", "siteId": "site-a"},
 	)
 	seed(t, db, "subscriptions",
 		// active dm
@@ -701,7 +702,7 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		bson.M{"_id": "closed-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Closed", "roomId": "r-closed",
 			"roomType": "channel", "siteId": "site-a", "open": false},
 		// explicitly open — included (guards against an over-broad exclusion)
-		bson.M{"_id": "open-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Opened", "roomId": "r-ch",
+		bson.M{"_id": "open-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Opened", "roomId": "r-open",
 			"roomType": "channel", "siteId": "site-a", "open": true},
 	)
 
