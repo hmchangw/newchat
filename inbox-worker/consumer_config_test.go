@@ -95,7 +95,6 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, []string{subject.InboxExternalAll(siteID)}, cc.FilterSubjects)
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 		assert.Equal(t, 30*time.Second, cc.AckWait)
-		assert.Equal(t, 5, cc.MaxDeliver)
 		assert.Equal(t, 512, cc.MaxWaiting)
 		assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)
 	})
@@ -112,7 +111,18 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 100, cc.MaxAckPending)
 		assert.Equal(t, []string{subject.InboxExternalAll(siteID)}, cc.FilterSubjects)
 		assert.Equal(t, 45*time.Second, cc.AckWait)
-		assert.Equal(t, 3, cc.MaxDeliver)
 		assert.Equal(t, 256, cc.MaxWaiting)
+	})
+
+	// Retry forever (delay, never drop), mirroring outbox-worker's lanes: this is
+	// federation's last hop, and a dropped event leaves this site permanently out
+	// of sync with the origin — no reconciler repairs it. Poison events still
+	// leave via errcode.Permanent (jsretry Ack-drops those). The per-attempt
+	// backoff is owned by jsretry, not consumer-level BackOff.
+	t.Run("overrides MaxDeliver to unlimited", func(t *testing.T) {
+		for _, maxDeliver := range []int{5, 3, -1, 0} {
+			cc := buildConsumerConfig(stream.ConsumerSettings{MaxDeliver: maxDeliver}, siteID)
+			assert.Equal(t, -1, cc.MaxDeliver, "CONSUMER_MAX_DELIVER=%d must not cap federation retries", maxDeliver)
+		}
 	})
 }

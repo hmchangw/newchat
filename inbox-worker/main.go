@@ -18,9 +18,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
-	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
-	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -779,35 +777,7 @@ func main() {
 	membershipCh := make(chan laneMsg, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	process := func(m laneMsg) {
-		// jobguard recovers handler panics — both the membership lane and the
-		// fan-out goroutines run outside natsrouter's Recovery middleware, so an
-		// unrecovered panic would crash the worker and crash-loop on JetStream
-		// redelivery. On panic it Acks (poison drop).
-		jobguard.Run(m.msg, func() {
-			msg := m.msg
-			handlerCtx, _ := natsutil.StampRequestID(m.ctx, msg.Headers(), msg.Subject())
-			if err := handler.HandleEvent(handlerCtx, msg.Data()); err != nil {
-				// Permanent failures (poison messages) Ack so JetStream stops
-				// redelivering; transient infra errors Nak for redelivery.
-				if _, isPermanent := errcode.IsPermanent(err); isPermanent {
-					slog.Warn("permanent event failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-					if err := msg.Ack(); err != nil {
-						slog.Error("failed to ack permanent message", "error", err)
-					}
-					return
-				}
-				slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-				if err := msg.Nak(); err != nil {
-					slog.Error("failed to nak message", "error", err)
-				}
-				return
-			}
-			if err := msg.Ack(); err != nil {
-				slog.Error("failed to ack message", "error", err)
-			}
-		})
-	}
+	process := func(m laneMsg) { processEvent(m.ctx, handler, m.msg) }
 
 	// Membership lane: a single worker drains membershipCh in FIFO order, so
 	// add/remove for the same (room, account) are applied in arrival order.
@@ -824,6 +794,13 @@ func main() {
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				// ErrMsgIteratorClosed is the normal stop (iter.Stop() on shutdown);
+				// any other error means consumption died unexpectedly and this site
+				// silently stops applying federated events — surface it, because the
+				// NATS-connection health check stays green either way.
+				if !errors.Is(err, jetstream.ErrMsgIteratorClosed) {
+					slog.ErrorContext(ctx, "inbox iterator stopped — no longer consuming federated events", "error", err)
+				}
 				return
 			}
 			m := laneMsg{ctx: msgCtx, msg: msg}
@@ -895,9 +872,19 @@ func isMembershipSubject(subj, siteID string) bool {
 // inbox-worker. The site-scoped FilterSubjects keeps inbox-worker on the
 // cross-site `external.>` lane only; same-site internal publishes are
 // reserved for search-sync-worker.
+//
+// MaxDeliver=-1 (retry forever) overrides the env setting, mirroring
+// outbox-worker's lanes: this is federation's last hop, so an exhausted event is
+// permanent, silent divergence from the origin site — nothing reconciles a
+// subscription replica that never landed. handleMemberAdded's "unknown users"
+// path depends on it too: that error means the referenced user has not
+// replicated YET, and its contract is redelivery until they do. Poison events
+// still leave the stream via errcode.Permanent, which jsretry Ack-drops; the
+// per-attempt spacing is jsretry's NakWithDelay, not consumer-level BackOff.
 func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "inbox-worker"
+	cc.MaxDeliver = -1
 	cc.FilterSubjects = []string{subject.InboxExternalAll(siteID)}
 	return cc
 }
