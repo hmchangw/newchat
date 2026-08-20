@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
@@ -110,6 +111,12 @@ type PreviewCache interface {
 	Get(ctx context.Context, roomID string, load func(context.Context) (models.PreviewMessage, bool, error)) (models.PreviewMessage, bool, error)
 }
 
+// DegradationReader reports whether this site's message history is still catching
+// up after a persistence outage. *histdegrade.CachedReader satisfies it.
+type DegradationReader interface {
+	DegradedSince(ctx context.Context, siteID string) (*int64, error)
+}
+
 // Option configures optional HistoryService dependencies.
 type Option func(*HistoryService)
 
@@ -117,6 +124,15 @@ type Option func(*HistoryService)
 // previews resolve directly (uncached).
 func WithPreviewCache(pc PreviewCache) Option {
 	return func(s *HistoryService) { s.previewCache = pc }
+}
+
+// WithDegradation installs the history-degraded marker reader. Without it,
+// history responses never carry incompleteSince.
+func WithDegradation(r DegradationReader, siteID string) Option {
+	return func(s *HistoryService) {
+		s.degradation = r
+		s.siteID = siteID
+	}
 }
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.
@@ -135,6 +151,8 @@ type HistoryService struct {
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
+	degradation        DegradationReader
+	siteID             string
 }
 
 func New(
@@ -168,6 +186,22 @@ func New(
 		opt(s)
 	}
 	return s
+}
+
+// incompleteSince reports the degraded-since timestamp to stamp on a history
+// response, or nil when history is healthy. A marker-read failure degrades to nil
+// rather than failing the read: the marker is an advisory hint, and losing it must
+// never turn a working history read into an error.
+func (s *HistoryService) incompleteSince(ctx context.Context) *int64 {
+	if s.degradation == nil {
+		return nil
+	}
+	since, err := s.degradation.DegradedSince(ctx, s.siteID)
+	if err != nil {
+		slog.WarnContext(ctx, "history degraded marker read failed", "error", err, "site", s.siteID)
+		return nil
+	}
+	return since
 }
 
 // RegisterHandlers wires all NATS endpoints. Panics on subscription failure (fatal at startup).

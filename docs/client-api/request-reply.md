@@ -978,6 +978,7 @@ Message schema: see [../client-api.md § Message schema](../client-api.md#messag
 | `messages` | Message[] | Most-recent first. |
 | `hasNext` | boolean | `true` if older messages may exist; next page via `before` = oldest returned `createdAt`. Always `false` on an empty page. |
 | `minUserLastSeenAt` | number | Optional. UTC ms. The room's strict read floor — present only when every member has read. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — rows at or after this timestamp may not be persisted yet. |
 
 **Emits:** None — reply only.
 
@@ -1005,6 +1006,7 @@ Forward-pagination counterpart to Load History.
 | `messages` | Message[] | Oldest-first. |
 | `nextCursor` | string | Optional. Opaque cursor for next page. |
 | `hasNext` | boolean | `true` if more messages exist. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — rows at or after this timestamp may not be persisted yet. |
 
 **Emits:** None — reply only.
 
@@ -1032,6 +1034,7 @@ Pivot on **exactly one** of `messageId` or `timestamp`.
 | `messages` | Message[] | Window oldest-first. Centered on `messageId`, or the at-or-before + after groups in `timestamp` mode. |
 | `moreBefore` | boolean | `true` if more messages exist before the window. |
 | `moreAfter` | boolean | `true` if more messages exist after the window. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — rows at or after this timestamp may not be persisted yet. |
 
 **Emits:** None — reply only.
 
