@@ -294,3 +294,33 @@ func TestSoakFailureTracker_AbandonUnsentReleasesTheRecipientExpectation(t *test
 	assert.Zero(t, observer.evidence.Len(),
 		"an abandoned operation leaves the ledger, so its expectation must go with it")
 }
+
+// The error branch of AbandonUnsent kept the expectation on the reasoning that
+// a failed call leaves the operation reconcilable. That holds for a failure
+// before the commit and not for one after it: finalizeLocked deletes from
+// l.active and compacts afterwards, so a compaction error arrives on an
+// operation the ledger has already retired — and no sweep will ever name it.
+func TestSoakFailureTracker_AbandonUnsentReleasesTheExpectationItRetired(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 4, CompactEvery: 1, Journal: &compactFailingJournal{},
+	})
+	require.NoError(t, err)
+	observer := newFailureRecipientObserver(ledger, nil, 4, func() time.Time { return now })
+	tracker := newSoakFailureTracker(
+		ledger, 0, time.Minute, func() time.Time { return now },
+		withSoakFailureRecipientObserver(observer),
+	)
+	pending := testSoakFailurePending(now)
+	pending.Target.Recipients = []string{"alice"}
+	require.NoError(t, tracker.Start(pending))
+	require.Equal(t, 1, observer.evidence.Len())
+
+	err = tracker.AbandonUnsent(pending)
+
+	require.Error(t, err, "the compaction failure must still be propagated")
+	assert.NotContains(t, ledger.active, pending.MessageID,
+		"the operation was retired before the compaction failed")
+	assert.Zero(t, observer.evidence.Len(),
+		"an expectation the ledger has retired must be released, error or not")
+}

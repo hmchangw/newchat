@@ -692,6 +692,18 @@ func (l *failureLedger) AbandonWithReason(
 	return nil
 }
 
+// Retired reports that the ledger no longer holds the operation. An error from
+// a finalizing call does not answer that question: finalizeLocked commits the
+// removal and compacts afterwards, so a compaction failure returns an error on
+// an operation that is already gone — and one nothing reports can never be
+// reported again.
+func (l *failureLedger) Retired(operationID string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, active := l.active[operationID]
+	return !active
+}
+
 func (l *failureLedger) Observe(
 	operationID string,
 	observer failureObserver,

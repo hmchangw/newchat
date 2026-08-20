@@ -410,20 +410,22 @@ func (t *soakFailureTracker) AbandonUnsent(pending *soakPendingSend) error {
 		return fmt.Errorf("soak pending send requires message ID")
 	}
 	err := t.ledger.Abandon(pending.MessageID, failureResultNotSent, t.now().UTC())
-	if errors.Is(err, errFailureOperationNotActive) {
-		// Already finalized, so no sweep will ever report this ID again.
+	// One decision, and the ledger makes it. Abandoning finalizes the operation
+	// out of the ledger, putting it beyond the expiry sweep that releases
+	// evidence by ID — but so does a failure that lands after the commit, so
+	// "did the call succeed" is the wrong question. An operation still held is
+	// still reconcilable and keeps its evidence; one the ledger has let go must
+	// release it here or nothing will.
+	if t.ledger.Retired(pending.MessageID) {
 		t.forgetRecipientExpectation(pending.MessageID)
+	}
+	if errors.Is(err, errFailureOperationNotActive) {
 		t.countUntracked(failureUntrackedReasonAbandon)
 		return nil
 	}
 	if err != nil {
-		// The operation may still be active and reconcilable, and its evidence
-		// is the only record of what was delivered.
 		return fmt.Errorf("abandon unsent soak operation: %w", err)
 	}
-	// Abandoning finalizes the operation out of the ledger, which puts it
-	// beyond the reach of the expiry sweep that releases evidence by ID.
-	t.forgetRecipientExpectation(pending.MessageID)
 	return nil
 }
 
