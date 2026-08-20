@@ -73,6 +73,16 @@ Three properties of the current client, all verified:
    buckets — not a first page. Each row carries `lastSeenAt`, `room.lastMsgAt`,
    `muted`, and `threadUnread`. Cross-site rows arrive already enriched by
    `subscription.list`, so no client-side federation is needed.
+
+   **This was not true when first written.** `subscription.list` filtered on
+   `open != false` while `unreadRooms()` did not
+   (`user-service/mongorepo/subscriptions.go`), so a room the user had closed
+   was counted by the server and invisible to the client — an unclosable gap
+   that made every reconcile mismatch and every resync fail to converge. Fixed
+   by adding the same `open` filter to `activeSubscriptionFilter`, which backs
+   both the total and unread counts. **Any future divergence between what
+   `subscription.list` returns and what `activeSubscriptionFilter` selects
+   breaks this design in the same way**; the two must be changed together.
 2. **The full delta signal already arrives.** `useRoomSubscriptions.js:568` opens
    a room-event subscription for every channel room, plus
    `chat.user.{account}.event.room` for DMs and thread replies. No message
@@ -95,12 +105,17 @@ below. A room counts **once** iff all hold:
 - `muted` is falsy, and
 - `room.lastMsgAt > lastSeenAt` (a null `lastSeenAt` with a set `lastMsgAt`
   counts as unread) **or** `threadUnread` is non-empty, and
-- it is not the *visibly* active room (§4.3).
+- it is not the *visibly* active room — **for the message test only**.
 
 The last condition is the deviation: the server has no concept of an open window
 and does count the active room. The two converge because `scheduleMarkActiveRead`
 advances `lastSeenAt` server-side, after which the server stops counting it too —
 but they disagree during the trailing-debounce window, which §4.6 must tolerate.
+
+Suppression must NOT extend to the thread test. Sitting in a room's main feed is
+not reading its threads, the server counts an unread thread regardless, and this
+client has no thread-read RPC to converge with — so suppressing it would hold the
+fold permanently below the server and spin the reconcile forever.
 
 **Cap.** The count is capped by a parameter, not hardcoded. Push counts are
 capped at `BADGE_COUNT_CAP` (default 10, rendered "9+") in `pkg/model/push.go:14`;
@@ -171,10 +186,17 @@ Maintain `state.subscriptions[roomId].threadUnread` from four sources:
 
 | Source | Effect |
 |---|---|
-| Bootstrap — `sub.threadUnread` from `subscription.list` | seed (already on the wire) |
+| Bootstrap / resync — `sub.threadUnread` from `subscription.list` | seed (already on the wire) |
 | `subscription.update` `action:"read"` — full `Subscription` | merge (see below) |
-| `new_thread_message` on `chat.user.{account}.event.room` | add `threadParentMessageId` |
-| Local `thread.read` / `thread.read.all` RPC resolves | optimistic remove / clear |
+| A thread reply from another account, via `fanThreadReply` | add `threadParentMessageId` |
+
+**It only grows locally.** An earlier draft also listed optimistic removal on
+`thread.read` / `thread.read.all`; those cases were written and then deleted,
+because **this client has no thread-read operation at all** — no `api/` op, no
+subject builder. Nothing could dispatch them. `threadUnread` therefore shrinks
+only on a resync, and the thread panel marking threads read is separate work.
+The badge dispatch happens *before* `fanThreadReply`'s handler short-circuit, so
+a closed thread panel does not suppress it.
 
 The `new_thread_message` fan-out is per-subscriber, so it arrives only for
 threads the user follows — matching the server's `ThreadUnread` producer.

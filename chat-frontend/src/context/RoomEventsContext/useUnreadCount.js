@@ -61,11 +61,17 @@ export function useUnreadCount(state, reconcile) {
   const reconcileRef = useRef(reconcile)
   reconcileRef.current = reconcile
   const mismatchesRef = useRef(0)
+  const inFlightRef = useRef(false)
 
   const enabled = Boolean(reconcile?.getCount)
   const check = useCallback(() => {
     const r = reconcileRef.current
     if (!r?.getCount) return
+    // A single foregrounding fires visibilitychange AND focus; without this
+    // guard that one transient scores two mismatches and instantly spends the
+    // whole tolerance. Also keeps a slow RPC from overlapping the next tick.
+    if (inFlightRef.current) return
+    inFlightRef.current = true
     r.getCount()
       .then((resp) => {
         if (!reconcileRef.current) return
@@ -81,6 +87,7 @@ export function useUnreadCount(state, reconcile) {
       // Keep the folded value and try again next tick. Zeroing the badge on a
       // transient RPC failure would read as "all caught up".
       .catch(() => {})
+      .finally(() => { inFlightRef.current = false })
   }, [])
 
   useEffect(() => {

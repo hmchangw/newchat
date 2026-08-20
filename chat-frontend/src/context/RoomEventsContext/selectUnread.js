@@ -28,12 +28,14 @@ function isAfter(at, lastSeenAt) {
 export function selectUnreadRoomIds(state, isVisible) {
   const ids = []
   for (const room of state.summaries) {
-    if (isVisible && room.id === state.activeRoomId) continue
     const sub = state.subscriptions[room.id]
     if (sub?.muted) continue
-    const unread =
-      isAfter(room.lastMsgAt, sub?.lastSeenAt) || (sub?.threadUnread?.length ?? 0) > 0
-    if (unread) ids.push(room.id)
+    // Suppression covers the MAIN FEED only: sitting in a room does not read
+    // its threads, and the server counts an unread thread either way.
+    const reading = isVisible && room.id === state.activeRoomId
+    const unreadByMessage = !reading && isAfter(room.lastMsgAt, sub?.lastSeenAt)
+    const unreadByThread = (sub?.threadUnread?.length ?? 0) > 0
+    if (unreadByMessage || unreadByThread) ids.push(room.id)
   }
   return ids
 }

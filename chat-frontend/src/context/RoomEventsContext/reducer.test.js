@@ -2374,76 +2374,58 @@ describe('roomEventsReducer — threadUnread tracking', () => {
     }
   }
 
-  it('THREAD_REPLY_RECEIVED adds the parent message id', () => {
+  it('ROOM_THREAD_UNREAD_ADDED adds the parent message id', () => {
     const next = roomEventsReducer(stateWithSub('a'), {
-      type: 'THREAD_REPLY_RECEIVED', roomId: 'a', parentMessageId: 'p1',
+      type: 'ROOM_THREAD_UNREAD_ADDED', roomId: 'a', parentMessageId: 'p1',
     })
     expect(next.subscriptions.a.threadUnread).toEqual(['p1'])
   })
 
-  it('THREAD_REPLY_RECEIVED appends a second distinct thread', () => {
+  it('ROOM_THREAD_UNREAD_ADDED appends a second distinct thread', () => {
     const next = roomEventsReducer(stateWithSub('a', { threadUnread: ['p1'] }), {
-      type: 'THREAD_REPLY_RECEIVED', roomId: 'a', parentMessageId: 'p2',
+      type: 'ROOM_THREAD_UNREAD_ADDED', roomId: 'a', parentMessageId: 'p2',
     })
     expect(next.subscriptions.a.threadUnread).toEqual(['p1', 'p2'])
   })
 
-  it('THREAD_REPLY_RECEIVED is idempotent for a redelivered reply', () => {
+  it('ROOM_THREAD_UNREAD_ADDED is idempotent for a redelivered reply', () => {
     const state = stateWithSub('a', { threadUnread: ['p1'] })
     const next = roomEventsReducer(state, {
-      type: 'THREAD_REPLY_RECEIVED', roomId: 'a', parentMessageId: 'p1',
+      type: 'ROOM_THREAD_UNREAD_ADDED', roomId: 'a', parentMessageId: 'p1',
     })
     expect(next.subscriptions.a.threadUnread).toEqual(['p1'])
     expect(next).toBe(state)
   })
 
-  it('THREAD_REPLY_RECEIVED is a no-op for a room with no subscription', () => {
+  it('ROOM_THREAD_UNREAD_ADDED is a no-op for a room with no subscription', () => {
     const state = { ...initialState }
     expect(roomEventsReducer(state, {
-      type: 'THREAD_REPLY_RECEIVED', roomId: 'nope', parentMessageId: 'p1',
+      type: 'ROOM_THREAD_UNREAD_ADDED', roomId: 'nope', parentMessageId: 'p1',
     })).toBe(state)
-  })
-
-  it('THREAD_READ removes just that thread', () => {
-    const next = roomEventsReducer(stateWithSub('a', { threadUnread: ['p1', 'p2'] }), {
-      type: 'THREAD_READ', roomId: 'a', parentMessageId: 'p1',
-    })
-    expect(next.subscriptions.a.threadUnread).toEqual(['p2'])
-  })
-
-  it('THREAD_READ on the last unread thread leaves an empty list', () => {
-    const next = roomEventsReducer(stateWithSub('a', { threadUnread: ['p1'] }), {
-      type: 'THREAD_READ', roomId: 'a', parentMessageId: 'p1',
-    })
-    expect(next.subscriptions.a.threadUnread).toEqual([])
-  })
-
-  it('THREAD_READ for a thread that is not unread changes nothing', () => {
-    const state = stateWithSub('a', { threadUnread: ['p1'] })
-    expect(roomEventsReducer(state, {
-      type: 'THREAD_READ', roomId: 'a', parentMessageId: 'other',
-    })).toBe(state)
-  })
-
-  it('THREAD_READ_ALL clears every room', () => {
-    const state = {
-      ...initialState,
-      subscriptions: {
-        a: { roomId: 'a', threadUnread: ['p1'] },
-        b: { roomId: 'b', threadUnread: ['p2', 'p3'] },
-        c: { roomId: 'c' },
-      },
-    }
-    const next = roomEventsReducer(state, { type: 'THREAD_READ_ALL' })
-    expect(next.subscriptions.a.threadUnread).toEqual([])
-    expect(next.subscriptions.b.threadUnread).toEqual([])
-    expect(next.subscriptions.c.threadUnread).toBeUndefined()
   })
 
   it('a bootstrapped threadUnread survives an unrelated action', () => {
     const state = stateWithSub('a', { threadUnread: ['p1'] })
     const next = roomEventsReducer(state, { type: 'SET_ACTIVE_ROOM', roomId: 'a' })
     expect(next.subscriptions.a.threadUnread).toEqual(['p1'])
+  })
+
+  it('BUCKETS_LOADED preserves locally accumulated per-room unread pills', () => {
+    // resync re-runs this action; rebuilding summaries from scratch would
+    // clear counters that only live client-side and then let them jump back
+    // on the next message.
+    const state = {
+      ...initialState,
+      summaries: [{ id: 'a', name: 'a', type: 'channel', siteId: 'site-A', lastMsgAt: null, unreadCount: 3, mentionAll: true }],
+      subscriptions: {},
+    }
+    const next = roomEventsReducer(state, {
+      type: 'BUCKETS_LOADED',
+      rooms: [{ id: 'a', name: 'a', type: 'channel', siteId: 'site-A', lastMsgAt: null }],
+      subscriptions: { a: { roomId: 'a', siteId: 'site-A' } },
+    })
+    expect(next.summaries[0].unreadCount).toBe(3)
+    expect(next.summaries[0].mentionAll).toBe(true)
   })
 
   it('a room-level read event preserves threadUnread (reading a room does not clear threads)', () => {

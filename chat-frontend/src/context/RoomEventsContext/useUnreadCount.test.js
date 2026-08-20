@@ -152,6 +152,24 @@ describe('useUnreadCount reconcile', () => {
     expect(getCount).toHaveBeenCalled()
   })
 
+  it('foregrounding runs ONE check even though visibilitychange and focus both fire', async () => {
+    // Browsers fire both on a single foregrounding. Counting it twice would
+    // burn the whole two-strike tolerance in one transient.
+    defineVisibility('hidden')
+    const { getCount, resync } = harness({ serverCounts: [2, 2] })
+    renderHook(() => useUnreadCount(UNREAD_ONE, { getCount, resync }))
+    getCount.mockClear()
+
+    await act(async () => {
+      defineVisibility('visible')
+      document.dispatchEvent(new Event('visibilitychange'))
+      window.dispatchEvent(new Event('focus'))
+    })
+
+    expect(getCount).toHaveBeenCalledTimes(1)
+    expect(resync).not.toHaveBeenCalled()
+  })
+
   it('works with no reconcile wiring at all', () => {
     const { result } = renderHook(() => useUnreadCount(UNREAD_ONE))
     expect(result.current).toBe(1)

@@ -89,6 +89,17 @@ describe('selectUnreadRoomIds', () => {
     expect(selectUnreadRoomIds(state, false)).toEqual(['a'])
   })
 
+  it('counts the visibly-active room when it has an unread thread', () => {
+    // Sitting in a room's main feed is not reading its threads, and the
+    // server counts it either way — suppressing it here would put the fold
+    // permanently below the server and spin the reconcile.
+    const state = stateWith(
+      [{ id: 'a', lastMsgAt: T1, lastSeenAt: T0, threadUnread: ['p1'] }],
+      { activeRoomId: 'a' },
+    )
+    expect(selectUnreadRoomIds(state, true)).toEqual(['a'])
+  })
+
   it('counts a room with no subscription record by message alone', () => {
     // A room can land in summaries before its subscription row arrives.
     const state = { ...initialState, summaries: [{ id: 'a', lastMsgAt: T1 }], subscriptions: {} }

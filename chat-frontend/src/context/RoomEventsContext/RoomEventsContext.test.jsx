@@ -2318,3 +2318,68 @@ describe('RoomEventsProvider resync', () => {
     expect(handlers.has('chat.room.g2.event')).toBe(true)
   })
 })
+
+describe('RoomEventsProvider thread-unread badge wiring', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function setup(rooms) {
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      return Promise.resolve({})
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    return { nats: mockNats({ request, subscribe }), request, handlers }
+  }
+
+  const ROOMS = [{ id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null }]
+
+  function threadReply(handlers, { sender }) {
+    handlers.get('chat.user.alice.event.room')({
+      type: 'new_message',
+      roomId: 'g1',
+      message: {
+        id: 'r1', roomId: 'g1', sender: { account: sender }, content: 'reply',
+        threadParentMessageId: 'p1', createdAt: '2026-08-19T12:00:00Z',
+      },
+    })
+  }
+
+  it('counts a room with an unread thread reply, with no thread panel open', async () => {
+    // fanThreadReply short-circuits when no ThreadEvents consumer is
+    // registered; the badge must update regardless.
+    const { nats, handlers } = setup(ROOMS)
+    let badge
+    function Probe() {
+      badge = useUnreadCount()
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.user.alice.event.room')).toBe(true))
+    expect(badge).toBe(0)
+
+    act(() => { threadReply(handlers, { sender: 'bob' }) })
+
+    await waitFor(() => expect(badge).toBe(1))
+  })
+
+  it('does not count the user own thread reply', async () => {
+    const { nats, handlers } = setup(ROOMS)
+    let badge
+    function Probe() {
+      badge = useUnreadCount()
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.user.alice.event.room')).toBe(true))
+
+    act(() => { threadReply(handlers, { sender: 'alice' }) })
+
+    await waitFor(() => expect(badge).toBe(0))
+  })
+})

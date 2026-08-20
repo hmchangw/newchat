@@ -287,6 +287,16 @@ export function useRoomSubscriptions(
     const fanThreadReply = (evt) => {
       const msg = evt?.message
       if (!msg?.threadParentMessageId) return
+      // Badge first, and unconditionally: the room's unread state must move
+      // whether or not a thread panel happens to be open. Own replies don't
+      // count — the server doesn't add the author to ThreadUnread either.
+      if (msg.sender?.account !== user.account) {
+        safeDispatch({
+          type: 'ROOM_THREAD_UNREAD_ADDED',
+          roomId: evt.roomId,
+          parentMessageId: msg.threadParentMessageId,
+        })
+      }
       const handler = threadReplyHandlerRef?.current
       if (!handler) return
       try {
@@ -606,7 +616,15 @@ export function useRoomSubscriptions(
     const onVisibilityChange = () => {
       if (!isDocumentVisible() || !isCurrent()) return
       const roomId = stateRef.current.activeRoomId
-      if (roomId) markReadNow(roomId)
+      if (!roomId) return
+      // Disarm any trailing read this foregrounding supersedes, or it fires a
+      // second, redundant message.read a moment later.
+      if (markReadTimeoutRef.current) {
+        clearTimeout(markReadTimeoutRef.current)
+        markReadTimeoutRef.current = null
+      }
+      pendingMarkReadRef.current = null
+      markReadNow(roomId)
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
 
