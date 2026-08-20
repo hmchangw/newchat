@@ -71,16 +71,24 @@ type Handler struct {
 	encoder       *roomcrypto.Encoder
 	routeMode     subject.RoomRouteMode
 	metrics       *broadcastMetrics
+	sealer        *previewSealer
 }
 
 type handlerOption func(*handlerOptions)
 
 type handlerOptions struct {
 	metrics *broadcastMetrics
+	sealer  *previewSealer
 }
 
 func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
 	return func(opts *handlerOptions) { opts.metrics = metrics }
+}
+
+// withPreviewSealer supplies the room-preview sealer; absent (or nil) disables
+// preview persistence, which is what ATREST_ENABLED=false yields.
+func withPreviewSealer(sealer *previewSealer) handlerOption {
+	return func(opts *handlerOptions) { opts.sealer = sealer }
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
@@ -101,6 +109,7 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		encoder:       roomcrypto.NewEncoder(),
 		routeMode:     routeMode,
 		metrics:       opts.metrics,
+		sealer:        opts.sealer,
 	}
 }
 
@@ -196,7 +205,15 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
-	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
+	sealed, sealFailed := h.previewForInserted(ctx, &msg, userByAccount, resolved.Participants)
+	if err := h.store.UpdateRoomLastMessage(ctx, roomLastMessage{
+		RoomID:        msg.RoomID,
+		MsgID:         msg.ID,
+		At:            msg.CreatedAt,
+		MentionAll:    resolved.MentionAll,
+		Preview:       sealed,
+		PreviewFailed: sealFailed,
+	}); err != nil {
 		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
 	}
 	// Sending implies the sender has read up to their own message: advance the

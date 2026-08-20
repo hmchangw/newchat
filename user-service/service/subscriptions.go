@@ -46,6 +46,17 @@ func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.Subscr
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
+	// TEMP DEBUG (remove before merge): absent and explicit-false are opposite
+	// here — nil means previews ARE requested. A nil *bool logs as false under
+	// naive formatting, so report presence and the derived gate separately.
+	slog.InfoContext(c, "preview-debug list",
+		"sentByClient", req.IncludeLastMessage != nil,
+		"clientValue", req.IncludeLastMessage != nil && *req.IncludeLastMessage,
+		"withLastMsg", withLastMsg, "type", req.Type, "rows", len(res.Data),
+		// Identify the caller: no commit in this repo sends includeLastMessage,
+		// so whoever sets it is a client we have not accounted for.
+		"account", account, "offset", req.Offset, "limit", req.Limit,
+		"favorite", req.Favorite != nil, "updatedWithinDays", req.UpdatedWithinDays != nil)
 	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, true, withLastMsg)
 	items := s.buildListItems(c, res.Data)
 	return &models.PagedSubscriptionListResponse{
@@ -317,16 +328,18 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 	return dropped
 }
 
-// enrichLastMessage populates sub.Room.PreviewMessage (read-time resolve, no denormalized
-// write path) via one rooms.get RPC per site — LOCAL subs need it too (last-message
-// isn't part of the $lookup baseline). One call per site: a subscription page is
-// bounded well under history-service's 100-roomId batch cap, so no chunk-split is
-// needed. Reuses the caller's per-site grouping. A degraded/absent site, or a room the
-// RPC omits, just leaves PreviewMessage nil; it never fails the list.
-// Each room already carrying a resolved sub.Room.LastMsgAt (set by enrichLocal/
-// enrichCrossSite, which both run before this) is passed as a hint so
-// history-service can skip its own room-times read for that room; rooms with no
-// Room (soft-deleted/degraded) contribute no hint.
+// enrichLastMessage populates sub.Room.PreviewMessage via one rooms.get RPC per site,
+// reusing the caller's per-site grouping — LOCAL subs need it too, since last-message
+// isn't part of the $lookup baseline. A degraded/absent site, or a room the RPC omits,
+// just leaves PreviewMessage nil; it never fails the list.
+//
+// Hints are still sent for wire compatibility but history-service ignores them: it reads
+// the room row anyway and cannot get staler bounds from us. Drop them once it stops
+// accepting them.
+//
+// No chunk-split: a per-site slice over history-service's 100-roomId cap is rejected
+// whole, blanking that site's previews. Pages are far smaller in practice, but nothing
+// enforces it — see #246.
 func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) {
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {

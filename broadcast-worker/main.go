@@ -16,6 +16,7 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -25,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -74,6 +76,17 @@ type config struct {
 	DebugLog          logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+
+	// Atrest/Vault gate room-list preview persistence. Distinct from Encryption
+	// above, which is the client-facing room-key transport: this is at-rest
+	// protection for the preview body this worker writes into the room doc.
+	Atrest atrest.Config      // env vars are already prefixed ATREST_*
+	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
+	// PreviewKeyEpoch selects the site preview DEK (preview:{siteID}:{epoch}).
+	// Rotation is an ops action — bump and redeploy. Keep it in step with
+	// history-service, which reads what this writes: a reader on another epoch
+	// treats the preview as absent.
+	PreviewKeyEpoch int `env:"PREVIEW_KEY_EPOCH" envDefault:"1"`
 }
 
 func main() {
@@ -135,7 +148,35 @@ func main() {
 		}
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL)
+	var (
+		previewCipher atrest.Cipher
+		vaultWrapper  atrest.KeyWrapperCloser
+	)
+	if cfg.Atrest.Enabled {
+		if cfg.PreviewKeyEpoch < 1 {
+			// The epoch is part of the DEK id, so a non-positive value mints a
+			// sentinel rotation could never move forward from.
+			slog.Error("PREVIEW_KEY_EPOCH must be >= 1", "preview_key_epoch", cfg.PreviewKeyEpoch)
+			os.Exit(1)
+		}
+		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
+		if err != nil {
+			slog.Error("failed to construct Vault key wrapper", "addr", cfg.Vault.Address, "error", err)
+			os.Exit(1)
+		}
+		vaultWrapper = w
+		// The preview DEK lives in its own collection, and is written here on first
+		// use; pin to primary so a just-minted key isn't missed on a lagging secondary.
+		dekColl := db.Collection(preview.DEKCollection, options.Collection().SetReadPreference(readpref.Primary()))
+		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+		slog.Info("room-preview persistence enabled", "site_id", cfg.SiteID, "key_epoch", cfg.PreviewKeyEpoch)
+	} else {
+		slog.Info("room-preview persistence disabled (ATREST_ENABLED=false); the room doc must never hold a plaintext body")
+	}
+	sealer := newPreviewSealer(previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch},
+		newAppNameRepo(db.Collection("apps")))
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL, sealer.enabled())
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Error("ensure indexes failed", "error", err)
 		os.Exit(1)
@@ -224,7 +265,8 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode, withBroadcastMetrics(domainMetrics))
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
+		withBroadcastMetrics(domainMetrics), withPreviewSealer(sealer))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
@@ -290,6 +332,9 @@ func main() {
 	}
 	if keyStore != nil {
 		hooks = append(hooks, func(ctx context.Context) error { return keyStore.Close() })
+	}
+	if vaultWrapper != nil {
+		hooks = append(hooks, func(_ context.Context) error { return vaultWrapper.Close() })
 	}
 	hooks = append(hooks,
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },

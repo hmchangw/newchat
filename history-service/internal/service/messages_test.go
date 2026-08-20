@@ -46,6 +46,12 @@ func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageReposi
 	svc, msgs, subs, rooms, pub, threadRooms, _, _ := newServiceWithRoomMock(t)
 	// Permissive defaults: existing tests don't care about the room reads.
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	// The mutation path persists what its walk resolved, and the read path warm-backs.
+	// Tests that assert on those writes take the room mock (newServiceWithRoomMock) and
+	// set their own expectations instead of inheriting these.
+	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	rooms.EXPECT().
 		GetRoomTimes(gomock.Any(), gomock.Any()).
 		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).
@@ -1925,10 +1931,14 @@ func TestHistoryService_EditMessage_EmbedsRefreshedPreview(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// Deleting the room's last eligible message publishes a nil preview so clients clear it.
-func TestHistoryService_DeleteMessage_LastMessage_PublishesNilPreview(t *testing.T) {
-	svc, msgs, subs, pub, _ := newService(t)
+// Deleting the room's last eligible message publishes a nil preview so clients clear
+// it, AND clears the stored one. This service owns both halves: it is the only one that
+// can tell "no eligible message left" from "the walk gave up".
+func TestHistoryService_DeleteMessage_LastMessage_ClearsStoredPreview(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	rooms.EXPECT().ClearPreview(gomock.Any(), "r1", gomock.Any()).Return(nil).Times(1)
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	hydrated := &models.Message{
@@ -1954,6 +1964,97 @@ func TestHistoryService_DeleteMessage_LastMessage_PublishesNilPreview(t *testing
 			var evt model.MessageEvent
 			require.NoError(t, json.Unmarshal(data, &evt))
 			assert.Nil(t, evt.PreviewMessage, "deleting the last eligible message clears the preview")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
+	require.NoError(t, err)
+}
+
+// The canonical event must be published BEFORE the preview is persisted. The Cassandra
+// delete has already committed by this point, so a store that stalls until the request
+// deadline would leave the mutation invisible to every canonical consumer — strictly
+// worse than a stale room-list row, which the next read repairs anyway.
+func TestHistoryService_DeleteMessage_PublishesCanonicalBeforePersistingPreview(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
+	c := testContext()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-1",
+		RoomID:    "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:       "content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	// A survivor remains, so the mutation takes the body-update branch.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{{
+			MessageID: "msg-0",
+			RoomID:    "r1",
+			Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+			CreatedAt: time.Date(2026, 5, 14, 11, 0, 0, 0, time.UTC),
+			Msg:       "survivor",
+		}}, false), nil)
+
+	var order []string
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(context.Context, string, []byte, string) error {
+			order = append(order, "publish")
+			return nil
+		})
+	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(context.Context, string, model.PreviewMessage, string, int64) error {
+			order = append(order, "persist")
+			return nil
+		})
+
+	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"publish", "persist"}, order,
+		"an optional store write must never queue ahead of the canonical publish")
+}
+
+// A walk that gives up mid-flight is NOT evidence the room is empty, so it must touch
+// nothing. This is the distinction the whole three-state walk exists for: clearing here
+// would drop a preview that is merely unread.
+func TestHistoryService_DeleteMessage_DegradedWalk_TouchesNoStoredPreview(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
+	c := testContext()
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	// No ClearPreview/UpdatePreviewBody expectations: either call fails the test.
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-1",
+		RoomID:    "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:       "content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+	msgs.EXPECT().
+		SoftDeleteMessage(gomock.Any(), hydrated, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *models.Message, deletedAt time.Time) (time.Time, bool, *int, *time.Time, error) {
+			return deletedAt, true, nil, nil, nil
+		})
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(cassrepo.Page[models.Message]{}, errors.New("cassandra unavailable"))
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalDeleted("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.Nil(t, evt.PreviewMessage, "a degraded walk has no preview to report")
 			return nil
 		})
 

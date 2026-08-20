@@ -340,16 +340,24 @@ func TestGenerator_PoolSaturationCountedAsError(t *testing.T) {
 func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
 	// Regression for the single-ticker RPS ceiling: the legacy serial path
 	// (MaxInFlight=0) releases one event per delivered tick, and the runtime
-	// cannot deliver 100k sub-millisecond ticks/sec, so it plateaus far below
-	// target. The batched pacer releases rate*interval events per coarse tick
-	// and must out-dispatch it by a wide margin. A relative comparison (same
-	// process, back to back) cancels host-speed and race-detector overhead.
+	// cannot deliver a tick per sub-microsecond interval, so it plateaus far
+	// below target regardless of the rate asked for. The batched pacer releases
+	// rate*interval events per coarse tick and must out-dispatch it by a wide
+	// margin. A relative comparison (same process, back to back) cancels
+	// host-speed and race-detector overhead.
 	//
 	// Both quantities are ceilings — the *most* each path can dispatch — so we
-	// measure the peak over a few short trials. A single 200ms sample is one
-	// GC pause or scheduler stall away from under-counting, which on a loaded
-	// CI runner can briefly compress the ratio below the margin; taking the
-	// best-of-N cancels those transient dips without changing what is asserted.
+	// measure the peak over a few short trials, which cancels a GC pause or
+	// scheduler stall in any single 200ms sample.
+	//
+	// The target rate must stay far above what EITHER path can dispatch in the
+	// window, or the assertion measures the wrong thing: the paced count is
+	// clamped at rate*window, so the achievable ratio is capped at
+	// rate*window/serial. At 100k rps that cap is 20000, and a fast host whose
+	// serial path reaches ~16k tripped the 1.3 margin no matter how good the
+	// pacer was — best-of-N made it worse, since more trials lift serial too.
+	// 1M rps keeps the clamp (200000) an order of magnitude clear of serial,
+	// which is runtime-tick-bound and does not move when the rate rises.
 	runAt := func(maxInFlight int) int {
 		p, _ := BuiltinPreset("small")
 		f := BuildFixtures(&p, 42, "site-local")
@@ -357,7 +365,7 @@ func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
 		m := NewMetrics()
 		g := NewGenerator(&GeneratorConfig{
 			Preset: &p, Fixtures: f, SiteID: "site-local",
-			Rate: 100000, Inject: InjectFrontdoor,
+			Rate: 1000000, Inject: InjectFrontdoor,
 			Publisher: rp, Metrics: m, Collector: NewCollector(m, p.Name),
 			MaxInFlight: maxInFlight,
 		}, 1)
@@ -381,7 +389,7 @@ func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
 	paced := peakOf(5000, 3) // batched pacer
 	require.Positive(t, serial)
 	assert.Greater(t, float64(paced), float64(serial)*1.3,
-		"batched pacer (%d) should out-dispatch the serial ticker (%d) at 100k rps", paced, serial)
+		"batched pacer (%d) should out-dispatch the serial ticker (%d) at 1M rps", paced, serial)
 }
 
 func TestParseInjectMode(t *testing.T) {

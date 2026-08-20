@@ -5,41 +5,43 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/hmchangw/chat/pkg/preview"
 )
 
-// roomLastMsgUpdate is the per-room state buffered between flushes.
-//
-// Coalescing semantics:
-//   - msgID/at carry the LATEST observed message for the room (max by createdAt).
-//   - lastMentionAllAt carries the latest createdAt among messages whose
-//     mentionAll flag was true; it sticks across subsequent non-mention-all
-//     messages until a newer mention-all arrives.
+// roomLastMessage is one room-doc update from an inserted message. The preview rides
+// along: previewForMsgId only means anything against the lastMsgId written beside it.
+type roomLastMessage struct {
+	RoomID     string
+	MsgID      string
+	At         time.Time
+	MentionAll bool
+	// Preview is the sealed preview, nil when MsgID is ineligible or previews are off.
+	// Nil still advances the key: the stored body is the room's last eligible message.
+	Preview *preview.Sealed
+	// PreviewFailed means MsgID was eligible but sealing failed, so the stored body is
+	// stale and the write clears it. Never true alongside a non-nil Preview (#224).
+	PreviewFailed bool
+}
+
+// roomLastMsgUpdate is the per-room state buffered between flushes. Fields take the
+// max by createdAt; pvw/pvwFailed ride pvwAt so an ineligible message can't displace them.
 type roomLastMsgUpdate struct {
 	msgID            string
 	at               time.Time
 	lastMentionAllAt time.Time
+	pvw              *preview.Sealed
+	pvwFailed        bool
+	pvwAt            time.Time
 }
 
-// bulkRoomLastMsgWriter is the persistence boundary the coalescer flushes to.
-// Kept separate from the Store interface so the handler-facing contract stays
-// narrow; the production implementation lives on *mongoStore.
+// bulkRoomLastMsgWriter is the flush boundary, kept off Store so the contract stays narrow.
 type bulkRoomLastMsgWriter interface {
 	BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error
 }
 
-// coalescingStore wraps an inner Store and intercepts UpdateRoomLastMessage,
-// buffering the latest (msgID, createdAt, mentionAll) per roomID in memory.
-// Flush periodically drains the buffer through a single Mongo BulkWrite.
-//
-// Memory is bounded by the count of distinct active rooms within a flush
-// interval — coalescing collapses any number of messages for the same room
-// into one map entry — not by message rate.
-//
-// Trade-off: errors from the buffered write (e.g. ErrNoDocuments for a room
-// that vanished between message and flush) are logged at flush time rather
-// than propagated to the handler. lastMsgAt is a derived/decorative field;
-// the message itself was already persisted to Cassandra by message-worker
-// before this code runs, so dropping the rooms-collection update is safe.
+// coalescingStore buffers UpdateRoomLastMessage per room and drains it through one
+// BulkWrite. Flush errors are logged, not propagated — the message is already in Cassandra.
 type coalescingStore struct {
 	Store
 	bulk bulkRoomLastMsgWriter
@@ -56,26 +58,32 @@ func newCoalescingStore(inner Store, bulk bulkRoomLastMsgWriter) *coalescingStor
 	}
 }
 
-// UpdateRoomLastMessage buffers the update. Always returns nil; the buffered
-// write is performed asynchronously by Flush.
-func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID string, at time.Time, mentionAll bool) error {
+// UpdateRoomLastMessage buffers the update; Flush performs the write asynchronously.
+//
+//nolint:gocritic // hugeParam: roomLastMessage is the Store.UpdateRoomLastMessage contract shared with the mock; by-value keeps the buffered copy obviously independent of the caller's.
+func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, upd roomLastMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cur := c.pending[roomID]
-	if at.After(cur.at) {
-		cur.msgID = msgID
-		cur.at = at
+	cur := c.pending[upd.RoomID]
+	if upd.At.After(cur.at) {
+		cur.msgID = upd.MsgID
+		cur.at = upd.At
 	}
-	if mentionAll && at.After(cur.lastMentionAllAt) {
-		cur.lastMentionAllAt = at
+	if upd.MentionAll && upd.At.After(cur.lastMentionAllAt) {
+		cur.lastMentionAllAt = upd.At
 	}
-	c.pending[roomID] = cur
+	// Against pvwAt, not at: a later ineligible message must not evict the preview it
+	// cannot replace. A seal failure moves this clock too, so an older seal cannot win.
+	if (upd.Preview != nil || upd.PreviewFailed) && upd.At.After(cur.pvwAt) {
+		cur.pvw = upd.Preview
+		cur.pvwFailed = upd.PreviewFailed
+		cur.pvwAt = upd.At
+	}
+	c.pending[upd.RoomID] = cur
 	return nil
 }
 
-// Flush drains the pending buffer and writes it via the bulk writer. Safe to
-// call concurrently with UpdateRoomLastMessage; takes the lock only to swap
-// the map so the BulkWrite itself runs without blocking new updates.
+// Flush drains the buffer, holding the lock only to swap the map so writes aren't blocked.
 func (c *coalescingStore) Flush(ctx context.Context) error {
 	c.mu.Lock()
 	if len(c.pending) == 0 {
@@ -88,9 +96,7 @@ func (c *coalescingStore) Flush(ctx context.Context) error {
 	return c.bulk.BulkUpdateRoomLastMessage(ctx, batch)
 }
 
-// Run drives the periodic flush loop until ctx is cancelled. On cancellation a
-// final flush runs against a fresh context with finalTimeout so a buffered
-// batch still lands even if the supplied ctx is already done.
+// Run drives the flush loop until ctx is cancelled; the final flush uses a fresh context.
 func (c *coalescingStore) Run(ctx context.Context, interval, finalTimeout time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()

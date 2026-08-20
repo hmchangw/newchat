@@ -35,6 +35,10 @@ services:
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - INPUT_STREAM=MESSAGES-CANONICAL-site1
       - INPUT_SUBJECT_FILTER=chat.msg.canonical.site1.*
+      # No ATREST_ENABLED here, unlike deploy/{user,bot}/docker-compose.yml: this
+      # harness runs no Vault, and the worker exits on startup if it cannot reach one.
+      # Previews are therefore off for these scenarios, which is what we want — they
+      # exercise cross-site delivery, not preview persistence.
     depends_on:
       - nats_site1
       - mongodb
