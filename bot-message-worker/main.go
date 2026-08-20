@@ -37,7 +37,7 @@ type config struct {
 	MessageBucketHours int `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
 
 	MaxWorkers int `env:"MAX_WORKERS" envDefault:"100"`
-	MaxDeliver int `env:"MAX_DELIVER" envDefault:"5"`
+	MaxDeliver int `env:"MAX_DELIVER" envDefault:"20"`
 
 	MongoURI      string `env:"MONGO_URI"`
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`

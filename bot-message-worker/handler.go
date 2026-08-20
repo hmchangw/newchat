@@ -41,7 +41,8 @@ func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		}
 		slog.WarnContext(ctx, "bot-message-worker transient error — nak",
 			"messageID", m.ID, "roomID", m.RoomID, "error", err)
-		// NakWithDelay(0) defers to the consumer's BackOff schedule.
+		// A delay-less NAK redelivers immediately: the consumer's BackOff
+		// applies only on AckWait expiry, never to an explicit NAK.
 		if nakErr := msg.NakWithDelay(0); nakErr != nil {
 			slog.WarnContext(ctx, "bot-message-worker nak failed", "error", nakErr)
 		}

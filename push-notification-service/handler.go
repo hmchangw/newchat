@@ -41,6 +41,8 @@ func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		}
 		slog.WarnContext(ctx, "push-notification-service transient — nak",
 			"id", evt.ID, "roomID", evt.RoomID, "error", err)
+		// A delay-less NAK redelivers immediately: the consumer's BackOff
+		// applies only on AckWait expiry, never to an explicit NAK.
 		_ = msg.NakWithDelay(0)
 		return
 	}

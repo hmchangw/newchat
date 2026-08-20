@@ -505,8 +505,8 @@ type consumerSource interface {
 	FilterSubjects(siteID string) []string
 }
 
-// buildConsumerConfig returns the durable consumer config for one collection; custom BackOff gives
-// progressive retries. With MaxDeliver=5 and 3 BackOff entries, NATS reuses the last (30s) for retries 4-5 — intended, don't extend to length 5.
+// buildConsumerConfig returns the durable consumer config for one collection. The BackOff ladder
+// spaces AckWait-expiry redeliveries only; natsutil.Nak sends no delay, so an explicit NAK is immediate.
 func buildConsumerConfig(s stream.ConsumerSettings, coll consumerSource, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = coll.ConsumerName()

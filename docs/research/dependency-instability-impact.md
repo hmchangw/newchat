@@ -34,7 +34,8 @@ Concrete, citable facts that ground the analysis below:
 
 - **NATS reconnect:** `MaxReconnects(-1)` infinite, `ReconnectWait 2s` (`pkg/natsutil/connect.go`).
 - **JetStream consumers** (`pkg/stream/consumer.go`): `AckExplicitPolicy`, `DeliverAllPolicy`, `AckWait` 30s
-  (`CONSUMER_ACK_WAIT`), `MaxDeliver` 5 (`CONSUMER_MAX_DELIVER`), `MaxAckPending` 1000, `MaxWaiting` 512.
+  (`CONSUMER_ACK_WAIT`), `MaxDeliver` 20 (`CONSUMER_MAX_DELIVER`), `MaxAckPending` 1000, `MaxWaiting` 512.
+  With `jsretry.DefaultBackoff` (tail 2m) that is a ~32m retry window per message before JetStream drops it.
 - **Stream schema** (`pkg/stream/stream.go`) defines **only `Name + Subjects`** — Replicas/Storage/Retention/MaxAge
   are **ops/IaC-controlled, not in code**. Dev bootstrap (`<service>/bootstrap.go`) calls `CreateOrUpdateStream`
   with minimal config.
@@ -85,7 +86,7 @@ Concrete, citable facts that ground the analysis below:
   redelivery; pull-consumer crash-before-ack double-delivers by design. → idempotency is mandatory, not optional.
   [docs.nats.io/consumers]
 - **Poison messages redeliver forever unless `MaxDeliver` is set**; at the cap an advisory fires on
-  `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.<STREAM>.<CONSUMER>`. The repo sets `MaxDeliver=5` (good) and
+  `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.<STREAM>.<CONSUMER>`. The repo sets `MaxDeliver=20` (good) and
   `jobguard` Acks deterministic panics (good). [model_deep_dive]
 - **Each stream is its own RAFT group**, separate from the meta group; an R3 stream can serve even with no meta
   leader, but **quorum loss stalls the stream** ("No Quorum has Stalled") and publishes during the stall are not

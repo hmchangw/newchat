@@ -23,7 +23,7 @@ type config struct {
 	NatsCredsFile string          `env:"NATS_CREDS_FILE"`
 	SiteID        string          `env:"SITE_ID,required"`
 	MaxWorkers    int             `env:"MAX_WORKERS" envDefault:"100"`
-	MaxDeliver    int             `env:"MAX_DELIVER" envDefault:"5"`
+	MaxDeliver    int             `env:"MAX_DELIVER" envDefault:"20"`
 	HealthAddr    string          `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled  bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Mode          stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve

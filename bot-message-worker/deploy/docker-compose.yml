@@ -19,7 +19,7 @@ services:
       - MONGO_URI=mongodb://mongodb:27017
       - MONGO_DB=chat
       - MAX_WORKERS=100
-      - MAX_DELIVER=5
+      - MAX_DELIVER=20
       # BOT-MESSAGES-CANONICAL is owned by bot-message-handler; consumer only verifies.
       - BOOTSTRAP_STREAMS=false
     volumes:

@@ -12,9 +12,20 @@ import (
 // Defaults are set on the struct tags so caarlos0/env supplies them when
 // the env vars are unset. Operators tune per-service values via the
 // service's deployment env (e.g. CONSUMER_MAX_ACK_PENDING).
+//
+// MaxDeliver is sized by the outage it must ride out, not by an attempt count:
+// paired with jsretry.DefaultBackoff (tail 2m) the retry window is
+// 36s + (MaxDeliver-4) x 2m, so 20 deliveries park a message for ~32m before
+// JetStream drops it — a node loss plus a rolling cluster restart, with
+// headroom. Buy the window with attempts rather than a longer backoff tail:
+// the tail is also the lag between the dependency recovering and the next
+// retry. Two ceilings bound any further increase — the stream's MaxAge (a
+// window past retention retries against a deleted message) and MaxAckPending
+// (a Nak'd-with-delay message holds its slot, so a consumer stalls once the
+// budget fills; backpressure, not loss).
 type ConsumerSettings struct {
 	AckWait       time.Duration `env:"ACK_WAIT"        envDefault:"30s"`
-	MaxDeliver    int           `env:"MAX_DELIVER"     envDefault:"5"`
+	MaxDeliver    int           `env:"MAX_DELIVER"     envDefault:"20"`
 	MaxWaiting    int           `env:"MAX_WAITING"     envDefault:"512"`
 	MaxAckPending int           `env:"MAX_ACK_PENDING" envDefault:"1000"`
 }

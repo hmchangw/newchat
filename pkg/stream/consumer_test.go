@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
@@ -54,7 +55,7 @@ func TestConsumerSettingsEnvDefaults(t *testing.T) {
 	require.NoError(t, env.Parse(&h))
 
 	assert.Equal(t, 30*time.Second, h.Consumer.AckWait)
-	assert.Equal(t, 5, h.Consumer.MaxDeliver)
+	assert.Equal(t, 20, h.Consumer.MaxDeliver)
 	assert.Equal(t, 512, h.Consumer.MaxWaiting)
 	assert.Equal(t, 1000, h.Consumer.MaxAckPending)
 }
@@ -76,4 +77,26 @@ func TestConsumerSettingsEnvOverrides(t *testing.T) {
 	assert.Equal(t, 7, h.Consumer.MaxDeliver)
 	assert.Equal(t, 1024, h.Consumer.MaxWaiting)
 	assert.Equal(t, 250, h.Consumer.MaxAckPending)
+}
+
+// The MaxDeliver default is picked for the outage window it buys, not as a
+// round number: paired with jsretry.DefaultBackoff it must ride out a NATS
+// node loss plus a rolling cluster restart. Lowering either side silently
+// shrinks that window, so pin the product of the two.
+func TestConsumerSettingsEnvDefaults_RetryWindow(t *testing.T) {
+	type holder struct {
+		Consumer stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	}
+
+	var h holder
+	require.NoError(t, env.Parse(&h))
+
+	// A message is Nak'd on every delivery but the last (which the server
+	// terminates), and delivery n uses backoff[n-1] with the last entry reused.
+	var window time.Duration
+	for n := 1; n < h.Consumer.MaxDeliver; n++ {
+		window += jsretry.DefaultBackoff[min(n-1, len(jsretry.DefaultBackoff)-1)]
+	}
+
+	assert.Equal(t, 32*time.Minute+36*time.Second, window)
 }
