@@ -351,19 +351,9 @@ type recipientExpectationConfig struct {
 	Route       recipientExpectedRoute
 	Source      recipientSetSource
 	Complete    bool
-	// Deadline is the operation's own deadline when the caller knows it. The
-	// ledger honours each operation's persisted deadline, so an entry expired
-	// on the sweep's current retention alone can be released while its
-	// operation is still live — a recovered operation accepted under a longer
-	// deadline is the reachable case. Optional: without it the sweep falls back
-	// to registration time, which matches for operations started in this
-	// process under this configuration.
-	Deadline time.Time
 }
 
 type recipientExpectation struct {
-	registeredAt      time.Time
-	deadline          time.Time
 	expected          map[string]struct{}
 	observed          map[string]map[recipientDeliveryRoute]int
 	mismatches        map[string]struct{}
@@ -386,15 +376,6 @@ type recipientEvidence struct {
 	// failing to expire would otherwise reinstate the growth this file exists
 	// to stop. Zero means unbounded.
 	capacity int
-	// now is injectable so expiry can be asserted without sleeping.
-	now func() time.Time
-}
-
-func (r *recipientEvidence) clock() time.Time {
-	if r.now == nil {
-		return time.Now().UTC()
-	}
-	return r.now().UTC()
 }
 
 type recipientEvidenceDisposition string
@@ -411,7 +392,6 @@ func newRecipientEvidence(allowDuplicates bool) *recipientEvidence {
 	return &recipientEvidence{
 		allowDuplicates: allowDuplicates,
 		operations:      make(map[string]*recipientExpectation),
-		now:             func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -474,9 +454,7 @@ func (r *recipientEvidence) ExpectDelivery(config *recipientExpectationConfig) e
 			r.capacity)
 	}
 	r.operations[config.OperationID] = &recipientExpectation{
-		registeredAt: r.clock(),
-		deadline:     config.Deadline,
-		expected:     expected, observed: make(map[string]map[recipientDeliveryRoute]int), mismatches: make(map[string]struct{}),
+		expected: expected, observed: make(map[string]map[recipientDeliveryRoute]int), mismatches: make(map[string]struct{}),
 		roomID: config.RoomID, eventType: config.EventType,
 		route: config.Route, source: config.Source, complete: config.Complete,
 		durableMissing: make(map[string]struct{}), durableUnexpected: make(map[string]struct{}),
@@ -631,46 +609,30 @@ func (r *recipientEvidence) Forget(operationID string) {
 	delete(r.operations, operationID)
 }
 
-// ExpireBefore releases every expectation registered at or before cutoff and
-// returns how many went. Callers pass now minus the operation deadline, so an
-// expectation cannot outlive the operation it describes.
+// ForgetAll releases the expectations for the operations the ledger reports it
+// finalized, and returns how many went. Taking the IDs from the ledger is what
+// keeps the two aligned: a time-based bound cannot be, because Expire stops at
+// its batch limit and skips claimed operations mid-verification, so "past its
+// deadline" and "the ledger is done with it" are different sets.
 //
-// It exists because the ledger's own expiry finalizes an operation and forgets
-// it without telling the evidence, while Finalize — the only other way out of
-// this map — runs inside the reconciler. Anything the reconciler never reaches
-// was therefore retained for the life of the process, and each entry holds one
-// route map per recipient, which made this the largest object graph in the run.
-//
-// A recovered expectation is registered when the restart replays it rather than
-// when its operation started, so it can outlive that operation by up to one
-// deadline. That over-retention is bounded and costs one deadline of entries
-// once per restart; treating a replayed entry as already aged would expire
-// evidence the run can still resolve.
-//
-// It is deliberately not driven from the ledger's finalize path. That would put
-// the evidence lock underneath the ledger lock, while the observer already
-// takes them the other way round; a sweep that holds neither cannot deadlock
-// however those paths change.
-func (r *recipientEvidence) ExpireBefore(cutoff time.Time) int {
-	if r == nil {
+// The caller passes IDs the ledger has already returned, so this takes only the
+// evidence lock — the ledger's is released by then, and no ordering between the
+// two is created.
+func (r *recipientEvidence) ForgetAll(operationIDs []string) int {
+	if r == nil || len(operationIDs) == 0 {
 		return 0
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	expired := 0
-	for operationID, expectation := range r.operations {
-		if !expectation.deadline.IsZero() {
-			// It knows when its operation ends, so nothing else may release it.
-			if !expectation.deadline.Before(r.clock()) {
-				continue
-			}
-		} else if expectation.registeredAt.IsZero() || expectation.registeredAt.After(cutoff) {
+	forgotten := 0
+	for _, operationID := range operationIDs {
+		if _, tracked := r.operations[operationID]; !tracked {
 			continue
 		}
 		delete(r.operations, operationID)
-		expired++
+		forgotten++
 	}
-	return expired
+	return forgotten
 }
 
 // Len reports how many expectations are retained. The run needs this as a gauge:
@@ -973,17 +935,12 @@ func (o *failureRecipientObserver) Recover(operations []failureOperation) error 
 			err = o.ExpectDelivery(&recipientExpectationConfig{
 				OperationID: operation.ID, Recipients: recipients,
 				Route: recipientExpectedRouteAny, Source: recipientSetSourceLegacy, Complete: false,
-				Deadline: operation.Deadline,
 			})
 		} else {
 			err = o.ExpectDelivery(&recipientExpectationConfig{
 				OperationID: operation.ID, Recipients: recipients,
 				RoomID: operation.Targets["roomId"], EventType: eventType,
 				Route: route, Source: source, Complete: complete,
-				// The persisted deadline, not this process's retention: the
-				// ledger keeps the operation until this instant regardless of
-				// how SOAK_RECONCILE_DEADLINE was changed between runs.
-				Deadline: operation.Deadline,
 			})
 		}
 		if err != nil {

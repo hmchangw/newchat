@@ -31,7 +31,8 @@ func TestFailureLedger_ExpireRetiresAtMostOneBatchPerSweep(t *testing.T) {
 	require.NoError(t, err)
 	startExpiredOperations(t, ledger, 100, now)
 
-	finalized, err := ledger.Expire(now.Add(time.Minute))
+	finalizedIDs, err := ledger.Expire(now.Add(time.Minute))
+	finalized := len(finalizedIDs)
 
 	require.NoError(t, err)
 	assert.Equal(t, 25, finalized)
@@ -48,7 +49,8 @@ func TestFailureLedger_ExpireDrainsTheBacklogOverSuccessiveSweeps(t *testing.T) 
 
 	total := 0
 	for range 4 {
-		finalized, err := ledger.Expire(now.Add(time.Minute))
+		finalizedIDs, err := ledger.Expire(now.Add(time.Minute))
+		finalized := len(finalizedIDs)
 		require.NoError(t, err)
 		total += finalized
 	}
@@ -65,7 +67,8 @@ func TestFailureLedger_ExpireIsUnboundedWhenNoBatchIsConfigured(t *testing.T) {
 	require.NoError(t, err)
 	startExpiredOperations(t, ledger, 60, now)
 
-	finalized, err := ledger.Expire(now.Add(time.Minute))
+	finalizedIDs, err := ledger.Expire(now.Add(time.Minute))
+	finalized := len(finalizedIDs)
 
 	require.NoError(t, err)
 	assert.Equal(t, 60, finalized)

@@ -540,7 +540,6 @@ func runSoakWorkload(
 			expiryCtx,
 			ledger,
 			observationRuntime.Evidence(),
-			cfg.Soak.ReconcileDeadline,
 			expiryTicker.C,
 			func(err error) {
 				slog.Error("expire Cassandra soak failure evidence", "error", err)

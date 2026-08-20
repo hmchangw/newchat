@@ -69,7 +69,6 @@ func runSoakFailureExpiry(
 	ctx context.Context,
 	ledger *failureLedger,
 	evidence *recipientEvidence,
-	retention time.Duration,
 	ticks <-chan time.Time,
 	onError func(error),
 	options ...soakFailureExpiryOption,
@@ -89,37 +88,23 @@ func runSoakFailureExpiry(
 			if !ok {
 				return
 			}
-			ledgerExpired := true
-			if _, err := ledger.Expire(at); err != nil {
-				ledgerExpired = false
+			// The IDs the ledger actually finalized, which is not the same as
+			// "everything overdue": Expire stops at its batch limit and skips
+			// claimed operations mid-verification. Forgetting exactly these
+			// keeps the evidence and the ledger in step, and taking them after
+			// Expire returns creates no ordering between the two locks.
+			expired, err := ledger.Expire(at)
+			if err != nil {
 				reportSoakFailureSweepError(
 					onError, fmt.Errorf("expire failure operations: %w", err))
 			}
+			evidence.ForgetAll(expired)
 			// Reclaiming on the same tick means a run that finalizes nothing
 			// still bounds the journal; the finalize counter alone would let it
 			// grow until the next restart made recovery more expensive.
 			if err := ledger.MaybeCompact(at); err != nil {
 				reportSoakFailureSweepError(
 					onError, fmt.Errorf("compact failure journal: %w", err))
-			}
-			// The ledger's expiry removes the operation and never tells the
-			// recipient evidence, whose only other exit is Finalize inside the
-			// reconciler. Anything the reconciler never reaches was therefore
-			// retained for the life of the process — and each entry holds one
-			// route map per recipient, which is what made this the largest
-			// object graph in the run. Sweeping here bounds the evidence by the
-			// same deadline that bounds the ledger.
-			// Only after the ledger finalized what was due. A failed expiry
-			// leaves those operations live and still reconcilable, so
-			// releasing their evidence on the same tick would destroy the only
-			// record of what was delivered. The next tick retries both.
-			//
-			// A zero window would put the cutoff at now and release every
-			// expectation, including operations still inside their deadline.
-			// Config validation forbids a zero SOAK_RECONCILE_DEADLINE, so
-			// this guards a caller mistake rather than a reachable setting.
-			if ledgerExpired && retention > 0 {
-				evidence.ExpireBefore(at.Add(-retention))
 			}
 			if settings.metrics != nil {
 				settings.metrics.FailureRecipientExpectations.Set(float64(evidence.Len()))
@@ -370,10 +355,6 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 			Route:       route,
 			Source:      source,
 			Complete:    complete,
-			// The same deadline this operation is about to be started with, so
-			// the sweep releases the evidence exactly when the ledger releases
-			// the operation.
-			Deadline: startedAt.Add(t.deadline),
 		}); err != nil {
 			return fmt.Errorf("register soak recipient expectation: %w", err)
 		}

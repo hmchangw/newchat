@@ -832,18 +832,23 @@ func defaultFailureReason(
 	}
 }
 
-func (l *failureLedger) Expire(now time.Time) (int, error) {
+// Expire finalizes every operation past its deadline and returns the IDs it
+// actually finalized. The IDs matter to callers holding per-operation state:
+// a successful call is not a complete one — it stops at expireBatch and skips
+// claimed operations mid-verification — so "the sweep succeeded" is not a
+// licence to discard anything else that looks overdue.
+func (l *failureLedger) Expire(now time.Time) ([]string, error) {
 	if now.IsZero() {
 		now = l.now()
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.ensureOpen(); err != nil {
-		return 0, err
+		return nil, err
 	}
-	finalized := 0
+	var finalized []string
 	for _, operation := range l.active {
-		if l.expireBatch > 0 && finalized >= l.expireBatch {
+		if l.expireBatch > 0 && len(finalized) >= l.expireBatch {
 			break
 		}
 		if now.Before(operation.Deadline) {
@@ -881,12 +886,13 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 			}
 		}
 		result := failureOperationResult(operation)
+		operationID := operation.ID
 		if err := l.finalizeLocked(
 			operation, result, failureOperationFinalReason(operation, result), now,
 		); err != nil {
 			return finalized, err
 		}
-		finalized++
+		finalized = append(finalized, operationID)
 	}
 	return finalized, nil
 }

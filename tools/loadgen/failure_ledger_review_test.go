@@ -33,7 +33,8 @@ func TestFailureLedger_AbandonFinalizesWithoutDataLoss(t *testing.T) {
 	assert.Equal(t, uint64(1), snapshot.Results[failureResultNotSent])
 	assert.Zero(t, snapshot.Results[failureResultMissingAfterDeadline])
 
-	expired, err := ledger.Expire(now.Add(time.Hour))
+	expiredIDs, err := ledger.Expire(now.Add(time.Hour))
+	expired := len(expiredIDs)
 	require.NoError(t, err)
 	assert.Zero(t, expired)
 }
@@ -174,7 +175,8 @@ func TestFailureLedger_FinalizationPreservesDeterministicReason(t *testing.T) {
 
 			tt.observe(t, ledger)
 			if tt.expire {
-				finalized, err := ledger.Expire(now.Add(time.Minute))
+				finalizedIDs, err := ledger.Expire(now.Add(time.Minute))
+				finalized := len(finalizedIDs)
 				require.NoError(t, err)
 				require.Equal(t, 1, finalized)
 			}
@@ -316,7 +318,8 @@ func TestFailureLedger_ExpireSkipsClaimedOperation(t *testing.T) {
 	_, ok := ledger.ClaimDue(now)
 	require.True(t, ok)
 
-	finalized, err := ledger.Expire(now.Add(time.Hour))
+	finalizedIDs, err := ledger.Expire(now.Add(time.Hour))
+	finalized := len(finalizedIDs)
 	require.NoError(t, err)
 	assert.Zero(t, finalized, "an in-flight verification must not be finalized underneath the reconciler")
 	assert.Equal(t, 1, ledger.Snapshot().Active)
@@ -340,7 +343,8 @@ func TestFailureLedger_ExpireFinalizesReleasedClaim(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, ledger.ReleaseClaim("released", now))
 
-	finalized, err := ledger.Expire(now.Add(time.Hour))
+	finalizedIDs, err := ledger.Expire(now.Add(time.Hour))
+	finalized := len(finalizedIDs)
 	require.NoError(t, err)
 	assert.Equal(t, 1, finalized)
 }
@@ -361,7 +365,8 @@ func TestFailureLedger_HistoryObservationReleasesClaimForAdmissionExpiry(t *test
 	require.NoError(t, err)
 	assert.False(t, finalized)
 
-	expired, err := ledger.Expire(now.Add(time.Hour))
+	expiredIDs, err := ledger.Expire(now.Add(time.Hour))
+	expired := len(expiredIDs)
 	require.NoError(t, err)
 	assert.Equal(t, 1, expired)
 	snapshot := ledger.Snapshot()
