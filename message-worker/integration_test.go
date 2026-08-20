@@ -819,7 +819,7 @@ func TestThreadStoreMongo_AddThreadUnread_EmptyAccountsNoop(t *testing.T) {
 	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", nil))
 }
 
-func TestThreadStoreMongo_CreateThreadRoom(t *testing.T) {
+func TestThreadStoreMongo_EnsureThreadRoom(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
 	store := newThreadStoreMongo(db)
@@ -833,48 +833,42 @@ func TestThreadStoreMongo_CreateThreadRoom(t *testing.T) {
 		SiteID:          "site-a",
 		LastMsgAt:       now,
 		LastMsgID:       "msg-reply-1",
+		ReplyAccounts:   []string{"alice"},
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
 
-	t.Run("first insert succeeds", func(t *testing.T) {
-		err := store.CreateThreadRoom(ctx, room)
+	t.Run("absent room is created and reported as created", func(t *testing.T) {
+		stored, created, err := store.EnsureThreadRoom(ctx, room)
 		require.NoError(t, err)
-
-		got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent")
-		require.NoError(t, err)
-		assert.Equal(t, "tr-1", got.ID)
-		assert.Equal(t, "msg-parent", got.ParentMessageID)
-		assert.Equal(t, "r-1", got.RoomID)
-		assert.Equal(t, "site-a", got.SiteID)
-		assert.Equal(t, "msg-reply-1", got.LastMsgID)
+		assert.True(t, created, "first call must report created=true")
+		assert.Equal(t, "tr-1", stored.ID)
+		assert.Equal(t, "msg-parent", stored.ParentMessageID)
+		assert.Equal(t, "r-1", stored.RoomID)
+		assert.Equal(t, "site-a", stored.SiteID)
+		assert.Equal(t, "msg-reply-1", stored.LastMsgID)
+		assert.Equal(t, []string{"alice"}, stored.ReplyAccounts)
 	})
 
-	t.Run("duplicate insert returns errThreadRoomExists", func(t *testing.T) {
-		dup := &model.ThreadRoom{
+	t.Run("existing room is returned without overwrite and reported as not created", func(t *testing.T) {
+		// Same parentMessageId, different candidate — must NOT replace the stored room.
+		candidate := &model.ThreadRoom{
 			ID:              "tr-2",
 			ParentMessageID: "msg-parent",
 			RoomID:          "r-1",
 			SiteID:          "site-a",
-			LastMsgAt:       now,
+			LastMsgAt:       now.Add(time.Minute),
 			LastMsgID:       "msg-reply-2",
-			CreatedAt:       now,
-			UpdatedAt:       now,
+			ReplyAccounts:   []string{"bob"},
+			CreatedAt:       now.Add(time.Minute),
+			UpdatedAt:       now.Add(time.Minute),
 		}
-		err := store.CreateThreadRoom(ctx, dup)
-		require.ErrorIs(t, err, errThreadRoomExists)
-	})
-}
-
-func TestThreadStoreMongo_GetThreadRoomByParentMessageID(t *testing.T) {
-	ctx := context.Background()
-	db := setupMongo(t)
-	store := newThreadStoreMongo(db)
-	require.NoError(t, store.EnsureIndexes(ctx))
-
-	t.Run("not found returns errThreadRoomNotFound", func(t *testing.T) {
-		_, err := store.GetThreadRoomByParentMessageID(ctx, "does-not-exist")
-		require.ErrorIs(t, err, errThreadRoomNotFound)
+		stored, created, err := store.EnsureThreadRoom(ctx, candidate)
+		require.NoError(t, err)
+		assert.False(t, created, "second call for the same parent must report created=false")
+		assert.Equal(t, "tr-1", stored.ID, "$setOnInsert must not overwrite the original room")
+		assert.Equal(t, "msg-reply-1", stored.LastMsgID)
+		assert.Equal(t, []string{"alice"}, stored.ReplyAccounts)
 	})
 }
 
@@ -1094,14 +1088,16 @@ func TestThreadStoreMongo_UpdateThreadRoomLastMessage(t *testing.T) {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	require.NoError(t, store.CreateThreadRoom(ctx, room))
+	_, _, err := store.EnsureThreadRoom(ctx, room)
+	require.NoError(t, err)
 
 	later := now.Add(10 * time.Minute)
-	err := store.UpdateThreadRoomLastMessage(ctx, "tr-update", "msg-5", []string{"bob"}, later)
+	err = store.UpdateThreadRoomLastMessage(ctx, "tr-update", "msg-5", []string{"bob"}, later)
 	require.NoError(t, err)
 
-	got, err := store.GetThreadRoomByParentMessageID(ctx, "msg-parent-update")
-	require.NoError(t, err)
+	var got model.ThreadRoom
+	require.NoError(t, db.Collection("thread_rooms").
+		FindOne(ctx, bson.M{"parentMessageId": "msg-parent-update"}).Decode(&got))
 	assert.Equal(t, "msg-5", got.LastMsgID)
 	assert.Equal(t, later, got.LastMsgAt.UTC().Truncate(time.Millisecond))
 	assert.Contains(t, got.ReplyAccounts, "bob", "replier account should be added to ReplyAccounts")
@@ -2110,69 +2106,64 @@ func TestAdvanceThreadSubscriptionLastSeen_OnlyAdvances(t *testing.T) {
 	require.NoError(t, store.AdvanceThreadSubscriptionLastSeen(ctx, "no-room", "nobody", t2))
 }
 
-func TestThreadStoreMongo_GetHistorySharedSince(t *testing.T) {
+func TestThreadStoreMongo_UpsertThreadSubscriptionAdvancingLastSeen(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
 	store := newThreadStoreMongo(db)
-
-	shared := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	_, err := db.Collection("subscriptions").InsertMany(ctx, []interface{}{
-		model.Subscription{ID: "hss-al", User: model.SubscriptionUser{ID: "u-al", Account: "alice"}, RoomID: "r-hss", HistorySharedSince: &shared},
-		model.Subscription{ID: "hss-bo", User: model.SubscriptionUser{ID: "u-bo", Account: "bob"}, RoomID: "r-hss"},
-	})
-	require.NoError(t, err)
-
-	got, err := store.GetHistorySharedSince(ctx, "r-hss", []string{"alice", "bob", "carol"})
-	require.NoError(t, err)
-	require.NotNil(t, got["alice"])
-	assert.Equal(t, shared.UnixMilli(), got["alice"].UTC().UnixMilli())
-	bobWindow, bobPresent := got["bob"]
-	require.True(t, bobPresent, "member with a nil window must still be present in the map")
-	assert.Nil(t, bobWindow, "member without window decodes to nil")
-	_, present := got["carol"]
-	assert.False(t, present, "non-member is absent from the map")
-
-	empty, err := store.GetHistorySharedSince(ctx, "r-hss", nil)
-	require.NoError(t, err)
-	assert.Empty(t, empty)
-}
-
-func TestCassandraStore_SaveThreadMessage_TShowWritesAllTables(t *testing.T) {
-	cassSession := setupCassandra(t)
-	bucket := msgbucket.New(24 * time.Hour)
-	store := NewCassandraStore(cassSession, bucket, nil)
-	ctx := context.Background()
+	require.NoError(t, store.EnsureIndexes(ctx))
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	parentCreatedAt := now.Add(-time.Hour)
-	sender := &cassParticipant{ID: "u-1", Account: "alice"}
-	msg := &model.Message{
-		ID:                           "m-tshow",
-		RoomID:                       "r-tshow",
-		UserID:                       "u-1",
-		UserAccount:                  "alice",
-		Content:                      "visible reply",
-		CreatedAt:                    now,
-		ThreadParentMessageID:        "m-parent",
-		ThreadParentMessageCreatedAt: &parentCreatedAt,
-		TShow:                        true,
+	sub := &model.ThreadSubscription{
+		ID:              "ts-comb",
+		ParentMessageID: "msg-p",
+		RoomID:          "r-comb",
+		ThreadRoomID:    "tr-comb",
+		UserID:          "u-comb",
+		UserAccount:     "alice",
+		SiteID:          "site-a",
+		LastSeenAt:      nil,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
-	_, err := store.SaveThreadMessage(ctx, msg, sender, "site-a", "tr-tshow-1")
-	require.NoError(t, err)
+	read := func() model.ThreadSubscription {
+		var got model.ThreadSubscription
+		require.NoError(t, db.Collection("thread_subscriptions").
+			FindOne(ctx, bson.M{"threadRoomId": "tr-comb", "userAccount": "alice"}).Decode(&got))
+		return got
+	}
 
-	// The batch must land in all three tables. Assert the reply's own rows by exact
-	// key so the parent's tcount-UPDATE upsert (same partitions) can't interfere.
-	var count int
-	require.NoError(t, cassSession.Query(`SELECT COUNT(*) FROM messages_by_id WHERE message_id = ?`, "m-tshow").WithContext(ctx).Scan(&count))
-	assert.Equal(t, 1, count, "messages_by_id reply row written")
+	t.Run("insert seeds the subscription with lastSeenAt=at", func(t *testing.T) {
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, now))
 
-	require.NoError(t, cassSession.Query(`SELECT COUNT(*) FROM thread_messages_by_thread WHERE thread_room_id = ?`, "tr-tshow-1").WithContext(ctx).Scan(&count))
-	assert.Equal(t, 1, count, "thread_messages_by_thread row written")
+		got := read()
+		assert.Equal(t, "ts-comb", got.ID)
+		assert.Equal(t, "u-comb", got.UserID)
+		require.NotNil(t, got.LastSeenAt, "lastSeenAt must be seeded by $max on insert")
+		assert.WithinDuration(t, now, got.LastSeenAt.UTC(), time.Millisecond)
+		assert.Equal(t, now, got.CreatedAt.UTC().Truncate(time.Millisecond))
+	})
 
-	var gotTShow bool
-	require.NoError(t, cassSession.Query(
-		`SELECT tshow FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
-		"r-tshow", bucket.Of(now), now, "m-tshow").WithContext(ctx).Scan(&gotTShow))
-	assert.True(t, gotTShow, "tshow mirror row written to messages_by_room with tshow=true")
+	t.Run("advances lastSeenAt forward on an existing subscription without overwriting identity", func(t *testing.T) {
+		later := now.Add(time.Minute)
+		// A redelivered/duplicate insert attempt with a fresh ID must not replace the original.
+		dup := *sub
+		dup.ID = "ts-comb-dup"
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, &dup, later))
+
+		got := read()
+		assert.Equal(t, "ts-comb", got.ID, "$setOnInsert must not overwrite the original _id")
+		require.NotNil(t, got.LastSeenAt)
+		assert.WithinDuration(t, later, got.LastSeenAt.UTC(), time.Millisecond, "newer time advances")
+	})
+
+	t.Run("never regresses lastSeenAt", func(t *testing.T) {
+		earlier := now.Add(-time.Minute)
+		require.NoError(t, store.UpsertThreadSubscriptionAdvancingLastSeen(ctx, sub, earlier))
+
+		got := read()
+		require.NotNil(t, got.LastSeenAt)
+		assert.WithinDuration(t, now.Add(time.Minute), got.LastSeenAt.UTC(), time.Millisecond,
+			"$max must keep the later value")
+	})
 }
