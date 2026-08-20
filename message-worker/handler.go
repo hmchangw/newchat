@@ -428,6 +428,21 @@ func (h *Handler) handleFirstThreadReply(ctx context.Context, msg *model.Message
 	return []string{parentSender.Account}, nil
 }
 
+// writeReplierThreadSub performs the replier's combined subscription upsert +
+// lastSeenAt advance on the subsequent-reply path, then publishes the cross-site
+// inbox copy when the replier's home site is remote. Callers keep their own
+// eligibility guard and set replierLastSeenAdvanced on success.
+func (h *Handler) writeReplierThreadSub(ctx context.Context, msg *model.Message, eventSiteID, threadRoomID string, replier *model.User, now time.Time) error {
+	replierSub := h.buildThreadSubscription(msg, threadRoomID, msg.UserID, msg.UserAccount, eventSiteID, now)
+	if err := h.threadStore.UpsertThreadSubscriptionAdvancingLastSeen(ctx, replierSub, msg.CreatedAt); err != nil {
+		return fmt.Errorf("upsert replier thread subscription: %w", err)
+	}
+	if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
+		return fmt.Errorf("publish replier thread subscription inbox: %w", err)
+	}
+	return nil
+}
+
 // handleSubsequentThreadReply runs when the thread room already existed (resolved by the
 // caller's EnsureThreadRoom and passed in as existingRoom, so no second fetch is needed).
 // It upserts only the replier's subscription — folding the replier's own lastSeenAt
@@ -459,14 +474,10 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 	switch {
 	case err == nil:
 		if !isMigration && replier != nil && msg.UserID != parentSender.ID {
-			replierSub := h.buildThreadSubscription(msg, existingRoom.ID, msg.UserID, msg.UserAccount, eventSiteID, now)
-			if err := h.threadStore.UpsertThreadSubscriptionAdvancingLastSeen(ctx, replierSub, msg.CreatedAt); err != nil {
-				return "", nil, false, fmt.Errorf("upsert replier thread subscription: %w", err)
+			if err := h.writeReplierThreadSub(ctx, msg, eventSiteID, existingRoom.ID, replier, now); err != nil {
+				return "", nil, false, err
 			}
 			replierLastSeenAdvanced = true
-			if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
-				return "", nil, false, fmt.Errorf("publish replier thread subscription inbox: %w", err)
-			}
 		}
 	case errors.Is(err, errMessageNotFound):
 		parentFound = false
@@ -475,14 +486,10 @@ func (h *Handler) handleSubsequentThreadReply(ctx context.Context, msg *model.Me
 			"replyID", msg.ID,
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		if !isMigration && replier != nil {
-			replierSub := h.buildThreadSubscription(msg, existingRoom.ID, msg.UserID, msg.UserAccount, eventSiteID, now)
-			if err := h.threadStore.UpsertThreadSubscriptionAdvancingLastSeen(ctx, replierSub, msg.CreatedAt); err != nil {
-				return "", nil, false, fmt.Errorf("upsert replier thread subscription: %w", err)
+			if err := h.writeReplierThreadSub(ctx, msg, eventSiteID, existingRoom.ID, replier, now); err != nil {
+				return "", nil, false, err
 			}
 			replierLastSeenAdvanced = true
-			if err := h.publishThreadSubInboxIfRemote(ctx, replierSub, replier.SiteID, msg.ID); err != nil {
-				return "", nil, false, fmt.Errorf("publish replier thread subscription inbox: %w", err)
-			}
 		}
 	default:
 		return "", nil, false, fmt.Errorf("get parent message sender: %w", err)
