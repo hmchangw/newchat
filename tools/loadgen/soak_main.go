@@ -836,10 +836,7 @@ func runSoakWorkload(
 		return 1
 	}
 	roomReader := newSoakRoomReader(
-		soakRoomReadConfig{
-			SiteID: cfg.SiteID, BatchSize: soakRoomInfoBatchSize,
-			RequestTimeout: soakRequestTimeout,
-		},
+		soakRoomReadConfigFrom(cfg.SiteID, &cfg.Soak),
 		roomPool,
 		rpc,
 		recorders.read,

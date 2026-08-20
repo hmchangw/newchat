@@ -93,6 +93,9 @@ the recipient callback queue and invalidate positive absence claims.
 |---|---:|---|
 | `SOAK_LEDGER_DIR` | empty | Persistent WAL and recipient-journal directory |
 | `SOAK_LEDGER_CAPACITY` | `200000` | Maximum unresolved in-memory operations |
+| `SOAK_LEDGER_COMPACT_EVERY` | `10000` | Finalizations before the journal is reclaimed |
+| `SOAK_LEDGER_MAX_BYTES` | `536870912` | Journal size that reclaims it regardless of the finalize count |
+| `SOAK_LEDGER_EXPIRE_BATCH` | `0` | Operations one expiry sweep may retire; `0` is unbounded. A bound below the arrival rate grows a backlog until capacity invalidates the ledger — size it above (operations/sec x sweep interval) |
 | `SOAK_RECONCILE_DEADLINE` | `10m` | Authoritative absence deadline |
 | `SOAK_RECONCILE_RETRY_INTERVAL` | `1s` | Earliest history retry |
 | `SOAK_RECONCILE_READ_SHARE` | `0.5` | Maximum read-lane reconciliation share |
@@ -104,6 +107,8 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_ROOM_MUTATION_RATE` | `1` | Rename and mute toggles per second, alternating |
 | `SOAK_ROOM_READ_RATE` | `20` | Room reads per second; also funds reconciliation |
 | `SOAK_USER_READ_RATE` | `10` | user-service reads per second, split evenly across its reads |
+| `SOAK_SUBSCRIPTION_LIST_LIMIT` | unset | Page size for the subscription-list read. Unset leaves user-service's own default (40) in force |
+| `SOAK_SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE` | unset | Last-message enrichment, which fans every listed room out to history-service. Unset sends nothing and the service enriches; `false` isolates that fan-out's cost |
 | `SOAK_SEARCH_READ_RATE` | `5` | search-service reads per second |
 | `SOAK_SEARCH_OBSERVER_ENABLED` | `false` | Opt in to search-index observation |
 | `SOAK_SEARCH_SETTLE` | `30s` | Grace before the index probe asks about a message |
@@ -118,6 +123,10 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_PRESENCE_QUERY_SHARE` | `0.1` | Share of presence slots spent verifying instead of signalling |
 | `SOAK_PRESENCE_QUERY_BATCH` | `50` | Accounts per batch presence query |
 | `SOAK_PRESENCE_SETTLE` | `5s` | Grace before a published signal is compared |
+| `SOAK_HEAP_PROFILE_DIR` | unset | Writes heap profiles here on a timer; point it at the ledger mount so a profile survives an OOM kill |
+| `SOAK_HEAP_PROFILE_INTERVAL` | `5m` | Interval between heap profiles |
+| `SOAK_HEAP_PROFILE_KEEP` | `3` | Profiles retained before the oldest is pruned |
+| `PPROF_ADDR` | unset | Serves pprof on its own listener, separate from the metrics endpoint. Loopback hosts only; a configured address that cannot bind fails startup |
 | `SOAK_PRESENCE_TTL` | `5m` | Connection TTL past which an absence is legal |
 
 Helm exposes the same opt-in as

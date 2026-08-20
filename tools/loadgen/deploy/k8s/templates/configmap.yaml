@@ -43,6 +43,12 @@ data:
   SOAK_ROOM_MUTATION_RATE: {{ .Values.soak.roomMutationRate | quote }}
   SOAK_ROOM_READ_RATE: {{ .Values.soak.roomReadRate | quote }}
   SOAK_USER_READ_RATE: {{ .Values.soak.userReadRate | quote }}
+  {{- if .Values.soak.subscriptionListLimit }}
+  SOAK_SUBSCRIPTION_LIST_LIMIT: {{ .Values.soak.subscriptionListLimit | quote }}
+  {{- end }}
+  {{- if .Values.soak.subscriptionListIncludeLastMessage }}
+  SOAK_SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE: {{ .Values.soak.subscriptionListIncludeLastMessage | quote }}
+  {{- end }}
   SOAK_SEARCH_READ_RATE: {{ .Values.soak.searchReadRate | quote }}
   SOAK_SEARCH_SETTLE: {{ .Values.soak.searchSettle | quote }}
   SOAK_SEARCH_OBSERVER_ENABLED: {{ .Values.searchObserver.enabled | quote }}

@@ -134,6 +134,13 @@ soak:
   roomMutationRate: "1"
   roomReadRate: "20"
   userReadRate: "10"
+  # Diagnostic shape controls for the subscription-list read. Empty leaves
+  # user-service's own defaults in force, which is what every baseline so far
+  # was recorded against — set them only for a probe run.
+  # subscriptionListIncludeLastMessage: "false" drops the per-room fan-out to
+  # history-service, isolating that cost from the rest of the request.
+  subscriptionListLimit: ""
+  subscriptionListIncludeLastMessage: ""
   searchReadRate: "5"
   searchSettle: 30s
   roomCreateRate: "0.05"

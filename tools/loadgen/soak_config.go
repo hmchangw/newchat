@@ -124,6 +124,16 @@ type soakConfig struct {
 	HeapProfileDir      string        `env:"HEAP_PROFILE_DIR"      envDefault:""`
 	HeapProfileInterval time.Duration `env:"HEAP_PROFILE_INTERVAL" envDefault:"5m"`
 	HeapProfileKeep     int           `env:"HEAP_PROFILE_KEEP"     envDefault:"3"`
+	// SubscriptionListLimit and SubscriptionListIncludeLastMessage shape the
+	// subscription-list request the room-read lane sends. Both are unset by
+	// default so the lane keeps sending exactly what it sent before they
+	// existed: user-service reads a missing limit as its own default and a
+	// missing includeLastMessage as true, and a baseline recorded without them
+	// has to stay comparable. Setting includeLastMessage to false drops the
+	// per-room fan-out to history-service, which is what separates that cost
+	// from the rest of the request without re-seeding anything.
+	SubscriptionListLimit              int   `env:"SUBSCRIPTION_LIST_LIMIT"          envDefault:"0"`
+	SubscriptionListIncludeLastMessage *bool `env:"SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE"`
 }
 
 // soakPayloadBudgetRatio is the share of max_payload a page of message bodies
@@ -258,6 +268,15 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	}
 	if cfg.LedgerExpireBatch < 0 {
 		return fmt.Errorf("SOAK_LEDGER_EXPIRE_BATCH must not be negative")
+	}
+	// A negative limit reaches user-service's normalizePage, which swaps it for
+	// the default — the run would then report on a page size nobody chose. Only
+	// the lower bound is checked: normalizePage also caps at the service's
+	// MAX_SUBSCRIPTION_LIMIT, but that is the service's own configuration and
+	// loadgen cannot read it, whereas a negative page size is wrong under every
+	// configuration.
+	if cfg.SubscriptionListLimit < 0 {
+		return fmt.Errorf("SOAK_SUBSCRIPTION_LIST_LIMIT must not be negative")
 	}
 	if cfg.HeapProfileDir != "" {
 		if cfg.HeapProfileInterval <= 0 {
