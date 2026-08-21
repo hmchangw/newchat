@@ -539,12 +539,13 @@ histogram **and** a counter (`chat.nats.requests`, `chat.nats.request.handled`):
 a histogram already publishes `_count`, so the counters were the same numbers on
 a second series built from a second attribute set.
 
-**`rpc.method` coverage is partial.** The label is derived by
+**`rpc.method` coverage is partial.** All ten `natsrouter` services emit the
+histogram, but the label is derived by
 `natsmetrics.RequestOperationFromSubject`, whose operation vocabulary covers
-room-service and history-service only. The other five `natsrouter` services
-(user-service, search-service, media-service, bot-message-handler,
-bot-room-service) emit the histogram — their latency and `error.type` are real —
-but every one of their ~45 routes records `rpc_method="unknown"`, so SLO-4/5 can
+room-service and history-service only. The other seven (user-service,
+search-service, media-service, bot-message-handler, bot-room-service,
+translation-service, user-presence-service) record `rpc_method="unknown"` on
+every route — their latency and `error.type` are still real — so SLO-4/5 can
 slice by method for room-service and history-service and nowhere else. Extending
 the vocabulary is deliberately a separate change: it is a decision about how fine
 `rpc.method` should be and what that costs in cardinality, not a rename.

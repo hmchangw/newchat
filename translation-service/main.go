@@ -9,6 +9,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -107,7 +108,8 @@ func main() {
 	// and outbound connections without ceiling; on saturation the router replies
 	// errcode.Unavailable("service busy") so the caller can retry immediately.
 	// MAX_CONCURRENCY=0 disables the cap (unbounded spawn).
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
