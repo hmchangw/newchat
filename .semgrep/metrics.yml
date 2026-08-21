@@ -17,7 +17,12 @@ rules:
         # services: they are run under supervision for a migration window and
         # their metrics are read live during that window. The allocation
         # argument is about sustained production load, which they never carry.
-        - "data-migration/**"
+        #
+        # Leading slash anchors this to the repo-root directory, which is the
+        # only one that exists. Semgrepignore v2 will read an unanchored
+        # "data-migration/**" as anchored anyway and warns about the ambiguity,
+        # so say which one is meant.
+        - "/data-migration/**"
     patterns:
       - pattern-either:
           - pattern: $C.Add($CTX, $N, metric.WithAttributes(...))
