@@ -590,11 +590,23 @@ type soakFailureReconciler struct {
 // with how many messages are slow to persist, which no configuration knows, and
 // idle claims are the only evidence that the lane still has slack.
 const (
-	soakReconcileClaimAdvanced = "advanced"
-	soakReconcileClaimRetried  = "retried"
-	soakReconcileClaimIdle     = "idle"
-	soakReconcileClaimFailed   = "failed"
+	soakReconcileClaimAdvanced    = "advanced"
+	soakReconcileClaimRetried     = "retried"
+	soakReconcileClaimIdle        = "idle"
+	soakReconcileClaimFailed      = "failed"
+	soakReconcileClaimUnavailable = "unavailable"
 )
+
+// reconcileProbeOutcome names a claim that reached a probe but not a verdict.
+// A probe that could not be answered proves nothing about the message, so it
+// must not share a label with one that answered and found nothing — that is how
+// a dependency outage reads as a persistence backlog.
+func reconcileProbeOutcome(probeErr error) string {
+	if probeErr != nil {
+		return soakReconcileClaimUnavailable
+	}
+	return soakReconcileClaimRetried
+}
 
 func withSoakFailureReconcileMetrics(metrics *Metrics) soakFailureReconcilerOption {
 	return func(reconciler *soakFailureReconciler) { reconciler.metrics = metrics }
@@ -769,7 +781,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 			return true, fmt.Errorf(
 				"reschedule pending soak history probe for %q: %w", operation.ID, err)
 		}
-		r.recordClaim(soakReconcileClaimRetried)
+		r.recordClaim(reconcileProbeOutcome(verifyErr))
 		return true, nil
 	}
 
@@ -827,7 +839,7 @@ func (r *soakFailureReconciler) observeSearchIndex(
 				"reschedule soak search index probe for %q: %w", operation.ID, err,
 			)
 		}
-		r.recordClaim(soakReconcileClaimRetried)
+		r.recordClaim(reconcileProbeOutcome(probeErr))
 		return nil
 	}
 	observation := failureObservationMissingAfterDeadline
