@@ -31,7 +31,7 @@ docs/load-testing/
 All three assert against the same acceptance criteria in
 [`common/sli-slo.md`](common/sli-slo.md); they differ in the question they ask.
 
-| Program | Question | Plans |
+| Program | Question | Documents |
 |---|---|---|
 | **Soak** | Does a component hold up under sustained realistic load? | [`soak/cassandra-soak-plan.md`](soak/cassandra-soak-plan.md) |
 | **Performance / capacity** | Does the system meet its SLOs at expected load, and at what load does an SLO first break? | [`performance/end-to-end-plan.md`](performance/end-to-end-plan.md), [`performance/capacity-test-plan.md`](performance/capacity-test-plan.md) |
@@ -48,7 +48,7 @@ storage and downstream services absorb is a capacity question.
 - [`failure/overview.md`](failure/overview.md) — what the three dependency
   documents share: cross-dependency write paths, failure classes, and the rules
   for reading a result.
-- Dependency plans — [`failure/nats-jetstream.md`](failure/nats-jetstream.md),
+- Dependency documents — [`failure/nats-jetstream.md`](failure/nats-jetstream.md),
   [`failure/mongodb.md`](failure/mongodb.md),
   [`failure/cassandra.md`](failure/cassandra.md), and the
   [NATS/JetStream failure-test topology](failure/topology.drawio).
