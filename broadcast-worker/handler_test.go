@@ -408,6 +408,148 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 	}
 }
 
+// A DM's desktop banner is computed client-side from this event, so the mention
+// roster has to ride along exactly as it does on the channel path — without it a
+// client can only render the raw @account token instead of the person's name.
+func TestHandler_HandleMessage_DMRoom_CarriesMentionRoster(t *testing.T) {
+	msgTime := time.Date(2026, 8, 21, 11, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name           string
+		content        string
+		lookupAccounts []string
+		lookupUsers    []model.User
+		wantSetMention []string
+		wantMentionAll bool
+		wantMentions   []model.Participant
+	}{
+		{
+			name:           "no mentions",
+			content:        "hey bob",
+			lookupAccounts: []string{"alice"},
+			lookupUsers:    []model.User{testUsers[0]},
+		},
+		{
+			name:           "account mention",
+			content:        "hey @bob",
+			lookupAccounts: []string{"alice", "bob"},
+			lookupUsers:    testUsers,
+			wantSetMention: []string{"bob"},
+			wantMentions: []model.Participant{
+				{UserID: "u-bob", Account: "bob", SiteID: "site-a", ChineseName: "鮑勃", EngName: "Bob Chen"},
+			},
+		},
+		{
+			name:           "mention all",
+			content:        "@all standup",
+			lookupAccounts: []string{"alice"},
+			lookupUsers:    []model.User{testUsers[0]},
+			wantMentionAll: true,
+			wantMentions:   []model.Participant{{Account: "all", EngName: "all"}},
+		},
+		{
+			name:           "account mention and all",
+			content:        "@bob @all standup",
+			lookupAccounts: []string{"alice", "bob"},
+			lookupUsers:    testUsers,
+			wantSetMention: []string{"bob"},
+			wantMentionAll: true,
+			wantMentions: []model.Participant{
+				{UserID: "u-bob", Account: "bob", SiteID: "site-a", ChineseName: "鮑勃", EngName: "Bob Chen"},
+				{Account: "all", EngName: "all"},
+			},
+		},
+		{
+			name:           "unknown account keeps no participant",
+			content:        "hey @nobody",
+			lookupAccounts: []string{"alice", "nobody"},
+			lookupUsers:    []model.User{testUsers[0]},
+			wantSetMention: []string{"nobody"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
+			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil)
+			store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
+			store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+			if len(tc.wantSetMention) > 0 {
+				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "dm-1", gomock.InAnyOrder(tc.wantSetMention), msgTime).Return(nil)
+			}
+			us.EXPECT().FindUsersByAccounts(gomock.Any(), tc.lookupAccounts).Return(tc.lookupUsers, nil)
+
+			evt := model.MessageEvent{
+				Event:     model.EventCreated,
+				SiteID:    "site-a",
+				Timestamp: msgTime.UnixMilli(),
+				Message: model.Message{
+					ID: "msg-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
+					Content: tc.content, CreatedAt: msgTime,
+				},
+			}
+			data, _ := json.Marshal(evt)
+
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+
+			require.Len(t, pub.records, 2)
+			for _, rec := range pub.records {
+				roomEvt := decodeRoomEvent(t, rec.data)
+				assert.Equal(t, tc.wantMentionAll, roomEvt.MentionAll, "subject %s", rec.subject)
+				assert.Equal(t, tc.wantMentions, roomEvt.Mentions, "subject %s", rec.subject)
+			}
+		})
+	}
+}
+
+// The DM thread-reply lane publishes through the same helper, so it carries the
+// roster too — a thread reply banner names the mentioned person as well.
+func TestHandleThreadCreated_DMRoom_CarriesMentionRoster(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 8, 21, 11, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice", "bob"}).Return(testUsers, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    "site-a",
+		Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "hey @bob", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-dm", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.Len(t, pub.records, 2)
+	want := []model.Participant{
+		{UserID: "u-bob", Account: "bob", SiteID: "site-a", ChineseName: "鮑勃", EngName: "Bob Chen"},
+	}
+	for _, rec := range pub.records {
+		roomEvt := decodeRoomEvent(t, rec.data)
+		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type)
+		assert.Equal(t, want, roomEvt.Mentions, "subject %s", rec.subject)
+	}
+}
+
 func TestHandler_HandleMessage_Errors(t *testing.T) {
 	msgTime := time.Date(2026, 3, 26, 12, 0, 0, 0, time.UTC)
 

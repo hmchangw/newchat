@@ -228,7 +228,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	case model.RoomTypeChannel:
 		return h.publishChannelEvent(ctx, &meta, clientMsg, evt.Timestamp, resolved.MentionAll, resolved.Participants)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
-		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts, model.RoomEventNewMessage)
+		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved, model.RoomEventNewMessage)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping fan-out",
 			"type", meta.Type,
@@ -303,7 +303,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		// owned by message-worker (markThreadMentions), so broadcast-worker doesn't
 		// touch subscriptions here. lastMsgAt is intentionally NOT updated (would
 		// wrongly mark hasUnread for non-participants).
-		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts, model.RoomEventNewThreadMessage)
+		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved, model.RoomEventNewThreadMessage)
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping thread fan-out",
 			"type", meta.Type,
@@ -912,7 +912,12 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 		"request_id", natsutil.RequestIDFromContext(ctx), "account", account, "room_id", roomID)
 }
 
-func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string, roomEventType model.RoomEventType) error {
+// publishDMEvents fans a DM/botDM room event out per non-bot member. resolved
+// carries the mention roster: the per-recipient hasMention flag comes from its
+// accounts, and the roster itself rides on every event so a client can render a
+// mentioned person's name instead of the raw @account token (the desktop banner
+// is computed client-side from this event).
+func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, resolved *mention.ResolveResult, roomEventType model.RoomEventType) error {
 	labels := broadcastLabels(ctx)
 	ctx = withBroadcastMetricLabels(ctx, roomKind(meta.Type), labels.eventType)
 	subs, err := h.store.ListSubscriptions(ctx, meta.ID)
@@ -920,8 +925,8 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 		return fmt.Errorf("list subscriptions for DM room %s: %w", meta.ID, err)
 	}
 
-	mentionSet := make(map[string]struct{}, len(mentionedAccounts))
-	for _, name := range mentionedAccounts {
+	mentionSet := make(map[string]struct{}, len(resolved.Accounts))
+	for _, name := range resolved.Accounts {
 		mentionSet[name] = struct{}{}
 	}
 
@@ -939,6 +944,10 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 		evt := buildRoomEvent(meta, clientMsg, timestamp)
 		evt.Type = roomEventType
 		evt.HasMention = hasMention
+		evt.MentionAll = resolved.MentionAll
+		if len(resolved.Participants) > 0 {
+			evt.Mentions = resolved.Participants
+		}
 
 		payload, err := sonic.Marshal(evt)
 		if err != nil {

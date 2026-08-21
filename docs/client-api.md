@@ -6377,7 +6377,7 @@ A `RoomEvent`. Recipients: every client subscribed to the room (which includes t
 | `userCount` | number | |
 | `lastMsgAt` | string | RFC 3339. |
 | `lastMsgId` | string | The new message's ID. |
-| `mentions` | [Participant](#participant)[] | Optional. |
+| `mentions` | [Participant](#participant)[] | Optional. The mentioned users (`account` plus `engName`/`chineseName`), so a client renders a name instead of the raw `@account` token. Sent on channel and DM events alike; `@all` adds an `{"account": "all"}` entry. An account with no matching user is omitted and keeps its raw token. |
 | `mentionAll` | boolean | Optional. `true` if the message mentioned `@all` or `@here`. |
 | `hasMention` | boolean | Optional. Per-recipient flag (DM event only). Always absent on channel events. |
 | `message` | [ClientMessage](#clientmessage) | Optional. Set for unencrypted rooms. |
@@ -6434,7 +6434,7 @@ The canonical broadcast message (distinct from the history [Message schema](#mes
 
 **2. For DM rooms — `chat.user.{recipient}.event.room`** (`publishDMEvents`)
 
-A `RoomEvent` (same struct as above) published once per DM participant. Recipients: each user subscribed to the DM. The `hasMention` field is set per-recipient. DM events carry `message` (plaintext); they do not use `encryptedMessage`.
+A `RoomEvent` (same struct as above) published once per DM participant. Recipients: each user subscribed to the DM. The `hasMention` field is set per-recipient; `mentions` / `mentionAll` are identical on every copy. DM events carry `message` (plaintext); they do not use `encryptedMessage`.
 
 ```json
 {

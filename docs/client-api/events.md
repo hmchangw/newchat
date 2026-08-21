@@ -385,7 +385,7 @@ messages through a separate backend path.
 | `userCount` | number | |
 | `lastMsgAt` | string | RFC 3339. |
 | `lastMsgId` | string | The new message's ID. |
-| `mentions` | [Participant](../client-api.md#participant)[] | Optional. |
+| `mentions` | [Participant](../client-api.md#participant)[] | Optional. The mentioned users (`account` plus `engName`/`chineseName`), so a client renders a name instead of the raw `@account` token. Sent on channel and DM events alike; `@all` adds an `{"account": "all"}` entry. An account with no matching user is omitted and keeps its raw token. |
 | `mentionAll` | boolean | Optional. `true` if `@all` or `@here` was used. |
 | `hasMention` | boolean | Optional. Per-recipient flag — present only on DM events. |
 | `message` | [ClientMessage](#clientmessage) | Optional. Set for unencrypted rooms. |
