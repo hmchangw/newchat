@@ -170,10 +170,18 @@ HTTP 500 on `/metrics` (this happened; fixed 2026-08-19).
 
 The two RPC families are the one place this repo does not use a `chat.` prefix:
 they implement the OpenTelemetry RPC semantic conventions, so they carry the
-convention's instrument names, labels and bucket boundaries verbatim (verified
-against `go.opentelemetry.io/otel/semconv/v1.40.0/rpcconv`). `error.type` is
-conditional on failure per the convention, so a successful call carries no error
-label at all.
+convention's instrument names, unit and labels verbatim (verified against
+`go.opentelemetry.io/otel/semconv/v1.40.0/rpcconv`). `error.type` is conditional
+on failure per the convention, so a successful call carries no error label at
+all.
+
+Bucket boundaries are the one deliberate deviation: these histograms use
+`o11y.DefaultLatencyBuckets()` (11 boundaries), not the convention's own table
+(14). The SDK overrides the identical table for `http.server.*` so that p99 is
+directly comparable across services, and an RPC family on different boundaries
+would break exactly that. Interop is unaffected in the part that matters — a
+generic RPC panel still finds and groups these series by name and label; only
+`histogram_quantile`'s interpolation points differ.
 
 The two `chat.nats.client.*` families are the exception: they carry no `site`
 at all, because they are emitted from the opt-in connection helper, which sits
