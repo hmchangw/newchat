@@ -582,6 +582,31 @@ type soakFailureReconciler struct {
 	now           func() time.Time
 	recipient     soakFailureRecipientFinalizer
 	searchIndex   soakFailureSearchIndexProbe
+	metrics       *Metrics
+}
+
+// What a reconcile claim achieved. The split exists because the startup
+// capacity rule can only model one claim per observer: the poll's retries scale
+// with how many messages are slow to persist, which no configuration knows, and
+// idle claims are the only evidence that the lane still has slack.
+const (
+	soakReconcileClaimAdvanced = "advanced"
+	soakReconcileClaimRetried  = "retried"
+	soakReconcileClaimIdle     = "idle"
+	soakReconcileClaimFailed   = "failed"
+)
+
+func withSoakFailureReconcileMetrics(metrics *Metrics) soakFailureReconcilerOption {
+	return func(reconciler *soakFailureReconciler) { reconciler.metrics = metrics }
+}
+
+// recordClaim is nil-safe so the tests that only assert reconciliation do not
+// have to build a registry.
+func (r *soakFailureReconciler) recordClaim(outcome string) {
+	if r == nil || r.metrics == nil {
+		return
+	}
+	r.metrics.FailureReconcileClaims.WithLabelValues(outcome).Inc()
 }
 
 type soakFailureRecipientFinalizer interface {
@@ -645,6 +670,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	// declared, while its own room_state observer never resolves.
 	operation, ok := r.ledger.ClaimDueLanes(now, []string{soakFailureLaneMessageSend})
 	if !ok {
+		r.recordClaim(soakReconcileClaimIdle)
 		return false, nil
 	}
 	if _, historyObserved := operation.Observations[failureObserverHistory]; historyObserved {
@@ -681,12 +707,15 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 				now,
 			); err != nil {
 				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
+				r.recordClaim(soakReconcileClaimFailed)
 				return true, fmt.Errorf("record soak recipient observation: %w", err)
 			}
+			r.recordClaim(soakReconcileClaimAdvanced)
 			return true, nil
 		}
 		if _, searchObserved := operation.Observations[failureObserverSearchIndex]; !searchObserved &&
 			slices.Contains(operation.Expected, failureObserverSearchIndex) {
+			r.recordClaim(soakReconcileClaimAdvanced)
 			return true, r.observeSearchIndex(ctx, &operation, now)
 		}
 		for _, observer := range operation.Expected {
@@ -700,10 +729,13 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 				now,
 			); err != nil {
 				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
+				r.recordClaim(soakReconcileClaimFailed)
 				return true, fmt.Errorf("record unresolved soak observation: %w", err)
 			}
+			r.recordClaim(soakReconcileClaimAdvanced)
 			return true, nil
 		}
+		r.recordClaim(soakReconcileClaimFailed)
 		if err := r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval)); err != nil {
 			return true, fmt.Errorf("release malformed failure operation %q: %w", operation.ID, err)
 		}
@@ -711,6 +743,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	}
 	result, verifyErr := r.verifier.Verify(ctx, &operation)
 	if verifyErr == nil && result == soakFailureHistoryFound {
+		r.recordClaim(soakReconcileClaimAdvanced)
 		return true, r.observe(operation.ID, failureObservationGood, now)
 	}
 	if now.Before(operation.Deadline) {
@@ -722,8 +755,10 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 			operation.ID,
 			nextReconcileProbe(now, operation.VerifyAfter, operation.Deadline, r.retryInterval),
 		); err != nil {
+			r.recordClaim(soakReconcileClaimFailed)
 			return true, err
 		}
+		r.recordClaim(soakReconcileClaimRetried)
 		return true, nil
 	}
 
@@ -738,6 +773,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	case result == soakFailureHistoryMismatch:
 		observation = failureObservationBad
 	}
+	r.recordClaim(soakReconcileClaimAdvanced)
 	return true, r.observe(operation.ID, observation, now)
 }
 

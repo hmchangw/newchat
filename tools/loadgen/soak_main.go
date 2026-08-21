@@ -759,7 +759,8 @@ func runSoakWorkload(
 		slog.Error("build Cassandra soak search reader", "error", searchReaderErr)
 		return 1
 	}
-	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 2)
+	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 3)
+	reconcilerOptions = append(reconcilerOptions, withSoakFailureReconcileMetrics(metrics))
 	if cfg.Soak.SearchObserverEnabled {
 		reconcilerOptions = append(reconcilerOptions, withSoakFailureSearchIndexProbe(
 			newSoakSearchIndexProbe(searchReader, catalog),

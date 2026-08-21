@@ -81,6 +81,7 @@ type Metrics struct {
 	FailureInvalidations         *prometheus.CounterVec
 	FailureJournalBytes          prometheus.Gauge
 	FailureUntracked             *prometheus.CounterVec
+	FailureReconcileClaims       *prometheus.CounterVec
 	FailureDropped               prometheus.Counter
 	FailureNotSent               *prometheus.CounterVec
 	FailureWALAppendDuration     prometheus.Histogram
@@ -420,6 +421,13 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"reason"},
 	)
+	m.FailureReconcileClaims = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_reconcile_claims_total",
+			Help: "Reconcile claims by what the claim achieved; retried is the poll cost the capacity rule cannot model, idle is the lane's remaining slack.",
+		},
+		[]string{"outcome"},
+	)
 	m.FailureDropped = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_dropped_total",
@@ -557,7 +565,7 @@ func NewMetrics() *Metrics {
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecipientExpectations,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
-		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,
+		m.FailureUntracked, m.FailureReconcileClaims, m.FailureDropped, m.FailureNotSent,
 		m.FailureWALAppendDuration, m.FailureWALAppends,
 		m.FailureWALFlushDuration, m.FailureWALFlushBatchSize,
 		m.FailureEvidenceFlushDuration, m.FailureEvidenceRecords,
