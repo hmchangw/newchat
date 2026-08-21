@@ -461,6 +461,34 @@
           "refId": "C"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile lane capacity",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(loadgen_failure_reconcile_claims_total[5m]))",
+          "legendFormat": "{{outcome}} claims/s",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(loadgen_failure_reconcile_lag_seconds_bucket[5m])))",
+          "legendFormat": "p99 lag behind schedule",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(loadgen_failure_invalidations_total{reason=\"reconcile_capacity\"})",
+          "legendFormat": "started below the floor",
+          "refId": "C"
+        }
+      ],
+      "description": "Validity gate for a fault window. rate(...{outcome=\"idle\"}[5m]) == 0 is the lane saturating; p99 lag approaching SOAK_RECONCILE_DEADLINE means operations expire unverified for want of a probe, so that window's verdicts are not evidence. A non-zero reconcile_capacity invalidation means the run started below the floor."
     }
   ]
 }
