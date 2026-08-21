@@ -4277,13 +4277,18 @@ func TestEnsureIndexes_ThreadSubsDropsLegacyAndCreatesUnique_Integration(t *test
 	var idxs []bson.M
 	require.NoError(t, cur.All(ctx, &idxs))
 	names := make(map[string]bool, len(idxs))
+	unique := make(map[string]bool, len(idxs))
 	for _, ix := range idxs {
 		if n, ok := ix["name"].(string); ok {
 			names[n] = true
+			u, _ := ix["unique"].(bool)
+			unique[n] = u
 		}
 	}
 	assert.True(t, names["threadRoomId_1_userAccount_1"],
-		"EnsureIndexes must create the canonical (threadRoomId, userAccount) unique index")
+		"EnsureIndexes must create the canonical (threadRoomId, userAccount) index")
+	assert.True(t, unique["threadRoomId_1_userAccount_1"],
+		"the (threadRoomId, userAccount) index must be unique")
 	assert.False(t, names["threadRoomId_1_userId_1"],
 		"EnsureIndexes must drop the legacy (threadRoomId, userId) index")
 }
