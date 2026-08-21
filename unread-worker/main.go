@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -122,11 +123,16 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
+	var consume consumeState
 	wg.Add(1)
-	go consumeLoop(iter, f, &wg)
+	go consumeLoop(iter, f, &wg, &consume)
 
+	// The consume-loop check sits alongside the NATS one deliberately: NATS stays
+	// healthy in precisely the failure where the loop has died, so probing the
+	// connection alone cannot detect a worker that has stopped doing its job.
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		consume.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -172,16 +178,50 @@ type messageIterator interface {
 	Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error)
 }
 
+// consumeState tracks whether the consume loop is still running, so /readyz can
+// answer the question that actually matters for this worker: is it consuming?
+//
+// It exists because the loop returns on any iterator error and nothing else
+// observes that — the only wg.Wait() is the shutdown drain. Without this the pod
+// keeps reporting ready on a healthy NATS connection while writing nothing at
+// all, which is the failure mode hardest to notice and slowest to diagnose.
+type consumeState struct {
+	reason atomic.Pointer[error]
+}
+
+func (s *consumeState) stopped(err error) { s.reason.Store(&err) }
+
+// Check reports not-ready once the loop has stopped. The readiness contract is
+// "can this pod do its job", and a worker whose only goroutine has exited
+// cannot, whatever the reason.
+func (s *consumeState) Check() health.Check {
+	return health.Check{Name: "consume-loop", Probe: func(context.Context) error {
+		if err := s.reason.Load(); err != nil {
+			return fmt.Errorf("consume loop stopped: %w", *err)
+		}
+		return nil
+	}}
+}
+
 // consumeLoop drains iter into the flusher. It is a single goroutine with no
 // worker pool: the per-message work is a sonic unmarshal plus a regex parse and
 // a map merge with no I/O, so concurrency would only add contention on the
 // batch mutex. Messages are NOT settled here — the flusher settles them once
 // their batch reaches MongoDB.
-func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup) {
+// state records why the loop stopped so readiness can reflect it; see
+// consumeState.
+func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *consumeState) {
 	defer wg.Done()
 	for {
 		msgCtx, msg, err := iter.Next()
 		if err != nil {
+			// Every exit is recorded, including the deliberate iter.Stop() during
+			// shutdown: a worker that has stopped consuming is not ready either
+			// way, and during shutdown failing readiness is what drains it from
+			// the load balancer.
+			state.stopped(err)
+			slog.Error("unread-worker consume loop stopped; no further unread state will be written",
+				"error", err)
 			return
 		}
 		// jobguard recovers a panic from the derive/add path so a single

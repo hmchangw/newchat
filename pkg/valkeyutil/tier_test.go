@@ -101,7 +101,13 @@ type bustClient struct {
 	sawDelay bool
 }
 
+// Del models a real client: a cancelled context fails before any command is
+// issued. Without this the double silently accepts calls that production would
+// refuse, and no test here could detect an inherited cancellation.
 func (b *bustClient) Del(ctx context.Context, keys ...string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, ok := ctx.Deadline(); ok {
 		b.sawDelay = true
 	}
@@ -121,6 +127,22 @@ func TestBustKeys_BoundsTheCall(t *testing.T) {
 	c := &bustClient{}
 	BustKeys(context.Background(), c, "test", "k1")
 	assert.True(t, c.sawDelay, "the delete must carry a deadline")
+}
+
+// A bust runs AFTER the authoritative write has committed, so it must not
+// inherit the caller's cancellation: a request that finishes (or a client that
+// disconnects) the instant the write lands would otherwise skip the DEL
+// entirely, leaving the cache serving data the write just invalidated for a
+// full TTL. The deadline still applies — cancellation is dropped, not the bound.
+func TestBustKeys_RunsAfterCallerCancellation(t *testing.T) {
+	c := &bustClient{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	BustKeys(ctx, c, "test", "k1")
+
+	assert.Equal(t, []string{"k1"}, c.deleted, "a cancelled caller must not skip the invalidation")
+	assert.True(t, c.sawDelay, "the delete must still carry a deadline")
 }
 
 func TestBustKeys_SwallowsFailures(t *testing.T) {

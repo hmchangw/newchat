@@ -70,7 +70,12 @@ func BustKeys(ctx context.Context, client Client, label string, keys ...string) 
 	if client == nil || len(keys) == 0 {
 		return
 	}
-	bustCtx, cancel := context.WithTimeout(ctx, bustTimeout)
+	// WithoutCancel first: a bust runs after the authoritative write has already
+	// committed, so inheriting the caller's cancellation would let a finished
+	// request skip the DEL and leave the cache serving what that write just
+	// invalidated, for a full TTL. The timeout still bounds the call — only
+	// cancellation is dropped, never the deadline.
+	bustCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bustTimeout)
 	defer cancel()
 	if err := client.Del(bustCtx, keys...); err != nil {
 		slog.WarnContext(ctx, label+" L2 invalidate failed (TTL will reconcile)",

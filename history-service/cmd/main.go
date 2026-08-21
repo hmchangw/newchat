@@ -232,7 +232,13 @@ func main() {
 	// Front the per-request Mongo reads with process-local LRU+TTL caches. The
 	// subscription L1's loader runs through the shared Valkey L2 (subauthcache),
 	// itself breaker-guarded so a Mongo outage fails open instead of stalling.
-	subTier := subauthcache.NewTier(subValkey, db.Collection("subscriptions"), cfg.SubL2TTL,
+	// Pinned to primary for the same reason as dekColl above: what this reads is
+	// written into a shared 90-minute L2 that every service trusts, so a
+	// replica-lagged read does not merely serve one stale answer — it publishes
+	// a just-revoked subscription as authorization for the whole TTL, and the
+	// outage TTL-slide can extend that further.
+	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
+	subTier := subauthcache.NewTier(subValkey, subsPrimary, cfg.SubL2TTL,
 		circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
 			circuitbreaker.Tracked(ctx, "subscription")),
 		cachemetrics.For("subauth", "l2"))

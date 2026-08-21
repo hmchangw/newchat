@@ -95,7 +95,7 @@ func TestConsumeLoop_MalformedPayloadSettledImmediatelyNeverJoinsBatch(t *testin
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(iter, f, &wg)
+	consumeLoop(iter, f, &wg, &consumeState{})
 
 	assert.True(t, bad.acked, "a malformed payload must be settled (Acked as permanent) immediately")
 	assert.False(t, bad.naked)
@@ -114,7 +114,7 @@ func TestConsumeLoop_WellFormedPayloadReachesFlusherHeldUntilFlush(t *testing.T)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(iter, f, &wg)
+	consumeLoop(iter, f, &wg, &consumeState{})
 
 	assert.False(t, good.acked, "a well-formed message must stay un-settled until its batch is flushed")
 	assert.False(t, good.naked)
@@ -155,7 +155,7 @@ func TestConsumeLoop_PanicInGuardedPathDoesNotKillLoopOrCrashMessage(t *testing.
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	require.NotPanics(t, func() { consumeLoop(iter, f, &wg) },
+	require.NotPanics(t, func() { consumeLoop(iter, f, &wg, &consumeState{}) },
 		"a panic in one message's handling must not escape the consume loop")
 
 	assert.False(t, bad.acked, "a message whose handling panicked must stay un-acked so JetStream redelivers it")
@@ -174,7 +174,7 @@ func TestConsumeLoop_ReturnsWhenIteratorErrors(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(iter, f, &wg)
+	consumeLoop(iter, f, &wg, &consumeState{})
 
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
@@ -183,4 +183,35 @@ func TestConsumeLoop_ReturnsWhenIteratorErrors(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("wg.Wait() did not return — consumeLoop did not call wg.Done() on iterator error")
 	}
+}
+
+// The consume loop is the only thing this worker does. If it stops — for any
+// reason other than a shutdown that is tearing the process down anyway — the
+// pod must stop reporting ready, or Kubernetes keeps a silently-dead worker in
+// rotation while room pointers, lastSeenAt and mention badges go unwritten with
+// no signal at all. /readyz previously probed only the NATS connection, which
+// stays healthy in exactly this failure.
+func TestConsumeLoop_ExitFailsReadiness(t *testing.T) {
+	var state consumeState
+	probe := state.Check().Probe
+
+	require.NoError(t, probe(context.Background()),
+		"a loop that has not exited must report ready")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}), &wg, &state)
+	wg.Wait()
+
+	err := probe(context.Background())
+	require.Error(t, err, "an exited consume loop must fail readiness")
+	assert.Contains(t, err.Error(), errFakeIterDone.Error(),
+		"the probe must carry the reason the loop stopped")
+}
+
+// A loop still draining messages is healthy — the probe must not fail merely
+// because work is in flight.
+func TestConsumeLoop_ReadyWhileConsuming(t *testing.T) {
+	var state consumeState
+	assert.NoError(t, state.Check().Probe(context.Background()))
 }

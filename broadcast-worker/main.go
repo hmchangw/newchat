@@ -155,7 +155,13 @@ func main() {
 	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
 		circuitbreaker.Tracked(ctx, "mongo"),
 		circuitbreaker.WithFailurePredicate(MongoBreakerFailure))
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"),
+	// subscriptions is pinned to primary: it feeds roomsubcache, a SHARED
+	// 90-minute entry that notification-worker reads too, so a replica-lagged
+	// read here republishes a removed member to every consumer of that key for
+	// the whole TTL rather than costing one stale fan-out. Same reasoning as
+	// roomsPrimary below.
+	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
+	store := NewMongoStore(db.Collection("rooms"), subsPrimary, db.Collection("thread_rooms"),
 		db.Collection("users"), valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)

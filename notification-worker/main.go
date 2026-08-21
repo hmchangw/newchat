@@ -114,7 +114,11 @@ func main() {
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
-	subCol := db.Collection("subscriptions")
+	// Pinned to primary: this feeds roomsubcache, a SHARED 90-minute entry every
+	// service reads. A replica-lagged read here does not just miss one removal —
+	// it republishes a removed member as a room member for the whole TTL, and
+	// broadcast-worker and notification-worker both deliver to that list.
+	subCol := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
 	threadRoomCol := db.Collection("thread_rooms")
 	roomsCol := db.Collection("rooms")
 	// Settings gate push delivery, so a stale read means a user who just muted
