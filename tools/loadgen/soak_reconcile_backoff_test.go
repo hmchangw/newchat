@@ -130,7 +130,7 @@ func TestSoakFailureReconciler_BacksOffThePollForAMessageThatHasNotLanded(t *tes
 		func() time.Time { return now },
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 
 	require.NoError(t, err)
 	require.True(t, ran)

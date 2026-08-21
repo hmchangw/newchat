@@ -51,7 +51,7 @@ func TestSoakFailureReconciler_SeparatesAdvancedFromRetriedClaims(t *testing.T) 
 	t.Run("a message still missing costs a retried claim", func(t *testing.T) {
 		metrics, reconciler := newRun(t, soakFailureHistoryMissing)
 
-		ran, err := reconciler.Try(context.Background())
+		ran, _, err := reconciler.Try(context.Background())
 
 		require.NoError(t, err)
 		require.True(t, ran)
@@ -64,7 +64,7 @@ func TestSoakFailureReconciler_SeparatesAdvancedFromRetriedClaims(t *testing.T) 
 	t.Run("a message that landed costs an advanced claim", func(t *testing.T) {
 		metrics, reconciler := newRun(t, soakFailureHistoryFound)
 
-		ran, err := reconciler.Try(context.Background())
+		ran, _, err := reconciler.Try(context.Background())
 
 		require.NoError(t, err)
 		require.True(t, ran)
@@ -91,7 +91,7 @@ func TestSoakFailureReconciler_CountsAClaimWithNothingDueAsIdle(t *testing.T) {
 		withSoakFailureReconcileMetrics(metrics),
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 
 	require.NoError(t, err)
 	require.False(t, ran, "an empty ledger has nothing to claim")
@@ -118,10 +118,10 @@ func TestSoakFailureReconciler_ARescheduledSearchProbeIsRetriedNotAdvanced(t *te
 
 	// History resolves on the first claim, the search step runs on the second
 	// and finds the message too early to be indexed yet.
-	handled, err := reconciler.Try(context.Background())
+	handled, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	require.True(t, handled)
-	handled, err = reconciler.Try(context.Background())
+	handled, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	require.True(t, handled)
 
@@ -158,7 +158,7 @@ func TestSoakFailureReconciler_AClaimThatCouldNotPersistIsFailed(t *testing.T) {
 	)
 	require.NoError(t, ledger.Close())
 
-	_, err = reconciler.Try(context.Background())
+	_, _, err = reconciler.Try(context.Background())
 
 	require.Error(t, err)
 	require.Equal(t, float64(1), testutil.ToFloat64(
@@ -196,7 +196,7 @@ func TestSoakFailureReconciler_AnUnreachableVerifierIsUnavailableNotRetried(t *t
 		withSoakFailureReconcileMetrics(metrics),
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 
 	require.NoError(t, err)
 	require.True(t, ran)
@@ -227,10 +227,10 @@ func TestSoakFailureReconciler_AnUnreachableSearchProbeIsUnavailableNotRetried(t
 
 	// History resolves on the first claim; the search step runs on the second
 	// and cannot reach the index.
-	handled, err := reconciler.Try(context.Background())
+	handled, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	require.True(t, handled)
-	handled, err = reconciler.Try(context.Background())
+	handled, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	require.True(t, handled)
 
@@ -277,7 +277,7 @@ func TestSoakFailureReconciler_MeasuresHowFarBehindScheduleAClaimWas(t *testing.
 			func() time.Time { return now },
 			withSoakFailureReconcileMetrics(metrics),
 		)
-		ran, err := reconciler.Try(context.Background())
+		ran, _, err := reconciler.Try(context.Background())
 		require.NoError(t, err)
 		require.True(t, ran)
 		return soakReconcileLagSum(t, metrics)
@@ -306,7 +306,7 @@ func TestSoakFailureReconciler_RecordsNoLagForAClaimWithNothingDue(t *testing.T)
 		withSoakFailureReconcileMetrics(metrics),
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 
 	require.NoError(t, err)
 	require.False(t, ran)

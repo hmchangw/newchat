@@ -588,16 +588,15 @@ func validateSoakSearchSettle(cfg *soakConfig) error {
 	return nil
 }
 
-// soakReconcileStepsPerMessage is how many claims one message costs the
-// reconciler. soakFailureReconciler.Try advances a single observer per claim
-// and re-enqueues while any expected observer is unresolved, so the count is
-// the number of observers the message declares: history always, plus whichever
-// of recipient and search are enabled.
+// soakReconcileStepsPerMessage counts the claims a message costs the read lane.
+//
+// soakFailureReconciler.Try advances one observer per claim, but only a
+// query-mode observer reaches a service: the recipient observer is event mode,
+// so finalizing it reads evidence already in memory and its allowance is
+// refunded rather than spent. Counting it here would demand read capacity for
+// work that never leaves the process.
 func soakReconcileStepsPerMessage(cfg *soakConfig) int {
 	steps := 1
-	if cfg.RecipientObserverEnabled {
-		steps++
-	}
 	if cfg.SearchObserverEnabled {
 		steps++
 	}

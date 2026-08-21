@@ -244,7 +244,7 @@ func TestSoakFailureReconciler_AcceptedAndPersistedIsGood(t *testing.T) {
 		func() time.Time { return now },
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	snapshot := ledger.Snapshot()
@@ -277,11 +277,11 @@ func TestSoakFailureReconciler_FinalizesRecipientAtDeadlineWithoutRepeatingHisto
 		ledger, &fakeSoakFailureVerifier{err: errors.New("must not query")}, time.Second,
 		func() time.Time { return now }, withSoakFailureRecipientFinalizer(finalizer),
 	)
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.False(t, ran)
 	now = now.Add(10 * time.Second)
-	ran, err = reconciler.Try(context.Background())
+	ran, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, 1, finalizer.calls)
@@ -316,7 +316,7 @@ func TestSoakFailureReconciler_UnverifiedRecipientDoesNotUseNegativeReason(t *te
 	)
 	now = now.Add(10 * time.Second)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultUnverified])
@@ -343,7 +343,7 @@ func TestSoakFailureReconciler_TimeoutButPersistedPreservesAvailabilityFailure(t
 		func() time.Time { return now },
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultUnverified])
@@ -398,16 +398,16 @@ func TestSoakFailureReconciler_RetriesMissingUntilDeadline(t *testing.T) {
 		ledger, verifier, 5*time.Second, func() time.Time { return now },
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, 1, ledger.Snapshot().Active)
-	ran, err = reconciler.Try(context.Background())
+	ran, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.False(t, ran)
 
 	now = now.Add(10 * time.Second)
-	ran, err = reconciler.Try(context.Background())
+	ran, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(
@@ -431,12 +431,12 @@ func TestSoakFailureReconciler_RPCFailureReleasesClaim(t *testing.T) {
 		ledger, verifier, time.Second, func() time.Time { return now },
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, 1, ledger.Snapshot().Active)
 	now = now.Add(time.Second)
-	ran, err = reconciler.Try(context.Background())
+	ran, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 }
@@ -462,13 +462,13 @@ func TestSoakFailureReconciler_MismatchRetriesUntilDeadlineThenFails(t *testing.
 		ledger, verifier, time.Second, func() time.Time { return now },
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, 1, ledger.Snapshot().Active)
 
 	now = now.Add(10 * time.Second)
-	ran, err = reconciler.Try(context.Background())
+	ran, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultBad])
@@ -676,7 +676,7 @@ func TestSoakFailureRPCVerifier_RejectsMissingDependenciesAndAttributes(t *testi
 
 func TestSoakFailureReconciler_HandlesNoDueAndInvalidConfiguration(t *testing.T) {
 	reconciler := newSoakFailureReconciler(nil, nil, 0, nil)
-	_, err := reconciler.Try(context.Background())
+	_, _, err := reconciler.Try(context.Background())
 	require.Error(t, err)
 
 	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
@@ -687,7 +687,7 @@ func TestSoakFailureReconciler_HandlesNoDueAndInvalidConfiguration(t *testing.T)
 		time.Second,
 		time.Now,
 	)
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.False(t, ran)
 }
@@ -761,10 +761,10 @@ func TestSoakFailureReconciler_TooEarlySearchProbeWaitsForTheSettleBoundary(t *t
 	)
 
 	// History resolves first, then the search step runs and finds it too early.
-	handled, err := reconciler.Try(context.Background())
+	handled, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	require.True(t, handled)
-	handled, err = reconciler.Try(context.Background())
+	handled, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	require.True(t, handled)
 	assert.Equal(t, 1, probe.calls)
@@ -790,10 +790,10 @@ func TestSoakFailureReconciler_TooEarlyAtTheDeadlineIsUnverified(t *testing.T) {
 		withSoakFailureSearchIndexProbe(probe),
 	)
 
-	_, err := reconciler.Try(context.Background())
+	_, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	now = startedAt.Add(2 * time.Minute)
-	_, err = reconciler.Try(context.Background())
+	_, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultUnverified])
@@ -850,7 +850,7 @@ func TestSoakFailureReconciler_LeavesRoomLaneOperationsAlone(t *testing.T) {
 		func() time.Time { return now },
 	)
 
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 
 	require.NoError(t, err)
 	assert.False(t, ran, "a room operation is not the message reconciler's to claim")

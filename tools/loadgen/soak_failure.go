@@ -692,9 +692,13 @@ func newSoakFailureReconciler(
 // Try consumes at most one due reconciliation operation. Callers use this in
 // the existing read lane so 100% send verification does not add unbudgeted
 // read traffic.
-func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
+// Try takes at most one claim. It reports whether it handled anything and
+// whether that claim spent a read slot: an event-mode observer finalizes from
+// evidence already in memory, so its claim reaches no service under test and
+// the caller can give the allowance back and take its scheduled read.
+func (r *soakFailureReconciler) Try(ctx context.Context) (bool, bool, error) {
 	if r == nil || r.ledger == nil || r.verifier == nil {
-		return false, fmt.Errorf("soak failure reconciler is not configured")
+		return false, false, fmt.Errorf("soak failure reconciler is not configured")
 	}
 	now := r.now().UTC()
 	// Scoped to the message lane. This reconciler only understands history,
@@ -705,7 +709,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	operation, ok := r.ledger.ClaimDueLanes(now, []string{soakFailureLaneMessageSend})
 	if !ok {
 		r.recordClaim(soakReconcileClaimIdle)
-		return false, nil
+		return false, false, nil
 	}
 	r.recordClaimLag(now, operation.nextVerifyAt)
 	if _, historyObserved := operation.Observations[failureObserverHistory]; historyObserved {
@@ -743,14 +747,15 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 			); err != nil {
 				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
 				r.recordClaim(soakReconcileClaimFailed)
-				return true, fmt.Errorf("record soak recipient observation: %w", err)
+				return true, false, fmt.Errorf("record soak recipient observation: %w", err)
 			}
 			r.recordClaim(soakReconcileClaimAdvanced)
-			return true, nil
+			return true, false, nil
 		}
 		if _, searchObserved := operation.Observations[failureObserverSearchIndex]; !searchObserved &&
 			slices.Contains(operation.Expected, failureObserverSearchIndex) {
-			return true, r.observeSearchIndex(ctx, &operation, now)
+			probed, err := r.observeSearchIndex(ctx, &operation, now)
+			return true, probed, err
 		}
 		for _, observer := range operation.Expected {
 			if _, observed := operation.Observations[observer]; observed {
@@ -764,20 +769,20 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 			); err != nil {
 				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
 				r.recordClaim(soakReconcileClaimFailed)
-				return true, fmt.Errorf("record unresolved soak observation: %w", err)
+				return true, false, fmt.Errorf("record unresolved soak observation: %w", err)
 			}
 			r.recordClaim(soakReconcileClaimAdvanced)
-			return true, nil
+			return true, false, nil
 		}
 		r.recordClaim(soakReconcileClaimFailed)
 		if err := r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval)); err != nil {
-			return true, fmt.Errorf("release malformed failure operation %q: %w", operation.ID, err)
+			return true, false, fmt.Errorf("release malformed failure operation %q: %w", operation.ID, err)
 		}
-		return true, fmt.Errorf("failure operation %q was queued without an unresolved observer", operation.ID)
+		return true, false, fmt.Errorf("failure operation %q was queued without an unresolved observer", operation.ID)
 	}
 	result, verifyErr := r.verifier.Verify(ctx, &operation)
 	if verifyErr == nil && result == soakFailureHistoryFound {
-		return true, r.recordObserved(r.observe(operation.ID, failureObservationGood, now))
+		return true, true, r.recordObserved(r.observe(operation.ID, failureObservationGood, now))
 	}
 	if now.Before(operation.Deadline) {
 		// The poll for a message that has not landed yet, and the only retry
@@ -789,11 +794,11 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 			nextReconcileProbe(now, operation.VerifyAfter, operation.Deadline, r.retryInterval),
 		); err != nil {
 			r.recordClaim(soakReconcileClaimFailed)
-			return true, fmt.Errorf(
+			return true, true, fmt.Errorf(
 				"reschedule pending soak history probe for %q: %w", operation.ID, err)
 		}
 		r.recordClaim(reconcileProbeOutcome(verifyErr))
-		return true, nil
+		return true, true, nil
 	}
 
 	// Past the deadline the result depends on what the verifier could actually
@@ -807,7 +812,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	case result == soakFailureHistoryMismatch:
 		observation = failureObservationBad
 	}
-	return true, r.recordObserved(r.observe(operation.ID, observation, now))
+	return true, true, r.recordObserved(r.observe(operation.ID, observation, now))
 }
 
 // observeSearchIndex asks the query side whether the message reached the index.
@@ -823,14 +828,16 @@ func (r *soakFailureReconciler) observeSearchIndex(
 	ctx context.Context,
 	operation *failureOperation,
 	now time.Time,
-) error {
+) (bool, error) {
 	result := soakSearchIndexUnknown
 	var probeErr error
-	if r.searchIndex != nil {
+	// Without a probe the claim reaches no service, so it spends no read slot.
+	probed := r.searchIndex != nil
+	if probed {
 		result, probeErr = r.searchIndex.Indexed(ctx, operation)
 	}
 	if probeErr == nil && result == soakSearchIndexFound {
-		return r.recordObserved(
+		return probed, r.recordObserved(
 			r.observeAs(operation.ID, failureObserverSearchIndex, failureObservationGood, now))
 	}
 	if now.Before(operation.Deadline) {
@@ -846,12 +853,12 @@ func (r *soakFailureReconciler) observeSearchIndex(
 		}
 		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
 			r.recordClaim(soakReconcileClaimFailed)
-			return fmt.Errorf(
+			return probed, fmt.Errorf(
 				"reschedule soak search index probe for %q: %w", operation.ID, err,
 			)
 		}
 		r.recordClaim(reconcileProbeOutcome(probeErr))
-		return nil
+		return probed, nil
 	}
 	observation := failureObservationMissingAfterDeadline
 	if probeErr != nil || result != soakSearchIndexMissing {
@@ -860,7 +867,7 @@ func (r *soakFailureReconciler) observeSearchIndex(
 		// which is a configuration problem, not evidence.
 		observation = failureObservationUnverified
 	}
-	return r.recordObserved(
+	return probed, r.recordObserved(
 		r.observeAs(operation.ID, failureObserverSearchIndex, observation, now))
 }
 
@@ -907,6 +914,18 @@ type soakShareGate struct {
 
 func newSoakShareGate(share float64) *soakShareGate {
 	return &soakShareGate{share: min(max(share, 0), 1)}
+}
+
+// Refund returns an allowance taken by a claim that issued no request to the
+// system under test. The gate exists to protect the production-like read mix,
+// so a claim that read nothing must not be charged against it.
+func (g *soakShareGate) Refund() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.credit++
 }
 
 func (g *soakShareGate) Allow() bool {

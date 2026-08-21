@@ -9,33 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// soakFailureReconciler.Try advances one observer per claim, so a message costs
-// one claim per observer it declares. The count has to come from the observers
-// actually enabled: the existing constant assumed history plus search, while
-// the run that hit this had history plus recipient — the same two steps, from a
-// different pair.
-func TestSoakReconcileStepsPerMessage_CountsTheObserversInPlay(t *testing.T) {
-	tests := []struct {
-		name      string
-		recipient bool
-		search    bool
-		want      int
-	}{
-		{name: "history alone", want: 1},
-		{name: "history and recipient", recipient: true, want: 2},
-		{name: "history and search", search: true, want: 2},
-		{name: "all three", recipient: true, search: true, want: 3},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := validSoakConfig(t)
-			cfg.RecipientObserverEnabled = tc.recipient
-			cfg.SearchObserverEnabled = tc.search
-			assert.Equal(t, tc.want, soakReconcileStepsPerMessage(&cfg))
-		})
-	}
-}
-
 // The arithmetic behind the floor, pinned separately from how it is reported so
 // the reporting can change without losing the numbers.
 func TestSoakReconcileCapacityFor_ScalesDemandWithTheObserversEnabled(t *testing.T) {
@@ -48,8 +21,11 @@ func TestSoakReconcileCapacityFor_ScalesDemandWithTheObserversEnabled(t *testing
 		sufficient   bool
 	}{
 		{name: "history alone fits", wantSteps: 1, wantRequired: 55, sufficient: true},
-		{name: "history and recipient does not", recipient: true, wantSteps: 2, wantRequired: 110},
-		{name: "all three does not", recipient: true, search: true, wantSteps: 3, wantRequired: 165},
+		{
+			name:      "the event-mode recipient observer adds no read step",
+			recipient: true, wantSteps: 1, wantRequired: 55, sufficient: true,
+		},
+		{name: "the search probe does not fit", search: true, wantSteps: 2, wantRequired: 110},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,11 +52,8 @@ func TestSoakReconcileCapacityFor_ScalesDemandWithTheObserversEnabled(t *testing
 // window.
 func TestValidateSoakConfig_AcceptsARunBelowTheReconcileFloor(t *testing.T) {
 	cfg := validSoakConfig(t)
-	cfg.RecipientObserverEnabled = true
-	cfg.LedgerDir = t.TempDir()
-	cfg.SearchObserverEnabled = false
 	cfg.SendRate = 55
-	cfg.ReadRate = 110
+	cfg.ReadRate = 50
 	cfg.ReconcileReadShare = 0.75
 
 	assert.NoError(t, validateSoakConfig(&cfg, "soak"))
@@ -91,8 +64,7 @@ func TestValidateSoakConfig_AcceptsARunBelowTheReconcileFloor(t *testing.T) {
 // carry every number needed to size the remedy, not just say "too slow".
 func TestWarnSoakReconcileCapacity_NamesTheDeficitAndTheRemedy(t *testing.T) {
 	cfg := validSoakConfig(t)
-	cfg.RecipientObserverEnabled = true
-	cfg.SearchObserverEnabled = false
+	cfg.SearchObserverEnabled = true
 	cfg.SendRate = 55
 	cfg.ReadRate = 110
 	cfg.ReconcileReadShare = 0.75
@@ -121,12 +93,13 @@ func TestWarnSoakReconcileCapacity_SaysNothingWhenTheLaneCanServeTheFloor(t *tes
 	assert.Empty(t, output.String())
 }
 
-// A history-only run needs one claim per message, so the same read config that
-// cannot serve the recipient observer is fine without it. The warning must
-// scale with the observers rather than firing at a fixed ratio.
+// The configuration that shipped broken — 55 sends/s against 110 read/s at a
+// 0.75 share — now fits, because the recipient observer it enables costs the
+// read lane nothing. The warning must scale with the observers that query
+// rather than firing at a fixed ratio.
 func TestWarnSoakReconcileCapacity_SaysNothingForAHistoryOnlyRunAtTheSameRates(t *testing.T) {
 	cfg := validSoakConfig(t)
-	cfg.RecipientObserverEnabled = false
+	cfg.RecipientObserverEnabled = true
 	cfg.SearchObserverEnabled = false
 	cfg.SendRate = 55
 	cfg.ReadRate = 110

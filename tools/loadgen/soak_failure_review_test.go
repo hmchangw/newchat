@@ -53,7 +53,7 @@ func TestSoakFailureReconciler_UnavailableVerifierIsNotDataLoss(t *testing.T) {
 		func() time.Time { return now.Add(2 * time.Minute) },
 	)
 
-	reconciled, err := reconciler.Try(context.Background())
+	reconciled, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, reconciled)
 
@@ -76,7 +76,7 @@ func TestSoakFailureReconciler_ConfirmedMissingAfterDeadlineIsDataLoss(t *testin
 		func() time.Time { return now.Add(2 * time.Minute) },
 	)
 
-	reconciled, err := reconciler.Try(context.Background())
+	reconciled, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, reconciled)
 	assert.Equal(
@@ -116,7 +116,7 @@ func TestSoakFailureReconciler_RetriesBeforeDeadline(t *testing.T) {
 				func() time.Time { return now.Add(time.Second) },
 			)
 
-			reconciled, err := reconciler.Try(context.Background())
+			reconciled, _, err := reconciler.Try(context.Background())
 			require.NoError(t, err)
 			assert.True(t, reconciled)
 
@@ -142,7 +142,7 @@ func TestSoakFailureReconciler_MismatchAfterDeadlineIsCorruption(t *testing.T) {
 		func() time.Time { return now.Add(2 * time.Minute) },
 	)
 
-	_, err := reconciler.Try(context.Background())
+	_, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1), ledger.Snapshot().Results[failureResultBad])
 }
@@ -162,7 +162,7 @@ func TestSoakFailureReconciler_ReleasesMalformedClaim(t *testing.T) {
 		ledger, &stubFailureHistoryVerifier{}, time.Second, func() time.Time { return now },
 	)
 
-	processed, err := reconciler.Try(context.Background())
+	processed, _, err := reconciler.Try(context.Background())
 
 	assert.True(t, processed)
 	assert.ErrorContains(t, err, "without an unresolved observer")
@@ -321,12 +321,12 @@ func TestSoakFailureReconciler_ReleasesClaimWhenObservationFails(t *testing.T) {
 		func() time.Time { return now.Add(2 * time.Minute) },
 	)
 
-	reconciled, err := reconciler.Try(context.Background())
+	reconciled, _, err := reconciler.Try(context.Background())
 	assert.True(t, reconciled)
 	require.Error(t, err)
 }
 
 func TestSoakFailureReconciler_TryRequiresConfiguration(t *testing.T) {
-	_, err := newSoakFailureReconciler(nil, nil, 0, nil).Try(context.Background())
+	_, _, err := newSoakFailureReconciler(nil, nil, 0, nil).Try(context.Background())
 	require.Error(t, err)
 }
