@@ -49,4 +49,4 @@ rules:
           - pattern: attribute.NewSet(..., attribute.String("$KEY", $V), ...)
       - metavariable-regex:
           metavariable: $KEY
-          regex: ^(room_?[iI]d|account|account_?[iI]d|user_?[iI]d|userId|message_?[iI]d|messageId|subject|request_?[iI]d|requestId|trace_?[iI]d|doc_?[iI]d|docID|index)$
+          regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org)_?[iI][dD]|account|subject|index)$

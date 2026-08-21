@@ -9,6 +9,7 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -146,4 +147,34 @@ func newLocalConn(t *testing.T) *nats.Conn {
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
 	return nc
+}
+
+// A response-inbox subscription must not put its subject on the metric.
+//
+// nats.go opens one shared response subscription per connection, on
+// `_INBOX.<per-connection random token>.*`. At any instant that is a single
+// series, which is why this label looked bounded and why the semgrep rule
+// flagging it was suppressed. But the token is regenerated on every connection,
+// so every process restart and every reconnect mints a label value that never
+// appears again — unbounded growth spread over time rather than all at once.
+// The contract's own forbidden-label list already names "concrete request/reply
+// inboxes".
+func TestSubjectLabel_CollapsesResponseInboxes(t *testing.T) {
+	tests := []struct {
+		name    string
+		subject string
+		want    string
+	}{
+		{name: "response inbox wildcard", subject: "_INBOX.hK4bQ2ZmTpVn1aXc.*", want: "inbox"},
+		{name: "concrete response inbox", subject: "_INBOX.hK4bQ2ZmTpVn1aXc.7", want: "inbox"},
+		{name: "custom inbox prefix is still an inbox", subject: "_INBOX.chat.abc123", want: "inbox"},
+		{name: "registered room subject is kept", subject: "chat.room.canonical.site-a.create", want: "chat.room.canonical.site-a.create"},
+		{name: "wildcarded router pattern is kept", subject: "chat.user.*.request.room.*.site-a.member.list", want: "chat.user.*.request.room.*.site-a.member.list"},
+		{name: "empty", subject: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, subjectLabel(tt.subject))
+		})
+	}
 }
