@@ -91,7 +91,7 @@ These metrics do not replace database telemetry; they connect dependency behavio
 | `loadgen_failure_operations_total{scenario,lane,result}` | loadgen soak | Terminal `good`/`bad`/`unverified`/`not_sent`/`missing_after_deadline` results for durable operation lanes | Existing for Cassandra user-message sends |
 | `loadgen_failure_observations_total{scenario,lane,observer,result}` | loadgen soak | Separates admission failures from Cassandra history loss or mismatch | Existing for admission and Cassandra history |
 | `loadgen_failure_inflight{scenario,lane}` | loadgen soak | Unresolved-operation backlog and deadline pressure | Existing for Cassandra user-message sends |
-| `loadgen_failure_recipient_expectations` | loadgen soak | Recipient expectations retained in memory. A healthy run tracks `loadgen_failure_inflight`; climbing past it means the map is outliving the operations again | Existing |
+| `loadgen_failure_recipient_expectations` | loadgen soak | Recipient expectations retained in memory, collected at scrape time so a stalled expiry sweep cannot freeze it. A healthy run tracks `loadgen_failure_inflight`; climbing past it means the map is outliving the operations again | Existing |
 | `loadgen_failure_recovered_operations_total` | loadgen soak | Operations restored from the PVC-backed WAL after loadgen restart | Existing |
 | `loadgen_failure_invalidations_total{reason}` | loadgen soak | Ledger capacity or WAL failures that invalidate evidence | Existing |
 | `loadgen_failure_journal_bytes` | loadgen soak | Persistent evidence footprint and compaction health | Existing |

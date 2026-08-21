@@ -53,30 +53,13 @@ func soakFailureExpiryInterval(deadline time.Duration) time.Duration {
 	return min(30*time.Second, max(time.Second, deadline/10))
 }
 
-// soakFailureExpiryOption configures the sweep. Metrics are optional so the
-// tests that only assert expiry do not have to build a registry.
-type soakFailureExpiryOption func(*soakFailureExpirySettings)
-
-type soakFailureExpirySettings struct {
-	metrics *Metrics
-}
-
-func withSoakFailureExpiryMetrics(metrics *Metrics) soakFailureExpiryOption {
-	return func(s *soakFailureExpirySettings) { s.metrics = metrics }
-}
-
 func runSoakFailureExpiry(
 	ctx context.Context,
 	ledger *failureLedger,
 	evidence *recipientEvidence,
 	ticks <-chan time.Time,
 	onError func(error),
-	options ...soakFailureExpiryOption,
 ) {
-	settings := soakFailureExpirySettings{}
-	for _, option := range options {
-		option(&settings)
-	}
 	if ledger == nil || ticks == nil {
 		return
 	}
@@ -105,9 +88,6 @@ func runSoakFailureExpiry(
 			if err := ledger.MaybeCompact(at); err != nil {
 				reportSoakFailureSweepError(
 					onError, fmt.Errorf("compact failure journal: %w", err))
-			}
-			if settings.metrics != nil {
-				settings.metrics.FailureRecipientExpectations.Set(float64(evidence.Len()))
 			}
 		}
 	}

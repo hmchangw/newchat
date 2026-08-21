@@ -530,6 +530,9 @@ func runSoakWorkload(
 		cfg.Soak.LedgerDir,
 		now,
 	)
+	// Collected at scrape time so a stalled expiry sweep cannot freeze the one
+	// number that would reveal the stall.
+	metrics.SetRecipientExpectationSource(observationRuntime.Evidence().Len)
 	expiryCtx, stopExpiry := context.WithCancel(ctx)
 	expiryTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
 	expiryDone := make(chan struct{})
@@ -544,7 +547,6 @@ func runSoakWorkload(
 			func(err error) {
 				slog.Error("expire Cassandra soak failure evidence", "error", err)
 			},
-			withSoakFailureExpiryMetrics(metrics),
 		)
 	}()
 	var expiryShutdownOnce sync.Once

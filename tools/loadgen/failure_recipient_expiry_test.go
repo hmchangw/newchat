@@ -211,27 +211,30 @@ func TestRecipientEvidence_RefusesToGrowPastItsCapacity(t *testing.T) {
 // which is how it went unnoticed for the whole investigation. A healthy run
 // tracks the ledger's own in-flight count; a run climbing past it is this
 // leaking again.
-func TestRunSoakFailureExpiry_PublishesTheRetainedExpectationCount(t *testing.T) {
-	at := time.Unix(1000, 0).UTC()
-	ledger, err := newFailureLedger(&failureLedgerConfig{
-		Capacity: 16, Now: func() time.Time { return at },
-	})
-	require.NoError(t, err)
+//
+// The gauge is read at scrape time rather than written by the expiry sweep. The
+// sweep publishing it makes the value depend on the sweep still running, and a
+// ledger stalled on its journal is exactly the condition the gauge exists to
+// expose — it would freeze at the last healthy number and read as normal.
+func TestMetrics_RecipientExpectationsReportsWithoutTheSweep(t *testing.T) {
 	metrics := NewMetrics()
 	evidence := newRecipientEvidence(false)
+
+	assert.Zero(t, testutil.ToFloat64(metrics.FailureRecipientExpectations),
+		"a run without a recipient observer must report zero, not fail to collect")
+
+	metrics.SetRecipientExpectationSource(evidence.Len)
 	for _, id := range []string{"op-1", "op-2", "op-3"} {
 		require.NoError(t, evidence.ExpectDelivery(&recipientExpectationConfig{
 			OperationID: id, Recipients: []string{"a"}, Complete: true,
 		}))
 	}
 
-	ticks := make(chan time.Time, 1)
-	ticks <- at.Add(time.Minute)
-	close(ticks)
-	runSoakFailureExpiry(context.Background(), ledger, evidence, ticks, nil,
-		withSoakFailureExpiryMetrics(metrics))
+	assert.Equal(t, float64(3), testutil.ToFloat64(metrics.FailureRecipientExpectations),
+		"the count must be current at scrape time, with no sweep tick in between")
 
-	assert.Equal(t, float64(3), testutil.ToFloat64(metrics.FailureRecipientExpectations))
+	require.Equal(t, 2, evidence.ForgetAll([]string{"op-1", "op-2"}))
+	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.FailureRecipientExpectations))
 }
 
 // The sweep frees ledger slots before ForgetAll frees the matching evidence, so
