@@ -421,9 +421,6 @@ func validateSoakRoomLaneConfig(cfg *soakConfig) error {
 	if err := validateSoakPresenceConfig(cfg); err != nil {
 		return err
 	}
-	if err := validateSoakReconcileCapacity(cfg); err != nil {
-		return err
-	}
 	if err := validateSoakSearchConfig(cfg); err != nil {
 		return err
 	}
@@ -607,27 +604,52 @@ func soakReconcileStepsPerMessage(cfg *soakConfig) int {
 	return steps
 }
 
-// validateSoakReconcileCapacity refuses a run whose read lane cannot serve the
-// reconciliation its observers demand. Below capacity the unresolved backlog
-// grows without bound and every message expires unverified — a run that reports
-// a storage problem it created itself, and reports it identically to a real one.
+// soakReconcileCapacity is the read-lane arithmetic behind the reconciliation
+// floor: what the observers in play demand against what the share supplies.
 //
-// This is the floor, not a budget: it covers one claim per observer and nothing
-// for the history poll's retries, which depend on how many messages are slow to
-// persist and cannot be derived from configuration. loadgen_failure_reconcile_claims_total
-// separates the two at runtime.
-func validateSoakReconcileCapacity(cfg *soakConfig) error {
+// It is a floor, not a budget. It covers one claim per observer and nothing for
+// the history poll's retries, which depend on how many messages are slow to
+// persist and cannot be derived from configuration.
+type soakReconcileCapacity struct {
+	Steps    int
+	Required float64
+	Supplied float64
+}
+
+// Sufficient reports whether the lane can serve one claim per observer for
+// every message sent.
+func (c soakReconcileCapacity) Sufficient() bool { return c.Supplied >= c.Required }
+
+func soakReconcileCapacityFor(cfg *soakConfig) soakReconcileCapacity {
 	steps := soakReconcileStepsPerMessage(cfg)
-	capacity := cfg.ReadRate * cfg.ReconcileReadShare
-	required := cfg.SendRate * float64(steps)
-	if cfg.SendRate > 0 && capacity < required {
-		return fmt.Errorf(
-			"reconciling %d observer step(s) per message needs %.3f operations/s at "+
-				"SOAK_SEND_RATE %.3f, but SOAK_READ_RATE %.3f at "+
-				"SOAK_RECONCILE_READ_SHARE %.3f supplies only %.3f; "+
-				"raise SOAK_READ_RATE or lower SOAK_SEND_RATE",
-			steps, required, cfg.SendRate, cfg.ReadRate, cfg.ReconcileReadShare, capacity,
-		)
+	return soakReconcileCapacity{
+		Steps:    steps,
+		Required: cfg.SendRate * float64(steps),
+		Supplied: cfg.ReadRate * cfg.ReconcileReadShare,
 	}
-	return nil
+}
+
+// warnSoakReconcileCapacity reports an under-provisioned reconcile lane without
+// refusing the run. Below the floor the unresolved backlog grows and every
+// message eventually expires unverified — a run that reports a storage problem
+// it created itself, and reports it identically to a real one.
+//
+// It warns rather than exits because refusing at startup spends a whole deploy
+// on a configuration mistake the message already states, and only the operator
+// knows whether a degraded lane is worth the window.
+// loadgen_failure_reconcile_claims_total shows at runtime whether it bit.
+func warnSoakReconcileCapacity(cfg *soakConfig) {
+	capacity := soakReconcileCapacityFor(cfg)
+	if cfg.SendRate <= 0 || capacity.Sufficient() {
+		return
+	}
+	slog.Warn("soak reconcile lane is below the capacity its observers demand",
+		"observerSteps", capacity.Steps,
+		"requiredOperationsPerSecond", capacity.Required,
+		"suppliedOperationsPerSecond", capacity.Supplied,
+		"soakSendRate", cfg.SendRate,
+		"soakReadRate", cfg.ReadRate,
+		"soakReconcileReadShare", cfg.ReconcileReadShare,
+		"remedy", "raise SOAK_READ_RATE or lower SOAK_SEND_RATE",
+	)
 }

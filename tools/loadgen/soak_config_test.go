@@ -682,30 +682,31 @@ func TestValidateSoakConfig_SearchObserverIsRefusedUntilPayloadsAreMarked(t *tes
 	assert.Contains(t, err.Error(), "marker")
 }
 
-// The capacity rule stays enforced for when the observer is usable: it adds a
-// second reconcile step to every admitted message, drawn from the same share
-// the history step already uses.
-func TestValidateSoakReconcileCapacity_CoversTwoStepsPerMessage(t *testing.T) {
+// The search observer adds a second reconcile step to every admitted message,
+// drawn from the same share the history step already uses, so the floor has to
+// move with it.
+func TestSoakReconcileCapacityFor_CoversTwoStepsPerMessage(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.SearchObserverEnabled = true
 	cfg.SendRate = 100
 	cfg.ReadRate = 700
 	cfg.ReconcileReadShare = 0.5
 
-	require.NoError(t, validateSoakReconcileCapacity(&cfg),
+	assert.True(t, soakReconcileCapacityFor(&cfg).Sufficient(),
 		"two reconcile steps per message fit inside 350 slots/s at 100 msg/s")
 
 	cfg.ReadRate = 200
 
-	err := validateSoakReconcileCapacity(&cfg)
+	capacity := soakReconcileCapacityFor(&cfg)
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "2 observer step(s)")
+	assert.Equal(t, 2, capacity.Steps)
+	assert.False(t, capacity.Sufficient())
 }
 
 // With the observer off the message lane needs one reconcile step per message,
-// so the tighter budget is fine. The check must not fire when it does not apply.
-func TestValidateSoakConfig_SearchCapacityCheckOnlyAppliesWhenEnabled(t *testing.T) {
+// so the tighter budget is fine. The floor must scale with the observers rather
+// than firing at a fixed ratio.
+func TestSoakReconcileCapacityFor_SearchStepOnlyCountsWhenEnabled(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.SearchObserverEnabled = false
 	cfg.SendRate = 100
@@ -713,6 +714,7 @@ func TestValidateSoakConfig_SearchCapacityCheckOnlyAppliesWhenEnabled(t *testing
 	cfg.ReconcileReadShare = 0.5
 
 	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+	assert.True(t, soakReconcileCapacityFor(&cfg).Sufficient())
 }
 
 // The settle window must fit inside the reconciliation deadline, or every

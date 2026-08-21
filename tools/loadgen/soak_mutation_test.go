@@ -431,11 +431,7 @@ func TestSoakReactionRateIsIndependentConfiguration(t *testing.T) {
 	require.NoError(t, validateSoakConfig(&cfg, "chat"))
 	assert.Equal(t, float64(87), cfg.ReactionRate)
 
-	// The read rate moves with the send rate only to keep the reconcile
-	// capacity rule satisfied; the point of the assertion is that the reaction
-	// rate does not move with either.
 	cfg.SendRate = 1000
-	cfg.ReadRate = 2100
 	require.NoError(t, validateSoakConfig(&cfg, "chat"))
 	assert.Equal(t, float64(87), cfg.ReactionRate)
 }
