@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -87,9 +88,12 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 		require.NoError(t, err)
 	}
 
-	wantResults := map[string]int64{"success": 1, "forbidden": 1, "bad_request": 1}
+	// A handled request is one rpc.server.call.duration observation. Per
+	// semconv the successful call carries no error.type at all, so it is keyed
+	// here by its absence rather than by a "success" label value.
+	wantResults := map[string]uint64{"": 1, "forbidden": 1, "bad_request": 1}
 	var (
-		results       map[string]int64
+		results       map[string]uint64
 		replyAttempts int64
 	)
 	require.Eventually(t, func() bool {
@@ -97,26 +101,28 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 		if err := reader.Collect(context.Background(), &rm); err != nil {
 			return false
 		}
-		results = map[string]int64{}
+		results = map[string]uint64{}
 		replyAttempts = 0
 		for _, scope := range rm.ScopeMetrics {
 			for _, metric := range scope.Metrics {
-				sum, ok := metric.Data.(metricdata.Sum[int64])
-				if !ok {
-					continue
-				}
-				for _, point := range sum.DataPoints {
-					attrs := map[string]string{}
-					for _, kv := range point.Attributes.ToSlice() {
-						attrs[string(kv.Key)] = kv.Value.AsString()
+				switch data := metric.Data.(type) {
+				case metricdata.Histogram[float64]:
+					if metric.Name != "rpc.server.call.duration" {
+						continue
 					}
-					switch metric.Name {
-					case "chat.nats.request.handled":
-						if attrs["operation"] != "member_read" {
+					for _, point := range data.DataPoints {
+						attrs := attrsOfPoint(point.Attributes)
+						if attrs["rpc.method"] != "member_read" || attrs["rpc.system.name"] != "nats" {
 							return false
 						}
-						results[attrs["result"]] += point.Value
-					case "chat.nats.publish.failures":
+						results[attrs["error.type"]] += point.Count
+					}
+				case metricdata.Sum[int64]:
+					if metric.Name != "chat.nats.publish.failures" {
+						continue
+					}
+					for _, point := range data.DataPoints {
+						attrs := attrsOfPoint(point.Attributes)
 						if attrs["destination_kind"] == "client_response" && attrs["operation"] == "client_response" {
 							replyAttempts += point.Value
 						}
@@ -853,4 +859,12 @@ func TestRegisterOptionalBody_MalformedPayloadIsBadRequest(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(resp.Data, &envelope))
 	assert.Equal(t, "bad_request", envelope.Code)
+}
+
+func attrsOfPoint(set attribute.Set) map[string]string {
+	out := map[string]string{}
+	for _, kv := range set.ToSlice() {
+		out[string(kv.Key)] = kv.Value.String()
+	}
+	return out
 }

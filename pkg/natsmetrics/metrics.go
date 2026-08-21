@@ -73,12 +73,14 @@ const (
 	PublishOtherError      PublishOutcome = "other_error"
 )
 
-// RequestSucceeded is the request family's success value. Outbound
-// request/reply keeps both halves because nothing else counts a Core NATS
-// exchange — unlike a publish, where the broker owns the success side.
+// RequestSucceeded marks a request that did not fail. It is not a label value:
+// semconv makes error.type conditional on failure, so a successful call carries
+// no error class at all. Outbound request/reply is still recorded on both
+// halves because nothing else counts a Core NATS exchange — unlike a publish,
+// where the broker owns the success side.
 const RequestSucceeded PublishOutcome = "success"
 
-// classifyRequestOutcome keeps success meaningful for the request family.
+// classifyRequestOutcome keeps success distinguishable for the request family.
 func classifyRequestOutcome(err error) PublishOutcome {
 	if err == nil {
 		return RequestSucceeded
@@ -162,10 +164,8 @@ type Metrics struct {
 	processingDuration metric.Float64Histogram
 	publishFailures    metric.Int64Counter
 	terminalFailures   metric.Int64Counter
-	requests           metric.Int64Counter
-	requestDuration    metric.Float64Histogram
-	handledRequests    metric.Int64Counter
-	handlerDuration    metric.Float64Histogram
+	clientCallDuration metric.Float64Histogram
+	serverCallDuration metric.Float64Histogram
 }
 
 // NewFromProvider builds the shared instruments on this package's own scope.
@@ -216,23 +216,23 @@ func New(meter metric.Meter) *Metrics {
 	if err != nil {
 		terminal, _ = noopMeter.Int64Counter("chat.nats.terminal.failures")
 	}
-	requests, err := meter.Int64Counter("chat.nats.requests", metric.WithDescription("NATS request/reply results."))
+	// The two request families are the convention's, not ours: name, unit,
+	// description and bucket boundaries all come from semconv. Each replaces a
+	// histogram AND the counter that used to shadow it — a histogram publishes
+	// its own `_count`, so `chat.nats.requests` was
+	// `rpc_client_call_duration_seconds_count` under a second name.
+	rpcBuckets := metric.WithExplicitBucketBoundaries(rpcDurationBuckets...)
+	clientCall, err := meter.Float64Histogram("rpc.client.call.duration",
+		metric.WithDescription("Measures the duration of an outgoing Remote Procedure Call (RPC)."), metric.WithUnit("s"), rpcBuckets)
 	if err != nil {
-		requests, _ = noopMeter.Int64Counter("chat.nats.requests")
+		clientCall, _ = noopMeter.Float64Histogram("rpc.client.call.duration")
 	}
-	requestDuration, err := meter.Float64Histogram("chat.nats.request.duration", metric.WithDescription("End-to-end NATS request/reply duration."), metric.WithUnit("s"), latency)
+	serverCall, err := meter.Float64Histogram("rpc.server.call.duration",
+		metric.WithDescription("Measures the duration of an incoming Remote Procedure Call (RPC)."), metric.WithUnit("s"), rpcBuckets)
 	if err != nil {
-		requestDuration, _ = noopMeter.Float64Histogram("chat.nats.request.duration")
+		serverCall, _ = noopMeter.Float64Histogram("rpc.server.call.duration")
 	}
-	handledRequests, err := meter.Int64Counter("chat.nats.request.handled", metric.WithDescription("Inbound NATS request/reply handler results."))
-	if err != nil {
-		handledRequests, _ = noopMeter.Int64Counter("chat.nats.request.handled")
-	}
-	handlerDuration, err := meter.Float64Histogram("chat.nats.request.handler.duration", metric.WithDescription("Inbound NATS request/reply handler duration."), metric.WithUnit("s"), latency)
-	if err != nil {
-		handlerDuration, _ = noopMeter.Float64Histogram("chat.nats.request.handler.duration")
-	}
-	return &Metrics{loop: loop, messages: messages, processingDuration: processing, publishFailures: publishFailures, terminalFailures: terminal, requests: requests, requestDuration: requestDuration, handledRequests: handledRequests, handlerDuration: handlerDuration}
+	return &Metrics{loop: loop, messages: messages, processingDuration: processing, publishFailures: publishFailures, terminalFailures: terminal, clientCallDuration: clientCall, serverCallDuration: serverCall}
 }
 
 // ConsumerConfig carries the per-consumer label base. Service identity is
@@ -532,17 +532,19 @@ func (m *Metrics) Publisher(site string) Publisher {
 				attribute.String("outcome", string(key.outcome)),
 			)
 		}),
+		// error.type is omitted on success, per semconv: its absence is what
+		// marks a call as having succeeded.
 		request: newOptTable(func(key requestKey) metric.MeasurementOption {
-			return build(
-				attribute.String("operation", string(key.operation)),
-				attribute.String("outcome", string(key.outcome)),
-			)
+			if key.outcome == RequestSucceeded {
+				return build(rpcSystemName, rpcMethod(key.operation))
+			}
+			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.outcome)))
 		}),
 		handled: newOptTable(func(key handledRequestKey) metric.MeasurementOption {
-			return build(
-				attribute.String("operation", string(key.operation)),
-				attribute.String("result", string(key.result)),
-			)
+			if key.result == RequestSuccess {
+				return build(rpcSystemName, rpcMethod(key.operation))
+			}
+			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.result)))
 		}),
 	}
 }
@@ -569,25 +571,25 @@ func (p Publisher) Failure(ctx context.Context, destination DestinationKind, ope
 	p.metrics.publishFailures.Add(ctx, 1, p.attempt.get(key))
 }
 
+// Request records one outbound request/reply call as rpc.client.call.duration.
+// The histogram's own count is the call count, so there is no paired counter.
 func (p Publisher) Request(ctx context.Context, operation Operation, duration time.Duration, err error) {
 	if p.metrics == nil {
 		return
 	}
 	opt := p.request.get(requestKey{normalizeOperation(operation), classifyRequestOutcome(err)})
-	p.metrics.requests.Add(ctx, 1, opt)
-	p.metrics.requestDuration.Record(ctx, duration.Seconds(), opt)
+	p.metrics.clientCallDuration.Record(ctx, duration.Seconds(), opt)
 }
 
-// HandledRequest records one inbound request/reply handler result. Both labels
-// are normalized against closed enums; subjects and error strings are never
-// attributes.
+// HandledRequest records one inbound request/reply handler result as
+// rpc.server.call.duration. Both labels are normalized against closed enums;
+// subjects and error strings are never attributes.
 func (p Publisher) HandledRequest(ctx context.Context, operation Operation, duration time.Duration, result RequestResult) {
 	if p.metrics == nil {
 		return
 	}
 	opt := p.handled.get(handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)})
-	p.metrics.handledRequests.Add(ctx, 1, opt)
-	p.metrics.handlerDuration.Record(ctx, duration.Seconds(), opt)
+	p.metrics.serverCallDuration.Record(ctx, duration.Seconds(), opt)
 }
 
 func NormalizeEventType(value string) EventType {

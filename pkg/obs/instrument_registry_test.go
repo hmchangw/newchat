@@ -21,6 +21,13 @@ const contractDoc = "docs/specs/o11y/nats-metrics-contract.md"
 var instrumentDecl = regexp.MustCompile(
 	`\b(?:Int64|Float64)(?:Counter|UpDownCounter|Histogram|Gauge)\(\s*"([^"]+)"`)
 
+// instrumentDeclAnyArg matches the same constructions with any first argument.
+// The two together find the bypass: a name hoisted into a constant is a name
+// the scan above cannot read, so the instrument would slip past the registry
+// without anyone intending it.
+var instrumentDeclAnyArg = regexp.MustCompile(
+	`\b(?:Int64|Float64)(?:Counter|UpDownCounter|Histogram|Gauge)\(\s*([^\s,)]+)`)
+
 // TestEveryInstrumentIsDocumented makes "is this metric necessary?" a mechanical
 // gate instead of a question that has to be re-litigated in review.
 //
@@ -96,6 +103,50 @@ func skipInstrument(files []string) bool {
 		}
 	}
 	return true
+}
+
+// TestInstrumentNamesAreLiterals keeps the registry guard above unfalsifiable.
+// It reads source, not a running meter, so `meter.Float64Histogram(nameConst)`
+// is invisible to it — the instrument ships undocumented and the guard stays
+// green. Requiring the literal at the construction site costs nothing (the name
+// is written once either way) and means the only way past the registry is to
+// add the row.
+func TestInstrumentNamesAreLiterals(t *testing.T) {
+	root := repoRoot(t)
+
+	var offenders []string
+	require.NoError(t, filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "testdata", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, _ := filepath.Rel(root, path)
+		for _, m := range instrumentDeclAnyArg.FindAllStringSubmatch(string(src), -1) {
+			if strings.HasPrefix(m[1], `"`) {
+				continue
+			}
+			offenders = append(offenders, rel+": "+m[0])
+		}
+		return nil
+	}))
+	sort.Strings(offenders)
+
+	assert.Empty(t, offenders,
+		"an instrument name must be a string literal at its construction site, so %s can be checked against it:\n  %s",
+		contractDoc, strings.Join(offenders, "\n  "))
 }
 
 func repoRoot(t *testing.T) string {

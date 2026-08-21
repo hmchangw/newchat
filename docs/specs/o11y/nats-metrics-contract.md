@@ -35,6 +35,16 @@ OTel instruments use dotted names; Prometheus families below show the expected
 normalized export. Project-owned metrics use a `chat_` prefix except existing
 loadgen families, which retain `loadgen_` for compatibility.
 
+One further exception, and it takes precedence: **an instrument that implements
+an OpenTelemetry semantic convention uses the convention's name, labels, unit
+and bucket boundaries verbatim, prefix included or omitted as the convention
+says.** The request/reply families are the case in point — they are
+`rpc.client.call.duration` and `rpc.server.call.duration`, not `chat.nats.*`.
+Renaming a standard metric into a house prefix costs exactly what the standard
+buys: a generic RPC dashboard, a collector processor, or a backend's built-in
+RPC view stops recognising it. Project-specific labels (`site`) may still be
+added; the convention permits extra attributes.
+
 Allowed bounded labels:
 
 - `service_name`;
@@ -42,6 +52,8 @@ Allowed bounded labels:
 - `stream` and `consumer`, sourced from deployed configuration;
 - `lane`, `operation`, `event_type`, and `destination_kind`, from code-owned
   enums;
+- `rpc.system.name`, `rpc.method`, and `error.type` on instruments that
+  implement the RPC semantic conventions, all three from code-owned enums;
 - `outcome`, `reason`, and `event`, from the vocabularies in this document;
 - `server`, `cluster`, and `role`, from infrastructure discovery.
 
@@ -79,6 +91,10 @@ but it must not carry `run_id`.
 
 `success`, `timeout`, `no_responders`, `disconnected`, `buffer_full`,
 `permission`, `payload_too_large`, and `other_error`.
+
+The same vocabulary supplies `error.type` on `rpc.client.call.duration`, minus
+`success`: the convention makes that label conditional on failure, so absence is
+what marks a successful call.
 
 ### Terminal reasons
 
@@ -214,8 +230,12 @@ wrappers so meanings do not drift.
 | `chat.nats.publish.attempts` / `chat_nats_publish_attempts_total` | counter | `service_name,site,destination_kind,operation,outcome` | One Core or JetStream publish attempt |
 | `chat.nats.publish.retries` / `chat_nats_publish_retries_total` | counter | `service_name,site,destination_kind,operation` | Application-managed retry beyond the first attempt |
 | `chat.nats.terminal.failures` / `chat_nats_terminal_failures_total`<br><sub>`chat.nats.terminal.failures`</sub> | counter | `service_name,site,stream,consumer,event_type,reason` | Work that will receive no further application attempt |
-| `chat.nats.requests` / `chat_nats_requests_total`<br><sub>`chat.nats.requests`</sub> | counter | `service_name,site,operation,outcome` | Request/reply result classified by bounded outcome |
-| `chat.nats.request.duration` / `chat_nats_request_duration_seconds_*` | histogram | `service_name,site,operation,outcome` | End-to-end request latency including application retry |
+| `rpc.client.call.duration` / `rpc_client_call_duration_seconds_*` | histogram | `service_name,site,rpc.system.name,rpc.method,error.type` | One outbound request/reply call. `error.type` absent on success |
+| `rpc.server.call.duration` / `rpc_server_call_duration_seconds_*` | histogram | `service_name,site,rpc.system.name,rpc.method,error.type` | One inbound request/reply handler call. `error.type` absent on success |
+
+The counters that used to shadow these two histograms (`chat.nats.requests`,
+`chat.nats.request.handled`) are gone: a histogram publishes its own `_count`,
+which is the same number on one fewer series built from one fewer attribute set.
 
 Rules:
 
@@ -477,10 +497,17 @@ instrument name** you grep for in source underneath where the two differ.
 | `chat_nats_consumer_processing_duration_seconds`<br><sub>`chat.nats.consumer.processing.duration`</sub> | histogram | the 5 JetStream consumers | on first delivery | none — the broker does not know handler time | campaign (AckWait headroom) |
 | `chat_nats_terminal_failures_total` | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
 | `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | all 7 NATS services | on first failure | none — the broker has no record of a publish that never arrived | campaign |
-| `chat_nats_requests_total` | counter | room-service, history-service | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health |
-| `chat_nats_request_duration_seconds`<br><sub>`chat.nats.request.duration`</sub> | histogram | room-service, history-service | on first outbound request | none | cross-site health; its `_count` is the denominator for the counter above |
-| `chat_nats_request_handled_total`<br><sub>`chat.nats.request.handled`</sub> | counter | every `natsrouter` service | on first inbound request | none | **SLO-4 / SLO-5** (`sli-slo.md` roadmap P1) |
-| `chat_nats_request_handler_duration_seconds`<br><sub>`chat.nats.request.handler.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4 / SLO-5** |
+| `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, history-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
+| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4 / SLO-5** (`sli-slo.md` roadmap P1) |
+
+These two are the only families here without the `chat_` prefix, and the
+exception is deliberate (§2): they implement the OpenTelemetry RPC semantic
+conventions, so they carry the convention's names, its `rpc.system.name` and
+`rpc.method` labels, its `error.type` label, and its bucket boundaries. They
+keep our `site` label, which the convention permits.
+
+`error.type` is conditional on failure, so a successful call carries no error
+label at all — query the unlabelled series directly rather than subtracting.
 
 The five JetStream consumers are `message-gatekeeper`, `message-worker`,
 `broadcast-worker`, `notification-worker`, and `room-worker`. `room-service` and
