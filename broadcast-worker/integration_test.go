@@ -80,7 +80,7 @@ func TestBroadcastWorker_ChannelRoom_Integration(t *testing.T) {
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, 0, nil)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
@@ -125,7 +125,7 @@ func TestBroadcastWorker_ChannelRoom_IndividualMention_Integration(t *testing.T)
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, 0, nil)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	key := testRoomKey(t)
@@ -168,7 +168,7 @@ func TestBroadcastWorker_DMRoom_Integration(t *testing.T) {
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, 0, nil)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 	keyStore := &fakeRoomKeyProvider{pair: nil}
@@ -223,7 +223,7 @@ func TestBroadcastWorker_ChannelRoom_EncryptionDisabled_Integration(t *testing.T
 	require.NoError(t, err)
 	seedUsers(t, db)
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, 0, nil)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	us := userstore.NewMongoStore(db.Collection("users"))
 	pub := &recordingPublisher{}
 
@@ -261,7 +261,7 @@ func TestBroadcastWorker_ChannelRoom_EncryptionDisabled_Integration(t *testing.T
 func TestBroadcastWorker_GetThreadFollowers_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, 0, nil)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 
 	// Seed a thread room document with replyAccounts (siteID isolation is handled
 	// at the deployment level — each site has its own MongoDB instance).
@@ -302,7 +302,7 @@ func TestBroadcastWorker_GetThreadFollowers_Integration(t *testing.T) {
 func TestBroadcastWorker_EnsureIndexes_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, 0, nil)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 
 	// EnsureIndexes should be idempotent — call it twice without error.
 	require.NoError(t, store.EnsureIndexes(ctx))
@@ -346,7 +346,7 @@ func TestBroadcastWorker_EnsureIndexes_Integration(t *testing.T) {
 func TestBroadcastWorker_GetHistorySharedSince_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, 0, nil)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 
 	shared := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	_, err := db.Collection("subscriptions").InsertMany(ctx, []interface{}{

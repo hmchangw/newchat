@@ -156,7 +156,7 @@ func main() {
 		circuitbreaker.Tracked(ctx, "mongo"),
 		circuitbreaker.WithFailurePredicate(MongoBreakerFailure))
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"),
-		valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
+		db.Collection("users"), valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}

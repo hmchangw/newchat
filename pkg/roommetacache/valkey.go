@@ -17,11 +17,24 @@ import (
 // interface, and cachemetrics.Recorder satisfies it.
 type Recorder = valkeyutil.CacheRecorder
 
+// cacheKeySchemaVersion namespaces cache keys by the stored value's shape,
+// mirroring pkg/roomsubcache. Bump whenever the value changes such that a
+// binary built against the other shape would decode it without error but with
+// the wrong contents — Valkey has no schema check, so the version segment is
+// what makes those entries miss and be repopulated instead. Bumped to v2 when
+// the value went from a bare Meta to the cachedMeta{Meta, CachedAt} envelope:
+// an older binary decodes that envelope into Meta with no JSON error (both
+// envelope fields are simply unknown) and every field zero, which during a
+// rolling deploy makes an old broadcast-worker drop fan-out on an empty room
+// type and an old message-gatekeeper read UserCount 0.
+const cacheKeySchemaVersion = "v2"
+
 // MetaKey is the L2 (Valkey) key for a room's cached Meta. The {roomID}
 // hash tag colocates it in the same cluster slot as the room's encryption
 // key (pkg/roomkeystore), matching house convention for room-scoped keys.
+// The version segment trails the key so the hash tag keeps that colocation.
 func MetaKey(roomID string) string {
-	return "room:{" + roomID + "}:meta"
+	return "room:{" + roomID + "}:meta:" + cacheKeySchemaVersion
 }
 
 // readL2 attempts the L2 (Valkey) read. An entry with no room ID is not usable:

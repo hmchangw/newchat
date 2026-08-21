@@ -29,7 +29,7 @@ func TestMongoStore_GetRoomMeta_ReadsThroughL2(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	store := NewMongoStore(rooms, db.Collection("subscriptions"), db.Collection("thread_rooms"), client, time.Minute, time.Minute, nil)
+	store := NewMongoStore(rooms, db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), client, time.Minute, time.Minute, nil)
 
 	got, err := store.GetRoomMeta(ctx, "r1")
 	require.NoError(t, err)

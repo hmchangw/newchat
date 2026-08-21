@@ -87,8 +87,18 @@ func (f *fakeValkey) IncrEx(_ context.Context, _ string, _ time.Duration) (int64
 	panic("fakeValkey.IncrEx not implemented")
 }
 
+// TestMetaKey pins both halves of the key contract. The version segment is what
+// keeps a rolling deploy safe: the value under this key changed from a bare Meta
+// to the cachedMeta envelope, and an old binary decodes that envelope into Meta
+// with no JSON error and every field zero — an unversioned key would hand old
+// broadcast-worker pods an empty room type and old gatekeeper pods UserCount 0.
+// The {roomID} hash tag must survive the change so the entry stays in the same
+// cluster slot as the room's encryption key (pkg/roomkeystore).
 func TestMetaKey(t *testing.T) {
-	assert.Equal(t, "room:{r123}:meta", MetaKey("r123"))
+	got := MetaKey("r123")
+	assert.Equal(t, "room:{r123}:meta:"+cacheKeySchemaVersion, got)
+	assert.Contains(t, got, "{r123}", "hash tag must be preserved for slot colocation")
+	assert.NotEqual(t, "room:{r123}:meta", got, "must not reuse the pre-envelope key")
 }
 
 func TestReadThrough_L2Hit(t *testing.T) {

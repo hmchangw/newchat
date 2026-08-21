@@ -42,11 +42,13 @@ type mongoStore struct {
 	members       *roomsubcache.Lookup
 }
 
-func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, mongoBreaker *circuitbreaker.Breaker) *mongoStore {
+func NewMongoStore(roomCol, subCol, threadRoomCol, userCol *mongo.Collection, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, mongoBreaker *circuitbreaker.Breaker) *mongoStore {
 	// A nil valkey leaves the Lookup cacheless (straight to Mongo). The loader
 	// is always the shared full-projection one: notification-worker reads the
 	// same key and gates on Muted/HistorySharedSince, so a partial write here
-	// would silently unmute users and widen their history windows.
+	// would silently unmute users and widen their history windows. userCol is
+	// what lets it stamp HomeSiteID too — without it a cold fill won here hands
+	// notification-worker an entry that misroutes its per-site badge RPC.
 	var subCache roomsubcache.Cache
 	if valkey != nil {
 		subCache = roomsubcache.NewValkeyCache(valkey)
@@ -59,7 +61,7 @@ func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valk
 		metaTTL:       metaTTL,
 		metaRec:       cachemetrics.For("roommeta", "l2"),
 		members: roomsubcache.NewLookup(subCache,
-			roomsubcache.GuardLoader(roomsubcache.NewMongoLoader(subCol), mongoBreaker), subTTL),
+			roomsubcache.GuardLoader(roomsubcache.NewMongoLoader(subCol, userCol), mongoBreaker), subTTL),
 	}
 	if mongoBreaker != nil {
 		s.metaOpts = []roommetacache.ReadThroughOption{roommetacache.WithFetchGuard(mongoBreaker.Do)}
