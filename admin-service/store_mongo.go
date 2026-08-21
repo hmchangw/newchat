@@ -121,8 +121,10 @@ var userProjection = bson.M{
 var fanoutProjection = bson.M{"_id": 1, "account": 1, "siteId": 1,
 	"engName": 1, "chineseName": 1, "roles": 1, "active": 1}
 
-func (s *storeMongo) SearchUsers(ctx context.Context, siteID, q string, page, limit int) ([]model.User, int64, error) {
-	filter := bson.M{"siteId": siteID}
+// SearchUsers spans every site: the admin console lists cross-site replicas
+// too (read-only there — mutations stay home-site-scoped).
+func (s *storeMongo) SearchUsers(ctx context.Context, q string, page, limit int) ([]model.User, int64, error) {
+	filter := bson.M{}
 	if q != "" {
 		// Escape so the query is matched as a literal substring, not a regex
 		// pattern — prevents metacharacter injection and ReDoS-style DoS.

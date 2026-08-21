@@ -7,6 +7,7 @@ services:
       dockerfile: admin-frontend/deploy/Dockerfile
     environment:
       ADMIN_SERVICE_URL: ${ADMIN_SERVICE_URL:-http://localhost:${ADMIN_SERVICE_HOST_PORT:-8082}}
+      PERMISSIONS_ENABLED: ${PERMISSIONS_ENABLED:-true}
     ports:
       - "${ADMIN_FRONTEND_HOST_PORT:-3001}:80"
     networks:

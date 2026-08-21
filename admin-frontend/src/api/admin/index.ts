@@ -255,6 +255,23 @@ export async function updateUser(
   return { syncFailures: raw.syncFailures ?? [] }
 }
 
+export interface ResyncUserResult {
+  syncFailures: string[]
+  hrSyncFailed: boolean
+}
+
+/** Re-delivers the current account state on both sync lanes (durable HR
+ * bootstrap + direct snapshot to every remote site). Re-delivery only — the
+ * server writes nothing. Home-site accounts only; foreign replicas 404. */
+export async function resyncUser(authToken: string, account: string): Promise<ResyncUserResult> {
+  const raw = await adminFetch<{
+    status: string
+    syncFailures?: string[]
+    hrSyncFailed?: boolean
+  }>(authToken, 'POST', `/users/${encodeURIComponent(account)}/resync`)
+  return { syncFailures: raw.syncFailures ?? [], hrSyncFailed: raw.hrSyncFailed ?? false }
+}
+
 /** Sets a new password; sent over the wire as `password` (admin-service's json tag). */
 export async function setPassword(
   authToken: string,
