@@ -147,7 +147,8 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	// (threadRoomId, userAccount) index FIRST — it has different keys from the legacy
 	// (threadRoomId, userId) index, so they coexist — then drop the legacy only once
 	// the replacement exists, so a failed create never leaves the collection without
-	// either constraint. IndexNotFound/NamespaceNotFound on the drop is a no-op (fresh deploy).
+	// either constraint. The collection exists post-create, so an absent legacy index
+	// is IndexNotFound (a no-op); a NamespaceNotFound would mean an external drop and surfaces.
 	if cerr := mongoutil.EnsureIndexWithRepair(ctx, s.threadSubscriptions, mongo.IndexModel{
 		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
 		Options: options.Index().SetUnique(true),
