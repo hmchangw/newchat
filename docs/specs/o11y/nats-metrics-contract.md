@@ -561,6 +561,7 @@ the site, so join them through `target_info`.
 | `broadcast_worker_fanout_recipients` | histogram | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
 | `broadcast_worker_recipient_deliveries_total` | counter | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
 | `notification_worker_outcomes_total` | counter | notification-worker | on first notification | none | campaign; SLO-6 |
+| `notification_worker_mention_resolution_total` | counter | notification-worker | on first push body containing an @mention | none | push-body quality: the fail-open path is invisible otherwise, since a users-collection outage leaves `notification_worker_outcomes_total` fully green while every body ships raw @tokens |
 | `room_key_fanout_errors_total` | counter | room-worker | on first failure | none | room-key delivery health. Carries no label: the room id lives on the log line beside it |
 | `room_key_store_errors_total` | counter | room-worker | on first failure | Mongo driver metrics cover I/O broadly, not this operation | room-key store health |
 | `room_key_absent_errors_total` | counter | room-worker | on first occurrence | none | distinguishes "no key" from "store broken" |

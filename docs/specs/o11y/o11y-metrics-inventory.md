@@ -199,9 +199,9 @@ arrives as a resource-derived constant label, never as an inline attribute.)
 Reconnect-buffer overflow is **not** a connection event: nats.go returns
 `ErrReconnectBufExceeded` synchronously from `publish()` and never routes it
 through `ErrorHandler`, so it is counted as
-`chat_nats_publish_attempts_total{outcome="buffer_full"}`. The full semantics,
-label enums, and the alerts these drive are specified in the NATS failure
-metrics contract under `docs/load-testing/failure/`.
+`chat_nats_publish_failures_total{outcome="buffer_full"}`. The full semantics,
+label enums, and the alerts these drive are specified in the NATS metrics
+contract at `docs/specs/o11y/nats-metrics-contract.md`.
 
 ### 2.2 Services not previously inventoried (2026-08-14)
 
