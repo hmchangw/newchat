@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -1862,4 +1863,131 @@ func TestUpsertUserAccount_Integration(t *testing.T) {
 		require.True(t, ok, "roles must be an array, got %T", doc["roles"])
 		assert.Len(t, roles, 0)
 	})
+}
+
+// TestUpsertUserAccount_ArrivalOrder_Integration pins the create/update ordering
+// contract: the payload watermark decides the winner, never the delivery order.
+// Federation gives no ordering guarantee on this lane (each destination is a
+// direct publish, no OUTBOX FIFO), so a create can land after the edit that
+// supersedes it. Each case owns its account so the subtests stay independent.
+func TestUpsertUserAccount_ArrivalOrder_Integration(t *testing.T) {
+	db := testutil.MongoDB(t, "inbox-user-account-order")
+	store := &mongoInboxStore{userCol: db.Collection("users")}
+	ctx := context.Background()
+	users := db.Collection("users")
+	_, err := users.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
+
+	// createSnap is what admin-service fans out on create; updateSnap is what a
+	// later edit fans out (rename + role grant + deactivation), so every field
+	// differs and the assertions can tell which snapshot won.
+	createSnap := func(account string, ts int64) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-" + account, Account: account, SiteID: "site-a",
+			EngName: "Alice", ChineseName: "Alice CN", Roles: []model.UserRole{model.UserRoleUser},
+			Active: true, Timestamp: ts}
+	}
+	updateSnap := func(account string, ts int64) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-" + account, Account: account, SiteID: "site-a",
+			EngName: "Alice Chen", ChineseName: "Alice Chen CN", Roles: []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			Active: false, Timestamp: ts}
+	}
+
+	const (
+		createTS = int64(1000)
+		updateTS = int64(2000)
+	)
+
+	tests := []struct {
+		name string
+		// deliver returns the events in the order the destination receives them.
+		deliver     func(account string) []*model.UserAccountUpdated
+		wantEngName string
+		wantRoles   []model.UserRole
+		wantActive  bool
+		wantMark    int64
+	}{
+		{
+			name: "in order: create then update, update wins",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{createSnap(a, createTS), updateSnap(a, updateTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "reversed: update lands first and creates the doc, late create dropped",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{updateSnap(a, updateTS), createSnap(a, createTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "redelivery: create replayed after update stays dropped",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{
+					createSnap(a, createTS), updateSnap(a, updateTS), createSnap(a, createTS),
+				}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "same millisecond, create last: $lte lets the last delivery win",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{updateSnap(a, createTS), createSnap(a, createTS)}
+			},
+			wantEngName: "Alice",
+			wantRoles:   []model.UserRole{model.UserRoleUser},
+			wantActive:  true,
+			wantMark:    createTS,
+		},
+		{
+			name: "same millisecond, update last: $lte lets the last delivery win",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{createSnap(a, createTS), updateSnap(a, createTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    createTS,
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := fmt.Sprintf("order-%d", i)
+			for _, e := range tt.deliver(account) {
+				require.NoError(t, store.UpsertUserAccount(ctx, e, time.UnixMilli(e.Timestamp).UTC()))
+			}
+
+			count, err := users.CountDocuments(ctx, bson.M{"account": account})
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, count, "every ordering must converge on one doc")
+
+			var doc bson.M
+			require.NoError(t, users.FindOne(ctx, bson.M{"account": account}).Decode(&doc))
+			assert.Equal(t, "id-"+account, doc["_id"], "_id is $setOnInsert, whichever snapshot inserted")
+			assert.Equal(t, "site-a", doc["siteId"])
+			assert.Equal(t, tt.wantEngName, doc["engName"])
+			assert.Equal(t, tt.wantActive, doc["active"])
+			assert.Equal(t, time.UnixMilli(tt.wantMark).UTC(), doc["accountUpdatedAt"].(bson.DateTime).Time().UTC())
+
+			roles, ok := doc["roles"].(bson.A)
+			require.True(t, ok, "roles must be an array, got %T", doc["roles"])
+			got := make([]model.UserRole, len(roles))
+			for j, r := range roles {
+				got[j] = model.UserRole(r.(string))
+			}
+			assert.Equal(t, tt.wantRoles, got)
+		})
+	}
 }
