@@ -143,14 +143,19 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 		bson.D{{Key: "roomId", Value: 1}, {Key: "joinedAt", Value: 1}, {Key: "_id", Value: 1}})
 	// Backs CountOwners (roomId+roles) index-only.
 	create(s.subscriptions, "subscriptions (roomId,roles)", bson.D{{Key: "roomId", Value: 1}, {Key: "roles", Value: 1}})
-	// room-service owns the thread_subscriptions unique key. Best-effort legacy
-	// (threadRoomId, userId) drop first so the userAccount index creates without a
-	// key conflict; it may not exist (fresh deploy) — ignore all errors.
-	if derr := s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1"); derr != nil && !mongoutil.IsIndexNotFound(derr) {
+	// room-service owns the thread_subscriptions unique key. Create the canonical
+	// (threadRoomId, userAccount) index FIRST — it has different keys from the legacy
+	// (threadRoomId, userId) index, so they coexist — then drop the legacy only once
+	// the replacement exists, so a failed create never leaves the collection without
+	// either constraint. IndexNotFound/NamespaceNotFound on the drop is a no-op (fresh deploy).
+	if cerr := mongoutil.EnsureIndexWithRepair(ctx, s.threadSubscriptions, mongo.IndexModel{
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); cerr != nil {
+		errs = append(errs, fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) unique index: %w", cerr))
+	} else if derr := s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1"); derr != nil && !mongoutil.IsIndexNotFound(derr) {
 		errs = append(errs, fmt.Errorf("drop legacy thread_subscriptions (threadRoomId,userId) index: %w", derr))
 	}
-	unique(s.threadSubscriptions, "thread_subscriptions (threadRoomId,userAccount)",
-		bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}})
 	create(s.threadSubscriptions, "thread_subscriptions (parentMessageId,userAccount)",
 		bson.D{{Key: "parentMessageId", Value: 1}, {Key: "userAccount", Value: 1}})
 	// Backs MinThreadSubscriptionLastSeenByThreadRoomID (covered seek on threadRoomId,lastSeenAt).

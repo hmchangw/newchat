@@ -61,6 +61,18 @@ func TestEnsureIndexWithRepair_DuplicateDataReturnsError(t *testing.T) {
 	assert.True(t, mongo.IsDuplicateKeyError(err), "duplicate data must surface E11000, not be silently repaired")
 }
 
+// A DropOne on a not-yet-created collection returns NamespaceNotFound (26), which
+// IsIndexNotFound must treat as "nothing to drop" — else a fresh-deploy
+// EnsureIndexes records a spurious error (regression: #334).
+func TestIsIndexNotFound_FreshCollection(t *testing.T) {
+	ctx := context.Background()
+	coll := repairTestColl(t, "mongoutil_index_notfound_test")
+
+	err := coll.Indexes().DropOne(ctx, "threadRoomId_1_userId_1")
+	require.Error(t, err)
+	assert.True(t, IsIndexNotFound(err), "fresh-collection DropOne (NamespaceNotFound) must count as not-found")
+}
+
 // The #159 dirty env — a non-unique index AND duplicate data — must not leave the
 // collection index-less: the unique recreate fails E11000, but the old index is
 // restored, and the error still surfaces so the caller shows dedupe guidance.
