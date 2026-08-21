@@ -285,10 +285,6 @@ Current repository provisioning is insufficient for a complete storage dashboard
 - Local MongoDB and Cassandra are single-node. Local tests can validate total outage/restart and client recovery, but not Mongo primary election/majority loss or Cassandra replica/quorum/hinted-handoff behavior.
 - Production/staging exporter deployment and recording rules are not represented in this repository, so their presence must be a campaign preflight gate rather than an assumption.
 
-The concrete deployment, scrape, recording-rule, dashboard overlay,
-annotation, security, retention, and preflight contract is defined in
-[Failure-Test Observability Deployment](../../load-testing/failure/observability-deployment.md).
-
 ## 9. Implementation Order
 
 1. Deploy/scrape MongoDB and Cassandra server exporters in staging and production, then add stable recording rules.

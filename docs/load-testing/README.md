@@ -53,13 +53,9 @@ for that overlap is still open.
   [`failure/mongodb.md`](failure/mongodb.md),
   [`failure/cassandra.md`](failure/cassandra.md), and the
   [NATS/JetStream failure-test topology](failure/topology.drawio).
-- NATS campaign readiness —
-  [`failure/nats-metrics-contract.md`](failure/nats-metrics-contract.md) (required
-  infrastructure, service, advisory, and loadgen metrics),
-  [`failure/observability-deployment.md`](failure/observability-deployment.md)
-  (scraping, recording rules, dashboards, annotations, preflight, retention), and
-  [`failure/nats-campaign-runbook.md`](failure/nats-campaign-runbook.md) (the first
-  operator-ready campaign, scenarios F01/F02/F03/F04/F07).
+- NATS metric inventory —
+  [`failure/nats-metrics-contract.md`](failure/nats-metrics-contract.md)
+  (infrastructure, service, advisory, and loadgen metrics).
 
 The shared MongoDB and Cassandra metric inventory stays in the observability
 specification area:
@@ -80,19 +76,10 @@ under [`loadgen/`](loadgen/):
 
 - [`loadgen/observation.md`](loadgen/observation.md) — the durable evidence
   ledger and the workload lanes implemented today.
-- [`loadgen/evidence-platform.md`](loadgen/evidence-platform.md) — the
-  generalized operation, observer, manifest, timeline, verdict, and report
-  contracts required to close the remaining gaps.
 - [`loadgen/dashboard-contract.md`](loadgen/dashboard-contract.md) — the
   query-time evidence/impact/correctness dimensions a dashboard must report.
 - [`loadgen/runtime-api.md`](loadgen/runtime-api.md) — the disabled-by-default
   runtime `pause`/`resume`/`status` skeleton.
-- [`loadgen/run-a-implementation-plan.md`](loadgen/run-a-implementation-plan.md)
-  — the task-by-task engineering plan for the Run A harness and its Kubernetes
-  deployment assets.
-
-Run B/C pathological and direct-CQL experiments remain deferred and are not part
-of the Run A implementation plan.
 
 ## Open Prerequisites
 

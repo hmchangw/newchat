@@ -1,8 +1,8 @@
 # Cassandra Load Test Plan (Soak Test)
 
 > This is the authoritative specification for the Cassandra Run A soak test.
-> The engineering work breakdown is maintained in
-> [`run-a-implementation-plan.md`](../loadgen/run-a-implementation-plan.md).
+> The harness that implements it is `tools/loadgen`; its runtime contract is
+> [`../loadgen/observation.md`](../loadgen/observation.md).
 
 A production-like soak test to validate the Cassandra **schema design** and
 **access patterns** of this project before release. **Run A (a soak through the
