@@ -26,6 +26,11 @@ import (
 // defaultRecipientBatchSize mirrors PUSH_RECIPIENT_BATCH_SIZE's envDefault so unit tests don't re-declare it.
 const defaultRecipientBatchSize = 100
 
+// maxMentionLookups caps how many distinct @accounts one message may resolve.
+// Not an env knob: it bounds a user-controlled fan-out rather than tuning a
+// workload, and no legible push body renders this many names.
+const maxMentionLookups = 50
+
 // MemberCache reads the cached member list and supports targeted invalidation.
 type MemberCache interface {
 	GetMembers(ctx context.Context, roomID string) ([]roomsubcache.Member, error)
@@ -46,8 +51,9 @@ type HandlerDeps struct {
 	Settings           UserSettingsSnapshotter // nil → noopUserSettings (pre-enforcement behaviour)
 	Hook               Vetoer
 	Emitter            Emitter
-	RoomMeta           RoomMetaGetter // nil → title falls back to sender.Account
-	BadgeClient        badgeClient    // nil (env-disabled or not wired) → badge phase skipped entirely (Phase A compat)
+	RoomMeta           RoomMetaGetter      // nil → title falls back to sender.Account
+	MentionNames       MentionNameResolver // nil → only @all/@here are substituted in the body
+	BadgeClient        badgeClient         // nil (env-disabled or not wired) → badge phase skipped entirely (Phase A compat)
 	LargeRoomThreshold int
 	RecipientBatchSize int                  // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
 	Metrics            *notificationMetrics // nil → built on the global meter
@@ -260,7 +266,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	pushEvt := model.PushNotificationEvent{
 		RoomID: msg.RoomID,
 		Title:  h.resolveTitle(ctx, msg.RoomID, roomType, sender),
-		Body:   msg.Content,
+		Body:   h.resolveBody(ctx, msg.Content, mentionInfo),
 		Data: model.PushNotificationData{
 			RoomID:            msg.RoomID,
 			MessageID:         msg.ID,
@@ -403,6 +409,59 @@ func shortRoomType(t model.RoomType) string {
 	default:
 		return "c"
 	}
+}
+
+// resolveBody renders the push body: @mentions become display names (@all/@here
+// become their literal words) so the lock screen shows a person, not an account.
+// Runs after the survivor filter, so a message nobody receives never pays for the
+// lookup. Fails open — a resolver error substitutes whatever names came back and
+// leaves the rest as raw @tokens rather than dropping the push.
+func (h *Handler) resolveBody(ctx context.Context, content string, parsed mention.ParseResult) string {
+	if len(parsed.Accounts) == 0 && !parsed.MentionAll {
+		return content
+	}
+	var names map[string]string
+	if h.deps.MentionNames != nil {
+		if lookup := mention.LookupAccountsFromParsed(parsed); len(lookup) > 0 {
+			// Message content is user-controlled, so cap the fan-out: the $in is
+			// unbounded otherwise, and userstore's batch path neither dedups
+			// concurrent misses nor negatively-caches them, so a message spamming
+			// unknown @tokens would re-query Mongo on every redelivery. Tokens past
+			// the cap keep their raw @token — a push body can't render 50 names anyway.
+			if len(lookup) > maxMentionLookups {
+				lookup = lookup[:maxMentionLookups]
+			}
+			resolved, err := h.deps.MentionNames.Resolve(ctx, lookup)
+			names = resolved
+			h.recordMentionResults(ctx, lookup, resolved, err)
+			if err != nil {
+				slog.WarnContext(ctx, "mention name lookup failed, body keeps raw mentions",
+					"error", err, "mentions", len(lookup), "resolved", len(resolved),
+					"request_id", natsutil.RequestIDFromContext(ctx))
+			}
+		}
+	}
+	return mention.ReplaceAccounts(content, names)
+}
+
+// recordMentionResults partitions the looked-up tokens across the three
+// mentionResult buckets. On a failed lookup the unresolved remainder is
+// attributed to `failed` rather than `unresolved`, so alerting on `failed`
+// separates an outage from users simply mentioning unknown accounts.
+func (h *Handler) recordMentionResults(ctx context.Context, lookup []string, resolved map[string]string, err error) {
+	hits := 0
+	for _, account := range lookup {
+		if resolved[account] != "" {
+			hits++
+		}
+	}
+	h.metrics.RecordMentions(ctx, mentionResolved, hits)
+	remainder := len(lookup) - hits
+	if err != nil {
+		h.metrics.RecordMentions(ctx, mentionFailed, remainder)
+		return
+	}
+	h.metrics.RecordMentions(ctx, mentionUnresolved, remainder)
 }
 
 // resolveTitle returns the room name when present, else the sender's account (legacy rule).

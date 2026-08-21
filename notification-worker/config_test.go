@@ -81,3 +81,36 @@ func TestConfig_UserSettingsKillSwitch(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, cfg.UserSettingsEnabled)
 }
+
+func TestConfig_MentionNamesDefaults(t *testing.T) {
+	t.Setenv("VALKEY_ADDRS", "valkey:6379")
+	t.Setenv("MODE", "user")
+	// Same shadowing guard as TestConfig_UserSettingsDefaults: t.Setenv to pin
+	// cleanup, then unset so the envDefault is what actually gets parsed.
+	for _, key := range []string{"USER_CACHE_SIZE", "USER_CACHE_TTL", "MENTION_NAMES_TIMEOUT", "MENTION_NAMES_ENABLED"} {
+		t.Setenv(key, "")
+		require.NoError(t, os.Unsetenv(key))
+	}
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	// Matches broadcast-worker/message-gatekeeper so the user cache is tuned the
+	// same way everywhere it appears.
+	require.Equal(t, 10000, cfg.UserCacheSize)
+	require.Equal(t, 5*time.Minute, cfg.UserCacheTTL)
+	require.Equal(t, 2*time.Second, cfg.MentionNamesTimeout)
+	// On by default like USER_SETTINGS_ENABLED: this is a kill switch for a sick
+	// users collection, not a rollout gate.
+	require.True(t, cfg.MentionNamesEnabled, "MENTION_NAMES_ENABLED must default to true")
+}
+
+func TestConfig_MentionNamesKillSwitch(t *testing.T) {
+	t.Setenv("VALKEY_ADDRS", "valkey:6379")
+	t.Setenv("MODE", "user")
+	t.Setenv("MENTION_NAMES_ENABLED", "false")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.False(t, cfg.MentionNamesEnabled)
+}

@@ -1614,3 +1614,271 @@ func TestHandle_PriorityContactPiercesDNDStub(t *testing.T) {
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// stubMentionNames records the accounts it was asked to resolve so tests can pin
+// both the substitution and where in the pipeline the lookup runs.
+type stubMentionNames struct {
+	mu       sync.Mutex
+	out      map[string]string
+	err      error
+	gotCalls [][]string
+}
+
+func (s *stubMentionNames) Resolve(_ context.Context, accounts []string) (map[string]string, error) {
+	s.mu.Lock()
+	got := make([]string, len(accounts))
+	copy(got, accounts)
+	s.gotCalls = append(s.gotCalls, got)
+	s.mu.Unlock()
+	// out AND err together — the real resolver returns the names it collected
+	// before failing, so nil-ing out here would hide the partial-result path.
+	return s.out, s.err
+}
+
+func (s *stubMentionNames) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.gotCalls)
+}
+
+func (s *stubMentionNames) lastAccounts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.gotCalls) == 0 {
+		return nil
+	}
+	return s.gotCalls[len(s.gotCalls)-1]
+}
+
+// newTestHandlerWithMentions wires a mention resolver onto the default test rig.
+func newTestHandlerWithMentions(members MemberCache, names MentionNameResolver, emit Emitter) *Handler {
+	return NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          &stubFollowers{},
+		Parent:             stubParent{},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		MentionNames:       names,
+		LargeRoomThreshold: 500,
+	})
+}
+
+func mentionMembers() *stubMembers {
+	return &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+		},
+	}}
+}
+
+func mentionMsg(content string) []byte {
+	return msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: content, CreatedAt: time.Now(),
+	})
+}
+
+func TestHandle_BodyReplacesMentionsWithDisplayNames(t *testing.T) {
+	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("hey @bob look")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "hey Bob Chen look", emit.emitted[0].Body)
+}
+
+func TestHandle_BodyReplacesLiteralMentions(t *testing.T) {
+	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("@all and @here and @bob")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "All and here and Bob Chen", emit.emitted[0].Body)
+}
+
+func TestHandle_BodyKeepsUnresolvedMentionVerbatim(t *testing.T) {
+	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("@bob ping @ghost")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "Bob Chen ping @ghost", emit.emitted[0].Body,
+		"an account with no display name keeps its @ marker rather than being invented")
+}
+
+func TestHandle_MentionResolverSeesOnlyAccountsNeedingLookup(t *testing.T) {
+	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("@all @here @bob")))
+
+	assert.Equal(t, []string{"bob"}, names.lastAccounts(),
+		"@all/@here resolve from constants and must not hit the users collection")
+}
+
+func TestHandle_MentionResolverSkippedWithoutMentions(t *testing.T) {
+	names := &stubMentionNames{}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("no mentions here")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "no mentions here", emit.emitted[0].Body)
+	assert.Zero(t, names.callCount(), "a message without mentions must not pay for a lookup")
+}
+
+func TestHandle_MentionResolverSkippedWhenNoSurvivors(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob", Muted: true}},
+	}}
+	names := &stubMentionNames{}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(members, names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("hey @bob")))
+
+	assert.Empty(t, emit.emitted)
+	assert.Zero(t, names.callCount(), "no surviving recipient means no lookup")
+}
+
+func TestHandle_MentionResolverFailsOpen(t *testing.T) {
+	names := &stubMentionNames{err: errors.New("mongo down")}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("hey @bob and @all")),
+		"a lookup failure must not drop the push")
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "hey @bob and All", emit.emitted[0].Body,
+		"accounts degrade to the raw token; literals still render")
+}
+
+func TestHandle_LiteralMentionsRenderWithoutResolver(t *testing.T) {
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), nil, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("@all hey @bob")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "All hey @bob", emit.emitted[0].Body,
+		"a nil resolver still renders the literals and never panics")
+}
+
+func TestHandle_SubstitutedBodyRidesEveryBatch(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          &stubFollowers{},
+		Parent:             stubParent{},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		MentionNames:       names,
+		LargeRoomThreshold: 500,
+		RecipientBatchSize: 1,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("hey @bob")))
+
+	require.Len(t, emit.emitted, 2, "two survivors at batch size 1")
+	for i := range emit.emitted {
+		assert.Equal(t, "hey Bob Chen", emit.emitted[i].Body, "batch %d", i)
+	}
+	assert.Equal(t, 1, names.callCount(), "one lookup per message, not per batch")
+}
+
+func TestHandle_MentionResolverCalledOnceForRepeatedMention(t *testing.T) {
+	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("@bob then @BOB again")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "Bob Chen then Bob Chen again", emit.emitted[0].Body)
+	assert.Equal(t, []string{"bob"}, names.lastAccounts(), "duplicate mentions dedup to one lookup key")
+}
+
+func TestHandle_MentionLookupIsCapped(t *testing.T) {
+	var content string
+	for i := 0; i < maxMentionLookups+25; i++ {
+		content += fmt.Sprintf("@user%03d ", i)
+	}
+	names := &stubMentionNames{out: map[string]string{"user000": "User Zero"}}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg(content)))
+
+	assert.Len(t, names.lastAccounts(), maxMentionLookups,
+		"user-controlled content must not drive an unbounded $in")
+	require.Len(t, emit.emitted, 1)
+	assert.Contains(t, emit.emitted[0].Body, "User Zero", "tokens within the cap still resolve")
+	assert.Contains(t, emit.emitted[0].Body, "@user070", "tokens past the cap keep their raw @token")
+}
+
+func TestHandle_MentionPartialResolutionOnError(t *testing.T) {
+	// The production resolver returns names it did collect alongside the error;
+	// the handler must substitute those rather than dropping the whole map.
+	names := &stubMentionNames{
+		out: map[string]string{"bob": "Bob Chen"},
+		err: errors.New("mongo down"),
+	}
+	emit := &recordingEmitter{}
+	h := newTestHandlerWithMentions(mentionMembers(), names, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("@bob and @ghost and @all")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "Bob Chen and @ghost and All", emit.emitted[0].Body)
+}
+
+// TestHandle_MentionsAndBadgeCountsCoexist pins the two independently-added
+// push-envelope phases against each other: substituted body and per-recipient
+// unread counts must both survive on the same event.
+func TestHandle_MentionsAndBadgeCountsCoexist(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+		},
+	}}
+	names := &stubMentionNames{out: map[string]string{"bob": "Bob Chen"}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          &stubFollowers{},
+		Parent:             stubParent{},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		MentionNames:       names,
+		BadgeClient:        &fakeBadgeClient{resp: map[string]map[string]int{"site-a": {"bob": 7}}},
+		LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), mentionMsg("hey @bob")))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "hey Bob Chen", emit.emitted[0].Body, "body substitution survives the badge phase")
+	assert.Equal(t, map[string]int{"bob": 7}, emit.emitted[0].UnreadCounts, "badge counts survive substitution")
+}
