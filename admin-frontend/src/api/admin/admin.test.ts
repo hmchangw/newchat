@@ -149,7 +149,34 @@ describe('createUser', () => {
       password: 'hunter2',
       requirePasswordChange: true,
     })
-    expect(result).toEqual(USER)
+    expect(result.user).toEqual(USER)
+  })
+
+  it('createUser defaults absent fanout fields', async () => {
+    stubFetch(201, { id: 'u1', account: 'a', siteId: 's', roles: ['bot'], active: true })
+
+    const res = await createUser('tok', { account: 'a', roles: ['bot'], password: 'x' })
+
+    expect(res.user.account).toBe('a')
+    expect(res.syncFailures).toEqual([])
+    expect(res.hrSyncFailed).toBe(false)
+  })
+
+  it('createUser passes through fanout failures', async () => {
+    stubFetch(201, {
+      id: 'u1',
+      account: 'a',
+      siteId: 's',
+      roles: [],
+      active: true,
+      syncFailures: ['site-c'],
+      hrSyncFailed: true,
+    })
+
+    const res = await createUser('tok', { account: 'a', roles: ['bot'], password: 'x' })
+
+    expect(res.syncFailures).toEqual(['site-c'])
+    expect(res.hrSyncFailed).toBe(true)
   })
 
   it('throws AsyncJobError with reason account_exists on a 409', async () => {
@@ -181,6 +208,14 @@ describe('updateUser', () => {
     expect(init.method).toBe('PATCH')
     expect(init.headers.Authorization).toBe('Bearer tok')
     expect(JSON.parse(init.body)).toEqual({ active: false })
+  })
+
+  it('updateUser returns syncFailures', async () => {
+    stubFetch(200, { status: 'ok', syncFailures: ['site-b'] })
+
+    const res = await updateUser('tok', 'a', { roles: ['admin'] })
+
+    expect(res.syncFailures).toEqual(['site-b'])
   })
 })
 

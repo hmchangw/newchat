@@ -19,6 +19,8 @@ beforeEach(() => {
   useAuth.mockReturnValue({ logout })
 })
 
+const cleanResult = { user: { account: 'alice' }, syncFailures: [], hrSyncFailed: false }
+
 function fillValidForm() {
   fireEvent.change(screen.getByLabelText(/^account/i), { target: { value: 'alice' } })
   fireEvent.change(screen.getByLabelText(/^password/i), { target: { value: 'hunter2' } })
@@ -52,7 +54,7 @@ describe('CreateUserForm', () => {
   })
 
   it('submits createUser with the form values on valid input', async () => {
-    createUser.mockResolvedValue({ id: 'u-1' })
+    createUser.mockResolvedValue(cleanResult)
     const onCreated = vi.fn()
     render(<CreateUserForm authToken="tok" onClose={vi.fn()} onCreated={onCreated} />)
     fillValidForm()
@@ -83,5 +85,37 @@ describe('CreateUserForm', () => {
     fireEvent.click(screen.getByRole('button', { name: /create user/i }))
     await waitFor(() => expect(logout).toHaveBeenCalledTimes(1))
     expect(screen.queryByText(/expired/i)).not.toBeInTheDocument()
+  })
+
+  it('closes immediately on a clean result', async () => {
+    createUser.mockResolvedValue(cleanResult)
+    const onCreated = vi.fn()
+    render(<CreateUserForm authToken="tok" onClose={vi.fn()} onCreated={onCreated} />)
+    fillValidForm()
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalled())
+    expect(screen.queryByText(/sync/i)).toBeNull()
+  })
+
+  it('shows the sync notice and defers onCreated to Done', async () => {
+    createUser.mockResolvedValue({
+      user: { account: 'alice' },
+      syncFailures: ['site-c'],
+      hrSyncFailed: true,
+    })
+    const onCreated = vi.fn()
+    render(<CreateUserForm authToken="tok" onClose={vi.fn()} onCreated={onCreated} />)
+    fillValidForm()
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+    await waitFor(() => expect(screen.getByText(/created on this site/i)).toBeInTheDocument())
+    expect(onCreated).not.toHaveBeenCalled()
+    expect(screen.getByText(/site-c/)).toBeInTheDocument()
+    // The HR lane is the durable backstop, not the only lane — the copy must not
+    // claim remote sites missed the account when the direct sync landed.
+    expect(
+      screen.getByText(/durable identity sync did not start.*if any site also missed the direct sync/i)
+    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /done/i }))
+    expect(onCreated).toHaveBeenCalled()
   })
 })

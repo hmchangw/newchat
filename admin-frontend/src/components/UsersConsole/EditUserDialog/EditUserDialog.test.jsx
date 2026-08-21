@@ -30,9 +30,11 @@ beforeEach(() => {
   useAuth.mockReturnValue({ logout })
 })
 
+const CLEAN = { syncFailures: [] }
+
 describe('EditUserDialog', () => {
   it('submits only the changed field (roles) via updateUser', async () => {
-    updateUser.mockResolvedValue(undefined)
+    updateUser.mockResolvedValue(CLEAN)
     const onUpdated = vi.fn()
     render(<EditUserDialog authToken="tok" user={USER} onClose={vi.fn()} onUpdated={onUpdated} />)
     fireEvent.click(screen.getByRole('checkbox', { name: /^admin$/i }))
@@ -44,7 +46,7 @@ describe('EditUserDialog', () => {
   })
 
   it('requires a second confirming click before deactivating', async () => {
-    updateUser.mockResolvedValue(undefined)
+    updateUser.mockResolvedValue(CLEAN)
     render(<EditUserDialog authToken="tok" user={USER} onClose={vi.fn()} onUpdated={vi.fn()} />)
     fireEvent.click(screen.getByRole('checkbox', { name: /^deactivated$/i }))
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
@@ -55,7 +57,7 @@ describe('EditUserDialog', () => {
   })
 
   it('does not require confirmation when reactivating an inactive user', async () => {
-    updateUser.mockResolvedValue(undefined)
+    updateUser.mockResolvedValue(CLEAN)
     render(
       <EditUserDialog
         authToken="tok"
@@ -78,5 +80,40 @@ describe('EditUserDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(logout).toHaveBeenCalledTimes(1))
     expect(screen.queryByText(/expired/i)).not.toBeInTheDocument()
+  })
+
+  it('closes immediately on a clean save', async () => {
+    updateUser.mockResolvedValue(CLEAN)
+    const onUpdated = vi.fn()
+    render(<EditUserDialog authToken="tok" user={USER} onClose={vi.fn()} onUpdated={onUpdated} />)
+    fireEvent.change(screen.getByLabelText(/english name/i), { target: { value: 'New' } })
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(onUpdated).toHaveBeenCalled())
+    expect(screen.queryByText(/saved on this site/i)).toBeNull()
+  })
+
+  it('shows the sync notice and defers onUpdated to Close', async () => {
+    updateUser.mockResolvedValue({ syncFailures: ['site-b'] })
+    const onUpdated = vi.fn()
+    render(<EditUserDialog authToken="tok" user={USER} onClose={vi.fn()} onUpdated={onUpdated} />)
+    fireEvent.change(screen.getByLabelText(/english name/i), { target: { value: 'New' } })
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(screen.getByText(/saved on this site/i)).toBeInTheDocument())
+    expect(onUpdated).not.toHaveBeenCalled()
+    expect(screen.getByText(/site-b/)).toBeInTheDocument()
+    expect(screen.getByText(/re-save this user to retry/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^close$/i }))
+    expect(onUpdated).toHaveBeenCalled()
+  })
+
+  it('shows the sync notice on a deactivate that failed to sync', async () => {
+    updateUser.mockResolvedValue({ syncFailures: ['site-b'] })
+    const onUpdated = vi.fn()
+    render(<EditUserDialog authToken="tok" user={USER} onClose={vi.fn()} onUpdated={onUpdated} />)
+    fireEvent.click(screen.getByRole('checkbox', { name: /^deactivated$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(screen.getByText(/saved on this site/i)).toBeInTheDocument())
+    expect(onUpdated).not.toHaveBeenCalled()
   })
 })
