@@ -4,14 +4,14 @@ import { resyncUser } from '@/api'
 import { useHandleAdminError } from '@/hooks/useHandleAdminError'
 
 // Double-confirm wrapper around POST /users/:account/resync. Re-delivery only —
-// the server writes nothing — so the only alarming outcome is the create-notice
-// rule (spec R5): both lanes missed at least one site.
+// the server writes nothing — and the alert follows the create-notice rule
+// (spec R9): any direct-sync miss alerts; hrSyncFailed picks the severity.
 export default function ResyncUserDialog({ authToken, user, onClose }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
-  // Set only when BOTH lanes missed at least one site — either lane alone
-  // fully covers a site, so anything less closes silently as a success.
-  const [failedSites, setFailedSites] = useState(null)
+  // Set whenever the direct sync missed a site — the durable HR feed carries
+  // identity fields only, so it never substitutes for the full snapshot.
+  const [syncResult, setSyncResult] = useState(null)
   const handleAdminError = useHandleAdminError()
 
   const handleConfirm = async () => {
@@ -19,8 +19,8 @@ export default function ResyncUserDialog({ authToken, user, onClose }) {
     setError(null)
     try {
       const res = await resyncUser(authToken, user.account)
-      if (res.hrSyncFailed && res.syncFailures.length > 0) {
-        setFailedSites(res.syncFailures)
+      if (res.syncFailures.length > 0) {
+        setSyncResult(res)
       } else {
         onClose()
       }
@@ -32,13 +32,22 @@ export default function ResyncUserDialog({ authToken, user, onClose }) {
     }
   }
 
-  if (failedSites) {
+  if (syncResult) {
     return (
       <Modal onClose={onClose} labelledBy="resync-user-title">
         <h2 id="resync-user-title">Resync incomplete</h2>
         <p className="dialog-error" role="alert">
-          Both the direct sync and the durable identity sync missed: {failedSites.join(', ')}.
-          Retry once those sites are reachable.
+          {syncResult.hrSyncFailed ? (
+            <>
+              This user did not sync to: {syncResult.syncFailures.join(', ')}. Resync again once
+              those sites are reachable.
+            </>
+          ) : (
+            <>
+              Only this user&apos;s identity reached: {syncResult.syncFailures.join(', ')} —
+              roles and status did not sync. Resync again to deliver them.
+            </>
+          )}
         </p>
         <div className="dialog-actions">
           <button type="button" onClick={onClose}>
