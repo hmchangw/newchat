@@ -273,11 +273,14 @@ Rules:
   client error that received an error reply; it belongs in the domain counter,
   not in `terminal_failures_total`. Counting it there makes the loss signal
   non-zero at baseline and hides real loss.
-- Both latency histograms must declare explicit second-scale bucket boundaries.
+- Every latency histogram must declare explicit second-scale bucket boundaries.
   The o11y SDK registers bucket views only for its own instrument names, so an
   undeclared histogram inherits the OpenTelemetry default boundaries (0 to
   10000) and every sub-second duration lands in the first bucket. Use the SDK's
-  shared latency boundaries so percentiles stay comparable with `http.server.*`.
+  shared latency boundaries so percentiles stay comparable with `http.server.*`
+  — **except** where a semantic convention specifies its own, which wins: the two
+  RPC families above carry the RPC convention's boundaries, because an RPC panel
+  reads the wrong quantile off any others.
 - There is no publish-retry family. It was declared for "a future retry loop"
   and never acquired one — no service loops around its own publish, and
   JetStream's internal PubAck retries and the consumer Nak path are not
@@ -517,8 +520,8 @@ instrument name** you grep for in source underneath where the two differ.
 | `chat_nats_consumer_processing_duration_seconds`<br><sub>`chat.nats.consumer.processing.duration`</sub> | histogram | the 5 JetStream consumers | on first delivery | none — the broker does not know handler time | campaign (AckWait headroom) |
 | `chat_nats_terminal_failures_total` | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
 | `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | all 7 NATS services | on first failure | none — the broker has no record of a publish that never arrived | campaign |
-| `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, history-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
-| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4 / SLO-5** (`sli-slo.md` roadmap P1) |
+| `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
+| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4 / SLO-5** (`sli-slo.md` roadmap P1) — but see the `rpc.method` coverage note below |
 
 These two are the only families here that do not carry the `chat_` prefix, and
 the exception is deliberate: they implement the OpenTelemetry RPC semantic
@@ -535,6 +538,22 @@ not needed; query the unlabelled series directly. Each family replaced a
 histogram **and** a counter (`chat.nats.requests`, `chat.nats.request.handled`):
 a histogram already publishes `_count`, so the counters were the same numbers on
 a second series built from a second attribute set.
+
+**`rpc.method` coverage is partial.** The label is derived by
+`natsmetrics.RequestOperationFromSubject`, whose operation vocabulary covers
+room-service and history-service only. The other five `natsrouter` services
+(user-service, search-service, media-service, bot-message-handler,
+bot-room-service) emit the histogram — their latency and `error.type` are real —
+but every one of their ~45 routes records `rpc_method="unknown"`, so SLO-4/5 can
+slice by method for room-service and history-service and nowhere else. Extending
+the vocabulary is deliberately a separate change: it is a decision about how fine
+`rpc.method` should be and what that costs in cardinality, not a rename.
+
+Until then the classifier is anchored on the subject's family token, so an
+unclassified subject stays honestly `unknown` instead of borrowing another
+service's label. It did borrow one: user-service's
+`chat.user.{account}.request.user.{site}.chatlist.section.create` ends in
+`.create` and was recorded as `rpc_method="room_mutation"`.
 
 The five JetStream consumers are `message-gatekeeper`, `message-worker`,
 `broadcast-worker`, `notification-worker`, and `room-worker`. `room-service` and
@@ -566,14 +585,14 @@ the site, so join them through `target_info`.
 | `room_key_store_errors_total` | counter | room-worker | on first failure | Mongo driver metrics cover I/O broadly, not this operation | room-key store health |
 | `room_key_absent_errors_total` | counter | room-worker | on first occurrence | none | distinguishes "no key" from "store broken" |
 | `cache_hits_total` / `cache_misses_total` / `cache_errors_total` | counter | 4 workers + history-service via `pkg/cachemetrics` | on first access | none | **already on the cache-hit-rates dashboard** |
-| `search_service_requests_total` | counter | search-service | on first search | none | SLO-7 |
-| `search_service_request_duration_seconds` | histogram | search-service | on first search | none | **SLO-8** (needs the status label, roadmap P4) |
-| `search_service_es_duration_seconds` | histogram | search-service | on first search | ES `_nodes/stats` is cluster-wide, not per-query | SLO-8 attribution |
-| `search_sync_worker_bulk_flush_duration_seconds` | histogram | search-sync-worker | on first flush | none — the o11y ES integration is trace-only (ADR 0020 §6) | ES backpressure attribution |
+| `search_service_requests_total`<br><sub>`search_service_requests`</sub> | counter | search-service | on first search | none | SLO-7 |
+| `search_service_request_duration_seconds`<br><sub>`search_service_request_duration`</sub> | histogram | search-service | on first search | none | **SLO-8** (needs the status label, roadmap P4) |
+| `search_service_es_duration_seconds`<br><sub>`search_service_es_duration`</sub> | histogram | search-service | on first search | ES `_nodes/stats` is cluster-wide, not per-query | SLO-8 attribution |
+| `search_sync_worker_bulk_flush_duration_seconds`<br><sub>`search_sync_worker_bulk_flush_duration`</sub> | histogram | search-sync-worker | on first flush | none — the o11y ES integration is trace-only (ADR 0020 §6) | ES backpressure attribution |
 | `search_sync_worker_bulk_flush_actions` | histogram | search-sync-worker | on first flush | none | batch-fill attribution |
-| `search_sync_worker_bulk_item_failures_total` | counter | search-sync-worker | on first item failure | none — 429 visibility exists nowhere else | ES rejection attribution |
-| `search_sync_worker_messages_total` | counter | search-sync-worker | on first message | partial: `jetstream_consumer_num_redelivered` counts redeliveries but not their cause | redelivery-source attribution |
-| `search_sync_worker_parent_resolve_duration_seconds` | histogram | search-sync-worker | on first thread reply | none | consumer-loop drag attribution |
+| `search_sync_worker_bulk_item_failures_total`<br><sub>`search_sync_worker_bulk_item_failures`</sub> | counter | search-sync-worker | on first item failure | none — 429 visibility exists nowhere else | ES rejection attribution |
+| `search_sync_worker_messages_total`<br><sub>`search_sync_worker_messages`</sub> | counter | search-sync-worker | on first message | partial: `jetstream_consumer_num_redelivered` counts redeliveries but not their cause | redelivery-source attribution |
+| `search_sync_worker_parent_resolve_duration_seconds`<br><sub>`search_sync_worker_parent_resolve_duration`</sub> | histogram | search-sync-worker | on first thread reply | none | consumer-loop drag attribution |
 
 ### 13.4 Adding an instrument
 
