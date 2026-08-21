@@ -156,3 +156,21 @@ func TestRequireRequestID(t *testing.T) {
 		})
 	}
 }
+
+func TestNewMsgEncoded_SetsEncodingHeader(t *testing.T) {
+	// No request-id in ctx: NewMsg returns a nil Header; the helper owns the guard.
+	msg := natsutil.NewMsgEncoded(context.Background(), "chat.hr.a.users.upsert", []byte("z"), natsutil.EncodingZstd)
+	assert.Equal(t, natsutil.EncodingZstd, msg.Header.Get(natsutil.HeaderNatsEncoding))
+}
+
+func TestNewMsgEncoded_KeepsRequestIDHeader(t *testing.T) {
+	ctx := natsutil.WithRequestID(context.Background(), "req-encoded-test")
+	msg := natsutil.NewMsgEncoded(ctx, "chat.foo", []byte("z"), natsutil.EncodingZstd)
+	assert.Equal(t, "req-encoded-test", msg.Header.Get(natsutil.RequestIDHeader))
+	assert.Equal(t, natsutil.EncodingZstd, msg.Header.Get(natsutil.HeaderNatsEncoding))
+}
+
+func TestNewMsgEncoded_EmptyEncodingMatchesNewMsg(t *testing.T) {
+	msg := natsutil.NewMsgEncoded(context.Background(), "chat.foo", []byte("p"), "")
+	assert.Nil(t, msg.Header)
+}

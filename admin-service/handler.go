@@ -129,29 +129,18 @@ type resyncUserResponse struct {
 }
 
 // fanoutUserAccount replicates the admin-owned account state after a committed
-// local write: the durable HR identity bootstrap on create, plus the
-// user_account_updated snapshot to every remote INBOX. Failures never change
+// local write: the user_account_updated snapshot to every remote INBOX, plus —
+// when withHRBootstrap is set (create and resync) — the durable HR identity
+// bootstrap. Failures never change
 // the HTTP status — they come back as response fields and are WARN-logged once
-// here; there is no retry (the next edit re-sends the whole snapshot).
+// here; heal via the per-user resync endpoint or the next edit (both re-send
+// the whole snapshot).
 // Takes the request ctx and derives its own — see below.
-func (h *Handler) fanoutUserAccount(ctx context.Context, u *model.User, isCreate bool) (hrFailed bool, syncFailures []string) {
+func (h *Handler) fanoutUserAccount(ctx context.Context, u *model.User, withHRBootstrap bool) (hrFailed bool, syncFailures []string) {
 	if h.publish == nil || u == nil {
 		return false, nil
 	}
-	// The request ctx dies if the client disconnects, which doesn't fit: the caller's
-	// local work is done (the user write already committed) and nothing retries this
-	// path, so replication runs to completion on its own budget instead of dying with
-	// the client. That budget is cfg.FanoutTimeout capped by the request's deadline
-	// when it has one: the local work already spent part of net/http's write window,
-	// and a fresh full FanoutTimeout on top could outlive it — the connection would
-	// close before the caller reads syncFailures. A destination that doesn't land in
-	// time is reported like any other unacknowledged publish. Same shape as
-	// publishPermissionFanout.
-	deadline := time.Now().Add(h.cfg.FanoutTimeout)
-	if reqDeadline, ok := ctx.Deadline(); ok && reqDeadline.Before(deadline) {
-		deadline = reqDeadline
-	}
-	ctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
+	ctx, cancel := h.fanoutCtx(ctx)
 	defer cancel()
 
 	// The HR bootstrap shares the INBOX lanes' errgroup rather than running ahead of
@@ -160,7 +149,7 @@ func (h *Handler) fanoutUserAccount(ctx context.Context, u *model.User, isCreate
 	// that goroutine and read after g.Wait().
 	var g errgroup.Group
 	var hrLaneFailed bool
-	if isCreate {
+	if withHRBootstrap {
 		g.Go(func() error {
 			hrLaneFailed = h.publishHRBootstrap(ctx, u)
 			return nil
@@ -207,12 +196,7 @@ func (h *Handler) fanoutUserAccount(ctx context.Context, u *model.User, isCreate
 		})
 	}
 	_ = g.Wait() // every goroutine returns nil; per-destination outcomes are in failed
-	for i, dest := range dests {
-		if failed[i] {
-			syncFailures = append(syncFailures, dest)
-		}
-	}
-	return hrLaneFailed, syncFailures
+	return hrLaneFailed, failedDests(dests, failed)
 }
 
 // publishHRBootstrap parks the identity-only users.upsert on the local HR

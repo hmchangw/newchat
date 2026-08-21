@@ -1,4 +1,4 @@
-import "./style.css";
+import './style.css'
 
 // Presentational — no state, no api/ imports. All actions bubble up via
 // callbacks so UsersPage owns which dialog (if any) is open.
@@ -12,10 +12,10 @@ export default function UserTable({
   onResync,
 }) {
   if (loading) {
-    return <div className="users-table-status">Loading…</div>;
+    return <div className="users-table-status">Loading…</div>
   }
   if (users.length === 0) {
-    return <div className="users-table-status">No users found.</div>;
+    return <div className="users-table-status">No users found.</div>
   }
 
   return (
@@ -35,29 +35,22 @@ export default function UserTable({
           {users.map((user) => (
             <tr key={user.id}>
               <td>{user.account}</td>
-              <td>
-                {[user.engName, user.chineseName].filter(Boolean).join(" / ") ||
-                  "—"}
-              </td>
+              <td>{[user.engName, user.chineseName].filter(Boolean).join(' / ') || '—'}</td>
               <td>{user.siteId}</td>
-              <td>{user.roles.join(", ")}</td>
+              <td>{user.roles.join(', ')}</td>
               <td>
                 <span
                   className={`users-status-badge ${
-                    user.active ? "is-active" : "is-inactive"
+                    user.active ? 'is-active' : 'is-inactive'
                   }`}
                 >
-                  {user.active ? "Active" : "Deactivated"}
+                  {user.active ? 'Active' : 'Deactivated'}
                 </span>
               </td>
               <td className="users-table-actions">
                 {user.siteId === ownSiteId ? (
                   <>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => onEdit(user)}
-                    >
+                    <button type="button" className="btn btn-ghost" onClick={() => onEdit(user)}>
                       Edit
                     </button>
                     <button
@@ -67,24 +60,16 @@ export default function UserTable({
                     >
                       Set password
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => onSessions(user)}
-                    >
+                    <button type="button" className="btn btn-ghost" onClick={() => onSessions(user)}>
                       Sessions
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => onResync(user)}
-                    >
+                    <button type="button" className="btn btn-ghost" onClick={() => onResync(user)}>
                       Resync
                     </button>
                   </>
                 ) : (
                   // Cross-site replica: managed at its home site, read-only here.
-                  <span className="users-table-foreign">—</span>
+                  <span>—</span>
                 )}
               </td>
             </tr>
@@ -92,5 +77,5 @@ export default function UserTable({
         </tbody>
       </table>
     </div>
-  );
+  )
 }

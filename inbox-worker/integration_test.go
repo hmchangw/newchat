@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -1792,15 +1793,23 @@ func TestInboxWorker_SubscriptionMention_Integration(t *testing.T) {
 	}
 }
 
-func TestUpsertUserAccount_Integration(t *testing.T) {
-	db := testutil.MongoDB(t, "inbox-user-account")
-	store := &mongoInboxStore{userCol: db.Collection("users")}
-	ctx := context.Background()
+// setupUserAccountStore hands each user-account test an isolated users
+// collection with the unique account index UpsertUserAccount's E11000-retry
+// branch depends on (owned by user-service in production).
+func setupUserAccountStore(t *testing.T, prefix string) (*mongoInboxStore, *mongo.Collection) {
+	t.Helper()
+	db := testutil.MongoDB(t, prefix)
 	users := db.Collection("users")
-	_, err := users.Indexes().CreateOne(ctx, mongo.IndexModel{
+	_, err := users.Indexes().CreateOne(context.Background(), mongo.IndexModel{
 		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),
 	})
 	require.NoError(t, err)
+	return &mongoInboxStore{userCol: users}, users
+}
+
+func TestUpsertUserAccount_Integration(t *testing.T) {
+	store, users := setupUserAccountStore(t, "inbox-user-account")
+	ctx := context.Background()
 
 	snap := func(ts int64, active bool, roles []model.UserRole) *model.UserAccountUpdated {
 		return &model.UserAccountUpdated{ID: "id-1", Account: "acct-1", SiteID: "site-a",
@@ -1860,14 +1869,8 @@ func TestUpsertUserAccount_Integration(t *testing.T) {
 // direct publish, no OUTBOX FIFO), so a create can land after the edit that
 // supersedes it. Each case owns its account so the subtests stay independent.
 func TestUpsertUserAccount_ArrivalOrder_Integration(t *testing.T) {
-	db := testutil.MongoDB(t, "inbox-user-account-order")
-	store := &mongoInboxStore{userCol: db.Collection("users")}
+	store, users := setupUserAccountStore(t, "inbox-user-account-order")
 	ctx := context.Background()
-	users := db.Collection("users")
-	_, err := users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),
-	})
-	require.NoError(t, err)
 
 	// createSnap is what admin-service fans out on create; updateSnap is what a
 	// later edit fans out (rename + role grant + deactivation), so every field

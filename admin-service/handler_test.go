@@ -1407,7 +1407,7 @@ func doUserRequest(t *testing.T, h *Handler, method, path string, body any) *htt
 	return w
 }
 
-// hrSubjPrefix / inboxSubjPrefix split a capture into its two lanes.
+// hrSubjPrefix splits a capture into its two lanes.
 const hrSubjPrefix = "chat.hr."
 
 // hrCall returns the single HR-lane publish, or nil when the lane stayed silent.
@@ -1600,36 +1600,15 @@ func TestHandler_createUser_Fanout(t *testing.T) {
 	})
 
 	t.Run("fanout deadline is capped by the whole-request budget, not a fresh FANOUT_TIMEOUT", func(t *testing.T) {
-		// net/http's WriteTimeout runs from the request, not from the fanout: the local
-		// write and audit that run first eat into it. A fanout budget that always started
-		// fresh could finish after net/http closed the connection, losing syncFailures. So
-		// the handler pins one absolute request deadline at entry (withRequestBudget) and
-		// the fanout takes the earlier of it and now+FanoutTimeout.
-		ctrl := gomock.NewController(t)
-		m := NewMockAdminStore(ctrl)
-		m.EXPECT().CreateUser(gomock.Any(), gomock.Any()).Return(nil)
-		m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
-
-		var mu sync.Mutex
-		var callDeadline time.Time
-		publish := func(ctx context.Context, _ string, _ []byte, _ string) error {
-			mu.Lock()
-			defer mu.Unlock()
-			callDeadline, _ = ctx.Deadline()
-			return nil
-		}
-		cfg := accountFanoutCfg()
-		cfg.FanoutTimeout = time.Hour // far past the request budget: the request budget must win
-		h := newHandler(m, emptySessionStore(), cfg, nil, publish)
-
-		start := time.Now()
-		require.Equal(t, http.StatusCreated, doUserRequest(t, h, http.MethodPost, "/users", createUserBody([]string{"user"})).Code)
-
-		mu.Lock()
-		defer mu.Unlock()
-		assert.WithinDuration(t, start.Add(requestBudget), callDeadline, 2*time.Second,
-			"fanout deadline must be bounded by the request budget measured from handler entry")
-		assert.Less(t, requestBudget, httpWriteTimeout, "the request budget must leave room to write the response before net/http's WriteTimeout")
+		assertFanoutCappedByRequestBudget(t, func(publish func(context.Context, string, []byte, string) error) *Handler {
+			ctrl := gomock.NewController(t)
+			m := NewMockAdminStore(ctrl)
+			m.EXPECT().CreateUser(gomock.Any(), gomock.Any()).Return(nil)
+			m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
+			cfg := accountFanoutCfg()
+			cfg.FanoutTimeout = time.Hour // far past the request budget: the request budget must win
+			return newHandler(m, emptySessionStore(), cfg, nil, publish)
+		}, http.MethodPost, "/users", createUserBody([]string{"user"}), http.StatusCreated)
 	})
 
 	t.Run("local write fails → nothing is published", func(t *testing.T) {
@@ -1741,31 +1720,16 @@ func TestHandler_updateUser_Fanout(t *testing.T) {
 	}
 
 	t.Run("fanout deadline is capped by the whole-request budget, not a fresh FANOUT_TIMEOUT", func(t *testing.T) {
-		ctrl := gomock.NewController(t)
-		m := NewMockAdminStore(ctrl)
-		m.EXPECT().UpdateUser(gomock.Any(), "site-a", "alice", gomock.Any()).
-			Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
-		m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
-
-		var mu sync.Mutex
-		var callDeadline time.Time
-		publish := func(ctx context.Context, _ string, _ []byte, _ string) error {
-			mu.Lock()
-			defer mu.Unlock()
-			callDeadline, _ = ctx.Deadline()
-			return nil
-		}
-		cfg := accountFanoutCfg()
-		cfg.FanoutTimeout = time.Hour // far past the request budget: the request budget must win
-		h := newHandler(m, emptySessionStore(), cfg, nil, publish)
-
-		start := time.Now()
-		require.Equal(t, http.StatusOK, doUserRequest(t, h, http.MethodPatch, "/users/alice", map[string]any{"engName": "New"}).Code)
-
-		mu.Lock()
-		defer mu.Unlock()
-		assert.WithinDuration(t, start.Add(requestBudget), callDeadline, 2*time.Second,
-			"fanout deadline must be bounded by the request budget measured from handler entry")
+		assertFanoutCappedByRequestBudget(t, func(publish func(context.Context, string, []byte, string) error) *Handler {
+			ctrl := gomock.NewController(t)
+			m := NewMockAdminStore(ctrl)
+			m.EXPECT().UpdateUser(gomock.Any(), "site-a", "alice", gomock.Any()).
+				Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
+			m.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil)
+			cfg := accountFanoutCfg()
+			cfg.FanoutTimeout = time.Hour // far past the request budget: the request budget must win
+			return newHandler(m, emptySessionStore(), cfg, nil, publish)
+		}, http.MethodPatch, "/users/alice", map[string]any{"engName": "New"}, http.StatusOK)
 	})
 
 	t.Run("empty patch → no fanout", func(t *testing.T) {
@@ -1786,6 +1750,36 @@ func TestHandler_updateUser_Fanout(t *testing.T) {
 	})
 }
 
+// assertFanoutCappedByRequestBudget drives one request through a handler whose
+// FanoutTimeout is far past the request budget and asserts the captured fanout
+// deadline is the request budget measured from handler entry. net/http's
+// WriteTimeout runs from the request, not from the fanout: the local write and
+// audit that run first eat into it. A fanout budget that always started fresh
+// could finish after net/http closed the connection, losing syncFailures. So
+// each handler pins one absolute request deadline at entry (withRequestBudget)
+// and the fanout takes the earlier of it and now+FanoutTimeout.
+func assertFanoutCappedByRequestBudget(t *testing.T, mkHandler func(publish func(context.Context, string, []byte, string) error) *Handler, method, path string, body any, wantStatus int) {
+	t.Helper()
+	var mu sync.Mutex
+	var callDeadline time.Time
+	publish := func(ctx context.Context, _ string, _ []byte, _ string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		callDeadline, _ = ctx.Deadline()
+		return nil
+	}
+	h := mkHandler(publish)
+
+	start := time.Now()
+	require.Equal(t, wantStatus, doUserRequest(t, h, method, path, body).Code)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.WithinDuration(t, start.Add(requestBudget), callDeadline, 2*time.Second,
+		"fanout deadline must be bounded by the request budget measured from handler entry")
+	assert.Less(t, requestBudget, httpWriteTimeout, "the request budget must leave room to write the response before net/http's WriteTimeout")
+}
+
 // -------------------------------------------------------------------------
 // resyncUser — POST /users/:account/resync
 // -------------------------------------------------------------------------
@@ -1801,6 +1795,17 @@ func resyncStoredUser() *model.User {
 }
 
 func TestHandler_resyncUser(t *testing.T) {
+	t.Run("fanout deadline is capped by the whole-request budget, not a fresh FANOUT_TIMEOUT", func(t *testing.T) {
+		assertFanoutCappedByRequestBudget(t, func(publish func(context.Context, string, []byte, string) error) *Handler {
+			ctrl := gomock.NewController(t)
+			m := NewMockAdminStore(ctrl)
+			m.EXPECT().GetUserByAccount(gomock.Any(), "site-a", "user1").Return(resyncStoredUser(), nil)
+			cfg := accountFanoutCfg()
+			cfg.FanoutTimeout = time.Hour // far past the request budget: the request budget must win
+			return newHandler(m, emptySessionStore(), cfg, nil, publish)
+		}, http.MethodPost, "/users/user1/resync", nil, http.StatusOK)
+	})
+
 	t.Run("re-fires both lanes from the stored doc, no writes, no audit", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		m := NewMockAdminStore(ctrl)

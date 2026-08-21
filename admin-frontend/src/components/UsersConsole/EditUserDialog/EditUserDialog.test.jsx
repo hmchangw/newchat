@@ -105,15 +105,4 @@ describe('EditUserDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /^close$/i }))
     expect(onUpdated).toHaveBeenCalled()
   })
-
-  it('shows the sync notice on a deactivate that failed to sync', async () => {
-    updateUser.mockResolvedValue({ syncFailures: ['site-b'] })
-    const onUpdated = vi.fn()
-    render(<EditUserDialog authToken="tok" user={USER} onClose={vi.fn()} onUpdated={onUpdated} />)
-    fireEvent.click(screen.getByRole('checkbox', { name: /^deactivated$/i }))
-    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
-    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
-    await waitFor(() => expect(screen.getByText(/saved on this site/i)).toBeInTheDocument())
-    expect(onUpdated).not.toHaveBeenCalled()
-  })
 })

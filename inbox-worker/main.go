@@ -557,6 +557,10 @@ func (s *mongoInboxStore) ensureIndexes(ctx context.Context) {
 	// SetSubscriptionMentions filters on (roomId, u.account); without this index
 	// the federated badge write collscans the shared subscriptions collection.
 	mongoutil.WarnMissingIndexes(ctx, s.subCol, "roomId_1_u.account_1")
+	// users.account (unique, owned by user-service): UpsertUserAccount's E11000
+	// retry branch — the stale-event-vs-HR-race disambiguator — only fires when
+	// account uniqueness is index-enforced.
+	mongoutil.WarnMissingIndexes(ctx, s.userCol, "account_1")
 }
 
 // SetSubscriptionMentions flags the accounts' subscriptions as mentioned. The

@@ -34,19 +34,10 @@ func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
 	// users.account (unique) is owned by user-service; verify + warn only, never create.
 	mongoutil.WarnMissingIndexes(ctx, s.users, "account_1")
 
-	// Backs SearchUsers, whose only non-regex predicate is siteId: no other service
-	// declares a siteId-prefixed index on the shared users collection, so without
-	// this both the count and the paged find scan every user document. account
-	// trails so the unfiltered count is answered from the index alone (a q-filtered
-	// one still fetches, since engName/chineseName aren't in the key).
-	_, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "account", Value: 1}},
-	})
-	if err != nil {
-		return fmt.Errorf("create users siteId_account index: %w", err)
-	}
-
-	_, err = s.adminAudit.Indexes().CreateOne(ctx, mongo.IndexModel{
+	// No owned users index: SearchUsers spans every site (spec R7, collection
+	// scan — acceptable at admin-console scale), and the remaining by-account
+	// equality lookups are unique point-reads via account_1 above.
+	_, err := s.adminAudit.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "timestamp", Value: -1}},
 	})
 	if err != nil {
