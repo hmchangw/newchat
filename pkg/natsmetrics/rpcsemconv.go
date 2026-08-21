@@ -1,6 +1,9 @@
 package natsmetrics
 
-import "go.opentelemetry.io/otel/attribute"
+import (
+	"github.com/flywindy/o11y"
+	"go.opentelemetry.io/otel/attribute"
+)
 
 // The inbound and outbound request/reply families implement the OpenTelemetry
 // RPC semantic conventions instead of carrying names of our own.
@@ -40,11 +43,27 @@ const (
 	rpcSystemNATS = "nats"
 )
 
-// rpcDurationBuckets are the convention's boundaries. An RPC panel that assumes
-// them reads the wrong quantile off our generic latency buckets.
-var rpcDurationBuckets = []float64{
-	0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10,
-}
+// rpcDurationBuckets is the one place these families deliberately depart from
+// the convention.
+//
+// The RPC convention prescribes 14 boundaries — o11y's 11 plus 0.075, 0.75 and
+// 7.5 — and asks for the identical set for http.server.request.duration. o11y
+// already overrides that for every http.server.* histogram, and its reason
+// decides this too: "Standardizing these boundaries across the company keeps
+// P99 calculations directly comparable between services" (o11y/options.go).
+// Taking the convention's set here would leave NATS RPC and HTTP with different
+// bucket layouts, so their percentiles could not be compared and no single
+// recording rule would fit both.
+//
+// The deviation is confined to boundaries. Instrument names, the `s` unit,
+// rpc.system.name, rpc.method and the conditional error.type all still conform,
+// which is where the interoperability actually lives: a generic RPC dashboard
+// still finds and groups these series, and only histogram_quantile's
+// interpolation points differ.
+//
+// Neither set has a boundary at 0.3, so SLO-5's 300 ms threshold falls mid
+// bucket either way. That is a separate question from this one.
+var rpcDurationBuckets = o11y.DefaultLatencyBuckets()
 
 // rpcSystemName is constant for the process; the attribute is built once.
 var rpcSystemName = attribute.String(rpcSystemNameKey, rpcSystemNATS)

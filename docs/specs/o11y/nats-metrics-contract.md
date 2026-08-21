@@ -36,14 +36,18 @@ normalized export. Project-owned metrics use a `chat_` prefix except existing
 loadgen families, which retain `loadgen_` for compatibility.
 
 One further exception, and it takes precedence: **an instrument that implements
-an OpenTelemetry semantic convention uses the convention's name, labels, unit
-and bucket boundaries verbatim, prefix included or omitted as the convention
-says.** The request/reply families are the case in point — they are
-`rpc.client.call.duration` and `rpc.server.call.duration`, not `chat.nats.*`.
-Renaming a standard metric into a house prefix costs exactly what the standard
-buys: a generic RPC dashboard, a collector processor, or a backend's built-in
-RPC view stops recognising it. Project-specific labels (`site`) may still be
-added; the convention permits extra attributes.
+an OpenTelemetry semantic convention uses the convention's name, labels and unit
+verbatim, prefix included or omitted as the convention says.** The request/reply
+families are the case in point — they are `rpc.client.call.duration` and
+`rpc.server.call.duration`, not `chat.nats.*`. Renaming a standard metric into a
+house prefix costs exactly what the standard buys: a generic RPC dashboard, a
+collector processor, or a backend's built-in RPC view stops recognising it.
+Project-specific labels (`site`) may still be added; the convention permits
+extra attributes.
+
+Bucket boundaries are the deliberate exception to that exception: they come from
+`o11y.DefaultLatencyBuckets()` even on instruments that otherwise conform. §7
+gives the reason.
 
 Allowed bounded labels:
 
@@ -273,14 +277,27 @@ Rules:
   client error that received an error reply; it belongs in the domain counter,
   not in `terminal_failures_total`. Counting it there makes the loss signal
   non-zero at baseline and hides real loss.
-- Every latency histogram must declare explicit second-scale bucket boundaries.
-  The o11y SDK registers bucket views only for its own instrument names, so an
-  undeclared histogram inherits the OpenTelemetry default boundaries (0 to
-  10000) and every sub-second duration lands in the first bucket. Use the SDK's
-  shared latency boundaries so percentiles stay comparable with `http.server.*`
-  — **except** where a semantic convention specifies its own, which wins: the two
-  RPC families above carry the RPC convention's boundaries, because an RPC panel
-  reads the wrong quantile off any others.
+- Every latency histogram must declare explicit second-scale bucket boundaries,
+  and they must be `o11y.DefaultLatencyBuckets()` — **including** instruments
+  that otherwise follow a semantic convention. The o11y SDK registers bucket
+  views only for its own instrument names, so an undeclared histogram inherits
+  the OpenTelemetry default boundaries (0 to 10000) and every sub-second
+  duration lands in the first bucket.
+
+  Boundaries are deliberately the one part of a convention we do not adopt. The
+  RPC and HTTP conventions both prescribe 14 boundaries (o11y's 11 plus 0.075,
+  0.75 and 7.5), and o11y already overrides that for every `http.server.*`
+  histogram, for a reason that decides it here too: *"Standardizing these
+  boundaries across the company keeps P99 calculations directly comparable
+  between services."* Letting NATS RPC keep the convention's set would give it a
+  different layout from HTTP, so their percentiles could not be compared and no
+  single recording rule would fit both. What conformance buys is unaffected —
+  names, unit and labels still match, so a generic RPC dashboard still finds and
+  groups the series; only `histogram_quantile`'s interpolation points differ.
+
+  Note that no set in play has a boundary at `0.3`, so SLO-5's 300 ms threshold
+  falls mid-bucket under any of them. That is a separate question from this
+  rule.
 - There is no publish-retry family. It was declared for "a future retry loop"
   and never acquired one — no service loops around its own publish, and
   JetStream's internal PubAck retries and the consumer Nak path are not
@@ -527,7 +544,8 @@ These two are the only families here that do not carry the `chat_` prefix, and
 the exception is deliberate: they implement the OpenTelemetry RPC semantic
 conventions, so they carry the convention's instrument names
 (`rpc.client.call.duration` / `rpc.server.call.duration`), its `rpc.system.name`
-and `rpc.method` labels, its `error.type` label, and its bucket boundaries. A
+and `rpc.method` labels, and its `error.type` label — but not its bucket
+boundaries, which are `o11y.DefaultLatencyBuckets()` for the reason given in §7. A
 standard name is what makes a generic RPC dashboard, a collector processor or a
 backend's RPC view read them without a translation table — the whole point of
 using one. They keep our `site` label, which the convention permits.

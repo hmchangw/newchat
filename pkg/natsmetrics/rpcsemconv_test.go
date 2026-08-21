@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/flywindy/o11y"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -113,10 +114,27 @@ func TestRequestCountersAreReplacedByTheHistogramCount(t *testing.T) {
 	assert.Equal(t, uint64(2), client[0].Count, "the histogram count is the request count")
 }
 
-// Buckets come from the convention's own table, not from our generic latency
-// boundaries: an RPC panel that assumes the standard boundaries reads the
-// wrong quantile otherwise.
-func TestRequestInstruments_UseSemconvBucketBoundaries(t *testing.T) {
+// Buckets are the one place these families deliberately depart from the
+// convention, and the deviation is deliberate — do not "fix" it back.
+//
+// The RPC convention prescribes 14 boundaries (its own set plus 0.075, 0.75 and
+// 7.5). o11y prescribes 11 and already applies them to every http.server.*
+// histogram, overriding the identical 14 the HTTP convention asks for. Its
+// stated reason is the deciding one: "Standardizing these boundaries across the
+// company keeps P99 calculations directly comparable between services"
+// (o11y/options.go). Using the convention's 14 here would give NATS RPC and
+// HTTP different bucket layouts, so their percentiles could not be compared and
+// no shared recording rule would fit both.
+//
+// What conformance actually buys is kept: the instrument names, the `s` unit,
+// rpc.system.name, rpc.method, and the conditional error.type are all
+// unchanged, so a generic RPC dashboard still finds and groups these series.
+// Only histogram_quantile's interpolation points differ.
+//
+// Cost of the deviation, measured: 14 series per label combination instead of
+// 17, about 250 fewer across the fleet — which is not why this was done. The
+// comparability is.
+func TestRequestInstruments_UseSharedLatencyBoundaries(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	ctx := context.Background()
 	p := m.Publisher("s1")
@@ -125,11 +143,35 @@ func TestRequestInstruments_UseSemconvBucketBoundaries(t *testing.T) {
 	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
 	rm := collect(t, reader)
 
-	want := []float64{0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10}
+	want := o11y.DefaultLatencyBuckets()
 	for _, name := range []string{"rpc.client.call.duration", "rpc.server.call.duration"} {
 		points := histogramPoints(t, rm, name)
 		require.Len(t, points, 1, name)
-		assert.Equal(t, want, points[0].Bounds, "%s must use the semconv boundaries", name)
+		assert.Equal(t, want, points[0].Bounds,
+			"%s must share o11y's boundaries so its percentiles compare with http.server.*", name)
+	}
+}
+
+// The consumer histogram and the two RPC histograms must agree, so a single
+// recording rule covers every latency family this package exports.
+func TestAllLatencyHistogramsShareOneBoundarySet(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	ctx := context.Background()
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "ST", Consumer: "dur"})
+	require.NoError(t, c.Track(ctx, &fakeMsg{}, EventCreated, 5).Ack())
+	p := m.Publisher("s1")
+	p.Request(ctx, OperationHistoryRead, time.Millisecond, nil)
+	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
+	rm := collect(t, reader)
+
+	for _, name := range []string{
+		"chat.nats.consumer.processing.duration",
+		"rpc.client.call.duration",
+		"rpc.server.call.duration",
+	} {
+		points := histogramPoints(t, rm, name)
+		require.Len(t, points, 1, name)
+		assert.Equal(t, o11y.DefaultLatencyBuckets(), points[0].Bounds, name)
 	}
 }
 
