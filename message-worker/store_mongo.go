@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -12,11 +11,6 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-)
-
-var (
-	errThreadRoomExists   = errors.New("thread room already exists")
-	errThreadRoomNotFound = errors.New("thread room not found")
 )
 
 type threadStoreMongo struct {
@@ -52,46 +46,39 @@ func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
 
-func (s *threadStoreMongo) CreateThreadRoom(ctx context.Context, room *model.ThreadRoom) error {
-	toInsert := *room
-	if toInsert.ReplyAccounts == nil {
-		toInsert.ReplyAccounts = []string{}
+// EnsureThreadRoom resolves the thread room for room.ParentMessageID in a single round
+// trip: an upserting FindOneAndUpdate whose $setOnInsert seeds the new room only when
+// absent, returning the post-image either way. The common subsequent-reply path matches
+// the existing room (no insert, no dup-key); the first reply inserts and returns it. created
+// is reported by comparing the returned _id to the candidate's — they match only on insert.
+// A rare concurrent first-reply can still surface a duplicate-key error (two upserts racing
+// the unique parentMessageId index); we resolve it by reading the now-existing room.
+func (s *threadStoreMongo) EnsureThreadRoom(ctx context.Context, room *model.ThreadRoom) (*model.ThreadRoom, bool, error) {
+	candidate := *room
+	if candidate.ReplyAccounts == nil {
+		candidate.ReplyAccounts = []string{}
 	}
-	_, err := s.threadRooms.InsertOne(ctx, &toInsert)
+	filter := bson.M{"parentMessageId": candidate.ParentMessageID}
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+
+	var stored model.ThreadRoom
+	err := s.threadRooms.FindOneAndUpdate(ctx, filter, bson.M{"$setOnInsert": candidate}, opts).Decode(&stored)
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			return fmt.Errorf("insert thread room: %w", errThreadRoomExists)
+			// Lost the insert race to a concurrent first reply: the room now exists, read it.
+			if ferr := s.threadRooms.FindOne(ctx, filter).Decode(&stored); ferr != nil {
+				return nil, false, fmt.Errorf("read thread room after upsert race for parent %s: %w", candidate.ParentMessageID, ferr)
+			}
+			return &stored, false, nil
 		}
-		return fmt.Errorf("insert thread room: %w", err)
+		return nil, false, fmt.Errorf("ensure thread room for parent %s: %w", candidate.ParentMessageID, err)
 	}
-	return nil
-}
-
-func (s *threadStoreMongo) GetThreadRoomByParentMessageID(ctx context.Context, parentMessageID string) (*model.ThreadRoom, error) {
-	var room model.ThreadRoom
-	if err := s.threadRooms.FindOne(ctx, bson.M{"parentMessageId": parentMessageID}).Decode(&room); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, errThreadRoomNotFound)
-		}
-		return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
-	}
-	return &room, nil
+	return &stored, stored.ID == candidate.ID, nil
 }
 
 func (s *threadStoreMongo) InsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
 	if _, err := s.threadSubscriptions.InsertOne(ctx, sub); err != nil {
 		return fmt.Errorf("insert thread subscription: %w", err)
-	}
-	return nil
-}
-
-// UpsertThreadSubscription inserts sub if no document exists for (threadRoomId, userAccount);
-// otherwise it is a no-op. $setOnInsert ensures existing subscriptions are never overwritten.
-func (s *threadStoreMongo) UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
-	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
-	update := bson.M{"$setOnInsert": sub}
-	if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
-		return fmt.Errorf("upsert thread subscription: %w", err)
 	}
 	return nil
 }
@@ -160,6 +147,53 @@ func (s *threadStoreMongo) AdvanceThreadSubscriptionLastSeen(ctx context.Context
 		bson.M{"$max": bson.M{"lastSeenAt": at}},
 	); err != nil {
 		return fmt.Errorf("advance thread lastSeenAt for %q in thread room %q: %w", account, threadRoomID, err)
+	}
+	return nil
+}
+
+// UpsertThreadSubscriptionAdvancingLastSeen creates the (threadRoomId, userAccount)
+// subscription via $setOnInsert when missing and advances its lastSeenAt to at via $max,
+// in one write. It folds a $setOnInsert upsert + AdvanceThreadSubscriptionLastSeen for
+// the replier on the hot path. lastSeenAt is owned exclusively by $max (never $setOnInsert)
+// so the two operators don't conflict: a new sub is seeded with lastSeenAt=at, an existing
+// one is moved forward only (never backward).
+func (s *threadStoreMongo) UpsertThreadSubscriptionAdvancingLastSeen(ctx context.Context, sub *model.ThreadSubscription, at time.Time) error {
+	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
+	update := bson.M{
+		"$setOnInsert": bson.M{
+			"_id":             sub.ID,
+			"parentMessageId": sub.ParentMessageID,
+			"roomId":          sub.RoomID,
+			"threadRoomId":    sub.ThreadRoomID,
+			"userId":          sub.UserID,
+			"userAccount":     sub.UserAccount,
+			"siteId":          sub.SiteID,
+			"hasMention":      sub.HasMention,
+			"createdAt":       sub.CreatedAt,
+			"updatedAt":       sub.UpdatedAt,
+		},
+		"$max": bson.M{"lastSeenAt": at},
+	}
+	if _, err := s.threadSubscriptions.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
+		if !mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("upsert thread subscription advancing lastSeen: %w", err)
+		}
+		// Lost the insert race to a concurrent reply by the same account in this thread
+		// (both missed the filter, both tried to insert, the unique
+		// (threadRoomId, userAccount) index rejected this one). The sub now exists, so
+		// replay the $max alone — without it the reply would NAK and the replier's
+		// lastSeenAt would ride on redelivery.
+		res, raceErr := s.threadSubscriptions.UpdateOne(ctx, filter, bson.M{"$max": bson.M{"lastSeenAt": at}})
+		if raceErr != nil {
+			return fmt.Errorf("advance thread subscription lastSeen after upsert race: %w", raceErr)
+		}
+		// Nothing matched (threadRoomId, userAccount), so the duplicate came from some
+		// other unique key — an _id already owned by an unrelated subscription, say — and
+		// this is a genuine conflict rather than the race above. Swallowing it would drop
+		// the write silently.
+		if res.MatchedCount == 0 {
+			return fmt.Errorf("upsert thread subscription advancing lastSeen: %w", err)
+		}
 	}
 	return nil
 }
