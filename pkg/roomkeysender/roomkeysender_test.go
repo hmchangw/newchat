@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/nats-io/nats.go"
@@ -246,17 +247,40 @@ func TestSender_MetricsAddNoAllocationOnSuccess(t *testing.T) {
 	payload := []byte("{}")
 
 	plain := roomkeysender.NewSender(&mockPublisher{})
-	baseline := testing.AllocsPerRun(200, func() {
+	baseline := minAllocsPerRun(func() {
 		_ = plain.SendDataContext(ctx, "alice", payload)
 	})
 
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader()))
 	instrumented := roomkeysender.NewSender(&mockPublisher{},
 		roomkeysender.WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
-	withMetrics := testing.AllocsPerRun(200, func() {
+	withMetrics := minAllocsPerRun(func() {
 		_ = instrumented.SendDataContext(ctx, "alice", payload)
 	})
 
 	assert.Equal(t, baseline, withMetrics,
 		"instrumenting a successful room-key send must not add allocations")
+}
+
+// minAllocsPerRun is testing.AllocsPerRun repeated, keeping the lowest result.
+//
+// AllocsPerRun brackets the loop with runtime.ReadMemStats, which counts every
+// allocation in the process, not just the ones the closure made. Under `go test
+// -tags integration` the whole package runs, and its other tests leave NATS
+// connections and their background goroutines alive — those allocate during the
+// measurement window and land in the same counter. That is how this assertion
+// failed in CI with baseline=3 against withMetrics=2 while passing locally,
+// where only this test was running.
+//
+// Background noise can only ever inflate a sample, never deflate it, so the
+// minimum across repetitions converges on the closure's own cost and the
+// equality this test is actually about stays exact.
+func minAllocsPerRun(f func()) float64 {
+	lowest := math.MaxFloat64
+	for range 5 {
+		if got := testing.AllocsPerRun(200, f); got < lowest {
+			lowest = got
+		}
+	}
+	return lowest
 }
