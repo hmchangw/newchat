@@ -138,3 +138,27 @@ func TestRequestOperationFromSubject_NonRequestSubjectsAreUnknown(t *testing.T) 
 		})
 	}
 }
+
+// Suffix rules must not cross service families. Every subject below belongs to
+// a service other than room-service, and each one ends in a tail that
+// room-service also uses. The first is not hypothetical: user-service's
+// chatlist.section.create was classified as room_mutation, so its traffic
+// landed in room-service's rpc.method series.
+//
+// Unknown is the right answer for these until the operation vocabulary is
+// extended deliberately — a wrong bounded label is worse than an honest
+// unknown, because a wrong one is silently aggregated with real traffic.
+func TestRequestOperationFromSubject_DoesNotCrossServiceFamilies(t *testing.T) {
+	for _, subj := range []string{
+		subject.UserChatlistSectionCreate("alice", "site-a"),
+		"chat.user.alice.request.user.site-a.chatlist.section.rename",
+		"chat.user.alice.request.user.site-a.member.list",
+		"chat.user.alice.request.user.site-a.key.get",
+		"chat.user.alice.request.search.site-a.messages",
+		"chat.user.alice.request.media.site-a.open",
+	} {
+		t.Run(subj, func(t *testing.T) {
+			assert.Equal(t, OperationUnknown, RequestOperationFromSubject(subj))
+		})
+	}
+}
