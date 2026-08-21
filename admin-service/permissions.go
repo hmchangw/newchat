@@ -323,19 +323,7 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 	if h.publish == nil || len(dests) == 0 {
 		return nil
 	}
-	// The request ctx dies if the client disconnects, which doesn't fit: the caller's
-	// local work is done (create's ledger write already committed; resync writes
-	// nothing), so re-delivery runs to completion on its own budget, shared by every
-	// lane. That budget is cfg.FanoutTimeout capped by the request's absolute deadline
-	// (withRequestBudget): the local work already spent part of net/http's write window,
-	// and a fresh full FanoutTimeout on top could outlive it — the connection would
-	// close before the caller reads syncFailures. A destination that doesn't land in
-	// time is reported like any other unacknowledged publish.
-	deadline := time.Now().Add(h.cfg.FanoutTimeout)
-	if reqDeadline, ok := ctx.Deadline(); ok && reqDeadline.Before(deadline) {
-		deadline = reqDeadline
-	}
-	ctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
+	ctx, cancel := h.fanoutCtx(ctx)
 	defer cancel()
 
 	now := time.Now().UTC().UnixMilli()
@@ -401,7 +389,29 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 		})
 	}
 	_ = g.Wait() // every goroutine returns nil; per-destination outcomes are in failed
+	return failedDests(dests, failed)
+}
 
+// fanoutCtx derives the replication budget every fanout runs on. The request ctx
+// dies if the client disconnects, which doesn't fit: by the time a fanout starts,
+// the caller's local work has already committed (or, for resync, there is none),
+// so re-delivery runs to completion on its own budget instead of dying with the
+// client. That budget is cfg.FanoutTimeout capped by the request's absolute
+// deadline (withRequestBudget): the local work already spent part of net/http's
+// write window, and a fresh full FanoutTimeout on top could outlive it — the
+// connection would close before the caller reads syncFailures. A destination that
+// doesn't land in time is reported like any other unacknowledged publish.
+func (h *Handler) fanoutCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(h.cfg.FanoutTimeout)
+	if reqDeadline, ok := ctx.Deadline(); ok && reqDeadline.Before(deadline) {
+		deadline = reqDeadline
+	}
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
+}
+
+// failedDests collects the destinations whose position-indexed lane reported
+// failure, preserving the configured destination order.
+func failedDests(dests []string, failed []bool) []string {
 	var failures []string
 	for i, dest := range dests {
 		if failed[i] {

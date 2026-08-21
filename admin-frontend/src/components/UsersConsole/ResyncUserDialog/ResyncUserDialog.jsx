@@ -9,8 +9,6 @@ import { useHandleAdminError } from '@/hooks/useHandleAdminError'
 export default function ResyncUserDialog({ authToken, user, onClose }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
-  // Set whenever the direct sync missed a site — the durable HR feed carries
-  // identity fields only, so it never substitutes for the full snapshot.
   const [syncResult, setSyncResult] = useState(null)
   const handleAdminError = useHandleAdminError()
 

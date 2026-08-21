@@ -619,8 +619,9 @@ func TestIntegration_EnsureIndexes_Keys(t *testing.T) {
 	require.NoError(t, st.EnsureIndexes(context.Background()))
 
 	userKeys := testutil.IndexSpecs(t, db.Collection("users"))
-	// users.account unique is owned by user-service now, not created here.
-	require.Contains(t, userKeys, "siteId:1,account:1")
+	// No owned users index: account_1 is user-service's, and the old
+	// {siteId, account} compound died with SearchUsers' site filter (R7).
+	require.NotContains(t, userKeys, "siteId:1,account:1")
 
 	auditKeys := testutil.IndexSpecs(t, db.Collection("admin_audit"))
 	require.Contains(t, auditKeys, "siteId:1,timestamp:-1")

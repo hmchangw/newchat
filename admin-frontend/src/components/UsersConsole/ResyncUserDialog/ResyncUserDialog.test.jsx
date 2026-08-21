@@ -43,8 +43,8 @@ describe('ResyncUserDialog', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  // Either lane alone fully covers a site (spec Q6/R3) — same rule as the
-  // create notice (R5): only both-lanes-missed is worth an alarm.
+  // Notice rule (spec R9): alerts whenever the direct sync missed a site;
+  // hrSyncFailed only picks the severity. HR-only failure stays silent.
   it('closes silently when only the HR lane failed', async () => {
     resyncUser.mockResolvedValue({ syncFailures: [], hrSyncFailed: true })
     const onClose = vi.fn()

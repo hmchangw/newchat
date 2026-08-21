@@ -490,6 +490,10 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 // crashloop the shared collection, and a missing index must not take the worker down.
 func (s *mongoInboxStore) ensureIndexes(ctx context.Context) {
 	mongoutil.WarnMissingIndexes(ctx, s.threadSubCol, "threadRoomId_1_userAccount_1")
+	// users.account (unique, owned by user-service): UpsertUserAccount's E11000
+	// retry branch — the stale-event-vs-HR-race disambiguator — only fires when
+	// account uniqueness is index-enforced.
+	mongoutil.WarnMissingIndexes(ctx, s.userCol, "account_1")
 }
 
 // UpsertThreadSubscription inserts the subscription on first event for a

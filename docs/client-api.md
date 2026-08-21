@@ -7366,7 +7366,7 @@ After the write commits, the whole account snapshot is fanned out to every other
 | Field | Type | Notes |
 |---|---|---|
 | `status` | string | Always `"ok"`. |
-| `syncFailures` | string[] | Remote site IDs whose account-snapshot publish was not acknowledged. Omitted (not `[]`) when every destination landed. Still `200` when present — the update is stored on this site; the listed sites converge on the next edit. |
+| `syncFailures` | string[] | Remote site IDs whose account-snapshot publish was not acknowledged. Omitted (not `[]`) when every destination landed. Still `200` when present — the update is stored on this site; the listed sites converge when healed by [§9.16 resync](#916-resync-user) or the next edit. |
 
 ```json
 { "status": "ok" }

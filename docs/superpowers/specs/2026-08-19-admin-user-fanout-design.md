@@ -50,13 +50,13 @@ colleague review, which **supersedes** the crossed-through parts.
 | # | Decision |
 |---|---|
 | Q1 | Scope is admin-service's three write paths reaching every remote site. Primary goal: admin-created accounts exist everywhere. Secondary: `active`/`roles`/names not stale. |
-| Q2 | ~~Pure status style: WARN only, response unchanged.~~ **Superseded by R2:** fanout failures are surfaced in the HTTP response so the admin frontend can distinguish a DB-write error from a fanout error. Still no retry machinery and no resync endpoint. |
+| Q2 | ~~Pure status style: WARN only, response unchanged.~~ **Superseded by R2:** fanout failures are surfaced in the HTTP response so the admin frontend can distinguish a DB-write error from a fanout error. ~~Still no retry machinery and no resync endpoint.~~ **Superseded by R8:** a per-user resync endpoint re-delivers the snapshot. |
 | Q3 | **Two lanes** (revised by R3): the **create bootstrap** rides the existing HR feed (`chat.hr.{site}.users.upsert`, durable, create only). **All admin-owned account state — roles, names, active — rides a new INBOX event** `user_account_updated` (direct publish, whole snapshot, fired on every trigger). |
 | Q4 | HR lane fields (create only): `_id, account, siteId(home), engName, chineseName`. INBOX snapshot fields: `id, account, siteId(home), engName, chineseName, roles, active, timestamp`. Never cross: `services.password`, `requirePasswordChange`, `permissions` (own event), `settings`/`statusText`/`chatlist` (user-service owns), `employeeId`/dept fields (HR owns; admin never sets them). |
 | Q5 | Triggers: `createUser`, `updateUser` (roles / names / `active=true`), `DeactivateAndRevoke`. Not: `setPassword`, `changePassword`, `revokeSession(s)`, permissions. All three publish the INBOX snapshot; only `createUser` additionally publishes the HR bootstrap. |
 | Q6 | INBOX lane destinations: every entry of `ALL_SITE_IDS` except self (`remoteSites`). HR lane reaches every site by construction (per-site `hr-sync-worker`). |
 | Q7 | Remote INBOX apply is an **upsert** keyed by `account` with `$setOnInsert {_id, siteId}`, so either arrival order converges to the same doc with the same `_id`. This is a deliberate exception to the other four user handlers' "missing doc = silent no-op" rule and must be commented as such. |
-| Q8 | ~~Name changes ride the HR lane.~~ **Superseded by R3:** name changes ride the INBOX snapshot. The HR lane fires only at create. |
+| Q8 | ~~Name changes ride the HR lane.~~ **Superseded by R3:** name changes ride the INBOX snapshot. The HR lane fires ~~only at create~~ at create and per-user resync (R8). |
 | Q9 | HR payload is an identity-only `model.User` (same shape `room-worker` / `message-worker` publish); `roles`, `active`, `services` are never populated on the wire. |
 | Q10 | Watermark: new top-level field `accountUpdatedAt`, compared with **`$lte`** (two admin writes can share a millisecond; the apply is an idempotent whole-snapshot `$set`, so a same-ms tie resolves to last-delivered). |
 | Q11 | No `Nats-Msg-Id` on either lane (snapshot is idempotent; `$setOnInsert {_id}` already prevents duplicate inserts). |
@@ -66,13 +66,13 @@ colleague review, which **supersedes** the crossed-through parts.
 | Q16 | HR lane `changeType` is **omitted** (`omitempty`). `hr-sync-worker` ignores it; `search-sync-worker` does not consume `users.upsert`. |
 | Q21 | HR-lane publish failure does not fail the request (the local insert already committed; a 5xx would make the admin retry into a 409). **R2 refines it:** the failure is reported as `hrSyncFailed: true` in the 200 response instead of being WARN-only. |
 | R1 | **HR lane payloads are zstd-compressed**: `natsutil.EncodeZstd(data)` + `Nats-Encoding: zstd` header, mirroring `teams-hr-sync`'s `publishZstd`/`jetStreamPublish`. `hr-sync-worker` already decodes via `natsutil.DecodePayload` (header-sniffing, so the plain publishes from `room-worker`/`message-worker` stay compatible). |
-| R2 | **Fanout errors are surfaced, DB errors stay errors.** A failed local write is the existing errcode envelope (4xx/5xx; frontend branches on `reason`/`code`). A committed write whose fanout partially failed is HTTP 200/201 with `syncFailures: []string` (INBOX lane, per failed site, name matches the permissions precedent) and `hrSyncFailed: bool` (create only), both `omitempty`. |
-| R3 | **Roles, names, and active all sync via direct INBOX publish.** The HR lane is reduced to the durable create bootstrap. Consequence: the INBOX snapshot carries the full identity, so a doc created by either lane alone is complete (no nameless stub). |
+| R2 | **Fanout errors are surfaced, DB errors stay errors.** A failed local write is the existing errcode envelope (4xx/5xx; frontend branches on `reason`/`code`). A committed write whose fanout partially failed is HTTP 200/201 with `syncFailures: []string` (INBOX lane, per failed site, name matches the permissions precedent) and `hrSyncFailed: bool` (~~create only~~ create and resync, per R8), both `omitempty`. |
+| R3 | **Roles, names, and active all sync via direct INBOX publish.** The HR lane is reduced to the durable identity bootstrap (~~create only~~ create and per-user resync, per R8). Consequence: the INBOX snapshot carries the full identity, so a doc created by either lane alone is complete (no nameless stub). |
 | R4 | **admin-frontend displays both error kinds** (added 2026-08-20). DB errors already render via `useHandleAdminError` → `formatAsyncJobError` (no change needed). New: the `createUser`/`updateUser` API clients surface `syncFailures`/`hrSyncFailed`, and `CreateUserForm` / `EditUserDialog` render a post-success sync-failure notice following `CreatePermissionsDialog`'s existing `syncFailures` result-banner pattern. The UsersConsole UI already exists (`admin-frontend/src/components/UsersConsole/`). |
-| R5 | **Create notice alarms only when both lanes missed a site** (added 2026-08-21). Per Q6 and R3, either lane alone fully covers a site: the durable HR lane reaches every site by construction, and the direct INBOX snapshot is complete on its own. `CreateUserForm` therefore treats a create as synced unless `hrSyncFailed` AND `syncFailures` are both present, and then lists the both-missed sites (heal: re-save the user). The wire response is unchanged — both fields still come back so the API stays honest. Edits are unaffected: the INBOX snapshot is their only lane, so `EditUserDialog` still surfaces every `syncFailures`. |
-| R6 | **Permissions section is deploy-gated** (added 2026-08-21). The admin console renders the Permissions tab only when the runtime config flag `PERMISSIONS_ENABLED` is the literal string `"true"` (nginx envsubst renders it from the container env; default `false`). Backend permission endpoints are unchanged — this gates the UI section only. Dev compose defaults the flag on. |
+| R5 | **Create notice alarms only when both lanes missed a site** (added 2026-08-21). Per Q6 and R3, either lane alone fully covers a site: the durable HR lane reaches every site by construction, and the direct INBOX snapshot is complete on its own. `CreateUserForm` therefore treats a create as synced unless `hrSyncFailed` AND `syncFailures` are both present, and then lists the both-missed sites (heal: re-save the user). **Superseded by R9.** The wire response is unchanged — both fields still come back so the API stays honest. Edits are unaffected: the INBOX snapshot is their only lane, so `EditUserDialog` still surfaces every `syncFailures`. |
+| R6 | **Permissions section is deploy-gated** (added 2026-08-21). The admin console renders the Permissions tab only when the runtime config flag `PERMISSIONS_ENABLED` is the literal string `"true"` (nginx envsubst renders it from the container env; default `false`). Backend permission endpoints are unchanged — this gates the UI section only. Dev compose defaults the flag off too (revised 2026-08-21; enable per environment with `PERMISSIONS_ENABLED=true`). |
 | R7 | **The user list spans every site** (added 2026-08-21). `GET /v1/admin/users` (store `SearchUsers`) no longer filters by `siteId`: admins see cross-site replicas too, with a Site column. Rows homed at another site are read-only — the actions cell renders nothing for them, matching the server, where every mutating user endpoint stays home-site-scoped (404 elsewhere). |
-| R8 | **Per-user Resync action** (added 2026-08-21). `POST /v1/admin/users/:account/resync` re-delivers the current home-site state on both lanes (HR identity bootstrap + INBOX snapshot to every remote site). Like permissions resync it is re-delivery, not re-recording: no user write, no audit entry; receivers re-stamp the watermark with identical values, so it is idempotent. Foreign replicas 404. The UI requires an explicit confirm before firing and applies the R5 notice rule to the result (alarm only when both lanes missed a site). |
+| R8 | **Per-user Resync action** (added 2026-08-21). `POST /v1/admin/users/:account/resync` re-delivers the current home-site state on both lanes (HR identity bootstrap + INBOX snapshot to every remote site). Like permissions resync it is re-delivery, not re-recording: no user write, no audit entry; receivers re-stamp the watermark with identical values, so it is idempotent. Foreign replicas 404. The UI requires an explicit confirm before firing and applies the ~~R5~~ R9 notice rule to the result. |
 | R9 | **Sync notice is driven by the direct lane; HR only picks severity** (added 2026-08-21, revises R5/R8's notice rule). R5 assumed either lane alone fully covers a site, but the durable HR feed carries identity fields only (`hr-sync-worker` never writes roles/status — `users` is the live auth store), so an INBOX miss leaves the remote replica without roles even when HR lands. New rule for `CreateUserForm` and `ResyncUserDialog`: `syncFailures` empty → silent success regardless of `hrSyncFailed` (the INBOX snapshot is complete on its own); `syncFailures` present + `hrSyncFailed` → full-failure notice (account absent at those sites); `syncFailures` present + HR ok → identity-only partial notice (roles/status missing at those sites). All three dialogs direct the admin to the per-user Resync action (R8) instead of re-saving — `EditUserDialog`'s rule was already correct (INBOX is its only lane, any miss alerts); only its guidance copy changed. Wire response unchanged. |
 
 ## Approach
@@ -245,11 +245,12 @@ type UserAccountUpdated struct {
   (wire: the 201 body embeds the view plus the two `omitempty` fields; absent →
   `[]` / `false`). `updateUser` returns `UpdateUserResult { syncFailures: string[] }`
   instead of `void`. Only call sites are `CreateUserForm` / `EditUserDialog`.
-- **`CreateUserForm.jsx`** — on success with `syncFailures.length > 0 ||
-  hrSyncFailed`, swap the form for a result notice (the
-  `CreatePermissionsDialog` pattern): "created on this site" + which lane
-  failed + "re-save to retry"; a Done button then calls `onCreated()`. A fully
-  clean result closes immediately as today.
+- **`CreateUserForm.jsx`** — on success with ~~`syncFailures.length > 0 ||
+  hrSyncFailed`~~ `syncFailures.length > 0` (R9), swap the form for a result
+  notice (the `CreatePermissionsDialog` pattern): "created on this site" +
+  severity by `hrSyncFailed` + ~~"re-save to retry"~~ "use Resync" (R8/R9); a
+  Done button then calls `onCreated()`. A fully clean result closes
+  immediately as today.
 - **`EditUserDialog.jsx`** — same shape for `updateUser`: on `syncFailures`,
   show the notice with a Close button calling `onUpdated()`; clean result
   closes immediately as today.
@@ -261,9 +262,10 @@ type UserAccountUpdated struct {
 
 `pkg/outbox` (these are not OUTBOX types), `hr-sync-worker` (third producer on
 an existing contract; `DecodePayload` already handles zstd), `pkg/subject`
-(both builders exist), `docs/client-api.md` and its derived views (no
-client-facing subject or struct changes), `docs/nats-subject-naming.md` (does
-not enumerate inbox event types).
+(both builders exist), `docs/nats-subject-naming.md` (does not enumerate inbox
+event types). ~~`docs/client-api.md` and its derived views~~ — later revisions
+(R2, R7, R8) did land in `docs/client-api.md` §9.1/§9.2/§9.4/§9.16 and
+`request-reply.md`.
 
 ## Edge cases
 
@@ -367,8 +369,9 @@ TDD throughout (red → green → refactor), table-driven where there are varian
 
 ## Out of scope
 
-Permissions fanout (exists), password/session replication (never), a resync
-endpoint (retry = re-saving the user; failures are visible per R2/R4),
+Permissions fanout (exists), password/session replication (never), ~~a resync
+endpoint (retry = re-saving the user; failures are visible per R2/R4)~~ —
+**superseded by R8**, which shipped `POST /users/:account/resync` —
 changes to `hr-sync-worker`, a client-facing status event, and the `status`
 client-fanout gap noted in the user-sync write-up. (An earlier revision
 excluded the admin-frontend display on the mistaken claim that no

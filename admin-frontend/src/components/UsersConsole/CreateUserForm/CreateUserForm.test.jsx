@@ -97,10 +97,7 @@ describe('CreateUserForm', () => {
     expect(screen.queryByText(/sync/i)).toBeNull()
   })
 
-  // Notice rule (spec R9): the INBOX snapshot is the only complete lane — the
-  // durable HR feed carries identity fields only (never roles/status). So the
-  // notice fires whenever the direct sync missed a site; hrSyncFailed merely
-  // picks the severity (full failure vs identity-only partial sync).
+  // Notice rule: see spec R9 (and the syncResult comment in CreateUserForm.jsx).
 
   it('closes immediately when only the HR lane failed (direct sync reached every site)', async () => {
     createUser.mockResolvedValue({ user: { account: 'alice' }, syncFailures: [], hrSyncFailed: true })

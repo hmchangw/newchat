@@ -546,6 +546,7 @@ describe('resyncUser', () => {
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('http://localhost:8082/v1/admin/users/u-1/resync')
     expect(init.method).toBe('POST')
+    expect(init.body).toBeUndefined()
     expect(init.headers.Authorization).toBe('Bearer tok')
     expect(res).toEqual({ syncFailures: [], hrSyncFailed: false })
   })

@@ -10,8 +10,5 @@ export const ADMIN_SERVICE_URL =
 // can both flip it. envsubst renders strings, so only the string 'true' enables.
 export const permissionsEnabled = () => {
   const runtimeNow = (typeof window !== 'undefined' && window.__APP_CONFIG__) || {}
-  return (
-    (runtimeNow.PERMISSIONS_ENABLED ?? import.meta.env.VITE_PERMISSIONS_ENABLED ?? 'false') ===
-    'true'
-  )
+  return (runtimeNow.PERMISSIONS_ENABLED ?? import.meta.env.VITE_PERMISSIONS_ENABLED) === 'true'
 }
