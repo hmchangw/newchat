@@ -44,7 +44,7 @@ type AuditFilter struct {
 //go:generate mockgen -source=store.go -destination=mock_store_test.go -package=main
 
 type AdminStore interface {
-	SearchUsers(ctx context.Context, siteID, q string, page, limit int) ([]model.User, int64, error)
+	SearchUsers(ctx context.Context, q string, page, limit int) ([]model.User, int64, error)
 	GetUserByAccount(ctx context.Context, siteID, account string) (*model.User, error)
 	// GetUserForAuth loads a user for password-verification paths (login and
 	// self-service change-password). Returns credential fields (services.password.bcrypt,

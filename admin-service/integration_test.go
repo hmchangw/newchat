@@ -94,49 +94,54 @@ func TestIntegration_SearchUsers(t *testing.T) {
 		require.NoError(t, st.CreateUser(ctx, &users[i]))
 	}
 
-	t.Run("filter by siteId – excludes other sites", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "", 1, 10)
+	t.Run("lists every site's users – no site filter", func(t *testing.T) {
+		results, total, err := st.SearchUsers(ctx, "", 1, 10)
 		require.NoError(t, err)
-		assert.Equal(t, int64(2), total)
-		assert.Len(t, results, 2)
+		assert.Equal(t, int64(3), total)
+		assert.Len(t, results, 3)
+		sites := make(map[string]bool)
+		for _, u := range results {
+			sites[u.SiteID] = true
+		}
+		assert.True(t, sites["site-a"] && sites["site-b"], "both sites' users must appear")
 	})
 
 	t.Run("filter by q matches account", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "alice", 1, 10)
+		results, total, err := st.SearchUsers(ctx, "alice", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), total)
 		assert.Equal(t, "alice", results[0].Account)
 	})
 
 	t.Run("filter by q matches engName", func(t *testing.T) {
-		_, total, err := st.SearchUsers(ctx, "site-a", "Smith", 1, 10)
+		_, total, err := st.SearchUsers(ctx, "Smith", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), total)
 	})
 
 	t.Run("filter by q matches chineseName", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "阿鮑", 1, 10)
+		results, total, err := st.SearchUsers(ctx, "阿鮑", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), total)
 		assert.Equal(t, "bob", results[0].Account)
 	})
 
 	t.Run("pagination – page 1 limit 1", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "", 1, 1)
+		results, total, err := st.SearchUsers(ctx, "", 1, 1)
 		require.NoError(t, err)
-		assert.Equal(t, int64(2), total)
+		assert.Equal(t, int64(3), total)
 		assert.Len(t, results, 1)
 	})
 
-	t.Run("pagination – page 2 limit 1", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "", 2, 1)
+	t.Run("pagination – page 3 limit 1", func(t *testing.T) {
+		results, total, err := st.SearchUsers(ctx, "", 3, 1)
 		require.NoError(t, err)
-		assert.Equal(t, int64(2), total)
+		assert.Equal(t, int64(3), total)
 		assert.Len(t, results, 1)
 	})
 
 	t.Run("no match returns empty slice", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "zzznomatch", 1, 10)
+		results, total, err := st.SearchUsers(ctx, "zzznomatch", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), total)
 		assert.Empty(t, results)

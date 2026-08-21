@@ -120,6 +120,14 @@ type updateUserResponse struct {
 	SyncFailures []string `json:"syncFailures,omitempty"`
 }
 
+// resyncUserResponse is the 200 body for a resync — the create pair of failure
+// fields, since resync re-fires both lanes.
+type resyncUserResponse struct {
+	Status       string   `json:"status"`
+	SyncFailures []string `json:"syncFailures,omitempty"`
+	HRSyncFailed bool     `json:"hrSyncFailed,omitempty"`
+}
+
 // fanoutUserAccount replicates the admin-owned account state after a committed
 // local write: the durable HR identity bootstrap on create, plus the
 // user_account_updated snapshot to every remote INBOX. Failures never change
@@ -283,7 +291,7 @@ func (h *Handler) listUsers(c *gin.Context) {
 	q := c.Query("q")
 	page, limit := parsePaging(c, 1, 20)
 
-	users, total, err := h.store.SearchUsers(ctx, h.cfg.SiteID, q, page, limit)
+	users, total, err := h.store.SearchUsers(ctx, q, page, limit)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("search users: %w", err))
 		return
@@ -296,6 +304,34 @@ func (h *Handler) listUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"users": views,
 		"total": total,
+	})
+}
+
+// resyncUser handles POST /users/:account/resync — re-delivers the current
+// home-site account state on both lanes (HR identity bootstrap + snapshot to
+// every remote INBOX). Like permissions resync it is re-delivery, not
+// re-recording: no user write, no audit entry, idempotent on the receivers
+// (the snapshot re-stamps the watermark with the same field values). Foreign
+// replicas 404: only the home site may re-assert an account.
+func (h *Handler) resyncUser(c *gin.Context) {
+	ctx, cancel := withRequestBudget(c)
+	defer cancel()
+	account := c.Param("account")
+
+	u, err := h.store.GetUserByAccount(ctx, h.cfg.SiteID, account)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			errhttp.Write(ctx, c, errcode.NotFound("user not found",
+				errcode.WithReason(errcode.AdminUserNotFound)))
+			return
+		}
+		errhttp.Write(ctx, c, fmt.Errorf("get user for resync: %w", err))
+		return
+	}
+
+	hrFailed, syncFailures := h.fanoutUserAccount(ctx, u, true)
+	c.JSON(http.StatusOK, resyncUserResponse{
+		Status: "ok", SyncFailures: syncFailures, HRSyncFailed: hrFailed,
 	})
 }
 

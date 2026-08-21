@@ -9,6 +9,7 @@ import {
   listSessions,
   listUsers,
   resyncPermissions,
+  resyncUser,
   revokeAllSessions,
   revokeSession,
   setPassword,
@@ -531,5 +532,29 @@ describe('listPermissions', () => {
     expect(parsed.searchParams.get('permission')).toBe('external.image.view')
     expect(parsed.searchParams.get('page')).toBe('1')
     expect(parsed.searchParams.get('limit')).toBe('20')
+  })
+})
+
+describe('resyncUser', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('POSTs /v1/admin/users/:account/resync with no body', async () => {
+    const fetchMock = stubFetch(200, { status: 'ok' })
+
+    const res = await resyncUser('tok', 'u-1')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8082/v1/admin/users/u-1/resync')
+    expect(init.method).toBe('POST')
+    expect(init.headers.Authorization).toBe('Bearer tok')
+    expect(res).toEqual({ syncFailures: [], hrSyncFailed: false })
+  })
+
+  it('maps syncFailures and hrSyncFailed when present', async () => {
+    stubFetch(200, { status: 'ok', syncFailures: ['site-b'], hrSyncFailed: true })
+
+    const res = await resyncUser('tok', 'a')
+
+    expect(res).toEqual({ syncFailures: ['site-b'], hrSyncFailed: true })
   })
 })

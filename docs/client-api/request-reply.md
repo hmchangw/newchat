@@ -276,6 +276,7 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `POST /v1/admin/users` | synchronous HTTP | Create a user, then fan the account out to every other site and onto the durable HR identity feed (unacknowledged destinations come back as `syncFailures`, a failed HR publish as `hrSyncFailed`) (§9.2). |
 | `GET /v1/admin/users/:account` | synchronous HTTP | Get a user by account (§9.3). |
 | `PATCH /v1/admin/users/:account` | synchronous HTTP | Update a user by account, then fan the whole account snapshot out to every other site (unacknowledged destinations come back as `syncFailures`) (§9.4). |
+| `POST /v1/admin/users/:account/resync` | synchronous HTTP | Re-deliver the account's current state on both sync lanes (durable HR bootstrap + snapshot to every remote site); re-delivery only, no writes (§9.16). |
 | `POST /v1/admin/users/:account/password` | synchronous HTTP | Admin set/reset a user's password by account (§9.5). |
 | `GET /v1/admin/sessions?account=<account>` | synchronous HTTP | List an account's active sessions (§9.6). |
 | `DELETE /v1/admin/sessions?account=<account>` | synchronous HTTP | Revoke all of an account's sessions (§9.7). |

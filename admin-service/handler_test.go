@@ -68,6 +68,7 @@ func setupRouter(h *Handler) *gin.Engine {
 	r.GET("/users/:account", h.getUser)
 	r.PATCH("/users/:account", h.updateUser)
 	r.POST("/users/:account/password", h.setPassword)
+	r.POST("/users/:account/resync", h.resyncUser)
 	return r
 }
 
@@ -383,10 +384,10 @@ func TestHandler_listUsers(t *testing.T) {
 		checkBody  func(t *testing.T, body map[string]any, raw []byte)
 	}{
 		{
-			name:  "passes siteID, q, paging to store",
+			name:  "passes q and paging to store",
 			query: "?q=alice&page=2&limit=10",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().SearchUsers(gomock.Any(), "site-A", "alice", 2, 10).
+				m.EXPECT().SearchUsers(gomock.Any(), "alice", 2, 10).
 					Return([]model.User{
 						{ID: "u1", Account: "alice", SiteID: "site-A"},
 					}, int64(1), nil)
@@ -404,7 +405,7 @@ func TestHandler_listUsers(t *testing.T) {
 			name:  "defaults page=1 limit=20",
 			query: "",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().SearchUsers(gomock.Any(), "site-A", "", 1, 20).
+				m.EXPECT().SearchUsers(gomock.Any(), "", 1, 20).
 					Return([]model.User{}, int64(0), nil)
 			},
 			wantStatus: http.StatusOK,
@@ -419,7 +420,7 @@ func TestHandler_listUsers(t *testing.T) {
 			name:  "limit is clamped to maxPageLimit when larger value is passed",
 			query: "?limit=100000",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().SearchUsers(gomock.Any(), "site-A", "", 1, 100).
+				m.EXPECT().SearchUsers(gomock.Any(), "", 1, 100).
 					Return([]model.User{}, int64(0), nil)
 			},
 			wantStatus: http.StatusOK,
@@ -428,7 +429,7 @@ func TestHandler_listUsers(t *testing.T) {
 			name:  "store error → 500",
 			query: "",
 			setupMock: func(m *MockAdminStore) {
-				m.EXPECT().SearchUsers(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+				m.EXPECT().SearchUsers(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(nil, int64(0), fmt.Errorf("db offline"))
 			},
 			wantStatus: http.StatusInternalServerError,
@@ -1782,5 +1783,117 @@ func TestHandler_updateUser_Fanout(t *testing.T) {
 		assert.Equal(t, "ok", body["status"])
 		assertNoFanoutFields(t, body)
 		assert.Empty(t, pub.calls, "nothing was written, so nothing is replicated")
+	})
+}
+
+// -------------------------------------------------------------------------
+// resyncUser — POST /users/:account/resync
+// -------------------------------------------------------------------------
+
+// resyncStoredUser is the home-site doc the resync re-delivers.
+func resyncStoredUser() *model.User {
+	active := true
+	return &model.User{
+		ID: "id-user1", Account: "user1", SiteID: "site-a",
+		EngName: "User One", ChineseName: "User One CN",
+		Roles: []model.UserRole{model.UserRoleBot}, Active: &active,
+	}
+}
+
+func TestHandler_resyncUser(t *testing.T) {
+	t.Run("re-fires both lanes from the stored doc, no writes, no audit", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		// GetUserByAccount is the only store touch: no CreateUser/UpdateUser,
+		// and no AppendAudit — resync is re-delivery, not re-recording.
+		m.EXPECT().GetUserByAccount(gomock.Any(), "site-a", "user1").Return(resyncStoredUser(), nil)
+
+		var pub fanoutCapture
+		h := newHandler(m, emptySessionStore(), accountFanoutCfg(), nil, pub.publish)
+
+		w := doUserRequest(t, h, http.MethodPost, "/users/user1/resync", nil)
+		require.Equal(t, http.StatusOK, w.Code)
+		body := respBody(t, w)
+		assert.Equal(t, "ok", body["status"])
+		assertNoFanoutFields(t, body)
+
+		require.Len(t, pub.calls, 3, "1 HR bootstrap + 1 snapshot per remote site")
+
+		subj, encoding, data, found := hrCall(&pub)
+		require.True(t, found, "resync must re-publish the durable HR identity bootstrap")
+		assert.Equal(t, subject.OrgSyncUsersUpsert("site-a"), subj)
+		assert.Equal(t, natsutil.EncodingZstd, encoding)
+		users, _ := decodeHRPayload(t, data)
+		require.Len(t, users, 1)
+		assert.Equal(t, "id-user1", users[0].ID)
+		assert.Equal(t, "user1", users[0].Account)
+
+		for dest, snap := range assertSnapshotLanes(t, &pub, []string{"site-b", "site-c"}) {
+			assert.Equal(t, "id-user1", snap.ID, dest)
+			assert.Equal(t, "user1", snap.Account, dest)
+			assert.Equal(t, "site-a", snap.SiteID, dest)
+			assert.Equal(t, "User One", snap.EngName, dest)
+			assert.Equal(t, []model.UserRole{model.UserRoleBot}, snap.Roles, dest)
+			assert.True(t, snap.Active, dest)
+		}
+	})
+
+	t.Run("unknown or foreign account → 404 user_not_found, nothing published", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		m.EXPECT().GetUserByAccount(gomock.Any(), "site-a", "ghost").Return(nil, ErrUserNotFound)
+
+		var pub fanoutCapture
+		h := newHandler(m, emptySessionStore(), accountFanoutCfg(), nil, pub.publish)
+
+		w := doUserRequest(t, h, http.MethodPost, "/users/ghost/resync", nil)
+		require.Equal(t, http.StatusNotFound, w.Code)
+		assert.Equal(t, string(errcode.AdminUserNotFound), respBody(t, w)["reason"])
+		assert.Empty(t, pub.calls)
+	})
+
+	t.Run("store error → 500, nothing published", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		m.EXPECT().GetUserByAccount(gomock.Any(), "site-a", "user1").Return(nil, errors.New("mongo down"))
+
+		var pub fanoutCapture
+		h := newHandler(m, emptySessionStore(), accountFanoutCfg(), nil, pub.publish)
+
+		w := doUserRequest(t, h, http.MethodPost, "/users/user1/resync", nil)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		assert.Empty(t, pub.calls)
+	})
+
+	t.Run("one INBOX lane fails → syncFailures names it, status stays ok", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		m.EXPECT().GetUserByAccount(gomock.Any(), "site-a", "user1").Return(resyncStoredUser(), nil)
+
+		pub := fanoutCapture{failSubjPrefix: "chat.inbox.site-c."}
+		h := newHandler(m, emptySessionStore(), accountFanoutCfg(), nil, pub.publish)
+
+		w := doUserRequest(t, h, http.MethodPost, "/users/user1/resync", nil)
+		require.Equal(t, http.StatusOK, w.Code)
+		body := respBody(t, w)
+		assert.Equal(t, "ok", body["status"])
+		assert.Equal(t, []any{"site-c"}, body["syncFailures"])
+		_, hasHR := body["hrSyncFailed"]
+		assert.False(t, hasHR)
+	})
+
+	t.Run("HR publish fails → hrSyncFailed true, snapshots still land", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		m := NewMockAdminStore(ctrl)
+		m.EXPECT().GetUserByAccount(gomock.Any(), "site-a", "user1").Return(resyncStoredUser(), nil)
+
+		pub := fanoutCapture{failSubjPrefix: hrSubjPrefix}
+		h := newHandler(m, emptySessionStore(), accountFanoutCfg(), nil, pub.publish)
+
+		w := doUserRequest(t, h, http.MethodPost, "/users/user1/resync", nil)
+		require.Equal(t, http.StatusOK, w.Code)
+		body := respBody(t, w)
+		assert.Equal(t, true, body["hrSyncFailed"])
+		assertSnapshotLanes(t, &pub, []string{"site-b", "site-c"})
 	})
 }
