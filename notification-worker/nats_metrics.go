@@ -30,32 +30,15 @@ const (
 
 var allNotifyResults = []notifyResult{notifySent, notifySuppressed, notifyPublishFailed, notifyFailed}
 
-// mentionResult is the per-token outcome of push-body mention resolution. The
-// three values partition every looked-up token, so resolved+unresolved+failed
-// equals the tokens requested: a failed lookup's tokens count as failed only,
-// never also as unresolved. Without this the fail-open path is invisible — a
-// users-collection outage would leave notification_worker_outcomes_total fully
-// green while every body shipped raw @tokens.
-type mentionResult string
-
-const (
-	mentionResolved   mentionResult = "resolved"
-	mentionUnresolved mentionResult = "unresolved"
-	mentionFailed     mentionResult = "failed"
-)
-
-var allMentionResults = []mentionResult{mentionResolved, mentionUnresolved, mentionFailed}
-
 type notifyKey struct {
 	kind   notifyKind
 	result notifyResult
 }
 
 type notificationMetrics struct {
-	outcomes    metric.Int64Counter
-	opts        map[notifyKey]metric.MeasurementOption
-	mentions    metric.Int64Counter
-	mentionOpts map[mentionResult]metric.MeasurementOption
+	outcomes        metric.Int64Counter
+	opts            map[notifyKey]metric.MeasurementOption
+	mentionFailures metric.Int64Counter
 }
 
 func newNotificationMetrics(meter metric.Meter) *notificationMetrics {
@@ -67,16 +50,20 @@ func newNotificationMetrics(meter metric.Meter) *notificationMetrics {
 		// the service runs blind on this metric rather than not at all.
 		counter, _ = noopMeter.Int64Counter("notification_worker_outcomes_total")
 	}
-	mentions, err := meter.Int64Counter("notification_worker_mention_resolution_total",
-		metric.WithDescription("Push-body @mention tokens by resolution result."))
+	// Failures only, and attribute-free: a mention lookup that errors or times out
+	// ships raw @tokens in every push body, which nothing else in this service
+	// reports. Per-token resolved/unresolved accounting was deliberately dropped —
+	// it costs a counter add per message on the hot path to report something an
+	// operator cannot act on.
+	mentionFailures, err := meter.Int64Counter("notification_worker_mention_lookup_failures_total",
+		metric.WithDescription("Push-body @mention lookups that errored or timed out."))
 	if err != nil {
-		mentions, _ = noopMeter.Int64Counter("notification_worker_mention_resolution_total")
+		mentionFailures, _ = noopMeter.Int64Counter("notification_worker_mention_lookup_failures_total")
 	}
 	m := &notificationMetrics{
-		outcomes:    counter,
-		opts:        make(map[notifyKey]metric.MeasurementOption, len(allNotifyKinds)*len(allNotifyResults)),
-		mentions:    mentions,
-		mentionOpts: make(map[mentionResult]metric.MeasurementOption, len(allMentionResults)),
+		outcomes:        counter,
+		opts:            make(map[notifyKey]metric.MeasurementOption, len(allNotifyKinds)*len(allNotifyResults)),
+		mentionFailures: mentionFailures,
 	}
 	for _, kind := range allNotifyKinds {
 		for _, result := range allNotifyResults {
@@ -86,23 +73,16 @@ func newNotificationMetrics(meter metric.Meter) *notificationMetrics {
 			)
 		}
 	}
-	for _, result := range allMentionResults {
-		m.mentionOpts[result] = metric.WithAttributes(attribute.String("result", string(result)))
-	}
 	return m
 }
 
-// RecordMentions adds n tokens under result. A non-positive n is a no-op so
-// call sites don't have to guard the common zero case.
-func (m *notificationMetrics) RecordMentions(ctx context.Context, result mentionResult, n int) {
-	if m == nil || m.mentions == nil || n <= 0 {
+// RecordMentionFailure counts one failed mention lookup — the push still goes
+// out, with raw @tokens in the body.
+func (m *notificationMetrics) RecordMentionFailure(ctx context.Context) {
+	if m == nil || m.mentionFailures == nil {
 		return
 	}
-	opt, ok := m.mentionOpts[result]
-	if !ok {
-		return
-	}
-	m.mentions.Add(ctx, int64(n), opt)
+	m.mentionFailures.Add(ctx, 1)
 }
 
 func (m *notificationMetrics) Record(ctx context.Context, kind notifyKind, result notifyResult) {
