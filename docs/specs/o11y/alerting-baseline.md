@@ -4,11 +4,12 @@
 > and the [Dashboard Panel Catalog](dashboard-panel-catalog.md). Trap
 > references ("trap 7.x") point at the guide.
 >
-> Verified against `main` at `d4d270e`. **Eight rules, seven deployable
+> Verified against `main` at `d2fdb33`. **Nine rules, eight deployable
 > today** — the eighth needs the NATS exporter scraped in staging and
 > production, which is a deployment task, not an instrumentation one. The
 > consumer-recovery rule that earlier revisions carried has been removed:
-> #283 is not landing, and guide §3.2 explains why no coverage is lost.
+> #283 is not landing, and guide §3.2 explains why no coverage is lost. #318
+> added the search-sync domain metrics that rule 9 watches.
 
 ---
 
@@ -22,7 +23,7 @@ deliberately does not restate:
 - **Dependency infrastructure alerts** — the NATS, MongoDB, and Cassandra teams
   each supply recommended alerts for their own systems, which are adopted
   as-is.
-- **SLO targets and burn-rate policy** — owned by `../../load-testing/system/sli-slo.md`
+- **SLO targets and burn-rate policy** — owned by `../../load-testing/common/sli-slo.md`
   §7. Section 5 here describes how this baseline hands over to it.
 
 The gap this fills is narrow and specific: guide §2 lists seven questions that
@@ -46,13 +47,13 @@ observationally for four to six weeks, with **no paging alerts before then**.
 | Admission rule | The healthy value is **structurally 0 or 1**, derivable from the metric's own semantics | Ratios and durations whose healthy range must be measured |
 | Basis | Metric semantics | Four to six weeks of observed distribution |
 | Action | Mostly ticket; three exceptions page (Section 3) | Multi-window burn-rate paging per `sli-slo.md` §7 |
-| Size | 8 rules, 7 deployable | Grows with the SLO set |
+| Size | 9 rules, 8 deployable | Grows with the SLO set |
 
 The Phase 0 admission rule does most of the work. Applied to the metrics this
 project owns — and to the platform-exporter series the recording rules in guide
-§9.3 derive from — it yields exactly eight rules, none of which needs a
-baseline, because each metric's own contract says what healthy means. Seven can
-be written today; the eighth is blocked on a deployment, not on measurement.
+§9.3 derive from — it yields exactly nine rules, none of which needs a
+baseline, because each metric's own contract says what healthy means. Eight can
+be written today; the ninth is blocked on a deployment, not on measurement.
 
 Phase 0 rules are not provisional. They remain in place through Phase 1; the
 burn-rate rules are added beside them, not instead of them.
@@ -61,7 +62,7 @@ burn-rate rules are added beside them, not instead of them.
 
 ## 3. Phase 0 rule set
 
-Eight rules. Severity `critical` means it pages; `warning` means it opens a
+Nine rules. Severity `critical` means it pages; `warning` means it opens a
 ticket or posts to a channel.
 
 | # | Rule | `for` | Severity | Pages | Deployable |
@@ -74,12 +75,13 @@ ticket or posts to a channel.
 | 6 | `ChatNATSSlowConsumer` | 5m | warning | no | yes |
 | 7 | `AtRestKEKRenewalFailing` | 30m | critical | yes | yes |
 | 8 | `ChatJetStreamAckFloorStalled` | 15m | warning | no | **not yet — exporter** |
+| 9 | `ChatSearchSyncPoisonDrop` | 10m | warning | no | yes |
 
-Three page, five do not. The three that page share a property: by the time a
+Three page, six do not. The three that page share a property: by the time a
 human notices without being told, data has already been lost or a total outage
 is imminent.
 
-**Seven of the eight can be written today.** Rule 8 is blocked on the NATS
+**Eight of the nine can be written today.** Rule 8 is blocked on the NATS
 exporter being scraped in staging and production. It needs no application
 change at all, and it closes a gap nothing else covers: `sli-slo.md` §7 names
 stalled JetStream backlog as the outage backstop for every asynchronous SLO,
@@ -187,23 +189,20 @@ sum by (service_name, site, destination_kind, operation) (
 ### 3.5 `ChatNATSClientDisconnected`
 
 ```promql
-(
-  chat_nats_client_connected
-    * on (job, instance) group_left (service_name)
-      target_info
-) == 0
+chat_nats_client_connected == 0
 ```
 
 - **`for`:** 5m · **Severity:** warning · **Pages:** no
 - **Threshold rationale:** a connected process reads 1. Reconnection is usually
   automatic, so a short disconnect is not actionable; 5m distinguishes a blip
   from a service that cannot reach the broker at all.
-- **Why the join is mandatory:** this family carries no `service_name` or `site`
-  label (trap 7.12). Without joining `target_info`, the alert can say a
-  connection was lost but not by which service, which makes it unactionable.
-  **Verify the join keys resolve in the target environment before enabling** —
-  they depend on collector configuration, and a join that silently returns
-  nothing produces a rule that can never fire.
+- **Attribution:** `service_name` is on the series already, as a
+  resource-derived constant label, so the alert names the affected service with
+  no join. Earlier revisions required a `target_info` join here; that was wrong
+  on both counts — unnecessary for `service_name`, and unable to supply `site`,
+  which this family does not have at all (trap 7.12).
+- **Blind spot:** with no `site` label, a multi-site Prometheus cannot tell you
+  *which* site lost the connection from this rule alone.
 - **Panel:** D1-3.4, D2-1.6, D4-4.4
 
 ### 3.6 `ChatNATSSlowConsumer`
@@ -215,8 +214,8 @@ sum by (subject, queue) (increase(nats_slow_consumer_events_total[5m])) > 0
 - **`for`:** 5m · **Severity:** warning · **Pages:** no
 - **Threshold rationale:** healthy is zero; the event means the broker is
   discarding messages destined for one of our subscriptions.
-- **Note:** same resource-scoping caveat as rule 6 — join `target_info` to
-  attribute it to a service.
+- **Note:** same scoping as rule 5 — `service_name` is present, `site` is
+  not.
 - **Panel:** D1-3.5, D2-1.7, D4-4.5
 
 ### 3.7 `AtRestKEKRenewalFailing`
@@ -276,6 +275,33 @@ chat_jetstream_consumer_ack_floor_stalled == 1
   `message-worker` and a parked outbox lane are the same series with opposite
   meanings.
 - **Panel:** D2-5.2
+
+### 3.9 `ChatSearchSyncPoisonDrop`
+
+```promql
+sum by (collection) (
+  rate(search_sync_worker_messages{outcome="acked", reason="poison"}[10m])
+) > 0
+```
+
+- **`for`:** 10m · **Severity:** warning · **Pages:** no
+- **Threshold rationale:** healthy is zero. `poison` is the Ack-and-drop path
+  for a payload that could not be decoded or turned into a bulk action — there
+  is no legitimate rate of undecodable messages on a working pipeline, so no
+  baseline is needed.
+- **What only this catches:** search-index loss. Every JetStream-shaped signal
+  reads clean through it — pending goes to zero, the ack floor advances, there
+  is no Nak and no redelivery — and `search-sync-worker` is not a `chat_nats_*`
+  adopter, so it emits no terminal-failure counter either (trap 7.17).
+  **Before #318 a log line was the only evidence.**
+- **Why it does not page:** the loss is already permanent by the time this
+  fires; there is nothing to catch in progress. It is a reindex-and-investigate
+  ticket, not a wake-up.
+- **Blind spot:** this proves a payload was undecodable, not that an otherwise
+  valid message reached the index. There is still no end-to-end check — the
+  loadgen search-index observer is refused at startup until soak payloads carry
+  a per-message searchable marker (guide §8.2).
+- **Panel:** D2-3.5
 
 ---
 
@@ -396,6 +422,7 @@ who receives a page must find the corresponding panel without searching.
 | 6 `ChatNATSSlowConsumer` | D1-3.5 | D2-1.7 | D4-4.5 |
 | 7 `AtRestKEKRenewalFailing` | D1-3.6 | — | — |
 | 8 `ChatJetStreamAckFloorStalled` | — | D2-5.2 | — |
+| 9 `ChatSearchSyncPoisonDrop` | — | D2-3.5 | — |
 
 Rule 1 has no D4 series by design: consumer absence during a fault window is
 usually a killed pod, which the Kubernetes alerts already explain.
@@ -417,9 +444,10 @@ rather than as a boolean.
 
 1. **Confirm the series is scraped.** Rule 7 is the worked example of why
    (trap 7.14), but the check applies to all of them.
-2. **Confirm label spelling** against the deployed collector, including whether
-   `service_name` and `site` appear inline or only via `target_info`
-   (traps 7.12, 7.13).
+2. **Confirm label spelling** against the deployed collector. In particular
+   confirm that `service_name` arrives as a resource constant label on the
+   families the rule touches, and remember that `site` exists only on the
+   `chat_nats_*` consumer/publisher families (traps 7.12, 7.13).
 3. **Confirm the rule covers every deployment of the binary.** Since #286 the
    Teams and bot deployments carry their own `service_name`
    (`teams-message-worker`, `bot-broadcast-worker`, `bot-notification-worker`,

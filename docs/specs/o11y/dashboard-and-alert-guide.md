@@ -1,8 +1,7 @@
 # Dashboard and Alert Guide
 
-> Status: design specification. Verified against `main` at `d4d270e`
-> (#272, #271, #286, and #295 merged). #283 is not expected to land and nothing
-> here depends on it. This document
+> Status: design specification. Verified against `main` at `d2fdb33`.
+> #283 is not expected to land and nothing here depends on it. This document
 > and its two companions are the only version-controlled description of the
 > dashboards. Grafana JSON is not committed to this repository, so a dashboard
 > that drifts from this document is wrong, and a dashboard lost to a Grafana
@@ -21,16 +20,15 @@ Upstream contracts this document extends rather than restates:
 
 | Document | Owns | Availability |
 |---|---|---|
-| [`../../load-testing/failure-testing/dashboard-evidence-contract.md`](../../load-testing/failure-testing/dashboard-evidence-contract.md) | The three independent dimensions, query cadence, dispatch and observer validity, recovery classification. Section 5 here explains which parts survive outside a failure test. | On `main` since #271 |
-| `docs/load-testing/failure-testing/nats-failure-metrics-contract.md` | Shared NATS metric semantics, label enums, required alert list. | **Not on `main`** — branch `codex/failure-testing-docs` |
+| [`../../load-testing/loadgen/dashboard-contract.md`](../../load-testing/loadgen/dashboard-contract.md) | The three independent dimensions, query cadence, dispatch and observer validity, recovery classification. Section 5 here explains which parts survive outside a failure test. | On `main` since #271 |
+| [`../../load-testing/failure/nats-metrics-contract.md`](../../load-testing/failure/nats-metrics-contract.md) | Shared NATS metric semantics, label enums, required alert list. | On `main` since #258 |
 | [`storage-dependency-metrics.md`](storage-dependency-metrics.md) §7 | The production-base plus failure-test-overlay model. Section 4 here implements it. | On `main` |
-| [`../../load-testing/system/sli-slo.md`](../../load-testing/system/sli-slo.md) | Authoritative SLO definitions, the error-budget eligibility table, the burn-rate alerting policy. | On `main` |
+| [`../../load-testing/common/sli-slo.md`](../../load-testing/common/sli-slo.md) | Authoritative SLO definitions, the error-budget eligibility table, the burn-rate alerting policy. | On `main` |
 | [`o11y-metrics-inventory.md`](o11y-metrics-inventory.md) | Per-service metric coverage. | On `main` |
 
-The NATS failure metrics contract is referenced by section number throughout.
-Until its branch merges, those references resolve only against the named branch
-— this is stated rather than linked so a broken link does not read as a missing
-document.
+#258 reorganized `docs/load-testing/` by test type, so every path above moved.
+The NATS metrics contract landed on `main` in the same change and is now a
+resolvable link rather than a branch reference.
 
 ---
 
@@ -132,7 +130,7 @@ Every panel and alert in the companions carries one of these:
 
 | Status | Meaning |
 |---|---|
-| **Available** | Emitted by code on `main` at `d4d270e` and scrapeable wherever the service is deployed |
+| **Available** | Emitted by code on `main` at `d2fdb33` and scrapeable wherever the service is deployed |
 | **Proposed** | Specified here but not emitted yet. Only the JetStream backlog row is in this state, and it is blocked on a deployment, not on code — see Section 9. |
 | **Missing** | Not emitted and not planned; the panel is not built, and the gap is listed in Section 8 |
 
@@ -146,6 +144,8 @@ Four merges cleared what earlier revisions of this document listed as blocked:
 | #286 | Inbound request/reply metrics, and the same families on `history-service`, `room-service`, `room-worker` |
 | #271 | The loadgen evidence ledger: dispatch validity, observer validity, terminal results, and a full set of JetStream cursor gauges including an ack-floor stall duration |
 | #295 | Eight more soak lanes, eleven metric families, and consumer sampling across nine durables |
+| #318 | `search_sync_worker_*` domain metrics — the first counter that sees search-index loss (trap 7.17) |
+| #319 | Removed the inline `service_name` attribute that collided with the exporter's constant label and 500'd `/metrics` (trap 7.12) |
 
 **Only one thing in this document is not Available: the JetStream backlog row**
 (D2 Row 5 and alert rule 9). It needs no application change — just the NATS
@@ -462,33 +462,59 @@ recreation with a recovery counter — and it is not landing (Section 3.2).
 exist.** There is no churn failure mode to look for and no recovery metric to
 build a panel on.
 
-### 7.12 `chat_nats_client_*` carry no service or site label
+### 7.12 `service_name` is a constant label; `site` is not
 
+Two different mechanisms put identity on a series, and confusing them produces
+queries that silently return nothing.
+
+- **`service_name` comes from the OpenTelemetry resource**, rendered by the o11y
+  Prometheus exporter as a **constant label on every series it exports** — the
+  `chat_nats_*` families, the domain counters, `db_client_*`, all of them. It is
+  read from `OTEL_SERVICE_NAME`. No join is needed to filter or group by it.
+- **`site` is an inline attribute set in code**, and only where code sets it:
+  the `chat_nats_*` consumer, publisher and request families
+  (`pkg/natsmetrics`, the `base` slice). It is not a resource attribute, so it
+  is **not** in `target_info` either.
+
+The consequence for the three connection families —
 `chat_nats_client_connected`, `chat_nats_client_connection_events_total`, and
-`nats_slow_consumer_events_total` are emitted from the connection helper, which
-sits below the layer that knows the site. They are scoped by the OpenTelemetry
-resource instead. Every panel using them must join `target_info` to recover
-`service_name`; without the join the panel shows a connection count with no way
-to tell which service lost its connection.
+`nats_slow_consumer_events_total` — is that they carry `service_name` like
+everything else, but **no `site` at all, and no join can recover it.** They are
+emitted from the connection helper, which sits below the layer that knows the
+site.
 
-### 7.13 The domain counters have no inline `site` label
+This corrects earlier guidance in this document and in
+`o11y-metrics-inventory.md` that told readers to join `target_info` for
+`service_name`. That join is unnecessary, and it was never able to supply
+`site`.
 
-`chat_nats_*` sets `service_name` and `site` as explicit attributes in code
-(`pkg/natsmetrics/metrics.go`, the `base` slice). The four domain counters —
+The mechanism is also why #319 exists: `pkg/natsmetrics` used to set its own
+inline `service_name` attribute, which collided with the exporter's constant
+label of the same name. `client_golang` rejects that collision, `Gather()`
+failed, and promhttp turned `/metrics` into an HTTP 500 — **taking every
+`chat_nats_*` family down at once**. If a future instrument adds an inline
+attribute whose rendered name matches a resource constant label, the same
+outage returns.
+
+### 7.13 The domain counters have no `site` label
+
+Following from trap 7.12: `chat_nats_*` sets `site` as an inline attribute
+(`pkg/natsmetrics/metrics.go`, the `base` slice). The domain counters —
 `message_gatekeeper_messages_total`, `message_worker_persistence_total`,
 `broadcast_worker_fanout_recipients`,
-`broadcast_worker_recipient_deliveries_total`, and
-`notification_worker_outcomes_total` — set only their own dimensions
-(`result`, `reason`, `message_kind`, `room_kind`, `event_type`, `kind`). Their
-service and site identity comes from the OpenTelemetry resource instead.
+`broadcast_worker_recipient_deliveries_total`,
+`notification_worker_outcomes_total`, and the `search_sync_worker_*` families —
+set only their own dimensions. They carry `service_name` like every other
+series, but **no `site`**.
 
 This matters most on the J1 funnel, which mixes both families. In a multi-site
 deployment, `chat_nats_publish_attempts_total{site="$site"}` is one site while
-an unqualified `message_gatekeeper_messages_total` is every site, and the
-funnel silently compares them. Either join `target_info` on the domain
-counters, or confirm the collector promotes the resource's site attribute
-inline — and verify which, rather than assuming, since the answer depends on
-collector configuration.
+an unqualified `message_gatekeeper_messages_total` is every site, and the funnel
+silently compares them. There is no join that fixes this — `site` is not on the
+resource, so it is absent from `target_info` too. Either scope the query some
+other way (one Prometheus per site, or a scrape-time relabel like the one the
+federated local stack uses, trap 7.5) or read the funnel as single-site only
+and say so on the panel.
 
 ### 7.14 `atrest_*` are not on the SDK endpoint
 
@@ -534,32 +560,36 @@ visible here, and for the inbound side it belongs to
 `chat_nats_request_handled_total`, whose `result` enum does distinguish the
 categories.
 
-### 7.17 Search-index loss is invisible to every signal in this document
+### 7.17 Search-index loss is invisible to every JetStream signal
 
 `search-sync-worker/handler.go` **Acks and drops** a message whose payload it
-cannot decode (`decode payload failed`) or cannot turn into a bulk action
-(`build action failed`). The comment on the second one is explicit: *"Every
-BuildAction error is parse/validation poison — Ack drops it for good, so this
-line is the only trace."*
-
-Trace the consequences through the signals this document specifies:
+cannot decode or cannot turn into a bulk action. The message is gone, and every
+JetStream-shaped signal reads clean:
 
 | Signal | What it shows |
 |---|---|
 | JetStream backlog (D2-5.1) | Nothing. The message was Acked, so pending goes to zero. |
 | Ack-floor stall (D2-5.2) | Nothing. The floor advances normally. |
 | Redelivery (D2-1.3) | Nothing. There is no Nak and no redelivery. |
-| Terminal failures (D1-3.3, D2-1.5) | Nothing — **`search-sync-worker` is not a `chat_nats_*` adopter at all**, so it emits no consumer family, no loop gauge, and no terminal-failure counter. |
+| Terminal failures (D1-3.2, D2-1.5) | Nothing — **`search-sync-worker` is not a `chat_nats_*` adopter**, so it emits no consumer family, no loop gauge, and no terminal-failure counter. |
 | Loadgen ledger (D4-3.1) | Nothing. No observer covers the search path. |
 
-**A log line is the only evidence.** Search is the one MESSAGES-CANONICAL
-downstream with no end-to-end check, and this is the concrete reason the
-search-index observer exists in #295 — where it is present but **rejected at
-startup**, because every soak body is a single run of one character and
-analyzes to one token, so the probe would report every message lost.
+**Since #318 the drop is counted, by the service's own domain metric.** The
+poison path records
+`search_sync_worker_messages{collection, outcome="acked", reason="poison"}`,
+which is the only counter anywhere that sees this loss. Alert rule 9 watches
+it, and D2-3.5 draws it.
 
-Do not read a clean backlog row as evidence that indexing is intact. Nothing on
-these dashboards can make that claim today.
+Two things that counter does **not** give you. It says a payload was
+undecodable, not that an otherwise-valid message failed to reach the index —
+there is still no end-to-end check, because the loadgen search-index observer
+is refused at startup until soak payloads carry a per-message searchable
+marker (Section 8.2). And it is scoped per collection, not per message, so it
+enumerates loss without identifying what was lost.
+
+Do not read a clean backlog row as evidence that indexing is intact. The
+backlog row is structurally incapable of making that claim; only the domain
+counter speaks, and only about poison.
 
 ### 7.18 Some durables have no loop gauge
 
@@ -610,14 +640,14 @@ question that stays unanswerable until the item lands.
 | Domain metrics for `room-service`, `room-worker`, `inbox-worker`, `outbox-worker`, `search-sync-worker` | Missing | Business outcomes on the room, membership, and federation paths. #286 gave the first three `chat_nats_*` coverage, which is NATS failure evidence — not business outcomes. `o11y-metrics-inventory.md` §2 tracks these as F-items. |
 | Inbound request metrics for `user-service`, `search-service`, `media-service`, `bot-message-handler`, `bot-room-service` | Missing | Server-side success rate and latency for every request/reply service outside the seven-service failure-test scope. These build a `natsrouter` **without** `WithMetrics`, so the router is unchanged and emits nothing. |
 | Fault annotation source | Missing | Aligning injection, failover, recovery, and settle timestamps on D4. Manual annotations are acceptable locally; a durable event source is required for staging campaigns. |
-| Per-message searchable marker in soak payloads | Missing — blocks #295's search-index observer | Whether search indexing dropped a message (trap 7.17). #295 ships the observer machinery but **refuses the flag at startup**: soak bodies are one run of a single character, so they analyze to one token and the probe would report every message lost. The change touches the send path, the `SOAK_PAYLOAD_*` budgets, and the sonic wire-compat tests. |
+| Per-message searchable marker in soak payloads | Missing — blocks the search-index observer | Whether an otherwise-valid message reached the index. #318 closed the *poison-drop* half of trap 7.17; this is the end-to-end half. #295 ships the observer machinery but **refuses the flag at startup**: soak bodies are one run of a single character, so they analyze to one token and the probe would report every message lost. The change touches the send path, the `SOAK_PAYLOAD_*` budgets, and the sonic wire-compat tests. |
 | Loop gauges for `notification-worker-room-event-invalidate`, `message-sync`, `spotlight-sync`, `user-room-sync` | Missing | Absence and wedge detection for four durables that carry real traffic (trap 7.18). Alert rules 1 and 2 do not reach them. |
 | `loadgen_failure_observer_configured` for the `room_state` and `search_index` observers | Missing | Whether an observer is switched off or broken. The gauge is set for `admission`, `cassandra_history`, and `recipient_broadcast` only, while `room_state` is `Required: true` for every room, member, and read-receipt operation. `loadgen_failure_observer_up` does cover `room_state`, so live-versus-down is answerable; enabled-versus-disabled is not (see D4-1.3). |
 
 ### 8.3 Cleared
 
 Recorded so a reader coming from an earlier revision knows these are done, not
-forgotten. All four are Available on `main` at `d4d270e`.
+forgotten. All are Available on `main` at `d2fdb33`.
 
 | Was blocked on | Cleared by |
 |---|---|
@@ -627,6 +657,7 @@ forgotten. All four are Available on `main` at `d4d270e`.
 | Ack-floor gauge in the loadgen sampler | #271, and better than proposed: `loadgen_consumer_ack_floor_stall_seconds` is a **duration**, not a boolean |
 | Whether the exporter exposes an ack floor at all | Answered **yes** — `jetstream_consumer_ack_floor_stream_seq` is in active use by the repo's own local dashboards (Section 9.1) |
 | Room, member, presence, search and user traffic in the soak | #295 — Section 6 |
+| Any counter at all for search-index loss | #318 — `search_sync_worker_messages{reason="poison"}`, watched by alert rule 9 |
 
 
 ---
@@ -857,8 +888,11 @@ A dashboard built from this document is not trustworthy until:
 2. The Prometheus metric names and label spellings have been checked against
    the deployed collector, not assumed from the OTel instrument names in this
    document.
-3. The `target_info` join used by the connection panels resolves in the target
-   environment, since the join keys depend on collector configuration.
+3. `service_name` really is present as a resource constant label on every
+   family a panel filters by it. The whole `chat_nats_*` set once vanished
+   behind an HTTP 500 for a label collision (trap 7.12); a panel that filters
+   on a label the deployment does not render returns nothing, which reads as
+   healthy.
 4. A deliberate known failure changes the expected panels. The NATS metrics
    contract §12 requires this for the metric implementation; the same standard
    applies to the dashboard built on it.

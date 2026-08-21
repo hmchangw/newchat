@@ -6,7 +6,7 @@
 
 Every panel carries: source status, applicable situations, PromQL, expected
 reading, and what no-data means. Source status values are defined in the guide
-§3. Verified against `main` at `d4d270e`. Everything the application emits is
+§3. Verified against `main` at `d2fdb33`. Everything the application emits is
 Available; the only Proposed panels are the JetStream backlog row, which is
 blocked on a deployment rather than on code (guide §9).
 
@@ -186,18 +186,16 @@ sum(increase(chat_nats_publish_attempts_total{outcome="buffer_full"}[5m]))
 - **Applies to:** operations, soak, failure
 
 ```promql
-count(
-  chat_nats_client_connected == 0
-    * on (job, instance) group_left (service_name)
-      target_info
-)
+count(chat_nats_client_connected == 0)
 ```
 
-- **Expected reading:** 0.
-- **No data:** healthy, or the `target_info` join is not resolving — verify the
-  join keys in the target environment before trusting this tile.
-- **Traps:** 7.12. Without the join this tile can tell you a connection was
-  lost but not by which service.
+- **Expected reading:** 0. `service_name` is already on the series as a
+  resource-derived constant label, so break the count out by it to see which
+  service lost its connection — no join required.
+- **No data:** healthy, or no process uses the opt-in
+  `natsutil.ConnectWithMetrics`.
+- **Traps:** 7.12 — this family has **no `site` label**, and no join can supply
+  one. In a multi-site Prometheus this tile counts across all sites.
 
 #### D1-3.5 · Slow consumer events
 
@@ -386,15 +384,11 @@ sum by (stream, consumer, event_type, reason) (
 - **Applies to:** operations, soak, failure
 
 ```promql
-chat_nats_client_connected
-  * on (job, instance) group_left (service_name)
-    target_info{service_name="$service_name"}
+chat_nats_client_connected{service_name="$service_name"}
 
 sum by (service_name, event) (
-  increase(
-    chat_nats_client_connection_events_total
-      * on (job, instance) group_left (service_name) target_info
-  [5m])
+  increase(chat_nats_client_connection_events_total{
+    service_name="$service_name"}[5m])
 )
 ```
 
@@ -403,12 +397,12 @@ sum by (service_name, event) (
   blip; `closed` is terminal for that connection. Read this **before** drawing
   any conclusion from D2-2.1: a Core NATS publish that succeeded while this
   gauge read 0 went into a buffer, not to a subscriber.
-- **No data:** either the service does not use `natsutil.ConnectWithMetrics`
-  (it is opt-in), or the `target_info` join is not resolving. These are not
-  distinguishable from this panel — verify the join in the target environment
-  first.
-- **Traps:** 7.12 — this family carries no `service_name` or `site` label of
-  its own, so the join is mandatory, not cosmetic.
+- **No data:** the service does not use `natsutil.ConnectWithMetrics` — it is
+  opt-in, and only the four #272 workers plus `history-service`, `room-service`
+  and `room-worker` call it.
+- **Traps:** 7.12 — `service_name` filters directly because it is a resource
+  constant label, but there is **no `site`** on this family and no join that
+  can add one.
 
 #### D2-1.7 · Slow consumer events
 
@@ -539,6 +533,40 @@ sum by (kind, result) (rate(notification_worker_outcomes_total[5m]))
   unused `notification` value, so a query or legend expecting three kinds is
   written against a vocabulary that no longer exists.
 - **No data:** no canonical messages reached the worker.
+
+#### D2-3.5 · search-sync-worker indexing outcomes
+
+- **Source:** Available (#318)
+- **Applies to:** operations, soak, failure
+
+```promql
+sum by (collection, outcome, reason) (
+  rate(search_sync_worker_messages[5m])
+)
+
+sum by (collection, action, status) (
+  rate(search_sync_worker_bulk_item_failures[5m])
+)
+
+histogram_quantile(0.95,
+  sum by (le, collection, outcome) (
+    rate(search_sync_worker_bulk_flush_duration_bucket[5m])
+  )
+)
+```
+
+- **Expected reading:** dominated by `{outcome="acked", reason="success"}`.
+  `{outcome="acked", reason="filtered"}` is normal — not every canonical event
+  produces a bulk action. **`{outcome="acked", reason="poison"}` should be flat
+  zero**: it is the Ack-and-drop path, and it is the only counter anywhere that
+  sees search-index loss (trap 7.17). The `nakked` reasons — `request_failed`,
+  `item_failed`, `result_mismatch` — recur on every redelivery, so they are a
+  rate of attempts, not of messages.
+- **No data:** `search-sync-worker` is not reporting. Note it emits **no**
+  `chat_nats_*` family at all, so D2 Rows 1 and 2 are structurally empty for
+  it — this panel and the runtime row are its entire coverage.
+- **Traps:** 7.17 (the JetStream signals cannot see the poison drop), 7.18
+  (its three durables have no loop gauge).
 
 ### Row 4 — Request/reply
 
@@ -1308,7 +1336,7 @@ fault annotation overlaid rather than as a stat tile (guide §4.3).
 | D4-4.1 Consumer loop | `chat_nats_consumer_loop_up` | Drops to 0 and **stays** at 0 until the pod restarts — there is no supervisor on `main` (trap 7.11). **A vanishing series is a killed pod, a zero is a live process not consuming** (trap 7.1) — these are different findings. |
 | D4-4.2 Terminal failures | `sum by (reason) (rate(chat_nats_terminal_failures_total[2m]))` | Non-zero is expected and is the enumerable-loss evidence. `reason` identifies whether it was `max_deliver` exhaustion or a permanent drop. |
 | D4-4.3 Buffer full | `sum(increase(chat_nats_publish_attempts_total{outcome="buffer_full"}[2m]))` | Non-zero during a broker outage. **Any interval overlapping this has unproven recipient delivery** — mark the affected absence claims inconclusive. |
-| D4-4.4 Client connected | `chat_nats_client_connected * on (job, instance) group_left (service_name) target_info` | Drops to 0 for affected services. Read beside D4-1.6 to separate service disconnection from generator disconnection. |
+| D4-4.4 Client connected | `chat_nats_client_connected` | Drops to 0 for affected services; group by `service_name` (a resource constant label, no join). Read beside D4-1.6 to separate service disconnection from generator disconnection. |
 | D4-4.5 Slow consumers | `sum(increase(nats_slow_consumer_events_total[2m]))` | May rise during a reconnect surge. |
 
 **Do not silence these signals during a test.** They are the expected result.
@@ -1330,10 +1358,14 @@ enum is a bug, not a new series — the code normalizes unrecognized inputs to
 
 ### A.1 Shared NATS application metrics — `pkg/natsmetrics`
 
-`service_name` and `site` are **inline attributes set in code**
-(`pkg/natsmetrics/metrics.go`, the `base` slice) on every family in this table.
+**`site` is the inline attribute** set in code (`pkg/natsmetrics/metrics.go`,
+the `base` slice) on every family in this table. `service_name` is **not**
+inline — it arrives as a resource-derived constant label on every SDK-exported
+series. #319 removed the inline attribute because it collided with that
+constant label and took `/metrics` down with an HTTP 500 (trap 7.12). Queries
+are unchanged; the mechanism is not.
 
-| Prometheus family | Type | Labels beyond base | Emitters | Status |
+| Prometheus family | Type | Labels beyond `site` | Emitters | Status |
 |---|---|---|---|---|
 | `chat_nats_consumer_loop_up` | gauge | `stream`, `consumer` | 6 of 7 adopters | Available |
 | `chat_nats_consumer_messages_total` | counter | `stream`, `consumer`, `event_type`, `outcome` | 6 of 7 | Available |
@@ -1394,10 +1426,10 @@ Opt-in through `natsutil.ConnectWithMetrics`.
 | `chat_nats_client_connection_events_total` | counter | `event`: `connected` `disconnected` `reconnected` `closed` `async_error` |
 | `nats_slow_consumer_events_total` | counter | `subject`, `queue` |
 
-These carry **no `service_name` and no `site`** — they are emitted below the
-layer that knows the site and are scoped by the OpenTelemetry resource. Join
-`target_info` (trap 7.12). Reconnect-buffer overflow is deliberately absent
-from the events family; it is counted at the publish boundary as
+These carry `service_name` — like every SDK-exported series, from the resource
+as a constant label — but **no `site`**, and no join can supply one (trap
+7.12). Reconnect-buffer overflow is deliberately absent from the events family;
+it is counted at the publish boundary as
 `chat_nats_publish_attempts_total{outcome="buffer_full"}`.
 
 ### A.3 Domain metrics — four workers
@@ -1412,9 +1444,23 @@ No inline `site` label (trap 7.13).
 | `broadcast_worker_recipient_deliveries_total` | counter | `room_kind` · `event_type` · `result`: `success` `failed` |
 | `notification_worker_outcomes_total` | counter | `kind`: `push` `unknown` (#286 removed the unused `notification` value) · `result`: `sent` `suppressed` `publish_failed` `failed` |
 
-No other service owns domain metrics. `room-service`, `room-worker`,
-`inbox-worker`, `outbox-worker`, and `search-sync-worker` are tracked as gaps
-in guide §8.2.
+`search-sync-worker` gained its own set in #318. All are labelled `collection`,
+because the worker runs one consumer per indexed collection:
+
+| Prometheus family | Type | Labels and enums |
+|---|---|---|
+| `search_sync_worker_messages` | counter | `collection` · `outcome`/`reason` pairs: `acked`/`success`, `acked`/`filtered`, **`acked`/`poison`**, `nakked`/`request_failed`, `nakked`/`item_failed`, `nakked`/`result_mismatch` |
+| `search_sync_worker_bulk_flush_duration_*` | histogram (s) | `collection`, `outcome` |
+| `search_sync_worker_bulk_flush_actions_*` | histogram | `collection` |
+| `search_sync_worker_bulk_item_failures` | counter | `collection`, action type, bounded status |
+| `search_sync_worker_parent_resolve_duration_*` | histogram (s) | `collection`, `outcome` |
+
+`acked`/`poison` is the Ack-and-drop path and the only counter anywhere that
+sees search-index loss (trap 7.17). The `nakked` reasons recur on every
+redelivery, so they count attempts, not messages.
+
+`room-service`, `room-worker`, `inbox-worker`, and `outbox-worker` still own no
+domain metrics; guide §8.2 tracks them as gaps.
 
 ### A.4 Dependency client metrics — o11y SDK
 
@@ -1541,10 +1587,17 @@ and message IDs stay WAL and log content, never Prometheus labels.
 | `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
 | `loadgen_soak_presence_connections{status}` | Connections the lane currently claims online |
 | `loadgen_failure_abandoned_journals` | Retained journals from earlier ledger epochs |
+| `loadgen_soak_error_reasons_total{action,class,reason,phase}` | Soak failures by bounded action, error class, **service-supplied reason**, and run phase — the reason dimension `loadgen_soak_errors_total` lacks |
+| `loadgen_soak_encryption_preflight` | 1 once the run proved a message reached Cassandra encrypted with a wrapped room DEK |
 
 The existing `loadgen_failure_*` and `loadgen_soak_*` pacing families cover the
 new lanes through their existing `lane` and `observer` labels — no new terminal
 result values, and `scenario` stays `message_soak`.
+
+`loadgen_soak_encryption_preflight` reads 0 for several unrelated reasons —
+skipped by configuration, still in flight, failed, or a loadgen mode that never
+runs the check. Its own Help text states the rule: **alert on a sustained 0
+during soak, never on any 0.** It is a proof-obtained flag, not a health gauge.
 
 **Pool degradation is reversible; ledger invalidation is not.** Quarantine
 overflow is reported through `loadgen_soak_room_pool_degraded` and
