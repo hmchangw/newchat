@@ -269,6 +269,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 			ThreadMessageID:   msg.ThreadParentMessageID,
 			PushTime:          now.Format(time.RFC3339),
 			AlsoSendToChannel: msg.TShow,
+			MentionAll:        mentionsAll,
 		},
 		Timestamp: now.UnixMilli(),
 	}
@@ -291,6 +292,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 		if counts := filterUnreadCounts(unreadCounts, batchAccounts); len(counts) > 0 {
 			evt.UnreadCounts = counts
 		}
+		evt.Mentions = filterMentions(mentionedAccounts, batchAccounts)
 		if err := h.deps.Emitter.Emit(ctx, evt); err != nil {
 			outcome = notifyPublishFailed
 			slog.Error("emit push batch failed", "error", err, "batch", batchIdx,
@@ -364,6 +366,24 @@ func filterUnreadCounts(unreadCounts map[string]int, batchAccounts []string) map
 	for _, account := range batchAccounts {
 		if n, ok := unreadCounts[account]; ok {
 			filtered[account] = n
+		}
+	}
+	return filtered
+}
+
+// filterMentions returns the batch's accounts that were @-mentioned by name,
+// so each outgoing batch only names the recipients it actually addresses.
+// Mentioned accounts filtered out of the push (muted, vetoed, presence) never
+// reach batchAccounts and so never appear. @all is carried by Data.MentionAll
+// rather than expanded here — that would duplicate Accounts on every batch.
+func filterMentions(mentionedAccounts map[string]bool, batchAccounts []string) []string {
+	if len(mentionedAccounts) == 0 {
+		return nil
+	}
+	var filtered []string
+	for _, account := range batchAccounts {
+		if mentionedAccounts[account] {
+			filtered = append(filtered, account)
 		}
 	}
 	return filtered

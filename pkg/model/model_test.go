@@ -5461,3 +5461,42 @@ func TestMessageAppInfoJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"isSubscribed":false`)
 }
+
+// Mention fields ride the push envelope (mentions) and payload (mentionAll);
+// both must survive a round trip alongside the existing fields.
+func TestPushNotificationEvent_MentionsRoundTrip(t *testing.T) {
+	in := model.PushNotificationEvent{
+		ID:       "m1-b0",
+		Accounts: []string{"alice", "bob"},
+		Mentions: []string{"bob"},
+		Title:    "general",
+		Body:     "hey @bob",
+		RoomID:   "r1",
+		Data: model.PushNotificationData{
+			RoomID:     "r1",
+			MessageID:  "m1",
+			Type:       "c",
+			PushTime:   "2026-05-27T00:00:00Z",
+			MentionAll: true,
+		},
+		Timestamp: 1700000000000,
+	}
+	data, err := json.Marshal(in)
+	require.NoError(t, err)
+	var out model.PushNotificationEvent
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, in, out)
+}
+
+// Both mention fields are omitempty: a message with no mentions must not put
+// `mentions` or `mentionAll` on the wire at all.
+func TestPushNotificationEvent_MentionFieldsOmittedWhenEmpty(t *testing.T) {
+	data, err := json.Marshal(model.PushNotificationEvent{
+		ID:       "m1-b0",
+		Accounts: []string{"alice"},
+		Data:     model.PushNotificationData{RoomID: "r1", MessageID: "m1"},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "mentions")
+	assert.NotContains(t, string(data), "mentionAll")
+}

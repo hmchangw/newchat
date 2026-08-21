@@ -1614,3 +1614,214 @@ func TestHandle_PriorityContactPiercesDNDStub(t *testing.T) {
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// --- mention propagation onto the push payload ---------------------------
+
+// A direct @mention lands on the batch envelope as the mentioned account,
+// scoped to the recipients that batch actually addresses.
+func TestHandle_PushPayload_DirectMentionsCarried(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "hey @bob check this", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, []string{"bob"}, emit.emitted[0].Mentions)
+	assert.False(t, emit.emitted[0].Data.MentionAll, "a direct mention is not a broad mention")
+}
+
+// @all is a message-level fact carried by the flag alone — it must NOT be
+// expanded into a per-recipient list (that would duplicate Accounts).
+func TestHandle_PushPayload_MentionAll_SetsFlagOnly(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "@all heads up", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 1)
+	assert.True(t, emit.emitted[0].Data.MentionAll)
+	assert.Empty(t, emit.emitted[0].Mentions, "@all must not expand into a per-account list")
+}
+
+// "@all and @bob" is both: the flag covers the room, the list still names bob
+// so the client can highlight the direct mention.
+func TestHandle_PushPayload_MentionAllPlusDirect_CarriesBoth(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "@all and especially @bob", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 1)
+	assert.True(t, emit.emitted[0].Data.MentionAll)
+	assert.Equal(t, []string{"bob"}, emit.emitted[0].Mentions)
+}
+
+func TestHandle_PushPayload_NoMentions_Empty(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "plain message", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Empty(t, emit.emitted[0].Mentions)
+	assert.False(t, emit.emitted[0].Data.MentionAll)
+}
+
+// @here is parsed as an ordinary account token and matches no member, so it
+// must never leak onto the wire as a mentioned account.
+func TestHandle_PushPayload_AtHereIsNotAMentionedAccount(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob"},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "@here standup", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Empty(t, emit.emitted[0].Mentions)
+	assert.False(t, emit.emitted[0].Data.MentionAll, "@here is not @all")
+}
+
+// A mentioned member filtered out of the push (muted) is not a recipient, so
+// their account must not ride the mentions list either.
+func TestHandle_PushPayload_MentionsExcludeNonRecipients(t *testing.T) {
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},
+			{ID: "bob", Account: "bob", Muted: true},
+			{ID: "carol", Account: "carol"},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := newTestHandler(members, &stubFollowers{}, noopPresenceSnapshotter{}, noopVetoer{}, emit)
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "@bob @carol look", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 1)
+	assert.ElementsMatch(t, []string{"carol"}, emit.emitted[0].Accounts)
+	assert.Equal(t, []string{"carol"}, emit.emitted[0].Mentions, "muted bob is not a recipient of this batch")
+}
+
+// Each batch carries only its own recipients' mentions — same scoping rule as
+// unreadCounts, so a 100-account batch never leaks another batch's mentions.
+func TestHandle_PushPayload_MentionsFilteredPerBatch(t *testing.T) {
+	roomMembers := []roomsubcache.Member{{ID: "alice", Account: "alice"}}
+	for i := 0; i < 250; i++ {
+		roomMembers = append(roomMembers, roomsubcache.Member{ID: fmt.Sprintf("u%03d", i), Account: fmt.Sprintf("u%03d", i)})
+	}
+	members := &stubMembers{out: map[string][]roomsubcache.Member{"r1": roomMembers}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          &stubFollowers{},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		LargeRoomThreshold: 1000,
+		RecipientBatchSize: 100,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "@u000 and @u200 please review", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 3)
+	assert.Equal(t, []string{"u000"}, emit.emitted[0].Mentions)
+	assert.Empty(t, emit.emitted[1].Mentions, "batch 1 addresses u100-u199 — neither mention belongs to it")
+	assert.Equal(t, []string{"u200"}, emit.emitted[2].Mentions)
+}
+
+func TestFilterMentions(t *testing.T) {
+	tests := []struct {
+		name          string
+		mentioned     map[string]bool
+		batchAccounts []string
+		want          []string
+	}{
+		{
+			name:          "no mentions returns nil",
+			mentioned:     nil,
+			batchAccounts: []string{"alice", "bob"},
+			want:          nil,
+		},
+		{
+			name:          "subset of batch accounts",
+			mentioned:     map[string]bool{"bob": true},
+			batchAccounts: []string{"alice", "bob", "carol"},
+			want:          []string{"bob"},
+		},
+		{
+			name:          "mentioned account outside the batch is dropped",
+			mentioned:     map[string]bool{"dave": true},
+			batchAccounts: []string{"alice", "bob"},
+			want:          nil,
+		},
+		{
+			name:          "preserves batch ordering",
+			mentioned:     map[string]bool{"carol": true, "alice": true},
+			batchAccounts: []string{"alice", "bob", "carol"},
+			want:          []string{"alice", "carol"},
+		},
+		{
+			name:          "empty batch returns nil",
+			mentioned:     map[string]bool{"alice": true},
+			batchAccounts: nil,
+			want:          nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, filterMentions(tc.mentioned, tc.batchAccounts))
+		})
+	}
+}

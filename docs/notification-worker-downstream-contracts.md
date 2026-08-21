@@ -55,11 +55,13 @@ for future siblings (`.silent`, `.priority`) without restructuring the stream.
     "fileType": "",
     "parentRoomId": "",
     "pushTime": "2026-05-28T00:00:00Z",
-    "alsoSendToChannel": false
+    "alsoSendToChannel": false,
+    "mentionAll": false
   },
   "roomId": "r123",
   "timestamp": 1700000000000,
-  "unreadCounts": { "alice": 3, "carol": 9 }
+  "unreadCounts": { "alice": 3, "carol": 9 },
+  "mentions": ["alice"]
 }
 ```
 
@@ -73,6 +75,9 @@ Field notes:
 - **`data.sender`** is a `Participant` carrying `account`, `userId`, and `displayName`. **`displayName` is pre-composed by `message-gatekeeper`** at canonical-message write time via `pkg/displayfmt.CombineWithFallback(engName, chineseName, account)` (same helper already used by `room-worker/sysmsg.go`, `room-service/store_mongo.go`, and reaction rendering — one source of truth for display formatting across the system). The composition happens once per message regardless of downstream consumer count and never on the push hot path; push-service renders `sender.displayName` verbatim. Empty `displayName` (legacy in-flight canonical messages predating the field) falls back to `sender.account` in `notification-worker`. `engName` / `chineseName` are deliberately not propagated on the push event since the composed string is the only render-time input.
 - **`timestamp`** is event publish time (UnixMilli); **`data.pushTime`** is the RFC3339 domain send time. They are distinct fields.
 - **`unreadCounts`** (optional) is per-recipient badge counts stamped at notify time — see § Badge counts below. Omitted entirely (not an empty object) when the badge phase is disabled or produced no counts for this batch.
+- **`mentions`** (optional) lists the accounts **in this batch** that the message @-mentioned by name, scoped to `accounts` exactly as `unreadCounts` is — a mentioned member who was filtered out of the push (muted, hook-vetoed, presence-busy) is not a recipient and so never appears. Omitted entirely when the batch has no named mentions. Accounts are lowercased by the parser (`pkg/mention`), matching the `account` casing everywhere else on the event.
+- **`data.mentionAll`** (optional) is `true` when the message contained `@all`. A broad mention is **not** expanded into `mentions` — that would duplicate the whole `accounts` list on every batch — so the push service resolves per recipient as `data.mentionAll || mentions.includes(account)`. Both can be set at once (`"@all and especially @bob"`), which lets a client distinguish a room-wide ping from a direct one. `@here` sets neither: it is not a push trigger (see below) and is not a real account, so it never lands in `mentions`.
+- Neither mention field costs a lookup: both are derived from the `mention.Parse` result the worker already computes for its routing filters. Resolving mentions into full `Participant` objects (as the `RoomEvent.mentions` client event does) would require a per-message user lookup on the push hot path, which this contract deliberately avoids — see the `data.sender` note above.
 
 ### Badge counts (`unreadCounts`)
 

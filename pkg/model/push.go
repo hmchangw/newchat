@@ -15,6 +15,11 @@ type PushNotificationEvent struct {
 	// stamped per recipient at notify time. Accounts whose home-site badge
 	// RPC failed are absent — clients refresh the true count on open.
 	UnreadCounts map[string]int `json:"unreadCounts,omitempty" bson:"unreadCounts,omitempty"`
+	// Mentions lists the accounts in this batch that were @-mentioned by name,
+	// scoped to Accounts the same way UnreadCounts is. A broad @all mention is
+	// carried by Data.MentionAll instead of expanding into every recipient, so
+	// a recipient is mentioned when Data.MentionAll || Mentions contains them.
+	Mentions []string `json:"mentions,omitempty" bson:"mentions,omitempty"`
 }
 
 // PushNotificationData is the push payload; short legacy tag names (rid/tmid/prid) are spelled
@@ -30,4 +35,7 @@ type PushNotificationData struct {
 	ParentRoomID      string       `json:"parentRoomId,omitempty"      bson:"parentRoomId,omitempty"`
 	PushTime          string       `json:"pushTime"                    bson:"pushTime"`
 	AlsoSendToChannel bool         `json:"alsoSendToChannel,omitempty" bson:"alsoSendToChannel,omitempty"`
+	// MentionAll is true when the message contained @all. @here is deliberately
+	// excluded — it is not a push trigger (see notification-worker/routing.go).
+	MentionAll bool `json:"mentionAll,omitempty" bson:"mentionAll,omitempty"`
 }
