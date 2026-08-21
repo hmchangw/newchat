@@ -312,28 +312,55 @@ func TestHandler_HandleMessage_ChannelRoom(t *testing.T) {
 func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 	msgTime := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
 
+	bobParticipant := model.Participant{UserID: "u-bob", Account: "bob", SiteID: "site-a", ChineseName: "鮑勃", EngName: "Bob Chen"}
+	allParticipant := model.Participant{Account: "all", EngName: "all"}
+
 	tests := []struct {
 		name            string
 		content         string
-		wantSetMentions bool
 		mentionedUsers  []string
+		lookupUsers     []model.User
 		aliceHasMention bool
 		bobHasMention   bool
+		// The roster rides every copy so a client renders a name, not the raw @token.
+		wantMentionAll bool
+		wantMentions   []model.Participant
 	}{
 		{
-			name:            "no mentions",
-			content:         "hey bob",
-			wantSetMentions: false,
-			aliceHasMention: false,
-			bobHasMention:   false,
+			name:        "no mentions",
+			content:     "hey bob",
+			lookupUsers: []model.User{testUsers[0]},
 		},
 		{
-			name:            "with mention",
-			content:         "hey @bob",
-			wantSetMentions: true,
-			mentionedUsers:  []string{"bob"},
-			aliceHasMention: false,
-			bobHasMention:   true,
+			name:           "with mention",
+			content:        "hey @bob",
+			mentionedUsers: []string{"bob"},
+			lookupUsers:    testUsers,
+			bobHasMention:  true,
+			wantMentions:   []model.Participant{bobParticipant},
+		},
+		{
+			name:           "mention all",
+			content:        "@all standup",
+			lookupUsers:    []model.User{testUsers[0]},
+			wantMentionAll: true,
+			wantMentions:   []model.Participant{allParticipant},
+		},
+		{
+			name:           "mention and all",
+			content:        "@bob @all standup",
+			mentionedUsers: []string{"bob"},
+			lookupUsers:    testUsers,
+			bobHasMention:  true,
+			wantMentionAll: true,
+			wantMentions:   []model.Participant{bobParticipant, allParticipant},
+		},
+		{
+			// An unresolvable account is omitted from the roster, so the client keeps its raw @token.
+			name:           "unknown account",
+			content:        "hey @nobody",
+			mentionedUsers: []string{"nobody"},
+			lookupUsers:    []model.User{testUsers[0]},
 		},
 	}
 
@@ -355,24 +382,18 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 			}
 			data, _ := json.Marshal(evt)
 
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, false).Return(nil)
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
 			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil)
 			store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
 			store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
 
-			if tc.wantSetMentions {
+			if len(tc.mentionedUsers) > 0 {
 				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "dm-1", gomock.InAnyOrder(tc.mentionedUsers), msgTime).Return(nil)
 			}
 
 			// Single user lookup: sender first, then mentioned accounts.
-			if tc.wantSetMentions {
-				wantAccounts := append([]string{"alice"}, tc.mentionedUsers...)
-				us.EXPECT().FindUsersByAccounts(gomock.Any(), wantAccounts).
-					Return([]model.User{testUsers[0], testUsers[1]}, nil)
-			} else {
-				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).
-					Return([]model.User{testUsers[0]}, nil)
-			}
+			wantAccounts := append([]string{"alice"}, tc.mentionedUsers...)
+			us.EXPECT().FindUsersByAccounts(gomock.Any(), wantAccounts).Return(tc.lookupUsers, nil)
 
 			keyStore := NewMockRoomKeyProvider(ctrl)
 			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
@@ -404,149 +425,12 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 			assert.Equal(t, "msg-1", bobEvt.Message.ID)
 			require.NotNil(t, bobEvt.Message.Sender)
 			assert.Equal(t, tc.bobHasMention, bobEvt.HasMention)
-		})
-	}
-}
 
-// A DM's desktop banner is computed client-side from this event, so the mention
-// roster has to ride along exactly as it does on the channel path — without it a
-// client can only render the raw @account token instead of the person's name.
-func TestHandler_HandleMessage_DMRoom_CarriesMentionRoster(t *testing.T) {
-	msgTime := time.Date(2026, 8, 21, 11, 0, 0, 0, time.UTC)
-
-	tests := []struct {
-		name           string
-		content        string
-		lookupAccounts []string
-		lookupUsers    []model.User
-		wantSetMention []string
-		wantMentionAll bool
-		wantMentions   []model.Participant
-	}{
-		{
-			name:           "no mentions",
-			content:        "hey bob",
-			lookupAccounts: []string{"alice"},
-			lookupUsers:    []model.User{testUsers[0]},
-		},
-		{
-			name:           "account mention",
-			content:        "hey @bob",
-			lookupAccounts: []string{"alice", "bob"},
-			lookupUsers:    testUsers,
-			wantSetMention: []string{"bob"},
-			wantMentions: []model.Participant{
-				{UserID: "u-bob", Account: "bob", SiteID: "site-a", ChineseName: "鮑勃", EngName: "Bob Chen"},
-			},
-		},
-		{
-			name:           "mention all",
-			content:        "@all standup",
-			lookupAccounts: []string{"alice"},
-			lookupUsers:    []model.User{testUsers[0]},
-			wantMentionAll: true,
-			wantMentions:   []model.Participant{{Account: "all", EngName: "all"}},
-		},
-		{
-			name:           "account mention and all",
-			content:        "@bob @all standup",
-			lookupAccounts: []string{"alice", "bob"},
-			lookupUsers:    testUsers,
-			wantSetMention: []string{"bob"},
-			wantMentionAll: true,
-			wantMentions: []model.Participant{
-				{UserID: "u-bob", Account: "bob", SiteID: "site-a", ChineseName: "鮑勃", EngName: "Bob Chen"},
-				{Account: "all", EngName: "all"},
-			},
-		},
-		{
-			name:           "unknown account keeps no participant",
-			content:        "hey @nobody",
-			lookupAccounts: []string{"alice", "nobody"},
-			lookupUsers:    []model.User{testUsers[0]},
-			wantSetMention: []string{"nobody"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			store := NewMockStore(ctrl)
-			us := NewMockUserStore(ctrl)
-			pub := &mockPublisher{}
-			keyStore := NewMockRoomKeyProvider(ctrl)
-
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "dm-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
-			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "dm-1", "alice", msgTime).Return(nil)
-			store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
-			store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
-			if len(tc.wantSetMention) > 0 {
-				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "dm-1", gomock.InAnyOrder(tc.wantSetMention), msgTime).Return(nil)
-			}
-			us.EXPECT().FindUsersByAccounts(gomock.Any(), tc.lookupAccounts).Return(tc.lookupUsers, nil)
-
-			evt := model.MessageEvent{
-				Event:     model.EventCreated,
-				SiteID:    "site-a",
-				Timestamp: msgTime.UnixMilli(),
-				Message: model.Message{
-					ID: "msg-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
-					Content: tc.content, CreatedAt: msgTime,
-				},
-			}
-			data, _ := json.Marshal(evt)
-
-			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-			require.NoError(t, h.HandleMessage(context.Background(), data))
-
-			require.Len(t, pub.records, 2)
-			for _, rec := range pub.records {
-				roomEvt := decodeRoomEvent(t, rec.data)
-				assert.Equal(t, tc.wantMentionAll, roomEvt.MentionAll, "subject %s", rec.subject)
-				assert.Equal(t, tc.wantMentions, roomEvt.Mentions, "subject %s", rec.subject)
+			for subj, e := range evtBySubject {
+				assert.Equal(t, tc.wantMentionAll, e.MentionAll, "subject %s", subj)
+				assert.Equal(t, tc.wantMentions, e.Mentions, "subject %s", subj)
 			}
 		})
-	}
-}
-
-// The DM thread-reply lane publishes through the same helper, so it carries the
-// roster too — a thread reply banner names the mentioned person as well.
-func TestHandleThreadCreated_DMRoom_CarriesMentionRoster(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-
-	msgTime := time.Date(2026, 8, 21, 11, 0, 0, 0, time.UTC)
-
-	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
-	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice", "bob"}).Return(testUsers, nil)
-
-	evt := model.MessageEvent{
-		Event:     model.EventCreated,
-		SiteID:    "site-a",
-		Timestamp: msgTime.UnixMilli(),
-		Message: model.Message{
-			ID: "reply-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
-			Content: "hey @bob", CreatedAt: msgTime,
-			ThreadParentMessageID: "parent-dm", TShow: false,
-		},
-	}
-	data, _ := json.Marshal(evt)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	require.Len(t, pub.records, 2)
-	want := []model.Participant{
-		{UserID: "u-bob", Account: "bob", SiteID: "site-a", ChineseName: "鮑勃", EngName: "Bob Chen"},
-	}
-	for _, rec := range pub.records {
-		roomEvt := decodeRoomEvent(t, rec.data)
-		assert.Equal(t, model.RoomEventNewThreadMessage, roomEvt.Type)
-		assert.Equal(t, want, roomEvt.Mentions, "subject %s", rec.subject)
 	}
 }
 
@@ -2788,6 +2672,12 @@ func TestHandleThreadCreated_DMRoom_WithMention_NoSubscriptionWrite(t *testing.T
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 	require.Len(t, pub.records, 2)
+
+	// The roster still rides the thread lane, so a reply banner can name the person.
+	want := []model.Participant{{UserID: "u-bob", Account: "bob", SiteID: "site-a", ChineseName: "鮑勃", EngName: "Bob Chen"}}
+	for _, rec := range pub.records {
+		assert.Equal(t, want, decodeRoomEvent(t, rec.data).Mentions, "subject %s", rec.subject)
+	}
 }
 
 func TestHandleThreadCreated_ChannelExcludesRestrictedAndNonMemberMentions(t *testing.T) {

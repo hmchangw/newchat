@@ -226,7 +226,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
-		return h.publishChannelEvent(ctx, &meta, clientMsg, evt.Timestamp, resolved.MentionAll, resolved.Participants)
+		return h.publishChannelEvent(ctx, &meta, clientMsg, evt.Timestamp, resolved)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved, model.RoomEventNewMessage)
 	default:
@@ -287,12 +287,8 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		// Do NOT call SetSubscriptionMentions here: TShow=false replies are invisible
 		// in the main channel, so a room-level mention badge would appear with no
 		// visible message to explain it.
-		roomEvt := buildRoomEvent(&meta, clientMsg, evt.Timestamp)
+		roomEvt := buildRoomEvent(&meta, clientMsg, evt.Timestamp, resolved)
 		roomEvt.Type = model.RoomEventNewThreadMessage
-		roomEvt.MentionAll = resolved.MentionAll
-		if len(resolved.Participants) > 0 {
-			roomEvt.Mentions = resolved.Participants
-		}
 		payload, err := sonic.Marshal(roomEvt)
 		if err != nil {
 			return fmt.Errorf("marshal thread created event for parent %s: %w", parentMsgID, err)
@@ -857,12 +853,8 @@ func (h *Handler) encryptRoomEvent(ctx context.Context, roomID string, clientMsg
 	return nil
 }
 
-func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionAll bool, mentions []model.Participant) error {
-	evt := buildRoomEvent(meta, clientMsg, timestamp)
-	evt.MentionAll = mentionAll
-	if len(mentions) > 0 {
-		evt.Mentions = mentions
-	}
+func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, resolved *mention.ResolveResult) error {
+	evt := buildRoomEvent(meta, clientMsg, timestamp, resolved)
 	if err := h.encryptRoomEvent(ctx, meta.ID, clientMsg, &evt); err != nil {
 		return fmt.Errorf("encrypt channel event for room %s: %w", meta.ID, err)
 	}
@@ -912,11 +904,8 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 		"request_id", natsutil.RequestIDFromContext(ctx), "account", account, "room_id", roomID)
 }
 
-// publishDMEvents fans a DM/botDM room event out per non-bot member. resolved
-// carries the mention roster: the per-recipient hasMention flag comes from its
-// accounts, and the roster itself rides on every event so a client can render a
-// mentioned person's name instead of the raw @account token (the desktop banner
-// is computed client-side from this event).
+// publishDMEvents fans a DM/botDM room event out per non-bot member; only
+// hasMention differs between the copies.
 func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, resolved *mention.ResolveResult, roomEventType model.RoomEventType) error {
 	labels := broadcastLabels(ctx)
 	ctx = withBroadcastMetricLabels(ctx, roomKind(meta.Type), labels.eventType)
@@ -941,13 +930,9 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 		}
 		_, hasMention := mentionSet[account]
 
-		evt := buildRoomEvent(meta, clientMsg, timestamp)
+		evt := buildRoomEvent(meta, clientMsg, timestamp, resolved)
 		evt.Type = roomEventType
 		evt.HasMention = hasMention
-		evt.MentionAll = resolved.MentionAll
-		if len(resolved.Participants) > 0 {
-			evt.Mentions = resolved.Participants
-		}
 
 		payload, err := sonic.Marshal(evt)
 		if err != nil {
@@ -978,7 +963,10 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 	return nil
 }
 
-func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, eventTimestamp int64) model.RoomEvent {
+// buildRoomEvent is the only constructor of model.RoomEvent, so stamping the
+// mention roster here is what keeps a publish path from shipping without one.
+// resolved must be non-nil — every caller passes mention.ResolveFromParsed's result.
+func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, eventTimestamp int64, resolved *mention.ResolveResult) model.RoomEvent {
 	return model.RoomEvent{
 		Type:           model.RoomEventNewMessage,
 		RoomID:         meta.ID,
@@ -991,6 +979,8 @@ func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, ev
 		LastMsgAt:      clientMsg.CreatedAt,
 		LastMsgID:      clientMsg.ID,
 		Message:        clientMsg,
+		MentionAll:     resolved.MentionAll,
+		Mentions:       resolved.Participants,
 	}
 }
 
