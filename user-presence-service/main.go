@@ -10,6 +10,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -158,7 +159,9 @@ func main() {
 	// silently dropped (no reply, no redelivery) — a reconnect storm would lose
 	// presence updates and strand users online/offline. Only the per-request
 	// timeout is applied.
-	router := natsrouter.Default(nc, "user-presence-service", natsrouter.WithSiteID(cfg.SiteID))
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.Default(nc, "user-presence-service",
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	if cfg.RequestTimeout > 0 {
 		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
 	}
