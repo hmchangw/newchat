@@ -146,7 +146,9 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	// room-service owns the thread_subscriptions unique key. Best-effort legacy
 	// (threadRoomId, userId) drop first so the userAccount index creates without a
 	// key conflict; it may not exist (fresh deploy) — ignore all errors.
-	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
+	if derr := s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1"); derr != nil && !mongoutil.IsIndexNotFound(derr) {
+		errs = append(errs, fmt.Errorf("drop legacy thread_subscriptions (threadRoomId,userId) index: %w", derr))
+	}
 	unique(s.threadSubscriptions, "thread_subscriptions (threadRoomId,userAccount)",
 		bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}})
 	create(s.threadSubscriptions, "thread_subscriptions (parentMessageId,userAccount)",

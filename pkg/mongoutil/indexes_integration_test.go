@@ -80,6 +80,8 @@ func TestEnsureIndexWithRepair_DirtyDataRestoresOldIndex(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.True(t, mongo.IsDuplicateKeyError(err), "duplicate data must surface E11000")
-	assert.Equal(t, "account_1", indexNameByKeys(ctx, coll, bson.D{{Key: "account", Value: 1}}),
-		"the old account index must be restored, not left dropped")
+	restored := existingIndexByKeys(ctx, coll, bson.D{{Key: "account", Value: 1}})
+	require.Equal(t, "account_1", restored.name, "the old account index must be restored, not left dropped")
+	u, _ := restored.spec["unique"].(bool)
+	assert.False(t, u, "the restored index must faithfully preserve the old (non-unique) spec")
 }
