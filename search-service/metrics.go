@@ -143,8 +143,24 @@ func observeRequest(ctx context.Context, kind string, errPtr *error) func() {
 	start := time.Now()
 	return func() {
 		status := statusLabel(*errPtr)
-		appMetrics.requestDuration.Record(ctx, time.Since(start).Seconds(), appMetrics.kindOpts[kind])
-		appMetrics.requests.Add(ctx, 1, appMetrics.statusOpts[requestLabels{kind, status}])
+		// Look the precomputed sets up rather than indexing blind. A kind
+		// outside allMetricKinds yields a nil MeasurementOption, and the SDK
+		// dereferences it — a runtime panic on a telemetry path, which must
+		// never be able to take a request down. Recording without the kind
+		// label loses a dimension; it does not lose the request, and it does
+		// not mint an unbounded label from an unvetted value. The sibling
+		// recorder in search-sync-worker guards the same way.
+		durationOpt, ok := appMetrics.kindOpts[kind]
+		if !ok {
+			durationOpt = metric.WithAttributes()
+		}
+		appMetrics.requestDuration.Record(ctx, time.Since(start).Seconds(), durationOpt)
+
+		countOpt, ok := appMetrics.statusOpts[requestLabels{kind, status}]
+		if !ok {
+			countOpt = metric.WithAttributes(attribute.String("status", status))
+		}
+		appMetrics.requests.Add(ctx, 1, countOpt)
 	}
 }
 
