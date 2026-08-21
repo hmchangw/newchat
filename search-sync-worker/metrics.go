@@ -109,8 +109,11 @@ type collectionMetrics struct {
 	flushOpts     map[flushOutcome]metric.MeasurementOption
 	msgOpts       map[msgDisposition]metric.MeasurementOption
 	// itemFailureOpts is keyed by the closed action set crossed with the
-	// bounded status labels bulkStatusLabel can return.
+	// bounded status labels bulkStatusLabel can return, and statusOnlyOpts
+	// carries the same statuses without an action, for an action outside the
+	// closed set.
 	itemFailureOpts map[itemFailureKey]metric.MeasurementOption
+	statusOnlyOpts  map[string]metric.MeasurementOption
 }
 
 type itemFailureKey struct {
@@ -151,6 +154,13 @@ func (m *syncMetrics) forCollection(name string) *collectionMetrics {
 			))
 		}
 	}
+	statusOnlyOpts := make(map[string]metric.MeasurementOption, len(allBulkStatusLabels))
+	for _, status := range allBulkStatusLabels {
+		statusOnlyOpts[status] = metric.WithAttributeSet(attribute.NewSet(
+			attribute.String("collection", name),
+			attribute.String("status", status),
+		))
+	}
 	return &collectionMetrics{
 		m:          m,
 		collection: name,
@@ -162,6 +172,7 @@ func (m *syncMetrics) forCollection(name string) *collectionMetrics {
 		flushOpts:       flushOpts,
 		msgOpts:         msgOpts,
 		itemFailureOpts: itemFailureOpts,
+		statusOnlyOpts:  statusOnlyOpts,
 	}
 }
 
@@ -208,12 +219,18 @@ func (c *collectionMetrics) recordItemFailure(ctx context.Context, action string
 	if c == nil {
 		return
 	}
-	if opt, ok := c.itemFailureOpts[itemFailureKey{action, bulkStatusLabel(status)}]; ok {
+	label := bulkStatusLabel(status)
+	if opt, ok := c.itemFailureOpts[itemFailureKey{action, label}]; ok {
 		c.m.itemFailures.Add(ctx, 1, opt)
 		return
 	}
-	// An action outside the closed set still counts, without minting a label.
-	c.m.itemFailures.Add(ctx, 1, c.actionsOpt)
+	// An action outside the closed set still counts, and keeps the status —
+	// bulkStatusLabel is total, so the status is bounded whatever the action
+	// was, and it is the half that carries the diagnosis. Dropping it would
+	// blind the 429 signal for any action added to searchengine but not to
+	// allBulkActions, which is exactly when you would want to see it. The
+	// fallback sets are precomputed like every other recorder here.
+	c.m.itemFailures.Add(ctx, 1, c.statusOnlyOpts[label])
 }
 
 // bulkStatusLabel maps an ES bulk item status to a bounded label value: the

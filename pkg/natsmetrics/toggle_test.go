@@ -107,3 +107,20 @@ func TestRemovedInstrumentsAreNotRegistered(t *testing.T) {
 	assert.Equal(t, "nak", attrs(naks[0])["outcome"])
 	assert.Equal(t, "member_add", attrs(naks[0])["event_type"])
 }
+
+// A nil *Consumer must be inert across the whole surface, not most of it.
+// enabled() already declares nil support with its `c != nil`, and
+// LoopStarted/LoopStopped/Terminal honoured it — but IsUp and LoopFailed
+// dereferenced c first and panicked. An API that advertises a contract on one
+// method and breaks it on the next is the trap, whether or not a caller hits it
+// today.
+func TestNilConsumerIsInertAcrossTheWholeSurface(t *testing.T) {
+	var c *Consumer
+	ctx := context.Background()
+
+	assert.NotPanics(t, func() { c.LoopStarted(ctx) })
+	assert.NotPanics(t, func() { c.LoopStopped(ctx) })
+	assert.NotPanics(t, func() { c.Terminal(ctx, EventCreated, TerminalInternal) })
+	assert.NotPanics(t, func() { c.LoopFailed(ctx, nats.ErrTimeout) })
+	assert.NotPanics(t, func() { assert.False(t, c.IsUp()) })
+}

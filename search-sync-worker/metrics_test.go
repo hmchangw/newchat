@@ -360,3 +360,50 @@ func TestRecordItemFailure_CoversEveryBoundedLabel(t *testing.T) {
 	// An action outside the closed set still records, without minting a label.
 	require.NotPanics(t, func() { c.recordItemFailure(ctx, "not-an-action", 429) })
 }
+
+// An action outside allBulkActions must keep the status. bulkStatusLabel is
+// total, so the status is bounded whatever the action was, and it is the half
+// that carries the diagnosis — the fallback used to drop it, blinding the 429
+// signal for any action added to searchengine but not to allBulkActions.
+func TestRecordItemFailure_UnknownActionKeepsStatus(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	c := newSyncMetrics(mp.Meter("search-sync-test")).forCollection("messages")
+
+	c.recordItemFailure(context.Background(), "an-action-nobody-registered", 429)
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var got map[string]string
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "search_sync_worker_bulk_item_failures" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			require.Len(t, sum.DataPoints, 1)
+			got = map[string]string{}
+			for _, kv := range sum.DataPoints[0].Attributes.ToSlice() {
+				got[string(kv.Key)] = kv.Value.String()
+			}
+		}
+	}
+	require.NotNil(t, got, "the failure must still be recorded")
+	assert.Equal(t, "429", got["status"], "the bounded status must survive an unknown action")
+	assert.Equal(t, "messages", got["collection"])
+	assert.NotContains(t, got, "action", "the unvetted action must not become a label")
+}
+
+// The fallback is precomputed like every other recorder here, so it costs the
+// same as the hit path.
+func TestRecordItemFailure_UnknownActionDoesNotAllocateMore(t *testing.T) {
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader()))
+	c := newSyncMetrics(mp.Meter("search-sync-test")).forCollection("messages")
+	ctx := context.Background()
+
+	known := testing.AllocsPerRun(50, func() { c.recordItemFailure(ctx, "index", 429) })
+	unknown := testing.AllocsPerRun(50, func() { c.recordItemFailure(ctx, "unregistered", 429) })
+
+	assert.Equal(t, known, unknown, "the fallback must not cost more than the precomputed hit")
+}

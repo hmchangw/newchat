@@ -344,10 +344,13 @@ func (c *Consumer) LoopStopped(ctx context.Context) {
 }
 
 // IsUp reports whether the loop is currently able to receive messages.
-func (c *Consumer) IsUp() bool { return c.up.Load() }
+func (c *Consumer) IsUp() bool { return c != nil && c.up.Load() }
 
 // LoopFailed marks the loop down before recording the bounded terminal cause.
 func (c *Consumer) LoopFailed(ctx context.Context, err error) {
+	if c == nil {
+		return
+	}
 	wasUp := c.up.Load()
 	c.LoopStopped(ctx)
 	if !wasUp {
