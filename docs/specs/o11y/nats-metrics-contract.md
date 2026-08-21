@@ -515,11 +515,11 @@ instrument name** you grep for in source underneath where the two differ.
 
 | Exported name | Type | Emitted by | Appears | Platform alternative | Read by |
 |---|---|---|---|---|---|
-| `chat_nats_consumer_loop_up` | gauge | the 5 JetStream consumers | at startup | none — the broker sees the durable exist, not whether the client loop is alive | failure campaign F11; **the alert this family exists for** |
-| `chat_nats_consumer_messages_total` | counter | the 5 JetStream consumers | on first delivery | partial: ack throughput via ack-floor rate; naks and terms have no broker equivalent | campaign; carries the event-type breakdown a redelivery question needs |
+| `chat_nats_consumer_loop_up`<br><sub>`chat.nats.consumer.loop.up`</sub> | gauge | the 5 JetStream consumers | at startup | none — the broker sees the durable exist, not whether the client loop is alive | failure campaign F11; **the alert this family exists for** |
+| `chat_nats_consumer_messages_total`<br><sub>`chat.nats.consumer.messages`</sub> | counter | the 5 JetStream consumers | on first delivery | partial: ack throughput via ack-floor rate; naks and terms have no broker equivalent | campaign; carries the event-type breakdown a redelivery question needs |
 | `chat_nats_consumer_processing_duration_seconds`<br><sub>`chat.nats.consumer.processing.duration`</sub> | histogram | the 5 JetStream consumers | on first delivery | none — the broker does not know handler time | campaign (AckWait headroom) |
-| `chat_nats_terminal_failures_total` | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
-| `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | all 7 NATS services | on first failure | none — the broker has no record of a publish that never arrived | campaign |
+| `chat_nats_terminal_failures_total`<br><sub>`chat.nats.terminal.failures`</sub> | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
+| `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | every service using the shared connect helper | on first failure | none — the broker has no record of a publish that never arrived | campaign |
 | `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
 | `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4 / SLO-5** (`sli-slo.md` roadmap P1) — but see the `rpc.method` coverage note below |
 
@@ -565,8 +565,8 @@ absent there.
 
 | Exported name | Type | Emitted by | Appears | Platform alternative | Read by |
 |---|---|---|---|---|---|
-| `chat_nats_client_connected` | gauge | all 7 NATS services | at startup | none at per-process granularity | **SLO-1b connection-risk backstop** (roadmap P4) |
-| `chat_nats_client_connection_events_total` | counter | all 7 NATS services | at startup (initial connect) | none | SLO-1b backstop |
+| `chat_nats_client_connected`<br><sub>`chat.nats.client.connected`</sub> | gauge | every service using the shared connect helper | at startup | none at per-process granularity | **SLO-1b connection-risk backstop** (roadmap P4) |
+| `chat_nats_client_connection_events_total`<br><sub>`chat.nats.client.connection.events`</sub> | counter | every service using the shared connect helper | at startup (initial connect) | none | SLO-1b backstop |
 | `nats_slow_consumer_events_total` | counter | any service using the shared helper | on first episode | none | campaign |
 
 These three carry no `site` label: they are emitted below the layer that knows
