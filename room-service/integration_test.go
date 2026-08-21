@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
 
@@ -4301,15 +4302,17 @@ func TestEnsureIndexes_ThreadSubsCanonicalCreateFailure_KeepsLegacy_Integration(
 	store := NewMongoStore(db)
 	ctx := context.Background()
 
-	// Legacy index present, plus duplicate (threadRoomId, userAccount) rows so the
-	// canonical UNIQUE create fails with E11000.
+	// Legacy UNIQUE index present (models the real constraint the migration preserves).
 	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
+		Options: options.Index().SetUnique(true),
 	})
 	require.NoError(t, err)
+	// Distinct (threadRoomId, userId) so both rows coexist under the legacy unique index,
+	// but the SAME (threadRoomId, userAccount) so the canonical UNIQUE create fails E11000.
 	_, err = db.Collection("thread_subscriptions").InsertMany(ctx, []any{
-		bson.M{"_id": "a", "threadRoomId": "tr1", "userAccount": "dup"},
-		bson.M{"_id": "b", "threadRoomId": "tr1", "userAccount": "dup"},
+		bson.M{"_id": "a", "threadRoomId": "tr1", "userId": "u1", "userAccount": "dup"},
+		bson.M{"_id": "b", "threadRoomId": "tr1", "userId": "u2", "userAccount": "dup"},
 	})
 	require.NoError(t, err)
 
