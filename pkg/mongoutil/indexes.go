@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -84,7 +85,7 @@ func EnsureIndexWithRepair(ctx context.Context, coll *mongo.Collection, model mo
 		// collection keeps an index; the returned error still carries the cause.
 		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), indexRestoreTimeout)
 		defer cancel()
-		if _, rerr := coll.Indexes().CreateOne(restoreCtx, old.model()); rerr != nil {
+		if _, rerr := coll.Indexes().CreateOne(restoreCtx, old.model(ctx)); rerr != nil {
 			slog.WarnContext(ctx, "mongo: index repair failed and the old index could not be restored",
 				"collection", coll.Name(), "index", old.name, "error", rerr)
 		}
@@ -120,7 +121,7 @@ type existingIndex struct {
 // correctness-relevant options (unique, sparse, hidden, TTL, partial filter) so a
 // restore never silently weakens the constraint. Collation is not reconstructed —
 // no repaired index in this repo uses it.
-func (e existingIndex) model() mongo.IndexModel {
+func (e existingIndex) model(ctx context.Context) mongo.IndexModel {
 	opts := options.Index().SetName(e.name)
 	if v, _ := e.spec["unique"].(bool); v {
 		opts = opts.SetUnique(true)
@@ -131,16 +132,36 @@ func (e existingIndex) model() mongo.IndexModel {
 	if v, _ := e.spec["hidden"].(bool); v {
 		opts = opts.SetHidden(true)
 	}
-	switch v := e.spec["expireAfterSeconds"].(type) {
-	case int32:
-		opts = opts.SetExpireAfterSeconds(v)
-	case int64:
-		opts = opts.SetExpireAfterSeconds(int32(v))
+	if raw, ok := e.spec["expireAfterSeconds"]; ok {
+		if ttl, ok := ttlSeconds(raw); ok {
+			opts = opts.SetExpireAfterSeconds(ttl)
+		} else {
+			slog.WarnContext(ctx, "mongo: captured index TTL is not a usable expireAfterSeconds; restoring the index without it",
+				"index", e.name, "expireAfterSeconds", raw)
+		}
 	}
 	if v, ok := e.spec["partialFilterExpression"]; ok {
 		opts = opts.SetPartialFilterExpression(v)
 	}
 	return mongo.IndexModel{Keys: e.keys, Options: opts}
+}
+
+// ttlSeconds narrows a captured expireAfterSeconds to the int32 the driver takes.
+// Mongo hands it back as int32 or int64, and a live TTL always fits in [0,
+// MaxInt32]; anything outside that is reported unusable rather than narrowed,
+// because a wrapped value would restore an index expiring documents on a
+// schedule the original never had.
+func ttlSeconds(raw any) (int32, bool) {
+	switch v := raw.(type) {
+	case int32:
+		return v, v >= 0
+	case int64:
+		if v < 0 || v > math.MaxInt32 {
+			return 0, false
+		}
+		return int32(v), true
+	}
+	return 0, false
 }
 
 // existingIndexByKeys returns the index on coll whose key spec matches keys
