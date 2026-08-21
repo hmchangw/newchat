@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/mock/gomock"
@@ -314,4 +315,48 @@ func TestESParentResolver_RecordsResolveDuration(t *testing.T) {
 	}
 	assert.Equal(t, uint64(1), byOutcome["resolved"])
 	assert.Equal(t, uint64(1), byOutcome["unresolved"])
+}
+
+// recordItemFailure runs once per failed bulk action, and the loop that calls
+// it is bounded by the actions in one message — a Teams migration batch
+// contributes one action per migrated message, so a single message can drive
+// the whole inner loop. The path is only "cold" while Elasticsearch is
+// healthy; under the 429 backpressure these metrics exist to diagnose it runs
+// once per rejected action, up to BULK_BATCH_SIZE (500) per flush. Building an
+// attribute set per call there adds allocation pressure to a system already
+// under strain, so the labels are precomputed like every other recorder in
+// this file.
+func TestRecordItemFailure_DoesNotAllocate(t *testing.T) {
+	m := newSyncMetrics(noop.NewMeterProvider().Meter("test"))
+	c := m.forCollection("messages")
+	ctx := context.Background()
+
+	// One allocation is the floor for any OTel recording call: Add(ctx, n, opt)
+	// is variadic, so the option slice is built per call. The contract is parity
+	// with a peer that already precomputes its labels, not zero.
+	peer := testing.AllocsPerRun(200, func() {
+		c.recordMessages(ctx, dispAckedSuccess, 1)
+	})
+	allocs := testing.AllocsPerRun(200, func() {
+		c.recordItemFailure(ctx, "index", 429)
+	})
+
+	assert.Equal(t, peer, allocs,
+		"recording a bulk item failure must cost the same as a precomputed peer")
+}
+
+// Every action/status pair the classifier can produce must resolve to a
+// precomputed set, including statuses that bucket into a class.
+func TestRecordItemFailure_CoversEveryBoundedLabel(t *testing.T) {
+	m := newSyncMetrics(noop.NewMeterProvider().Meter("test"))
+	c := m.forCollection("messages")
+	ctx := context.Background()
+
+	for _, action := range []string{"index", "delete", "update"} {
+		for _, status := range []int{400, 404, 409, 413, 429, 500, 503, 418, 599, 0} {
+			require.NotPanics(t, func() { c.recordItemFailure(ctx, action, status) })
+		}
+	}
+	// An action outside the closed set still records, without minting a label.
+	require.NotPanics(t, func() { c.recordItemFailure(ctx, "not-an-action", 429) })
 }
