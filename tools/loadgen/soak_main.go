@@ -424,6 +424,7 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
+	warnSoakReconcileCapacity(&cfg.Soak, metrics)
 	setSoakRunInfo(metrics, cfg.Soak.Environment)
 	defer metrics.stopNATSHealth()
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)

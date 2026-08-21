@@ -392,7 +392,6 @@ func runSoakPhase(
 	if phase == soakPhaseSeed {
 		return runSoakSeed(ctx, cfg, opts.Seed)
 	}
-	warnSoakReconcileCapacity(&cfg.Soak)
 	return runSoakWorkload(ctx, cfg, opts)
 }
 

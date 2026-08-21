@@ -245,9 +245,15 @@ var (
 
 const invalidReasonCapacity = "capacity"
 
+// invalidReasonReconcileCapacity marks a run started below the reconciliation
+// floor. Nothing has failed yet, but every message will expire unverified for
+// want of a claim, so the evidence is in question from the first second.
+const invalidReasonReconcileCapacity = "reconcile_capacity"
+
 var failureInvalidationReasonRegistry = map[string]struct{}{
 	"capacity": {}, "wal": {}, "accounting_invariant": {}, "observer_queue": {},
-	"observer_malformed": {}, "recipient_recovery": {}, "recipient_observer": {},
+	invalidReasonReconcileCapacity: {},
+	"observer_malformed":           {}, "recipient_recovery": {}, "recipient_observer": {},
 	"timeline": {}, "other": {},
 	"sidecar": {},
 }

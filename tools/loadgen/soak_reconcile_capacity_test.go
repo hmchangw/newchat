@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,7 +71,7 @@ func TestWarnSoakReconcileCapacity_NamesTheDeficitAndTheRemedy(t *testing.T) {
 	cfg.ReconcileReadShare = 0.75
 
 	output := captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg)
+	warnSoakReconcileCapacity(&cfg, nil)
 
 	logged := output.String()
 	require.Contains(t, logged, `"level":"WARN"`)
@@ -78,6 +79,47 @@ func TestWarnSoakReconcileCapacity_NamesTheDeficitAndTheRemedy(t *testing.T) {
 	assert.Contains(t, logged, `"requiredOperationsPerSecond":110`)
 	assert.Contains(t, logged, `"suppliedOperationsPerSecond":82.5`)
 	assert.Contains(t, logged, "SOAK_READ_RATE")
+}
+
+// A warning in the log is not machine-readable, and below the floor every
+// message eventually expires unverified — the run produces evidence it cannot
+// stand behind. Marking it through the invalidation counter is what lets a
+// dashboard and an operator see, from the run's own output, that the window was
+// inconclusive from the first second rather than degraded partway through.
+func TestWarnSoakReconcileCapacity_MarksTheRunInvalidFromStartup(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SearchObserverEnabled = true
+	cfg.SendRate = 55
+	cfg.ReadRate = 110
+	cfg.ReconcileReadShare = 0.75
+	metrics := NewMetrics()
+
+	captureSoakLog(t)
+	warnSoakReconcileCapacity(&cfg, metrics)
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureInvalidations.WithLabelValues(invalidReasonReconcileCapacity)))
+}
+
+func TestWarnSoakReconcileCapacity_DoesNotInvalidateARunThatFits(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SendRate = 55
+	cfg.ReadRate = 200
+	cfg.ReconcileReadShare = 0.75
+	metrics := NewMetrics()
+
+	captureSoakLog(t)
+	warnSoakReconcileCapacity(&cfg, metrics)
+
+	assert.Zero(t, testutil.ToFloat64(
+		metrics.FailureInvalidations.WithLabelValues(invalidReasonReconcileCapacity)))
+}
+
+// The reason has to be in the bounded registry, or a run recovering the same
+// invalidation from its journal would record it as "other" and lose the cause.
+func TestFailureInvalidationRegistry_KnowsTheReconcileCapacityReason(t *testing.T) {
+	_, known := failureInvalidationReasonRegistry[invalidReasonReconcileCapacity]
+	assert.True(t, known)
 }
 
 func TestWarnSoakReconcileCapacity_SaysNothingWhenTheLaneCanServeTheFloor(t *testing.T) {
@@ -88,7 +130,7 @@ func TestWarnSoakReconcileCapacity_SaysNothingWhenTheLaneCanServeTheFloor(t *tes
 	cfg.ReconcileReadShare = 0.75
 
 	output := captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg)
+	warnSoakReconcileCapacity(&cfg, nil)
 
 	assert.Empty(t, output.String())
 }
@@ -106,7 +148,7 @@ func TestWarnSoakReconcileCapacity_SaysNothingForAHistoryOnlyRunAtTheSameRates(t
 	cfg.ReconcileReadShare = 0.75
 
 	output := captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg)
+	warnSoakReconcileCapacity(&cfg, nil)
 
 	assert.Empty(t, output.String())
 }
@@ -121,7 +163,7 @@ func TestWarnSoakReconcileCapacity_SaysNothingWithoutASendRate(t *testing.T) {
 	cfg.ReconcileReadShare = 0.75
 
 	output := captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg)
+	warnSoakReconcileCapacity(&cfg, nil)
 
 	assert.Empty(t, output.String())
 }

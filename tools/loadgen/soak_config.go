@@ -641,11 +641,20 @@ func soakReconcileCapacityFor(cfg *soakConfig) soakReconcileCapacity {
 // It warns rather than exits because refusing at startup spends a whole deploy
 // on a configuration mistake the message already states, and only the operator
 // knows whether a degraded lane is worth the window.
-// loadgen_failure_reconcile_claims_total shows at runtime whether it bit.
-func warnSoakReconcileCapacity(cfg *soakConfig) {
+// loadgen_failure_reconcile_claims_total shows at runtime whether it bit, and
+// loadgen_failure_invalidations_total marks the run itself as one whose
+// evidence was already in question when it started.
+func warnSoakReconcileCapacity(cfg *soakConfig, metrics *Metrics) {
 	capacity := soakReconcileCapacityFor(cfg)
 	if cfg.SendRate <= 0 || capacity.Sufficient() {
 		return
+	}
+	// A log line is not machine-readable, and below the floor every message
+	// eventually expires unverified. The run is producing evidence it cannot
+	// stand behind, which is what the invalidation counter is for — the window
+	// was inconclusive from the first second, not degraded partway through.
+	if metrics != nil {
+		metrics.FailureInvalidations.WithLabelValues(invalidReasonReconcileCapacity).Inc()
 	}
 	slog.Warn("soak reconcile lane is below the capacity its observers demand",
 		"observerSteps", capacity.Steps,
