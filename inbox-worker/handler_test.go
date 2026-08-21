@@ -121,6 +121,13 @@ type stubInboxStore struct {
 	chatlistUpdates       []userChatlistUpdate
 	sectionMoves          []sectionMove
 	permissionsApplies    []permissionsApply
+	accountUpserts        []userAccountUpsert
+	accountErr            error
+}
+
+type userAccountUpsert struct {
+	event     model.UserAccountUpdated
+	updatedAt time.Time
 }
 
 type permissionsApply struct {
@@ -502,6 +509,24 @@ func (s *stubInboxStore) UpdateUserChatlist(_ context.Context, account string, c
 	defer s.mu.Unlock()
 	s.chatlistUpdates = append(s.chatlistUpdates, userChatlistUpdate{account: account, chatlist: chatlist, updatedAt: updatedAt})
 	return nil
+}
+
+func (s *stubInboxStore) UpsertUserAccount(_ context.Context, e *model.UserAccountUpdated, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.accountErr != nil {
+		return s.accountErr
+	}
+	s.accountUpserts = append(s.accountUpserts, userAccountUpsert{event: *e, updatedAt: updatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) getAccountUpserts() []userAccountUpsert {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]userAccountUpsert, len(s.accountUpserts))
+	copy(cp, s.accountUpserts)
+	return cp
 }
 
 func (s *stubInboxStore) UpdateSubscriptionSection(_ context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error {
@@ -2647,6 +2672,65 @@ func TestHandler_UserPermissionsUpdated_UnknownPermissionKey(t *testing.T) {
 
 	require.NoError(t, h.HandleEvent(context.Background(), evt))
 	assert.Empty(t, store.getPermissionsApplies())
+}
+
+func TestHandler_UserAccountUpdated(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.UserAccountUpdated{
+		ID: "u1", Account: "alice", SiteID: "site-a", EngName: "A",
+		Roles: []model.UserRole{model.UserRoleBot}, Active: true, Timestamp: 1755640000000,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserAccountUpdated, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 1755640000000,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	upserts := store.getAccountUpserts()
+	require.Len(t, upserts, 1)
+	assert.Equal(t, "u1", upserts[0].event.ID)
+	assert.Equal(t, "alice", upserts[0].event.Account)
+	assert.Equal(t, "site-a", upserts[0].event.SiteID)
+	assert.Equal(t, []model.UserRole{model.UserRoleBot}, upserts[0].event.Roles)
+	assert.True(t, upserts[0].event.Active)
+	assert.Equal(t, time.UnixMilli(1755640000000).UTC(), upserts[0].updatedAt)
+}
+
+func TestHandler_UserAccountUpdated_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserAccountUpdated, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: []byte("{nope"), Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	require.Error(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getAccountUpserts())
+}
+
+// A store failure must propagate so JetStream redelivers rather than Ack-dropping
+// the snapshot.
+func TestHandler_UserAccountUpdated_StoreError(t *testing.T) {
+	store := &stubInboxStore{accountErr: errors.New("mongo down")}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.UserAccountUpdated{ID: "u1", Account: "alice", Timestamp: 1})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserAccountUpdated, Payload: payload, Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	err = h.HandleEvent(context.Background(), evt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upsert user account")
 }
 
 // A bot-DM member_added at the target MUST upsert a subscription only, never a rooms doc

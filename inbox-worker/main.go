@@ -272,6 +272,34 @@ func (s *mongoInboxStore) UpdateUserChatlist(ctx context.Context, account string
 	return nil
 }
 
+// UpsertUserAccount — see the InboxStore interface comment for why this one
+// upserts when the other user_* appliers do not.
+func (s *mongoInboxStore) UpsertUserAccount(ctx context.Context, e *model.UserAccountUpdated, updatedAt time.Time) error {
+	roles := e.Roles
+	if roles == nil {
+		roles = []model.UserRole{}
+	}
+	filter := bson.M{"account": e.Account, "$or": bson.A{
+		bson.M{"accountUpdatedAt": bson.M{"$exists": false}},
+		bson.M{"accountUpdatedAt": bson.M{"$lte": updatedAt}},
+	}}
+	update := bson.M{
+		"$setOnInsert": bson.M{"_id": e.ID, "siteId": e.SiteID},
+		"$set": bson.M{"engName": e.EngName, "chineseName": e.ChineseName,
+			"roles": roles, "active": e.Active, "accountUpdatedAt": updatedAt},
+	}
+	_, err := s.userCol.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
+	if mongo.IsDuplicateKeyError(err) {
+		// Doc exists: a newer snapshot (stale → retry matches nothing) or the
+		// HR lane's insert raced ours (no watermark → retry applies).
+		_, err = s.userCol.UpdateOne(ctx, filter, update)
+	}
+	if err != nil {
+		return fmt.Errorf("upsert user account for %q: %w", e.Account, err)
+	}
+	return nil
+}
+
 // BulkCreateSubscriptions inserts the supplied subs idempotently. Each is
 // keyed by (roomId, u.account) and written via $setOnInsert so an existing
 // sub (from a previous delivery, or with read-state already accumulated) is
