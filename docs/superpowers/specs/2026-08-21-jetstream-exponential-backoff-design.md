@@ -235,9 +235,11 @@ a real consumer from `DurableConsumerDefaults` and read back
 This is the test that would have caught bug 1b, and it must be an integration test
 because the overwrite happens server-side.
 
-**Per-service `consumer_config_test.go`** — 8 services assert consumer config; update
-for `MaxDeliver=6` and the new `BackOff`. search-sync-worker's assertions on the
-hardcoded `{1s, 5s, 30s}` (`consumer_config_test.go:57,82`) are deleted.
+**Per-service `consumer_config_test.go`** — no change needed. All eight build
+`ConsumerSettings` as struct literals with explicit `AckWait`/`MaxDeliver`, so the new
+`BackOff*` fields default to zero and `cc.BackOff` stays nil. Propagation is covered in
+`pkg/stream`, where it belongs. The one exception is search-sync-worker, whose assertions
+on the hardcoded `{1s, 5s, 30s}` (`consumer_config_test.go:57,82`) are replaced.
 
 **New** `consumer_config_test.go` for bot-message-worker and push-notification-service,
 which have none today.

@@ -62,7 +62,7 @@ func run() error {
 
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.PushStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode, wiring))
+	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.PushStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode, wiring.PushInputWildcard))
 	if err != nil {
 		return fmt.Errorf("create consumer: %w", err)
 	}
@@ -118,9 +118,9 @@ func run() error {
 // buildConsumerConfig returns the durable consumer config. The BackOff schedule
 // comes from ConsumerSettings — never hardcode it, a literal BackOff[0] silently
 // becomes the server-side AckWait.
-func buildConsumerConfig(s stream.ConsumerSettings, mode stream.Pipeline, wiring stream.Wiring) jetstream.ConsumerConfig {
+func buildConsumerConfig(s stream.ConsumerSettings, mode stream.Pipeline, filterSubject string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = mode.ConsumerName("push-notification-service")
-	cc.FilterSubject = wiring.PushInputWildcard
+	cc.FilterSubject = filterSubject
 	return cc
 }

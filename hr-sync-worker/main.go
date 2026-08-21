@@ -113,6 +113,10 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 		AckWait:    30 * time.Second,
 		MaxDeliver: -1, // never drop a feed batch; jsretry backoff spaces the retries
 		MaxWaiting: 512,
+		// MaxDeliver=-1 exempts this consumer from the len(BackOff)<=MaxDeliver rule.
+		BackOffSteps:  5,
+		BackOffFactor: 2,
+		BackOffMax:    8 * time.Minute,
 	})
 	consCfg.Durable = durableName
 	consCfg.MaxAckPending = 1

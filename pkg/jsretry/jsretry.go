@@ -18,7 +18,10 @@ package jsretry
 import (
 	"context"
 	"log/slog"
-	"math/rand/v2"
+
+	// Retry jitter only, never security-sensitive; crypto/rand would add an error
+	// path to a pure timing helper.
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"

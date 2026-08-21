@@ -19,7 +19,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 	for _, mode := range []stream.Pipeline{stream.PipelineUser, stream.PipelineBot} {
 		t.Run(string(mode), func(t *testing.T) {
 			wiring := stream.Resolve(mode, "site-a")
-			cc := buildConsumerConfig(s, mode, wiring)
+			cc := buildConsumerConfig(s, mode, wiring.PushInputWildcard)
 
 			assert.Equal(t, mode.ConsumerName("push-notification-service"), cc.Durable)
 			assert.Equal(t, wiring.PushInputWildcard, cc.FilterSubject)
