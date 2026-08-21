@@ -3,6 +3,7 @@ package natsutil
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
@@ -90,19 +91,46 @@ func logSlowConsumer(log *slog.Logger, sub *nats.Subscription) {
 	if sub == nil {
 		return
 	}
-	// Both suppressions below are deliberate. sub.Subject is the subscription's own
-	// registered subject, not a per-message value: that is one series per subscription
-	// in the process, and the router registers wildcarded patterns. And unlike a
-	// per-item failure loop this fires once per slow-consumer episode with no loop
-	// around it, so there is nothing to precompute against — the label set is
-	// per-subscription and the subscription set is not known at init.
+	// The remaining suppression is deliberate: unlike a per-item failure loop this
+	// fires once per slow-consumer episode with no loop around it, so there is
+	// nothing to precompute against — the label set is per-subscription and the
+	// subscription set is not known at init.
 	// nosemgrep: metrics-no-per-call-attribute-set
 	slowConsumerEvents.Add(context.Background(), 1,
+		// The rule matches the label key and cannot see that the value is
+		// bounded. subjectLabel collapses response inboxes to a constant, and
+		// TestSubjectLabel_CollapsesResponseInboxes is what keeps that true —
+		// the earlier suppression here claimed boundedness without anything
+		// enforcing it, which is how the leak survived.
 		// nosemgrep: metrics-no-unbounded-label
 		metric.WithAttributes(
-			attribute.String("subject", sub.Subject),
+			attribute.String("subject", subjectLabel(sub.Subject)),
 			attribute.String("queue", sub.Queue),
 		))
+}
+
+// inboxLabel replaces any response-inbox subject, whose token is unique per
+// connection.
+const inboxLabel = "inbox"
+
+// subjectLabel bounds the subject label.
+//
+// A registered subject is a per-subscription constant — the router registers
+// wildcarded patterns — so it is safe as a label. A response inbox is not:
+// nats.go opens one shared response subscription per connection on
+// `_INBOX.<random>.*`, and while that is a single series at any instant, the
+// token is regenerated on every connection. Every restart and every reconnect
+// would mint a value that never recurs, which is unbounded growth spread over
+// time rather than all at once — and the metrics contract already forbids
+// "concrete request/reply inboxes" as labels.
+//
+// This was suppressed with a nosemgrep and a justification that only considered
+// the instant, not the lifetime. The rule was right.
+func subjectLabel(subject string) string {
+	if strings.HasPrefix(subject, "_INBOX.") {
+		return inboxLabel
+	}
+	return subject
 }
 
 // logSlowConsumerAt picks the level: dropped messages on a core subscription are
