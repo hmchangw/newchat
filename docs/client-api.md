@@ -7405,7 +7405,7 @@ After the write commits, the account is fanned out to every other site so their 
 
 | Field | Type | Notes |
 |---|---|---|
-| `syncFailures` | string[] | Remote site IDs whose account-snapshot publish was not acknowledged. Omitted (not `[]`) when every destination landed. Still `201` when present — the account exists on this site; the listed sites converge on the next edit ([§9.4](#94-update-user)). |
+| `syncFailures` | string[] | Remote site IDs whose account-snapshot publish was not acknowledged. Omitted (not `[]`) when every destination landed. Still `201` when present — the account exists on this site. The durable HR feed delivers **identity fields only**, so the listed sites lack this account's roles/status (or the whole account, when `hrSyncFailed` is also set) until healed by [§9.16 resync](#916-resync-user) or the next edit ([§9.4](#94-update-user)). |
 | `hrSyncFailed` | boolean | `true` when the durable HR identity publish failed. Omitted when it landed. Still `201` when present. |
 
 ```json
@@ -8141,7 +8141,7 @@ None.
 | Field | Type | Notes |
 |---|---|---|
 | `status` | string | Always `"ok"`. |
-| `syncFailures` | string[] | Remote site IDs whose snapshot publish was not acknowledged. Omitted when every destination landed. Sites named here still converge via the durable HR feed unless `hrSyncFailed` is also set. |
+| `syncFailures` | string[] | Remote site IDs whose snapshot publish was not acknowledged. Omitted when every destination landed. The durable HR feed delivers identity fields only, so sites named here lack roles/status (or the whole account, when `hrSyncFailed` is also set) until a later resync or edit lands. |
 | `hrSyncFailed` | boolean | `true` when the durable HR identity publish failed. Omitted when it landed. |
 
 ```json

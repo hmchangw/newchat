@@ -101,7 +101,7 @@ describe('EditUserDialog', () => {
     await waitFor(() => expect(screen.getByText(/saved on this site/i)).toBeInTheDocument())
     expect(onUpdated).not.toHaveBeenCalled()
     expect(screen.getByText(/site-b/)).toBeInTheDocument()
-    expect(screen.getByText(/re-save this user to retry/i)).toBeInTheDocument()
+    expect(screen.getByText(/use resync on this user/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /^close$/i }))
     expect(onUpdated).toHaveBeenCalled()
   })

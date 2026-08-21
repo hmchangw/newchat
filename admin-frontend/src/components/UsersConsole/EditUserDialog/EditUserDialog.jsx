@@ -80,7 +80,8 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
       <Modal onClose={onUpdated} labelledBy="edit-user-title">
         <h2 id="edit-user-title">Saved on this site</h2>
         <p className="dialog-error" role="alert">
-          Cross-site sync failed for: {syncFailures.join(', ')}. Re-save this user to retry.
+          Cross-site sync failed for: {syncFailures.join(', ')}. Use Resync on this user once
+          those sites are reachable.
         </p>
         <div className="dialog-actions">
           <button type="button" onClick={onUpdated}>

@@ -53,12 +53,20 @@ describe('ResyncUserDialog', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled())
   })
 
-  it('closes silently when only the direct sync missed sites', async () => {
+  it('shows the identity-only partial alert when the direct sync missed sites', async () => {
     resyncUser.mockResolvedValue({ syncFailures: ['site-b'], hrSyncFailed: false })
     const onClose = vi.fn()
     render(<ResyncUserDialog authToken="tok" user={USER} onClose={onClose} />)
     fireEvent.click(screen.getByRole('button', { name: /^resync$/i }))
-    await waitFor(() => expect(onClose).toHaveBeenCalled())
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('site-b')
+    expect(alert).toHaveTextContent(/only .* identity/i)
+    expect(alert).toHaveTextContent(/roles and status/i)
+    expect(onClose).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: /done/i }))
+    expect(onClose).toHaveBeenCalled()
   })
 
   it('shows the both-lanes-failed alert and defers close to Done', async () => {
@@ -69,6 +77,7 @@ describe('ResyncUserDialog', () => {
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('site-b, site-c')
+    expect(alert).toHaveTextContent(/did not sync/i)
     expect(onClose).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: /done/i }))
