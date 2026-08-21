@@ -320,7 +320,7 @@ type fanoutBatch struct {
 // publish was not acknowledged (nil when all landed).
 func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.PermissionKey, batches []fanoutBatch) []string {
 	dests := h.remoteDests
-	if h.publishInbox == nil || len(dests) == 0 {
+	if h.publish == nil || len(dests) == 0 {
 		return nil
 	}
 	// The request ctx dies if the client disconnects, which doesn't fit: the caller's
@@ -391,7 +391,7 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 					failed[i] = true
 					continue
 				}
-				if err := h.publishInbox(ctx, subj, data); err != nil {
+				if err := h.publish(ctx, subj, data, ""); err != nil {
 					// Not self-healing like status/settings: surface it, don't swallow it.
 					slog.ErrorContext(ctx, "publish permissions inbox event", "dest", dest, "error", err)
 					failed[i] = true

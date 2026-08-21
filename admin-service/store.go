@@ -53,7 +53,10 @@ type AdminStore interface {
 	// endpoints; those must use GetUserByAccount which scrubs the hash.
 	GetUserForAuth(ctx context.Context, siteID, account string) (*model.User, error)
 	CreateUser(ctx context.Context, u *model.User) error
-	UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) error
+
+	// UpdateUser applies the non-nil patch fields. Returns the post-write doc
+	// projected to the fanout fields; returns (nil, nil) when the patch is empty.
+	UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) (*model.User, error)
 
 	// UpdateUserPasswordAndRevoke atomically updates the user's bcrypt hash +
 	// requirePasswordChange flag AND deletes matching sessions for that account.
@@ -67,7 +70,8 @@ type AdminStore interface {
 	// deletes every session for the account. Runs in one Mongo transaction.
 	// Called only for the deactivate branch of updateUser; other UpdateUser
 	// patches (name/roles) stay non-transactional.
-	DeactivateAndRevoke(ctx context.Context, siteID, account string) error
+	// Returns the post-write doc projected to the fanout fields.
+	DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error)
 
 	AppendAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, siteID string, f AuditFilter, page, limit int) ([]AuditEntry, int64, error)

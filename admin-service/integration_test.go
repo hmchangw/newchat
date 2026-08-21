@@ -193,13 +193,25 @@ func TestIntegration_UpdateUser(t *testing.T) {
 		Account: "eve",
 		SiteID:  "site-a",
 		Roles:   []model.UserRole{model.UserRoleUser},
+		// Sentinel credential material so the returned-doc projection guard
+		// below is real: a widened fanoutProjection would surface this.
+		Services: model.Services{Password: model.PasswordCredentials{Bcrypt: "seeded-hash-must-not-be-projected"}},
 	}
 	require.NoError(t, st.CreateUser(ctx, u))
 
 	t.Run("update roles", func(t *testing.T) {
 		newRoles := []model.UserRole{model.UserRoleAdmin}
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Roles: &newRoles})
+		updated, err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Roles: &newRoles})
 		require.NoError(t, err)
+
+		// The returned doc is the POST-write state (ReturnDocument=After) — the
+		// fanout publishes it, so a Before doc would ship stale roles.
+		require.NotNil(t, updated)
+		assert.Equal(t, []model.UserRole{model.UserRoleAdmin}, updated.Roles)
+		assert.Equal(t, u.ID, updated.ID)
+		assert.Equal(t, u.Account, updated.Account)
+		assert.Equal(t, "site-a", updated.SiteID)
+		assert.Empty(t, updated.Services.Password.Bcrypt, "fanoutProjection must never return credential material")
 
 		got, err := st.GetUserByAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
@@ -211,7 +223,7 @@ func TestIntegration_UpdateUser(t *testing.T) {
 		seedSession(t, db, session.Session{ID: "eve-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 
 		inactive := false
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Active: &inactive})
+		_, err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Active: &inactive})
 		require.NoError(t, err)
 
 		got, err := st.GetUserByAccount(ctx, "site-a", u.Account)
@@ -226,7 +238,7 @@ func TestIntegration_UpdateUser(t *testing.T) {
 	t.Run("update names", func(t *testing.T) {
 		eng := "Eve Updated"
 		cn := "更新伊芙"
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{EngName: &eng, ChineseName: &cn})
+		_, err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{EngName: &eng, ChineseName: &cn})
 		require.NoError(t, err)
 
 		got, err := st.GetUserByAccount(ctx, "site-a", u.Account)
@@ -236,13 +248,15 @@ func TestIntegration_UpdateUser(t *testing.T) {
 	})
 
 	t.Run("no-op when all fields nil", func(t *testing.T) {
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{})
+		updated, err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{})
 		require.NoError(t, err)
+		// (nil, nil) on an empty patch — the fanout branches on this to skip publishing.
+		assert.Nil(t, updated)
 	})
 
 	t.Run("nonexistent id returns ErrUserNotFound", func(t *testing.T) {
 		eng := "Ghost"
-		err := st.UpdateUser(ctx, "site-a", "nonexistent-account", UserUpdate{EngName: &eng})
+		_, err := st.UpdateUser(ctx, "site-a", "nonexistent-account", UserUpdate{EngName: &eng})
 		assert.ErrorIs(t, err, ErrUserNotFound)
 	})
 }
@@ -356,8 +370,14 @@ func TestIntegration_DeactivateAndRevoke(t *testing.T) {
 		seedSession(t, db, session.Session{ID: "gwen-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 		seedSession(t, db, session.Session{ID: "gwen-sess-2", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 2})
 
-		err := st.DeactivateAndRevoke(ctx, "site-a", u.Account)
+		updated, err := st.DeactivateAndRevoke(ctx, "site-a", u.Account)
 		require.NoError(t, err)
+
+		// Post-write doc (ReturnDocument=After): active must already be false,
+		// otherwise the fanout would publish the user as still active.
+		require.NotNil(t, updated)
+		assert.Equal(t, u.ID, updated.ID)
+		assert.False(t, updated.IsActive())
 
 		var raw struct {
 			Active *bool `bson:"active"`
@@ -375,7 +395,7 @@ func TestIntegration_DeactivateAndRevoke(t *testing.T) {
 	})
 
 	t.Run("nonexistent account returns ErrUserNotFound", func(t *testing.T) {
-		err := st.DeactivateAndRevoke(ctx, "site-a", "ghost-account")
+		_, err := st.DeactivateAndRevoke(ctx, "site-a", "ghost-account")
 		assert.ErrorIs(t, err, ErrUserNotFound)
 	})
 }
