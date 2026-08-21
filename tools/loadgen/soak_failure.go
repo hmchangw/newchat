@@ -919,13 +919,20 @@ func newSoakShareGate(share float64) *soakShareGate {
 // Refund returns an allowance taken by a claim that issued no request to the
 // system under test. The gate exists to protect the production-like read mix,
 // so a claim that read nothing must not be charged against it.
+//
+// The credit is capped at one whole allowance. Allow bounds its own credit
+// below one, so an uncapped refund would be the only way the gate could bank
+// it — and a lane that sat idle would then admit a long run of consecutive
+// reconciliation reads the moment a backlog arrived, which is the fault window
+// the cap exists to protect. One allowance is what the refunded claim was
+// entitled to and no more.
 func (g *soakShareGate) Refund() {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.credit++
+	g.credit = min(g.credit+1, 1)
 }
 
 func (g *soakShareGate) Allow() bool {

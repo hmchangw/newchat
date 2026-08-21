@@ -25,6 +25,31 @@ func TestSoakShareGate_RefundsAnAllowanceThatBoughtNoRead(t *testing.T) {
 	assert.True(t, gate.Allow(), "the refunded slot is available again immediately")
 }
 
+// A refund must not turn idle time into future burst capacity. Allow() bounds
+// its own credit below one whole allowance, so an uncapped refund is the only
+// way the gate can bank credit — and a lane that sat idle would then admit a
+// long run of consecutive reconciliation reads exactly when the backlog
+// arrives, which is the fault window the gate exists to protect.
+func TestSoakShareGate_RefundDoesNotBankIdleTimeAsFutureBurst(t *testing.T) {
+	gate := newSoakShareGate(0.5)
+
+	// A long quiet stretch: every admitted claim finds nothing due and refunds.
+	for range 100 {
+		if gate.Allow() {
+			gate.Refund()
+		}
+	}
+
+	// The backlog arrives and every claim now spends its slot.
+	consecutive := 0
+	for consecutive <= 4 && gate.Allow() {
+		consecutive++
+	}
+
+	assert.LessOrEqual(t, consecutive, 2,
+		"an idle lane must not accumulate reconciliation capacity above its share")
+}
+
 func TestSoakShareGate_RefundIsNilSafe(t *testing.T) {
 	var gate *soakShareGate
 	assert.NotPanics(t, gate.Refund)
