@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -73,7 +72,10 @@ func TestOptTable_ConcurrentMissesAllResolve(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 32 {
-				require.NotNil(t, table.get(i%16))
+				// assert, not require: require calls FailNow, and the testing
+				// package requires FailNow to run on the test's own goroutine —
+				// from here it would kill this worker without failing the test.
+				assert.NotNil(t, table.get(i%16))
 			}
 		}()
 	}
