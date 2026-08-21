@@ -49,4 +49,7 @@ rules:
           - pattern: attribute.NewSet(..., attribute.String("$KEY", $V), ...)
       - metavariable-regex:
           metavariable: $KEY
-          regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org)_?[iI][dD]|account|subject|index)$
+          # The ID suffix is optional: attribute.String("room", roomID) is the
+          # same unbounded series as attribute.String("roomId", roomID), and the
+          # key alone was enough to slip past the earlier form of this rule.
+          regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org)(?:_?[iI][dD])?|subject|index)$
