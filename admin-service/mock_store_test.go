@@ -84,11 +84,12 @@ func (mr *MockAdminStoreMockRecorder) CreateUser(ctx, u any) *gomock.Call {
 }
 
 // DeactivateAndRevoke mocks base method.
-func (m *MockAdminStore) DeactivateAndRevoke(ctx context.Context, siteID, account string) error {
+func (m *MockAdminStore) DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DeactivateAndRevoke", ctx, siteID, account)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // DeactivateAndRevoke indicates an expected call of DeactivateAndRevoke.
@@ -263,11 +264,12 @@ func (mr *MockAdminStoreMockRecorder) SearchUsers(ctx, siteID, q, page, limit an
 }
 
 // UpdateUser mocks base method.
-func (m *MockAdminStore) UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) error {
+func (m *MockAdminStore) UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) (*model.User, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateUser", ctx, siteID, account, fields)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdateUser indicates an expected call of UpdateUser.

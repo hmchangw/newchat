@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/nats-io/nats.go"
 
 	o11ygin "github.com/flywindy/o11y/gin"
 
@@ -72,14 +73,22 @@ func run() error {
 		return fmt.Errorf("jetstream: %w", err)
 	}
 	// PublishMsg (not Publish) so X-Request-ID from ctx rides onto the outgoing
-	// message — same shape as user-service/publisher.
-	publishInbox := func(ctx context.Context, subj string, data []byte) error {
-		if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+	// message — same shape as user-service/publisher. natsutil.NewMsg returns a
+	// nil Header when ctx carries no request-id, so guard before setting encoding.
+	publish := func(ctx context.Context, subj string, data []byte, encoding string) error {
+		msg := natsutil.NewMsg(ctx, subj, data)
+		if encoding != "" {
+			if msg.Header == nil {
+				msg.Header = nats.Header{}
+			}
+			msg.Header.Set(natsutil.HeaderNatsEncoding, encoding)
+		}
+		if _, err := js.PublishMsg(ctx, msg); err != nil {
 			return fmt.Errorf("publish inbox event: %w", err)
 		}
 		return nil
 	}
-	h := newHandler(st, sessStore, cfg, nc, publishInbox)
+	h := newHandler(st, sessStore, cfg, nc, publish)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
