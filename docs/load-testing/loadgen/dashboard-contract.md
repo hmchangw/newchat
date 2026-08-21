@@ -179,6 +179,30 @@ consumer identifiers are bounded configuration values. Run, operation,
 message, room, account, user, recipient, subject, inbox, raw error/advisory,
 and pod UID values are forbidden labels.
 
+## Panel watch list
+
+The panels below are the ones in `tools/loadgen/deploy/grafana/dashboards/loadtest.json`.
+This table says which rule each panel feeds and what an abnormal shape looks
+like; the rule itself is defined in the sections above.
+
+| Panel | Feeds | Abnormal shape |
+|---|---|---|
+| Failure ledger terminal outcomes | Correctness | Any `bad` or `missing_after_deadline` is positive evidence and is never explained away by a scrape gap. A run dominated by `unverified` is not clean, it is blind |
+| Room and member lane outcomes | Correctness, per lane | One lane going `unverified` while the others stay `good` points at that lane's observer, not at the dependency |
+| Reconciliation observations | Observer validity | `unverified` above `max(3, 0.001 x eligible)` invalidates the interval for that observer and lane |
+| Room state observer sources | Observer validity | `room_state_source_total{source="mongo"}` falling to zero while `rpc` continues means only the arbiter is gone: absence claims stop being trustworthy before anything else looks wrong |
+| Reconciliation inflight and invalidations | Evidence validity | `inflight` climbing to `send rate x reconcile deadline` and staying there means reconciliation is not keeping up and everything is ageing out. Any `invalidations_total` increment is sticky for the process lifetime |
+| Failure evidence durability, WAL and memory | Evidence validity | Rising WAL flush p95 next to a falling dispatch ratio identifies evidence I/O, not the system under test, as the bottleneck |
+| NATS connection and lifecycle events | Attribution | A loadgen-side disconnect makes the window inconclusive. Read this before attributing any error spike to the system |
+| Sampled consumer health | Impact | Consumer pending rising while terminal outcomes stay `good` is a worker falling behind, not loss — yet |
+| Consumer pending / ack pending | Impact | Backlog that does not return to its pre-fault level after remediation is `UNRECOVERED` regardless of latency looking normal |
+| Throughput, publish errors, E1/E2 latency | Impact | Latency alone cannot separate a slow dependency from a retry absorbing an election. Pair it with the client error ratio |
+| Cassandra soak operation rate | Dispatch validity | A dispatch ratio below 95% of the configured rate makes the window inconclusive before any other reading |
+| Member candidate pool | Traffic validity | Pool exhaustion or degradation means the mutation lanes are producing less than configured. Reversible, and it never invalidates the ledger |
+| Room create budget and retained journals | Housekeeping | A spent budget stops the create lane by design. Retained journals mean an earlier epoch was abandoned |
+| Search index evidence | — | The search observer is refused at startup; expect no data |
+| Presence signals and verification | Impact | Presence is compared live and creates no ledger operation. Treat a divergence as impact, not as loss |
+
 ## Recovery classification
 
 Starting at the external remediation timestamp, evaluate each full 2-minute
