@@ -1,6 +1,8 @@
 package obs_test
 
 import (
+	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,14 +22,14 @@ const contractDoc = "docs/specs/o11y/nats-metrics-contract.md"
 
 // instrumentDecl matches an OTel instrument construction, capturing its name.
 var instrumentDecl = regexp.MustCompile(
-	`\b(?:Int64|Float64)(?:Counter|UpDownCounter|Histogram|Gauge)\(\s*"([^"]+)"`)
+	`\b(?:Int64|Float64)(?:Observable)?(?:Counter|UpDownCounter|Histogram|Gauge)\(\s*"([^"]+)"`)
 
 // instrumentDeclAnyArg matches the same constructions with any first argument.
 // The two together find the bypass: a name hoisted into a constant is a name
 // the scan above cannot read, so the instrument would slip past the registry
 // without anyone intending it.
 var instrumentDeclAnyArg = regexp.MustCompile(
-	`\b(?:Int64|Float64)(?:Counter|UpDownCounter|Histogram|Gauge)\(\s*([^\s,)]+)`)
+	`\b(?:Int64|Float64)(?:Observable)?(?:Counter|UpDownCounter|Histogram|Gauge)\(\s*([^\s,)]+)`)
 
 // TestEveryInstrumentIsDocumented makes "is this metric necessary?" a mechanical
 // gate instead of a question that has to be re-litigated in review.
@@ -111,30 +113,39 @@ func TestInstrumentNamesAreLiterals(t *testing.T) {
 		contractDoc, strings.Join(offenders, "\n  "))
 }
 
+// registryHeading opens the one section that registers application instruments,
 // tableRowFirstCell captures the first cell of a markdown table row, and
-// backticked captures each `code` token inside it. Together they read the
-// registry's rows without reading its prose.
+// backticked captures each `code` token inside it. Together they read that
+// section's rows and nothing else.
+const registryHeading = "## 13. Application instrument registry"
+
 var (
 	tableRowFirstCell = regexp.MustCompile(`(?m)^\|([^|]*)\|`)
 	backticked        = regexp.MustCompile("`([^`]+)`")
 )
 
-// registeredInstruments is the set of names that have a row in the contract's
-// tables.
+// registeredInstruments is the set of names with a row in the registry section.
 //
-// Matching the whole document instead would let the prose register an
-// instrument by accident, which is not hypothetical: the section explaining why
-// four families were deleted names all four, so a plain substring search
-// accepted every one of them. Substring search also accepted any name that was
-// a prefix of a documented one. A registered instrument has a row; a name only
-// discussed in prose does not.
+// The scope is deliberately narrow, and each narrowing closed a real hole.
+// Searching the whole document let the prose register an instrument by
+// accident: the section explaining why four families were deleted names all
+// four, so a substring search accepted every one of them, and accepted any name
+// that was a prefix of a documented one too. Reading every table was still too
+// loose — the infrastructure and loadgen tables in §4 and §5 name plenty of
+// series, and a row there says nothing about who reads an application
+// instrument. Only §13 carries the "Read by" column that this gate exists to
+// require, so only §13 counts.
 func registeredInstruments(t *testing.T, repo fs.FS) map[string]struct{} {
 	t.Helper()
 	contract, err := fs.ReadFile(repo, contractDoc)
 	require.NoError(t, err, "the metrics contract must exist at %s", contractDoc)
 
+	start := bytes.Index(contract, []byte(registryHeading))
+	require.GreaterOrEqual(t, start, 0, "%s must contain %q", contractDoc, registryHeading)
+	registry := string(contract[start:])
+
 	registered := map[string]struct{}{}
-	for _, row := range tableRowFirstCell.FindAllStringSubmatch(string(contract), -1) {
+	for _, row := range tableRowFirstCell.FindAllStringSubmatch(registry, -1) {
 		for _, name := range backticked.FindAllStringSubmatch(row[1], -1) {
 			registered[name[1]] = struct{}{}
 		}
@@ -147,7 +158,7 @@ func registeredInstruments(t *testing.T, repo fs.FS) map[string]struct{} {
 func walkGoSources(repo fs.FS, visit func(path string, src []byte)) error {
 	return fs.WalkDir(repo, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("walk the Go source tree: %w", err)
 		}
 		if d.IsDir() {
 			switch d.Name() {
@@ -161,7 +172,7 @@ func walkGoSources(repo fs.FS, visit func(path string, src []byte)) error {
 		}
 		src, readErr := fs.ReadFile(repo, path)
 		if readErr != nil {
-			return readErr
+			return fmt.Errorf("read Go source %q: %w", path, readErr)
 		}
 		visit(path, src)
 		return nil
@@ -229,4 +240,43 @@ func TestRegistryMatchesTableRowsNotProse(t *testing.T) {
 
 	// Prefixes are distinct names, not matches.
 	assert.NotContains(t, registered, "chat.nats.consumer.loop")
+
+	// Only §13 registers. The infrastructure and loadgen tables in §4/§5 name
+	// plenty of series, but a row there carries no "Read by" column, so it
+	// cannot stand in for registering an application instrument.
+	for _, elsewhere := range []string{
+		"chat_nats_server_up",
+		"chat_jetstream_stream_up",
+		"loadgen_consumer_sample_errors_total",
+	} {
+		assert.NotContains(t, registered, elsewhere,
+			"%s has a row outside §13; only the registry section may register an instrument", elsewhere)
+	}
+}
+
+// Observable instruments are real OTel constructors and must not bypass either
+// gate. Nothing in the repo declares one today, which is exactly why the regexes
+// missed them — the first one added would have shipped unregistered.
+func TestInstrumentRegexesCoverObservableConstructors(t *testing.T) {
+	const src = `
+		a, _ := meter.Int64ObservableGauge("chat.example.observable.gauge")
+		b, _ := meter.Float64ObservableCounter("chat.example.observable.counter")
+		c, _ := meter.Int64ObservableUpDownCounter(nameFromAConstant)
+	`
+
+	var names []string
+	for _, m := range instrumentDecl.FindAllStringSubmatch(src, -1) {
+		names = append(names, m[1])
+	}
+	assert.Equal(t, []string{"chat.example.observable.gauge", "chat.example.observable.counter"}, names,
+		"the documentation gate must see Observable declarations")
+
+	var nonLiteral []string
+	for _, m := range instrumentDeclAnyArg.FindAllStringSubmatch(src, -1) {
+		if !strings.HasPrefix(m[1], `"`) {
+			nonLiteral = append(nonLiteral, m[1])
+		}
+	}
+	assert.Equal(t, []string{"nameFromAConstant"}, nonLiteral,
+		"the literal-name gate must see Observable declarations too")
 }
