@@ -1,30 +1,14 @@
-# Storage Dependency Metrics and Dashboard Contract
+# Storage Dependency Metrics
 
-> Inventory date: 2026-08-11. This document is the repository source of truth for MongoDB- and Cassandra-related metrics used by production operations and failure/load testing. The inventory is based on current service wiring, `pkg/mongoutil`, `pkg/cassutil`, `github.com/flywindy/o11y v0.9.1`, loadgen collectors, and Prometheus provisioning in this repository.
+> Verified against the code on 2026-08-21. This is the repository's dictionary
+> of MongoDB and Cassandra client metrics: what each family is called, what
+> labels it carries, and what it proves. Panels and alerts are built from it,
+> but are not defined here.
+>
+> MongoDB server metrics come from the managed service's own dashboard and are
+> deliberately not inventoried here.
 
-## 1. Ownership and Reuse
-
-This document belongs under `docs/specs/o11y/` because metric names, labels, recording rules, scrape coverage, and the production dashboard are operational contracts. Failure-test plans under `docs/load-testing/` own fault mechanics, traffic profiles, reconciliation, and test-specific acceptance thresholds; they reference this contract instead of copying it.
-
-Production and failure testing use the same base storage dashboard and the same application/client/server metrics. A failure-test view adds loadgen outcome rows, run metadata, and fault annotations. It must not introduce a second definition of storage health.
-
-```mermaid
-flowchart LR
-    APP["Application and client metrics<br/>same in every environment"]
-    DB["Database server/exporter metrics<br/>same in every environment"]
-    BASE["Storage dependency dashboard<br/>production base"]
-    PROD["Production view<br/>alerts and live diagnosis"]
-    TEST["Failure-test overlay<br/>loadgen, run ID, fault phases"]
-
-    APP --> BASE
-    DB --> BASE
-    BASE --> PROD
-    BASE --> TEST
-    LG["Loadgen outcome metrics"] --> TEST
-    AN["Fault annotations"] --> TEST
-```
-
-## 2. Status Vocabulary
+## 1. Status Vocabulary
 
 | Status | Meaning |
 |---|---|
@@ -34,7 +18,7 @@ flowchart LR
 
 Prometheus converts OpenTelemetry dots to underscores and appends unit/type suffixes. For example, `db.client.operation.duration` is normally exported as the `db_client_operation_duration_seconds_*` histogram family. Verify the actual collector/exporter output in the target environment before installing alerts.
 
-## 3. Existing MongoDB Client Metrics
+## 2. Existing MongoDB Client Metrics
 
 `pkg/mongoutil.Connect` instruments clients only when the caller passes `mongoutil.WithObservability`. The o11y integration currently emits the following complete MongoDB client metric set:
 
@@ -52,16 +36,16 @@ The SDK deliberately drops `db.client.connection.idle.max`, `.use_time`, and `.w
 
 Mongo operation metrics intentionally omit database and collection labels to control cardinality. Traces are required when an operator must distinguish collections or individual calls.
 
-### 3.1 MongoDB instrumentation coverage
+### 2.1 MongoDB instrumentation coverage
 
 | Coverage | Direct MongoDB processes |
 |---|---|
 | Instrumented | admin-service; bot-message-handler; bot-message-worker; botplatform-service; bot-room-service; broadcast-worker; history-service; hr-sync-worker; inbox-worker; media-service; message-gatekeeper; message-worker; notification-worker; portal-service; room-service; room-worker; search-service; search-sync-worker; tcard-service; teams-room-inspector; upload-service; user-presence-service; user-service; data-migration oplog connector/direct-transfer/transformers |
 | Missing instrumentation | teams-chat-member-sync; teams-chat-sync; teams-hr-sync; teams-room-creation; teams-room-verify; teams-user-sync; loadgen's own MongoDB clients |
 
-The missing processes must pass `mongoutil.WithObservability` before a service-complete MongoDB fault campaign. A healthy metric from another service is not evidence that an uninstrumented client recovered.
+Every service that carries ordinary chat traffic is instrumented. The uninstrumented processes are the Teams synchronisation lane, the migration lane and loadgen's own clients; none of them serve user traffic. A healthy metric from another service is never evidence that an uninstrumented client recovered.
 
-## 4. Existing Cassandra Client Metrics
+## 3. Existing Cassandra Client Metrics
 
 `pkg/cassutil.Connect` instruments sessions only when the caller passes `cassutil.WithObservability`.
 
@@ -89,7 +73,7 @@ Batch call sites need o11y's `ExecuteBatch` seam to produce spans/metrics; a dir
 
 The message-worker sites cover the first core-message campaign's write path. The remaining sites must move to the seam before a campaign claims Cassandra coverage for reactions, pin/unpin, or the bot lane.
 
-## 5. Existing Storage-Relevant Application and Loadgen Metrics
+## 4. Existing Storage-Relevant Application and Loadgen Metrics
 
 These metrics do not replace database telemetry; they connect dependency behavior to a product outcome.
 
@@ -133,41 +117,20 @@ Other loadgen lanes remain aggregate or sampled. A campaign that relies on one
 of those lanes remains inconclusive if aggregate success looks healthy but
 individual operations can disappear.
 
-## 6. Missing Metrics and Telemetry
+## 5. Missing Metrics and Telemetry
 
-### 6.1 P0: required for both production and failure testing
+### 5.1 Gaps that change what a result can prove
 
 | Missing signal | Required implementation | Why it is required |
 |---|---|---|
-| MongoDB server metrics | Deploy a MongoDB exporter and scrape every replica-set member | Client latency cannot identify election state, replication lag, flow control, locks, cache pressure, connections, or oplog-window risk |
-| Cassandra server metrics | Deploy JMX exporter/agent on every node and scrape it | Client latency cannot identify dropped messages, pending compactions, hints, tombstones, coordinator saturation, GC, disk, or repair progress |
-| Storage readiness | Add bounded Mongo `Ping` and Cassandra query probes, or an explicit dependency-readiness policy, to direct clients | Current checked services pass only `natsutil.HealthCheck`; a storage-broken pod can remain ready |
-| Mongo instrumentation gaps | Instrument every direct service/process listed in Section 3.1 | Otherwise the service-by-service dashboard is incomplete |
+| Cassandra server metrics | JMX exporter or agent on every node | Client latency cannot identify dropped messages, pending compactions, hints, tombstones, coordinator saturation, GC, disk, or repair progress |
+| Storage readiness | No service probes MongoDB or Cassandra; only `natsutil.HealthCheck` is registered | A storage-broken pod stays `Ready`. Deliberate for now — a probe would pull every pod from its Service at once during a full outage — so client metrics have to carry the signal |
+| Mongo instrumentation gaps | Instrument every direct service/process listed in Section 2.1 | Otherwise the service-by-service dashboard is incomplete |
 | Cassandra batch telemetry | Route production batches through the o11y batch seam or add equivalent batch duration/error metrics | The highest-risk denormalized writes are currently absent from Cassandra operation metrics |
 | Retry/exhaustion metrics | Count application retry, driver attempt, JetStream redelivery, terminal failure, and permanent drop separately | Logs alone cannot prove retry safety or enumerate exhausted work |
-| Operation outcome ledger expansion | Extend the implemented Cassandra message-send ledger to MongoDB state, mutations, real bot messages, federation, and the remaining JetStream lanes | Required to detect silent loss and ambiguous success outside the first vertical slice |
-| Fault timeline | Emit Grafana annotations or a bounded `fault_event` series with run/scenario/phase | Required to align election, error, backlog, and recovery windows |
+| Operation outcome ledger expansion | The ledger settles message sends and the five room/member lanes. Thread and user writes, the real bot chain and federation are not covered | Aggregate success can look healthy while individual operations disappear |
 
-### 6.2 MongoDB server signals to normalize
-
-Exporter names vary by version, so recording rules should expose stable project-owned series. The source exporter metric must be documented beside each rule.
-
-| Canonical signal | Dimensions | Dashboard/alert use |
-|---|---|---|
-| `chat_storage_member_up{dependency="mongodb"}` | cluster, member, role | Member reachability and topology |
-| `chat_mongodb_primary_members` | cluster | Must equal one per replica set |
-| `chat_mongodb_elections_total` | cluster | Election timeline/rate |
-| `chat_mongodb_replication_lag_seconds` | cluster, member | Secondary lag and post-fault convergence |
-| `chat_mongodb_oplog_window_seconds` | cluster | Change-stream history-loss risk |
-| `chat_mongodb_connections{state}` | cluster, member, state | Server connection saturation |
-| `chat_mongodb_operations_total{operation}` | cluster, member, operation | Server-side throughput |
-| `chat_mongodb_operation_latency_seconds_*{operation}` | cluster, member, operation | Server latency independent of client queues |
-| `chat_mongodb_wiredtiger_cache_bytes{state}` | cluster, member, state | Cache pressure/eviction |
-| `chat_mongodb_lock_time_seconds_total{mode}` | cluster, member, mode | Lock contention |
-| `chat_mongodb_flow_control_*` | cluster, member | Majority-commit/replication pressure |
-| `chat_storage_disk_bytes{dependency="mongodb",state}` | cluster, member, state | Capacity and recovery headroom |
-
-### 6.3 Cassandra server signals to normalize
+### 5.2 Cassandra server signals to normalize
 
 | Canonical signal | Dimensions | Dashboard/alert use |
 |---|---|---|
@@ -190,39 +153,7 @@ Exporter names vary by version, so recording rules should expose stable project-
 
 Table/keyspace labels are acceptable on server metrics because their values are bounded by deployed schema. Never label application hot-path metrics with room ID, message ID, account, trace ID, or arbitrary error text.
 
-## 7. Dashboard Specification
-
-### 7.1 Base dashboard: `Storage Dependencies`
-
-The production dashboard should contain the following rows:
-
-1. **User impact:** request/message rate, error ratio, p95/p99 service latency, and affected services.
-2. **Client operations:** MongoDB/Cassandra operation rate, error ratio, p95/p99 by service and operation.
-3. **Client pools/connections:** Mongo used/idle/pending/timeouts and Cassandra connection attempts/failures/create latency.
-4. **Topology:** Mongo primary/member state/elections/lag; Cassandra up nodes by DC/rack and coordinator distribution.
-5. **Server saturation:** connections, queues, locks/cache/flow control for Mongo; pending compactions, thread pools, dropped messages, GC for Cassandra.
-6. **Durability and convergence:** Mongo oplog window/change-stream lag; Cassandra hints, repair, tombstones, SSTables, disk.
-7. **Upstream backlog:** JetStream pending/ack-pending/redelivery for workers that write the affected storage.
-8. **Runtime:** service/container CPU, memory, goroutines, restarts, and network.
-
-Dashboard variables: `environment`, `site`, `dependency`, `cluster`, `service_name`, and `operation`. Server/member is a drill-down variable, not a default aggregation.
-
-### 7.2 Failure-test overlay
-
-The failure-test view reuses all base rows and adds:
-
-- `run_id`, `scenario`, and traffic-profile variables sourced from loadgen/run metadata.
-- An annotation track for baseline, injection, failover, recovery, backlog-drain, and settle timestamps.
-- Loadgen offered/completed/retried/failed/saturated rates.
-- `eligible` as the separate non-terminal ledger state, the exact terminal
-  results `good`, `bad`, `unverified`, `not_sent`, and
-  `missing_after_deadline`, and separate untracked/recovery-dropped counts.
-- Before/during/after deltas for latency, error rate, replication lag, pending work, and resource saturation.
-- A verdict panel that reports `PASS`, `FAIL`, or `INCONCLUSIVE`; missing required telemetry is never a pass.
-
-Do not add `run_id` to every database operation. Keep it on loadgen/run metadata and use time-range plus deployment/environment labels to correlate the run; otherwise each run multiplies hot-path time-series cardinality.
-
-### 7.3 Core PromQL patterns
+## 6. Core PromQL Patterns
 
 The following queries use the SDK's current Prometheus naming. Label spelling must be verified against the deployed collector.
 
@@ -276,28 +207,7 @@ sum by (action, class) (
 
 In PromQL, `error_type!=""` excludes series where the label is absent as well as series where it is empty. Keep the denominator unfiltered so it includes successful and failed operations.
 
-## 8. Scrape and Deployment Gaps
-
-Current repository provisioning is insufficient for a complete storage dashboard:
-
-- `docker-local/o11y/prometheus.yaml` scrapes chat service SDK endpoints and the OTel collector, but no MongoDB or Cassandra exporter.
-- `tools/observability/prometheus/prometheus.yml` scrapes cAdvisor, NATS exporter, and a stale fixed subset of application endpoints; it also has no storage exporters.
-- Local MongoDB and Cassandra are single-node. Local tests can validate total outage/restart and client recovery, but not Mongo primary election/majority loss or Cassandra replica/quorum/hinted-handoff behavior.
-- Production/staging exporter deployment and recording rules are not represented in this repository, so their presence must be a campaign preflight gate rather than an assumption.
-
-## 9. Implementation Order
-
-1. Deploy/scrape MongoDB and Cassandra server exporters in staging and production, then add stable recording rules.
-2. Close direct-client instrumentation gaps and Cassandra batch telemetry.
-3. Add storage readiness or explicitly document a deliberate readiness policy.
-4. Add the remaining retry/exhaustion metrics and expand the implemented
-   terminal-outcome metrics and Cassandra user-message ledger to MongoDB state,
-   mutations, federation, and the remaining loadgen lanes.
-5. Build the shared production base dashboard.
-6. Add the failure-test overlay and fault annotations.
-7. Execute single-dependency campaigns only after every required panel has non-stale data.
-
-## 10. Code Evidence
+## 7. Code Evidence
 
 - Mongo client setup and startup ping: `pkg/mongoutil/mongo.go`, `tuning.go`, and `readpref.go`.
 - Cassandra consistency, timeout, host policy, and pool setup: `pkg/cassutil/cass.go`.
@@ -305,5 +215,4 @@ Current repository provisioning is insufficient for a complete storage dashboard
 - Current loadgen collectors: `tools/loadgen/metrics.go`.
 - Mongo change-stream outcome metrics: `data-migration/oplog-connector/metrics.go`.
 - At-rest metrics: `pkg/atrest/metrics.go`.
-- Current scrape configs: `docker-local/o11y/prometheus.yaml` and `tools/observability/prometheus/prometheus.yml`.
 - Current readiness wiring: service `main.go` files and `pkg/natsutil/health.go`; no MongoDB/Cassandra probe is registered.
