@@ -89,12 +89,14 @@ but it must not carry `run_id`.
 
 ### Publish outcomes
 
-`success`, `timeout`, `no_responders`, `disconnected`, `buffer_full`,
-`permission`, `payload_too_large`, and `other_error`.
+`timeout`, `no_responders`, `disconnected`, `buffer_full`, `permission`,
+`payload_too_large`, and `other_error`.
 
-The same vocabulary supplies `error.type` on `rpc.client.call.duration`, minus
-`success`: the convention makes that label conditional on failure, so absence is
-what marks a successful call.
+There is deliberately no `success` value: a publish that succeeded is not
+recorded at all (§7.1). The same vocabulary supplies `error.type` on
+`rpc.client.call.duration`, where a successful call likewise carries no value —
+the convention makes the label conditional on failure, so absence is what marks
+success.
 
 ### Terminal reasons
 
@@ -127,7 +129,7 @@ the drop keeps its own reason — the first classification per delivery wins.
 | OTel NATS spans | instrumented services | Existing | Spans do not replace counters, gauges, or terminal advisories |
 | `nats_slow_consumer_events_total{subject,queue}` | `pkg/natsutil` | Existing | Per-episode count; exact drops are in the log fields |
 | `chat_nats_client_connected` / `chat_nats_client_connection_events_total{event}` | `pkg/natsutil` | Existing | Every service connecting through the shared helper; scoped by resource, not by inline `service_name` |
-| Section 7 shared application families | `pkg/natsmetrics` | Existing for message-gatekeeper, message-worker, broadcast-worker, notification-worker, history-service, room-service, and room-worker | Adoption depth differs: the first four and room-worker instrument the consumer path; history-service and room-service are publisher-side only. `publish_retries_total` still has no producer, so an empty family is expected rather than a freshness-gate failure |
+| Section 7 shared application families | `pkg/natsmetrics` | Existing for message-gatekeeper, message-worker, broadcast-worker, notification-worker, history-service, room-service, and room-worker | Adoption depth differs: the first four and room-worker instrument the consumer path; history-service and room-service are publisher-side only |
 | Section 8 domain families | owning service | Existing for the four first-campaign services | See Section 8 for the channel fan-out caveat |
 
 ## 5. Canonical Infrastructure Metrics
@@ -225,17 +227,30 @@ wrappers so meanings do not drift.
 |---|---|---|---|
 | `chat.nats.consumer.loop.up` / `chat_nats_consumer_loop_up`<br><sub>`chat.nats.consumer.loop.up`</sub> | gauge | `service_name,site,stream,consumer` | 1 only while a live iterator/loop can receive messages |
 | `chat.nats.consumer.messages` / `chat_nats_consumer_messages_total`<br><sub>`chat.nats.consumer.messages`</sub> | counter | `service_name,site,stream,consumer,event_type,outcome` | One terminal application disposition per delivery attempt |
-| `chat.nats.consumer.redeliveries` / `chat_nats_consumer_redeliveries_total` | counter | `service_name,site,stream,consumer,event_type` | Delivery attempts whose JetStream delivery count is greater than one |
 | `chat.nats.consumer.processing.duration` / `chat_nats_consumer_processing_duration_seconds_*` | histogram | `service_name,site,stream,consumer,event_type,outcome` | Handler start through disposition attempt |
-| `chat.nats.publish.attempts` / `chat_nats_publish_attempts_total` | counter | `service_name,site,destination_kind,operation,outcome` | One Core or JetStream publish attempt |
-| `chat.nats.publish.retries` / `chat_nats_publish_retries_total` | counter | `service_name,site,destination_kind,operation` | Application-managed retry beyond the first attempt |
+| `chat.nats.publish.failures` / `chat_nats_publish_failures_total` | counter | `service_name,site,destination_kind,operation,outcome` | One Core or JetStream publish that failed. Successes are not recorded — see below |
 | `chat.nats.terminal.failures` / `chat_nats_terminal_failures_total`<br><sub>`chat.nats.terminal.failures`</sub> | counter | `service_name,site,stream,consumer,event_type,reason` | Work that will receive no further application attempt |
 | `rpc.client.call.duration` / `rpc_client_call_duration_seconds_*` | histogram | `service_name,site,rpc.system.name,rpc.method,error.type` | One outbound request/reply call. `error.type` absent on success |
 | `rpc.server.call.duration` / `rpc_server_call_duration_seconds_*` | histogram | `service_name,site,rpc.system.name,rpc.method,error.type` | One inbound request/reply handler call. `error.type` absent on success |
 
-The counters that used to shadow these two histograms (`chat.nats.requests`,
-`chat.nats.request.handled`) are gone: a histogram publishes its own `_count`,
-which is the same number on one fewer series built from one fewer attribute set.
+Three families this table used to require were deleted rather than implemented,
+and the reasoning is the standard to hold new ones to:
+
+- `chat.nats.publish.retries` — no path in this repo loops around its own
+  publish, so it could never leave zero.
+- `chat.nats.consumer.redeliveries` — the broker already publishes
+  `jetstream_consumer_num_redelivered`, and which event type keeps failing is
+  carried by `chat_nats_consumer_messages_total{event_type,outcome="nak"}`, the
+  nak being what causes the redelivery.
+- the publish **success** half of `chat.nats.publish.attempts` — for a JetStream
+  destination `jetstream_stream_total_messages` is the acceptance count any
+  failure ratio needs, and for a Core NATS destination a nil error only means
+  the message entered the client's write or reconnect buffer, so a "success"
+  there never meant delivery. What remains is `chat.nats.publish.failures`.
+
+Similarly, the counters that used to shadow the two RPC histograms
+(`chat.nats.requests`, `chat.nats.request.handled`) are gone: a histogram
+publishes its own `_count`, which is the same number on one fewer series.
 
 Rules:
 
@@ -251,8 +266,8 @@ Rules:
   Every consumer of a stream must derive it identically or the label cannot join
   across services, and a payload parse on the dispatch path serializes the
   consumer. Unrecognized tails use `unknown`.
-- A handler that swallows a recipient publish failure must still emit a failed
-  publish attempt and terminal failure when the canonical message will be Acked.
+- A handler that swallows a recipient publish failure must still emit a publish
+  failure and a terminal failure when the canonical message will be Acked.
 - Business rejections are not terminal failures. A message the service validated
   and refused (not subscribed, restricted room, oversize content) is an ordinary
   client error that received an error reply; it belongs in the domain counter,
@@ -263,29 +278,34 @@ Rules:
   undeclared histogram inherits the OpenTelemetry default boundaries (0 to
   10000) and every sub-second duration lands in the first bucket. Use the SDK's
   shared latency boundaries so percentiles stay comparable with `http.server.*`.
-- `publish_retries_total` has no producer in the first campaign: no service
-  loops around its own publish. JetStream's internal PubAck retries and the
-  consumer Nak path are not application retries and must not be counted here.
-  The family is declared so a future retry loop has a defined home; an empty
-  family is expected at campaign time and does not fail the freshness gate.
+- There is no publish-retry family. It was declared for "a future retry loop"
+  and never acquired one — no service loops around its own publish, and
+  JetStream's internal PubAck retries and the consumer Nak path are not
+  application retries. A family whose expected value is permanently empty is a
+  series, a hot-path attribute set and a reviewer's attention spent on nothing;
+  add it when the retry loop exists, not before.
 
 ### 7.1 Core NATS publish success is not delivery
 
-`publish_attempts_total{outcome="success"}` means different things per
-destination, and the difference decides how F07a/F07b are read:
+This is why the publish family counts failures only. A publish "success" means
+different things per destination, and the difference decides how F07a/F07b are
+read:
 
 - **JetStream destinations** (`canonical`, `outbox`, `inbox`, `push`) wait for a
-  PubAck. Success is broker-confirmed.
+  PubAck. Success is broker-confirmed — and already counted, by the broker, as
+  `jetstream_stream_total_messages`.
 - **Core NATS destinations** (`recipient_event`, `client_response`) return nil as
   soon as the message enters the client's write or reconnect buffer. nats.go
-  buffers publishes across a disconnect, so a complete broker outage produces a
-  rising `success` count until the reconnect buffer overflows.
+  buffers publishes across a disconnect, so a complete broker outage would
+  produce a rising "success" count until the reconnect buffer overflows.
 
-Never read a Core NATS `success` as proof a recipient was reached. Read it
-alongside the client connection metrics below, and treat any interval
-overlapping `disconnected`, or any `buffer_full` publish outcome, as unproven
-for recipient delivery;
-the authoritative recipient evidence is the loadgen recipient observer.
+A Core NATS success was therefore never proof a recipient was reached, which is
+what made it not worth a series. Read `chat_nats_publish_failures_total`
+alongside the client connection metrics below, treat any interval overlapping
+`disconnected`, or any `buffer_full` publish outcome, as unproven for recipient
+delivery, and take the denominator from the broker (JetStream) or from the
+loadgen recipient observer (Core NATS), which is the authoritative recipient
+evidence either way.
 
 ### 7.2 Client connection state
 
@@ -303,7 +323,7 @@ Reconnect-buffer overflow is deliberately absent from this family. nats.go
 returns `ErrReconnectBufExceeded` synchronously from `publish()` and never routes
 it through `ErrorHandler`, so a connection-level event value for it could never
 be recorded. The overflow is counted at the publish boundary instead, as
-`chat_nats_publish_attempts_total{outcome="buffer_full"}` (Section 7), which is
+`chat_nats_publish_failures_total{outcome="buffer_full"}` (Section 7), which is
 what `NATSReconnectBufferFull` in Section 11 fires on. Any future client-side
 loss signal must be taken from a publish return value, not from an async
 callback.
@@ -421,7 +441,7 @@ business reconciliation must complete.
 | `NATSConsumerLoopStopped` | durable exists but application loop gauge is 0 | Alive-but-not-consuming failure |
 | `NATSConsumerOldestPendingHigh` | age exceeds approved objective | Stuck/slow recovery |
 | `NATSTerminalDelivery` | terminal advisory or application terminal counter increases | Enumerate possible loss |
-| `NATSReconnectBufferFull` | `chat_nats_publish_attempts_total{outcome="buffer_full"}` or the loadgen equivalent increases | Potential client-side loss/inconclusive loadgen interval |
+| `NATSReconnectBufferFull` | `chat_nats_publish_failures_total{outcome="buffer_full"}` or the loadgen equivalent increases | Potential client-side loss/inconclusive loadgen interval |
 | `NATSClientDisconnected` | `chat_nats_client_connected == 0` outside a declared fault window | Service lost its broker connection; Core NATS publish success is unproven for the interval |
 | `LoadgenObserverDown` | required observer up is 0 | `INCONCLUSIVE` |
 
@@ -464,7 +484,7 @@ The metrics contract is ready for the core-message campaign only when every
 series required by the runbook has a fresh baseline sample and a deliberate
 known failure changes the expected series and verdict.
 
-## 11. Application instrument registry
+## 13. Application instrument registry
 
 Every OTel instrument this repo declares appears here. A guard test
 (`pkg/obs/instrument_registry_test.go`) scans the tree and fails when a new
@@ -488,7 +508,7 @@ broken deployment.
 Each row shows the **exported Prometheus name** you query, with the **OTel
 instrument name** you grep for in source underneath where the two differ.
 
-### 11.1 Shared NATS families (`pkg/natsmetrics`)
+### 13.1 Shared NATS families (`pkg/natsmetrics`)
 
 | Exported name | Type | Emitted by | Appears | Platform alternative | Read by |
 |---|---|---|---|---|---|
@@ -500,21 +520,28 @@ instrument name** you grep for in source underneath where the two differ.
 | `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, history-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
 | `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4 / SLO-5** (`sli-slo.md` roadmap P1) |
 
-These two are the only families here without the `chat_` prefix, and the
-exception is deliberate (§2): they implement the OpenTelemetry RPC semantic
-conventions, so they carry the convention's names, its `rpc.system.name` and
-`rpc.method` labels, its `error.type` label, and its bucket boundaries. They
-keep our `site` label, which the convention permits.
+These two are the only families here that do not carry the `chat_` prefix, and
+the exception is deliberate: they implement the OpenTelemetry RPC semantic
+conventions, so they carry the convention's instrument names
+(`rpc.client.call.duration` / `rpc.server.call.duration`), its `rpc.system.name`
+and `rpc.method` labels, its `error.type` label, and its bucket boundaries. A
+standard name is what makes a generic RPC dashboard, a collector processor or a
+backend's RPC view read them without a translation table — the whole point of
+using one. They keep our `site` label, which the convention permits.
 
 `error.type` is conditional on failure, so a successful call carries no error
-label at all — query the unlabelled series directly rather than subtracting.
+label at all — `sum without (error_type) (...) - sum(...{error_type!=""})` is
+not needed; query the unlabelled series directly. Each family replaced a
+histogram **and** a counter (`chat.nats.requests`, `chat.nats.request.handled`):
+a histogram already publishes `_count`, so the counters were the same numbers on
+a second series built from a second attribute set.
 
 The five JetStream consumers are `message-gatekeeper`, `message-worker`,
 `broadcast-worker`, `notification-worker`, and `room-worker`. `room-service` and
 `history-service` have no consumer loop, so the consumer families are correctly
 absent there.
 
-### 11.2 Connection families (`pkg/natsutil`)
+### 13.2 Connection families (`pkg/natsutil`)
 
 | Exported name | Type | Emitted by | Appears | Platform alternative | Read by |
 |---|---|---|---|---|---|
@@ -525,7 +552,7 @@ absent there.
 These three carry no `site` label: they are emitted below the layer that knows
 the site, so join them through `target_info`.
 
-### 11.3 Domain families
+### 13.3 Domain families
 
 | Exported name | Type | Emitted by | Appears | Platform alternative | Read by |
 |---|---|---|---|---|---|
@@ -547,7 +574,7 @@ the site, so join them through `target_info`.
 | `search_sync_worker_messages_total` | counter | search-sync-worker | on first message | partial: `jetstream_consumer_num_redelivered` counts redeliveries but not their cause | redelivery-source attribution |
 | `search_sync_worker_parent_resolve_duration_seconds` | histogram | search-sync-worker | on first thread reply | none | consumer-loop drag attribution |
 
-### 11.4 Adding an instrument
+### 13.4 Adding an instrument
 
 1. Name what reads it — a dashboard panel, an alert rule, or an SLO row. If the
    answer is "nothing yet", that is the finding; add the metric with the
