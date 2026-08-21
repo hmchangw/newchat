@@ -1,6 +1,7 @@
 package obs_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,36 +42,17 @@ var instrumentDeclAnyArg = regexp.MustCompile(
 // Adding an instrument therefore means naming it in the contract next to what
 // reads it. If nothing reads it yet, that is the finding.
 func TestEveryInstrumentIsDocumented(t *testing.T) {
-	root := repoRoot(t)
+	repo := repoFS(t)
 
-	contract, err := os.ReadFile(filepath.Join(root, contractDoc))
+	contract, err := fs.ReadFile(repo, contractDoc)
 	require.NoError(t, err, "the metrics contract must exist at %s", contractDoc)
 	documented := string(contract)
 
 	declared := map[string][]string{} // instrument name -> files declaring it
-	require.NoError(t, filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "testdata", "vendor":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		src, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		rel, _ := filepath.Rel(root, path)
+	require.NoError(t, walkGoSources(repo, func(path string, src []byte) {
 		for _, m := range instrumentDecl.FindAllStringSubmatch(string(src), -1) {
-			declared[m[1]] = append(declared[m[1]], rel)
+			declared[m[1]] = append(declared[m[1]], path)
 		}
-		return nil
 	}))
 	require.NotEmpty(t, declared, "instrument scan found nothing — the regex is probably wrong")
 
@@ -112,41 +94,64 @@ func skipInstrument(files []string) bool {
 // is written once either way) and means the only way past the registry is to
 // add the row.
 func TestInstrumentNamesAreLiterals(t *testing.T) {
-	root := repoRoot(t)
+	repo := repoFS(t)
 
 	var offenders []string
-	require.NoError(t, filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "testdata", "vendor":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		src, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		rel, _ := filepath.Rel(root, path)
+	require.NoError(t, walkGoSources(repo, func(path string, src []byte) {
 		for _, m := range instrumentDeclAnyArg.FindAllStringSubmatch(string(src), -1) {
 			if strings.HasPrefix(m[1], `"`) {
 				continue
 			}
-			offenders = append(offenders, rel+": "+m[0])
+			offenders = append(offenders, path+": "+m[0])
 		}
-		return nil
 	}))
 	sort.Strings(offenders)
 
 	assert.Empty(t, offenders,
 		"an instrument name must be a string literal at its construction site, so %s can be checked against it:\n  %s",
 		contractDoc, strings.Join(offenders, "\n  "))
+}
+
+// walkGoSources hands every non-test .go file in the repo to visit, keyed by its
+// repo-relative slash path.
+func walkGoSources(repo fs.FS, visit func(path string, src []byte)) error {
+	return fs.WalkDir(repo, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "testdata", "vendor":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, readErr := fs.ReadFile(repo, path)
+		if readErr != nil {
+			return readErr
+		}
+		visit(path, src)
+		return nil
+	})
+}
+
+// repoFS opens the repository as a root-scoped filesystem.
+//
+// os.Root rather than a plain path walk: gosec flags os.ReadFile on a
+// WalkDir-supplied path (G122/G304) because the path can change identity
+// between the walk and the read, and a symlink out of the tree would be
+// followed. A root-scoped FS cannot escape the repository, which is also just
+// the correct scope for a scan whose whole premise is "every file in this
+// repository".
+func repoFS(t *testing.T) fs.FS {
+	t.Helper()
+	root, err := os.OpenRoot(repoRoot(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+	return root.FS()
 }
 
 func repoRoot(t *testing.T) string {
