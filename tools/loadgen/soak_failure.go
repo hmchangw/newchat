@@ -624,6 +624,16 @@ func (r *soakFailureReconciler) recordObserved(err error) error {
 	return nil
 }
 
+// recordClaimLag reports how far past its scheduled probe an operation was when
+// the lane finally reached it. A claim taken early is not negative progress, so
+// it floors at zero.
+func (r *soakFailureReconciler) recordClaimLag(now, scheduled time.Time) {
+	if r == nil || r.metrics == nil || scheduled.IsZero() {
+		return
+	}
+	r.metrics.FailureReconcileLag.Observe(max(0, now.Sub(scheduled).Seconds()))
+}
+
 // recordClaim is nil-safe so the tests that only assert reconciliation do not
 // have to build a registry.
 func (r *soakFailureReconciler) recordClaim(outcome string) {
@@ -697,6 +707,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		r.recordClaim(soakReconcileClaimIdle)
 		return false, nil
 	}
+	r.recordClaimLag(now, operation.nextVerifyAt)
 	if _, historyObserved := operation.Observations[failureObserverHistory]; historyObserved {
 		if _, recipientObserved := operation.Observations[failureObserverRecipient]; !recipientObserved &&
 			slices.Contains(operation.Expected, failureObserverRecipient) {

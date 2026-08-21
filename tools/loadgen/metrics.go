@@ -82,6 +82,7 @@ type Metrics struct {
 	FailureJournalBytes          prometheus.Gauge
 	FailureUntracked             *prometheus.CounterVec
 	FailureReconcileClaims       *prometheus.CounterVec
+	FailureReconcileLag          prometheus.Histogram
 	FailureDropped               prometheus.Counter
 	FailureNotSent               *prometheus.CounterVec
 	FailureWALAppendDuration     prometheus.Histogram
@@ -428,6 +429,15 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"outcome"},
 	)
+	m.FailureReconcileLag = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "loadgen_failure_reconcile_lag_seconds",
+			Help: "Seconds past its scheduled probe an operation was when the reconciler claimed it; the capacity floor cannot model fault-time retries, so lag is what shows the lane falling behind, and lag near SOAK_RECONCILE_DEADLINE means operations expire unverified for want of a probe.",
+			Buckets: []float64{
+				0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600,
+			},
+		},
+	)
 	m.FailureDropped = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_dropped_total",
@@ -565,7 +575,8 @@ func NewMetrics() *Metrics {
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecipientExpectations,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
-		m.FailureUntracked, m.FailureReconcileClaims, m.FailureDropped, m.FailureNotSent,
+		m.FailureUntracked, m.FailureReconcileClaims, m.FailureReconcileLag,
+		m.FailureDropped, m.FailureNotSent,
 		m.FailureWALAppendDuration, m.FailureWALAppends,
 		m.FailureWALFlushDuration, m.FailureWALFlushBatchSize,
 		m.FailureEvidenceFlushDuration, m.FailureEvidenceRecords,

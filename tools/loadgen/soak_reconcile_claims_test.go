@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -235,4 +238,96 @@ func TestSoakFailureReconciler_AnUnreachableSearchProbeIsUnavailableNotRetried(t
 		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimUnavailable)))
 	require.Zero(t, testutil.ToFloat64(
 		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimRetried)))
+}
+
+// The capacity rule is a floor for the healthy path: it covers one claim per
+// observer and nothing for the retries a fault window creates. Above a few
+// percent of messages missing, demand outruns the lane and operations age out
+// before anything probes them — expiring unverified for want of a look, which
+// is indistinguishable from a dependency that was genuinely unreachable.
+//
+// Reconcile lag is what separates them without a threshold to configure: how
+// far past its scheduled probe an operation was when the reconciler finally
+// reached it. A healthy lane claims on schedule; a saturated one falls behind
+// without bound, and lag approaching the deadline means the window's unverified
+// verdicts are not evidence.
+func TestSoakFailureReconciler_MeasuresHowFarBehindScheduleAClaimWas(t *testing.T) {
+	started := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	const grace = 10 * time.Second
+
+	claimAfter := func(t *testing.T, late time.Duration) float64 {
+		t.Helper()
+		ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
+		require.NoError(t, err)
+		tracker := newSoakFailureTracker(
+			ledger, grace, 10*time.Minute, func() time.Time { return started },
+		)
+		pending := testSoakFailurePending(started)
+		require.NoError(t, tracker.Start(pending))
+		require.NoError(t, tracker.Activate(pending))
+		require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
+			Status: soakSendReplyAccepted, MessageID: pending.MessageID,
+		}))
+		metrics := NewMetrics()
+		now := started.Add(grace).Add(late)
+		reconciler := newSoakFailureReconciler(
+			ledger,
+			&fakeSoakFailureVerifier{results: []soakFailureHistoryResult{soakFailureHistoryFound}},
+			time.Second,
+			func() time.Time { return now },
+			withSoakFailureReconcileMetrics(metrics),
+		)
+		ran, err := reconciler.Try(context.Background())
+		require.NoError(t, err)
+		require.True(t, ran)
+		return soakReconcileLagSum(t, metrics)
+	}
+
+	t.Run("a claim taken on schedule is not behind", func(t *testing.T) {
+		assert.InDelta(t, 0, claimAfter(t, 0), 0.001)
+	})
+
+	t.Run("a claim the lane could not reach for a minute is a minute behind", func(t *testing.T) {
+		assert.InDelta(t, 60, claimAfter(t, time.Minute), 0.001)
+	})
+}
+
+// An idle claim reached no operation, so it has no schedule to be late against
+// and must not report a lag of zero — that would dilute the very signal a
+// saturated lane produces.
+func TestSoakFailureReconciler_RecordsNoLagForAClaimWithNothingDue(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	metrics := NewMetrics()
+	reconciler := newSoakFailureReconciler(
+		ledger, &fakeSoakFailureVerifier{}, time.Second,
+		func() time.Time { return now },
+		withSoakFailureReconcileMetrics(metrics),
+	)
+
+	ran, err := reconciler.Try(context.Background())
+
+	require.NoError(t, err)
+	require.False(t, ran)
+	assert.Equal(t, uint64(0), soakReconcileLagCount(t, metrics))
+}
+
+func soakReconcileLagHistogram(t *testing.T, metrics *Metrics) *dto.Histogram {
+	t.Helper()
+	var measured dto.Metric
+	collector, ok := metrics.FailureReconcileLag.(prometheus.Metric)
+	require.True(t, ok, "reconcile lag must be a single collectable histogram")
+	require.NoError(t, collector.Write(&measured))
+	return measured.GetHistogram()
+}
+
+func soakReconcileLagSum(t *testing.T, metrics *Metrics) float64 {
+	t.Helper()
+	return soakReconcileLagHistogram(t, metrics).GetSampleSum()
+}
+
+func soakReconcileLagCount(t *testing.T, metrics *Metrics) uint64 {
+	t.Helper()
+	return soakReconcileLagHistogram(t, metrics).GetSampleCount()
 }
