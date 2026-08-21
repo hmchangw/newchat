@@ -43,22 +43,7 @@ func TestAck_ErrorIsLoggedNotReturned(t *testing.T) {
 	assert.True(t, msg.ackCalled)
 }
 
-func TestNak_Success(t *testing.T) {
-	msg := &stubMsg{}
-	natsutil.Nak(msg, "handler error")
-	assert.True(t, msg.nakCalled, "Nak() should be invoked on the message")
-}
-
-func TestNak_ErrorIsLoggedNotReturned(t *testing.T) {
-	msg := &stubMsg{nakErr: errors.New("consumer deleted")}
-	natsutil.Nak(msg, "bulk failure")
-	assert.True(t, msg.nakCalled)
-}
-
 // Compile-time checks that the stub implements the interfaces the helpers
 // require — this is what lets production code pass `jetstream.Msg` and
 // `oteljetstream.Msg` to the helpers without a wrapper.
-var (
-	_ natsutil.Acker = (*stubMsg)(nil)
-	_ natsutil.Naker = (*stubMsg)(nil)
-)
+var _ natsutil.Acker = (*stubMsg)(nil)

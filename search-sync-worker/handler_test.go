@@ -23,16 +23,17 @@ import (
 
 // stubMsg implements jetstream.Msg for testing.
 type stubMsg struct {
-	data    []byte
-	headers nats.Header
-	acked   bool
-	nacked  bool
+	data     []byte
+	headers  nats.Header
+	acked    bool
+	nacked   bool
+	nakDelay time.Duration
 }
 
 func (m *stubMsg) Data() []byte                              { return m.data }
 func (m *stubMsg) Ack() error                                { m.acked = true; return nil }
 func (m *stubMsg) Nak() error                                { m.nacked = true; return nil }
-func (m *stubMsg) NakWithDelay(time.Duration) error          { return nil }
+func (m *stubMsg) NakWithDelay(d time.Duration) error        { m.nacked = true; m.nakDelay = d; return nil }
 func (m *stubMsg) InProgress() error                         { return nil }
 func (m *stubMsg) Term() error                               { return nil }
 func (m *stubMsg) TermWithReason(string) error               { return nil }
@@ -591,4 +592,32 @@ func (c *captureCollection) MappingUpdate() (string, json.RawMessage)  { return 
 func (c *captureCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
 	c.received = append(c.received[:0], data...)
 	return nil, nil
+}
+
+// A bare Nak() is an instant redelivery that ignores the consumer's BackOff
+// (nats-server/server/consumer.go:3308-3311), so every nak this worker issues
+// must carry a positive delay.
+func TestHandler_NaksCarryABackoffDelay(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().
+		Bulk(gomock.Any(), gomock.Len(1)).
+		Return(nil, fmt.Errorf("connection refused"))
+
+	h := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 500)
+	evt := model.MessageEvent{
+		Event: model.EventCreated,
+		Message: model.Message{
+			ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+			Content: "hello", CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		},
+		SiteID: "site-a", Timestamp: 100,
+	}
+	msg := makeStubMsg(t, &evt)
+
+	h.Add(msg)
+	h.Flush(context.Background())
+
+	assert.True(t, msg.nacked)
+	assert.Positive(t, msg.nakDelay, "nak must be delayed, never an instant redelivery")
 }

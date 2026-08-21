@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/searchengine"
 )
@@ -108,7 +109,7 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 		if ok {
 			if err := h.store.UpdateByQuery(ctx, index, body); err != nil {
 				slog.ErrorContext(ctx, "update-by-query failed", "error", err, "index", index, "consumer", h.collection.ConsumerName())
-				natsutil.Nak(msg, "update-by-query failed")
+				jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, "update-by-query failed")
 				h.metrics.recordMessages(ctx, dispNakkedRequestFailed, 1)
 				return
 			}
@@ -168,7 +169,7 @@ func (h *Handler) Flush(ctx context.Context) {
 		slog.Error("bulk request failed", "error", err, "actions", len(actions))
 		h.metrics.recordFlush(bulkCtx, flushRequestFailed, elapsed, len(actions))
 		h.metrics.recordMessages(bulkCtx, dispNakkedRequestFailed, len(pending))
-		nakAll(pending, "bulk request failed")
+		nakAll(bulkCtx, pending, "bulk request failed")
 		return
 	}
 
@@ -187,7 +188,7 @@ func (h *Handler) Flush(ctx context.Context) {
 		slog.Error("bulk result count mismatch", "expected", len(actions), "actual", len(results))
 		h.metrics.recordFlush(bulkCtx, flushResultMismatch, elapsed, len(actions))
 		h.metrics.recordMessages(bulkCtx, dispNakkedResultMismatch, len(pending))
-		nakAll(pending, "bulk result count mismatch")
+		nakAll(bulkCtx, pending, "bulk result count mismatch")
 		return
 	}
 
@@ -218,7 +219,7 @@ func (h *Handler) Flush(ctx context.Context) {
 			natsutil.Ack(p.jsMsg, "bulk actions succeeded")
 		} else {
 			nakked++
-			natsutil.Nak(p.jsMsg, "bulk action failed")
+			jsretry.Nak(bulkCtx, p.jsMsg, jsretry.DefaultBackoff, "bulk action failed")
 		}
 	}
 	h.metrics.recordMessages(bulkCtx, dispAckedSuccess, acked)
@@ -256,9 +257,9 @@ func (h *Handler) startFlushSpan(ctx context.Context, pending []pendingMsg, acti
 // (bulk request failed, or the ES response item count didn't match the
 // request). The shared `reason` is logged against every message so an
 // operator grepping by cause sees all of them together.
-func nakAll(pending []pendingMsg, reason string) {
+func nakAll(ctx context.Context, pending []pendingMsg, reason string) {
 	for _, p := range pending {
-		natsutil.Nak(p.jsMsg, reason)
+		jsretry.Nak(ctx, p.jsMsg, jsretry.DefaultBackoff, reason)
 	}
 }
 
