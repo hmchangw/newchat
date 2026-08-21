@@ -90,7 +90,15 @@ func logSlowConsumer(log *slog.Logger, sub *nats.Subscription) {
 	if sub == nil {
 		return
 	}
+	// Both suppressions below are deliberate. sub.Subject is the subscription's own
+	// registered subject, not a per-message value: that is one series per subscription
+	// in the process, and the router registers wildcarded patterns. And unlike a
+	// per-item failure loop this fires once per slow-consumer episode with no loop
+	// around it, so there is nothing to precompute against — the label set is
+	// per-subscription and the subscription set is not known at init.
+	// nosemgrep: metrics-no-per-call-attribute-set
 	slowConsumerEvents.Add(context.Background(), 1,
+		// nosemgrep: metrics-no-unbounded-label
 		metric.WithAttributes(
 			attribute.String("subject", sub.Subject),
 			attribute.String("queue", sub.Queue),
