@@ -26,8 +26,9 @@ type Publisher struct {
 
 type Option func(*Publisher)
 
-// WithMetrics enables bounded publish-attempt metrics without changing
-// JetStream acknowledgement or deduplication behavior.
+// WithMetrics enables bounded publish-failure metrics without changing
+// JetStream acknowledgement or deduplication behavior. Successful publishes are
+// not recorded; see natsmetrics.Publisher.Failure.
 func WithMetrics(metrics natsmetrics.Publisher) Option {
 	return withFailureRecorder(metrics)
 }
