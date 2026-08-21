@@ -1,8 +1,8 @@
 # Cassandra Load Test Plan (Soak Test)
 
 > This is the authoritative specification for the Cassandra Run A soak test.
-> The engineering work breakdown is maintained in
-> [`run-a-implementation-plan.md`](../loadgen/run-a-implementation-plan.md).
+> The harness that implements it is `tools/loadgen`; its runtime contract is
+> [`../loadgen/observation.md`](../loadgen/observation.md).
 
 A production-like soak test to validate the Cassandra **schema design** and
 **access patterns** of this project before release. **Run A (a soak through the
@@ -354,6 +354,26 @@ a realistic, non-overloading rate; review L1/L2/L3 daily. (4) Follow-on Run B/C 
 isolation, if time permits. (5) Evidence retention (24–72h). (6) Cleanup by
 manifest (`TRUNCATE`/drop). (7) Verify. Avoid the infra team's full repair (it
 pollutes TWCS windows).
+
+### 6.1 Pre-run gate
+
+Implementation being complete does not by itself make a run safe. Confirm all
+of the following before creating the seed job, and fail the seed rather than
+generating load if any of them is unanswered:
+
+- the exact site and NATS account;
+- the borrowed-user filter and count (see
+  [`../common/environments-and-data-ownership.md`](../common/environments-and-data-ownership.md));
+- room count and the MongoDB write budget;
+- a Cassandra keyspace dedicated to this test, configured identically on
+  `message-worker` and `history-service`;
+- `MESSAGE_BUCKET_HOURS` identical on every reader and writer, and matching the
+  TWCS compaction window — a mismatch reads exactly like data loss;
+- `ATREST_ENABLED=true` with working Vault/KMS dependencies;
+- enough free Cassandra disk for the planned observation window plus margin;
+- Prometheus scraping loadgen, and the evidence retention and teardown time;
+- that NATS, Elasticsearch and Valkey will receive side effects this teardown
+  does not remove.
 
 ---
 
