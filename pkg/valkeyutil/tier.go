@@ -61,6 +61,11 @@ func SlideTTL(ctx context.Context, client Client, key string, ttl time.Duration,
 // BustKeys best-effort deletes entries an authoritative write has made wrong.
 // Fail-open: a nil client or no keys is a no-op, and any error warns and is
 // swallowed, since the TTL reconciles a missed bust.
+// All keys in one call MUST hash to the same cluster slot — share a {hashTag},
+// as subauthcache's sub:{roomID}:account and roommetacache's room:{roomID}:meta
+// generations do. Valkey rejects a cross-slot multi-key DEL outright, so a
+// caller batching untagged keys clears none of them rather than some; such a
+// caller must issue one BustKeys per key instead.
 func BustKeys(ctx context.Context, client Client, label string, keys ...string) {
 	if client == nil || len(keys) == 0 {
 		return

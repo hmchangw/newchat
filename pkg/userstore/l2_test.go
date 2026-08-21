@@ -26,6 +26,7 @@ type fakeValkey struct {
 	mgets    int
 	mgetKeys int
 	expires  int
+	delCalls [][]string
 }
 
 func newFakeValkey() *fakeValkey {
@@ -57,6 +58,7 @@ func (f *fakeValkey) Set(_ context.Context, key, value string, ttl time.Duration
 }
 
 func (f *fakeValkey) Del(_ context.Context, keys ...string) error {
+	f.delCalls = append(f.delCalls, keys)
 	for _, k := range keys {
 		delete(f.data, k)
 		delete(f.ttls, k)
@@ -265,6 +267,21 @@ func TestL2Store_BustRemovesBothKeys(t *testing.T) {
 
 	Bust(ctx, vk, "u-alice", "alice")
 	assert.Empty(t, vk.data, "both key spaces must be dropped or one serves a stale user")
+	// One Del per key space. "user:id:…" and "user:acct:…" carry no hash tag, so
+	// they hash to different cluster slots and a single multi-key DEL fails with
+	// CROSSSLOT against a real cluster — dropping neither key rather than both.
+	require.Len(t, vk.delCalls, 2, "one Del per key — a batched DEL is CROSSSLOT in cluster mode")
+	assert.Equal(t, []string{idKey("u-alice")}, vk.delCalls[0])
+	assert.Equal(t, []string{accountKey("alice")}, vk.delCalls[1])
+}
+
+// A caller that supplies only one identifier must issue exactly one Del, not an
+// empty one alongside it.
+func TestBust_SingleIdentifier_IssuesOneDel(t *testing.T) {
+	vk := newFakeValkey()
+	Bust(context.Background(), vk, "", "alice")
+	require.Len(t, vk.delCalls, 1)
+	assert.Equal(t, []string{accountKey("alice")}, vk.delCalls[0])
 }
 
 func TestL2Store_StaleEntryEvictedWhenUserGenuinelyGone(t *testing.T) {

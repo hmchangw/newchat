@@ -210,11 +210,15 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	require.NoError(t, cache.Set(ctx, "r1", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
 	require.NoError(t, cache.Invalidate(ctx, "r1"))
 
-	require.Len(t, client.delCalls, 1)
-	// Both generations: during the rolling-deploy window an old binary still
-	// populates and reads the v3 key, so dropping only v4 would leave it serving
-	// a member list for a room whose membership just changed.
-	assert.ElementsMatch(t, []string{"room:v4:r1:subs", "room:v3:r1:subs"}, client.delCalls[0])
+	// Both generations are dropped, but in SEPARATE Del calls. These keys carry
+	// no hash tag, so "room:v4:r1:subs" and "room:v3:r1:subs" hash to different
+	// cluster slots and a single multi-key DEL is a CROSSSLOT error against a
+	// real cluster — which would fail every invalidation, not just the legacy
+	// half. (roommetacache can batch its two keys because they share a {roomID}
+	// hash tag; this package cannot.)
+	require.Len(t, client.delCalls, 2, "one Del per key — a batched DEL is CROSSSLOT in cluster mode")
+	assert.Equal(t, []string{"room:v4:r1:subs"}, client.delCalls[0])
+	assert.Equal(t, []string{"room:v3:r1:subs"}, client.delCalls[1])
 
 	_, err := cache.Get(ctx, "r1")
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)

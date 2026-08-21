@@ -88,14 +88,15 @@ func Bust(ctx context.Context, client valkeyutil.Client, userID, account string)
 	if client == nil {
 		return
 	}
-	keys := make([]string, 0, 2)
+	// One Del per key space, never a batched DEL: these keys carry no hash tag,
+	// so "user:id:…" and "user:acct:…" hash to different cluster slots and a
+	// multi-key DEL fails with CROSSSLOT — clearing neither instead of both.
 	if userID != "" {
-		keys = append(keys, idKey(userID))
+		valkeyutil.BustKeys(ctx, client, "user", idKey(userID))
 	}
 	if account != "" {
-		keys = append(keys, accountKey(account))
+		valkeyutil.BustKeys(ctx, client, "user", accountKey(account))
 	}
-	valkeyutil.BustKeys(ctx, client, "user", keys...)
 }
 
 func (l *l2Store) FindUserByID(ctx context.Context, id string) (*model.User, error) {

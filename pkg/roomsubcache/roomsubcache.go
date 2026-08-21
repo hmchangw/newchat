@@ -236,8 +236,14 @@ func (c *valkeyCache) Invalidate(ctx context.Context, roomID string) error {
 	if roomID == "" {
 		return errors.New("roomsubcache: empty roomID")
 	}
-	// Both generations — see legacyCacheKeySchemaVersion.
-	if err := c.client.Del(ctx, cacheKey(roomID), legacyCacheKey(roomID)); err != nil {
+	// Both generations — see legacyCacheKeySchemaVersion — but one Del each.
+	// These keys carry no hash tag, so the two versions hash to different
+	// cluster slots and a single multi-key DEL fails with CROSSSLOT, taking the
+	// current-key delete down with the legacy one. Neither delete short-circuits
+	// the other: a failure to clear v3 must not leave v4 stale as well.
+	errCurrent := c.client.Del(ctx, cacheKey(roomID))
+	errLegacy := c.client.Del(ctx, legacyCacheKey(roomID))
+	if err := errors.Join(errCurrent, errLegacy); err != nil {
 		return fmt.Errorf("invalidate cached subscriptions for room %s: %w", roomID, err)
 	}
 	return nil
