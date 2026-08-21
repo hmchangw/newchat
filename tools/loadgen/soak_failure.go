@@ -714,9 +714,13 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		return true, r.observe(operation.ID, failureObservationGood, now)
 	}
 	if now.Before(operation.Deadline) {
+		// The poll for a message that has not landed yet, and the only retry
+		// here that repeats for the whole deadline — so it is the one that has
+		// to back off. The error paths above keep the flat interval: they
+		// retry a failed call, not a pending effect.
 		if err := r.ledger.ReleaseClaim(
 			operation.ID,
-			now.Add(r.retryInterval),
+			nextReconcileProbe(now, operation.VerifyAfter, operation.Deadline, r.retryInterval),
 		); err != nil {
 			return true, err
 		}
