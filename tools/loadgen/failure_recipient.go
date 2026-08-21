@@ -372,6 +372,10 @@ type recipientEvidence struct {
 	mu              sync.Mutex
 	allowDuplicates bool
 	operations      map[string]*recipientExpectation
+	// capacity bounds the map when expiry cannot run — a ledger that keeps
+	// failing to expire would otherwise reinstate the growth this file exists
+	// to stop. Zero means unbounded.
+	capacity int
 }
 
 type recipientEvidenceDisposition string
@@ -385,7 +389,10 @@ const (
 )
 
 func newRecipientEvidence(allowDuplicates bool) *recipientEvidence {
-	return &recipientEvidence{allowDuplicates: allowDuplicates, operations: make(map[string]*recipientExpectation)}
+	return &recipientEvidence{
+		allowDuplicates: allowDuplicates,
+		operations:      make(map[string]*recipientExpectation),
+	}
 }
 
 func (r *recipientEvidence) Expect(operationID string, recipients []string) error {
@@ -440,6 +447,11 @@ func (r *recipientEvidence) ExpectDelivery(config *recipientExpectationConfig) e
 	defer r.mu.Unlock()
 	if _, exists := r.operations[config.OperationID]; exists {
 		return fmt.Errorf("recipient expectation %q already exists", config.OperationID)
+	}
+	if r.capacity > 0 && len(r.operations) >= r.capacity {
+		return fmt.Errorf(
+			"recipient expectation capacity %d exceeded; evidence is not being expired",
+			r.capacity)
 	}
 	r.operations[config.OperationID] = &recipientExpectation{
 		expected: expected, observed: make(map[string]map[recipientDeliveryRoute]int), mismatches: make(map[string]struct{}),
@@ -595,6 +607,44 @@ func (r *recipientEvidence) Forget(operationID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.operations, operationID)
+}
+
+// ForgetAll releases the expectations for the operations the ledger reports it
+// finalized, and returns how many went. Taking the IDs from the ledger is what
+// keeps the two aligned: a time-based bound cannot be, because Expire stops at
+// its batch limit and skips claimed operations mid-verification, so "past its
+// deadline" and "the ledger is done with it" are different sets.
+//
+// The caller passes IDs the ledger has already returned, so this takes only the
+// evidence lock — the ledger's is released by then, and no ordering between the
+// two is created.
+func (r *recipientEvidence) ForgetAll(operationIDs []string) int {
+	if r == nil || len(operationIDs) == 0 {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	forgotten := 0
+	for _, operationID := range operationIDs {
+		if _, tracked := r.operations[operationID]; !tracked {
+			continue
+		}
+		delete(r.operations, operationID)
+		forgotten++
+	}
+	return forgotten
+}
+
+// Len reports how many expectations are retained. The run needs this as a gauge:
+// a count that tracks the ledger's own in-flight number is healthy, one that
+// climbs past it is this map leaking again.
+func (r *recipientEvidence) Len() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.operations)
 }
 
 func (r *recipientEvidence) Complete(operationID string) bool {
@@ -770,6 +820,30 @@ type failureRecipientObserverOption func(*failureRecipientObserver)
 
 func withFailureRecipientEvidenceDir(directory string) failureRecipientObserverOption {
 	return func(observer *failureRecipientObserver) { observer.evidenceDir = directory }
+}
+
+// recipientEvidenceCapacityFactor is the headroom the expectation map keeps over
+// the ledger's own capacity.
+//
+// The sweep frees ledger slots inside Expire and frees the matching evidence
+// afterwards, in ForgetAll, so between the two the ledger has room the evidence
+// does not. Sized exactly like the ledger, a send arriving in that window is
+// refused registration even though the ledger would have admitted its
+// operation. One extra generation closes the window by construction: an
+// unbounded sweep can retire at most the whole ledger before cleanup runs, so
+// the lag can never exceed one capacity.
+const recipientEvidenceCapacityFactor = 2
+
+// withFailureRecipientEvidenceCapacity bounds the expectation map. Callers pass
+// the ledger's own capacity: an expectation exists per ledger operation, so the
+// ledger's admission limit binds first in a healthy run and this only engages
+// once expiry has stopped working.
+func withFailureRecipientEvidenceCapacity(capacity int) failureRecipientObserverOption {
+	return func(o *failureRecipientObserver) {
+		if capacity > 0 {
+			o.evidence.capacity = capacity * recipientEvidenceCapacityFactor
+		}
+	}
 }
 
 func withFailureRecipientDuplicatePolicy(allow bool) failureRecipientObserverOption {

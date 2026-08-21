@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -11,8 +12,12 @@ import (
 
 // Metrics holds the Prometheus collectors used across loadgen components.
 type Metrics struct {
-	natsHealthMu          sync.Mutex
-	natsPoolHealth        map[string]*loadgenNATSPoolState
+	natsHealthMu   sync.Mutex
+	natsPoolHealth map[string]*loadgenNATSPoolState
+	// recipientExpectations is installed once the recipient evidence exists,
+	// which is well after the registry is built, and is read on the scrape
+	// goroutine.
+	recipientExpectations atomic.Pointer[func() int]
 	Registry              *prometheus.Registry
 	Published             *prometheus.CounterVec
 	PublishErrors         *prometheus.CounterVec
@@ -71,6 +76,7 @@ type Metrics struct {
 	FailureObservations          *prometheus.CounterVec
 	FailureObservationReasons    *prometheus.CounterVec
 	FailureInflight              *prometheus.GaugeVec
+	FailureRecipientExpectations prometheus.GaugeFunc
 	FailureRecovered             prometheus.Counter
 	FailureInvalidations         *prometheus.CounterVec
 	FailureJournalBytes          prometheus.Gauge
@@ -381,6 +387,13 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"scenario", "lane"},
 	)
+	m.FailureRecipientExpectations = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "loadgen_failure_recipient_expectations",
+			Help: "Recipient expectations retained in memory; healthy runs track loadgen_failure_inflight.",
+		},
+		m.recipientExpectationCount,
+	)
 	m.FailureRecovered = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_recovered_operations_total",
@@ -542,6 +555,7 @@ func NewMetrics() *Metrics {
 		m.SoakLaneAttempts,
 		m.SoakPresenceSignals, m.SoakPresenceChecks, m.SoakPresenceConnections,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
+		m.FailureRecipientExpectations,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
 		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,
 		m.FailureWALAppendDuration, m.FailureWALAppends,
@@ -561,4 +575,30 @@ func NewMetrics() *Metrics {
 // Handler returns an http.Handler serving this metrics registry.
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{})
+}
+
+// SetRecipientExpectationSource installs the count the expectation gauge reads.
+//
+// The gauge is collected at scrape time rather than written by the expiry
+// sweep: a sweep that publishes it makes the value depend on the sweep still
+// running, and a ledger stalled on its journal is precisely the condition the
+// gauge exists to expose. Published from there it would freeze at the last
+// healthy number and read as normal.
+func (m *Metrics) SetRecipientExpectationSource(source func() int) {
+	if m == nil || source == nil {
+		return
+	}
+	m.recipientExpectations.Store(&source)
+}
+
+// recipientExpectationCount reports zero until a source is installed, which is
+// the honest answer for a run with no recipient observer.
+func (m *Metrics) recipientExpectationCount() float64 {
+	if m == nil {
+		return 0
+	}
+	if source := m.recipientExpectations.Load(); source != nil {
+		return float64((*source)())
+	}
+	return 0
 }

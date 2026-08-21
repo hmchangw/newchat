@@ -56,6 +56,7 @@ func soakFailureExpiryInterval(deadline time.Duration) time.Duration {
 func runSoakFailureExpiry(
 	ctx context.Context,
 	ledger *failureLedger,
+	evidence *recipientEvidence,
 	ticks <-chan time.Time,
 	onError func(error),
 ) {
@@ -70,10 +71,17 @@ func runSoakFailureExpiry(
 			if !ok {
 				return
 			}
-			if _, err := ledger.Expire(at); err != nil {
+			// The IDs the ledger actually finalized, which is not the same as
+			// "everything overdue": Expire stops at its batch limit and skips
+			// claimed operations mid-verification. Forgetting exactly these
+			// keeps the evidence and the ledger in step, and taking them after
+			// Expire returns creates no ordering between the two locks.
+			expired, err := ledger.Expire(at)
+			if err != nil {
 				reportSoakFailureSweepError(
 					onError, fmt.Errorf("expire failure operations: %w", err))
 			}
+			evidence.ForgetAll(expired)
 			// Reclaiming on the same tick means a run that finalizes nothing
 			// still bounds the journal; the finalize counter alone would let it
 			// grow until the next restart made recovery more expensive.
@@ -352,9 +360,7 @@ func (t *soakFailureTracker) Start(pending *soakPendingSend) error {
 		),
 		Attributes: attributes,
 	}); err != nil {
-		if t.recipient != nil {
-			t.recipient.evidence.Forget(pending.MessageID)
-		}
+		t.forgetRecipientExpectation(pending.MessageID)
 		return fmt.Errorf("start soak failure operation: %w", err)
 	}
 	return nil
@@ -384,6 +390,15 @@ func (t *soakFailureTracker) AbandonUnsent(pending *soakPendingSend) error {
 		return fmt.Errorf("soak pending send requires message ID")
 	}
 	err := t.ledger.Abandon(pending.MessageID, failureResultNotSent, t.now().UTC())
+	// One decision, and the ledger makes it. Abandoning finalizes the operation
+	// out of the ledger, putting it beyond the expiry sweep that releases
+	// evidence by ID — but so does a failure that lands after the commit, so
+	// "did the call succeed" is the wrong question. An operation still held is
+	// still reconcilable and keeps its evidence; one the ledger has let go must
+	// release it here or nothing will.
+	if t.ledger.Retired(pending.MessageID) {
+		t.forgetRecipientExpectation(pending.MessageID)
+	}
 	if errors.Is(err, errFailureOperationNotActive) {
 		t.countUntracked(failureUntrackedReasonAbandon)
 		return nil
@@ -392,6 +407,14 @@ func (t *soakFailureTracker) AbandonUnsent(pending *soakPendingSend) error {
 		return fmt.Errorf("abandon unsent soak operation: %w", err)
 	}
 	return nil
+}
+
+// forgetRecipientExpectation releases an expectation the ledger will never
+// report, on the paths that retire an operation without going through expiry.
+func (t *soakFailureTracker) forgetRecipientExpectation(operationID string) {
+	if t.recipient != nil {
+		t.recipient.evidence.Forget(operationID)
+	}
 }
 
 func (t *soakFailureTracker) ObserveReply(result *soakSendReplyResult) error {

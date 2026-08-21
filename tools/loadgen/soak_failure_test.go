@@ -69,7 +69,7 @@ func TestSoakFailureExpiryLoop_FinalizesPastDeadline(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runSoakFailureExpiry(ctx, ledger, ticks, nil)
+		runSoakFailureExpiry(ctx, ledger, nil, ticks, nil)
 	}()
 	ticks <- now.Add(2 * time.Minute)
 
@@ -98,7 +98,7 @@ func TestSoakFailureExpiryLoop_ReportsPersistenceFailureAndStopsOnCancel(t *test
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runSoakFailureExpiry(ctx, ledger, ticks, func(err error) { errorsSeen <- err })
+		runSoakFailureExpiry(ctx, ledger, nil, ticks, func(err error) { errorsSeen <- err })
 	}()
 	ticks <- now.Add(2 * time.Minute)
 	require.ErrorContains(t, <-errorsSeen, "expire failure operations")

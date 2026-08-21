@@ -69,7 +69,8 @@ func TestFailureLedger_RejectedAdmissionDoesNotBecomeMissingSideEffect(t *testin
 	)
 	require.NoError(t, err)
 
-	finalized, err := ledger.Expire(now.Add(time.Minute))
+	finalizedIDs, err := ledger.Expire(now.Add(time.Minute))
+	finalized := len(finalizedIDs)
 	require.NoError(t, err)
 	require.Equal(t, 1, finalized)
 	assert.Equal(

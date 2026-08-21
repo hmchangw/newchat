@@ -692,6 +692,18 @@ func (l *failureLedger) AbandonWithReason(
 	return nil
 }
 
+// Retired reports that the ledger no longer holds the operation. An error from
+// a finalizing call does not answer that question: finalizeLocked commits the
+// removal and compacts afterwards, so a compaction failure returns an error on
+// an operation that is already gone — and one nothing reports can never be
+// reported again.
+func (l *failureLedger) Retired(operationID string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, active := l.active[operationID]
+	return !active
+}
+
 func (l *failureLedger) Observe(
 	operationID string,
 	observer failureObserver,
@@ -832,18 +844,23 @@ func defaultFailureReason(
 	}
 }
 
-func (l *failureLedger) Expire(now time.Time) (int, error) {
+// Expire finalizes every operation past its deadline and returns the IDs it
+// actually finalized. The IDs matter to callers holding per-operation state:
+// a successful call is not a complete one — it stops at expireBatch and skips
+// claimed operations mid-verification — so "the sweep succeeded" is not a
+// licence to discard anything else that looks overdue.
+func (l *failureLedger) Expire(now time.Time) ([]string, error) {
 	if now.IsZero() {
 		now = l.now()
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.ensureOpen(); err != nil {
-		return 0, err
+		return nil, err
 	}
-	finalized := 0
+	var finalized []string
 	for _, operation := range l.active {
-		if l.expireBatch > 0 && finalized >= l.expireBatch {
+		if l.expireBatch > 0 && len(finalized) >= l.expireBatch {
 			break
 		}
 		if now.Before(operation.Deadline) {
@@ -881,12 +898,20 @@ func (l *failureLedger) Expire(now time.Time) (int, error) {
 			}
 		}
 		result := failureOperationResult(operation)
-		if err := l.finalizeLocked(
+		operationID := operation.ID
+		err := l.finalizeLocked(
 			operation, result, failureOperationFinalReason(operation, result), now,
-		); err != nil {
+		)
+		// Report by what left the ledger, not by whether the call succeeded.
+		// finalizeLocked drops the operation from l.active and compacts
+		// afterwards, so it can fail on one it has already retired — and an ID
+		// this loop does not report can never be reported by a later sweep.
+		if _, stillActive := l.active[operationID]; !stillActive {
+			finalized = append(finalized, operationID)
+		}
+		if err != nil {
 			return finalized, err
 		}
-		finalized++
 	}
 	return finalized, nil
 }

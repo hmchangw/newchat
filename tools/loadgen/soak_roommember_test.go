@@ -727,7 +727,8 @@ func TestSoakRoomLanes_ReleasesReservationsTheLedgerExpired(t *testing.T) {
 	// deadline, so a reconcile slot is not guaranteed to be the path that ends
 	// an operation. The lane must still get its room lease back.
 	fixture.advance(2 * time.Minute)
-	expired, err := fixture.ledger.Expire(fixture.now)
+	expiredIDs, err := fixture.ledger.Expire(fixture.now)
+	expired := len(expiredIDs)
 	require.NoError(t, err)
 	require.Equal(t, 1, expired)
 
