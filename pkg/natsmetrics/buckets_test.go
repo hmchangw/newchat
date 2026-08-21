@@ -17,9 +17,9 @@ import (
 // latency histogram must instead carry the SDK's shared latency boundaries so
 // p95/p99 are comparable with the http.server.* families.
 //
-// The two RPC histograms deliberately do not use these boundaries: they follow
-// the RPC semantic convention's own table instead, which is what an RPC panel
-// expects. See TestRequestInstruments_UseSemconvBucketBoundaries.
+// The two RPC histograms use the same shared set, deviating from the RPC
+// convention's own boundary table so that all three families interpolate at the
+// same points. See TestAllLatencyHistogramsShareOneBoundarySet.
 func TestLatencyHistogramsUseSharedLatencyBuckets(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
