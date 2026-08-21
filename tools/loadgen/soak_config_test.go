@@ -685,21 +685,22 @@ func TestValidateSoakConfig_SearchObserverIsRefusedUntilPayloadsAreMarked(t *tes
 // The capacity rule stays enforced for when the observer is usable: it adds a
 // second reconcile step to every admitted message, drawn from the same share
 // the history step already uses.
-func TestValidateSoakSearchReconcileCapacity_CoversTwoStepsPerMessage(t *testing.T) {
+func TestValidateSoakReconcileCapacity_CoversTwoStepsPerMessage(t *testing.T) {
 	cfg := validSoakConfig(t)
+	cfg.SearchObserverEnabled = true
 	cfg.SendRate = 100
 	cfg.ReadRate = 700
 	cfg.ReconcileReadShare = 0.5
 
-	require.NoError(t, validateSoakSearchReconcileCapacity(&cfg),
+	require.NoError(t, validateSoakReconcileCapacity(&cfg),
 		"two reconcile steps per message fit inside 350 slots/s at 100 msg/s")
 
 	cfg.ReadRate = 200
 
-	err := validateSoakSearchReconcileCapacity(&cfg)
+	err := validateSoakReconcileCapacity(&cfg)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SOAK_SEARCH_OBSERVER_ENABLED")
+	assert.Contains(t, err.Error(), "2 observer step(s)")
 }
 
 // With the observer off the message lane needs one reconcile step per message,

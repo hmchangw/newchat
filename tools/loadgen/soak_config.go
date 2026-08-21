@@ -421,6 +421,9 @@ func validateSoakRoomLaneConfig(cfg *soakConfig) error {
 	if err := validateSoakPresenceConfig(cfg); err != nil {
 		return err
 	}
+	if err := validateSoakReconcileCapacity(cfg); err != nil {
+		return err
+	}
 	if err := validateSoakSearchConfig(cfg); err != nil {
 		return err
 	}
@@ -559,9 +562,6 @@ func validateSoakSearchConfig(cfg *soakConfig) error {
 	if err := validateSoakSearchSettle(cfg); err != nil {
 		return err
 	}
-	if err := validateSoakSearchReconcileCapacity(cfg); err != nil {
-		return err
-	}
 	// The probe locates a message by full-text search, so the payload has to
 	// contain something that identifies one message. Today every soak body is a
 	// run of the same character differing only in length, which analyzes to a
@@ -591,20 +591,42 @@ func validateSoakSearchSettle(cfg *soakConfig) error {
 	return nil
 }
 
-// validateSoakSearchReconcileCapacity is kept separate so the capacity rule
-// stays testable while the observer itself is refused above.
-func validateSoakSearchReconcileCapacity(cfg *soakConfig) error {
-	// One step for the history observer, one for the search observer.
-	const reconcileStepsPerMessage = 2
+// soakReconcileStepsPerMessage is how many claims one message costs the
+// reconciler. soakFailureReconciler.Try advances a single observer per claim
+// and re-enqueues while any expected observer is unresolved, so the count is
+// the number of observers the message declares: history always, plus whichever
+// of recipient and search are enabled.
+func soakReconcileStepsPerMessage(cfg *soakConfig) int {
+	steps := 1
+	if cfg.RecipientObserverEnabled {
+		steps++
+	}
+	if cfg.SearchObserverEnabled {
+		steps++
+	}
+	return steps
+}
+
+// validateSoakReconcileCapacity refuses a run whose read lane cannot serve the
+// reconciliation its observers demand. Below capacity the unresolved backlog
+// grows without bound and every message expires unverified — a run that reports
+// a storage problem it created itself, and reports it identically to a real one.
+//
+// This is the floor, not a budget: it covers one claim per observer and nothing
+// for the history poll's retries, which depend on how many messages are slow to
+// persist and cannot be derived from configuration. loadgen_failure_reconcile_claims_total
+// separates the two at runtime.
+func validateSoakReconcileCapacity(cfg *soakConfig) error {
+	steps := soakReconcileStepsPerMessage(cfg)
 	capacity := cfg.ReadRate * cfg.ReconcileReadShare
-	required := cfg.SendRate * reconcileStepsPerMessage
+	required := cfg.SendRate * float64(steps)
 	if cfg.SendRate > 0 && capacity < required {
 		return fmt.Errorf(
-			"SOAK_SEARCH_OBSERVER_ENABLED needs %.3f reconcile operations/s at "+
+			"reconciling %d observer step(s) per message needs %.3f operations/s at "+
 				"SOAK_SEND_RATE %.3f, but SOAK_READ_RATE %.3f at "+
 				"SOAK_RECONCILE_READ_SHARE %.3f supplies only %.3f; "+
 				"raise SOAK_READ_RATE or lower SOAK_SEND_RATE",
-			required, cfg.SendRate, cfg.ReadRate, cfg.ReconcileReadShare, capacity,
+			steps, required, cfg.SendRate, cfg.ReadRate, cfg.ReconcileReadShare, capacity,
 		)
 	}
 	return nil
