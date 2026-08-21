@@ -158,12 +158,10 @@ func main() {
 	appRepo := mongorepo.NewAppRepo(db)
 
 	if err := threadRoomRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure thread_rooms indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure thread_rooms indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	if err := threadSubRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure thread_subscriptions indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure thread_subscriptions indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	// Front the per-request Mongo reads with process-local LRU+TTL caches.

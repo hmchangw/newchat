@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -435,7 +434,7 @@ func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T)
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store.ensureIndexes(ctx)
 
 	handler := NewHandler(store)
 
@@ -484,7 +483,7 @@ func TestInboxWorker_ThreadSubscription_DedupByUserAccount_Integration(t *testin
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store.ensureIndexes(ctx)
 
 	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	first := model.ThreadSubscription{
@@ -521,7 +520,7 @@ func TestInboxWorker_ThreadSubscriptionUpserted_MonotonicMention_Integration(t *
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store.ensureIndexes(ctx)
 
 	handler := NewHandler(store)
 	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
@@ -1218,43 +1217,6 @@ func TestIntegration_HandleRoomVisibilityChanged(t *testing.T) {
 	assert.Equal(t, []model.Role{model.RoleMember}, rolesByAccount["carol"], "carol should be member")
 }
 
-// ensureIndexes must standardize on (threadRoomId, userAccount) — the same
-// natural key room-service, message-worker, and history-service create — and
-// drop the legacy (threadRoomId, userId) index that message-worker explicitly
-// removes. Otherwise the two services thrash the index across restarts and the
-// collection ends up with two conflicting unique constraints.
-func TestInboxStore_EnsureIndexes_DropsLegacyAndCreatesUserAccount_Integration(t *testing.T) {
-	db := setupMongo(t)
-	ctx := context.Background()
-	threadSubs := db.Collection("thread_subscriptions")
-	store := &mongoInboxStore{threadSubCol: threadSubs}
-
-	// Simulate a DB where the legacy index already exists (older inbox-worker).
-	_, err := threadSubs.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, store.ensureIndexes(ctx))
-
-	cur, err := threadSubs.Indexes().List(ctx)
-	require.NoError(t, err)
-	var idxs []bson.M
-	require.NoError(t, cur.All(ctx, &idxs))
-
-	names := make(map[string]bool, len(idxs))
-	for _, ix := range idxs {
-		if n, ok := ix["name"].(string); ok {
-			names[n] = true
-		}
-	}
-	assert.True(t, names["threadRoomId_1_userAccount_1"],
-		"ensureIndexes must create the canonical (threadRoomId, userAccount) unique index")
-	assert.False(t, names["threadRoomId_1_userId_1"],
-		"ensureIndexes must drop the legacy (threadRoomId, userId) index")
-}
-
 // Regression: a federated upsert for an existing (threadRoomId, userAccount)
 // whose userId differs from the local document must MERGE onto that document,
 // not insert a second one. userId is a site-local identity; only userAccount is
@@ -1267,7 +1229,7 @@ func TestInboxStore_UpsertThreadSubscription_DedupesByUserAccount_Integration(t 
 	ctx := context.Background()
 	threadSubs := db.Collection("thread_subscriptions")
 	store := &mongoInboxStore{threadSubCol: threadSubs}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store.ensureIndexes(ctx)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 

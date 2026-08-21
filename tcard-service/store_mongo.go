@@ -8,6 +8,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 type mongoCardStore struct {
@@ -21,7 +23,7 @@ func newMongoCardStore(db *mongo.Database) *mongoCardStore {
 // EnsureIndexes enforces (path, _tcardVersion) uniqueness so two docs can't
 // claim one version. The data-type `version` field is unrelated, not indexed.
 func (s *mongoCardStore) EnsureIndexes(ctx context.Context) error {
-	if _, err := s.cards.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.cards, mongo.IndexModel{
 		Keys:    bson.D{{Key: "path", Value: 1}, {Key: "_tcardVersion", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {

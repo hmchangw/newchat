@@ -7,7 +7,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -60,13 +59,12 @@ func NewSubscriptionRepo(db *mongo.Database, siteID string, opts ...Option) *Sub
 
 // EnsureIndexes creates the subscription indexes this service queries on.
 func (r *SubscriptionRepo) EnsureIndexes(ctx context.Context) error {
+	// subscriptions.{roomId,u.account} (unique) is owned by room-service; verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, r.subscriptions.Raw(), "roomId_1_u.account_1")
 	if _, err := r.subscriptions.Raw().Indexes().CreateMany(ctx, []mongo.IndexModel{
 		// Serves the account+roomType match on every list/count path; the retention
 		// window keys on room.lastMsgAt (a room field), so no trailing time key.
 		{Keys: bson.D{{Key: "u.account", Value: 1}, {Key: "roomType", Value: 1}}},
-		// Unique logical key (one subscription per room per user). Must match
-		// room-service's declaration on the shared collection (mismatch → conflict).
-		{Keys: bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}}, Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "name", Value: 1}, {Key: "roomType", Value: 1}}},
 	}); err != nil {
 		return fmt.Errorf("create subscription indexes: %w", err)

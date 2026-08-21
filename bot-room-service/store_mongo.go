@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 type storeMongo struct {
@@ -31,14 +32,8 @@ func newStoreMongo(db *mongo.Database) *storeMongo {
 // writes, and must be invoked once at startup. The rooms and users access here
 // (including the room-key store) is entirely _id-keyed, so neither needs one.
 func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
-	// Mirrors room-service's declaration — same keys AND same unique option, or
-	// whichever service starts second hits IndexOptionsConflict on the shared collection.
-	if _, err := s.subs.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (roomId,u.account) unique index: %w", err)
-	}
+	// subscriptions.{roomId,u.account} (unique) is owned by room-service; verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, s.subs, "roomId_1_u.account_1")
 	// Upsert and delete identify a subscription by u._id — the remove RPC carries
 	// user ids, not accounts — which the unique index above cannot serve.
 	if _, err := s.subs.Indexes().CreateOne(ctx, mongo.IndexModel{

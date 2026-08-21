@@ -107,7 +107,7 @@ func run() error {
 
 	store := newMongoStore(mongoClient.Database(cfg.MongoDB))
 	if err := store.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure indexes: %w", err)
+		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	graph, err := msgraph.NewChatsClient(msgraph.Config{

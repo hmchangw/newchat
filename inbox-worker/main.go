@@ -455,26 +455,13 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 	return true, len(out.ThreadUnread), nil
 }
 
-// ensureIndexes creates the unique index on (threadRoomId, userAccount) used by
-// UpsertThreadSubscription. The shape matches what room-service, message-worker,
-// and history-service create so every service that touches thread_subscriptions
-// agrees on the natural key. userAccount is the stable cross-site identity;
-// userId is site-local, so keying on it would let federated upserts miss
-// existing documents and collide on this unique index.
-func (s *mongoInboxStore) ensureIndexes(ctx context.Context) error {
-	// Best-effort: drop the legacy (threadRoomId, userId) unique index so the
-	// (threadRoomId, userAccount) index can be created without a key conflict.
-	// Mirrors message-worker's threadStoreMongo.EnsureIndexes; the index may not
-	// exist (fresh deploy / test container), so ignore all errors.
-	_ = s.threadSubCol.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-
-	if _, err := s.threadSubCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
-	}
-	return nil
+// ensureIndexes verifies the thread_subscriptions (threadRoomId, userAccount)
+// unique index that UpsertThreadSubscription relies on. The index is owned by
+// room-service (which also drops the legacy threadRoomId_1_userId_1 index); this
+// worker only warns if it is missing, never creates it — a divergent spec would
+// crashloop the shared collection, and a missing index must not take the worker down.
+func (s *mongoInboxStore) ensureIndexes(ctx context.Context) {
+	mongoutil.WarnMissingIndexes(ctx, s.threadSubCol, "threadRoomId_1_userAccount_1")
 }
 
 // UpsertThreadSubscription inserts the subscription on first event for a
@@ -699,10 +686,7 @@ func main() {
 		userCol:      db.Collection("users"),
 		threadSubCol: db.Collection("thread_subscriptions"),
 	}
-	if err := store.ensureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
-	}
+	store.ensureIndexes(ctx)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {

@@ -41,10 +41,9 @@ func NewSSOTokenRepo(db *mongo.Database) *SSOTokenRepo {
 
 // EnsureIndexes creates the unique username index.
 func (r *SSOTokenRepo) EnsureIndexes(ctx context.Context) error {
-	_, err := r.col.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, r.col, mongo.IndexModel{
 		Keys: bson.D{{Key: "username", Value: 1}}, Options: options.Index().SetUnique(true),
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("create sso token index: %w", err)
 	}
 	return nil

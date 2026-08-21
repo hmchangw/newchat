@@ -60,25 +60,11 @@ func TestEnsureIndexes_Integration(t *testing.T) {
 	// {u.account, roomType} serves the account+roomType match on every list/count
 	// path. (The retention window keys on room.lastMsgAt, not a subscription field.)
 	require.Contains(t, subKeys, "u.account:1,roomType:1")
-	require.Contains(t, subKeys, "roomId:1,u.account:1")
 	require.Contains(t, subKeys, "name:1,roomType:1")
+	// roomId:1,u.account:1 (unique) is owned by room-service now, not created here.
 
 	userKeys := indexKeySpecs(t, userRepo.users.Raw())
 	require.Contains(t, userKeys, "account:1")
-}
-
-// A user holds at most one subscription per room — (roomId, u.account) is the unique key shared with room-service.
-func TestSubscriptionUniqueIndex_Integration(t *testing.T) {
-	subRepo, _ := newTestSubscriptionRepo(t)
-	ctx := context.Background()
-	col := subRepo.subscriptions.Raw()
-	doc := func(id string) bson.M {
-		return bson.M{"_id": id, "roomId": "r1", "u": bson.M{"account": "alice"}}
-	}
-	_, err := col.InsertOne(ctx, doc("sub-1"))
-	require.NoError(t, err)
-	_, err = col.InsertOne(ctx, doc("sub-2"))
-	require.True(t, mongo.IsDuplicateKeyError(err), "expected duplicate-key error, got %v", err)
 }
 
 // Duplicate accounts cause E11000 on unique-index creation; error must point the operator at the dedupe preflight.
@@ -94,7 +80,8 @@ func TestUserEnsureIndexes_DuplicateAccounts_Integration(t *testing.T) {
 	require.Contains(t, err.Error(), "dedupe preflight")
 }
 
-// A pre-existing non-unique account_1 index conflicts (code 85); error must tell the operator to drop it.
+// A pre-existing non-unique account_1 index is self-healed: EnsureIndexes drops it
+// and recreates it unique (the #159 conflict no longer needs operator action).
 func TestUserEnsureIndexes_NonUniqueAccountConflict_Integration(t *testing.T) {
 	db := testutil.MongoDB(t, "user-service")
 	ctx := context.Background()
@@ -102,9 +89,14 @@ func TestUserEnsureIndexes_NonUniqueAccountConflict_Integration(t *testing.T) {
 		Keys: bson.D{{Key: "account", Value: 1}},
 	})
 	require.NoError(t, err)
-	err = NewUserRepo(db).EnsureIndexes(ctx)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "drop the old non-unique account_1 index")
+
+	require.NoError(t, NewUserRepo(db).EnsureIndexes(ctx), "a non-unique account_1 must be repaired, not fatal")
+
+	// account_1 is now unique: a duplicate account insert must fail.
+	_, err = db.Collection(usersCollection).InsertOne(ctx, bson.M{"_id": "u1", "account": "dup"})
+	require.NoError(t, err)
+	_, err = db.Collection(usersCollection).InsertOne(ctx, bson.M{"_id": "u2", "account": "dup"})
+	require.True(t, mongo.IsDuplicateKeyError(err), "account_1 must be unique after repair")
 }
 
 // The apps index backs assistant.name lookups (GetAppsByAssistants / the bot-DM

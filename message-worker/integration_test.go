@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model"
@@ -883,6 +884,14 @@ func TestThreadStoreMongo_InsertThreadSubscription(t *testing.T) {
 	db := setupMongo(t)
 	store := newThreadStoreMongo(db)
 	require.NoError(t, store.EnsureIndexes(ctx))
+
+	// thread_subscriptions unique key is owned by room-service; create it here so
+	// the duplicate-insert path is exercised.
+	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	sub := &model.ThreadSubscription{

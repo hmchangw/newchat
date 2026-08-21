@@ -57,7 +57,7 @@ func run() error {
 	db := mongoClient.Database(cfg.MongoDB)
 	sessionStore := session.NewMongoStore(db)
 	if err := sessionStore.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure session indexes: %w", err)
+		slog.Warn("ensure session indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	st := newStoreMongo(db)
 	subStore := newMongoSubscriptionStore(db)

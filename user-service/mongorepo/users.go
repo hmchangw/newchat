@@ -35,26 +35,21 @@ func NewUserRepo(db *mongo.Database, opts ...Option) *UserRepo {
 	}
 }
 
-// EnsureIndexes creates user indexes. The unique account index is shared with room-service; failure messages guide the operator to the same fix.
+// EnsureIndexes creates the unique users.account index (user-service owns it).
+// A pre-existing non-unique account_1 (the #159 conflict) self-heals; duplicate
+// account VALUES surface the dedupe-preflight error.
 func (r *UserRepo) EnsureIndexes(ctx context.Context) error {
-	_, err := r.users.Raw().Indexes().CreateOne(ctx, mongo.IndexModel{
+	err := mongoutil.EnsureIndexWithRepair(ctx, r.users.Raw(), mongo.IndexModel{
 		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),
 	})
-	if err == nil {
-		return nil
-	}
-	// E11000: pre-existing duplicate accounts (populated env pre-rollout) — point operators at the one-time dedupe preflight.
 	if mongo.IsDuplicateKeyError(err) {
 		return fmt.Errorf("create user index: duplicate account values exist in the users collection — run the "+
 			"one-time dedupe preflight (group users by account, resolve n>1) before starting this service: %w", err)
 	}
-	// A pre-existing non-unique account_1 conflicts (85 IndexOptionsConflict / 86 IndexKeySpecsConflict); Mongo won't upgrade it — the operator must drop it.
-	if se := mongo.ServerError(nil); errors.As(err, &se) && (se.HasErrorCode(85) || se.HasErrorCode(86)) {
-		return fmt.Errorf("create user index: a non-unique account_1 index already exists on the users collection — "+
-			"drop the old non-unique account_1 index (db.users.dropIndex(\"account_1\")) before starting this service "+
-			"so it can be recreated as unique: %w", err)
+	if err != nil {
+		return fmt.Errorf("create user index: %w", err)
 	}
-	return fmt.Errorf("create user index: %w", err)
+	return nil
 }
 
 // activeUserFilter matches active users. Missing `active` is treated as active ({$ne:false}); only explicit false excludes.

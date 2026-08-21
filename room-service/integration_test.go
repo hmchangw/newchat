@@ -4254,63 +4254,43 @@ func TestBotAndAdminPredicate_GoAndMongoAgree_Integration(t *testing.T) {
 	}
 }
 
-// account is a user's identity, so EnsureIndexes makes users.account unique —
-// matching user-service's declaration on the shared collection. A second users
-// doc with the same account must violate the unique index.
-func TestEnsureIndexes_UsersAccountUnique_Integration(t *testing.T) {
-	db := setupMongo(t)
-	store := NewMongoStore(db)
-	ctx := context.Background()
-	require.NoError(t, store.EnsureIndexes(ctx))
-
-	users := db.Collection("users")
-	_, err := users.InsertOne(ctx, bson.M{"_id": "u1", "account": "alice"})
-	require.NoError(t, err)
-	_, err = users.InsertOne(ctx, bson.M{"_id": "u2", "account": "alice"})
-	require.True(t, mongo.IsDuplicateKeyError(err), "expected duplicate-key error, got %v", err)
-}
-
-// Building the users.account unique index against a collection that already holds
-// duplicate accounts (a dirty pre-rollout environment) must fail at startup with
-// an actionable error pointing operators at the dedupe preflight, not a bare
-// driver error.
-func TestEnsureIndexes_UsersAccountUnique_PreexistingDuplicates_Integration(t *testing.T) {
+// room-service owns the thread_subscriptions unique key: EnsureIndexes drops the
+// legacy (threadRoomId, userId) index and creates the canonical (threadRoomId,
+// userAccount) unique index. (The users.account unique index and its
+// operator-guidance errors moved to user-service, which owns the users collection.)
+func TestEnsureIndexes_ThreadSubsDropsLegacyAndCreatesUnique_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	ctx := context.Background()
 
-	users := db.Collection("users")
-	_, err := users.InsertOne(ctx, bson.M{"_id": "u1", "account": "alice"})
-	require.NoError(t, err)
-	_, err = users.InsertOne(ctx, bson.M{"_id": "u2", "account": "alice"})
-	require.NoError(t, err)
-
-	err = store.EnsureIndexes(ctx)
-	require.Error(t, err)
-	require.True(t, mongo.IsDuplicateKeyError(err), "expected duplicate-key error, got %v", err)
-	require.Contains(t, err.Error(), "dedupe preflight", "error must direct operators to the dedupe preflight")
-}
-
-// A pre-existing NON-unique account_1 index conflicts with EnsureIndexes'
-// unique account_1 declaration (IndexOptionsConflict 85 / IndexKeySpecsConflict
-// 86 — the latter when the auto-generated name collides). The service must
-// surface an actionable error telling the operator to drop the old index rather
-// than a bare driver error.
-func TestEnsureIndexes_UsersAccountIndexOptionsConflict_Integration(t *testing.T) {
-	db := setupMongo(t)
-	store := NewMongoStore(db)
-	ctx := context.Background()
-
-	// Pre-create a non-unique index named account_1 with the same key spec.
-	_, err := db.Collection("users").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "account", Value: 1}},
+	// Simulate a DB where the legacy index already exists (older worker). The name
+	// is threadRoomId_1_userId_1 regardless of uniqueness, which is what the drop targets.
+	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
 	})
 	require.NoError(t, err)
 
-	err = store.EnsureIndexes(ctx)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "drop the old non-unique account_1 index",
-		"error must direct operators to drop the conflicting non-unique index")
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	cur, err := db.Collection("thread_subscriptions").Indexes().List(ctx)
+	require.NoError(t, err)
+	var idxs []bson.M
+	require.NoError(t, cur.All(ctx, &idxs))
+	names := make(map[string]bool, len(idxs))
+	unique := make(map[string]bool, len(idxs))
+	for _, ix := range idxs {
+		if n, ok := ix["name"].(string); ok {
+			names[n] = true
+			u, _ := ix["unique"].(bool)
+			unique[n] = u
+		}
+	}
+	assert.True(t, names["threadRoomId_1_userAccount_1"],
+		"EnsureIndexes must create the canonical (threadRoomId, userAccount) index")
+	assert.True(t, unique["threadRoomId_1_userAccount_1"],
+		"the (threadRoomId, userAccount) index must be unique")
+	assert.False(t, names["threadRoomId_1_userId_1"],
+		"EnsureIndexes must drop the legacy (threadRoomId, userId) index")
 }
 
 func TestMongoStore_ClearThreadSubscriptionsForAccount_Integration(t *testing.T) {

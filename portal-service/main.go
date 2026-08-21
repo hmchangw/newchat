@@ -112,7 +112,7 @@ func run() error {
 
 	store := newMongoDirectoryStore(mongoClient.Database(cfg.MongoDB))
 	if err := store.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure directory indexes: %w", err)
+		slog.Warn("ensure directory indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	// Populate the directory cache in the background; /readyz stays

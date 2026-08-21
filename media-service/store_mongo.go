@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 type mongoStore struct {
@@ -126,11 +127,10 @@ func (s *mongoStore) SetBotAvatar(ctx context.Context, av *model.Avatar) error {
 // EnsureEmojiIndexes creates the (siteId, shortcode) unique index; idempotent.
 // media-service is the sole owner of the custom_emojis collection.
 func (s *mongoStore) EnsureEmojiIndexes(ctx context.Context) error {
-	_, err := s.customEmojis.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.customEmojis, mongo.IndexModel{
 		Keys:    bson.D{{Key: "siteId", Value: 1}, {Key: "shortcode", Value: 1}},
 		Options: options.Index().SetUnique(true).SetName("siteId_shortcode_unique"),
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("ensure custom_emojis indexes: %w", err)
 	}
 	return nil

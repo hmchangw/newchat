@@ -215,9 +215,7 @@ func main() {
 
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := mongoStore.ensureIndexes(ensureCtx); err != nil {
-		ensureCancel()
-		slog.Error("ensure mongo indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure mongo indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
 	handler := newHandler(store, mongoStore, usersClient, cache, &handlerConfig{

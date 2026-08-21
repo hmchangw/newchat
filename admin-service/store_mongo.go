@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/session"
 )
 
@@ -30,21 +31,15 @@ func newStoreMongo(db *mongo.Database) *storeMongo {
 
 // EnsureIndexes creates required indexes idempotently.
 func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
-	// Matches botplatform's auto-named "account_1" unique index for idempotency on the shared collection.
-	_, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "account", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	if err != nil {
-		return fmt.Errorf("create users account index: %w", err)
-	}
+	// users.account (unique) is owned by user-service; verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, s.users, "account_1")
 
 	// Backs SearchUsers, whose only non-regex predicate is siteId: no other service
 	// declares a siteId-prefixed index on the shared users collection, so without
 	// this both the count and the paged find scan every user document. account
 	// trails so the unfiltered count is answered from the index alone (a q-filtered
 	// one still fetches, since engName/chineseName aren't in the key).
-	_, err = s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
+	_, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "account", Value: 1}},
 	})
 	if err != nil {

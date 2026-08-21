@@ -121,24 +121,19 @@ func main() {
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	ssoTokenRepo := mongorepo.NewSSOTokenRepo(db)
 	if err := subRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure subscription indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	if err := userRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure user indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	if err := appRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure app indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	if err := threadSubRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure thread subscription indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	if err := ssoTokenRepo.EnsureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure sso token indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	tokenValidator, tokenRefresher, err := oidcValidator(ctx, &cfg)
