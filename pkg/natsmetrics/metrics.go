@@ -2,10 +2,11 @@
 // metrics. It observes existing publish and message-disposition behavior; it
 // never retries, acknowledges, or changes a business result on its own.
 //
-// Every label value comes from a closed enum in this file, so the attribute
-// sets are precomputed once per Consumer/Publisher and looked up by value on
-// the hot path — fan-out records one publish per recipient and must not pay for
-// attribute-set construction each time.
+// Every label value comes from a closed enum in this file, so each attribute
+// set is built once per Consumer/Publisher and looked up by value thereafter —
+// fan-out records one publish per recipient and must not pay for attribute-set
+// construction each time. The sets are cached on first use rather than
+// precomputed across the full cross product; see optTable for why.
 package natsmetrics
 
 import (
@@ -38,8 +39,6 @@ const (
 	OutcomeHandlerCancelled Outcome = "handler_cancelled"
 )
 
-var allOutcomes = []Outcome{OutcomeAck, OutcomeNak, OutcomeTerm, OutcomeLeftPending, OutcomeHandlerCancelled}
-
 type EventType string
 
 const (
@@ -60,12 +59,6 @@ const (
 	EventUnknown          EventType = "unknown"
 )
 
-var allEventTypes = []EventType{
-	EventCreated, EventUpdated, EventDeleted, EventPinned, EventUnpinned,
-	EventReacted, EventThreadReplyAdded, EventSend, EventTeamsBatch, EventUnknown,
-	EventRoomCreate, EventMemberAdd, EventMemberRemove, EventRoomRename, EventMemberMuted,
-}
-
 type PublishOutcome string
 
 // PublishOutcome is a bounded failure cause. There is deliberately no success
@@ -80,17 +73,10 @@ const (
 	PublishOtherError      PublishOutcome = "other_error"
 )
 
-var allPublishOutcomes = []PublishOutcome{
-	PublishTimeout, PublishNoResponders, PublishDisconnected,
-	PublishBufferFull, PublishPermission, PublishPayloadTooLarge, PublishOtherError,
-}
-
 // RequestSucceeded is the request family's success value. Outbound
 // request/reply keeps both halves because nothing else counts a Core NATS
 // exchange — unlike a publish, where the broker owns the success side.
 const RequestSucceeded PublishOutcome = "success"
-
-var allRequestOutcomes = append([]PublishOutcome{RequestSucceeded}, allPublishOutcomes...)
 
 // classifyRequestOutcome keeps success meaningful for the request family.
 func classifyRequestOutcome(err error) PublishOutcome {
@@ -112,11 +98,6 @@ const (
 	TerminalInternal          TerminalReason = "internal"
 )
 
-var allTerminalReasons = []TerminalReason{
-	TerminalMaxDeliver, TerminalPermanent, TerminalPublishExhausted, TerminalConsumerDeleted,
-	TerminalStreamUnavailable, TerminalInvalidPayload, TerminalInternal,
-}
-
 type RequestResult string
 
 const (
@@ -130,11 +111,6 @@ const (
 	RequestUnavailable     RequestResult = "unavailable"
 	RequestInternal        RequestResult = "internal"
 )
-
-var allRequestResults = []RequestResult{
-	RequestSuccess, RequestBadRequest, RequestUnauthenticated, RequestForbidden,
-	RequestNotFound, RequestConflict, RequestTooManyRequests, RequestUnavailable, RequestInternal,
-}
 
 type DestinationKind string
 
@@ -152,12 +128,6 @@ const (
 	DestinationUserSync       DestinationKind = "user_sync"
 	DestinationUnknown        DestinationKind = "unknown"
 )
-
-var allDestinations = []DestinationKind{
-	DestinationCanonical, DestinationRecipientEvent, DestinationNotification, DestinationPush,
-	DestinationOutbox, DestinationInbox, DestinationRoomCanonical, DestinationRoomEvent,
-	DestinationMemberEvent, DestinationClientResponse, DestinationUserSync, DestinationUnknown,
-}
 
 type Operation string
 
@@ -183,15 +153,6 @@ const (
 	OperationOutboxPublish       Operation = "outbox_publish"
 	OperationUnknown             Operation = "unknown"
 )
-
-var allOperations = []Operation{
-	OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
-	OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
-	OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
-	OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
-	OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
-	OperationMemberPublish, OperationOutboxPublish, OperationUnknown,
-}
 
 // Metrics owns the shared instruments. Instrument-creation failures fall back
 // to no-op instruments so telemetry can never block service startup or work.
@@ -316,8 +277,8 @@ type handledRequestKey struct {
 type Consumer struct {
 	metrics *Metrics
 	loopOpt metric.MeasurementOption
-	message map[consumerKey]metric.MeasurementOption
-	termOpt map[terminalKey]metric.MeasurementOption
+	message *optTable[consumerKey]
+	termOpt *optTable[terminalKey]
 	up      atomic.Bool
 }
 
@@ -334,27 +295,22 @@ func (m *Metrics) Consumer(cfg ConsumerConfig) *Consumer {
 		attribute.String("stream", cfg.Stream),
 		attribute.String("consumer", cfg.Consumer),
 	}
-	withEvent := func(event EventType, extra ...attribute.KeyValue) []attribute.KeyValue {
+	withEvent := func(event EventType, extra ...attribute.KeyValue) metric.MeasurementOption {
 		attrs := make([]attribute.KeyValue, 0, len(base)+1+len(extra))
 		attrs = append(attrs, base...)
 		attrs = append(attrs, attribute.String("event_type", string(event)))
-		return append(attrs, extra...)
+		return metric.WithAttributes(append(attrs, extra...)...)
 	}
-	c := &Consumer{
+	return &Consumer{
 		metrics: m,
 		loopOpt: metric.WithAttributes(base...),
-		message: make(map[consumerKey]metric.MeasurementOption, len(allEventTypes)*len(allOutcomes)),
-		termOpt: make(map[terminalKey]metric.MeasurementOption, len(allEventTypes)*len(allTerminalReasons)),
+		message: newOptTable(func(key consumerKey) metric.MeasurementOption {
+			return withEvent(key.event, attribute.String("outcome", string(key.outcome)))
+		}),
+		termOpt: newOptTable(func(key terminalKey) metric.MeasurementOption {
+			return withEvent(key.event, attribute.String("reason", string(key.reason)))
+		}),
 	}
-	for _, event := range allEventTypes {
-		for _, outcome := range allOutcomes {
-			c.message[consumerKey{event, outcome}] = metric.WithAttributes(withEvent(event, attribute.String("outcome", string(outcome)))...)
-		}
-		for _, reason := range allTerminalReasons {
-			c.termOpt[terminalKey{event, reason}] = metric.WithAttributes(withEvent(event, attribute.String("reason", string(reason)))...)
-		}
-	}
-	return c
 }
 
 // enabled reports whether this Consumer carries live instruments. A Consumer
@@ -426,7 +382,7 @@ func (c *Consumer) Terminal(ctx context.Context, eventType EventType, reason Ter
 		return
 	}
 	key := terminalKey{NormalizeEventType(string(eventType)), normalizeTerminalReason(reason)}
-	c.metrics.terminalFailures.Add(ctx, 1, c.termOpt[key])
+	c.metrics.terminalFailures.Add(ctx, 1, c.termOpt.get(key))
 }
 
 // Message intercepts disposition calls while preserving the wrapped message's
@@ -539,7 +495,7 @@ func (m *Message) finishWithOutcome(ctx context.Context, outcome Outcome) {
 		if !m.consumer.enabled() {
 			return
 		}
-		opt := m.consumer.message[consumerKey{m.eventType, outcome}]
+		opt := m.consumer.message.get(consumerKey{m.eventType, outcome})
 		m.consumer.metrics.messages.Add(ctx, 1, opt)
 		m.consumer.metrics.processingDuration.Record(ctx, time.Since(m.started).Seconds(), opt)
 	})
@@ -547,16 +503,16 @@ func (m *Message) finishWithOutcome(ctx context.Context, outcome Outcome) {
 
 type Publisher struct {
 	metrics *Metrics
-	attempt map[publishKey]metric.MeasurementOption
-	request map[requestKey]metric.MeasurementOption
-	handled map[handledRequestKey]metric.MeasurementOption
+	attempt *optTable[publishKey]
+	request *optTable[requestKey]
+	handled *optTable[handledRequestKey]
 }
 
 // Publisher builds the publish-side recorder. Like Consumer, it carries no
 // inline service identity — the resource-derived `service_name` constant
 // label supplies it, and duplicating it here breaks the /metrics endpoint.
 func (m *Metrics) Publisher(site string) Publisher {
-	// Toggled off: hand back the zero value so Attempt/Request/HandledRequest
+	// Toggled off: hand back the zero value so Failure/Request/HandledRequest
 	// take their nil short-circuit instead of recording into no-op instruments.
 	if m == nil {
 		return Publisher{}
@@ -567,31 +523,28 @@ func (m *Metrics) Publisher(site string) Publisher {
 		attrs = append(attrs, base...)
 		return metric.WithAttributes(append(attrs, extra...)...)
 	}
-	p := Publisher{
+	return Publisher{
 		metrics: m,
-		attempt: make(map[publishKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)*len(allPublishOutcomes)),
-		request: make(map[requestKey]metric.MeasurementOption, len(allOperations)*len(allRequestOutcomes)),
-		handled: make(map[handledRequestKey]metric.MeasurementOption, len(allOperations)*len(allRequestResults)),
+		attempt: newOptTable(func(key publishKey) metric.MeasurementOption {
+			return build(
+				attribute.String("destination_kind", string(key.destination)),
+				attribute.String("operation", string(key.operation)),
+				attribute.String("outcome", string(key.outcome)),
+			)
+		}),
+		request: newOptTable(func(key requestKey) metric.MeasurementOption {
+			return build(
+				attribute.String("operation", string(key.operation)),
+				attribute.String("outcome", string(key.outcome)),
+			)
+		}),
+		handled: newOptTable(func(key handledRequestKey) metric.MeasurementOption {
+			return build(
+				attribute.String("operation", string(key.operation)),
+				attribute.String("result", string(key.result)),
+			)
+		}),
 	}
-	for _, destination := range allDestinations {
-		dst := attribute.String("destination_kind", string(destination))
-		for _, operation := range allOperations {
-			op := attribute.String("operation", string(operation))
-			for _, outcome := range allPublishOutcomes {
-				p.attempt[publishKey{destination, operation, outcome}] = build(dst, op, attribute.String("outcome", string(outcome)))
-			}
-		}
-	}
-	for _, operation := range allOperations {
-		op := attribute.String("operation", string(operation))
-		for _, outcome := range allRequestOutcomes {
-			p.request[requestKey{operation, outcome}] = build(op, attribute.String("outcome", string(outcome)))
-		}
-		for _, result := range allRequestResults {
-			p.handled[handledRequestKey{operation, result}] = build(op, attribute.String("result", string(result)))
-		}
-	}
-	return p
 }
 
 // Failure records a publish that did not succeed, by bounded cause. A nil err
@@ -613,14 +566,14 @@ func (p Publisher) Failure(ctx context.Context, destination DestinationKind, ope
 		return
 	}
 	key := publishKey{normalizeDestination(destination), normalizeOperation(operation), ClassifyPublishError(err)}
-	p.metrics.publishFailures.Add(ctx, 1, p.attempt[key])
+	p.metrics.publishFailures.Add(ctx, 1, p.attempt.get(key))
 }
 
 func (p Publisher) Request(ctx context.Context, operation Operation, duration time.Duration, err error) {
 	if p.metrics == nil {
 		return
 	}
-	opt := p.request[requestKey{normalizeOperation(operation), classifyRequestOutcome(err)}]
+	opt := p.request.get(requestKey{normalizeOperation(operation), classifyRequestOutcome(err)})
 	p.metrics.requests.Add(ctx, 1, opt)
 	p.metrics.requestDuration.Record(ctx, duration.Seconds(), opt)
 }
@@ -632,7 +585,7 @@ func (p Publisher) HandledRequest(ctx context.Context, operation Operation, dura
 	if p.metrics == nil {
 		return
 	}
-	opt := p.handled[handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)}]
+	opt := p.handled.get(handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)})
 	p.metrics.handledRequests.Add(ctx, 1, opt)
 	p.metrics.handlerDuration.Record(ctx, duration.Seconds(), opt)
 }
