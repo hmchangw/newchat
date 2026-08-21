@@ -159,18 +159,21 @@ HTTP 500 on `/metrics` (this happened; fixed 2026-08-19).
 |---|---|---|---|
 | `chat.nats.consumer.loop.up` | up-down counter | `pkg/natsmetrics` | stream, consumer |
 | `chat.nats.consumer.messages` | counter | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
-| `chat.nats.consumer.redeliveries` | counter | `pkg/natsmetrics` | stream, consumer, event_type |
 | `chat.nats.consumer.processing.duration` | histogram (s) | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
 | `chat.nats.terminal.failures` | counter | `pkg/natsmetrics` | stream, consumer, event_type, reason |
-| `chat.nats.publish.attempts` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
-| `chat.nats.publish.retries` | counter | `pkg/natsmetrics` | destination_kind, operation |
-| `chat.nats.requests` | counter | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.request.duration` | histogram (s) | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.request.handled` | counter | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
-| `chat.nats.request.handler.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
+| `chat.nats.publish.failures` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
+| `rpc.client.call.duration` | histogram (s) | `pkg/natsmetrics` | rpc.system.name, rpc.method, error.type (absent on success) |
+| `rpc.server.call.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | rpc.system.name, rpc.method, error.type (absent on success) |
 | `chat.nats.client.connected` | up-down counter | `pkg/natsutil` | none — one series per process; value is the live connection count |
 | `chat.nats.client.connection.events` | counter | `pkg/natsutil` | event |
 | `nats_slow_consumer_events_total` | counter | `pkg/natsutil` | subject, queue |
+
+The two RPC families are the one place this repo does not use a `chat.` prefix:
+they implement the OpenTelemetry RPC semantic conventions, so they carry the
+convention's instrument names, labels and bucket boundaries verbatim (verified
+against `go.opentelemetry.io/otel/semconv/v1.40.0/rpcconv`). `error.type` is
+conditional on failure per the convention, so a successful call carries no error
+label at all.
 
 The two `chat.nats.client.*` families are the exception: they carry no `site`
 at all, because they are emitted from the opt-in connection helper, which sits

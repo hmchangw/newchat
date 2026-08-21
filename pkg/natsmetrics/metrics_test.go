@@ -244,10 +244,9 @@ func TestPublishAndRequestMetrics(t *testing.T) {
 
 	rm := collect(t, reader)
 	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.failures"), 1)
-	requestPoints := metricPoints[int64](t, rm, "chat.nats.requests")
+	requestPoints := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, requestPoints, 1)
-	assert.Equal(t, "timeout", attrs(requestPoints[0])["outcome"])
-	assert.Len(t, histogramPoints(t, rm, "chat.nats.request.duration"), 1)
+	assert.Equal(t, "timeout", attrsOf(requestPoints[0])["error.type"])
 }
 
 func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
@@ -261,9 +260,9 @@ func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 	require.Len(t, publishPoints, 1)
 	assert.Equal(t, string(DestinationUnknown), attrs(publishPoints[0])["destination_kind"])
 	assert.Equal(t, string(OperationUnknown), attrs(publishPoints[0])["operation"])
-	requestPoints := metricPoints[int64](t, rm, "chat.nats.requests")
+	requestPoints := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, requestPoints, 1)
-	assert.Equal(t, string(OperationUnknown), attrs(requestPoints[0])["operation"])
+	assert.Equal(t, string(OperationUnknown), attrsOf(requestPoints[0])["rpc.method"])
 }
 
 func TestZeroValuePublisherDoesNotAffectBusinessFlow(t *testing.T) {

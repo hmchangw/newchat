@@ -84,9 +84,10 @@ func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string
 			return
 		}
 		// A remote "not a room member" is a complete answer from a healthy peer:
-		// the request/reply exchange worked. chat.nats.requests carries a
-		// transport-shaped outcome enum, so counting a business rejection there
-		// lands it in other_error and leaves the family non-zero at baseline.
+		// the request/reply exchange worked. rpc.client.call.duration's
+		// error.type is a transport-shaped enum, so counting a business
+		// rejection there lands it in other_error and leaves the family
+		// non-zero at baseline.
 		// GetMessageReadMeta already excludes its CodeNotFound the same way.
 		outcome := resultErr
 		if errors.Is(outcome, errNotRoomMember) {

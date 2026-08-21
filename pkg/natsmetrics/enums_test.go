@@ -88,9 +88,9 @@ func TestLabelSpaceStaysWithinBudget(t *testing.T) {
 	assert.Equal(t, 1680, len(allDestinations)*len(allOperations)*len(allPublishOutcomes),
 		"chat.nats.publish.failures: destination_kind x operation x outcome")
 	assert.Equal(t, 160, len(allOperations)*len(allRequestOutcomes),
-		"chat.nats.requests / .request.duration: operation x outcome")
+		"rpc.client.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
 	assert.Equal(t, 180, len(allOperations)*len(allRequestResults),
-		"chat.nats.request.handled / .handler.duration: operation x result")
+		"rpc.server.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
 }
 
 // The publish family's theoretical 1,680 is the clearest argument for building
