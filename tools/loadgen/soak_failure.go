@@ -903,6 +903,52 @@ func (r *soakFailureReconciler) observe(
 	return nil
 }
 
+// soakReadLaneReconciler is the reconciler seen from the read lane: one claim
+// per call, reporting whether that claim queried the system under test.
+type soakReadLaneReconciler interface {
+	Try(context.Context) (bool, bool, error)
+}
+
+// soakReconcileFreeClaimBurst bounds how many claims one read action may drain,
+// so a backlog cannot monopolise a single action.
+const soakReconcileFreeClaimBurst = 8
+
+// reconcileReadAction spends one read-lane action on reconciliation and reports
+// whether the action queried the system under test, in which case the caller
+// skips the read it was scheduled for.
+//
+// Try advances one observer per claim and a read action is the only way to take
+// one, so a claim that costs no read still costs a callback. With the recipient
+// observer on that is a second callback for every message — at the configured
+// rates, the whole read lane, leaving nothing for the history poll's retries.
+// Draining the free claims inside one admission is what keeps the callback
+// budget matched to the claims that actually query, which is what the startup
+// floor models.
+func reconcileReadAction(
+	ctx context.Context,
+	reconciler soakReadLaneReconciler,
+	gate *soakShareGate,
+) bool {
+	if !gate.Allow() {
+		return false
+	}
+	for range soakReconcileFreeClaimBurst {
+		handled, spentRead, err := reconciler.Try(ctx)
+		if err != nil {
+			slog.Error("reconcile Cassandra soak operation", "error", err)
+		}
+		if spentRead {
+			return true
+		}
+		// Nothing was due, so there is no free claim left to drain either.
+		if !handled {
+			break
+		}
+	}
+	gate.Refund()
+	return false
+}
+
 // soakShareGate admits a fixed fraction of calls. Reconciliation runs inside the
 // read lane, so without a cap a large unresolved backlog would consume every
 // read slot and stop the production-like read mix during the fault window.

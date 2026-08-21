@@ -595,6 +595,11 @@ func validateSoakSearchSettle(cfg *soakConfig) error {
 // so finalizing it reads evidence already in memory and its allowance is
 // refunded rather than spent. Counting it here would demand read capacity for
 // work that never leaves the process.
+//
+// This holds only because reconcileReadAction drains the free claims inside one
+// admission. A read action is the only way to take a claim, so without that
+// drain an event-mode claim would still cost a callback and the real demand
+// would be every observer, not every querying observer.
 func soakReconcileStepsPerMessage(cfg *soakConfig) int {
 	steps := 1
 	if cfg.SearchObserverEnabled {

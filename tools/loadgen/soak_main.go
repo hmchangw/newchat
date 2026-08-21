@@ -971,19 +971,8 @@ func runSoakWorkload(
 			// Reconciliation borrows read slots so verification adds no read RPS,
 			// but it may only take its configured share: a large unresolved
 			// backlog must not stop the production-like read mix mid-fault.
-			if reconcileGate.Allow() {
-				_, spentRead, err := failureReconciler.Try(actionCtx)
-				if err != nil {
-					slog.Error("reconcile Cassandra soak operation", "error", err)
-				}
-				if spentRead {
-					return nil
-				}
-				// The claim queried nothing — an event-mode observer finalized
-				// from local evidence, or nothing was due. The gate guards the
-				// read mix, so an allowance that bought no read goes back and
-				// this action performs the read it was scheduled for.
-				reconcileGate.Refund()
+			if reconcileReadAction(actionCtx, failureReconciler, reconcileGate) {
+				return nil
 			}
 			_, _ = reader.ReadMixed(actionCtx, selector.nextRoom())
 			return nil
