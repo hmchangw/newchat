@@ -94,3 +94,71 @@ func TestSoakFailureReconciler_CountsAClaimWithNothingDueAsIdle(t *testing.T) {
 	require.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimIdle)))
 }
+
+// observeSearchIndex returns nil both when it persisted an observation and when
+// it merely rescheduled the probe, so classifying the claim before the call
+// counts every search retry as progress — which is the one thing the split
+// exists to tell apart.
+func TestSoakFailureReconciler_ARescheduledSearchProbeIsRetriedNotAdvanced(t *testing.T) {
+	startedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	now := startedAt.Add(12 * time.Second)
+	probe := &stubSoakSearchIndexProbe{result: soakSearchIndexTooEarly, settle: 30 * time.Second}
+	ledger := newSoakSearchTestLedger(t, startedAt, now)
+	metrics := NewMetrics()
+	reconciler := newSoakFailureReconciler(
+		ledger, &fakeSoakFailureVerifier{results: []soakFailureHistoryResult{soakFailureHistoryFound}},
+		time.Second, func() time.Time { return now },
+		withSoakFailureSearchIndexProbe(probe),
+		withSoakFailureReconcileMetrics(metrics),
+	)
+
+	// History resolves on the first claim, the search step runs on the second
+	// and finds the message too early to be indexed yet.
+	handled, err := reconciler.Try(context.Background())
+	require.NoError(t, err)
+	require.True(t, handled)
+	handled, err = reconciler.Try(context.Background())
+	require.NoError(t, err)
+	require.True(t, handled)
+
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimRetried)),
+		"a rescheduled search probe advanced nothing")
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimAdvanced)),
+		"only the history observation advanced")
+}
+
+// A claim whose observation could not be persisted advanced nothing either. The
+// ledger is closed here, so recording the history verdict fails.
+func TestSoakFailureReconciler_AClaimThatCouldNotPersistIsFailed(t *testing.T) {
+	started := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
+	require.NoError(t, err)
+	tracker := newSoakFailureTracker(
+		ledger, 0, time.Minute, func() time.Time { return started },
+	)
+	pending := testSoakFailurePending(started)
+	require.NoError(t, tracker.Start(pending))
+	require.NoError(t, tracker.Activate(pending))
+	require.NoError(t, tracker.ObserveReply(&soakSendReplyResult{
+		Status: soakSendReplyAccepted, MessageID: pending.MessageID,
+	}))
+	metrics := NewMetrics()
+	reconciler := newSoakFailureReconciler(
+		ledger,
+		&fakeSoakFailureVerifier{results: []soakFailureHistoryResult{soakFailureHistoryFound}},
+		time.Second,
+		func() time.Time { return started },
+		withSoakFailureReconcileMetrics(metrics),
+	)
+	require.NoError(t, ledger.Close())
+
+	_, err = reconciler.Try(context.Background())
+
+	require.Error(t, err)
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimFailed)))
+	require.Zero(t, testutil.ToFloat64(
+		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimAdvanced)))
+}

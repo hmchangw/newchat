@@ -600,6 +600,18 @@ func withSoakFailureReconcileMetrics(metrics *Metrics) soakFailureReconcilerOpti
 	return func(reconciler *soakFailureReconciler) { reconciler.metrics = metrics }
 }
 
+// recordObserved classifies a claim by whether the observation it tried to
+// persist actually landed. Recording before the call counts a failed write as
+// progress, which is the opposite of what the split is for.
+func (r *soakFailureReconciler) recordObserved(err error) error {
+	if err != nil {
+		r.recordClaim(soakReconcileClaimFailed)
+		return err
+	}
+	r.recordClaim(soakReconcileClaimAdvanced)
+	return nil
+}
+
 // recordClaim is nil-safe so the tests that only assert reconciliation do not
 // have to build a registry.
 func (r *soakFailureReconciler) recordClaim(outcome string) {
@@ -715,7 +727,6 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 		}
 		if _, searchObserved := operation.Observations[failureObserverSearchIndex]; !searchObserved &&
 			slices.Contains(operation.Expected, failureObserverSearchIndex) {
-			r.recordClaim(soakReconcileClaimAdvanced)
 			return true, r.observeSearchIndex(ctx, &operation, now)
 		}
 		for _, observer := range operation.Expected {
@@ -743,8 +754,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	}
 	result, verifyErr := r.verifier.Verify(ctx, &operation)
 	if verifyErr == nil && result == soakFailureHistoryFound {
-		r.recordClaim(soakReconcileClaimAdvanced)
-		return true, r.observe(operation.ID, failureObservationGood, now)
+		return true, r.recordObserved(r.observe(operation.ID, failureObservationGood, now))
 	}
 	if now.Before(operation.Deadline) {
 		// The poll for a message that has not landed yet, and the only retry
@@ -756,7 +766,8 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 			nextReconcileProbe(now, operation.VerifyAfter, operation.Deadline, r.retryInterval),
 		); err != nil {
 			r.recordClaim(soakReconcileClaimFailed)
-			return true, err
+			return true, fmt.Errorf(
+				"reschedule pending soak history probe for %q: %w", operation.ID, err)
 		}
 		r.recordClaim(soakReconcileClaimRetried)
 		return true, nil
@@ -773,8 +784,7 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	case result == soakFailureHistoryMismatch:
 		observation = failureObservationBad
 	}
-	r.recordClaim(soakReconcileClaimAdvanced)
-	return true, r.observe(operation.ID, observation, now)
+	return true, r.recordObserved(r.observe(operation.ID, observation, now))
 }
 
 // observeSearchIndex asks the query side whether the message reached the index.
@@ -797,7 +807,8 @@ func (r *soakFailureReconciler) observeSearchIndex(
 		result, probeErr = r.searchIndex.Indexed(ctx, operation)
 	}
 	if probeErr == nil && result == soakSearchIndexFound {
-		return r.observeAs(operation.ID, failureObserverSearchIndex, failureObservationGood, now)
+		return r.recordObserved(
+			r.observeAs(operation.ID, failureObserverSearchIndex, failureObservationGood, now))
 	}
 	if now.Before(operation.Deadline) {
 		// A too-early operation is rescheduled to the settle boundary, not the
@@ -811,10 +822,12 @@ func (r *soakFailureReconciler) observeSearchIndex(
 			}
 		}
 		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
+			r.recordClaim(soakReconcileClaimFailed)
 			return fmt.Errorf(
 				"reschedule soak search index probe for %q: %w", operation.ID, err,
 			)
 		}
+		r.recordClaim(soakReconcileClaimRetried)
 		return nil
 	}
 	observation := failureObservationMissingAfterDeadline
@@ -824,7 +837,8 @@ func (r *soakFailureReconciler) observeSearchIndex(
 		// which is a configuration problem, not evidence.
 		observation = failureObservationUnverified
 	}
-	return r.observeAs(operation.ID, failureObserverSearchIndex, observation, now)
+	return r.recordObserved(
+		r.observeAs(operation.ID, failureObserverSearchIndex, observation, now))
 }
 
 func (r *soakFailureReconciler) observeAs(
