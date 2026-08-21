@@ -167,7 +167,7 @@ func TestSubjectLabel_CollapsesResponseInboxes(t *testing.T) {
 	}{
 		{name: "response inbox wildcard", subject: "_INBOX.hK4bQ2ZmTpVn1aXc.*", want: "inbox"},
 		{name: "concrete response inbox", subject: "_INBOX.hK4bQ2ZmTpVn1aXc.7", want: "inbox"},
-		{name: "custom inbox prefix is still an inbox", subject: "_INBOX.chat.abc123", want: "inbox"},
+		{name: "extra token after the random one is still an inbox", subject: "_INBOX.chat.abc123", want: "inbox"},
 		{name: "registered room subject is kept", subject: "chat.room.canonical.site-a.create", want: "chat.room.canonical.site-a.create"},
 		{name: "wildcarded router pattern is kept", subject: "chat.user.*.request.room.*.site-a.member.list", want: "chat.user.*.request.room.*.site-a.member.list"},
 		{name: "empty", subject: "", want: ""},

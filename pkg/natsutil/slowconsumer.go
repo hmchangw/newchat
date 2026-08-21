@@ -126,6 +126,11 @@ const inboxLabel = "inbox"
 //
 // This was suppressed with a nosemgrep and a justification that only considered
 // the instant, not the lifetime. The rule was right.
+//
+// The default prefix is the only one recognised. nats.CustomInboxPrefix would
+// produce inboxes this leaves uncollapsed, but Connect is never called with it
+// anywhere in the repo, and reading the effective prefix off the connection
+// would mean threading it through every caller for a setting nothing uses.
 func subjectLabel(subject string) string {
 	if strings.HasPrefix(subject, "_INBOX.") {
 		return inboxLabel
