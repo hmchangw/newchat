@@ -37,6 +37,15 @@ func MetaKey(roomID string) string {
 	return "room:{" + roomID + "}:meta:" + cacheKeySchemaVersion
 }
 
+// legacyMetaKey is the pre-v2 key, still written and read by binaries that
+// predate the cachedMeta envelope. Only invalidation touches it: a bust must
+// clear both generations for as long as a rolling deploy can have both binaries
+// live, or an old pod serves a room that a new pod just renamed or deleted.
+// Delete this (and its use in BustMeta) once no pre-v2 binary can be running.
+func legacyMetaKey(roomID string) string {
+	return "room:{" + roomID + "}:meta"
+}
+
 // readL2 attempts the L2 (Valkey) read. An entry with no room ID is not usable:
 // FetchFromMongo always populates it, so a zero Meta means the key holds
 // something that is not a Meta — and serving it would hand out an empty SiteID
@@ -183,6 +192,7 @@ func fetchGuarded(ctx context.Context, o *readThroughOpts, rooms *mongo.Collecti
 // site (room-worker) after an authoritative Mongo write to name/userCount.
 // Fail-open: a nil client is a no-op and any Valkey error logs at warn and is
 // swallowed — the configured L2 TTL reconciles a missed bust.
+// Both key generations are dropped: see legacyMetaKey.
 func BustMeta(ctx context.Context, client valkeyutil.Client, roomID string) {
-	valkeyutil.BustKeys(ctx, client, "room meta", MetaKey(roomID))
+	valkeyutil.BustKeys(ctx, client, "room meta", MetaKey(roomID), legacyMetaKey(roomID))
 }

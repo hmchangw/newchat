@@ -137,10 +137,25 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 // SiteID was added; bumped to v3 when SiteID (the room's home site — a bug)
 // was replaced by HomeSiteID (the member's home site, see Member.HomeSiteID)
 // so pre-fix entries miss instead of decoding with the wrong semantics.
-const cacheKeySchemaVersion = "v3"
+//
+// Bumped to v4 when the stored value stopped being a bare []Member and became
+// the Entry{Members, CachedAt} envelope. That is a change of JSON kind, array
+// to object, so reusing v3 would have each binary in a rolling deploy handed
+// the other's shape — an unmarshal error, not a silent zero value.
+const cacheKeySchemaVersion = "v4"
+
+// legacyCacheKeySchemaVersion is the pre-envelope generation. Only invalidation
+// touches it: while a rolling deploy can still have a v3 binary live, a bust
+// must clear both or that binary keeps serving a member list for a room whose
+// membership just changed. Drop this once no v3 binary can be running.
+const legacyCacheKeySchemaVersion = "v3"
 
 func cacheKey(roomID string) string {
 	return "room:" + cacheKeySchemaVersion + ":" + roomID + ":subs"
+}
+
+func legacyCacheKey(roomID string) string {
+	return "room:" + legacyCacheKeySchemaVersion + ":" + roomID + ":subs"
 }
 
 // Get returns the cached member list for roomID. On absence it returns
@@ -221,7 +236,8 @@ func (c *valkeyCache) Invalidate(ctx context.Context, roomID string) error {
 	if roomID == "" {
 		return errors.New("roomsubcache: empty roomID")
 	}
-	if err := c.client.Del(ctx, cacheKey(roomID)); err != nil {
+	// Both generations — see legacyCacheKeySchemaVersion.
+	if err := c.client.Del(ctx, cacheKey(roomID), legacyCacheKey(roomID)); err != nil {
 		return fmt.Errorf("invalidate cached subscriptions for room %s: %w", roomID, err)
 	}
 	return nil

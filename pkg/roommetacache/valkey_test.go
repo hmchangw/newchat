@@ -205,13 +205,24 @@ func TestReadThrough_ZeroValueL2Entry_TreatedAsMiss(t *testing.T) {
 	}
 }
 
+// TestBustMeta_CallsDel pins that a bust clears BOTH key generations. Versioning
+// the key stopped old binaries decoding the new envelope, but it also split the
+// entry in two: during a rolling deploy an old pod still populates and reads
+// legacyMetaKey. A bust that dropped only the current key would leave that pod
+// serving metadata for a room that was just renamed or deleted, for a full TTL.
+// The legacy key goes away with the compatibility window, not before.
 func TestBustMeta_CallsDel(t *testing.T) {
 	fake := newFakeValkey()
 	fake.data[MetaKey("r1")] = "{}"
+	fake.data[legacyMetaKey("r1")] = "{}"
+
 	BustMeta(context.Background(), fake, "r1")
-	assert.Equal(t, []string{MetaKey("r1")}, fake.dels)
+
+	assert.ElementsMatch(t, []string{MetaKey("r1"), legacyMetaKey("r1")}, fake.dels)
 	_, present := fake.data[MetaKey("r1")]
-	assert.False(t, present)
+	assert.False(t, present, "current key must be evicted")
+	_, legacyPresent := fake.data[legacyMetaKey("r1")]
+	assert.False(t, legacyPresent, "pre-v2 key must be evicted during the rolling-deploy window")
 }
 
 func TestBustMeta_NilClient_NoPanic(t *testing.T) {
@@ -223,7 +234,7 @@ func TestBustMeta_FailOpen(t *testing.T) {
 	fake.delErr = errors.New("valkey down")
 	// Must not panic and must not propagate — best-effort.
 	assert.NotPanics(t, func() { BustMeta(context.Background(), fake, "r1") })
-	assert.Equal(t, []string{MetaKey("r1")}, fake.dels)
+	assert.ElementsMatch(t, []string{MetaKey("r1"), legacyMetaKey("r1")}, fake.dels)
 }
 
 // MGet loops the fake's own Get so it cannot drift from single-key behaviour.

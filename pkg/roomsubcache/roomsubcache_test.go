@@ -108,8 +108,8 @@ func TestValkeyCache_Set_UsesExpectedKey(t *testing.T) {
 
 	require.NoError(t, cache.Set(ctx, "roomABC", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
 
-	_, ok := client.store["room:v3:roomABC:subs"]
-	assert.True(t, ok, "expected cache key room:v3:roomABC:subs to be set; got keys: %v", keysOf(client.store))
+	_, ok := client.store["room:v4:roomABC:subs"]
+	assert.True(t, ok, "expected cache key room:v4:roomABC:subs to be set; got keys: %v", keysOf(client.store))
 }
 
 func TestValkeyCache_Set_PropagatesTTL(t *testing.T) {
@@ -118,7 +118,7 @@ func TestValkeyCache_Set_PropagatesTTL(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NoError(t, cache.Set(ctx, "r1", nil, 90*time.Second))
-	assert.Equal(t, 90*time.Second, client.ttls["room:v3:r1:subs"])
+	assert.Equal(t, 90*time.Second, client.ttls["room:v4:r1:subs"])
 }
 
 // A pre-upgrade cache entry (written under the unversioned key by an older
@@ -134,10 +134,16 @@ func TestValkeyCache_Get_PreUpgradeKey_IsMiss(t *testing.T) {
 	// v2 entry: siteId held the room's home site (the bug fixed by the v3 bump) —
 	// it must never be served as a member's home site.
 	client.store["room:v2:roomABC:subs"] = `[{"id":"u1","account":"a","siteId":"room-site"}]`
+	// v3 entry: a bare []Member array, the shape written before the value became
+	// the Entry{Members, CachedAt} envelope. Reusing v3 for the envelope would
+	// point two incompatible shapes at one key, so a rolling deploy would have
+	// old binaries unmarshalling an object into a slice and new binaries
+	// unmarshalling an array into a struct.
+	client.store["room:v3:roomABC:subs"] = `[{"id":"u1","account":"a","homeSiteId":"site-a"}]`
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, err := cache.Get(ctx, "roomABC")
-	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss, "unversioned and stale-versioned keys must not be read by the v3 cache")
+	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss, "every pre-envelope key generation must miss, not decode")
 }
 
 func TestValkeyCache_Get_Miss_ReturnsErrCacheMiss(t *testing.T) {
@@ -165,7 +171,7 @@ func TestValkeyCache_Get_EmptyListIsCacheHit(t *testing.T) {
 func TestValkeyCache_Get_MalformedJSON_IsNotMiss(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeClient()
-	client.store["room:v3:bad:subs"] = "{not json"
+	client.store["room:v4:bad:subs"] = "{not json"
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, err := cache.Get(ctx, "bad")
@@ -205,7 +211,10 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	require.NoError(t, cache.Invalidate(ctx, "r1"))
 
 	require.Len(t, client.delCalls, 1)
-	assert.Equal(t, []string{"room:v3:r1:subs"}, client.delCalls[0])
+	// Both generations: during the rolling-deploy window an old binary still
+	// populates and reads the v3 key, so dropping only v4 would leave it serving
+	// a member list for a room whose membership just changed.
+	assert.ElementsMatch(t, []string{"room:v4:r1:subs", "room:v3:r1:subs"}, client.delCalls[0])
 
 	_, err := cache.Get(ctx, "r1")
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
@@ -250,7 +259,7 @@ func TestValkeyCache_Get_OversizedBlob_ReturnsError(t *testing.T) {
 
 	// Stash a value larger than the cap directly through the fake — simulates
 	// a compromised or misbehaving Valkey writer.
-	client.store["room:v3:big:subs"] = strings.Repeat("x", 101)
+	client.store["room:v4:big:subs"] = strings.Repeat("x", 101)
 
 	_, err := cache.Get(ctx, "big")
 	require.Error(t, err)
@@ -363,13 +372,13 @@ func TestValkeyCache_Slide_ReArmsTTLWithoutRewriting(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client)
 	members := []roomsubcache.Member{{ID: "u1", Account: "alice"}}
 	require.NoError(t, cache.Set(ctx, "r1", members, time.Minute))
-	before := client.store["room:v3:r1:subs"]
+	before := client.store["room:v4:r1:subs"]
 
 	require.NoError(t, cache.Slide(ctx, "r1", time.Hour))
 
-	assert.Equal(t, []string{"room:v3:r1:subs"}, client.expired)
-	assert.Equal(t, time.Hour, client.ttls["room:v3:r1:subs"], "the deadline must move")
-	assert.Equal(t, before, client.store["room:v3:r1:subs"], "the value must not be rewritten")
+	assert.Equal(t, []string{"room:v4:r1:subs"}, client.expired)
+	assert.Equal(t, time.Hour, client.ttls["room:v4:r1:subs"], "the deadline must move")
+	assert.Equal(t, before, client.store["room:v4:r1:subs"], "the value must not be rewritten")
 }
 
 func TestValkeyCache_Slide_DoesNotResurrectAnEvictedEntry(t *testing.T) {
