@@ -1790,3 +1790,65 @@ func TestInboxWorker_SubscriptionMention_Integration(t *testing.T) {
 		assert.Equal(t, tc.want, got.HasMention, "subscription %s", tc.id)
 	}
 }
+
+func TestUpsertUserAccount_Integration(t *testing.T) {
+	db := testutil.MongoDB(t, "inbox-user-account")
+	store := &mongoInboxStore{userCol: db.Collection("users")}
+	ctx := context.Background()
+	users := db.Collection("users")
+	_, err := users.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
+
+	snap := func(ts int64, active bool, roles []model.UserRole) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-1", Account: "acct-1", SiteID: "site-a",
+			EngName: "Eng", ChineseName: "Eng CN", Roles: roles, Active: active, Timestamp: ts}
+	}
+	at := func(ts int64) time.Time { return time.UnixMilli(ts).UTC() }
+	readBack := func(t *testing.T) bson.M {
+		t.Helper()
+		var doc bson.M
+		require.NoError(t, users.FindOne(ctx, bson.M{"account": "acct-1"}).Decode(&doc))
+		return doc
+	}
+
+	t.Run("no doc: inserts complete doc", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(1000, true, []model.UserRole{model.UserRoleBot}), at(1000)))
+		doc := readBack(t)
+		assert.Equal(t, "id-1", doc["_id"])
+		assert.Equal(t, "site-a", doc["siteId"])
+		assert.Equal(t, "Eng", doc["engName"])
+		assert.Equal(t, true, doc["active"])
+	})
+	t.Run("existing HR-shaped doc: $set only, _id kept", func(t *testing.T) {
+		_, err := users.UpdateOne(ctx, bson.M{"account": "acct-1"},
+			bson.M{"$set": bson.M{"engName": "FromHR"}, "$unset": bson.M{"accountUpdatedAt": "", "roles": "", "active": ""}})
+		require.NoError(t, err)
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(2000, false, []model.UserRole{}), at(2000)))
+		doc := readBack(t)
+		assert.Equal(t, "id-1", doc["_id"], "existing _id must survive")
+		assert.Equal(t, false, doc["active"])
+	})
+	t.Run("older timestamp: no-op, nil error", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(1500, true, []model.UserRole{}), at(1500)))
+		assert.Equal(t, false, readBack(t)["active"], "older snapshot must not regress")
+	})
+	t.Run("equal timestamp: applied ($lte)", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(2000, true, []model.UserRole{}), at(2000)))
+		assert.Equal(t, true, readBack(t)["active"])
+	})
+	t.Run("doc without watermark (HR raced): applied via non-upsert retry", func(t *testing.T) {
+		_, err := users.UpdateOne(ctx, bson.M{"account": "acct-1"}, bson.M{"$unset": bson.M{"accountUpdatedAt": ""}})
+		require.NoError(t, err)
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(3000, false, []model.UserRole{}), at(3000)))
+		assert.Equal(t, false, readBack(t)["active"])
+	})
+	t.Run("empty roles stored as [], not null", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(4000, false, nil), at(4000)))
+		doc := readBack(t)
+		roles, ok := doc["roles"].(bson.A)
+		require.True(t, ok, "roles must be an array, got %T", doc["roles"])
+		assert.Len(t, roles, 0)
+	})
+}
