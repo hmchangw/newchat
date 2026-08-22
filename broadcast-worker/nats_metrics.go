@@ -71,7 +71,10 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 		metric.WithDescription("Intended fan-out recipients by bounded room and event kind."))
 	if err != nil {
 		// Telemetry must never block startup: fall back to a no-op instrument so
-		// the service runs blind on this metric rather than not at all.
+		// the service runs blind on this metric rather than not at all. The
+		// fallback's own error is discarded here and at each instrument below —
+		// a no-op meter has no failure mode, and there is nothing left to fall
+		// back to if it somehow had one.
 		fanout, _ = noopMeter.Int64Histogram("broadcast_worker_fanout_recipients")
 	}
 	deliveries, err := meter.Int64Counter("broadcast_worker_recipient_deliveries_total",
