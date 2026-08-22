@@ -269,6 +269,11 @@ func main() {
 	// track which streams have already been created to avoid redundant CreateOrUpdateStream calls.
 	createdStreams := make(map[string]struct{}, len(collections))
 
+	// A live NATS connection says nothing about whether these consumers are
+	// still fetching — that gap is what let a dead consumer keep reporting
+	// healthy — so each one's own state is probed alongside it.
+	consumerChecks := make([]health.Check, 0, len(collections))
+
 	// INBOX is owned by inbox-worker; HR is owned by hr-syncer. search-sync-worker is a pure consumer of both and must not create their schemas.
 	inboxName := stream.Inbox(cfg.SiteID).Name
 	hrName := stream.OrgSyncStream(cfg.HRCentralSiteID).Name
@@ -292,35 +297,41 @@ func main() {
 
 		// The HR (spotlight-org) collection reads OrgSyncStream; when a remote HR domain is configured,
 		// create its consumer against the domain-scoped context — every other collection uses the shared js.
-		var fetcher msgFetcher
-		if streamCfg.Name == hrName && hrJS != nil {
-			cons, err := hrJS.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
-			if err != nil {
-				slog.Error("create consumer failed",
-					"stream", streamCfg.Name,
-					"consumer", coll.ConsumerName(),
-					"domain", cfg.HRJetStreamDomain,
-					"error", err,
-				)
-				os.Exit(1)
+		//
+		// The consumer is re-resolved on every build, not captured once: a
+		// consumer the server dropped has to be recreated, and a rebuild onto a
+		// stale handle would just fetch nothing again.
+		build := func(ctx context.Context) (msgFetcher, error) {
+			if streamCfg.Name == hrName && hrJS != nil {
+				cons, err := hrJS.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
+				if err != nil {
+					return nil, fmt.Errorf("create %s consumer on domain %s: %w", streamCfg.Name, cfg.HRJetStreamDomain, err)
+				}
+				return rawConsumerAdapter{cons}, nil
 			}
-			fetcher = rawConsumerAdapter{cons}
+			cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
+			if err != nil {
+				return nil, fmt.Errorf("create %s consumer: %w", streamCfg.Name, err)
+			}
+			return o11yConsumerAdapter{cons}, nil
+		}
+
+		fetcher, err := newRecoveringFetcher(ctx, coll.ConsumerName(), build, stopCh)
+		if err != nil {
+			slog.Error("create consumer failed",
+				"stream", streamCfg.Name,
+				"consumer", coll.ConsumerName(),
+				"error", err,
+			)
+			os.Exit(1)
+		}
+		consumerChecks = append(consumerChecks, fetcher.HealthCheck())
+		if streamCfg.Name == hrName && hrJS != nil {
 			slog.Info("HR consumer bound to remote JetStream domain",
 				"domain", cfg.HRJetStreamDomain,
 				"stream", streamCfg.Name,
 				"consumer", coll.ConsumerName(),
 			)
-		} else {
-			cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
-			if err != nil {
-				slog.Error("create consumer failed",
-					"stream", streamCfg.Name,
-					"consumer", coll.ConsumerName(),
-					"error", err,
-				)
-				os.Exit(1)
-			}
-			fetcher = o11yConsumerAdapter{cons}
 		}
 
 		handler := NewHandler(&engineAdapter{engine: engine}, coll, cfg.BulkBatchSize)
@@ -338,7 +349,7 @@ func main() {
 	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
-		natsutil.HealthCheck(nc),
+		append([]health.Check{natsutil.HealthCheck(nc)}, consumerChecks...)...,
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -401,7 +412,7 @@ func pushMappings(ctx context.Context, engine searchengine.SearchEngine, collect
 // (client-tuning only), bulkBatchSize caps buffered ES actions (flushed on stopCh, size, or bulkFlushInterval; the loop clamps fetch to remaining bulk capacity, but a fan-out message can still overshoot mid-loop and triggers its own flush).
 func runConsumer(
 	ctx context.Context,
-	cons msgFetcher,
+	cons fetchSource,
 	handler *Handler,
 	fetchBatchSize, bulkBatchSize int,
 	bulkFlushInterval time.Duration,
@@ -451,6 +462,12 @@ func runConsumer(
 				flush()
 				lastFlush = time.Now()
 			}
+			// Recover backs off and rebuilds; swallowing the error instead would
+			// spin this loop against a consumer that will never answer again.
+			if !cons.Recover(ctx, err) {
+				flush()
+				return
+			}
 			continue
 		}
 
@@ -472,6 +489,17 @@ func runConsumer(
 		} else if handler.ActionCount() > 0 && time.Since(lastFlush) >= bulkFlushInterval {
 			flush()
 			lastFlush = time.Now()
+		}
+
+		// Read only now that Messages is drained. This is the sole channel by
+		// which a Fetch loop learns its consumer was deleted or its leader moved
+		// — Fetch itself keeps returning empty batches and a nil error — so
+		// skipping it turns a dead consumer into an indefinitely quiet one.
+		if err := batch.Error(); err != nil {
+			if !cons.Recover(ctx, err) {
+				flush()
+				return
+			}
 		}
 	}
 }

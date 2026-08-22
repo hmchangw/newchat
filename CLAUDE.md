@@ -338,6 +338,44 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Match the pattern already used by the service being modified — don't mix patterns within a single consumer
 - Follow existing worker services (`message-worker`, `broadcast-worker`, etc.) as reference implementations
 
+### JetStream Consumer Recovery (`pkg/jsiter`)
+
+`Next` (and `Consume`'s error handler) report two very different things through one
+error, and conflating them is how a consumer silently stops forever:
+
+- **Recoverable.** `jetstream.ErrNoHeartbeat` — surfaced by default, since `Messages`
+  sets `ReportMissingHeartbeats`. The iterator is still live and nats.go has already
+  re-issued the pull request (`pull.go:394-413`, `:679-686`); the caller must call
+  `Next` again.
+- **Fatal.** `ErrConsumerDeleted` / `ErrBadRequest` stop the iterator outright
+  (`pull.go:718-722`); `Consume` stops its subscription with no notice at all
+  (`:285`). A new iterator/subscription is the only way back.
+
+A loop that returns on any error treats the first as the second: one hiccup on the
+inter-site link exceeds two heartbeat intervals, the pump goroutine exits, and the
+service consumes nothing more while the NATS connection — and therefore `/healthz` —
+stays green. Cross-site consumers hit this first: their heartbeats and pull expiries
+cross a supercluster gateway.
+
+Rules:
+
+- **Never drive a raw iterator.** Wrap it: `jsiter.New(ctx, name, newIter)` returns a
+  `*Pump` with the same `Next` signature, so an error out of `Next` means consumption
+  is genuinely over (`jsiter.ErrStopped` on shutdown).
+- **Never call `Consume` without an error handler.** Use
+  `jsiter.Supervise(ctx, name, newConsume)` and pass its `onError` to
+  `jetstream.ConsumeErrHandler`.
+- **The build closure must re-resolve the consumer** (`CreateOrUpdateConsumer` then
+  `Messages`/`Consume`), never close over a handle — a stopped iterator usually means
+  the durable is gone.
+- **A `Fetch` loop MUST read `batch.Error()` after draining `Messages()`.** A deleted
+  consumer reaches only that method; `Fetch` itself keeps returning empty batches and
+  a nil error. See `search-sync-worker`'s `recoveringFetcher`.
+- **Probe the consumer in `/healthz`, not just the connection**: add
+  `pump.HealthCheck()` beside `natsutil.HealthCheck(nc)`. It reports whether a live
+  iterator is held — deliberately not "time since the last message", which would
+  restart merely-idle workers.
+
 ### JetStream Redelivery Backoff
 
 Two levers space redeliveries, and they fire on **disjoint** failure modes. Set both.

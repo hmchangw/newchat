@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -706,12 +707,23 @@ func main() {
 	}
 
 	inboxCfg := stream.Inbox(cfg.SiteID)
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.SiteID)
 
 	// Internal lane is reserved for search-sync-worker; scope to external.> only.
-	cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
+	//
+	// The consumer is re-resolved on every iterator build, not captured once: an
+	// iterator the server stopped usually means the durable itself is gone, and
+	// rebuilding onto a stale handle would just stop again.
+	newIter := func(ctx context.Context) (jsiter.Iterator, error) {
+		cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create inbox consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("open inbox message iterator: %w", err)
+		}
+		return iter, nil
 	}
 
 	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
@@ -761,7 +773,10 @@ func main() {
 	// Membership traffic is a tiny fraction of the lane, so serializing it
 	// costs negligible throughput while the read-receipt path keeps its full
 	// MaxWorkers concurrency.
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	// jsiter.Pump absorbs the errors that leave the iterator usable (a missed idle
+	// heartbeat across the inter-site gateway) and rebuilds the ones that do not,
+	// so an error out of Next below means consumption is genuinely over.
+	iter, err := jsiter.New(ctx, "inbox", newIter)
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -798,6 +813,11 @@ func main() {
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				// The pump only reports an error it could not recover from, so
+				// this is the end of consumption — never a passing hiccup.
+				if !errors.Is(err, jsiter.ErrStopped) {
+					slog.ErrorContext(ctx, "inbox consumer loop stopped", "error", err)
+				}
 				return
 			}
 			m := laneMsg{ctx: msgCtx, msg: msg}
@@ -817,8 +837,12 @@ func main() {
 		}
 	}()
 
+	// A live NATS connection says nothing about whether this consumer is still
+	// receiving — that gap is what let a dead pump keep reporting healthy — so
+	// the pump's own state is probed alongside it.
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)

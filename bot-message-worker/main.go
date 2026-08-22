@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -120,12 +121,26 @@ func run() error {
 	h := newHandler(store, cfg.SiteID)
 
 	streamCfg := stream.BotMessagesCanonical(cfg.SiteID)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
-	if err != nil {
-		return fmt.Errorf("create consumer: %w", err)
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.SiteID)
+	// The consumer is re-resolved on every iterator build, not captured once: an
+	// iterator the server stopped usually means the durable itself is gone, and
+	// rebuilding onto a stale handle would just stop again.
+	newIter := func(ctx context.Context) (jsiter.Iterator, error) {
+		cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create bot-messages consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("open bot-messages message iterator: %w", err)
+		}
+		return iter, nil
 	}
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	// jsiter.Pump absorbs the errors that leave the iterator usable (a missed idle
+	// heartbeat) and rebuilds the ones that do not, so an error out of Next below
+	// means consumption is genuinely over.
+	iter, err := jsiter.New(ctx, consumerCfg.Durable, newIter)
 	if err != nil {
 		return fmt.Errorf("messages iter: %w", err)
 	}
@@ -147,8 +162,12 @@ func run() error {
 		}
 	}()
 
+	// A live NATS connection says nothing about whether this consumer is still
+	// receiving — that gap is what let a dead pump keep reporting healthy — so
+	// the pump's own state is probed alongside it.
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
 	)
 	if err != nil {
 		return fmt.Errorf("health server: %w", err)

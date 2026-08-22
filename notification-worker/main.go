@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -271,10 +273,19 @@ func main() {
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
-	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
+	// The consumer is re-resolved on every iterator build, not captured once: an
+	// iterator the server stopped usually means the durable itself is gone, and
+	// rebuilding onto a stale handle would just stop again.
+	newIter := func(ctx context.Context) (jsiter.Iterator, error) {
+		cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create canonical consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("open canonical message iterator: %w", err)
+		}
+		return iter, nil
 	}
 	// The broker advertises max_payload in its INFO on connect, so this is
 	// always in step with the server. An env var was a second source of truth
@@ -355,17 +366,24 @@ func main() {
 	// Mute is the only canonical member event still on this stream; add/remove invalidation rides on MESSAGES-CANONICAL sys-messages.
 	// DeliverNewPolicy: skip history on restart; roomsubcache TTL reconciles any boundary staleness.
 	roomsCfg := stream.Rooms(cfg.SiteID)
-	invalCons, err := otelJS.CreateOrUpdateConsumer(ctx, roomsCfg.Name, jetstream.ConsumerConfig{
+	invalCfg := jetstream.ConsumerConfig{
 		Durable:       cfg.Mode.ConsumerName("notification-worker-room-event-invalidate"),
 		FilterSubject: subject.RoomCanonicalMemberEvent(cfg.SiteID, model.CanonicalMemberEventMuted),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		DeliverPolicy: jetstream.DeliverNewPolicy,
-	})
-	if err != nil {
-		slog.Error("create canonical member event consumer failed", "error", err)
-		os.Exit(1)
 	}
-	invalIter, err := invalCons.Messages(ctx, jetstream.PullMaxMessages(64))
+	newInvalIter := func(ctx context.Context) (jsiter.Iterator, error) {
+		invalCons, err := otelJS.CreateOrUpdateConsumer(ctx, roomsCfg.Name, invalCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create canonical member event consumer: %w", err)
+		}
+		iter, err := invalCons.Messages(ctx, jetstream.PullMaxMessages(64))
+		if err != nil {
+			return nil, fmt.Errorf("open canonical member event iterator: %w", err)
+		}
+		return iter, nil
+	}
+	invalIter, err := jsiter.New(ctx, invalCfg.Durable, newInvalIter)
 	if err != nil {
 		slog.Error("canonical member event iterator failed", "error", err)
 		os.Exit(1)
@@ -374,6 +392,11 @@ func main() {
 		for {
 			_, msg, err := invalIter.Next()
 			if err != nil {
+				// The pump only reports an error it could not recover from, so
+				// this is the end of consumption — never a passing hiccup.
+				if !errors.Is(err, jsiter.ErrStopped) {
+					slog.ErrorContext(ctx, "canonical member event loop stopped", "error", err)
+				}
 				return
 			}
 			var evt model.CanonicalMemberEvent
@@ -393,7 +416,10 @@ func main() {
 		}
 	}()
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	// jsiter.Pump absorbs the errors that leave the iterator usable (a missed idle
+	// heartbeat) and rebuilds the ones that do not, so an error out of Next below
+	// means consumption is genuinely over.
+	iter, err := jsiter.New(ctx, consumerCfg.Durable, newIter)
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -447,8 +473,13 @@ func main() {
 		}
 	}()
 
+	// A live NATS connection says nothing about whether these consumers are still
+	// receiving — that gap is what let a dead pump keep reporting healthy — so
+	// each pump's own state is probed alongside it.
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
+		invalIter.HealthCheck(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
