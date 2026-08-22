@@ -1855,7 +1855,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 
 | Field | Type | Notes |
 |---|---|---|
-| `subscriptions` | Subscription[] | One page of room-info-enriched records, ordered by `lastMsgAt` desc. |
+| `subscriptions` | Subscription[] | One page of room-info-enriched records, ordered by `lastMsgAt` desc. Ordering freshness is cache-bounded (default 15s) and per server instance — dedupe by `roomId` across a multi-page drain; row fields, `updatedWithinDays`, `favorite` and open/closed membership are always fresh (a row that stops matching the filters before its page is built is dropped, not returned stale). |
 | `hasMore` | boolean | `true` when another page follows. Advance `offset` by your `limit` for the next page. |
 
 Per-room-type fields: channel rows add `name` (channel name); DM rows add `hrInfo`;
