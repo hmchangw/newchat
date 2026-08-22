@@ -15,6 +15,7 @@ served by `pkg/health`.
 | Service | Probe port | Notes |
 |---------|-----------|-------|
 | `auth-service` | `PORT` (default `8080`) | On the main Gin server. |
+| `user-service` | `HEALTH_ADDR` (default `:8081`) | A dedicated listener, deliberately separate from its client API on `HTTP_PORT`: the API group sheds overload with `429`, and a shed liveness probe would restart pods mid-burst. |
 | `search-service` | `SEARCH_METRICS_ADDR` (default `:9090`) | Mounted on the existing metrics listener — no extra port. |
 | all other (NATS) services | `HEALTH_ADDR` (default `:8081`) | A dedicated health-only listener. One port per pod, so the shared default does not collide. |
 

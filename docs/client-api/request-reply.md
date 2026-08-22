@@ -1,6 +1,6 @@
 > Request/Reply and Events views of the chat client API — see also [client-api.md](../client-api.md).
 
-<!-- last synced: client-api.md @ 6b584e7 -->
+<!-- last synced: client-api.md @ d9d8fe7 -->
 
 # Chat — Request/Reply Methods & Publish Operations
 
@@ -1811,6 +1811,11 @@ server-side cross-site federation update also fires, same as `settings.set`.
 ### subscription.list
 
 **Subject:** `chat.user.{account}.request.user.{siteID}.subscription.list`
+
+> **Large pages:** the NATS reply is capped at 128 KB, so a full sidebar does not
+> fit in one call. Clients fetching 100+ rows should use the HTTP form,
+> [GET /api/v1/subscriptions](../client-api.md#132-http--get-apiv1subscriptions),
+> which returns the same body with no payload ceiling.
 
 Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 [../client-api.md §3.4 Enrichment behavior](../client-api.md#enrichment-behavior).
