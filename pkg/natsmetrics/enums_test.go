@@ -79,8 +79,8 @@ func TestNormalizersAcceptEveryDeclaredValue(t *testing.T) {
 // The worst case is per site, per service, and for the consumer families also
 // per stream/consumer pair, so these numbers multiply out in the backend. They
 // are asserted rather than described so that adding one operation — which adds
-// 7 publish-failure series and 17 request series at a stroke — has to be
-// acknowledged here.
+// 84 publish-failure series (12 destinations x 7 outcomes) and 17 request
+// series (8 client + 9 server) at a stroke — has to be acknowledged here.
 func TestLabelSpaceStaysWithinBudget(t *testing.T) {
 	assert.Equal(t, 75, len(allEventTypes)*len(allOutcomes),
 		"chat.nats.consumer.messages / .processing.duration: event_type x outcome")
@@ -94,11 +94,11 @@ func TestLabelSpaceStaysWithinBudget(t *testing.T) {
 		"rpc.server.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
 }
 
-// The publish family's theoretical 1,680 is the clearest argument for building
+// The publish family's theoretical 1,848 is the clearest argument for building
 // sets on demand: destination and operation are chosen together at each call
 // site, never crossed, so the pairs that can actually occur are the ones
 // PublishLabelsFromSubject returns plus the fixed literal pairs. Roughly
-// seventeen of 240, and only the ones that fail ever get recorded.
+// seventeen of 264, and only the ones that fail ever get recorded.
 func TestPublishLabelPairsAreFarNarrowerThanTheCrossProduct(t *testing.T) {
 	reachable := map[publishPair]bool{}
 	for _, subj := range []string{

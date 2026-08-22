@@ -22,6 +22,12 @@ import (
 // Installing a global exactly once keeps the reader shared, so every assertion
 // below measures a delta around its own call rather than an absolute total.
 // That is what keeps the tests independent of each other and of their order.
+//
+// The delta is only sound while these tests run sequentially: two tests
+// recording concurrently would each read the other's increments between their
+// own before and after. No test in this package may call t.Parallel(). The
+// shared reader is not a choice — the instruments are created at init() against
+// the global meter, so there is one set of counters per process to read.
 var (
 	installOnce sync.Once
 	reader      sdkmetric.Reader
