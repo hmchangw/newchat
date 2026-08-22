@@ -22,6 +22,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 5. [Room events — per-room live events](#room-events--per-room-live-events)
    - [new_message (RoomEvent)](#new_message-roomevent)
    - [new_thread_message (RoomEvent)](#new_thread_message-roomevent)
+   - [Thread view subject](#thread-view-subject)
    - [message_edited (EditRoomEvent)](#message_edited-editroomevent)
    - [message_deleted (DeleteRoomEvent)](#message_deleted-deleteroomevent)
    - [message_pinned / message_unpinned (PinStateRoomEvent)](#message_pinned--message_unpinned-pinstateroomevent)
@@ -50,6 +51,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above (per-user fan-out for DM/botDM rooms); **plus `new_thread_message`** — channel thread replies fan out per-subscriber on this subject, not the room subject |
+| `chat.room.{roomID}.thread.{parentMessageID}.event` | new_thread_message, message_edited, message_deleted — the [thread view subject](#thread-view-subject), subscribed to only while a thread panel is open |
 | `chat.room.{roomID}.event.member` (or `chat.local.room.{roomID}.event.member` for same-site rooms, by `crossSite`) | member_added, member_left / member_removed |
 | `chat.user.{account}.notification` | NotificationEvent (reaction only) |
 | `chat.user.presence.state.{account}` | PresenceState |
@@ -492,6 +494,9 @@ history-gated @-mentioned accounts. DM/botDM thread replies fan out **per member
 `chat.user.{account}.event.room` subject — the bot account is skipped (`isBot`), same as an ordinary
 `new_message` in a botDM.
 
+A channel thread reply is **additionally** published on the [thread view subject](#thread-view-subject),
+which serves clients that have the thread panel open without following the thread.
+
 | Field | Type | Notes |
 |---|---|---|
 | `type` | string | Always `"new_thread_message"`. |
@@ -527,6 +532,34 @@ Channel example:
   }
 }
 ```
+
+---
+
+### Thread view subject
+
+**Subjects:** `chat.room.{roomID}.thread.{parentMessageID}.event`, or
+`chat.local.room.{roomID}.thread.{parentMessageID}.event` when the room's `crossSite` is
+explicitly `false`. Resolve the namespace exactly as for `chat.room.{roomID}.event`; a room
+that has just flipped local→global publishes to both for the transition grace window.
+
+Channel rooms only — DM and botDM thread replies already reach every member.
+
+The per-subscriber fan-out above reaches only thread followers, so a client that opens a thread
+panel without following the thread would see nothing until it refetched. `broadcast-worker`
+publishes the same three events a second time here, and a client subscribes for exactly as long
+as the panel is open:
+
+| Type | Payload |
+|---|---|
+| `new_thread_message` | [RoomEvent](#new_thread_message-roomevent) — byte-identical to the per-subscriber copy, `encryptedMessage` envelope included |
+| `message_edited` | [EditRoomEvent](#message_edited-editroomevent) |
+| `message_deleted` | [DeleteRoomEvent](#message_deleted-deleteroomevent) |
+
+**Client handling.** Subscribe *before* calling `msg.thread`, or a reply published in the gap is
+lost. Unsubscribe on panel close, on a switch to another parent, and on teardown. Deduplicate by
+message ID: a follower with the panel open receives every event twice, and the copies are
+identical. Delivery here is best-effort and never retried — the panel's next open refetches, and
+the per-subscriber lane is unaffected.
 
 ---
 

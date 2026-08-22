@@ -67,6 +67,8 @@ paths.
    - [3.6 translation-service](#36-translation-service)
      - [Translate Text](#translate-text)
 4. [Message Send](#4-message-send)
+   - [4.1 Thread Metadata Event](#41-thread-metadata-event)
+   - [4.2 Thread View Subject](#42-thread-view-subject)
 5. [Room Encryption](#5-room-encryption)
 6. [Error envelope reference](#6-error-envelope-reference)
 7. [Media Service](#7-media-service)
@@ -3485,7 +3487,7 @@ See [Error envelope](#6-error-envelope-reference). Errors:
 A `DeleteRoomEvent` is fanned out by `broadcast-worker` (not published when the request hits an already-deleted message or loses a concurrent-delete CAS). The subject and recipients depend on message type:
 
 - **Top-level channel message — `chat.room.{roomID}.event`** — one publish to the room stream; all room subscribers receive it.
-- **Thread reply (TShow=false) in a channel** — `chat.user.{recipient}.event.room` — published once per thread subscriber (followers + @-mentioned accounts). Non-subscribers do not receive this event.
+- **Thread reply (TShow=false) in a channel** — `chat.user.{recipient}.event.room` — published once per thread subscriber (followers + @-mentioned accounts). Non-subscribers do not receive this event. Also published on `chat.room.{roomID}.thread.{parentMessageID}.event` for clients with the thread panel open — see [§4.2 Thread View Subject](#42-thread-view-subject).
 - **Thread reply (TShow=true) in a channel** — `chat.room.{roomID}.event` — visible in the main channel, so the full room stream receives it.
 - **DM/botDM message — `chat.user.{recipient}.event.room`** — published once per non-bot member.
 
@@ -6468,6 +6470,8 @@ A `RoomEvent` (same struct as above) published once per DM participant. Recipien
 
 **Thread replies additionally emit a `ThreadMetadataUpdatedEvent`** (see [§4.1 Thread Metadata Event](#41-thread-metadata-event)) to update the parent message's reply-count badge. This event is published to all room members (not only thread subscribers) so every client can show the correct badge without subscribing to the thread.
 
+**Channel thread replies are additionally published on the thread-scoped subject** (see [§4.2 Thread View Subject](#42-thread-view-subject)), so a client with the thread panel open receives the reply even when it does not follow the thread.
+
 #### Triggered events — error path
 
 When validation fails, the gatekeeper publishes the error envelope to `chat.user.{account}.response.{requestId}` and **no downstream events are emitted**. The client should display the error and offer a retry.
@@ -6554,6 +6558,40 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 #### Client handling
 
 Apply `newTcount` directly to the parent message's badge — do not compute a delta. Apply `newThreadLastMsgAt` to the parent message's thread-freshness timestamp (or clear it when absent). Events for the same parent may arrive out of order due to JetStream redelivery; when `eventTimestamp` is present, prefer the event with the larger `eventTimestamp`. Fall back to `timestamp` only for legacy events that omit `eventTimestamp`.
+
+---
+
+## 4.2 Thread View Subject
+
+A **channel** thread reply fans out per-subscriber (see [`new_thread_message`](#send-message)), so a client that opens a thread panel without following the thread receives nothing until it refetches. `broadcast-worker` therefore publishes the same events a second time on a thread-scoped subject that a client subscribes to for exactly as long as the panel is open.
+
+#### Subjects
+
+| Room `crossSite` | Subject |
+|---|---|
+| `true` / absent | `chat.room.{roomID}.thread.{parentMessageID}.event` |
+| `false` | `chat.local.room.{roomID}.thread.{parentMessageID}.event` |
+
+Resolve `crossSite` exactly as for the room's own `chat.room.{roomID}.event` subject: only an explicit `false` selects the local namespace. A room that has just flipped local→global publishes to both for the transition grace window.
+
+Channel rooms only. DM and botDM thread replies already reach every member, so no thread subject is published for them.
+
+#### Events carried
+
+| Type | Payload |
+|---|---|
+| `new_thread_message` | The `RoomEvent` of [Send Message](#send-message) — byte-identical to the per-subscriber copy, `encryptedMessage` envelope included |
+| `message_edited` | The `EditRoomEvent` of [Edit Message](#edit-message) |
+| `message_deleted` | The `DeleteRoomEvent` of [Delete Message](#delete-message) |
+
+Decrypt with the room key exactly as for the per-subscriber copy — see [§5 Room Encryption](#5-room-encryption).
+
+#### Client handling
+
+- **Subscribe before fetching.** Open the subscription, then call [Get Thread Messages](#get-thread-messages), then merge. Fetching first leaves a window in which a reply is published before the subscription exists and is lost.
+- **Unsubscribe when the panel closes**, when it switches to another parent, and on teardown. The subscription is the only thing that makes the server deliver here, so a leaked one keeps consuming events.
+- **Deduplicate by message ID.** A thread follower with the panel open receives every event twice — once per-subscriber, once here. The two copies are identical.
+- **Delivery is best-effort.** A publish failure on this subject is not retried; the panel's next open refetches. Followers' per-subscriber delivery is unaffected.
 
 ---
 
