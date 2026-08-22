@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -3394,4 +3396,163 @@ func terminalCountFor(t *testing.T, reason string, fn func(context.Context)) int
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 	return sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": reason})
+}
+
+// mentionOutboxRecorder captures OUTBOX publishes so tests can assert the
+// per-destination fan-out without a real JetStream connection.
+type mentionOutboxRecorder struct {
+	mu      sync.Mutex
+	records []outboxRecord
+	err     error
+}
+
+type outboxRecord struct {
+	subject string
+	msgID   string
+	event   model.SubscriptionMentionEvent
+}
+
+func (r *mentionOutboxRecorder) publish(_ context.Context, subj string, data []byte, msgID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	var outboxEvt model.OutboxEvent
+	if err := json.Unmarshal(data, &outboxEvt); err != nil {
+		return err
+	}
+	var envelope model.InboxEvent
+	if err := json.Unmarshal(outboxEvt.Envelope, &envelope); err != nil {
+		return err
+	}
+	var evt model.SubscriptionMentionEvent
+	if err := json.Unmarshal(envelope.Payload, &evt); err != nil {
+		return err
+	}
+	r.records = append(r.records, outboxRecord{subject: subj, msgID: msgID, event: evt})
+	return nil
+}
+
+func (r *mentionOutboxRecorder) sorted() []outboxRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := append([]outboxRecord(nil), r.records...)
+	sort.Slice(out, func(i, j int) bool { return out[i].subject < out[j].subject })
+	return out
+}
+
+func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
+	msgTime := time.Now().UTC().Truncate(time.Millisecond)
+
+	tests := []struct {
+		name        string
+		content     string
+		users       []model.User
+		publishErr  error
+		noFederate  bool
+		wantRecords []outboxRecord
+	}{
+		{
+			name:    "all mentionees are local",
+			content: "hi @alice",
+			users:   []model.User{{ID: "u1", Account: "alice", SiteID: "site-a"}},
+		},
+		{
+			name:    "one event per remote site carrying only that site's accounts",
+			content: "hi @alice @bob @carol",
+			users: []model.User{
+				{ID: "u1", Account: "alice", SiteID: "site-a"},
+				{ID: "u2", Account: "bob", SiteID: "site-b"},
+				{ID: "u3", Account: "carol", SiteID: "site-c"},
+			},
+			wantRecords: []outboxRecord{
+				{
+					subject: "chat.outbox.site-a.site-b.subscription_mention",
+					msgID:   "mention:room-1:msg-1:site-b",
+					event: model.SubscriptionMentionEvent{
+						RoomID: "room-1", Accounts: []string{"bob"}, MessageCreatedAt: msgTime.UnixMilli(),
+					},
+				},
+				{
+					subject: "chat.outbox.site-a.site-c.subscription_mention",
+					msgID:   "mention:room-1:msg-1:site-c",
+					event: model.SubscriptionMentionEvent{
+						RoomID: "room-1", Accounts: []string{"carol"}, MessageCreatedAt: msgTime.UnixMilli(),
+					},
+				},
+			},
+		},
+		{
+			name:    "unresolved mentionee has no home site to route to",
+			content: "hi @ghost",
+			users:   nil,
+		},
+		{
+			name:    "mention-all alone federates nothing",
+			content: "hi @all",
+			users:   nil,
+		},
+		{
+			name:       "publish error is swallowed",
+			content:    "hi @bob",
+			users:      []model.User{{ID: "u2", Account: "bob", SiteID: "site-b"}},
+			publishErr: errors.New("jetstream down"),
+		},
+		{
+			name:       "federation disabled",
+			content:    "hi @bob",
+			users:      []model.User{{ID: "u2", Account: "bob", SiteID: "site-b"}},
+			noFederate: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+			rec := &mentionOutboxRecorder{err: tc.publishErr}
+
+			mentionAll := strings.Contains(tc.content, "@all")
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, mentionAll).Return(nil)
+			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
+			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+			us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(tc.users, nil)
+			store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.Any(), msgTime).Return(nil).AnyTimes()
+			keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+
+			var opts []handlerOption
+			if !tc.noFederate {
+				opts = append(opts, withOutboxFederation("site-a", rec.publish))
+			}
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal, opts...)
+
+			data, err := json.Marshal(model.MessageEvent{
+				Event:  model.EventCreated,
+				SiteID: "site-a",
+				Message: model.Message{
+					ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+					Content: tc.content, CreatedAt: msgTime,
+				},
+			})
+			require.NoError(t, err)
+
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+			assert.Len(t, pub.records, 1, "the client fan-out must still happen")
+
+			got := rec.sorted()
+			require.Len(t, got, len(tc.wantRecords))
+			for i, want := range tc.wantRecords {
+				assert.Equal(t, want.subject, got[i].subject)
+				assert.Equal(t, want.msgID, got[i].msgID)
+				assert.Equal(t, want.event.RoomID, got[i].event.RoomID)
+				assert.Equal(t, want.event.Accounts, got[i].event.Accounts)
+				assert.Equal(t, want.event.MessageCreatedAt, got[i].event.MessageCreatedAt)
+				assert.NotZero(t, got[i].event.Timestamp)
+			}
+		})
+	}
 }
