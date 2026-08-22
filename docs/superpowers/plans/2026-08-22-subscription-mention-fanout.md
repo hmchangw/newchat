@@ -435,14 +435,14 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			wantRecords: []outboxRecord{
 				{
 					subject: "chat.outbox.site-a.site-b.subscription_mention",
-					msgID:   "mention:room-1:msg-1:site-b",
+					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:site-b", msgTime.UnixMilli()),
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 				{
 					subject: "chat.outbox.site-a.site-c.subscription_mention",
-					msgID:   "mention:room-1:msg-1:site-c",
+					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:site-c", msgTime.UnixMilli()),
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
 					},
