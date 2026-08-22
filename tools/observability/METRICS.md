@@ -55,7 +55,7 @@ have been dropped after MaxDeliver. To tell healed from dropped, pair the gauge 
 
 | metric | type | key labels | meaning / use |
 |---|---|---|---|
-| `chat_nats_consumer_loop_up` | gauge | (base) | 1 = loop alive, 0 = **consumer not receiving at all**. |
+| `chat_nats_consumer_loop_up` | gauge | (base) | 1 = loop alive, 0 = **consumer loop failed** (graceful stop/error). A hard process crash *removes* the series (it can't emit 0), so a stale `1` can linger on a `lastNotNull` panel — detect a crashed process with `absent(chat_nats_consumer_loop_up)` or the Prometheus scrape `up==0`, not this gauge alone. |
 | `chat_nats_consumer_messages_total` | counter | `event_type`, `outcome` | Terminal disposition per delivery. `outcome` ∈ ack / nak / term / left_pending / handler_cancelled. |
 | `chat_nats_consumer_redeliveries_total` | counter | `event_type` | Cumulative redelivery count (companion to the `num_redelivered` gauge). |
 | `chat_nats_consumer_processing_duration_seconds` | histogram | `event_type`, `outcome` | Handler latency. Rising p99 precedes a `num_pending` climb. |
@@ -87,7 +87,7 @@ Read the dashboard backwards: match the shape you see to the cause.
 |---|---|---|
 | Consumer can't keep up with ingest | `num_pending` ↑ (sustained), `processing_duration` p99 ↑ | Backlog growing faster than drain. Scale workers / speed up the handler. |
 | A handler is wedged (stuck on a dependency) | `num_ack_pending` → pinned at `MaxAckPending`, `num_pending` ↑, ack rate (`rate(ack_floor)`) → 0 | Delivered work not acking. The producer is fine; the consumer isn't. |
-| A dependency has a brief blip, handler naks + retries | `num_redelivered` ↑ then → 0, `chat_nats_consumer_redeliveries_total` rate ↑, then recovers | Self-heal in progress. Gauge returning to 0 = backlog cleared. |
+| A dependency has a brief blip, handler naks + retries | `num_redelivered` ↑ then → 0, `chat_nats_consumer_redeliveries_total` rate ↑, then recovers | Self-heal in progress — **but only if `chat_nats_terminal_failures_total{reason="max_deliver"}` stayed flat.** The gauge returns to 0 whether messages were acked *or* dropped after MaxDeliver, so confirm no `max_deliver` uptick before calling it cleared (next row). |
 | A dependency outage lasts longer than the retry budget | `num_redelivered` ↑ then falls to 0 **while** `chat_nats_terminal_failures_total{reason="max_deliver"}` ↑ | **Not healed — dropped.** Messages exhausted MaxDeliver and were discarded (no DLQ). The most important row: the pending/redelivered gauges *look* recovered. |
 | Consumer process crashed / loop died | `chat_nats_consumer_loop_up` → 0, `num_pending` ↑ (nothing consuming) | Page-worthy. Nothing is being processed for that durable. |
 | A cross-site peer is unreachable | that destination's `num_ack_pending` ↑ (concurrent lane) and `num_pending` ↑ (FIFO ordered lane, stuck behind one in-flight message) | Isolate by `consumer_name` (`…-{dest}`). Self-clears when the peer recovers; healthy peers' lanes stay flat. |

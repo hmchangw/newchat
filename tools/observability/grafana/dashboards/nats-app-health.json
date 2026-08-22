@@ -26,7 +26,7 @@
       "id": 1,
       "type": "stat",
       "title": "Consumer loop status (chat_nats_consumer_loop_up)",
-      "description": "1 = loop alive and receiving; 0 = consumer loop DOWN (nothing being consumed). Any 0 here is page-worthy.",
+      "description": "1 = loop alive and receiving; 0 = consumer loop DOWN (nothing being consumed). Any 0 here is page-worthy. NOTE: loop_up=0 catches a graceful loop failure; a hard process crash removes the series entirely (it can't emit 0), so pair this with absent(chat_nats_consumer_loop_up) or the Prometheus scrape `up==0` to catch a dead process.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -91,7 +91,7 @@
             "uid": "prometheus"
           },
           "expr": "chat_nats_consumer_loop_up",
-          "legendFormat": "{{consumer}}"
+          "legendFormat": "{{consumer}} \u00b7 {{stream}}/{{site}}"
         }
       ]
     },
@@ -142,8 +142,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(chat_nats_terminal_failures_total{reason=\"max_deliver\"}[$__rate_interval])",
-          "legendFormat": "{{consumer}}"
+          "expr": "sum by (consumer, stream, site) (increase(chat_nats_terminal_failures_total{reason=\"max_deliver\"}[$__rate_interval]))",
+          "legendFormat": "{{consumer}} \u00b7 {{stream}}/{{site}}"
         }
       ]
     },
@@ -246,8 +246,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (consumer) (rate(chat_nats_consumer_redeliveries_total[$__rate_interval]))",
-          "legendFormat": "{{consumer}}"
+          "expr": "sum by (consumer, stream, site) (rate(chat_nats_consumer_redeliveries_total[$__rate_interval]))",
+          "legendFormat": "{{consumer}} \u00b7 {{stream}}/{{site}}"
         }
       ]
     },
