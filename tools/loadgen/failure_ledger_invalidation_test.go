@@ -210,5 +210,30 @@ func TestFailureLedger_ClosePersistsAnInvalidationTheJournalLaterAccepted(t *tes
 	journal.failFor = ""
 
 	require.NoError(t, ledger.Close())
-	assert.Equal(t, 2, journal.attempts, "close retries the append it never landed")
+	assert.Equal(t, 3, journal.attempts,
+		"close retries the reason that never landed, and the wal cause the failure itself recorded")
+}
+
+// A WAL that will not take the invalidation is itself a cause. Every other
+// journal failure in the ledger records "wal", and a startup invalidation is
+// exactly where no later write would otherwise expose the broken file — the run
+// would carry a verdict it could not persist and never say why.
+func TestFailureLedger_AFailedInvalidationAppendRecordsTheWALCause(t *testing.T) {
+	journal := &appendFailingFailureJournal{failFor: failureLedgerEventInvalidated}
+	metrics := NewMetrics()
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 4, Journal: journal, Recorder: newFailureLedgerPromRecorder(metrics),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ledger.Close() })
+
+	ledger.Invalidate(invalidReasonReconcileCapacity)
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureInvalidations.WithLabelValues(invalidReasonWAL)),
+		"a journal that refused the invalidation is a cause in its own right")
+	assert.Equal(t, invalidReasonReconcileCapacity, ledger.Snapshot().InvalidReason,
+		"the first cause still owns InvalidReason; wal joins it, it does not replace it")
+	assert.Equal(t, 1, journal.attempts,
+		"recording the wal cause must not attempt an append of its own")
 }

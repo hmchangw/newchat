@@ -246,6 +246,9 @@ var (
 
 const invalidReasonCapacity = "capacity"
 
+// invalidReasonWAL marks evidence the journal could not be trusted to hold.
+const invalidReasonWAL = "wal"
+
 // invalidReasonReconcileCapacity marks a run started below the reconciliation
 // floor. Nothing has failed yet, but every message will expire unverified for
 // want of a claim, so the evidence is in question from the first second.
@@ -626,7 +629,7 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 		l.startingWG.Done()
 	}()
 	if appendErr != nil {
-		l.invalidateLocked("wal")
+		l.invalidateLocked(invalidReasonWAL)
 		return fmt.Errorf("persist failure operation %q: %w", tracked.ID, appendErr)
 	}
 	if l.recorder != nil && l.journal != nil {
@@ -663,7 +666,7 @@ func (l *failureLedger) Activate(operationID string, at time.Time) error {
 		Type: failureLedgerEventActivated, OperationID: operationID, At: at.UTC(),
 	}
 	if err := l.appendLocked(&event); err != nil {
-		l.invalidateLocked("wal")
+		l.invalidateLocked(invalidReasonWAL)
 		return fmt.Errorf("persist activated failure operation %q: %w", operationID, err)
 	}
 	operation.LifecycleState = failureOperationActive
@@ -787,7 +790,7 @@ func (l *failureLedger) ObserveWithReason(
 				Observer: observer, Observation: observation, At: at.UTC(),
 			}
 			if err := l.appendLocked(&event); err != nil {
-				l.invalidateLocked("wal")
+				l.invalidateLocked(invalidReasonWAL)
 				return false, fmt.Errorf("persist accounting invariant for %q: %w", operationID, err)
 			}
 			l.invalidateLocked("accounting_invariant")
@@ -826,7 +829,7 @@ func (l *failureLedger) ObserveWithReason(
 		Observer: observer, Observation: observation, Reason: reason, At: at.UTC(),
 	}
 	if err := l.appendLocked(&event); err != nil {
-		l.invalidateLocked("wal")
+		l.invalidateLocked(invalidReasonWAL)
 		return false, fmt.Errorf("persist failure observation for %q: %w", operationID, err)
 	}
 	operation.Observations[observer] = observation
@@ -933,7 +936,7 @@ func (l *failureLedger) Expire(now time.Time) ([]string, error) {
 				At: now.UTC(),
 			}
 			if err := l.appendLocked(&event); err != nil {
-				l.invalidateLocked("wal")
+				l.invalidateLocked(invalidReasonWAL)
 				return finalized, fmt.Errorf(
 					"persist expired failure observation for %q: %w", operation.ID, err,
 				)
@@ -1218,7 +1221,7 @@ func (l *failureLedger) finalizeLocked(
 		Result: result, Reason: reason, At: at.UTC(),
 	}
 	if err := l.appendLocked(&event); err != nil {
-		l.invalidateLocked("wal")
+		l.invalidateLocked(invalidReasonWAL)
 		return fmt.Errorf("persist finalized failure operation %q: %w", operation.ID, err)
 	}
 	l.results[result]++
@@ -1241,7 +1244,7 @@ func (l *failureLedger) finalizeLocked(
 	if l.journal != nil && l.canCompactLocked() &&
 		(l.finalizedSinceCompact >= l.compactEvery || l.journalOverBudgetLocked()) {
 		if err := l.compactLocked(at); err != nil {
-			l.invalidateLocked("wal")
+			l.invalidateLocked(invalidReasonWAL)
 			return fmt.Errorf("compact failure ledger: %w", err)
 		}
 		l.finalizedSinceCompact = 0
@@ -1367,7 +1370,7 @@ func (l *failureLedger) MaybeCompact(at time.Time) error {
 		return nil
 	}
 	if err := l.compactLocked(at); err != nil {
-		l.invalidateLocked("wal")
+		l.invalidateLocked(invalidReasonWAL)
 		return fmt.Errorf("compact failure ledger: %w", err)
 	}
 	l.finalizedSinceCompact = 0
@@ -1620,18 +1623,26 @@ func (l *failureLedger) ensureOpen() error {
 // counted and journaled, so a startup invalidation cannot silence the runtime
 // failures an operator still has to act on.
 func (l *failureLedger) invalidateLocked(reason string) {
-	if !slices.Contains(l.invalidReasons, reason) {
-		l.invalidReasons = append(l.invalidReasons, reason)
-		if l.invalidReason == "" {
-			l.invalidReason = reason
-		}
-		if l.recorder != nil {
-			l.recorder.Invalidated(reason)
-		}
-	}
-	// Outside the guard above: a cause already counted in memory can still be
+	l.noteInvalidationLocked(reason)
+	// Outside the note above: a cause already counted in memory can still be
 	// missing from the journal, and durability is what the retry is for.
 	l.persistInvalidationLocked(reason)
+}
+
+// noteInvalidationLocked records a cause in memory and counts it once. It
+// deliberately does not touch the journal, so the paths that report a journal
+// failure can use it without attempting the append that just failed.
+func (l *failureLedger) noteInvalidationLocked(reason string) {
+	if slices.Contains(l.invalidReasons, reason) {
+		return
+	}
+	l.invalidReasons = append(l.invalidReasons, reason)
+	if l.invalidReason == "" {
+		l.invalidReason = reason
+	}
+	if l.recorder != nil {
+		l.recorder.Invalidated(reason)
+	}
 }
 
 // persistInvalidationLocked writes the cause to the journal and remembers only
@@ -1645,6 +1656,11 @@ func (l *failureLedger) persistInvalidationLocked(reason string) {
 		return
 	}
 	if err := l.journalInvalidationLocked(reason); err != nil {
+		// A journal that will not hold the verdict is a cause in its own right,
+		// and every other write path in this ledger records it. Noted rather
+		// than invalidated, because invalidating would attempt the append that
+		// just failed and recurse.
+		l.noteInvalidationLocked(invalidReasonWAL)
 		return
 	}
 	l.persistedInvalidReasons = append(l.persistedInvalidReasons, reason)
