@@ -215,3 +215,47 @@ func TestConsumeLoop_ReadyWhileConsuming(t *testing.T) {
 	var state consumeState
 	assert.NoError(t, state.Check().Probe(context.Background()))
 }
+
+// Failing readiness is not recovery for a queue worker. Nothing routes traffic
+// to it, and liveness always returns 200 by design, so a 503 on /readyz leaves
+// a dead consumer running indefinitely — visible to an alert, but never
+// restarted. The loop therefore asks the process to terminate so the supervisor
+// replaces it, which is the only actor that can actually recover a stopped
+// iterator.
+func TestConsumeLoop_UnexpectedExitRequestsProcessRestart(t *testing.T) {
+	restarted := make(chan struct{}, 1)
+	state := consumeState{onUnexpectedStop: func() { restarted <- struct{}{} }}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}), &wg, &state)
+	wg.Wait()
+
+	select {
+	case <-restarted:
+	default:
+		t.Fatal("an unexpected consume-loop exit must request process termination, not merely fail readiness")
+	}
+}
+
+// The deliberate iter.Stop() during shutdown must not be mistaken for a failure
+// — the process is already going down, and signalling it again would log a
+// spurious error on every clean stop.
+func TestConsumeLoop_ShutdownExitDoesNotRequestRestart(t *testing.T) {
+	restarted := make(chan struct{}, 1)
+	state := consumeState{onUnexpectedStop: func() { restarted <- struct{}{} }}
+	state.beginShutdown()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}), &wg, &state)
+	wg.Wait()
+
+	select {
+	case <-restarted:
+		t.Fatal("a shutdown-initiated stop must not request termination")
+	default:
+	}
+	require.Error(t, state.Check().Probe(context.Background()),
+		"readiness must still report not-ready while shutting down, so the pod drains")
+}

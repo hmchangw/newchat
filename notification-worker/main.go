@@ -120,7 +120,11 @@ func main() {
 	// broadcast-worker and notification-worker both deliver to that list.
 	subCol := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
 	threadRoomCol := db.Collection("thread_rooms")
-	roomsCol := db.Collection("rooms")
+	// Pinned for the same reason as subCol: roomsCol is read through into
+	// roommetacache, a SHARED key that message-gatekeeper and broadcast-worker
+	// also read, so a lagging secondary republishes a renamed or just-deleted
+	// room to all of them for the whole TTL.
+	roomsCol := mongoutil.CollectionWithReadPreference(db.Collection("rooms"), readpref.Primary())
 	// Settings gate push delivery, so a stale read means a user who just muted
 	// still gets notified; route to primary regardless of the client-wide
 	// preference. The other collections here tolerate replica lag and keep it.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/stream"
 )
@@ -34,4 +35,30 @@ func TestBuildConsumerConfig_UnlimitedDeliverAndDeliverNew(t *testing.T) {
 func TestBuildConsumerConfig_BotModePrefixesDurable(t *testing.T) {
 	assert.Equal(t, "bot-unread-worker", stream.PipelineBot.ConsumerName("unread-worker"))
 	assert.Equal(t, "unread-worker", stream.PipelineUser.ConsumerName("unread-worker"))
+}
+
+func TestValidateFlushBudget(t *testing.T) {
+	tests := []struct {
+		name                       string
+		interval, timeout, ackWait time.Duration
+		wantErr                    bool
+	}{
+		{"defaults fit comfortably", 250 * time.Millisecond, 10 * time.Second, 30 * time.Second, false},
+		// The budget is interval+timeout: a message waits out the interval in the
+		// pending batch BEFORE its bounded flush even starts, so checking the
+		// timeout alone lets a legal config still outlive AckWait.
+		{"timeout alone fits but interval pushes it over", 25 * time.Second, 9 * time.Second, 30 * time.Second, true},
+		{"exactly at the budget is not under it", 10 * time.Second, 20 * time.Second, 30 * time.Second, true},
+		{"timeout alone exceeds ack wait", time.Second, 31 * time.Second, 30 * time.Second, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateFlushBudget(tt.interval, tt.timeout, tt.ackWait)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

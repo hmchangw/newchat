@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -71,9 +72,8 @@ func main() {
 	// Fail fast rather than run with a flush that can outlive the ack deadline:
 	// the whole point of bounding the flush is that it gives up BEFORE JetStream
 	// redelivers the batch underneath it.
-	if cfg.FlushTimeout >= cfg.Consumer.AckWait {
-		slog.Error("FLUSH_TIMEOUT must be less than CONSUMER_ACK_WAIT, or a wedged flush outlives the ack deadline and the batch redelivers while it is still running",
-			"flush_timeout", cfg.FlushTimeout, "ack_wait", cfg.Consumer.AckWait)
+	if err := validateFlushBudget(cfg.FlushInterval, cfg.FlushTimeout, cfg.Consumer.AckWait); err != nil {
+		slog.Error("invalid flush configuration", "error", err)
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
@@ -137,7 +137,7 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	var consume consumeState
+	consume := consumeState{onUnexpectedStop: requestSelfShutdown}
 	wg.Add(1)
 	go consumeLoop(iter, f, &wg, &consume)
 
@@ -156,6 +156,10 @@ func main() {
 	slog.Info("unread-worker started", "site", cfg.SiteID, "mode", string(cfg.Mode))
 
 	shutdown.Wait(ctx, 25*time.Second,
+		// Mark the stop as intended BEFORE iter.Stop(), so the consume loop's
+		// exit is not mistaken for a failure and does not re-signal a process
+		// that is already on its way down.
+		func(_ context.Context) error { consume.beginShutdown(); return nil },
 		func(_ context.Context) error { iter.Stop(); return nil },
 		func(ctx context.Context) error {
 			done := make(chan struct{})
@@ -199,11 +203,57 @@ type messageIterator interface {
 // observes that — the only wg.Wait() is the shutdown drain. Without this the pod
 // keeps reporting ready on a healthy NATS connection while writing nothing at
 // all, which is the failure mode hardest to notice and slowest to diagnose.
+// Readiness alone cannot recover this: nothing routes traffic to a queue
+// worker, and liveness always answers 200 by design, so a 503 on /readyz makes
+// a dead consumer visible without ever replacing it. onUnexpectedStop is what
+// closes that gap — it asks the process to terminate so the supervisor starts a
+// fresh one, which is the only actor able to rebuild the iterator.
 type consumeState struct {
-	reason atomic.Pointer[error]
+	reason   atomic.Pointer[error]
+	stopping atomic.Bool
+	// onUnexpectedStop runs when the loop stops for any reason other than a
+	// shutdown already under way. Tests substitute a recorder.
+	onUnexpectedStop func()
 }
 
-func (s *consumeState) stopped(err error) { s.reason.Store(&err) }
+// beginShutdown marks the stop that follows as intended, so tearing the worker
+// down does not look like a failure and re-signal a process already exiting.
+func (s *consumeState) beginShutdown() { s.stopping.Store(true) }
+
+func (s *consumeState) stopped(err error) {
+	s.reason.Store(&err)
+	if s.stopping.Load() || s.onUnexpectedStop == nil {
+		return
+	}
+	s.onUnexpectedStop()
+}
+
+// requestSelfShutdown raises SIGTERM on this process so shutdown.Wait runs the
+// ordinary graceful teardown — draining the final flush rather than abandoning
+// the batch, which os.Exit here would do.
+func requestSelfShutdown() {
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		slog.Error("cannot signal self after consume loop stopped; the pod will stay up and idle", "error", err)
+		return
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		slog.Error("cannot signal self after consume loop stopped; the pod will stay up and idle", "error", err)
+	}
+}
+
+// validateFlushBudget rejects a configuration in which a held message can
+// outlive its ack deadline. The budget is interval+timeout, not timeout alone:
+// a message waits out the flush interval in the pending batch BEFORE its
+// bounded flush even begins, so checking the timeout by itself admits configs
+// that still let JetStream redeliver the batch from underneath a running flush.
+func validateFlushBudget(interval, timeout, ackWait time.Duration) error {
+	if budget := interval + timeout; budget >= ackWait {
+		return fmt.Errorf("FLUSH_INTERVAL (%s) + FLUSH_TIMEOUT (%s) = %s must be less than CONSUMER_ACK_WAIT (%s), or a held message outlives its ack deadline and redelivers while its flush is still running",
+			interval, timeout, budget, ackWait)
+	}
+	return nil
+}
 
 // Check reports not-ready once the loop has stopped. The readiness contract is
 // "can this pod do its job", and a worker whose only goroutine has exited

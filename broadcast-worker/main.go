@@ -161,7 +161,12 @@ func main() {
 	// the whole TTL rather than costing one stale fan-out. Same reasoning as
 	// roomsPrimary below.
 	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
-	store := NewMongoStore(db.Collection("rooms"), subsPrimary, db.Collection("thread_rooms"),
+	// rooms is pinned for the identical reason: it is what GetRoomMeta reads
+	// through into roommetacache, another key shared with message-gatekeeper and
+	// notification-worker. A lagging secondary there republishes a renamed or
+	// just-deleted room to all of them for the TTL.
+	roomsPrimaryStore := mongoutil.CollectionWithReadPreference(db.Collection("rooms"), readpref.Primary())
+	store := NewMongoStore(roomsPrimaryStore, subsPrimary, db.Collection("thread_rooms"),
 		db.Collection("users"), valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
