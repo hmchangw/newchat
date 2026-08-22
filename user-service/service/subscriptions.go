@@ -446,13 +446,29 @@ func isResponseTooLarge(err error) bool {
 // Not client-facing: enrichment failures never fail the list.
 var errBudgetSpent = errors.New("preview byte budget exhausted")
 
-// overBudget adds n to spent and reports whether the page has exceeded its
-// preview budget. A budget of 0 disables the check.
+// overBudget charges n against the page's preview budget, reporting true and
+// charging nothing when it would not fit. Check-and-add, not Add: charging a
+// rejected chunk would lock out later chunks that still fit the remainder.
+// A budget of 0 disables the check.
 func (s *UserService) overBudget(spent *atomic.Int64, n int64) bool {
 	if s.previewBudget <= 0 {
 		return false
 	}
-	return spent.Add(n) > s.previewBudget
+	for {
+		cur := spent.Load()
+		if cur+n > s.previewBudget {
+			return true
+		}
+		if spent.CompareAndSwap(cur, cur+n) {
+			return false
+		}
+	}
+}
+
+// budgetSpent reports an exhausted budget, so a chunk can skip its RPC entirely.
+// Separate from overBudget, which no longer overshoots and so cannot report it.
+func (s *UserService) budgetSpent(spent *atomic.Int64) bool {
+	return s.previewBudget > 0 && spent.Load() >= s.previewBudget
 }
 
 // previewBytes approximates a chunk's retained size by its message bodies, which
@@ -548,7 +564,7 @@ func (s *UserService) enrichLastMessage(ctx context.Context, account string, sub
 	var spent atomic.Int64
 	lastMsgBySite := fanOutChunks(ctx, planChunks(subs, sites, idxBySite, s.roomBatchChunk), len(sites), s.fanout(),
 		func(ctx context.Context, job chunkJob) (map[string]model.PreviewMessage, error) {
-			if s.overBudget(&spent, 0) {
+			if s.budgetSpent(&spent) {
 				return nil, errBudgetSpent
 			}
 			m, err := s.roomsGetSplitting(ctx, job.site, subs, job.rows, job.roomIDs, 0)

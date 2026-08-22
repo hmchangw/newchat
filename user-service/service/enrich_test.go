@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -811,4 +812,16 @@ func TestEnrichLastMessage_BoundsSplitDepth(t *testing.T) {
 	for i := range subs {
 		assert.Nil(t, subs[i].Room.PreviewMessage, "row %d degrades once the cap is hit", i)
 	}
+}
+
+// A rejected chunk must not consume budget: charging it would let one oversized
+// chunk lock out later chunks that still fit the remainder.
+func TestOverBudget_RejectedChunkDoesNotConsumeBudget(t *testing.T) {
+	svc := &UserService{previewBudget: 1000}
+	var spent atomic.Int64
+
+	assert.False(t, svc.overBudget(&spent, 600), "600 fits")
+	assert.True(t, svc.overBudget(&spent, 600), "a second 600 does not fit")
+	assert.False(t, svc.overBudget(&spent, 400), "400 still fits the remaining budget")
+	assert.EqualValues(t, 1000, spent.Load(), "only accepted chunks are charged")
 }
