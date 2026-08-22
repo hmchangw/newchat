@@ -14,9 +14,16 @@
 | | Where the message is lost | Fixable with today's architecture? |
 |---|---|---|
 | **Problem 1 — DM** | NATS delivers it to client B; **B's client discards it** because the room isn't in local state yet | **Yes, client-only.** No backend change. |
-| **Problem 2 — channel** | NATS drops it: nobody is subscribed to `chat.room.{id}.event` yet | **Yes, client-only** via subscribe → backfill over the existing `msg.history` RPC. A small server change upgrades that from *recovered* to *delivered live*. |
+| **Problem 2 — channel** | Two independent losses: NATS drops the live event (nobody is subscribed to `chat.room.{id}.event` yet), **and** `msg.history` cannot see the just-sent message | **Yes, client-only** — but backfill alone is *not* enough: the history call must carry the documented `meta.lastMsgAt` hint. Verified end-to-end. |
 
 The measured, decisive fact:
+
+**A second, separate defect surfaced once the full stack was run** (see "What the end-to-end run added" below): `msg.history`
+ceilings its Cassandra scan at the room document's `lastMsgAt`, which is advanced
+asynchronously. A message sent moments ago is therefore invisible to a plain history
+load — and **retrying does not help**, because history-service caches the stale ceiling
+for `HISTORY_ROOM_CACHE_TTL` (10 s by default). Measured: 55 retries over 3.5 s still
+returned 2 of 3 messages. This is why "just backfill" is not on its own a fix.
 
 > **The race window is dominated by the client, not by NATS.**
 > With an instant client, the channel window is under 1 ms. With a realistic 30 ms
@@ -149,13 +156,61 @@ Three things the measurements settle:
    NATS exposes no cluster-wide "interest is live" signal — [nats-server#1142](https://github.com/nats-io/nats-server/issues/1142)
    is still open on exactly this.
 
-### Fix A — client backfill (works today, zero backend change)
+### What the end-to-end run added (`tools/roomrace/e2e`)
+
+Running the real services changed the picture in two ways. Full numbers in
+`tools/roomrace/RESULTS-e2e.md`.
+
+**The creator learns about her own room ~500 ms after everyone else.**
+`room-worker.finishCreateRoom` publishes `subscription.update` to every member,
+*then* the `room_created` / `members_added` system messages, *then* the deferred
+`publishAsyncJobResult`. Measured: members get `subscription.update` at 23 ms, the
+system messages are broadcast at 29 ms, and the creator's async job result lands at
+**529 ms**. A creator who waits for that result before subscribing has already missed
+both system messages — which is exactly the reported symptom. Subscribing on the
+client's *own* `subscription.update` instead (24 ms) catches them.
+
+**`msg.history` cannot see a just-sent message, and retrying does not help.**
+This is the more important finding, and it invalidates "backfill alone" as a fix.
+
+`history-service.walkBounds` sets the scan ceiling to the room document's `lastMsgAt`,
+and `LoadHistory` caps `before` at that value. Anything newer than the room document
+is therefore invisible. Two delays stack:
+
+* `broadcast-worker` advances `room.lastMsgAt` on a **batched flush**
+  (`LAST_MSG_FLUSH_INTERVAL`, default 250 ms);
+* `history-service` then **caches** the resolved room times
+  (`HISTORY_ROOM_CACHE_TTL`, default 10 s), pinning the stale ceiling.
+
+Measured, with all three messages confirmed present in Cassandra:
+
+| run | alice history | bob history |
+|---|---|---|
+| baseline | 2 of 3 | 2 of 3 |
+| retry until it appears (55 tries / 3.5 s) | **2 of 3** | **2 of 3** |
+| same retry, `HISTORY_ROOM_CACHE_SIZE=0` | 3 of 3 (5 tries, ~200 ms) | 3 of 3 (1 try) |
+| `meta.lastMsgAt` hint, cache enabled | **3 of 3, first try** | **3 of 3, first try** |
+
+The last row is the fix and it needs no backend change: `msg.history` already accepts
+`meta.lastMsgAt` (documented in `docs/client-api.md`, Common request fields). The doc
+presents it as a way to skip a MongoDB lookup; it is *also* the scan ceiling, so a
+client that supplies a fresh value sees its own just-sent message. Values up to one
+hour ahead pass sanitisation, so `Date.now()` is accepted.
+
+**Server-side follow-up worth doing anyway.** Ceiling-at-`lastMsgAt` is an optimisation
+to avoid scanning empty buckets, but for a *newest-page* request (no `before` supplied)
+it costs nothing to ceiling at `max(lastMsgAt, now)` instead — with
+`MESSAGE_BUCKET_HOURS=360` that is almost always the same partition, just a wider
+clustering-range upper bound. That removes the sharp edge for every client, including
+ones that never send the hint.
+
+### Fix A — client backfill **with a freshness hint** (works today, zero backend change)
 
 On `subscription.update{added}` for a channel: **subscribe first, then read the durable log,
 then merge by message ID.**
 
 ```
-open chat.room.{id}.event  →  Flush()  →  msg.history{limit:N}  →  merge, dedupe by messageId
+open chat.room.{id}.event  →  Flush()  →  msg.history{limit:N, meta:{lastMsgAt: now}}  →  merge, dedupe by messageId
 ```
 
 `msg.history` already exists —
@@ -167,7 +222,9 @@ The ordering is the whole point, and it is Zulip's documented guarantee applied 
 register the listener before reading state, so anything that arrives during the read is
 still delivered. Backfill-then-subscribe re-opens the window.
 
-**One caveat the harness is optimistic about.** It persists before fanning out. In
+**The `meta` hint is not optional — see the end-to-end section above.** Without it this recovers nothing for up to 10 s.
+
+**One caveat the NATS-level harness was optimistic about.** It persists before fanning out. In
 production `message-worker` and `broadcast-worker` are **separate durable consumers of
 MESSAGES-CANONICAL** and run concurrently, so a backfill issued milliseconds after the
 fan-out can read Cassandra *before* the write lands. Backfill therefore needs a companion:
@@ -246,9 +303,11 @@ For reference, neither Slack nor Zulip built a compound endpoint: both made DM c
 | # | Change | Side | Fixes | Evidence |
 |---|---|---|---|---|
 | 1 | `new_message` upserts the room from the event payload instead of dropping it | client | **Problem 1, completely** | `dm / client buffers unknown room`: 0% at every delay |
-| 2 | On channel join: subscribe → flush → `msg.history` → merge by message id | client | **Problem 2**, recovered | `channel / … + backfill`: 0% at every delay |
+| 1b | Subscribe to the room subject on the client's **own** `subscription.update`, not on the create job result or on room-open | client | the creator missing her own room's system messages | E2E: subscribed at 24 ms vs system messages at 29 ms; the job result lands at 529 ms |
+| 2 | On channel join: subscribe → flush → `msg.history` **with `meta.lastMsgAt`** → merge by message id | client | **Problem 2**, recovered | `channel / … + backfill`: 0% at every delay; E2E: 3 of 3 on the first try |
 | 3 | Gap detection on `lastMsgId` + reconcile on reconnect | client | the `message-worker`/`broadcast-worker` write race, and every event lost to a disconnect | see §4 caveat |
 | 4 | Join grace window: dual-publish to the per-user subject for members joined < N s ago, gated on `Meta.LastJoinAt` | server | **Problem 2**, delivered live | `channel / server join grace window`: 0% at every delay |
+| 4b | `msg.history` newest-page ceiling at `max(lastMsgAt, now)` | server | removes the stale-ceiling edge for every client, hint or not | E2E: cache disabled → 3 of 3 |
 | 5 | *(optional)* combined DM create+send as a thin orchestrator | server | latency/UX only | §5 |
 
 Steps 1–3 need no backend change at all. Step 4 is one cache field plus a gated lookup, and
