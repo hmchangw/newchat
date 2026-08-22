@@ -194,7 +194,7 @@ func (s *UserService) enrichCrossSiteThreads(c *natsrouter.Context, sites []stri
 		return
 	}
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxSiteFanout)
+	sem := make(chan struct{}, s.fanout())
 	for _, i := range crossIdx {
 		if c.Err() != nil {
 			results[i].failed = true

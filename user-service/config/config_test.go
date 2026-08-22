@@ -372,3 +372,141 @@ func TestLoad_BadgeMarkerTTLValidation(t *testing.T) {
 		})
 	}
 }
+
+// requiredEnv sets the minimum env Load needs, so a case can vary one variable.
+func requiredEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+}
+
+func TestLoad_HTTPDefaults(t *testing.T) {
+	requiredEnv(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "8080", cfg.HTTP.Port)
+	assert.Equal(t, 256, cfg.HTTP.MaxConcurrency)
+	assert.Equal(t, 30*time.Second, cfg.HTTP.HandlerTimeout)
+	assert.Equal(t, 35*time.Second, cfg.HTTP.WriteTimeout)
+	assert.Equal(t, 1024, cfg.HTTP.GzipMinBytes)
+	assert.Equal(t, uint64(128), cfg.HTTP.MongoMaxPoolSize)
+	assert.Equal(t, uint64(16), cfg.HTTP.MongoMinPoolSize)
+	assert.Equal(t, 40, cfg.HTTP.DefaultLimit, "matches the NATS default so an omitted limit behaves the same")
+	assert.Equal(t, 400, cfg.HTTP.MaxLimit)
+	assert.Equal(t, uint64(100), cfg.Mongo.MaxPoolSize, "the NATS-path pool is now explicit, not the driver default")
+	assert.Equal(t, ":8081", cfg.HealthAddr)
+	assert.InDelta(t, 0.8, cfg.GoMemLimitFraction, 1e-9)
+	assert.Equal(t, 100, cfg.RoomBatchChunk)
+	assert.Empty(t, cfg.BotplatformURL)
+}
+
+func TestLoad_RejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name, env, val, wantMsg string
+	}{
+		{"http default above max", "HTTP_SUBSCRIPTION_DEFAULT_LIMIT", "500", "HTTP_SUBSCRIPTION_DEFAULT_LIMIT"},
+		{"http default below one", "HTTP_SUBSCRIPTION_DEFAULT_LIMIT", "0", "HTTP_SUBSCRIPTION_DEFAULT_LIMIT"},
+		{"http max below one", "HTTP_SUBSCRIPTION_MAX_LIMIT", "0", "HTTP_SUBSCRIPTION_MAX_LIMIT"},
+		{"write timeout equals handler timeout", "HTTP_WRITE_TIMEOUT", "30s", "HTTP_WRITE_TIMEOUT"},
+		{"write timeout below handler timeout", "HTTP_WRITE_TIMEOUT", "10s", "HTTP_WRITE_TIMEOUT"},
+		{"negative concurrency", "HTTP_MAX_CONCURRENCY", "-1", "HTTP_MAX_CONCURRENCY"},
+		{"zero mongo pool", "HTTP_MONGO_MAX_POOL_SIZE", "0", "HTTP_MONGO_MAX_POOL_SIZE"},
+		{"min pool above max pool", "HTTP_MONGO_MIN_POOL_SIZE", "999", "HTTP_MONGO_MIN_POOL_SIZE"},
+		{"zero nats pool", "MONGO_MAX_POOL_SIZE", "0", "MONGO_MAX_POOL_SIZE"},
+		{"fraction above one", "GOMEMLIMIT_FRACTION", "1.5", "GOMEMLIMIT_FRACTION"},
+		{"fraction zero", "GOMEMLIMIT_FRACTION", "0", "GOMEMLIMIT_FRACTION"},
+		{"chunk above the history-service cap", "ROOM_BATCH_CHUNK", "101", "ROOM_BATCH_CHUNK"},
+		{"chunk below one", "ROOM_BATCH_CHUNK", "0", "ROOM_BATCH_CHUNK"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requiredEnv(t)
+			t.Setenv(tc.env, tc.val)
+			_, err := Load()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantMsg)
+		})
+	}
+}
+
+func TestLoad_HTTPOverrides(t *testing.T) {
+	requiredEnv(t)
+	t.Setenv("HTTP_PORT", "9090")
+	t.Setenv("HTTP_MAX_CONCURRENCY", "512")
+	t.Setenv("HTTP_SUBSCRIPTION_DEFAULT_LIMIT", "200")
+	t.Setenv("HTTP_SUBSCRIPTION_MAX_LIMIT", "500")
+	t.Setenv("BOTPLATFORM_URL", "http://botplatform:8080")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "9090", cfg.HTTP.Port)
+	assert.Equal(t, 512, cfg.HTTP.MaxConcurrency)
+	assert.Equal(t, 200, cfg.HTTP.DefaultLimit)
+	assert.Equal(t, 500, cfg.HTTP.MaxLimit)
+	assert.Equal(t, "http://botplatform:8080", cfg.BotplatformURL)
+}
+
+// Zero disables the limiter entirely; it must not be rejected as invalid.
+func TestLoad_ZeroConcurrencyIsAllowed(t *testing.T) {
+	requiredEnv(t)
+	t.Setenv("HTTP_MAX_CONCURRENCY", "0")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 0, cfg.HTTP.MaxConcurrency)
+}
+
+func TestLoad_HTTPMongoMaxIdleTimeDefault(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	unsetEnv(t, "HTTP_MONGO_MAX_IDLE_TIME")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Minute, cfg.HTTP.MongoMaxIdleTime)
+}
+
+func TestLoad_HTTPMongoMaxIdleTimeOverride(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("HTTP_MONGO_MAX_IDLE_TIME", "90s")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, 90*time.Second, cfg.HTTP.MongoMaxIdleTime)
+}
+
+func TestLoad_RejectsNegativeHTTPMongoMaxIdleTime(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("HTTP_MONGO_MAX_IDLE_TIME", "-1s")
+
+	_, err := Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP_MONGO_MAX_IDLE_TIME")
+}
+
+func TestLoad_RejectsNonPositiveHandlerTimeout(t *testing.T) {
+	// ginutil.Timeout disables itself at <= 0, so a zero or negative value would
+	// silently drop the request budget instead of failing loudly at startup.
+	for _, v := range []string{"0s", "-1s"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("MONGO_URI", "mongodb://x")
+			t.Setenv("NATS_URL", "nats://x")
+			t.Setenv("SITE_ID", "site-a")
+			t.Setenv("HTTP_HANDLER_TIMEOUT", v)
+
+			_, err := Load()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "HTTP_HANDLER_TIMEOUT")
+		})
+	}
+}

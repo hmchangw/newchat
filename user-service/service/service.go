@@ -152,6 +152,15 @@ type UserService struct {
 	badgeCacheFirst bool
 	maxSubs         int
 	defaultLimit    int
+	// roomBatchChunk caps room ids per enrichment RPC (history-service hard-rejects
+	// over 100, and each reply must fit the 128 KB NATS payload).
+	roomBatchChunk int
+	// previewBudget caps the preview bytes one page may assemble. Room count cannot
+	// bound them: gatekeeper caps a body at 20 KB, but a 400-row page carries 400 of
+	// them, and splitting recovers every one instead of dropping the oversized chunk.
+	previewBudget int64
+	// maxFanout bounds concurrent enrichment RPCs per request (MAX_SITE_FANOUT).
+	maxFanout       int
 	maxApps         int
 	defaultApps     int
 	maxAccountNames int
@@ -179,11 +188,29 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		badgeCap:         cfg.BadgeCountCap,
 		badgeCacheFirst:  cfg.BadgeCountCacheFirst,
 		maxSubs:          cfg.MaxSubscriptionLimit,
+		roomBatchChunk:   cfg.RoomBatchChunk,
+		previewBudget:    cfg.PreviewByteBudget,
+		maxFanout:        cfg.MaxSiteFanout,
 		defaultLimit:     cfg.DefaultSubscriptionLimit,
 		maxApps:          cfg.MaxAppsLimit,
 		defaultApps:      cfg.DefaultAppsLimit,
 		maxAccountNames:  cfg.MaxAccountNames,
 	}
+}
+
+// defaultSiteFanout is the fallback when maxFanout is unset.
+const defaultSiteFanout = 8
+
+// fanout is the per-request enrichment RPC bound. It normalises a non-positive
+// value because the semaphores sized by it send before spawning their receiver:
+// a capacity of zero would be an unbuffered channel, and the send would block
+// forever. Config validation keeps production above zero; this covers a
+// directly-constructed UserService.
+func (s *UserService) fanout() int {
+	if s.maxFanout < 1 {
+		return defaultSiteFanout
+	}
+	return s.maxFanout
 }
 
 // RegisterHandlers wires all UserService endpoints onto the router.
