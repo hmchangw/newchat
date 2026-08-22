@@ -311,6 +311,7 @@ type failureLedgerEvent struct {
 	Results           map[failureResult]uint64                          `json:"results,omitempty"`
 	ObservationCounts map[failureObserver]map[failureObservation]uint64 `json:"observationCounts,omitempty"`
 	NotSent           []string                                          `json:"notSent,omitempty"`
+	InvalidReason     string                                            `json:"invalidReason,omitempty"`
 	At                time.Time                                         `json:"at"`
 }
 
@@ -351,6 +352,11 @@ const (
 	failureLedgerEventFinalized  = "finalized"
 	failureLedgerEventCheckpoint = "checkpoint"
 	failureLedgerEventInvariant  = "accounting_invariant"
+	// failureLedgerEventInvalidated carries the reason a run's evidence stopped
+	// standing. It is durable because the window a run invalidates outlives the
+	// process: the pod restarts, the journal replays, and the verdicts from
+	// before the restart are still in it.
+	failureLedgerEventInvalidated = "invalidated"
 )
 
 // streamingFailureJournal is the recovery path a journal should offer: the
@@ -419,16 +425,25 @@ type failureLedger struct {
 	now             func() time.Time
 	recorder        failureLedgerRecorder
 
-	active                map[string]*failureOperation
-	starting              map[string]struct{}
-	verifyQueues          map[string]*failureVerifyQueue
-	results               map[failureResult]uint64
-	observations          map[failureObserver]map[failureObservation]uint64
-	notSent               map[string]struct{}
-	notSentOrder          []string
-	recovered             int
-	dropped               int
-	invalidReason         string
+	active        map[string]*failureOperation
+	starting      map[string]struct{}
+	verifyQueues  map[string]*failureVerifyQueue
+	results       map[failureResult]uint64
+	observations  map[failureObserver]map[failureObservation]uint64
+	notSent       map[string]struct{}
+	notSentOrder  []string
+	recovered     int
+	dropped       int
+	invalidReason string
+	// invalidReasons is every distinct cause, in the order observed.
+	// invalidReason keeps the first — that is when the evidence stopped
+	// standing — while the counter reports them all, because a run invalidated
+	// at startup can still lose its WAL an hour later and that is the failure
+	// an operator has to act on.
+	invalidReasons []string
+	// replaying suppresses the journal write while recovery re-applies records
+	// that are already in the file.
+	replaying             bool
 	closed                bool
 	finalizedSinceCompact int
 	recoveredEvents       int
@@ -1087,12 +1102,28 @@ func (l *failureLedger) Invalidate(reason string) {
 	if l == nil || reason == "" {
 		return
 	}
-	if _, known := failureInvalidationReasonRegistry[reason]; !known {
-		reason = "other"
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.invalidateLocked(reason)
+	l.invalidateLocked(registeredInvalidationReason(reason))
+}
+
+// registeredInvalidationReason keeps the label set bounded. An unregistered
+// reason becomes "other" rather than adding a series nobody declared.
+func registeredInvalidationReason(reason string) string {
+	if _, known := failureInvalidationReasonRegistry[reason]; !known {
+		return "other"
+	}
+	return reason
+}
+
+// invalidateReplayedLocked applies a cause read back from the journal. It folds
+// through the registry because a journal written by a newer build is exactly
+// where a reason this one does not know arrives.
+func (l *failureLedger) invalidateReplayedLocked(reason string) {
+	if reason == "" {
+		return
+	}
+	l.invalidateLocked(registeredInvalidationReason(reason))
 }
 
 func (l *failureLedger) Close() error {
@@ -1172,6 +1203,15 @@ func (l *failureLedger) compactLocked(at time.Time) error {
 		ObservationCounts: cloneFailureObservationCounts(l.observations),
 		NotSent:           append([]string(nil), l.notSentOrder...), At: at.UTC(),
 	})
+	// Compaction rewrites the journal from live state, so a cause that is not
+	// re-emitted here is dropped by the first reclamation — the one thing a
+	// long run is guaranteed to do. Order is preserved because the first cause
+	// is the one InvalidReason keeps.
+	for _, reason := range l.invalidReasons {
+		events = append(events, failureLedgerEvent{
+			Type: failureLedgerEventInvalidated, InvalidReason: reason, At: at.UTC(),
+		})
+	}
 	for _, operationID := range operationIDs {
 		operation := l.active[operationID]
 		started := cloneFailureOperation(operation)
@@ -1229,6 +1269,8 @@ func (l *failureLedger) appendLocked(event *failureLedgerEvent) error {
 // reading it into one slice costs roughly twice the file on the heap before the
 // surviving operations are even built.
 func (l *failureLedger) recoverFrom(journal failureJournal) error {
+	l.replaying = true
+	defer func() { l.replaying = false }()
 	dropped := make(map[string]struct{})
 	if streaming, ok := journal.(streamingFailureJournal); ok {
 		index := 0
@@ -1431,6 +1473,12 @@ func (l *failureLedger) replayEvent(
 			delete(l.active, event.OperationID)
 		case failureLedgerEventInvariant:
 			l.invalidateLocked("accounting_invariant")
+		case failureLedgerEventInvalidated:
+			// Through Invalidate rather than invalidateLocked so a reason this
+			// build does not know folds to "other" instead of widening the
+			// label set — a journal from a newer build is exactly where one
+			// arrives.
+			l.invalidateReplayedLocked(event.InvalidReason)
 		default:
 			return fmt.Errorf("replay failure ledger event %d: unknown type %q", index, event.Type)
 		}
@@ -1503,13 +1551,45 @@ func (l *failureLedger) ensureOpen() error {
 	return nil
 }
 
+// invalidateLocked records one cause. The first keeps InvalidReason, since that
+// is the point the run's evidence stopped standing; every distinct cause is
+// counted and journaled, so a startup invalidation cannot silence the runtime
+// failures an operator still has to act on.
 func (l *failureLedger) invalidateLocked(reason string) {
-	if l.invalidReason != "" {
+	if slices.Contains(l.invalidReasons, reason) {
 		return
 	}
-	l.invalidReason = reason
+	l.invalidReasons = append(l.invalidReasons, reason)
+	if l.invalidReason == "" {
+		l.invalidReason = reason
+	}
 	if l.recorder != nil {
 		l.recorder.Invalidated(reason)
+	}
+	l.journalInvalidationLocked(reason)
+}
+
+// journalInvalidationLocked persists the cause on a best effort. It cannot
+// route its own failure back through invalidateLocked — that is how the WAL
+// paths report, and it would recurse — and a lost record is strictly better
+// than losing the in-memory verdict too, so the error is logged and dropped.
+func (l *failureLedger) journalInvalidationLocked(reason string) {
+	if l.replaying || l.journal == nil {
+		return
+	}
+	err := l.journal.Append(&failureLedgerEvent{
+		Type: failureLedgerEventInvalidated, InvalidReason: reason, At: l.now().UTC(),
+	})
+	if err != nil {
+		slog.Error("persist failure ledger invalidation",
+			"reason", reason,
+			"consequence", "a restart will not know this run's evidence was in question",
+			"error", err,
+		)
+		return
+	}
+	if l.recorder != nil {
+		l.recorder.JournalSize(l.journal.Size())
 	}
 }
 
