@@ -1,0 +1,92 @@
+rules:
+  - id: metrics-no-per-call-attribute-set
+    languages: [go]
+    severity: ERROR
+    message: >
+      Build the attribute set once and look it up, do not construct one per
+      recording call. attribute.NewSet sorts and allocates every time (measured
+      264ns/192B against 9.6ns/0B for a map lookup), and recording paths run
+      per message, per recipient or per failed item — the "cold path" argument
+      fails exactly when the incident you are measuring is happening. Precompute
+      the closed label combinations into a map keyed by your enum, the way
+      pkg/natsmetrics and search-sync-worker/metrics.go do.
+    paths:
+      exclude:
+        - "**/*_test.go"
+        # data-migration/oplog-* are one-shot batch tools, not always-on
+        # services: they are run under supervision for a migration window and
+        # their metrics are read live during that window. The allocation
+        # argument is about sustained production load, which they never carry.
+        #
+        # Leading slash anchors this to the repo-root directory, which is the
+        # only one that exists. Semgrepignore v2 will read an unanchored
+        # "data-migration/**" as anchored anyway and warns about the ambiguity,
+        # so say which one is meant.
+        - "/data-migration/**"
+    patterns:
+      - pattern-either:
+          - pattern: $C.Add($CTX, $N, metric.WithAttributes(...))
+          - pattern: $C.Add($CTX, $N, metric.WithAttributeSet(attribute.NewSet(...)))
+          - pattern: $C.Record($CTX, $V, metric.WithAttributes(...))
+          - pattern: $C.Record($CTX, $V, metric.WithAttributeSet(attribute.NewSet(...)))
+          # Observe takes no context — its signature is Observe(value, ...ObserveOption)
+          # — so it needs its own patterns rather than reusing the two above. An
+          # observable callback runs once per collection interval for as long as
+          # the process lives, so building the set inline there is the same cost
+          # in a shape that is easy to miss.
+          - pattern: $C.Observe($V, metric.WithAttributes(...))
+          - pattern: $C.Observe($V, metric.WithAttributeSet(attribute.NewSet(...)))
+
+  - id: metrics-no-unbounded-label
+    languages: [go]
+    severity: ERROR
+    message: >
+      This identifier is unbounded — one metric series per room, account, user,
+      message or subject will grow without limit and take the metrics backend
+      with it. Identity belongs on the log line and the span next to the call,
+      where high cardinality is free. If you need to slice the metric, add a
+      closed enum instead (see bulkStatusLabel in search-sync-worker, or the
+      label enums in pkg/natsmetrics).
+    paths:
+      exclude:
+        - "**/*_test.go"
+    patterns:
+      - pattern-either:
+          # $CTOR, not String: an int room id opens exactly as many series as a
+          # string one, and the earlier String-only form let Int64, Int, Bool and
+          # the rest through untouched.
+          - pattern: metric.WithAttributes(..., attribute.$CTOR("$KEY", $V), ...)
+          - pattern: attribute.NewSet(..., attribute.$CTOR("$KEY", $V), ...)
+          # attribute.Key("k").String(v) is the same attribute built the other
+          # way round, and reads as deliberate enough that review waves it past.
+          - pattern: metric.WithAttributes(..., attribute.Key("$KEY").$CTOR(...), ...)
+          - pattern: attribute.NewSet(..., attribute.Key("$KEY").$CTOR(...), ...)
+      - metavariable-regex:
+          metavariable: $KEY
+          # Three shapes, all drawn from the contract's forbidden-label list:
+          #
+          #   1. An identity prefix with an optional Id / _id / UID / _uid tail.
+          #      The tail is optional because attribute.String("room", roomID) is
+          #      the same one-series-per-room growth as ("roomId", roomID), and
+          #      the bare key slipped past the earlier form of this rule.
+          #   2. Anything ending in Subject or _subject — the contract forbids
+          #      both "inbox subject" and "arbitrary destination subject", and
+          #      the key is usually qualified (inboxSubject, destSubject).
+          #   3. index, which is an Elasticsearch index name.
+          #
+          #   4. Raw error text and stack traces, the last two entries on that
+          #      list. Bounded *classifications* of an error are allowed and must
+          #      keep passing: error_type, errorType, reason, outcome, result and
+          #      status all fall outside the pattern by construction.
+          #
+          # run is here for run_id specifically. A bounded run_info metric
+          # describing scenario and traffic profile is allowed by the contract
+          # and does not match, because run_info is not run + an id tail.
+          #
+          # Every separator is [._] rather than _, because OTel semconv spells
+          # these keys dotted — user.id, session.id, error.stack — and this
+          # repo already carries semconv attributes elsewhere, so the dotted
+          # form is the one most likely to be reached for. Widening the
+          # separator does not widen what matches: the tails are still a closed
+          # set, so error.type, user.agent and org.name stay outside it.
+          regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)(?:[._]?[uU]?[iI][dD])?|[a-z]*[._]?[sS]ubject|index|(?:[rR]aw)?[._]?[eE]rr(?:or)?(?:[._]?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?[._]?)?[sS]tack(?:[._]?[tT]race)?)$

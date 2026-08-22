@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strconv"
 
 	"github.com/flywindy/o11y"
 	"go.opentelemetry.io/otel/attribute"
@@ -109,7 +108,25 @@ type collectionMetrics struct {
 	unresolvedOpt metric.MeasurementOption
 	flushOpts     map[flushOutcome]metric.MeasurementOption
 	msgOpts       map[msgDisposition]metric.MeasurementOption
+	// itemFailureOpts is keyed by the closed action set crossed with the
+	// bounded status labels bulkStatusLabel can return, and statusOnlyOpts
+	// carries the same statuses without an action, for an action outside the
+	// closed set.
+	itemFailureOpts map[itemFailureKey]metric.MeasurementOption
+	statusOnlyOpts  map[string]metric.MeasurementOption
 }
+
+type itemFailureKey struct {
+	action string
+	status string
+}
+
+// allBulkActions is the closed set of actions this worker emits, and
+// allBulkStatusLabels is every value bulkStatusLabel can return.
+var (
+	allBulkActions      = []string{"index", "delete", "update"}
+	allBulkStatusLabels = []string{"400", "404", "409", "413", "429", "500", "503", "4xx", "5xx", "other"}
+)
 
 func (m *syncMetrics) forCollection(name string) *collectionMetrics {
 	flushOpts := make(map[flushOutcome]metric.MeasurementOption, len(allFlushOutcomes))
@@ -127,6 +144,23 @@ func (m *syncMetrics) forCollection(name string) *collectionMetrics {
 			attribute.String("reason", d.reason),
 		))
 	}
+	itemFailureOpts := make(map[itemFailureKey]metric.MeasurementOption, len(allBulkActions)*len(allBulkStatusLabels))
+	for _, action := range allBulkActions {
+		for _, status := range allBulkStatusLabels {
+			itemFailureOpts[itemFailureKey{action, status}] = metric.WithAttributeSet(attribute.NewSet(
+				attribute.String("collection", name),
+				attribute.String("action", action),
+				attribute.String("status", status),
+			))
+		}
+	}
+	statusOnlyOpts := make(map[string]metric.MeasurementOption, len(allBulkStatusLabels))
+	for _, status := range allBulkStatusLabels {
+		statusOnlyOpts[status] = metric.WithAttributeSet(attribute.NewSet(
+			attribute.String("collection", name),
+			attribute.String("status", status),
+		))
+	}
 	return &collectionMetrics{
 		m:          m,
 		collection: name,
@@ -135,8 +169,10 @@ func (m *syncMetrics) forCollection(name string) *collectionMetrics {
 			attribute.String("collection", name), attribute.String("outcome", "resolved"))),
 		unresolvedOpt: metric.WithAttributeSet(attribute.NewSet(
 			attribute.String("collection", name), attribute.String("outcome", "unresolved"))),
-		flushOpts: flushOpts,
-		msgOpts:   msgOpts,
+		flushOpts:       flushOpts,
+		msgOpts:         msgOpts,
+		itemFailureOpts: itemFailureOpts,
+		statusOnlyOpts:  statusOnlyOpts,
 	}
 }
 
@@ -169,25 +205,55 @@ func (c *collectionMetrics) recordMessages(ctx context.Context, d msgDisposition
 	c.m.messages.Add(ctx, int64(n), c.msgOpts[d])
 }
 
-// recordItemFailure counts one failed bulk item. This is a cold path, so the
-// attribute set is built per call instead of precomputed per status.
+// recordItemFailure counts one failed bulk item.
+//
+// The attribute set is precomputed, like every other recorder here. This path
+// is only quiet while Elasticsearch is healthy: under the 429 backpressure
+// these metrics exist to diagnose it runs once per rejected action — up to
+// BULK_BATCH_SIZE per flush, and a Teams migration batch contributes one
+// action per migrated message, so a single source message can drive the whole
+// inner loop. Building a set per call there costs 264 ns and an allocation
+// each, against 9.6 ns for a map lookup, exactly when the system is already
+// under strain.
 func (c *collectionMetrics) recordItemFailure(ctx context.Context, action string, status int) {
 	if c == nil {
 		return
 	}
-	c.m.itemFailures.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
-		attribute.String("collection", c.collection),
-		attribute.String("action", action),
-		attribute.String("status", bulkStatusLabel(status)),
-	)))
+	label := bulkStatusLabel(status)
+	if opt, ok := c.itemFailureOpts[itemFailureKey{action, label}]; ok {
+		c.m.itemFailures.Add(ctx, 1, opt)
+		return
+	}
+	// An action outside the closed set still counts, and keeps the status —
+	// bulkStatusLabel is total, so the status is bounded whatever the action
+	// was, and it is the half that carries the diagnosis. Dropping it would
+	// blind the 429 signal for any action added to searchengine but not to
+	// allBulkActions, which is exactly when you would want to see it. The
+	// fallback sets are precomputed like every other recorder here.
+	c.m.itemFailures.Add(ctx, 1, c.statusOnlyOpts[label])
 }
 
 // bulkStatusLabel maps an ES bulk item status to a bounded label value: the
 // diagnostically interesting codes stay exact, everything else buckets by class.
 func bulkStatusLabel(status int) string {
+	// Returned as literals rather than strconv.Itoa: Go only interns small
+	// integers, so Itoa(429) allocates on every rejected item — which is
+	// exactly the case this label exists for.
 	switch status {
-	case 400, 404, 409, 413, 429, 500, 503:
-		return strconv.Itoa(status)
+	case 400:
+		return "400"
+	case 404:
+		return "404"
+	case 409:
+		return "409"
+	case 413:
+		return "413"
+	case 429:
+		return "429"
+	case 500:
+		return "500"
+	case 503:
+		return "503"
 	}
 	switch {
 	case status >= 400 && status < 500:

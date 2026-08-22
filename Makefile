@@ -1,6 +1,6 @@
 .PHONY: lint fmt tidy test test-integration benchmark-natsmetrics test-loadgen-failure test-loadgen-failure-integration coverage-loadgen-failure coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
-        o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep \
+        o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep sast-semgrep-test \
         fed-deps-up fed-deps-down fed-regen require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs \
         fed-seed fed-seed-reset fed-o11y-up fed-o11y-down
 
@@ -85,8 +85,8 @@ GOSEC_FLAGS := -quiet -severity medium -confidence medium -tests=true \
 # semgrep: fail on medium+ (WARNING/ERROR; INFO is informational/low).
 SEMGREP_FLAGS := --error --severity=WARNING --severity=ERROR --metrics=off \
                  --exclude=tools --exclude=chat-frontend --exclude=testdata \
-                 --exclude=docs --config=p/golang --config=p/security-audit \
-                 --config=.semgrep/
+                 --exclude=docs --exclude=.semgrep --config=p/golang \
+                 --config=p/security-audit --config=.semgrep/
 
 # Makefile for the distributed multi-site chat system.
 
@@ -473,15 +473,18 @@ tools:
 tools-mockgen:
 	GOTOOLCHAIN=$(TOOLS_GO_TOOLCHAIN) go install go.uber.org/mock/mockgen@$(MOCKGEN_VERSION)
 
-# Run all SAST scans (gosec, govulncheck, semgrep). All three always run
-# (no fail-fast) so every category is reported in one pass; exits non-zero
-# if any scan finds an issue. This is the exact command CI enforces.
+# Run all SAST scans (gosec, govulncheck, semgrep) plus the repo-owned semgrep
+# rule tests. All always run (no fail-fast) so every category is reported in one
+# pass; exits non-zero if any finds an issue. The rule tests run before the scan
+# they validate, so a broken rule reads as a rule failure rather than as a
+# suspiciously clean scan. This is the exact command CI enforces.
 sast:
-	@rc=0; g=PASS; v=PASS; s=PASS; \
-	$(MAKE) --no-print-directory sast-gosec   || { rc=1; g=FAIL; }; \
-	$(MAKE) --no-print-directory sast-vuln    || { rc=1; v=FAIL; }; \
-	$(MAKE) --no-print-directory sast-semgrep || { rc=1; s=FAIL; }; \
-	echo "==> SAST summary: gosec=$$g govulncheck=$$v semgrep=$$s"; \
+	@rc=0; g=PASS; v=PASS; s=PASS; t=PASS; \
+	$(MAKE) --no-print-directory sast-gosec        || { rc=1; g=FAIL; }; \
+	$(MAKE) --no-print-directory sast-vuln         || { rc=1; v=FAIL; }; \
+	$(MAKE) --no-print-directory sast-semgrep-test || { rc=1; t=FAIL; }; \
+	$(MAKE) --no-print-directory sast-semgrep      || { rc=1; s=FAIL; }; \
+	echo "==> SAST summary: gosec=$$g govulncheck=$$v semgrep=$$s rule-tests=$$t"; \
 	exit $$rc
 
 # gosec: Go security static analysis (injection, weak crypto, unsafe code).
@@ -500,6 +503,31 @@ sast-vuln:
 sast-semgrep:
 	@command -v semgrep >/dev/null 2>&1 || { echo "semgrep not installed — run 'make tools' (needs pipx), or: pipx install semgrep==$(SEMGREP_VERSION)"; exit 1; }
 	semgrep scan $(SEMGREP_FLAGS) .
+
+# Test the repo-owned rules against their fixtures, so a pattern edit that
+# disables a rule fails here instead of silently passing every later scan.
+#
+# A rule file is tested when a Go fixture of the same basename sits beside it
+# (.semgrep/metrics.yml -> .semgrep/metrics.go); rule files without one are
+# skipped, so adding fixtures for another rule needs no Makefile change. The
+# fixture must be a sibling because semgrep's test runner matches by basename
+# and does not support a separate tests directory. Fixtures contain deliberate
+# violations, which is why SEMGREP_FLAGS excludes .semgrep from the scan above.
+# No fixture at all is a failure — silently testing nothing is the outcome this
+# target exists to prevent.
+sast-semgrep-test:
+	@command -v semgrep >/dev/null 2>&1 || { echo "semgrep not installed — run 'make tools' (needs pipx), or: pipx install semgrep==$(SEMGREP_VERSION)"; exit 1; }
+	@rc=0; n=0; \
+	for rule in .semgrep/*.yml; do \
+	  fixture="$${rule%.yml}.go"; \
+	  [ -f "$$fixture" ] || continue; \
+	  n=$$((n+1)); \
+	  echo "==> semgrep rule tests: $$rule"; \
+	  ( cd .semgrep && semgrep scan --test --metrics=off \
+	      --config "$$(basename "$$rule")" "$$(basename "$$fixture")" ) || rc=1; \
+	done; \
+	if [ "$$n" -eq 0 ]; then echo "no semgrep rule fixtures found — expected at least one" >&2; exit 1; fi; \
+	exit $$rc
 
 # --- Sample data seeder -----------------------------------------------------
 # Populate MongoDB and Valkey with a small idempotent dataset for local dev.

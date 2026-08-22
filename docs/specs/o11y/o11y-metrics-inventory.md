@@ -159,18 +159,29 @@ HTTP 500 on `/metrics` (this happened; fixed 2026-08-19).
 |---|---|---|---|
 | `chat.nats.consumer.loop.up` | up-down counter | `pkg/natsmetrics` | stream, consumer |
 | `chat.nats.consumer.messages` | counter | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
-| `chat.nats.consumer.redeliveries` | counter | `pkg/natsmetrics` | stream, consumer, event_type |
 | `chat.nats.consumer.processing.duration` | histogram (s) | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
 | `chat.nats.terminal.failures` | counter | `pkg/natsmetrics` | stream, consumer, event_type, reason |
-| `chat.nats.publish.attempts` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
-| `chat.nats.publish.retries` | counter | `pkg/natsmetrics` | destination_kind, operation |
-| `chat.nats.requests` | counter | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.request.duration` | histogram (s) | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.request.handled` | counter | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
-| `chat.nats.request.handler.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
+| `chat.nats.publish.failures` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
+| `rpc.client.call.duration` | histogram (s) | `pkg/natsmetrics` | rpc.system.name, rpc.method, error.type (absent on success) |
+| `rpc.server.call.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | rpc.system.name, rpc.method, error.type (absent on success) |
 | `chat.nats.client.connected` | up-down counter | `pkg/natsutil` | none — one series per process; value is the live connection count |
 | `chat.nats.client.connection.events` | counter | `pkg/natsutil` | event |
 | `nats_slow_consumer_events_total` | counter | `pkg/natsutil` | subject, queue |
+
+The two RPC families are the one place this repo does not use a `chat.` prefix:
+they implement the OpenTelemetry RPC semantic conventions, so they carry the
+convention's instrument names, unit and labels verbatim (verified against
+`go.opentelemetry.io/otel/semconv/v1.40.0/rpcconv`). `error.type` is conditional
+on failure per the convention, so a successful call carries no error label at
+all.
+
+Bucket boundaries are the one deliberate deviation: these histograms use
+`o11y.DefaultLatencyBuckets()` (11 boundaries), not the convention's own table
+(14). The SDK overrides the identical table for `http.server.*` so that p99 is
+directly comparable across services, and an RPC family on different boundaries
+would break exactly that. Interop is unaffected in the part that matters — a
+generic RPC panel still finds and groups these series by name and label; only
+`histogram_quantile`'s interpolation points differ.
 
 The two `chat.nats.client.*` families are the exception: they carry no `site`
 at all, because they are emitted from the opt-in connection helper, which sits
@@ -182,9 +193,14 @@ All subject- and error-derived dimensions are closed enums. Inbound request
 `result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
 `not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
 Room and history operations are coarse bounded categories — `room_read`,
-`room_mutation`, `member_read`, `member_mutation`, `history_read`,
-`history_mutation`, `room_publish`, `member_publish`, `outbox_publish`. Subject
-families that do not map normalize to `unknown` rather than minting a label.
+`room_mutation`, `member_read`, `member_mutation`, `channel_history`,
+`thread_open`, `history_read`, `history_mutation`, `room_publish`,
+`member_publish`, `outbox_publish`. `channel_history` and `thread_open` are
+deliberately finer than the rest: each is the whole numerator and denominator of
+an SLO (SLO-4 and SLO-5), which the coarse `history_read` cannot serve because it
+also carries scroll, jump, single and batch reads, pinned lists and thread
+parents. Subject families that do not map normalize to `unknown` rather than
+minting a label.
 Raw subjects, room IDs, account IDs, site IDs parsed out of subject tokens, and
 error strings are never labels.
 
@@ -196,9 +212,9 @@ arrives as a resource-derived constant label, never as an inline attribute.)
 Reconnect-buffer overflow is **not** a connection event: nats.go returns
 `ErrReconnectBufExceeded` synchronously from `publish()` and never routes it
 through `ErrorHandler`, so it is counted as
-`chat_nats_publish_attempts_total{outcome="buffer_full"}`. The full semantics,
-label enums, and the alerts these drive are specified in the NATS failure
-metrics contract under `docs/load-testing/failure/`.
+`chat_nats_publish_failures_total{outcome="buffer_full"}`. The full semantics,
+label enums, and the alerts these drive are specified in the NATS metrics
+contract at `docs/specs/o11y/nats-metrics-contract.md`.
 
 ### 2.2 Services not previously inventoried (2026-08-14)
 

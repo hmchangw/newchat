@@ -28,6 +28,39 @@ type metrics struct {
 	requests        metric.Int64Counter     // → search_service_requests_total
 	requestDuration metric.Float64Histogram // → search_service_request_duration_seconds
 	esDuration      metric.Float64Histogram // → search_service_es_duration_seconds
+
+	// Both label sets are closed (see metricKind* and allowedStatusLabels), so
+	// every combination is built once here rather than per request.
+	kindOpts   map[string]metric.MeasurementOption
+	statusOpts map[requestLabels]metric.MeasurementOption
+}
+
+// requestLabels keys the precomputed request attribute sets.
+type requestLabels struct {
+	kind   string
+	status string
+}
+
+// allMetricKinds is the closed set of searchable collections.
+var allMetricKinds = []string{
+	metricKindMessages, metricKindRooms, metricKindApps, metricKindUsers, metricKindOrgs,
+}
+
+// buildRequestOpts precomputes kind and kind×status attribute sets so
+// observeRequest, which runs once per search, does no attribute construction.
+func buildRequestOpts() (map[string]metric.MeasurementOption, map[requestLabels]metric.MeasurementOption) {
+	kindOpts := make(map[string]metric.MeasurementOption, len(allMetricKinds))
+	statusOpts := make(map[requestLabels]metric.MeasurementOption, len(allMetricKinds)*len(allowedStatusLabels))
+	for _, kind := range allMetricKinds {
+		kindOpts[kind] = metric.WithAttributeSet(attribute.NewSet(attribute.String("kind", kind)))
+		for status := range allowedStatusLabels {
+			statusOpts[requestLabels{kind, status}] = metric.WithAttributeSet(attribute.NewSet(
+				attribute.String("kind", kind),
+				attribute.String("status", status),
+			))
+		}
+	}
+	return kindOpts, statusOpts
 }
 
 // appMetrics is set once by initMetrics after obs.Init has installed the global
@@ -63,7 +96,14 @@ func newMetrics(meter metric.Meter) (*metrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create es-duration histogram: %w", err)
 	}
-	return &metrics{requests: requests, requestDuration: requestDuration, esDuration: esDuration}, nil
+	kindOpts, statusOpts := buildRequestOpts()
+	return &metrics{
+		requests:        requests,
+		requestDuration: requestDuration,
+		esDuration:      esDuration,
+		kindOpts:        kindOpts,
+		statusOpts:      statusOpts,
+	}, nil
 }
 
 // initMetrics builds the app instruments from meter and installs them as the
@@ -102,12 +142,25 @@ func observeRequest(ctx context.Context, kind string, errPtr *error) func() {
 	}
 	start := time.Now()
 	return func() {
-		appMetrics.requestDuration.Record(ctx, time.Since(start).Seconds(),
-			metric.WithAttributes(attribute.String("kind", kind)))
-		appMetrics.requests.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("kind", kind),
-			attribute.String("status", statusLabel(*errPtr)),
-		))
+		status := statusLabel(*errPtr)
+		// Look the precomputed sets up rather than indexing blind. A kind
+		// outside allMetricKinds yields a nil MeasurementOption, and the SDK
+		// dereferences it — a runtime panic on a telemetry path, which must
+		// never be able to take a request down. Recording without the kind
+		// label loses a dimension; it does not lose the request, and it does
+		// not mint an unbounded label from an unvetted value. The sibling
+		// recorder in search-sync-worker guards the same way.
+		durationOpt, ok := appMetrics.kindOpts[kind]
+		if !ok {
+			durationOpt = metric.WithAttributes()
+		}
+		appMetrics.requestDuration.Record(ctx, time.Since(start).Seconds(), durationOpt)
+
+		countOpt, ok := appMetrics.statusOpts[requestLabels{kind, status}]
+		if !ok {
+			countOpt = metric.WithAttributes(attribute.String("status", status))
+		}
+		appMetrics.requests.Add(ctx, 1, countOpt)
 	}
 }
 

@@ -39,7 +39,16 @@ func (a plainIterAdapter) Next(opts ...jetstream.NextOpt) (context.Context, jets
 // Docker) with the MESSAGES-CANONICAL stream and a broadcast-worker-style
 // durable consumer, returning the JetStream handle, the iterator, the subject
 // to publish canonical messages on, and the durable's MaxDeliver.
-func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetStream, natsmetrics.Iterator, string, int) {
+// ackWait is a parameter because the two callers want opposite things from it.
+// The redelivery test needs it short, so an unacked message visibly redelivers
+// inside the test window. The metrics test needs it long: its handler Naks, and
+// a Nak issued after AckWait has already expired is rejected by the server —
+// natsmetrics.Message.finish then records left_pending instead of nak, the
+// server redelivers on expiry anyway, and the nak assertion fails on a loaded
+// runner while the test still observes its redelivery. That is a real property
+// of the system rather than a test artifact, and it is the subject of an open
+// review thread; here it is only noise, so the metrics test buys headroom.
+func startEmbeddedCanonicalConsumer(t *testing.T, siteID string, ackWait time.Duration) (jetstream.JetStream, natsmetrics.Iterator, string, int) {
 	t.Helper()
 	opts := &natsserver.Options{Port: -1, JetStream: true, StoreDir: t.TempDir()}
 	ns, err := natsserver.NewServer(opts)
@@ -59,11 +68,9 @@ func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetS
 	_, err = js.CreateOrUpdateStream(context.Background(), jetstream.StreamConfig{Name: sc.Name, Subjects: sc.Subjects})
 	require.NoError(t, err)
 
-	// Short AckWait so a message that is NOT acked (left pending or Nak'd)
-	// visibly redelivers within the test window. jobguard Acks the poison
-	// message, so it must NOT redeliver.
+	// jobguard Acks the poison message, so it must NOT redeliver.
 	settings := stream.ConsumerSettings{
-		AckWait:       time.Second,
+		AckWait:       ackWait,
 		MaxDeliver:    10,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
@@ -87,7 +94,8 @@ func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetS
 // must be Acked (poison drop) rather than redelivered — a redelivery loop is
 // what crash-loops a real worker.
 func TestConsume_PoisonMessageDoesNotBlockStream(t *testing.T) {
-	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-test")
+	// Short AckWait: this test wants an unacked message to redeliver fast.
+	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-test", time.Second)
 
 	var poisonCalls atomic.Int32
 	good := make(chan struct{}, 1)
@@ -151,7 +159,7 @@ func newTestBroadcastMetrics(t *testing.T) (*natsmetrics.Metrics, sdkmetric.Read
 // check: run real deliveries through a real durable and assert the exact
 // counter deltas, the loop gauge, and that no identifier leaked into a label.
 func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
-	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-metrics")
+	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-metrics", 30*time.Second)
 	m, reader := newTestBroadcastMetrics(t)
 	consumer := m.Consumer(natsmetrics.ConsumerConfig{
 		Site:   "site-metrics",
@@ -170,8 +178,13 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 			acked <- struct{}{}
 		case "transient":
 			// Nak once, then Ack on the redelivery so the run terminates.
+			//
+			// assert, not require: this runs on a Consume goroutine where FailNow
+			// is illegal. The error is checked rather than discarded because a
+			// rejected Nak is recorded as left_pending, and the only symptom used
+			// to be the nak assertion below reading 0 with nothing to explain it.
 			if naks.Add(1) == 1 {
-				_ = msg.Nak()
+				assert.NoError(t, msg.Nak(), "Nak was rejected — the nak assertion below will read 0")
 				return
 			}
 			_ = msg.Ack()
@@ -216,8 +229,11 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.loop.up", nil), "loop must be up")
 	assert.Equal(t, int64(3), sumOf(t, rm, "chat.nats.consumer.messages", map[string]string{"outcome": "ack", "event_type": "created"}))
+	// The nak above is the redelivery signal. A nakked delivery is what makes
+	// JetStream redeliver, and this counter already carries the event type, so
+	// "which kind of message keeps failing" is answered here; "how many times it
+	// was redelivered" is the broker's jetstream_consumer_num_redelivered.
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.messages", map[string]string{"outcome": "nak", "event_type": "created"}))
-	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.redeliveries", map[string]string{"event_type": "created"}))
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": "invalid_payload"}))
 
 	// The stream, subject and site carry a site id and a message body, but no

@@ -108,9 +108,16 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
-	domainMetrics := newBroadcastMetrics(sdk.MeterProvider().Meter("broadcast-worker"))
+	// Same gate as the line above, for the same reason. Every recorder on
+	// *broadcastMetrics already guards a nil receiver, so the toggle collapses
+	// the per-recipient Delivery call to a return instead of to a no-op
+	// instrument that still costs a map lookup and an SDK Add.
+	var domainMetrics *broadcastMetrics
+	if sdk.Toggles.Metrics {
+		domainMetrics = newBroadcastMetrics(sdk.MeterProvider().Meter("broadcast-worker"))
+	}
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
 	if err != nil {
@@ -312,7 +319,7 @@ type natsPublisher struct {
 
 func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte) error {
 	err := p.nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subject, data))
-	p.metrics.Attempt(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish, err)
+	p.metrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish, err)
 	if err != nil {
 		return fmt.Errorf("publish to %q: %w", subject, err)
 	}
