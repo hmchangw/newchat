@@ -137,3 +137,40 @@ func TestBroadcastMetrics_Record_NilReceiverIsSafe(t *testing.T) {
 	metrics.Fanout(context.Background(), roomChannel, natsmetrics.EventCreated, 1)
 	metrics.Delivery(context.Background(), roomChannel, natsmetrics.EventCreated, nil)
 }
+
+func TestBroadcastMetrics_ThreadViewPublishFailed(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	m := newBroadcastMetrics(mp.Meter("test"))
+
+	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated)
+	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated)
+	// An unclassified event must collapse onto the bounded "unknown" series.
+	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventType("dynamic-event"))
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	byEvent := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != "broadcast_worker_thread_view_publish_failures_total" {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "counter must collect as an int64 sum")
+			for _, dp := range sum.DataPoints {
+				event, found := dp.Attributes.Value("event_type")
+				require.True(t, found, "every point carries event_type")
+				byEvent[event.AsString()] += dp.Value
+			}
+		}
+	}
+	assert.Equal(t, map[string]int64{"created": 2, "unknown": 1}, byEvent)
+}
+
+// A nil metrics value must be inert, not panic the publish path.
+func TestBroadcastMetrics_ThreadViewPublishFailed_NilSafe(t *testing.T) {
+	var m *broadcastMetrics
+	assert.NotPanics(t, func() { m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated) })
+}

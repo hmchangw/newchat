@@ -6905,6 +6905,22 @@ func TestHandler_marshalBounded(t *testing.T) {
 	}
 }
 
+// room-service catches an oversize reply proactively, before the transport
+// does, so its error must carry the same reason the router's reactive fallback
+// emits — otherwise the same condition reaches the client two different ways
+// and the documented `response_too_large` branch (docs/client-api.md §6)
+// silently misses this one.
+func TestHandler_marshalBounded_OversizeCarriesTheDocumentedReason(t *testing.T) {
+	h := &Handler{maxResponseBytes: 8}
+
+	_, err := h.marshalBounded(map[string]string{"hello": strings.Repeat("x", 64)})
+
+	var coded *errcode.Error
+	require.ErrorAs(t, err, &coded)
+	assert.Equal(t, errcode.CodeInternal, coded.Code)
+	assert.Equal(t, errcode.ResponseTooLarge, coded.Reason)
+}
+
 func TestHandler_authorizeRoomAppRead(t *testing.T) {
 	tests := []struct {
 		name            string

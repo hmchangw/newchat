@@ -4,19 +4,19 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -576,6 +576,182 @@ func TestBroadcastWorker_GetHistorySharedSince_Integration(t *testing.T) {
 	empty, err := store.GetHistorySharedSince(ctx, "r-hss", nil)
 	require.NoError(t, err)
 	assert.Empty(t, empty)
+}
+
+// natsConnPublisher lets the test assert on what a client receives, not a fake.
+type natsConnPublisher struct{ nc *nats.Conn }
+
+func (p *natsConnPublisher) Publish(_ context.Context, subj string, data []byte) error {
+	if err := p.nc.Publish(subj, data); err != nil {
+		return fmt.Errorf("publish to %s: %w", subj, err)
+	}
+	return nil
+}
+
+// dave never replied, so the per-follower fan-out skips him; the panel must not.
+func TestBroadcastWorker_ThreadViewSubject_NonFollowerReceivesReply_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	seedUsers(t, db)
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-view", Name: "general", Type: model.RoomTypeChannel, UserCount: 3, SiteID: "site-a",
+	})
+	require.NoError(t, err)
+	_, err = db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+		"_id":             "tr-view",
+		"parentMessageId": "parent-view",
+		"replyAccounts":   []string{"alice", "bob"},
+	})
+	require.NoError(t, err)
+
+	nc, err := nats.Connect(testutil.NATS(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nc.Drain() })
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
+		&fakeRoomKeyProvider{}, stubParentFetcher{}, false, subject.RouteGlobal, withThreadViewSubject(true))
+
+	// dave follows nothing; his only subscription is the open panel.
+	viewerSub, err := nc.SubscribeSync(subject.RoomThreadEvent("r-view", "parent-view", true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = viewerSub.Unsubscribe() })
+	// A follower's per-user lane, to prove both lanes carry the same event.
+	followerSub, err := nc.SubscribeSync(subject.UserRoomEvent("bob"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = followerSub.Unsubscribe() })
+	require.NoError(t, nc.Flush())
+
+	msgTime := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	data, err := json.Marshal(model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-view", RoomID: "r-view", UserID: "u-alice", UserAccount: "alice",
+			Content: "a reply nobody following", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-view", TShow: false,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(ctx, data))
+
+	viewerMsg, err := viewerSub.NextMsg(5 * time.Second)
+	require.NoError(t, err, "a non-follower with the panel open must receive the reply")
+
+	var viewerEvt model.RoomEvent
+	require.NoError(t, json.Unmarshal(viewerMsg.Data, &viewerEvt))
+	assert.Equal(t, model.RoomEventNewThreadMessage, viewerEvt.Type)
+	assert.Equal(t, "r-view", viewerEvt.RoomID)
+	require.NotNil(t, viewerEvt.Message)
+	assert.Equal(t, "reply-view", viewerEvt.Message.ID)
+
+	followerMsg, err := followerSub.NextMsg(5 * time.Second)
+	require.NoError(t, err, "the per-follower lane must be unaffected")
+	assert.Equal(t, followerMsg.Data, viewerMsg.Data, "both lanes carry the identical envelope")
+}
+
+// A same-site room keeps its thread lane local; the global subject stays silent.
+func TestBroadcastWorker_ThreadViewSubject_SameSiteRoomRoutesLocal_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	seedUsers(t, db)
+
+	sameSite := false
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-local", Name: "general", Type: model.RoomTypeChannel, UserCount: 2,
+		SiteID: "site-a", CrossSite: &sameSite,
+	})
+	require.NoError(t, err)
+
+	nc, err := nats.Connect(testutil.NATS(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nc.Drain() })
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
+		&fakeRoomKeyProvider{}, stubParentFetcher{}, false, subject.RouteLocal, withThreadViewSubject(true))
+
+	localSub, err := nc.SubscribeSync(subject.RoomThreadEvent("r-local", "parent-local", false))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = localSub.Unsubscribe() })
+	globalSub, err := nc.SubscribeSync(subject.RoomThreadEvent("r-local", "parent-local", true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalSub.Unsubscribe() })
+	require.NoError(t, nc.Flush())
+
+	msgTime := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	data, err := json.Marshal(model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-local", RoomID: "r-local", UserID: "u-alice", UserAccount: "alice",
+			Content: "same-site reply", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-local", TShow: false,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(ctx, data))
+
+	_, err = localSub.NextMsg(5 * time.Second)
+	require.NoError(t, err, "same-site thread events ride the local namespace")
+
+	_, err = globalSub.NextMsg(200 * time.Millisecond)
+	assert.Error(t, err, "a same-site room must not leak its thread lane onto the global namespace")
+}
+
+// The view lane rides the room namespace, which any authenticated client may
+// subscribe to, so what actually reaches the wire must be ciphertext a room-key
+// holder can open — and nothing a non-member could read.
+func TestBroadcastWorker_ThreadViewSubject_EncryptedForRoomNamespace_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	seedUsers(t, db)
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-enc", Name: "general", Type: model.RoomTypeChannel, UserCount: 3, SiteID: "site-a",
+	})
+	require.NoError(t, err)
+	_, err = db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+		"_id": "tr-enc", "parentMessageId": "parent-enc", "replyAccounts": []string{"bob"},
+	})
+	require.NoError(t, err)
+
+	nc, err := nats.Connect(testutil.NATS(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nc.Drain() })
+
+	secret := make([]byte, 32)
+	_, err = rand.Read(secret)
+	require.NoError(t, err)
+	key := &roomkeystore.VersionedKeyPair{Version: 7, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: secret}}
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
+		&fakeRoomKeyProvider{pair: key}, stubParentFetcher{}, true, subject.RouteGlobal, withThreadViewSubject(true))
+
+	viewerSub, err := nc.SubscribeSync(subject.RoomThreadEvent("r-enc", "parent-enc", true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = viewerSub.Unsubscribe() })
+	require.NoError(t, nc.Flush())
+
+	msgTime := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	data, err := json.Marshal(model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-enc", RoomID: "r-enc", UserID: "u-alice", UserAccount: "alice",
+			Content: "secret thread body", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-enc", TShow: false,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(ctx, data))
+
+	msg, err := viewerSub.NextMsg(5 * time.Second)
+	require.NoError(t, err)
+	assert.NotContains(t, string(msg.Data), "secret thread body", "the body must not cross the wire in the clear")
+
+	evt, clientMsg := decryptClientMessage(t, msg.Data, key)
+	assert.Equal(t, model.RoomEventNewThreadMessage, evt.Type)
+	assert.Equal(t, "secret thread body", clientMsg.Content)
 }
 
 // TestBroadcastWorker_MentionFederation_Integration is the producer leg of the

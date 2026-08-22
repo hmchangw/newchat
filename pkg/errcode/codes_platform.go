@@ -25,4 +25,12 @@ const (
 	// NatsRequestTimeout marks a request that was delivered but not answered
 	// within the caller's timeout. Retryable.
 	NatsRequestTimeout Reason = "upstream_timeout"
+
+	// ResponseTooLarge marks a reply the transport refused because the
+	// marshalled response exceeds the broker's max_payload. Without the
+	// fallback envelope that carries this reason the request would simply
+	// time out, so the client cannot tell "too big" from "server down" —
+	// the two call for opposite recoveries. Retry with a narrower request
+	// (a smaller limit or page), never with the same one.
+	ResponseTooLarge Reason = "response_too_large"
 )
