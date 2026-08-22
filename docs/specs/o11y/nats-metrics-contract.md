@@ -72,6 +72,14 @@ Use traces, logs, and retained report sidecars for individual identifiers. A
 bounded `run_info` metric may describe scenario/environment/traffic profile,
 but it must not carry `run_id`.
 
+This list is enforced, not advisory: `.semgrep/metrics.yml`'s
+`metrics-no-unbounded-label` rule fails CI on an attribute key matching any of
+these prefixes, with or without an `Id`/`_id`/`UID` tail, plus anything ending
+in `Subject`. `run_info` is deliberately outside the pattern. A key the rule
+cannot recognise as bounded but which genuinely is takes a `nosemgrep` with a
+justification naming what enforces the boundedness — a claim with nothing behind
+it is how the `_INBOX` leak survived review once already.
+
 ## 3. Outcome Vocabularies
 
 ### Consumer outcomes
