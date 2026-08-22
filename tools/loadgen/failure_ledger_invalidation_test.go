@@ -181,3 +181,34 @@ func TestFailureLedger_AReplayedInvalidationWithoutAReasonFailsTheReplay(t *test
 		"the failure must name the record, or the operator cannot find it")
 	assert.Contains(t, err.Error(), "invalidation is missing its reason")
 }
+
+// Close is the last durability barrier. A run whose invalidation never reached
+// the journal must not exit reporting success: nothing would retry it, and the
+// next replay would present the evidence this run had already disowned as
+// sound.
+func TestFailureLedger_CloseReportsAnInvalidationItCouldNotPersist(t *testing.T) {
+	journal := &appendFailingFailureJournal{failFor: failureLedgerEventInvalidated}
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 4, Journal: journal})
+	require.NoError(t, err)
+
+	ledger.Invalidate(invalidReasonReconcileCapacity)
+
+	closeErr := ledger.Close()
+
+	require.Error(t, closeErr, "a lost invalidation must not close cleanly")
+	assert.Contains(t, closeErr.Error(), invalidReasonReconcileCapacity)
+}
+
+// Close retries first, so a journal that recovers before shutdown still ends
+// durable and the run closes cleanly.
+func TestFailureLedger_ClosePersistsAnInvalidationTheJournalLaterAccepted(t *testing.T) {
+	journal := &appendFailingFailureJournal{failFor: failureLedgerEventInvalidated}
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 4, Journal: journal})
+	require.NoError(t, err)
+
+	ledger.Invalidate(invalidReasonReconcileCapacity)
+	journal.failFor = ""
+
+	require.NoError(t, ledger.Close())
+	assert.Equal(t, 2, journal.attempts, "close retries the append it never landed")
+}

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -1163,23 +1164,47 @@ func (l *failureLedger) invalidateReplayedLocked(reason string) error {
 	return nil
 }
 
+// flushInvalidationsLocked makes one last attempt at every cause the journal
+// never accepted, and reports what still did not land. A run that closes with
+// an invalidation only in memory would leave the next replay presenting
+// evidence this run had already disowned.
+func (l *failureLedger) flushInvalidationsLocked() error {
+	var unpersisted []string
+	for _, reason := range l.invalidReasons {
+		l.persistInvalidationLocked(reason)
+		if !slices.Contains(l.persistedInvalidReasons, reason) {
+			unpersisted = append(unpersisted, reason)
+		}
+	}
+	if len(unpersisted) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"failure ledger could not persist invalidation %s",
+		strings.Join(unpersisted, ", "),
+	)
+}
+
 func (l *failureLedger) Close() error {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
 		return nil
 	}
+	// Before the journal goes away, not after: this is the last chance to land
+	// a cause the file never accepted.
+	flushErr := l.flushInvalidationsLocked()
 	l.closed = true
 	journal := l.journal
 	l.mu.Unlock()
 	l.startingWG.Wait()
 	if journal == nil {
-		return nil
+		return flushErr
 	}
 	if err := journal.Close(); err != nil {
-		return fmt.Errorf("close failure ledger journal: %w", err)
+		return errors.Join(flushErr, fmt.Errorf("close failure ledger journal: %w", err))
 	}
-	return nil
+	return flushErr
 }
 
 func (l *failureLedger) finalizeLocked(
