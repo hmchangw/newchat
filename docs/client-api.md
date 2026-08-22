@@ -5157,7 +5157,9 @@ There is **no** member list on a section — membership rides the subscriptions.
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
 > **Large pages:** the NATS reply is capped at 128 KB, so a full sidebar does not
-> fit in one call. Clients fetching 100+ rows should use the HTTP form,
+> fit in one call — a page that overflows it comes back as `internal` /
+> [`response_too_large`](#6-error-envelope-reference), which is the signal to
+> switch rather than to retry. Clients fetching 100+ rows should use the HTTP form,
 > [GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions), which returns
 > the same body with no payload ceiling.
 
@@ -5320,6 +5322,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
 | Unknown `type` value | `bad_request` | `{ "code": "bad_request", "error": "unknown subscription type" }` |
 | Negative `updatedWithinDays` | `bad_request` | `{ "code": "bad_request", "error": "updatedWithinDays must be non-negative" }` |
 | Server exceeded its own handler budget | `unavailable` | Enrichment did not finish in time. Retryable — the server fails rather than return a page whose rooms are indistinguishable from deleted ones. |
+| Reply exceeds the transport payload cap | `internal` (`response_too_large`) | Only over NATS. The HTTP form has no payload ceiling — see [GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions). |
 | Internal failure | `internal` | — |
 
 ---
