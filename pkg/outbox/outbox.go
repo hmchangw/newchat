@@ -40,6 +40,9 @@ var ConcurrentEventTypes = []model.InboxEventType{
 	// Idempotent + commutes with add/remove (a delete just makes it a no-op), so
 	// it rides the concurrent lane.
 	model.InboxMemberJoinedAtRefreshed,
+	// broadcast-worker: room-level mention badge. The destination write is a
+	// guarded idempotent $set, so duplicates and out-of-order applies converge.
+	model.InboxSubscriptionMention,
 }
 
 // OrderedEventTypes are the OUTBOX event types forwarded by outbox-worker's
