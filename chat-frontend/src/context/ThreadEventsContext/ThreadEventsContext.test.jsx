@@ -38,6 +38,11 @@ const registerThreadMessageMutationHandler = vi.fn((handler) => {
     if (registeredThreadMessageMutationHandler === handler) registeredThreadMessageMutationHandler = null
   }
 })
+const decrypt = vi.fn(async () => null)
+const ensureKey = vi.fn(async () => false)
+vi.mock('@/context/RoomKeysContext', () => ({
+  useRoomKeys: () => ({ decrypt, ensureKey }),
+}))
 vi.mock('../RoomEventsContext/RoomEventsContext', () => ({
   useRoomDispatch: () => roomDispatch,
   useRegisterThreadReplyHandler: () => registerThreadReplyHandler,
@@ -333,6 +338,8 @@ describe('ThreadEventsContext thread-view subscription', () => {
     unsubscribe.mockClear()
     callOrder.length = 0
     threadEventHandler = null
+    decrypt.mockReset().mockResolvedValue(null)
+    ensureKey.mockReset().mockResolvedValue(false)
     request.mockImplementation(() => {
       callOrder.push('request')
       return Promise.resolve({ messages: [], hasNext: false, nextCursor: null })
@@ -441,6 +448,22 @@ describe('ThreadEventsContext thread-view subscription', () => {
       threadEventHandler({ type: 'message_edited', messageId: 'm9', newContent: 'after', editedAt: 1756000000000 })
     })
     expect(screen.getByText('firstEditedAt:2025-08-24T01:46:40.000Z')).toBeInTheDocument()
+  })
+
+  // Channel rooms are encrypted, so without a decrypt step every reply on this
+  // lane would arrive as an empty envelope and be dropped.
+  it('decrypts an encrypted reply arriving on the thread subject', async () => {
+    decrypt.mockResolvedValue(JSON.stringify({ id: 'm9', content: 'sealed then opened' }))
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      await threadEventHandler({
+        type: 'new_thread_message',
+        roomId: 'r1',
+        encryptedMessage: { version: 3, nonce: 'bm9uY2U=', ciphertext: 'Y2lwaGVy' },
+      })
+    })
+    expect(screen.getByText('firstContent:sealed then opened')).toBeInTheDocument()
   })
 
   it('applies a delete arriving on the thread subject', async () => {

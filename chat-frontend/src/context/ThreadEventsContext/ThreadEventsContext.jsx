@@ -7,7 +7,9 @@ import {
   useRegisterThreadMessageMutationHandler,
 } from '../RoomEventsContext/RoomEventsContext'
 import { generateMessageID } from '@/lib/idgen'
+import { useRoomKeys } from '@/context/RoomKeysContext'
 import { fetchThreadMessages, sendMessage, subscribeToThreadEvents } from '@/api'
+import { decryptRoomEvent } from '@/lib/decryptRoomEvent'
 import { threadEventsReducer, initialState } from './reducer'
 
 /** Mirrors the room lane's coercion so both lanes hand the reducer an ISO
@@ -22,11 +24,16 @@ export function ThreadEventsProvider({ children }) {
   const nats = useNats()
   const { user } = nats
   const roomDispatch = useRoomDispatch()
+  const { decrypt, ensureKey } = useRoomKeys()
   const registerThreadReplyHandler = useRegisterThreadReplyHandler()
   const registerThreadMessageMutationHandler = useRegisterThreadMessageMutationHandler()
   const [state, dispatch] = useReducer(threadEventsReducer, initialState)
   const generationRef = useRef(0)
   const threadSubRef = useRef(null)
+  const decryptRef = useRef(decrypt)
+  decryptRef.current = decrypt
+  const ensureKeyRef = useRef(ensureKey)
+  ensureKeyRef.current = ensureKey
   const stateRef = useRef(state)
   stateRef.current = state
 
@@ -95,7 +102,15 @@ export function ThreadEventsProvider({ children }) {
       threadSubRef.current = subscribeToThreadEvents(
         nats,
         { roomId: parent.roomId, parentMessageId: parent.messageId, crossSite: parent.crossSite },
-        (evt) => {
+        async (raw) => {
+          // Channel rooms are encrypted, so this lane must decrypt exactly as
+          // the room lane does or every reply arrives as an empty envelope.
+          const evt = await decryptRoomEvent(raw, {
+            decrypt: decryptRef.current,
+            ensureKey: ensureKeyRef.current,
+            fallbackSiteId: parent.siteId,
+          })
+          if (myGen !== generationRef.current) return
           if (evt?.type === 'new_thread_message') {
             applyReply(parent.messageId, evt.message)
           } else if (evt?.type === 'message_edited') {
