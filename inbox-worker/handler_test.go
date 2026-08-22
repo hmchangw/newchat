@@ -2784,6 +2784,12 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 			},
 		},
 		{
+			name: "omitted mentionedAt is dropped rather than badging as 1970",
+			payload: model.SubscriptionMentionEvent{
+				RoomID: "room-1", Accounts: []string{"alice"},
+			},
+		},
+		{
 			name:     "store error propagates for redelivery",
 			payload:  valid,
 			storeErr: errors.New("mongo down"),

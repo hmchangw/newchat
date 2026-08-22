@@ -42,7 +42,7 @@ InboxSubscriptionMention InboxEventType = "subscription_mention"
 type SubscriptionMentionEvent struct {
     RoomID           string   `json:"roomId"           bson:"roomId"`
     Accounts         []string `json:"accounts"         bson:"accounts"`
-    MessageCreatedAt int64    `json:"messageCreatedAt" bson:"messageCreatedAt"`
+    MentionedAt      int64    `json:"mentionedAt"      bson:"mentionedAt"`
     Timestamp        int64    `json:"timestamp"        bson:"timestamp"`
 }
 ```
@@ -51,15 +51,18 @@ type SubscriptionMentionEvent struct {
 the full list would ship mention identities to sites with no business knowing
 them, exactly as `room-worker`'s per-site filtering avoids.
 
-`MessageCreatedAt` is the message's `createdAt` (or `editedAt` on the edit
-path) as unix-millis, feeding the destination's read guard. Mongo stores BSON
-datetimes at millisecond precision, so the wire type loses nothing.
+`MentionedAt` is when the mention appeared — the message's `createdAt`, or its
+`editedAt` when an edit added it — as unix-millis, feeding the destination's
+read guard. Mongo stores BSON datetimes at millisecond precision, so the wire
+type loses nothing. The destination drops an event missing `roomId`,
+`accounts`, or `mentionedAt`: it would write nothing (a zero `mentionedAt`
+badges as 1970 and loses the guard) and no redelivery can repair it.
 
 ### Lane: concurrent
 
 `InboxSubscriptionMention` joins `outbox.ConcurrentEventTypes`. The destination
 write is `$set hasMention:true` under the same "has not already read past
-`MessageCreatedAt`" guard the origin applies, which is idempotent and commutes
+`MentionedAt`" guard the origin applies, which is idempotent and commutes
 with `subscription_read` replays. It needs no FIFO ordering against
 `member_added`/`member_removed`: a mention arriving before its `member_added`
 matches no subscription and is a silent no-op, and the next mention re-badges.
@@ -84,8 +87,8 @@ blank and local entries, and publish one `outbox.Publish` per remote site.
 Site IDs already ride the existing `FindUsersByAccounts` result
 (`pkg/mention/mention.go:115`), so the hot path takes no extra round-trip.
 
-Dedup ID: `mention:{roomID}:{msgID}:{destSiteID}` — stable across
-MESSAGES-CANONICAL redeliveries, distinct per destination.
+Dedup ID: `mention:{roomID}:{msgID}:{mentionedAtMillis}:{destSiteID}` — stable
+across MESSAGES-CANONICAL redeliveries, distinct per destination.
 
 ### Edits
 
@@ -93,9 +96,8 @@ MESSAGES-CANONICAL redeliveries, distinct per destination.
 one `FindUsersByAccounts` call, made only when the edit actually contains
 mentions.
 
-Dedup ID: `mention-edit:{roomID}:{msgID}:{editedAtMillis}:{destSiteID}`.
-`editedAt` is in the seed so a second edit adding a new mention is not
-swallowed by stream-level dedup.
+Same dedup format, with `editedAt` as the timestamp component, so an edit
+adding a new mention is not swallowed by the original send's dedup ID.
 
 ### Failure handling
 

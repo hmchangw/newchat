@@ -494,11 +494,13 @@ func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.Inbo
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
 		return fmt.Errorf("unmarshal subscription_mention payload: %w", err)
 	}
-	// A blank room or empty account list writes nothing and would Ack silently;
-	// no redelivery can fix it, so drop it loudly as the producer bug it is.
-	if e.RoomID == "" || len(e.Accounts) == 0 {
-		slog.WarnContext(ctx, "dropping subscription_mention with no room or accounts",
-			"room_id", e.RoomID, "accounts", len(e.Accounts), "origin_site", evt.SiteID)
+	// Each of these writes nothing and would Ack silently — a zero mentionedAt
+	// badges as 1970, so the read guard skips everyone who has ever read the room.
+	// No redelivery repairs any of them, so drop loudly as the producer bug it is.
+	if e.RoomID == "" || len(e.Accounts) == 0 || e.MentionedAt <= 0 {
+		slog.WarnContext(ctx, "dropping malformed subscription_mention",
+			"room_id", e.RoomID, "accounts", len(e.Accounts), "mentioned_at", e.MentionedAt,
+			"origin_site", evt.SiteID)
 		return nil
 	}
 	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MentionedAt).UTC()); err != nil {
