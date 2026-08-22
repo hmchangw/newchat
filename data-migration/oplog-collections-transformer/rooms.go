@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -59,18 +57,6 @@ func (r *sourceRoom) displayName() string {
 	return r.Name
 }
 
-// destinationName is the name the destination room doc takes: the display name, forced to carry the
-// soft-delete marker when the source set it on only one of the two name fields. user-service hides a
-// deleted room by matching ^Del- on this value, so dropping the marker here would apply a deletion
-// that hides nothing.
-func (r *sourceRoom) destinationName() string {
-	name := r.displayName()
-	if isSoftDeletedRecord(r.T, r.Name, r.FName) && !strings.HasPrefix(name, deletedNamePrefix) {
-		return deletedNamePrefix + name
-	}
-	return name
-}
-
 // handleRoom maps a rocketchat_rooms change event to an inbox InboxEvent (§4.2 / §4.0).
 // Returns migration.ErrSkipped for deletes, excluded room types, and update lookup misses.
 //
@@ -101,7 +87,7 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 	// hasBot is unresolvable here without a user lookup (botDM detection deferred — see §4.2 /
 	// the design's botDM note); pass false so a 2-party bot DM classifies as a plain dm for now.
 	// Classification runs before the soft-delete guard so a never-migratable type keeps metering its
-	// own reason, and a malformed delta on one still Skips instead of Terming.
+	// own exclusion reason rather than being counted as a soft delete.
 	class := classifyRoom(sr.T, sr.Prid != "", sr.TeamID != "", false, sr.participantCount())
 	if class.Excluded {
 		slog.Debug("skip excluded room type",
@@ -110,25 +96,14 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 		return migration.ErrSkipped
 	}
 
-	desc, derr := roomUpdateDelta(ev.Op, ev.UpdateDescription)
-	if derr != nil {
-		return fmt.Errorf("room update delta: %w", derr)
-	}
-
-	softDeleted := isSoftDeletedRecord(sr.T, sr.Name, sr.FName)
-	if softDeleted && !isDeletionEvent(ev.Op, desc) {
-		// Already soft-deleted at source and this event can't be the deletion itself: an insert would
-		// import a room the destination only ever hides, and a later field change is churn on a dead
-		// room. The events that DO carry the deletion are applied below.
+	if isSoftDeletedRecord(sr.Name, sr.FName) {
+		// Soft-deleted at source: skipped on every op, and before the delta is even decoded. Nothing
+		// about this room may reach Mongo — not the doc, not a rename of it — because room_sync would
+		// write the "Del-" name onto rooms.name and room_renamed onto every subscription in the room.
 		slog.DebugContext(ctx, "skip soft-deleted room",
 			"op", ev.Op, "t", sr.T, "eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
 		h.metrics.onSkipped(ctx, "room_soft_deleted")
 		return migration.ErrSkipped
-	}
-	if softDeleted {
-		// The cutover reconciliation counter: how many source deletions actually reached the
-		// destination, to compare against the source's Del- room count.
-		h.metrics.onSoftDeleteApplied(ctx, ev.Op)
 	}
 
 	// Zero-guard an absent source timestamp with now() so the room doc never carries a year-0001
@@ -146,7 +121,7 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 	room := model.Room{
 		ID:     sr.ID,
 		Type:   class.Type,
-		Name:   sr.destinationName(),
+		Name:   sr.displayName(),
 		SiteID: siteIDFromOrigin(sr.Federation.Origin, h.siteID),
 		// ExternalAccess source field is unconfirmed (SOURCE_DATA.md §3) — default false per design.
 		ExternalAccess: false,
@@ -158,7 +133,11 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 		CreatedAt:      createdAt,
 	}
 
-	for _, evt := range h.roomEvents(ev, &room, desc) {
+	evts, err := h.roomEvents(ev, &room)
+	if err != nil {
+		return fmt.Errorf("build room events: %w", err)
+	}
+	for _, evt := range evts {
 		if err := h.pub.Publish(ctx, evt); err != nil {
 			return fmt.Errorf("publish room event %q: %w", evt.Type, err)
 		}
@@ -170,10 +149,10 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 // (name/fname changed) and/or room_restricted (restricted changed) — both when one update changes both.
 //
 //nolint:gocritic // ev passed by value to mirror handle's signature; off the hot path.
-func (h *handler) roomEvents(ev oplogEvent, room *model.Room, desc updateDescription) []model.InboxEvent {
+func (h *handler) roomEvents(ev oplogEvent, room *model.Room) ([]model.InboxEvent, error) {
 	if ev.Op == "insert" {
 		// A brand-new room has no subscriptions yet — nothing to rename/re-restrict, sync suffices.
-		return []model.InboxEvent{h.roomSyncEvent(room)}
+		return []model.InboxEvent{h.roomSyncEvent(room)}, nil
 	}
 	if ev.Op != "update" {
 		// replace: a whole-doc rewrite carries NO updateDescription delta, so there is no way to
@@ -185,6 +164,13 @@ func (h *handler) roomEvents(ev oplogEvent, room *model.Room, desc updateDescrip
 			h.roomRenamedEvent(room),
 			h.roomRestrictedEvent(room),
 			h.roomSyncEvent(room),
+		}, nil
+	}
+
+	var desc updateDescription
+	if len(ev.UpdateDescription) > 0 {
+		if err := bson.UnmarshalExtJSON(ev.UpdateDescription, false, &desc); err != nil {
+			return nil, fmt.Errorf("%w: decode room updateDescription: %v", migration.ErrPoison, err) //nolint:errorlint // intentional single-%w sentinel wrap; decode err is informational only
 		}
 	}
 
@@ -199,34 +185,7 @@ func (h *handler) roomEvents(ev oplogEvent, room *model.Room, desc updateDescrip
 	}
 	// room_sync always trails so the room doc itself converges alongside the subscription-side events.
 	evts = append(evts, h.roomSyncEvent(room))
-	return evts
-}
-
-// roomUpdateDelta decodes an update event's field delta; other ops carry none.
-func roomUpdateDelta(op string, raw json.RawMessage) (updateDescription, error) {
-	var desc updateDescription
-	if op != "update" || len(raw) == 0 {
-		return desc, nil
-	}
-	if err := bson.UnmarshalExtJSON(raw, false, &desc); err != nil {
-		return desc, fmt.Errorf("%w: decode room updateDescription: %v", migration.ErrPoison, err) //nolint:errorlint // intentional single-%w sentinel wrap; decode err is informational only
-	}
-	return desc, nil
-}
-
-// isDeletionEvent reports whether this event can be carrying the soft-delete of a doc that now has
-// the prefix — the source's only delete signal, so it is applied (the destination room takes the
-// prefixed name, which user-service's ^Del- filter hides) rather than skipped.
-//
-// An update qualifies when its delta touches a name field (set or removed — a removal changes the
-// mapped name too). A replace always qualifies: it carries no delta, so the deletion cannot be
-// recognised from the event, and leaving a deleted room visible is worse than the hidden room doc a
-// spurious apply costs (see CDC_COVERAGE.md "Residual").
-func isDeletionEvent(op string, desc updateDescription) bool {
-	if op == "replace" {
-		return true
-	}
-	return op == "update" && (changed(desc, "name") || changed(desc, "fname"))
+	return evts, nil
 }
 
 // changed reports whether the named field appears in the update delta (set or removed).

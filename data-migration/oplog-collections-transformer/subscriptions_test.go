@@ -427,6 +427,7 @@ func TestHandleSubscription_SoftDeletedSkipped(t *testing.T) {
 	}{
 		{"fname carries the prefix", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"general","fname":"Del-General","open":true}`},
 		{"name carries the prefix", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"Del-general","fname":"General","open":true}`},
+		{"dm sub", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"d","name":"Del-bob","fname":"Del-Bob","open":true}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -450,8 +451,7 @@ func TestHandleSubscription_SoftDeletedSkipped(t *testing.T) {
 	}
 }
 
-// TestHandleSubscription_NonDeletedNameKept: only the exact "Del-" prefix on a non-DM sub marks
-// a soft delete.
+// TestHandleSubscription_NonDeletedNameKept: only the exact "Del-" prefix marks a soft delete.
 func TestHandleSubscription_NonDeletedNameKept(t *testing.T) {
 	tests := []struct {
 		name string
@@ -460,9 +460,6 @@ func TestHandleSubscription_NonDeletedNameKept(t *testing.T) {
 		{"prefix without hyphen", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"delta","fname":"Delta","open":true}`},
 		{"lowercase del-", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"del-general","fname":"del-General","open":true}`},
 		{"prefix mid-name", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"team-Del-old","fname":"Team Del-old","open":true}`},
-		// A DM sub's name/fname are the PEER's username and display name (see memberAddedEvent),
-		// not a room name — the prefix there marks a user, never a deletion.
-		{"dm with a Del- peer name", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"d","name":"Del-bob","fname":"Del-Bob","open":true}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
