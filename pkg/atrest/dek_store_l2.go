@@ -213,7 +213,7 @@ func (s *l2DEKStore) slideL2(ctx context.Context, roomID string) {
 
 // writeL2 stores the entry with a full TTL. Best-effort: a failure is logged and
 // swallowed — the caller already has the value, and the next read repopulates.
-// phase is a coarse tag ("populate"/"refresh"/"slide"); the caller decides
+// phase is a coarse tag ("populate"/"refresh"/"norow-restamp"); the caller decides
 // whether the entry's CachedAt advances, since only a confirmed fetch may reset
 // the refresh clock.
 func (s *l2DEKStore) writeL2(ctx context.Context, roomID string, entry cachedDEK, phase string) {

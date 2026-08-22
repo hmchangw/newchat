@@ -69,10 +69,6 @@ type readThroughOpts struct {
 	fetch func(context.Context, *mongo.Collection, string) (Meta, error)
 }
 
-func withFetcherForTest(f func(context.Context, *mongo.Collection, string) (Meta, error)) ReadThroughOption {
-	return func(o *readThroughOpts) { o.fetch = f }
-}
-
 // WithFetchGuard runs the Mongo fetch inside guard — typically a circuit
 // breaker's Do — so a cold miss fast-fails during an outage instead of stalling
 // on Mongo's own timeout.

@@ -85,18 +85,18 @@ func newL2StoreWithClock(store UserStore, client valkeyutil.Client, ttl time.Dur
 // persists it onto the Cassandra message row. The user identity feed
 // (hr-sync-worker) is the single choke point that should call it.
 func Bust(ctx context.Context, client valkeyutil.Client, userID, account string) {
-	if client == nil {
-		return
-	}
-	// One Del per key space, never a batched DEL: these keys carry no hash tag,
-	// so "user:id:…" and "user:acct:…" hash to different cluster slots and a
-	// multi-key DEL fails with CROSSSLOT — clearing neither instead of both.
+	// These keys carry no hash tag, so the two key spaces land in different
+	// cluster slots. BustKeys groups by slot and issues one DEL per group, so
+	// passing both here is safe — it cannot collapse into a CROSSSLOT DEL that
+	// would clear neither.
+	keys := make([]string, 0, 2)
 	if userID != "" {
-		valkeyutil.BustKeys(ctx, client, "user", idKey(userID))
+		keys = append(keys, idKey(userID))
 	}
 	if account != "" {
-		valkeyutil.BustKeys(ctx, client, "user", accountKey(account))
+		keys = append(keys, accountKey(account))
 	}
+	valkeyutil.BustKeys(ctx, client, "user", keys...)
 }
 
 func (l *l2Store) FindUserByID(ctx context.Context, id string) (*model.User, error) {
@@ -167,15 +167,19 @@ func (l *l2Store) FindUsersByAccounts(ctx context.Context, accounts []string) ([
 	// attacker-influenced (a message body can name hundreds), and per-key gets
 	// would serialize a round-trip each. Keys are collected before the fetch so
 	// duplicates cost nothing.
+	// uniq and keys are parallel: uniq[i] is the account, keys[i] its cache key.
+	// Deduping into a slice here rather than re-deriving it from a map below
+	// keeps the read loop a plain iteration instead of a mutate-while-reading.
+	uniq := make([]string, 0, len(accounts))
 	keys := make([]string, 0, len(accounts))
-	keyed := make(map[string]string, len(accounts))
+	seen := make(map[string]struct{}, len(accounts))
 	for _, a := range accounts {
-		if _, dup := keyed[a]; dup {
+		if _, dup := seen[a]; dup {
 			continue
 		}
-		k := accountKey(a)
-		keyed[a] = k
-		keys = append(keys, k)
+		seen[a] = struct{}{}
+		uniq = append(uniq, a)
+		keys = append(keys, accountKey(a))
 	}
 
 	cached, err := l.client.MGet(ctx, keys)
@@ -187,16 +191,11 @@ func (l *l2Store) FindUsersByAccounts(ctx context.Context, accounts []string) ([
 
 	hits := make([]model.User, 0, len(keys))
 	missing := make([]string, 0, len(keys))
-	for _, a := range accounts {
-		k, ok := keyed[a]
-		if !ok {
-			continue // duplicate, already accounted for
-		}
-		delete(keyed, a)
+	for i, a := range uniq {
 		// Served without refresh-on-read: this is the bulk mention path, and one
 		// re-validation per stale account would put back the outage latency the
 		// tier exists to remove. The TTL still bounds staleness.
-		if u, found := l.decodeEntry(ctx, cached[k]); found {
+		if u, found := l.decodeEntry(ctx, cached[keys[i]]); found {
 			hits = append(hits, u)
 			continue
 		}
@@ -215,31 +214,25 @@ func (l *l2Store) FindUsersByAccounts(ctx context.Context, accounts []string) ([
 	return append(hits, fresh...), nil
 }
 
+// entryIsUsable is the validity rule for a cached user, shared by the single-key
+// and MGet paths so the two cannot disagree about what a hit is. An entry with
+// no user ID would serve an identity-less record for the rest of its TTL.
+func entryIsUsable(c *cachedUser) bool { return c.User.ID != "" }
+
 // decodeEntry turns one MGet result into a usable user, recording the same
-// hit/miss/error outcomes the single-key path records through ReadCachedJSON.
-// An empty raw means the key was absent.
+// hit/miss/error outcomes the single-key path records — literally the same
+// outcome table, via valkeyutil. An empty raw means the key was absent.
 func (l *l2Store) decodeEntry(ctx context.Context, raw string) (model.User, bool) {
-	if raw == "" {
-		l.metrics.Miss(ctx)
+	entry, ok := valkeyutil.DecodeCachedJSON(ctx, raw, "user", l.metrics, entryIsUsable)
+	if !ok {
 		return model.User{}, false
 	}
-	var entry cachedUser
-	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
-		l.metrics.Error(ctx)
-		slog.WarnContext(ctx, "user L2 entry failed to decode, treating as miss", "error", err)
-		return model.User{}, false
-	}
-	if entry.User.ID == "" {
-		l.metrics.Miss(ctx)
-		return model.User{}, false
-	}
-	l.metrics.Hit(ctx)
 	return entry.User, true
 }
 
 func (l *l2Store) readL2(ctx context.Context, key string) (cachedUser, bool) {
-	return valkeyutil.ReadCachedJSON[cachedUser](ctx, l.client, key, "user",
-		l.metrics, func(c *cachedUser) bool { return c.User.ID != "" }, "key", key)
+	return valkeyutil.ReadCachedJSON(ctx, l.client, key, "user",
+		l.metrics, entryIsUsable, "key", key)
 }
 
 // write stores the record under both key spaces with a fresh confirmation

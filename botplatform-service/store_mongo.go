@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -49,14 +48,8 @@ func newStoreMongo(db *mongo.Database, breaker *circuitbreaker.Breaker, valkey v
 // a working Mongo, not evidence it is down. session.ErrNotFound especially —
 // without it, a run of invalid bot tokens would open the breaker on its own and
 // fence a database that is perfectly healthy.
-func mongoBreakerFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	return !errors.Is(err, mongo.ErrNoDocuments) &&
-		!errors.Is(err, model.ErrSubscriptionNotFound) &&
-		!errors.Is(err, session.ErrNotFound)
-}
+var mongoBreakerFailure = circuitbreaker.FailureExcept(
+	mongo.ErrNoDocuments, model.ErrSubscriptionNotFound, session.ErrNotFound)
 
 func (s *storeMongo) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
 	var u model.User

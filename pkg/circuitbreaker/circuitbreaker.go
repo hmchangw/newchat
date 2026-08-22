@@ -77,8 +77,7 @@ func fromGobreaker(s gobreaker.State) State {
 // Breaker is a concurrency-safe circuit breaker. The zero value is not usable;
 // construct with New.
 type Breaker struct {
-	threshold int
-	cb        *gobreaker.CircuitBreaker[any]
+	cb *gobreaker.CircuitBreaker[any]
 }
 
 // Option configures a Breaker at construction.
@@ -89,6 +88,34 @@ type Option func(*settings)
 type settings struct {
 	isFailure    func(error) bool
 	onTransition func(from, to State)
+}
+
+// FailureExcept builds the predicate every fenced store in this repo needs: an
+// error counts against the breaker unless it matches one of the supplied
+// "healthy absence" sentinels. A missing document, an unknown account or an
+// unrecognised session is an answer from a working downstream, not evidence it
+// is unwell — and without the exemption a burst of them trips a breaker against
+// a perfectly healthy database.
+//
+// It exists so the sentinel list is the only thing a service writes. Five call
+// sites had hand-rolled the same errors.Is chain, which meant each new sentinel
+// added to pkg/model had to be threaded into five predicates by hand, and the
+// one that got missed failed silently in the direction that hurts.
+//
+// Pass it to WithFailurePredicate. Sentinels are matched with errors.Is, so a
+// wrapped error still matches.
+func FailureExcept(sentinels ...error) func(error) bool {
+	return func(err error) bool {
+		if err == nil {
+			return false
+		}
+		for _, s := range sentinels {
+			if errors.Is(err, s) {
+				return false
+			}
+		}
+		return true
+	}
 }
 
 // WithFailurePredicate decides which errors count against the failure budget.
@@ -120,7 +147,7 @@ func New(threshold int, cooldown time.Duration, opts ...Option) *Breaker {
 		opt(&s)
 	}
 
-	b := &Breaker{threshold: threshold}
+	b := &Breaker{}
 	if threshold <= 0 {
 		// Nothing to build: Do short-circuits to fn before touching cb.
 		return b

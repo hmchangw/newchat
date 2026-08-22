@@ -290,3 +290,50 @@ func TestDo1_ReturnsValueAndZeroOnError(t *testing.T) {
 	require.ErrorIs(t, err, ErrOpen)
 	assert.Empty(t, got)
 }
+
+// FailureExcept is the shared form of the "a not-found is not a Mongo failure"
+// predicate that five stores had each written by hand.
+func TestFailureExcept(t *testing.T) {
+	notFound := errors.New("not found")
+	noSession := errors.New("no session")
+	boom := errors.New("connection refused")
+
+	tests := []struct {
+		name      string
+		sentinels []error
+		err       error
+		want      bool
+	}{
+		{"nil is never a failure", []error{notFound}, nil, false},
+		{"nil is never a failure, no sentinels", nil, nil, false},
+		{"an exempt sentinel is not a failure", []error{notFound}, notFound, false},
+		{"a wrapped sentinel is still exempt", []error{notFound}, fmt.Errorf("find room: %w", notFound), false},
+		{"any of several sentinels is exempt", []error{notFound, noSession}, noSession, false},
+		{"an unlisted error is a failure", []error{notFound}, boom, true},
+		{"with no sentinels every error is a failure", nil, boom, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, FailureExcept(tt.sentinels...)(tt.err))
+		})
+	}
+}
+
+// The point of the exemption: a run of healthy not-founds must leave the
+// breaker closed, while real infrastructure errors still trip it.
+func TestFailureExcept_ExemptErrorsDoNotTripTheBreaker(t *testing.T) {
+	notFound := errors.New("not found")
+	b := New(2, time.Minute, WithFailurePredicate(FailureExcept(notFound)))
+
+	for range 10 {
+		require.ErrorIs(t, b.Do(func() error { return notFound }), notFound,
+			"the sentinel must still reach the caller")
+	}
+	assert.Equal(t, StateClosed, b.State(), "healthy absences must not spend the budget")
+
+	boom := errors.New("connection refused")
+	for range 2 {
+		require.ErrorIs(t, b.Do(func() error { return boom }), boom)
+	}
+	assert.Equal(t, StateOpen, b.State(), "real failures must still trip it")
+}

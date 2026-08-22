@@ -35,7 +35,7 @@ func TestValkeyCache_Integration_SetGetInvalidate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, members, got.Members)
 
-	require.NoError(t, cache.Invalidate(ctx, "room-1"))
+	cache.Invalidate(ctx, "room-1")
 
 	_, err = cache.Get(ctx, "room-1")
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
@@ -95,7 +95,7 @@ func TestValkeyCache_Integration_SlideExtendsTheDeadline(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, cache.Set(ctx, "room-slide", []Member{{ID: "u1", Account: "alice"}}, 2*time.Second))
-	require.NoError(t, cache.Slide(ctx, "room-slide", time.Hour))
+	cache.Slide(ctx, "room-slide", time.Hour)
 
 	// Well past the original 2s deadline: without the slide this key is gone.
 	time.Sleep(3 * time.Second)
@@ -115,9 +115,9 @@ func TestValkeyCache_Integration_SlideCannotResurrectAnInvalidatedEntry(t *testi
 	ctx := context.Background()
 
 	require.NoError(t, cache.Set(ctx, "room-busted", []Member{{ID: "u1", Account: "alice"}}, time.Minute))
-	require.NoError(t, cache.Invalidate(ctx, "room-busted"))
+	cache.Invalidate(ctx, "room-busted")
 
-	require.NoError(t, cache.Slide(ctx, "room-busted", time.Hour), "sliding an absent key is a no-op, not an error")
+	cache.Slide(ctx, "room-busted", time.Hour) // sliding an absent key is a no-op
 
 	_, err := cache.Get(ctx, "room-busted")
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss, "a slide must never resurrect an invalidated entry")

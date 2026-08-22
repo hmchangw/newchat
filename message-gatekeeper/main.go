@@ -135,7 +135,7 @@ func main() {
 		circuitbreaker.Tracked(ctx, "subscription"))
 	metaBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
 		circuitbreaker.Tracked(ctx, "roommeta"),
-		circuitbreaker.WithFailurePredicate(MetaBreakerFailure))
+		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
 	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2TTL, cfg.SubL2TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {

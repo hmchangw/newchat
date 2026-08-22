@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -37,9 +36,7 @@ func newBreakerRoomRepo(inner service.RoomRepository, b *circuitbreaker.Breaker)
 // A missing room is a healthy answer that history-service turns into a 404;
 // counting it would let requests for deleted rooms open the breaker and degrade
 // every other room's read.
-func roomBreakerFailure(err error) bool {
-	return err != nil && !errors.Is(err, mongo.ErrNoDocuments)
-}
+var roomBreakerFailure = circuitbreaker.FailureExcept(mongo.ErrNoDocuments)
 
 func (r *breakerRoomRepo) GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error) {
 	var l, c time.Time

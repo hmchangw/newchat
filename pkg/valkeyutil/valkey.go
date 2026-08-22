@@ -253,8 +253,38 @@ type CacheRecorder interface {
 func ReadCachedJSON[T any](ctx context.Context, client Client, key, label string,
 	rec CacheRecorder, valid func(*T) bool, logAttrs ...any,
 ) (T, bool) {
-	var zero, cached T
+	var cached T
 	err := GetJSON(ctx, client, key, &cached)
+	return decodeCached(ctx, cached, err, label, rec, valid, logAttrs...)
+}
+
+// DecodeCachedJSON applies ReadCachedJSON's outcome rules to a raw entry a
+// caller already has in hand — the MGet path, where the fetch is one round trip
+// for many keys and so cannot go through GetJSON. An empty raw means the key
+// was absent.
+//
+// It exists so the bulk path and the single-key path cannot disagree about what
+// counts as a hit, a miss or an error, or about the validity rule. They had
+// already drifted in their log wording while both claiming to be identical.
+func DecodeCachedJSON[T any](ctx context.Context, raw, label string,
+	rec CacheRecorder, valid func(*T) bool, logAttrs ...any,
+) (T, bool) {
+	var cached T
+	// An absent key is reported as a clean miss, exactly as GetJSON does, so the
+	// two paths land on the same branch of the shared outcome table.
+	err := ErrCacheMiss
+	if raw != "" {
+		err = json.Unmarshal([]byte(raw), &cached)
+	}
+	return decodeCached(ctx, cached, err, label, rec, valid, logAttrs...)
+}
+
+// decodeCached is the shared outcome table: hit, failed-validation, clean miss,
+// or read/decode error.
+func decodeCached[T any](ctx context.Context, cached T, err error, label string,
+	rec CacheRecorder, valid func(*T) bool, logAttrs ...any,
+) (T, bool) {
+	var zero T
 	switch {
 	case err == nil && (valid == nil || valid(&cached)):
 		rec.Hit(ctx)

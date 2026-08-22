@@ -79,8 +79,13 @@ type Cache interface {
 	// resolvable while the source of truth is unreachable. It uses EXPIRE, which
 	// no-ops on an absent key — an entry invalidated since the read must stay
 	// invalidated rather than be resurrected.
-	Slide(ctx context.Context, roomID string, ttl time.Duration) error
-	Invalidate(ctx context.Context, roomID string) error
+	//
+	// Slide and Invalidate are best-effort and return nothing: both run after
+	// the caller has already committed to an outcome (serving a stale entry, or
+	// an authoritative write), so there is no decision left for an error to
+	// inform. Failures are logged by pkg/valkeyutil, which owns the policy.
+	Slide(ctx context.Context, roomID string, ttl time.Duration)
+	Invalidate(ctx context.Context, roomID string)
 }
 
 // Entry is a cached member list plus the moment the source of truth last
@@ -199,14 +204,11 @@ func (c *valkeyCache) Get(ctx context.Context, roomID string) (Entry, error) {
 }
 
 // Slide re-arms the entry's deadline. See Cache.Slide.
-func (c *valkeyCache) Slide(ctx context.Context, roomID string, ttl time.Duration) error {
+func (c *valkeyCache) Slide(ctx context.Context, roomID string, ttl time.Duration) {
 	if roomID == "" {
-		return errors.New("roomsubcache: empty roomID")
+		return
 	}
-	if _, err := c.client.Expire(ctx, cacheKey(roomID), ttl); err != nil {
-		return fmt.Errorf("slide cached subscriptions for room %s: %w", roomID, err)
-	}
-	return nil
+	valkeyutil.SlideTTL(ctx, c.client, cacheKey(roomID), ttl, "roomsubcache")
 }
 
 // Set stores members under roomID with the given TTL. A nil members
@@ -229,22 +231,18 @@ func (c *valkeyCache) Set(ctx context.Context, roomID string, members []Member, 
 	return nil
 }
 
-// Invalidate removes the cached entry for roomID. Intended for a future
-// membership-change event listener; not called by the cache itself,
-// which relies on TTL expiry. Returns an error if roomID is empty.
-func (c *valkeyCache) Invalidate(ctx context.Context, roomID string) error {
+// Invalidate removes the cached entry for roomID, in both key generations —
+// see legacyCacheKeySchemaVersion. Those keys carry no hash tag and so land in
+// different cluster slots; BustKeys groups by slot and issues one DEL per
+// group, so neither delete can take the other down with a CROSSSLOT rejection.
+//
+// Best-effort, like every other tier's invalidation: a bust runs after the
+// authoritative write has committed, and BustKeys is what strips the caller's
+// cancellation and bounds the call, so a request that finishes the instant the
+// write lands cannot skip the DEL and leave a member list stale for a full TTL.
+func (c *valkeyCache) Invalidate(ctx context.Context, roomID string) {
 	if roomID == "" {
-		return errors.New("roomsubcache: empty roomID")
+		return
 	}
-	// Both generations — see legacyCacheKeySchemaVersion — but one Del each.
-	// These keys carry no hash tag, so the two versions hash to different
-	// cluster slots and a single multi-key DEL fails with CROSSSLOT, taking the
-	// current-key delete down with the legacy one. Neither delete short-circuits
-	// the other: a failure to clear v3 must not leave v4 stale as well.
-	errCurrent := c.client.Del(ctx, cacheKey(roomID))
-	errLegacy := c.client.Del(ctx, legacyCacheKey(roomID))
-	if err := errors.Join(errCurrent, errLegacy); err != nil {
-		return fmt.Errorf("invalidate cached subscriptions for room %s: %w", roomID, err)
-	}
-	return nil
+	valkeyutil.BustKeys(ctx, c.client, "roomsubcache", cacheKey(roomID), legacyCacheKey(roomID))
 }

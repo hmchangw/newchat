@@ -164,17 +164,23 @@ func (c *Cache) FindUsersByAccounts(ctx context.Context, accounts []string) ([]m
 		return hits, nil
 	}
 	fresh, err := c.store.FindUsersByAccounts(ctx, missing)
+	// Populate and return whatever resolved, error or not. The store below is
+	// the L2 tier, which deliberately answers with its warm entries ALONGSIDE
+	// its error during a Mongo outage — dropping them here would discard a
+	// completed round trip, leave the L1 cold so the next message repeats it,
+	// and defeat the tier at the one moment it exists for. Mention resolution
+	// above is built on the same rule: a partial answer beats none.
+	for i := range fresh {
+		c.populate(&fresh[i])
+	}
 	if err != nil {
 		for range missing {
 			c.metrics.Error(ctx)
 		}
-		return hits, fmt.Errorf("cached find users by accounts: %w", err)
+		return append(hits, fresh...), fmt.Errorf("cached find users by accounts: %w", err)
 	}
 	for range missing {
 		c.metrics.Miss(ctx)
-	}
-	for i := range fresh {
-		c.populate(&fresh[i])
 	}
 	return append(hits, fresh...), nil
 }

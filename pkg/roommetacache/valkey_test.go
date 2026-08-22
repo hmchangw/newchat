@@ -18,6 +18,13 @@ import (
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
+// withFetcherForTest overrides the read-through's Mongo fetch so this package's
+// cache decisions can be exercised without a Mongo. It lives here rather than
+// in valkey.go because a test-only hook must not ship in the binary.
+func withFetcherForTest(f func(context.Context, *mongo.Collection, string) (Meta, error)) ReadThroughOption {
+	return func(o *readThroughOpts) { o.fetch = f }
+}
+
 // fakeValkey is an in-memory valkeyutil.Client for unit tests.
 type fakeValkey struct {
 	mu      sync.Mutex

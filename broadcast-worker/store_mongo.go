@@ -74,18 +74,13 @@ func NewMongoStore(roomCol, subCol, threadRoomCol, userCol *mongo.Collection, va
 	return s
 }
 
-// MongoBreakerFailure is the failure predicate this service's single Mongo
+// mongoBreakerFailure is the failure predicate this service's single Mongo
 // breaker must be built with. It exempts every "healthy absence" sentinel the
 // fenced call sites can return — a missing document or a missing user is an
 // answer from a working Mongo, not evidence it is unwell. A new fenced call
 // site with its own not-found sentinel must be added here rather than given a
 // breaker of its own, or it re-splits the failure budget.
-func MongoBreakerFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	return !errors.Is(err, mongo.ErrNoDocuments) && !errors.Is(err, userstore.ErrUserNotFound)
-}
+var mongoBreakerFailure = circuitbreaker.FailureExcept(mongo.ErrNoDocuments, userstore.ErrUserNotFound)
 
 // GetRoom backs the edit path, which has no cache tier to fall back on. It is
 // fenced so a Mongo outage fast-fails instead of spending a server-selection

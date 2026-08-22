@@ -20,7 +20,7 @@ import (
 // or mistyped rooms open the breaker and degrade every other room's meta read.
 func TestMetaBreaker_MissingRoomDoesNotTripBreaker(t *testing.T) {
 	metaBreaker := circuitbreaker.New(2, time.Minute,
-		circuitbreaker.WithFailurePredicate(MetaBreakerFailure))
+		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
 
 	for range 5 {
 		err := metaBreaker.Do(func() error {
@@ -35,7 +35,7 @@ func TestMetaBreaker_MissingRoomDoesNotTripBreaker(t *testing.T) {
 // Genuine infrastructure errors must still open the breaker.
 func TestMetaBreaker_InfraErrorTripsBreaker(t *testing.T) {
 	metaBreaker := circuitbreaker.New(2, time.Minute,
-		circuitbreaker.WithFailurePredicate(MetaBreakerFailure))
+		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
 
 	boom := errors.New("connection refused")
 	for range 2 {

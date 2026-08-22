@@ -96,7 +96,10 @@ func TestSlideTTL_NilClientIsNoOp(t *testing.T) {
 
 type bustClient struct {
 	Client
-	deleted  []string
+	deleted []string
+	// calls records the key set of each individual DEL, which is what makes
+	// cluster-slot grouping assertable — `deleted` alone flattens it away.
+	calls    [][]string
 	err      error
 	sawDelay bool
 }
@@ -112,6 +115,7 @@ func (b *bustClient) Del(ctx context.Context, keys ...string) error {
 		b.sawDelay = true
 	}
 	b.deleted = append(b.deleted, keys...)
+	b.calls = append(b.calls, append([]string(nil), keys...))
 	return b.err
 }
 
@@ -143,6 +147,60 @@ func TestBustKeys_RunsAfterCallerCancellation(t *testing.T) {
 
 	assert.Equal(t, []string{"k1"}, c.deleted, "a cancelled caller must not skip the invalidation")
 	assert.True(t, c.sawDelay, "the delete must still carry a deadline")
+}
+
+// Valkey rejects a cross-slot multi-key DEL outright, clearing NONE of the
+// keys rather than some. Leaving that to each caller has already produced one
+// production defect and three different hand-rolled obediences, so BustKeys
+// groups the keys itself: same hash tag batches, everything else gets its own
+// DEL. A bust is off the hot path, so the extra round trips cost nothing.
+func TestBustKeys_GroupsKeysByHashTag(t *testing.T) {
+	tests := []struct {
+		name string
+		keys []string
+		want [][]string
+	}{
+		{
+			name: "one shared hash tag batches into a single DEL",
+			keys: []string{"sub:{r1}:alice", "sub:{r1}:bob"},
+			want: [][]string{{"sub:{r1}:alice", "sub:{r1}:bob"}},
+		},
+		{
+			name: "untagged keys never share a DEL",
+			keys: []string{"user:id:u1", "user:acct:alice"},
+			want: [][]string{{"user:id:u1"}, {"user:acct:alice"}},
+		},
+		{
+			name: "different tags are separate DELs, each batched",
+			keys: []string{"sub:{r1}:alice", "sub:{r2}:bob", "sub:{r1}:carol"},
+			want: [][]string{{"sub:{r1}:alice", "sub:{r1}:carol"}, {"sub:{r2}:bob"}},
+		},
+		{
+			name: "a tagged and an untagged key do not batch",
+			keys: []string{"room:{r1}:meta:v2", "room:v3:r1:subs"},
+			want: [][]string{{"room:{r1}:meta:v2"}, {"room:v3:r1:subs"}},
+		},
+		{
+			name: "an empty tag is not a tag",
+			keys: []string{"a:{}:1", "b:{}:2"},
+			want: [][]string{{"a:{}:1"}, {"b:{}:2"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &bustClient{}
+			BustKeys(context.Background(), c, "test", tt.keys...)
+			assert.Equal(t, tt.want, c.calls)
+		})
+	}
+}
+
+// Grouping must not let one failing slot swallow the others: each group is an
+// independent DEL and a failure in one cannot skip the rest.
+func TestBustKeys_OneFailingGroupDoesNotSkipTheOthers(t *testing.T) {
+	c := &bustClient{err: errors.New("valkey down")}
+	BustKeys(context.Background(), c, "test", "user:id:u1", "user:acct:alice")
+	assert.Len(t, c.calls, 2, "every group must be attempted")
 }
 
 func TestBustKeys_SwallowsFailures(t *testing.T) {

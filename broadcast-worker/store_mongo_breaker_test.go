@@ -53,7 +53,7 @@ func TestMongoStore_ReadsAreFencedByTheBreaker(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			breaker := circuitbreaker.New(1, time.Minute,
-				circuitbreaker.WithFailurePredicate(MongoBreakerFailure))
+				circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 			s := newUndialedStore(t, breaker)
 
 			boom := errors.New("mongo down")
@@ -72,7 +72,7 @@ func TestMongoStore_ReadsAreFencedByTheBreaker(t *testing.T) {
 // what a deleted room returns; neither is evidence Mongo is unwell.
 func TestMongoStore_FencedReadsDoNotSpendBudgetOnAbsence(t *testing.T) {
 	breaker := circuitbreaker.New(3, time.Minute,
-		circuitbreaker.WithFailurePredicate(MongoBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 
 	for range 10 {
 		require.ErrorIs(t, breaker.Do(func() error { return mongo.ErrNoDocuments }), mongo.ErrNoDocuments)

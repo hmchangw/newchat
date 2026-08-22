@@ -125,7 +125,7 @@ func main() {
 	f := newFlusher(store)
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	flushDone := make(chan struct{})
-	go func() { f.Run(flushCtx, cfg.FlushInterval, 5*time.Second, cfg.FlushTimeout); close(flushDone) }()
+	go func() { f.Run(flushCtx, cfg.FlushInterval, cfg.FlushTimeout); close(flushDone) }()
 	slog.Info("unread-state flusher started",
 		"flush_interval", cfg.FlushInterval, "flush_timeout", cfg.FlushTimeout)
 

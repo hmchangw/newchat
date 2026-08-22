@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -17,12 +16,11 @@ import (
 )
 
 type MongoStore struct {
-	rooms       *mongo.Collection
-	valkey      valkeyutil.Client // nil disables the L2 tier (pure Mongo)
-	metaTTL     time.Duration
-	metaBreaker *circuitbreaker.Breaker // guards the room-meta read-through, independently
-	metaRec     roommetacache.Recorder
-	subTier     *subauthcache.Tier // owns the subscription L2 + its own breaker
+	rooms   *mongo.Collection
+	valkey  valkeyutil.Client // nil disables the L2 tier (pure Mongo)
+	metaTTL time.Duration
+	metaRec roommetacache.Recorder
+	subTier *subauthcache.Tier // owns the subscription L2 + its own breaker
 	// metaOpts is built once: the guard is a method value, so passing it inline
 	// on every GetRoomMeta would heap-allocate it on the message-send hot path.
 	metaOpts []roommetacache.ReadThroughOption
@@ -34,11 +32,10 @@ type MongoStore struct {
 // cold subscription misses would never trip fast-fail during a Mongo outage.
 func NewMongoStore(db *mongo.Database, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, subBreaker, metaBreaker *circuitbreaker.Breaker) *MongoStore {
 	s := &MongoStore{
-		rooms:       db.Collection("rooms"),
-		valkey:      valkey,
-		metaTTL:     metaTTL,
-		metaBreaker: metaBreaker,
-		metaRec:     cachemetrics.For("roommeta", "l2"),
+		rooms:   db.Collection("rooms"),
+		valkey:  valkey,
+		metaTTL: metaTTL,
+		metaRec: cachemetrics.For("roommeta", "l2"),
 		subTier: subauthcache.NewTier(valkey, db.Collection("subscriptions"), subTTL,
 			subBreaker, cachemetrics.For("subauth", "l2")),
 	}
@@ -65,7 +62,7 @@ func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string
 // L2 is the only tier that can answer during the outage that opened it.
 //
 // The "a missing room is not a Mongo failure" rule rides on the breaker itself
-// (see MetaBreakerFailure), so the guard is just its Do.
+// (see metaBreakerFailure), so the guard is just its Do.
 func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
 	meta, err := roommetacache.ReadThrough(ctx, s.valkey, s.rooms, roomID, s.metaTTL, s.metaRec, s.metaOpts...)
 	if err != nil {
@@ -74,10 +71,8 @@ func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetaca
 	return meta, nil
 }
 
-// MetaBreakerFailure is the failure predicate the room-meta breaker must be
+// metaBreakerFailure is the failure predicate the room-meta breaker must be
 // constructed with. A room that does not exist is a healthy answer from a
 // healthy Mongo; counting it would let a burst of requests for deleted or
 // mistyped rooms open the breaker and degrade every other room's meta read.
-func MetaBreakerFailure(err error) bool {
-	return err != nil && !errors.Is(err, mongo.ErrNoDocuments)
-}
+var metaBreakerFailure = circuitbreaker.FailureExcept(mongo.ErrNoDocuments)

@@ -208,14 +208,14 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NoError(t, cache.Set(ctx, "r1", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
-	require.NoError(t, cache.Invalidate(ctx, "r1"))
+	cache.Invalidate(ctx, "r1")
 
 	// Both generations are dropped, but in SEPARATE Del calls. These keys carry
 	// no hash tag, so "room:v4:r1:subs" and "room:v3:r1:subs" hash to different
 	// cluster slots and a single multi-key DEL is a CROSSSLOT error against a
 	// real cluster — which would fail every invalidation, not just the legacy
-	// half. (roommetacache can batch its two keys because they share a {roomID}
-	// hash tag; this package cannot.)
+	// half. The split is now enforced by valkeyutil.BustKeys, which groups the
+	// keys it is given by hash tag, rather than by this package hand-obeying it.
 	require.Len(t, client.delCalls, 2, "one Del per key — a batched DEL is CROSSSLOT in cluster mode")
 	assert.Equal(t, []string{"room:v4:r1:subs"}, client.delCalls[0])
 	assert.Equal(t, []string{"room:v3:r1:subs"}, client.delCalls[1])
@@ -224,15 +224,34 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
 }
 
-func TestValkeyCache_Invalidate_TransportError_IsWrapped(t *testing.T) {
+// Invalidation is best-effort: the authoritative write has already committed
+// and the TTL reconciles a missed bust, so a transport failure is swallowed
+// rather than surfaced. Both generations are still attempted — one failing
+// slot must not skip the other.
+func TestValkeyCache_Invalidate_TransportError_IsSwallowed(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeClient()
 	client.delErr = errors.New("boom")
 	cache := roomsubcache.NewValkeyCache(client)
 
-	err := cache.Invalidate(ctx, "r1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "boom")
+	require.NotPanics(t, func() { cache.Invalidate(ctx, "r1") })
+	assert.Len(t, client.delCalls, 2, "a failure on one generation must not skip the other")
+}
+
+// The reason this package routes through valkeyutil.BustKeys rather than
+// calling Del itself: a bust runs AFTER the authoritative membership write has
+// committed, so inheriting the caller's cancellation would let a request that
+// finishes at that instant skip the DEL — leaving the room's member list stale
+// for the full 90-minute TTL.
+func TestValkeyCache_Invalidate_RunsAfterCallerCancellation(t *testing.T) {
+	client := newFakeClient()
+	cache := roomsubcache.NewValkeyCache(client)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cache.Invalidate(ctx, "r1")
+
+	assert.Len(t, client.delCalls, 2, "a cancelled caller must not skip the invalidation")
 }
 
 func TestValkeyCache_EmptyRoomID_ReturnsError(t *testing.T) {
@@ -245,7 +264,6 @@ func TestValkeyCache_EmptyRoomID_ReturnsError(t *testing.T) {
 	}{
 		{"Get", func() error { _, err := cache.Get(ctx, ""); return err }},
 		{"Set", func() error { return cache.Set(ctx, "", nil, time.Minute) }},
-		{"Invalidate", func() error { return cache.Invalidate(ctx, "") }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -378,7 +396,7 @@ func TestValkeyCache_Slide_ReArmsTTLWithoutRewriting(t *testing.T) {
 	require.NoError(t, cache.Set(ctx, "r1", members, time.Minute))
 	before := client.store["room:v4:r1:subs"]
 
-	require.NoError(t, cache.Slide(ctx, "r1", time.Hour))
+	cache.Slide(ctx, "r1", time.Hour)
 
 	assert.Equal(t, []string{"room:v4:r1:subs"}, client.expired)
 	assert.Equal(t, time.Hour, client.ttls["room:v4:r1:subs"], "the deadline must move")
@@ -392,11 +410,15 @@ func TestValkeyCache_Slide_DoesNotResurrectAnEvictedEntry(t *testing.T) {
 
 	// EXPIRE on an absent key must be a no-op, not a create — otherwise a room
 	// invalidated mid-outage would come back with its stale member list.
-	require.NoError(t, cache.Slide(ctx, "never-written", time.Hour))
+	cache.Slide(ctx, "never-written", time.Hour)
 	assert.NotContains(t, client.store, "room:v3:never-written:subs")
 }
 
-func TestValkeyCache_Slide_EmptyRoomID_ReturnsError(t *testing.T) {
-	cache := roomsubcache.NewValkeyCache(newFakeClient())
-	require.Error(t, cache.Slide(context.Background(), "", time.Hour))
+// An empty roomID is a no-op rather than an error: Slide is best-effort and
+// has no caller left to inform.
+func TestValkeyCache_Slide_EmptyRoomID_IsANoOp(t *testing.T) {
+	client := newFakeClient()
+	cache := roomsubcache.NewValkeyCache(client)
+	cache.Slide(context.Background(), "", time.Hour)
+	assert.Empty(t, client.expired, "an empty roomID must not issue an EXPIRE")
 }

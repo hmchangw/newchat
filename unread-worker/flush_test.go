@@ -233,7 +233,7 @@ func TestFlusher_RunFlushesOnCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { f.Run(ctx, time.Hour, 5*time.Second, 10*time.Second); close(done) }()
+	go func() { f.Run(ctx, time.Hour, 10*time.Second); close(done) }()
 	cancel()
 
 	select {
@@ -274,7 +274,7 @@ func TestFlusher_RunRecoversPanicAndStillReturns(t *testing.T) {
 	// fire before we cancel — deterministic, no ticker race, no time.Sleep.
 	// (An unguarded panic here would crash the whole test binary, not just
 	// fail this assertion — the select below only proves the guarded case.)
-	go func() { f.Run(ctx, time.Hour, 5*time.Second, 10*time.Second); close(done) }()
+	go func() { f.Run(ctx, time.Hour, 10*time.Second); close(done) }()
 	cancel()
 
 	select {
@@ -362,7 +362,7 @@ func TestFlusher_RunBoundsEachPeriodicFlush(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { f.Run(ctx, time.Millisecond, 5*time.Second, time.Second); close(done) }()
+	go func() { f.Run(ctx, time.Millisecond, time.Second); close(done) }()
 
 	require.Eventually(t, store.deadlineSeen, 2*time.Second, 5*time.Millisecond,
 		"the periodic flush must bound the write context, not hand it the worker's")
@@ -386,7 +386,7 @@ func TestFlusher_RunWedgedFlushGivesUpAndKeepsFlushing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { f.Run(ctx, time.Millisecond, 5*time.Second, 20*time.Millisecond); close(done) }()
+	go func() { f.Run(ctx, time.Millisecond, 20*time.Millisecond); close(done) }()
 
 	// Keep feeding intents: a flush swaps the batch out, so without new work the
 	// later ticks would find it empty and return before reaching the store —

@@ -43,20 +43,17 @@ func (f *fakeCache) Set(_ context.Context, roomID string, members []Member, _ ti
 	f.data[roomID] = Entry{Members: cp, CachedAt: f.now().UnixMilli()}
 	return nil
 }
-func (f *fakeCache) Slide(_ context.Context, roomID string, _ time.Duration) error {
+func (f *fakeCache) Slide(_ context.Context, _ string, _ time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.slides++
-	if _, ok := f.data[roomID]; !ok {
-		return nil // EXPIRE no-ops on an absent key
-	}
-	return nil
+	// EXPIRE no-ops on an absent key, which is indistinguishable from success
+	// to the caller — the real Slide reports nothing either.
 }
-func (f *fakeCache) Invalidate(_ context.Context, roomID string) error {
+func (f *fakeCache) Invalidate(_ context.Context, roomID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.data, roomID)
-	return nil
 }
 
 type fakeLoader struct {
@@ -169,8 +166,8 @@ func (e *erroringCache) Get(context.Context, string) (Entry, error) {
 func (e *erroringCache) Set(context.Context, string, []Member, time.Duration) error {
 	return nil
 }
-func (e *erroringCache) Slide(context.Context, string, time.Duration) error { return nil }
-func (e *erroringCache) Invalidate(context.Context, string) error           { return nil }
+func (e *erroringCache) Slide(context.Context, string, time.Duration) {}
+func (e *erroringCache) Invalidate(context.Context, string)           {}
 
 func TestLookup_LeaderCancelDoesNotPoisonWaiters(t *testing.T) {
 	cache := newFakeCache()

@@ -150,11 +150,11 @@ func main() {
 	// is evidence about it, so they share one failure budget: N breakers at
 	// threshold T cost N*T stalled calls before the service is fully fenced,
 	// which is the delay the breaker exists to remove. Call sites differ only in
-	// which "healthy absence" they can return, and MongoBreakerFailure exempts
+	// which "healthy absence" they can return, and mongoBreakerFailure exempts
 	// all of them.
 	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
 		circuitbreaker.Tracked(ctx, "mongo"),
-		circuitbreaker.WithFailurePredicate(MongoBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 	// subscriptions is pinned to primary: it feeds roomsubcache, a SHARED
 	// 90-minute entry that notification-worker reads too, so a replica-lagged
 	// read here republishes a removed member to every consumer of that key for

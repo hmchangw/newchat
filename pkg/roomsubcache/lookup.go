@@ -120,10 +120,7 @@ func (c *Lookup) serveHit(ctx context.Context, roomID string, entry Entry) ([]Me
 
 		loaded, err := c.load(fetchCtx, roomID)
 		if err != nil {
-			if slideErr := c.cache.Slide(fetchCtx, roomID, c.ttl); slideErr != nil {
-				slog.WarnContext(fetchCtx, "roomsubcache TTL slide failed (entry keeps its current deadline)",
-					"error", slideErr, "roomId", roomID)
-			}
+			c.cache.Slide(fetchCtx, roomID, c.ttl)
 			return entry.Members, nil // fail-open by design; see above
 		}
 		c.write(fetchCtx, roomID, loaded)
@@ -144,9 +141,7 @@ func (c *Lookup) Invalidate(ctx context.Context, roomID string) {
 	if c.cache == nil {
 		return
 	}
-	if err := c.cache.Invalidate(ctx, roomID); err != nil {
-		slog.WarnContext(ctx, "roomsubcache invalidate failed", "error", err, "roomId", roomID)
-	}
+	c.cache.Invalidate(ctx, roomID)
 }
 
 // GuardLoader fences load behind breaker so a stalled backend costs one

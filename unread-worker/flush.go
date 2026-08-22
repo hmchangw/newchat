@@ -99,17 +99,17 @@ func (f *flusher) write(ctx context.Context, b *batch) flushOutcome {
 	var stageCodes []string
 	var mongoErrs []string
 
-	// stage classifies one stage's raw store error. It returns (outcome, true)
-	// when the batch must stop right here (transient failure), or (_, false)
-	// when the caller should proceed to the next stage (success, or a
-	// permanent failure recorded for later).
-	stage := func(name string, err error) (flushOutcome, bool) {
+	// stage classifies one stage's raw store error. A non-nil return is a
+	// transient failure and means the batch must stop right here; nil means
+	// proceed to the next stage (success, or a permanent failure recorded for
+	// later).
+	stage := func(name string, err error) error {
 		if err == nil {
-			return flushOutcome{}, false
+			return nil
 		}
 		classified := classifyFlushErr(fmt.Errorf("flush %s: %w", name, err))
 		if _, ok := errcode.IsPermanent(classified); !ok {
-			return flushOutcome{err: classified}, true
+			return classified
 		}
 		permanentErrs = append(permanentErrs, classified)
 		var bwe mongo.BulkWriteException
@@ -120,17 +120,17 @@ func (f *flusher) write(ctx context.Context, b *batch) flushOutcome {
 			stageCodes = append(stageCodes, fmt.Sprintf("%s=%v", name, bwe.ErrorCodes()))
 			mongoErrs = append(mongoErrs, fmt.Sprintf("%s=%s", name, bwe.Error()))
 		}
-		return flushOutcome{}, false
+		return nil
 	}
 
-	if out, stop := stage("room last message", f.store.BulkUpdateRoomLastMessage(ctx, b.rooms)); stop {
-		return out
+	if err := stage("room last message", f.store.BulkUpdateRoomLastMessage(ctx, b.rooms)); err != nil {
+		return flushOutcome{err: err}
 	}
-	if out, stop := stage("subscription last seen", f.store.BulkAdvanceLastSeen(ctx, b.lastSeen)); stop {
-		return out
+	if err := stage("subscription last seen", f.store.BulkAdvanceLastSeen(ctx, b.lastSeen)); err != nil {
+		return flushOutcome{err: err}
 	}
-	if out, stop := stage("subscription mentions", f.store.BulkSetMentions(ctx, b.mentions)); stop {
-		return out
+	if err := stage("subscription mentions", f.store.BulkSetMentions(ctx, b.mentions)); err != nil {
+		return flushOutcome{err: err}
 	}
 
 	if len(permanentErrs) == 0 {
@@ -217,6 +217,12 @@ func classifyFlushErr(err error) error {
 	return errcode.Permanent(errcode.Internal("mongo rejected unread-state bulk write", errcode.WithCause(err)))
 }
 
+// finalFlushTimeout bounds the one flush that runs after ctx is cancelled. It
+// is a constant rather than a parameter because every call site — production
+// and tests alike — passed the same value, and sitting next to the env-driven,
+// validated FlushTimeout it only invited confusing the two.
+const finalFlushTimeout = 5 * time.Second
+
 // Run drives the flush ticker until ctx is cancelled, then performs one final
 // flush on a fresh context so a buffered batch still lands — and its messages
 // still settle — even though the supplied ctx is already done.
@@ -235,13 +241,13 @@ func classifyFlushErr(err error) error {
 // is Nak'd, the loop keeps ticking, and back-pressure engages instead of a
 // silent stall. Must stay comfortably below CONSUMER_ACK_WAIT for the same
 // reason MongoSelectTimeout stays below it.
-func (f *flusher) Run(ctx context.Context, interval, finalTimeout, perFlushTimeout time.Duration) {
+func (f *flusher) Run(ctx context.Context, interval, perFlushTimeout time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			finalCtx, cancel := context.WithTimeout(context.Background(), finalTimeout)
+			finalCtx, cancel := context.WithTimeout(context.Background(), finalFlushTimeout)
 			jobguard.Guard("unread-state flush", func() { f.Flush(finalCtx) })
 			cancel()
 			return
