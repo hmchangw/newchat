@@ -1084,8 +1084,8 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 
 // enrichLastMessage must build a hint from each room's already-resolved
 // LastMsgAt (set by enrichLocal before this runs) so history-service can skip
-// its own room-times read; a room with no Room object (soft-deleted) must
-// contribute no hint entry.
+// its own room-times read; a sub with no Room object (soft-deleted) is not
+// requested at all — its preview would be discarded on arrival anyway.
 func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 	svc, subs, history := newSvcRawHistory(t)
 	lastMsgAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -1103,7 +1103,7 @@ func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
 		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
 	wantHints := map[string]model.RoomTimeHint{"r1": {LastMsgAt: timeutil.TimeToMillis(&lastMsgAt)}}
-	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1", "r2"}, wantHints).
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", []string{"r1"}, wantHints).
 		Return(map[string]model.PreviewMessage{}, nil)
 
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
@@ -1113,6 +1113,25 @@ func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 	require.NotNil(t, room1)
 	room2 := resp.Subscriptions[1].Base().Room
 	assert.Nil(t, room2, "soft-deleted local room has no Room object")
+}
+
+// A site whose subs all lack a Room object (soft-deleted/degraded) has nothing a
+// preview could attach to, so the rooms.get RPC for that site is skipped entirely.
+func TestListSubscriptions_LastMessage_AllRoomless_SkipsRPC(t *testing.T) {
+	svc, subs, _ := newSvcRawHistory(t)
+	storeSubs := []model.EnrichedSubscription{{
+		// Soft-deleted: buildLocalRoom returns nil Room.
+		Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "old-room", RoomType: model.RoomTypeChannel},
+		RoomName:     "Del-old-room",
+	}}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	// No history.RoomsGet EXPECT — the mock ctrl fails if it's called.
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 1)
+	assert.Nil(t, resp.Subscriptions[0].Base().Room)
 }
 
 // includeLastMessage:false skips the rooms.get RPC entirely.
