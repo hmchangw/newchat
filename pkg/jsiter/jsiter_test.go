@@ -501,3 +501,53 @@ func TestPump_Next_StopDuringRebuildStopsTheNewIterator(t *testing.T) {
 	assert.Equal(t, 1, fresh.stopCount(), "the iterator built during Stop must be released")
 	assert.False(t, p.IsUp())
 }
+
+// Replacements that fail the moment they are built must space out, not hammer
+// the first backoff step forever: rebuild's attempt counter cannot live inside
+// one rebuild call.
+func TestPump_Next_BackoffAdvancesAcrossFailingReplacements(t *testing.T) {
+	msg := &stubMsg{}
+	iters := []Iterator{
+		newScriptedIter(step{err: jetstream.ErrConsumerDeleted}),
+		newScriptedIter(step{err: jetstream.ErrConsumerDeleted}),
+		newScriptedIter(step{err: jetstream.ErrConsumerDeleted}),
+		newScriptedIter(step{msg: msg}),
+	}
+	f := &factory{iters: iters}
+	p, delays := newTestPump(t, f)
+
+	_, got, err := p.Next()
+
+	require.NoError(t, err)
+	assert.Same(t, msg, got)
+	require.Len(t, *delays, 3, "one backoff per rebuild")
+	assert.Equal(t, RebuildBackoff[0], (*delays)[0])
+	assert.Equal(t, RebuildBackoff[1], (*delays)[1], "a second failing replacement must back off further")
+	assert.Equal(t, RebuildBackoff[2], (*delays)[2])
+}
+
+func TestPump_Next_DeliveredMessageResetsRebuildBackoff(t *testing.T) {
+	first, second := &stubMsg{}, &stubMsg{}
+	f := &factory{iters: []Iterator{
+		newScriptedIter(step{err: jetstream.ErrConsumerDeleted}),
+		newScriptedIter(step{err: jetstream.ErrConsumerDeleted}),
+		// Delivers, then dies: the rebuild that follows must start from the top.
+		newScriptedIter(step{msg: first}, step{err: jetstream.ErrConsumerDeleted}),
+		newScriptedIter(step{msg: second}),
+	}}
+	p, delays := newTestPump(t, f)
+
+	_, got, err := p.Next()
+	require.NoError(t, err)
+	require.Same(t, first, got)
+	require.Len(t, *delays, 2)
+	assert.Equal(t, RebuildBackoff[0], (*delays)[0])
+	assert.Equal(t, RebuildBackoff[1], (*delays)[1])
+
+	_, got, err = p.Next()
+	require.NoError(t, err)
+	assert.Same(t, second, got)
+	require.Len(t, *delays, 3)
+	assert.Equal(t, RebuildBackoff[0], (*delays)[2],
+		"a delivered message means the consumer answers again — reset the schedule")
+}

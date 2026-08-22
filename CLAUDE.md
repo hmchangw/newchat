@@ -371,10 +371,12 @@ Rules:
 - **A `Fetch` loop MUST read `batch.Error()` after draining `Messages()`.** A deleted
   consumer reaches only that method; `Fetch` itself keeps returning empty batches and
   a nil error. See `search-sync-worker`'s `recoveringFetcher`.
-- **Probe the consumer in `/healthz`, not just the connection**: add
-  `pump.HealthCheck()` beside `natsutil.HealthCheck(nc)`. It reports whether a live
-  iterator is held — deliberately not "time since the last message", which would
-  restart merely-idle workers.
+- **Probe the consumer, not just the connection**: add `pump.HealthCheck()` beside
+  `natsutil.HealthCheck(nc)`. Checks passed to `health.Serve`/`ServeWithPprof` run on
+  `/readyz`; `/healthz` is liveness only and always returns 200, so a dead consumer
+  shows up as not-ready, never as a restart. It reports whether a live iterator is
+  held — deliberately not "time since the last message", which would restart
+  merely-idle workers.
 
 ### JetStream Redelivery Backoff
 

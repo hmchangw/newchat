@@ -172,6 +172,15 @@ func (s *Supervisor) observe(gen uint64, err error) {
 		return
 	}
 
+	// Every branch below acts on supervisor state, so a superseded round is
+	// dropped up front: its late error must not touch the round that replaced it.
+	s.mu.Lock()
+	current := gen == s.gen
+	s.mu.Unlock()
+	if !current {
+		return
+	}
+
 	disposition := Classify(err)
 	if disposition == Transient {
 		s.mu.Lock()
@@ -201,7 +210,15 @@ func (s *Supervisor) observe(gen uint64, err error) {
 	}
 
 	if disposition == Stopped {
-		s.up.Store(false)
+		// Recorded like a failure even though nothing is restarted: without it,
+		// a connection closing while start is still returning would let begin
+		// install the dead subscription and publish it as healthy.
+		s.mu.Lock()
+		if gen == s.gen {
+			s.failedGen = gen
+			s.up.Store(false)
+		}
+		s.mu.Unlock()
 		slog.ErrorContext(s.ctx, "jetstream consumption ended",
 			"consumer", s.name, "error", err)
 		return

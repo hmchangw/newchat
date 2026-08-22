@@ -462,3 +462,40 @@ func TestSupervisor_ReplacementFailingDuringStartKeepsRestarting(t *testing.T) {
 	}
 	assert.Equal(t, 0, handles[len(handles)-1].stopCount(), "the surviving round stays live")
 }
+
+// A terminal error from a superseded round must not clear the health of the
+// replacement that already took over.
+func TestSupervisor_StaleStoppedErrorLeavesHealthyRoundUp(t *testing.T) {
+	f := newConsumeFactory(nil, nil)
+	s := newTestSupervisor(t, f)
+
+	f.mu.Lock()
+	staleOnError := f.lastFail
+	f.mu.Unlock()
+
+	staleOnError(jetstream.ErrConsumerDeleted)
+	waitStarts(t, f, 1)
+	require.Eventually(t, s.IsUp, 2*time.Second, 10*time.Millisecond)
+
+	// The dead round's connection-closed error arrives late.
+	staleOnError(jetstream.ErrConnectionClosed)
+
+	assert.Never(t, func() bool { return !s.IsUp() }, 500*time.Millisecond, 20*time.Millisecond,
+		"a stale terminal error must not mark the live round down")
+}
+
+// A terminal error during start must not leave begin publishing a subscription
+// nats.go has already given up on as healthy.
+func TestSupervise_StoppedErrorDuringStartIsNotPublishedHealthy(t *testing.T) {
+	handle := &stubConsume{}
+	start := func(_ context.Context, onError func(error)) (ConsumeContext, error) {
+		onError(jetstream.ErrConnectionClosed)
+		return handle, nil
+	}
+
+	s, err := Supervise(context.Background(), "ordered", start)
+
+	require.Error(t, err, "a subscription whose connection closed during start is a startup failure")
+	assert.Nil(t, s)
+	assert.Equal(t, 1, handle.stopCount(), "the dead subscription must be released, not published")
+}

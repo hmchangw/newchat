@@ -132,6 +132,10 @@ type Pump struct {
 
 	mu   sync.Mutex
 	iter Iterator
+	// rebuilds indexes RebuildBackoff across consecutive rebuilds, not just the
+	// attempts inside one. A replacement that dies the moment it is built would
+	// otherwise restart the schedule and hammer its first step forever.
+	rebuilds int
 
 	up      atomic.Bool
 	stopped atomic.Bool
@@ -191,6 +195,11 @@ func (p *Pump) Next(opts ...jetstream.NextOpt) (context.Context, jetstream.Msg, 
 
 		msgCtx, msg, err := p.current().Next(opts...)
 		if err == nil {
+			// A delivered message proves the consumer is answering again, so the
+			// next failure starts from the top of the schedule.
+			p.mu.Lock()
+			p.rebuilds = 0
+			p.mu.Unlock()
 			return msgCtx, msg, nil
 		}
 		if p.stopped.Load() {
@@ -252,7 +261,15 @@ func (p *Pump) rebuild() error {
 	p.up.Store(false)
 	p.current().Stop()
 
-	for attempt := 0; ; attempt++ {
+	p.mu.Lock()
+	attempt := p.rebuilds
+	p.mu.Unlock()
+
+	for ; ; attempt++ {
+		p.mu.Lock()
+		p.rebuilds = attempt
+		p.mu.Unlock()
+
 		if !p.sleepFn(p.ctx, backoffStep(attempt)) {
 			if p.stopped.Load() {
 				return ErrStopped
@@ -285,6 +302,9 @@ func (p *Pump) rebuild() error {
 			iter.Stop()
 			return ErrStopped
 		}
+		p.mu.Lock()
+		p.rebuilds = attempt + 1
+		p.mu.Unlock()
 		slog.InfoContext(p.ctx, "jetstream iterator rebuilt",
 			"consumer", p.name, "attempts", attempt+1)
 		return nil
