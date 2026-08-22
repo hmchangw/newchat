@@ -152,3 +152,32 @@ func TestFailureLedger_AReplayedUnknownReasonBecomesOther(t *testing.T) {
 		metrics.FailureInvalidations.WithLabelValues("other")),
 		"the counter must carry the folded label, not the one from the file")
 }
+
+// An invalidated record carries one field, and the reason is it. A record
+// without one is malformed, and dropping it silently loses the whole
+// invalidation rather than just its cause — the run comes back looking valid.
+// Every other malformed field in replayEvent fails the replay with its index;
+// this one must too. Failing is safe: a journal that cannot be replayed
+// degrades to an in-memory ledger already invalidated for "wal", which is the
+// honest outcome for a corrupt evidence file.
+func TestFailureLedger_AReplayedInvalidationWithoutAReasonFailsTheReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reasonless.wal")
+
+	wal, err := openFailureWAL(path)
+	require.NoError(t, err)
+	require.NoError(t, wal.Append(&failureLedgerEvent{
+		Type: failureLedgerEventInvalidated, At: time.Unix(1000, 0).UTC(),
+	}))
+	require.NoError(t, wal.Close())
+
+	reopened, err := openFailureWAL(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, reopened.Close()) })
+
+	_, err = newFailureLedger(&failureLedgerConfig{Capacity: 8, Journal: reopened})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replay failure ledger event 0",
+		"the failure must name the record, or the operator cannot find it")
+	assert.Contains(t, err.Error(), "invalidation is missing its reason")
+}
