@@ -325,3 +325,64 @@ describe('threadEventsReducer placeholder reconciliation', () => {
     expect(threadEventsReducer(once, recv(real))).toBe(once)
   })
 })
+
+// Go marshals time.Time as RFC3339Nano with trailing zeros stripped, so the wire
+// carries both "...00Z" and "...00.5Z". Lexicographically "." (0x2E) sorts before
+// "Z" (0x5A), so a string compare calls the sub-second edit older and drops it.
+describe('threadEventsReducer edit ordering across timestamp precisions', () => {
+  const opened = threadEventsReducer(
+    threadEventsReducer(initialState, {
+      type: 'OPEN_THREAD',
+      parent: { roomId: 'r1', siteId: 's1', messageId: 'p1', createdAtMs: 1000 },
+    }),
+    { type: 'THREAD_REPLY_RECEIVED', parentId: 'p1', message: { id: 'm1', content: 'v0' } }
+  )
+  const edit = (content, editedAt) => ({ type: 'REPLY_EDITED', messageId: 'm1', content, editedAt })
+
+  it('applies a sub-second edit that follows a whole-second one', () => {
+    const first = threadEventsReducer(opened, edit('v1', '2026-08-22T10:00:00Z'))
+    const second = threadEventsReducer(first, edit('v2', '2026-08-22T10:00:00.5Z'))
+    expect(second.messages[0].content).toBe('v2')
+  })
+
+  it('still rejects a whole-second edit that precedes a sub-second one', () => {
+    const first = threadEventsReducer(opened, edit('v2', '2026-08-22T10:00:00.5Z'))
+    const stale = threadEventsReducer(first, edit('v1', '2026-08-22T10:00:00Z'))
+    expect(stale).toBe(first)
+  })
+})
+
+// A placeholder can be mutated while it stands in for a body the key had not
+// arrived for. Replacing it wholesale with the real body loses those mutations.
+describe('threadEventsReducer placeholder replacement preserves mutations', () => {
+  const opened = threadEventsReducer(initialState, {
+    type: 'OPEN_THREAD',
+    parent: { roomId: 'r1', siteId: 's1', messageId: 'p1', createdAtMs: 1000 },
+  })
+  const placeholder = { id: 'm1', content: '[encrypted message]', encrypted: true }
+  const real = { id: 'm1', content: 'the real body' }
+  const recv = (message) => ({ type: 'THREAD_REPLY_RECEIVED', parentId: 'p1', message })
+
+  it('keeps a delete applied while the placeholder stood', () => {
+    let st = threadEventsReducer(opened, recv(placeholder))
+    st = threadEventsReducer(st, { type: 'REPLY_DELETED', messageId: 'm1' })
+    st = threadEventsReducer(st, recv(real))
+    expect(st.messages[0].deleted).toBe(true)
+  })
+
+  it('keeps an edit applied while the placeholder stood', () => {
+    let st = threadEventsReducer(opened, recv(placeholder))
+    st = threadEventsReducer(st, {
+      type: 'REPLY_EDITED', messageId: 'm1', content: 'edited body', editedAt: '2026-08-22T10:00:00Z',
+    })
+    st = threadEventsReducer(st, recv(real))
+    expect(st.messages[0].content).toBe('edited body')
+    expect(st.messages[0].editedAt).toBe('2026-08-22T10:00:00Z')
+  })
+
+  it('takes the real body when nothing was applied to the placeholder', () => {
+    const st = threadEventsReducer(threadEventsReducer(opened, recv(placeholder)), recv(real))
+    expect(st.messages[0].content).toBe('the real body')
+    expect(st.messages[0].encrypted).toBeUndefined()
+  })
+})

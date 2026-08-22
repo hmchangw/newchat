@@ -28,6 +28,15 @@ function unsetStatus(messages, messageId) {
   return out
 }
 
+/** Whether `candidate` is at or before `applied`, comparing instants rather than
+ *  text: RFC3339Nano strips trailing zeros, so "…00.5Z" sorts before "…00Z".
+ *  Unparseable or absent values never reject, leaving the write to proceed. */
+function notNewerThan(candidate, applied) {
+  const a = Date.parse(candidate)
+  const b = Date.parse(applied)
+  return Number.isFinite(a) && Number.isFinite(b) && a <= b
+}
+
 export function threadEventsReducer(state, action) {
   switch (action.type) {
     case 'OPEN_THREAD': {
@@ -81,9 +90,16 @@ export function threadEventsReducer(state, action) {
         // when the room key had not arrived. Plain id dedup would let whichever
         // landed first win, so let a real body replace a placeholder — never the
         // reverse, and never a plain duplicate.
-        if (!state.messages[idx].encrypted || msg.encrypted) return state
+        const current = state.messages[idx]
+        if (!current.encrypted || msg.encrypted) return state
         const messages = [...state.messages]
-        messages[idx] = msg
+        // Carry over anything applied while the placeholder stood: replacing it
+        // wholesale would resurrect a deleted reply or revert an applied edit.
+        messages[idx] = {
+          ...msg,
+          ...(current.deleted ? { deleted: true } : {}),
+          ...(current.editedAt ? { content: current.content, editedAt: current.editedAt } : {}),
+        }
         return { ...state, messages }
       }
       return { ...state, messages: [...state.messages, msg] }
@@ -115,8 +131,9 @@ export function threadEventsReducer(state, action) {
       const current = state.messages[idx]
       // editedAt is the domain edit time, so it orders edits even though arrival
       // order does not: a redelivered older edit must not overwrite a newer one.
-      // Equal timestamps also cover the duplicate a follower gets on both lanes.
-      if (current.editedAt && action.editedAt && action.editedAt <= current.editedAt) return state
+      // Compared as instants, not strings — the wire carries RFC3339Nano with
+      // trailing zeros stripped, so "…00.5Z" sorts before "…00Z" as text.
+      if (notNewerThan(action.editedAt, current.editedAt)) return state
       if (current.content === action.content && current.editedAt === action.editedAt) return state
       const updated = { ...current, content: action.content, editedAt: action.editedAt }
       const messages = [...state.messages.slice(0, idx), updated, ...state.messages.slice(idx + 1)]
