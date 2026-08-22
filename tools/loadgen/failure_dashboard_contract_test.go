@@ -64,7 +64,10 @@ func TestFailureDashboardContract_BundledDashboardUsesCurrentMetricContract(t *t
 		// healthy one on the board an operator actually opens.
 		"loadgen_failure_reconcile_claims_total",
 		"loadgen_failure_reconcile_lag_seconds_bucket",
-		`loadgen_failure_invalidations_total{reason=\"reconcile_capacity\"}`,
+		// Both startup reasons, not just the capacity floor. A panel pinned to
+		// one reason goes blank for the other, which is the same "a metric
+		// nobody surfaces closes nothing" the panel was added to fix.
+		`loadgen_failure_invalidations_total{reason=~\"reconcile_capacity|reconcile_lag_range\"}`,
 	} {
 		assert.Contains(t, dashboard, query)
 	}
