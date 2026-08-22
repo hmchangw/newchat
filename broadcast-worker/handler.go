@@ -376,8 +376,6 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 // handleCreated. Additive only: SetSubscriptionMentions' filter skips
 // non-subscribers and accounts that already read past the edit, so a removed
 // mention is never cleared and an already-read one is never re-flagged.
-// The returned mentionees are for federation only, so the home-site lookup they
-// need is skipped when federation is off and a lookup failure is not fatal.
 func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) ([]model.Participant, error) {
 	parsed := mention.Parse(msg.Content)
 	if len(parsed.Accounts) == 0 {
@@ -386,6 +384,8 @@ func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string
 	if err := h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt); err != nil {
 		return nil, err
 	}
+	// The returned mentionees only route the cross-site relay, so skip the
+	// lookup when federation is off and treat a failure as non-fatal.
 	if h.publish == nil {
 		return nil, nil
 	}
@@ -401,16 +401,13 @@ func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string
 
 // federateMentions relays the badge to each mentionee's home site, one event per
 // destination carrying only that site's accounts. Best-effort: a failure is
-// logged, never returned, so it can't NAK the message and re-broadcast it to
-// clients. Participants without a home site (an unresolved account, or the
-// synthetic @all entry) have no destination and are skipped.
-// at is the message's createdAt, or editedAt when an edit added the mention; it
-// both feeds the destination's read guard and keeps the two dedup IDs distinct.
+// logged, never returned, so it can't NAK the message and re-broadcast to clients.
 func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, participants []model.Participant, at time.Time) {
 	if h.publish == nil {
 		return
 	}
-	// Allocated lazily: the overwhelmingly common case is no remote mentionee.
+	// Lazily allocated: most messages have no remote mentionee. A participant with
+	// no site is either unresolved or the synthetic @all entry — neither routes.
 	var accountsBySite map[string][]string
 	for i := range participants {
 		p := &participants[i]
@@ -428,8 +425,9 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 	now := time.Now().UTC().UnixMilli()
 	for destSiteID, accounts := range accountsBySite {
 		payload, err := sonic.Marshal(model.SubscriptionMentionEvent{
-			RoomID:      roomID,
-			Accounts:    accounts,
+			RoomID:   roomID,
+			Accounts: accounts,
+			// createdAt, or editedAt when an edit added the mention.
 			MentionedAt: at.UnixMilli(),
 			Timestamp:   now,
 		})
@@ -439,6 +437,7 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 				"request_id", natsutil.RequestIDFromContext(ctx))
 			continue
 		}
+		// at keeps a later edit's badge from being deduped against the original send.
 		dedupID := fmt.Sprintf("mention:%s:%s:%d:%s", roomID, msgID, at.UnixMilli(), destSiteID)
 		if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, destSiteID,
 			model.InboxSubscriptionMention, payload, dedupID, now); err != nil {
