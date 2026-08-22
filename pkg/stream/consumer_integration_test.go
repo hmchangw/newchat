@@ -39,7 +39,11 @@ func newStream(t *testing.T) (jetstream.JetStream, context.Context, string) {
 		Subjects: []string{"backoff." + t.Name() + ".>"},
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), name) })
+	t.Cleanup(func() {
+		if err := js.DeleteStream(context.Background(), name); err != nil {
+			t.Errorf("delete stream %s: %v", name, err)
+		}
+	})
 
 	return js, ctx, name
 }

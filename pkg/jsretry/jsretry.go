@@ -27,6 +27,12 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
+// minNakDelay floors every nak delay. A delay of 0 serializes as a bare -NAK,
+// which redelivers instantly and ignores the consumer's BackOff — the one thing
+// this package exists to prevent — so a degenerate schedule still yields a
+// positive delay.
+const minNakDelay = time.Millisecond
+
 // Msg is the subset of the JetStream message API the settle path needs. Both
 // jetstream.Msg and oteljetstream.Msg (which embeds it) satisfy it.
 type Msg interface {
@@ -124,6 +130,9 @@ func settle(ctx context.Context, msg Msg, backoff []time.Duration, err error, lo
 // first entry when metadata is unavailable. The uint64 counter is walked rather
 // than converted to int, avoiding any narrowing-overflow concern.
 func backoffFor(msg Msg, backoff []time.Duration) time.Duration {
+	if len(backoff) == 0 {
+		return minNakDelay
+	}
 	base := backoff[0]
 	// NumDelivered is 1 on the first delivery, so the i'th redelivery uses
 	// backoff[i]; once attempts exceed the schedule the last entry is reused.
@@ -139,8 +148,8 @@ func backoffFor(msg Msg, backoff []time.Duration) time.Duration {
 // to the other half. Decorrelates a fleet that all parked during one outage —
 // the server-side BackOff cannot do this, it is a literal duration list.
 func jitter(d time.Duration) time.Duration {
-	if d <= 0 {
-		return d
+	if d <= minNakDelay {
+		return minNakDelay
 	}
 	half := d / 2
 	// #nosec G404 -- retry jitter, not security-sensitive

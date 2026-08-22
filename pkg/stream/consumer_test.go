@@ -200,3 +200,28 @@ func TestDurableConsumerDefaults_BackOffNeverExceedsMaxDeliver(t *testing.T) {
 		assert.LessOrEqual(t, len(cc.BackOff), 6, "steps=%d", steps)
 	}
 }
+
+// BackOffMax below AckWait would otherwise truncate entry 0, and the server
+// then adopts that shorter value as AckWait (consumer.go:677-682) — the exact
+// bug this derivation exists to prevent, reachable via CONSUMER_BACKOFF_MAX.
+func TestDurableConsumerDefaults_BackOffMaxBelowAckWait(t *testing.T) {
+	cc := stream.DurableConsumerDefaults(stream.ConsumerSettings{
+		AckWait: 30 * time.Second, MaxDeliver: 6,
+		BackOffSteps: 3, BackOffFactor: 2, BackOffMax: 5 * time.Second,
+	})
+
+	require.NotEmpty(t, cc.BackOff)
+	assert.Equal(t, cc.AckWait, cc.BackOff[0], "AckWait must survive a too-small BackOffMax")
+	assert.Equal(t, []time.Duration{30 * time.Second, 30 * time.Second, 30 * time.Second}, cc.BackOff)
+}
+
+// An unlimited MaxDeliver skips the clamp, so BackOffSteps is otherwise
+// unbounded and allocates whatever an operator typed.
+func TestDurableConsumerDefaults_StepsAreBounded(t *testing.T) {
+	cc := stream.DurableConsumerDefaults(stream.ConsumerSettings{
+		AckWait: 30 * time.Second, MaxDeliver: -1,
+		BackOffSteps: 1_000_000, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+	})
+
+	assert.LessOrEqual(t, len(cc.BackOff), 32, "an absurd step count must be bounded")
+}

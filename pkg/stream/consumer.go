@@ -62,8 +62,17 @@ func DurableConsumerDefaults(s ConsumerSettings) jetstream.ConsumerConfig {
 // backOffSchedule builds the redelivery schedule, nil when disabled (flat AckWait
 // retry). Steps are clamped to MaxDeliver because the server rejects a longer
 // schedule outright (consumer.go:807) — clamping beats failing at startup.
+// maxBackOffSteps bounds an operator-supplied BackOffSteps. An unlimited
+// MaxDeliver skips the clamp below, so nothing else caps the allocation.
+const maxBackOffSteps = 32
+
 func (s ConsumerSettings) backOffSchedule() []time.Duration {
 	steps := s.BackOffSteps
+	if steps > maxBackOffSteps {
+		slog.Warn("consumer backoff steps above the bound — clamping",
+			"backoffSteps", steps, "bound", maxBackOffSteps)
+		steps = maxBackOffSteps
+	}
 	if steps <= 0 || s.AckWait <= 0 {
 		return nil
 	}
@@ -78,12 +87,20 @@ func (s ConsumerSettings) backOffSchedule() []time.Duration {
 	if factor < 1 {
 		factor = 1
 	}
+	// A cap below AckWait would truncate entry 0, and the server then adopts that
+	// shorter value as AckWait — exactly what deriving the schedule prevents.
+	backOffMax := s.BackOffMax
+	if backOffMax > 0 && backOffMax < s.AckWait {
+		slog.Warn("consumer backoff max is below AckWait — raising it to AckWait",
+			"backoffMax", backOffMax, "ackWait", s.AckWait)
+		backOffMax = s.AckWait
+	}
 
 	out := make([]time.Duration, steps)
 	d := s.AckWait
 	for i := range out {
-		if s.BackOffMax > 0 && d > s.BackOffMax {
-			d = s.BackOffMax
+		if backOffMax > 0 && d > backOffMax {
+			d = backOffMax
 		}
 		out[i] = d
 		next := time.Duration(float64(d) * factor)

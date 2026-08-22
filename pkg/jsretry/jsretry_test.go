@@ -137,9 +137,12 @@ func TestBackoffFor_JitterVaries(t *testing.T) {
 	assert.Greater(t, len(seen), 1, "equal jitter should produce a spread of delays")
 }
 
-func TestJitter_ZeroAndNegative(t *testing.T) {
-	assert.Equal(t, time.Duration(0), jitter(0))
-	assert.Equal(t, -time.Second, jitter(-time.Second))
+// A non-positive base must floor to minNakDelay, never pass through: a zero
+// delay serializes as a bare -NAK.
+func TestJitter_NonPositiveFloorsToMinimum(t *testing.T) {
+	assert.Equal(t, minNakDelay, jitter(0))
+	assert.Equal(t, minNakDelay, jitter(-time.Second))
+	assert.Equal(t, minNakDelay, jitter(minNakDelay))
 }
 
 func TestNak_UsesJitteredBackoffForAttempt(t *testing.T) {
@@ -239,4 +242,26 @@ func TestSettle_NetworkErrors(t *testing.T) {
 			assert.Equal(t, 1, n, "the network-failure path should log exactly once")
 		})
 	}
+}
+
+// jitter halves the base, so a sub-2ns entry can round to zero — and
+// NakWithDelay(0) is the bare -NAK this package exists to prevent.
+func TestNak_SubNanosecondScheduleNeverSendsZero(t *testing.T) {
+	for range 200 {
+		m := &fakeMsg{numDelivered: 1}
+		Nak(context.Background(), m, []time.Duration{1}, "tiny")
+		assert.Positive(t, m.nakDelay, "a nak delay of 0 is a bare -NAK")
+	}
+}
+
+func TestNak_EmptyScheduleDoesNotPanic(t *testing.T) {
+	m := &fakeMsg{numDelivered: 1}
+	assert.NotPanics(t, func() { Nak(context.Background(), m, nil, "empty") })
+}
+
+func TestSettle_EmptyScheduleDoesNotPanic(t *testing.T) {
+	m := &fakeMsg{numDelivered: 1}
+	assert.NotPanics(t, func() {
+		Settle(context.Background(), m, nil, errors.New("boom"))
+	})
 }
