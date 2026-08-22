@@ -70,3 +70,16 @@ func decryptEditedContent(t *testing.T, raw json.RawMessage, key *roomkeystore.V
 	require.NoError(t, err)
 	return plaintext
 }
+
+// unwrapOutbox peels an OUTBOX publish back to the federated payload:
+// OutboxEvent.Envelope -> InboxEvent.Payload -> the typed inner event.
+func unwrapOutbox(t *testing.T, data []byte) (model.OutboxEvent, model.InboxEvent, model.SubscriptionMentionEvent) {
+	t.Helper()
+	var relay model.OutboxEvent
+	require.NoError(t, json.Unmarshal(data, &relay))
+	var envelope model.InboxEvent
+	require.NoError(t, json.Unmarshal(relay.Envelope, &envelope))
+	var evt model.SubscriptionMentionEvent
+	require.NoError(t, json.Unmarshal(envelope.Payload, &evt))
+	return relay, envelope, evt
+}

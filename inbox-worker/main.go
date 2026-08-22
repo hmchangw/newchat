@@ -462,6 +462,27 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 // crashloop the shared collection, and a missing index must not take the worker down.
 func (s *mongoInboxStore) ensureIndexes(ctx context.Context) {
 	mongoutil.WarnMissingIndexes(ctx, s.threadSubCol, "threadRoomId_1_userAccount_1")
+	// SetSubscriptionMentions filters on (roomId, u.account); without this index
+	// the federated badge write collscans the shared subscriptions collection.
+	mongoutil.WarnMissingIndexes(ctx, s.subCol, "roomId_1_u.account_1")
+}
+
+// SetSubscriptionMentions flags the accounts' subscriptions as mentioned. The
+// guard is $not/$gte rather than $lt so a never-read subscription (missing
+// lastSeenAt) still matches — plain $lt would skip the missing field (#467).
+func (s *mongoInboxStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
+	_, err := s.subCol.UpdateMany(ctx,
+		bson.M{
+			"roomId":     roomID,
+			"u.account":  bson.M{"$in": accounts},
+			"lastSeenAt": bson.M{"$not": bson.M{"$gte": msgCreatedAt}},
+		},
+		bson.M{"$set": bson.M{"hasMention": true}},
+	)
+	if err != nil {
+		return fmt.Errorf("set subscription mentions for room %s: %w", roomID, err)
+	}
+	return nil
 }
 
 // UpsertThreadSubscription inserts the subscription on first event for a

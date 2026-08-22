@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -60,6 +61,9 @@ type ParentFetcher interface {
 	FetchParent(ctx context.Context, account, roomID, siteID, messageID string) (*ParentMessageInfo, error)
 }
 
+// PublishFunc publishes to JetStream with msgID as the Nats-Msg-Id.
+type PublishFunc func(ctx context.Context, subj string, data []byte, msgID string) error
+
 // Handler processes MESSAGES-CANONICAL messages and broadcasts room events.
 type Handler struct {
 	store         Store
@@ -71,6 +75,9 @@ type Handler struct {
 	encoder       *roomcrypto.Encoder
 	routeMode     subject.RoomRouteMode
 	metrics       *broadcastMetrics
+	siteID        string
+	// publish relays onto the OUTBOX; nil disables the cross-site mention fan-out.
+	publish PublishFunc
 	// threadViewSubject gates the thread-scoped view lane; see publishThreadViewEvent.
 	threadViewSubject bool
 }
@@ -79,11 +86,21 @@ type handlerOption func(*handlerOptions)
 
 type handlerOptions struct {
 	metrics           *broadcastMetrics
+	siteID            string
+	publish           PublishFunc
 	threadViewSubject bool
 }
 
 func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
 	return func(opts *handlerOptions) { opts.metrics = metrics }
+}
+
+// withOutboxFederation enables the cross-site mention fan-out from siteID.
+func withOutboxFederation(siteID string, publish PublishFunc) handlerOption {
+	return func(opts *handlerOptions) {
+		opts.siteID = siteID
+		opts.publish = publish
+	}
 }
 
 func withThreadViewSubject(enabled bool) handlerOption {
@@ -108,6 +125,8 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		encoder:           roomcrypto.NewEncoder(),
 		routeMode:         routeMode,
 		metrics:           opts.metrics,
+		siteID:            opts.siteID,
+		publish:           opts.publish,
 		threadViewSubject: opts.threadViewSubject,
 	}
 }
@@ -234,9 +253,13 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
-		return h.publishChannelEvent(ctx, &meta, clientMsg, evt.Timestamp, resolved.MentionAll, resolved.Participants)
+		if err := h.publishChannelEvent(ctx, &meta, clientMsg, evt.Timestamp, resolved.MentionAll, resolved.Participants); err != nil {
+			return err
+		}
 	case model.RoomTypeDM, model.RoomTypeBotDM:
-		return h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts, model.RoomEventNewMessage)
+		if err := h.publishDMEvents(ctx, &meta, clientMsg, evt.Timestamp, resolved.Accounts, model.RoomEventNewMessage); err != nil {
+			return err
+		}
 	default:
 		slog.WarnContext(ctx, "unknown room type, skipping fan-out",
 			"type", meta.Type,
@@ -244,6 +267,8 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		return nil
 	}
+	h.federateMentions(ctx, meta.ID, msg.ID, resolved.Participants, msg.CreatedAt)
+	return nil
 }
 
 func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEvent) error {
@@ -337,8 +362,14 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
-		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
+	// Additive only: SetSubscriptionMentions' filter skips non-subscribers and
+	// accounts that already read past the edit, so a removed mention is never
+	// cleared and an already-read one is never re-flagged.
+	parsed := mention.Parse(msg.Content)
+	if len(parsed.Accounts) > 0 {
+		if err := h.store.SetSubscriptionMentions(ctx, room.ID, parsed.Accounts, *msg.EditedAt); err != nil {
+			return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
+		}
 	}
 
 	edit := buildEditRoomEvent(room, evt)
@@ -347,19 +378,77 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
 		}
 	}
-	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
+	if err := h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit); err != nil {
+		return err
+	}
+	h.federateEditMentions(ctx, room.ID, msg.ID, parsed, *msg.EditedAt)
+	return nil
 }
 
-// badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
-// handleCreated. Additive only: SetSubscriptionMentions' filter skips
-// non-subscribers and accounts that have already read past the edit, so a
-// removed mention is never cleared and an already-read one is never re-flagged.
-func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
-	parsed := mention.Parse(msg.Content)
-	if len(parsed.Accounts) == 0 {
-		return nil
+// federateEditMentions resolves an edit's mentionees to their home sites and
+// relays the badge. The lookup is routing-only, so it runs after the client
+// broadcast, is skipped when federation is off, and a failure costs the relay
+// rather than the local badge.
+func (h *Handler) federateEditMentions(ctx context.Context, roomID, msgID string, parsed mention.ParseResult, at time.Time) {
+	if h.publish == nil || len(parsed.Accounts) == 0 {
+		return
 	}
-	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
+	users, err := h.userStore.FindUsersByAccounts(ctx, parsed.Accounts)
+	if err != nil {
+		slog.WarnContext(ctx, "user lookup failed for edited mentions, skipping federation",
+			"error", err, "room_id", roomID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+		return
+	}
+	h.federateMentions(ctx, roomID, msgID, mention.ResolveFromParsed(parsed, usersByAccount(users)).Participants, at)
+}
+
+// federateMentions relays the badge to each mentionee's home site, one event per
+// destination. A failure is logged, never returned, so it can't NAK the message
+// and re-broadcast it to clients.
+func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, participants []model.Participant, at time.Time) {
+	if h.publish == nil {
+		return
+	}
+	// Lazily allocated: most messages have no remote mentionee. A participant with
+	// no site is either unresolved or the synthetic @all entry — neither routes.
+	var accountsBySite map[string][]string
+	for i := range participants {
+		p := &participants[i]
+		if p.SiteID == "" || p.SiteID == h.siteID {
+			continue
+		}
+		if accountsBySite == nil {
+			accountsBySite = make(map[string][]string)
+		}
+		accountsBySite[p.SiteID] = append(accountsBySite[p.SiteID], p.Account)
+	}
+	if accountsBySite == nil {
+		return
+	}
+	now := time.Now().UTC().UnixMilli()
+	for destSiteID, accounts := range accountsBySite {
+		payload, err := sonic.Marshal(model.SubscriptionMentionEvent{
+			RoomID:      roomID,
+			Accounts:    accounts,
+			MentionedAt: at.UnixMilli(),
+			Timestamp:   now,
+		})
+		if err != nil {
+			slog.ErrorContext(ctx, "marshal subscription_mention failed",
+				"error", err, "room_id", roomID, "dest_site", destSiteID,
+				"request_id", natsutil.RequestIDFromContext(ctx))
+			continue
+		}
+		// at keeps a later edit's badge from being deduped against the original send.
+		dedupID := fmt.Sprintf("mention:%s:%s:%d:%s", roomID, msgID, at.UnixMilli(), destSiteID)
+		if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, destSiteID,
+			model.InboxSubscriptionMention, payload, dedupID, now); err != nil {
+			slog.ErrorContext(ctx, "federate subscription_mention failed",
+				"error", err, "room_id", roomID, "dest_site", destSiteID, "accounts", len(accounts),
+				"request_id", natsutil.RequestIDFromContext(ctx))
+		}
+	}
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {

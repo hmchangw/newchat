@@ -106,6 +106,10 @@ type InboxStore interface {
 	// sectionID==nil) on (roomID, account), guarded by sectionUpdatedAt so an
 	// out-of-order or duplicate move can't regress. A missing sub NAKs for retry.
 	UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error
+	// SetSubscriptionMentions flags accounts as mentioned in roomID, skipping any
+	// that already read past msgCreatedAt (#467). Mirrors broadcast-worker's
+	// origin-side write; a non-subscriber matches nothing.
+	SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error
 }
 
 // badgeCache is the badge cache's Valkey accelerator (pkg/badgecache.Cache
@@ -177,6 +181,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleUserChatlistUpdated(ctx, &evt)
 	case model.InboxSubscriptionSectionMoved:
 		return h.handleSubscriptionSectionMoved(ctx, &evt)
+	case model.InboxSubscriptionMention:
+		return h.handleSubscriptionMention(ctx, &evt)
 	default:
 		slog.Warn("unknown event type, skipping", "type", evt.Type)
 		return nil
@@ -476,6 +482,30 @@ func (h *Handler) handleThreadUnreadAdded(ctx context.Context, evt *model.InboxE
 	}
 	if err := h.store.AddThreadUnread(ctx, e.RoomID, e.ParentMessageID, e.Accounts); err != nil {
 		return fmt.Errorf("add thread unread %q in room %q: %w", e.ParentMessageID, e.RoomID, err)
+	}
+	return nil
+}
+
+// handleSubscriptionMention replicates a room-level @-mention badge onto the
+// mentionees' home replicas. The store's read guard makes it idempotent and
+// order-safe against a concurrent subscription_read.
+func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.SubscriptionMentionEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_mention payload"))
+	}
+	if len(e.Accounts) == 0 {
+		return nil
+	}
+	// Poison payload: a blank room matches nothing and a zero mentionedAt badges
+	// as 1970, so the read guard skips everyone who has ever read the room.
+	if e.RoomID == "" || e.MentionedAt <= 0 {
+		slog.WarnContext(ctx, "subscription_mention missing roomId or mentionedAt",
+			"room_id", e.RoomID, "mentioned_at", e.MentionedAt, "origin_site", evt.SiteID)
+		return errcode.Permanent(errcode.BadRequest("subscription_mention missing roomId or mentionedAt"))
+	}
+	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MentionedAt).UTC()); err != nil {
+		return fmt.Errorf("set subscription mentions in room %q: %w", e.RoomID, err)
 	}
 	return nil
 }
