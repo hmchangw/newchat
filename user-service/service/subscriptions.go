@@ -286,7 +286,7 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 // Each room already carrying a resolved sub.Room.LastMsgAt (set by enrichLocal/
 // enrichCrossSite, which both run before this) is passed as a hint so
 // history-service can skip its own room-times read for that room; rooms with no
-// Room (soft-deleted/degraded) contribute no hint.
+// Room (not found, or a degraded site) contribute no hint.
 func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) {
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {
@@ -329,7 +329,7 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 			continue
 		}
 		for _, j := range idxBySite[site] {
-			// Soft-deleted room (Room==nil) has nothing to attach a last message to.
+			// An unresolved room (Room==nil) has nothing to attach a last message to.
 			if subs[j].Room == nil {
 				continue
 			}
@@ -530,7 +530,7 @@ func (s *UserService) CountSubscriptions(c *natsrouter.Context, req models.Count
 // (best-effort, as before) but must not be cached: writing it would stamp
 // the freshness marker on a knowingly-incomplete set.
 // Local subs read lastMsgAt from the $lookup; cross-site subs fetch it via
-// per-site GetRoomsMeta (not-found/soft-deleted rooms are excluded entirely).
+// per-site GetRoomsMeta (rooms the remote site cannot resolve are excluded).
 func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]string, bool, error) {
 	subs, err := s.subs.GetActiveSubscriptions(c, account, s.maxSubs)
 	if err != nil {
