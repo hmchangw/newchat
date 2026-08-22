@@ -173,3 +173,42 @@ func (j *countingFailureJournal) Append(event *failureLedgerEvent) error {
 	}
 	return j.memoryFailureJournal.Append(event)
 }
+
+// InvalidReason is the first cause, the point the run's evidence stopped
+// standing, and replay rebuilds it from the order the journal holds. A retry
+// loop that steps over a reason it could not write lets a later cause be
+// journaled first, so a restart reports the wrong one as the first.
+func TestFailureLedger_ARetryNeverLetsALaterCauseOvertakeTheFirst(t *testing.T) {
+	now := time.Date(2026, 8, 22, 18, 0, 0, 0, time.UTC)
+	journal := &reasonFailingFailureJournal{refuse: invalidReasonReconcileCapacity}
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 4, Journal: journal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	// The first cause is refused, which raises the wal cause behind it.
+	ledger.Invalidate(invalidReasonReconcileCapacity)
+	require.Equal(t,
+		[]string{invalidReasonReconcileCapacity, invalidReasonWAL},
+		ledger.UnpersistedInvalidations())
+
+	// A successful append drives the retry, where the second cause would land.
+	operation := testFailureOperation("m1", now)
+	operation.LifecycleState = failureOperationJournaled
+	require.NoError(t, ledger.Start(operation))
+
+	assert.Empty(t, journaledMemoryInvalidationReasons(&journal.memoryFailureJournal),
+		"no cause may be journaled ahead of the one that came first")
+}
+
+type reasonFailingFailureJournal struct {
+	memoryFailureJournal
+	refuse string
+}
+
+func (j *reasonFailingFailureJournal) Append(event *failureLedgerEvent) error {
+	if event.Type == failureLedgerEventInvalidated && event.InvalidReason == j.refuse {
+		return errors.New("no space left on device")
+	}
+	return j.memoryFailureJournal.Append(event)
+}

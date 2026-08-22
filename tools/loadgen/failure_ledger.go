@@ -1379,9 +1379,15 @@ func (l *failureLedger) retryPendingInvalidationsLocked() {
 	if len(l.persistedInvalidReasons) == len(l.invalidReasons) {
 		return
 	}
+	// In order, and stopping at the first refusal. InvalidReason is the first
+	// cause and replay rebuilds it from the order the file holds, so stepping
+	// over a reason that would not land lets a later one be journaled ahead of
+	// it and a restart report the wrong cause as the first.
 	// Over a copy: a failed attempt appends the wal cause to the slice below.
 	for _, reason := range slices.Clone(l.invalidReasons) {
-		l.persistInvalidationLocked(reason)
+		if !l.persistInvalidationLocked(reason) {
+			return
+		}
 	}
 }
 
@@ -1691,7 +1697,7 @@ func (l *failureLedger) invalidateLocked(reason string) {
 	l.noteInvalidationLocked(reason)
 	// Outside the note above: a cause already counted in memory can still be
 	// missing from the journal, and durability is what the retry is for.
-	l.persistInvalidationLocked(reason)
+	l.retryPendingInvalidationsLocked()
 }
 
 // noteInvalidationLocked records a cause in memory and counts it once. It
@@ -1716,9 +1722,9 @@ func (l *failureLedger) noteInvalidationLocked(reason string) {
 // deduplicated away — otherwise one transient append failure would be
 // permanent, and a restart would replay the run's evidence without the verdict
 // that disqualifies it.
-func (l *failureLedger) persistInvalidationLocked(reason string) {
+func (l *failureLedger) persistInvalidationLocked(reason string) bool {
 	if slices.Contains(l.persistedInvalidReasons, reason) {
-		return
+		return true
 	}
 	if l.journalClosed {
 		// Nothing can be written any more, and nothing failed: the ledger closed
@@ -1728,7 +1734,7 @@ func (l *failureLedger) persistInvalidationLocked(reason string) {
 			"reason", reason,
 			"consequence", "this cause exists only in memory and will not survive the run",
 		)
-		return
+		return false
 	}
 	if err := l.journalInvalidationLocked(reason); err != nil {
 		// A journal that will not hold the verdict is a cause in its own right,
@@ -1736,9 +1742,10 @@ func (l *failureLedger) persistInvalidationLocked(reason string) {
 		// than invalidated, because invalidating would attempt the append that
 		// just failed and recurse.
 		l.noteInvalidationLocked(invalidReasonWAL)
-		return
+		return false
 	}
 	l.persistedInvalidReasons = append(l.persistedInvalidReasons, reason)
+	return true
 }
 
 // journalInvalidationLocked persists the cause on a best effort. It cannot

@@ -163,8 +163,14 @@ func TestFailureLedger_AnInvalidationWhoseAppendFailedIsRetriedNotForgotten(t *t
 	journal.failFor = ""
 	ledger.Invalidate(invalidReasonReconcileCapacity)
 
-	assert.Equal(t, 2, journal.attempts,
+	// Three, not two: the refused first append raised the wal cause behind it,
+	// and a recovered journal owes both. They land in the order they were
+	// raised, which is what keeps the first cause first on replay.
+	assert.Equal(t, 3, journal.attempts,
 		"a reason that never reached the journal must be retried, not deduplicated away")
+	assert.Equal(t,
+		[]string{invalidReasonReconcileCapacity, invalidReasonWAL},
+		journaledMemoryInvalidationReasons(&journal.memoryFailureJournal))
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureInvalidations.WithLabelValues(invalidReasonReconcileCapacity)),
 		"the counter still reports the cause once, however many appends it took")
