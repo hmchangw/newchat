@@ -877,6 +877,13 @@ func defaultFailureReason(
 // a successful call is not a complete one — it stops at expireBatch and skips
 // claimed operations mid-verification — so "the sweep succeeded" is not a
 // licence to discard anything else that looks overdue.
+// failureExpiryGrace is how long the sweep leaves a scheduled probe alone
+// before retiring the operation anyway, derived from the operation's own
+// verification window so it needs no configuration and scales with the run.
+func failureExpiryGrace(operation *failureOperation) time.Duration {
+	return soakFailureExpiryInterval(operation.Deadline.Sub(operation.StartedAt))
+}
+
 func (l *failureLedger) Expire(now time.Time) ([]string, error) {
 	if now.IsZero() {
 		now = l.now()
@@ -892,6 +899,17 @@ func (l *failureLedger) Expire(now time.Time) ([]string, error) {
 			break
 		}
 		if now.Before(operation.Deadline) {
+			continue
+		}
+		// An operation whose next probe is still owed its turn is not the
+		// sweep's to take. The reconciler schedules that probe on the deadline
+		// itself, and only a probe can tell a lost message from one nobody
+		// looked for — this sweep queries nothing and records unverified, so
+		// getting there first would report genuine data loss as an unread
+		// window. One sweep interval of grace lets a healthy lane deliver the
+		// verdict; past that the lane really did not look, and unverified
+		// becomes the honest answer.
+		if now.Before(operation.nextVerifyAt.Add(failureExpiryGrace(operation))) {
 			continue
 		}
 		// A claimed operation is mid-verification. Finalizing it here would

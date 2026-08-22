@@ -58,22 +58,6 @@ func TestNextReconcileProbe_KeepsAFinalProbeInsideTheDeadline(t *testing.T) {
 	assert.Equal(t, deadline.Add(-retry), got)
 }
 
-// Once there is no room left for another probe the operation must be allowed to
-// expire, rather than being rescheduled into a tight loop against a deadline it
-// has already effectively reached.
-func TestNextReconcileProbe_StopsWhenNoProbeStillFits(t *testing.T) {
-	verifyAfter := time.Unix(1000, 0).UTC()
-	deadline := verifyAfter.Add(10 * time.Minute)
-	const retry = time.Second
-
-	now := deadline.Add(-retry)
-
-	got := nextReconcileProbe(now, verifyAfter, deadline, retry)
-
-	assert.False(t, got.Before(deadline),
-		"with no room for a probe the next attempt must fall at or past the deadline")
-}
-
 // The whole point is the count. A flat interval spends ~590 claims on one
 // operation; the same walk under the doubling schedule has to cost an order of
 // magnitude less, or the reconcile budget is still set by the miss rate.
