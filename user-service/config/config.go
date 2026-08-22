@@ -44,6 +44,9 @@ type HTTPConfig struct {
 	GzipMinBytes     int           `env:"GZIP_MIN_BYTES"     envDefault:"1024"`
 	MongoMaxPoolSize uint64        `env:"MONGO_MAX_POOL_SIZE" envDefault:"128"`
 	MongoMinPoolSize uint64        `env:"MONGO_MIN_POOL_SIZE" envDefault:"16"`
+	// Pool sizes are per replica-set member, and the driver never reaps idle
+	// connections by default, so a burst's peak would be held for the process life.
+	MongoMaxIdleTime time.Duration `env:"MONGO_MAX_IDLE_TIME" envDefault:"5m"`
 	// Page bounds. The default matches the NATS one so an omitted limit behaves
 	// identically on both transports; the max is far higher because no 128 KB
 	// payload ceiling applies here.
@@ -183,6 +186,9 @@ func Load() (Config, error) {
 	}
 	if cfg.HTTP.MongoMaxPoolSize < 1 {
 		return Config{}, fmt.Errorf("HTTP_MONGO_MAX_POOL_SIZE must be >= 1, got %d", cfg.HTTP.MongoMaxPoolSize)
+	}
+	if cfg.HTTP.MongoMaxIdleTime < 0 {
+		return Config{}, fmt.Errorf("HTTP_MONGO_MAX_IDLE_TIME must be >= 0, got %s", cfg.HTTP.MongoMaxIdleTime)
 	}
 	if cfg.HTTP.MongoMinPoolSize > cfg.HTTP.MongoMaxPoolSize {
 		return Config{}, fmt.Errorf("HTTP_MONGO_MIN_POOL_SIZE (%d) must be <= HTTP_MONGO_MAX_POOL_SIZE (%d)", cfg.HTTP.MongoMinPoolSize, cfg.HTTP.MongoMaxPoolSize)

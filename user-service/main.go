@@ -139,6 +139,7 @@ func main() {
 		mongoutil.WithObservability(sdk),
 		mongoutil.WithMaxPoolSize(cfg.HTTP.MongoMaxPoolSize),
 		mongoutil.WithMinPoolSize(cfg.HTTP.MongoMinPoolSize),
+		mongoutil.WithMaxIdleTime(cfg.HTTP.MongoMaxIdleTime),
 	)
 	if err != nil {
 		slog.Error("http mongo connect failed", "error", err)

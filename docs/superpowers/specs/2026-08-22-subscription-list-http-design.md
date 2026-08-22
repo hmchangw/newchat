@@ -434,6 +434,7 @@ existing `MONGO_` / `NATS_` blocks:
 | `HTTP_GZIP_MIN_BYTES` | `1024` | Compression threshold |
 | `HTTP_MONGO_MAX_POOL_SIZE` | `128` | HTTP-only Mongo pool (§13) |
 | `HTTP_MONGO_MIN_POOL_SIZE` | `16` | Warm floor for burst arrivals |
+| `HTTP_MONGO_MAX_IDLE_TIME` | `5m` | Reap idle pooled connections; 0 = never |
 | `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` | `40` | Page size when `limit` omitted |
 | `HTTP_SUBSCRIPTION_MAX_LIMIT` | `400` | Hard page ceiling |
 | `ROOM_BATCH_CHUNK` | `100` | Enrichment fan-out chunk size |
@@ -490,6 +491,16 @@ minimum of 16 can be held on each active member. Size these against the replica
 set's connection budget rather than against the per-pod intuition, and consider
 dropping the HTTP minimum to 0 if warm-connection latency is not a concern —
 failover shifts pool creation between members and briefly multiplies the count.
+
+That ceiling used to be *sticky*: the driver reaps idle connections only when
+`maxIdleTimeMS` is set, and 0 (its default) means never
+(`x/mongo/driver/topology/server_options.go:145`, `pool.go:195`). A burst that
+grew the pool held those sockets for the life of the process, and failover
+re-growing them on a new member added to the total rather than replacing it. The
+HTTP client now sets `HTTP_MONGO_MAX_IDLE_TIME` (5m), so 684 is a transient peak
+that drains back toward `MinPoolSize × members` once the burst passes. The NATS
+client is deliberately left on the old behaviour — changing it is a pre-existing
+path this change does not own.
 
 ## 14. Deployment and operations
 

@@ -456,3 +456,39 @@ func TestLoad_ZeroConcurrencyIsAllowed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, cfg.HTTP.MaxConcurrency)
 }
+
+func TestLoad_HTTPMongoMaxIdleTimeDefault(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	unsetEnv(t, "HTTP_MONGO_MAX_IDLE_TIME")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Minute, cfg.HTTP.MongoMaxIdleTime)
+}
+
+func TestLoad_HTTPMongoMaxIdleTimeOverride(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("HTTP_MONGO_MAX_IDLE_TIME", "90s")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, 90*time.Second, cfg.HTTP.MongoMaxIdleTime)
+}
+
+func TestLoad_RejectsNegativeHTTPMongoMaxIdleTime(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("HTTP_MONGO_MAX_IDLE_TIME", "-1s")
+
+	_, err := Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP_MONGO_MAX_IDLE_TIME")
+}

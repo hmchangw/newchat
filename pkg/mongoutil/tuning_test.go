@@ -2,6 +2,7 @@ package mongoutil
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,4 +33,20 @@ func TestApplyTuning_UnsetLeavesOptionsUntouched(t *testing.T) {
 
 	assert.Nil(t, clientOpts.MaxPoolSize, "unset WithMaxPoolSize must not write MaxPoolSize")
 	assert.Nil(t, clientOpts.MinPoolSize, "unset WithMinPoolSize must not write MinPoolSize")
+}
+
+func TestApplyTuning_SetsMaxIdleTime(t *testing.T) {
+	clientOpts := options.Client()
+	newConnectConfig(WithMaxIdleTime(5 * time.Minute)).applyTuning(clientOpts)
+
+	require.NotNil(t, clientOpts.MaxConnIdleTime)
+	assert.Equal(t, 5*time.Minute, *clientOpts.MaxConnIdleTime)
+}
+
+func TestApplyTuning_UnsetMaxIdleTimeLeavesDriverDefault(t *testing.T) {
+	// The driver treats 0 as "never reap", so an unset option must not write it.
+	clientOpts := options.Client()
+	newConnectConfig().applyTuning(clientOpts)
+
+	assert.Nil(t, clientOpts.MaxConnIdleTime)
 }
