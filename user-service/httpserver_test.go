@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/user-service/config"
 )
@@ -22,4 +25,17 @@ func TestNewHTTPServer_Tuning(t *testing.T) {
 	// handler budget or a slow page is cut mid-write. config.Load enforces the ordering.
 	assert.Equal(t, 35*time.Second, srv.WriteTimeout)
 	assert.Equal(t, 16<<10, srv.MaxHeaderBytes)
+}
+
+// Readiness must fail as soon as the drain starts while liveness keeps answering:
+// stopping the health server outright would fail liveness too and invite a
+// SIGKILL mid-drain.
+func TestDrainingCheck_FailsReadinessOnlyWhileDraining(t *testing.T) {
+	var draining atomic.Bool
+	check := drainingCheck(&draining)
+
+	require.NoError(t, check.Probe(context.Background()), "ready before shutdown")
+
+	draining.Store(true)
+	assert.Error(t, check.Probe(context.Background()), "not ready once draining")
 }

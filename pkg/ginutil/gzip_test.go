@@ -275,3 +275,22 @@ func TestGzip_KeepsExplicitContentType(t *testing.T) {
 	w := doGet(gzipEngine(t, 1024, writeBody(strings.Repeat("a", 4096))), "gzip")
 	assert.Contains(t, w.Header().Get("Content-Type"), "application/json")
 }
+
+// A handler that flushes before writing is streaming: the body passes through
+// uncompressed rather than getting an application/x-gzip label from the sniffer.
+func TestGzip_FlushBeforeAnyWriteStaysUncompressed(t *testing.T) {
+	body := strings.Repeat("a", 4096)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(Gzip(1024))
+	r.GET("/x", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Writer.Flush()
+		_, _ = c.Writer.WriteString(body)
+	})
+	w := doGet(r, "gzip")
+
+	assert.Empty(t, w.Header().Get("Content-Encoding"))
+	assert.NotContains(t, w.Header().Get("Content-Type"), "gzip")
+	assert.Equal(t, body, w.Body.String())
+}

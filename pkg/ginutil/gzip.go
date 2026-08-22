@@ -197,13 +197,17 @@ func (w *gzipResponseWriter) close() {
 	}
 }
 
-// Flush commits first when the body is still buffered: flushing straight through
-// would let gin write its default 200 and strand both the handler's real status
-// and the buffered prefix.
+// Flush on an uncommitted body passes it through uncompressed: a handler that
+// flushes is streaming, and there is no plaintext left to sniff a Content-Type
+// from once deflate output goes out first. Flushing straight through instead
+// would let gin write its default 200 and strand the handler's real status.
 func (w *gzipResponseWriter) Flush() {
 	if w.gz == nil && !w.plain && !w.closed {
-		if err := w.commit(nil); err != nil {
-			return
+		w.plain = true
+		w.flushStatus()
+		if len(w.buf) > 0 {
+			_, _ = w.ResponseWriter.Write(w.buf)
+			w.buf = nil
 		}
 	}
 	if w.gz != nil {

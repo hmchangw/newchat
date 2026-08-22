@@ -23,6 +23,12 @@ import (
 
 var validListTypes = map[string]bool{"current": true, "rooms": true, "apps": true}
 
+// errTimedOut is the one 503 the list returns when it runs out of budget, so both
+// the query and the enrichment report the retryable code the API documents.
+func errTimedOut(cause error) error {
+	return errcode.Unavailable("subscription list timed out, please retry", errcode.WithCause(cause))
+}
+
 // deletedRoomNamePrefix marks a soft-deleted room (room-service renames it to
 // "Del-"+name); such rooms are surfaced on the subscription with no room object.
 const deletedRoomNamePrefix = "Del-"
@@ -51,6 +57,9 @@ func (s *UserService) ListSubscriptionsFor(ctx context.Context, account string, 
 	// slice and hasMore stay consistent (filtering after slicing would undercount).
 	res, err := s.subs.AggregateSubscriptions(ctx, account, req.Type, favorite, req.UpdatedWithinDays, page)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, errTimedOut(err)
+		}
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
@@ -65,8 +74,7 @@ func (s *UserService) ListSubscriptionsFor(ctx context.Context, account string, 
 	// that into a 503 would log an ERROR per abandoned request during exactly the
 	// reconnect burst this endpoint serves.
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, errcode.Unavailable("subscription list timed out, please retry",
-			errcode.WithCause(ctx.Err()))
+		return nil, errTimedOut(ctx.Err())
 	}
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: items,

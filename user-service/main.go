@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	o11y "github.com/flywindy/o11y"
@@ -248,7 +249,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second, natsutil.HealthCheck(nc))
+	// Readiness must fail the moment shutdown starts, so the load balancer stops
+	// routing before the listener closes. Liveness stays 200 throughout — stopping
+	// the health server outright would fail liveness too and invite a SIGKILL
+	// mid-drain.
+	var draining atomic.Bool
+	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second,
+		natsutil.HealthCheck(nc),
+		drainingCheck(&draining),
+	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
 		os.Exit(1)
@@ -256,16 +265,16 @@ func main() {
 
 	slog.Info("user-service running", "site", cfg.SiteID, "http_port", cfg.HTTP.Port, "health_addr", cfg.HealthAddr)
 
-	// Readiness goes first: shutdown.Wait runs these in order, so closing the API
-	// listener while /readyz still answers 200 would earn new connections an
-	// ECONNREFUSED instead of a graceful removal from rotation.
+	// Order matters. Readiness flips first so the load balancer drains us before
+	// the listener closes; HTTP then drains ahead of NATS and Mongo so in-flight
+	// requests can still reach them; the health server stops last, keeping
+	// liveness answerable throughout.
 	//
-	// HTTP then drains ahead of NATS and Mongo so in-flight requests can still
-	// reach them, but bounded — the budget is shared across every step and a
-	// handler may run for HTTP_HANDLER_TIMEOUT, so an unbounded drain would skip
-	// the NATS drain and the database disconnects entirely.
+	// The HTTP drain is bounded: shutdown.Wait shares one budget across every step
+	// and a handler may run for HTTP_HANDLER_TIMEOUT, so an unbounded drain would
+	// skip the NATS drain and the database disconnects entirely.
 	shutdown.Wait(ctx, 25*time.Second,
-		healthStop,
+		func(context.Context) error { draining.Store(true); return nil },
 		func(ctx context.Context) error {
 			ctx, cancel := context.WithTimeout(ctx, httpDrainTimeout)
 			defer cancel()
@@ -281,8 +290,20 @@ func main() {
 			}
 			return valkeyClient.Close()
 		},
+		healthStop,
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// drainingCheck fails readiness once shutdown begins, so the load balancer stops
+// routing here before the listener closes. Liveness is unaffected by design.
+func drainingCheck(draining *atomic.Bool) health.Check {
+	return health.Check{Name: "draining", Probe: func(context.Context) error {
+		if draining.Load() {
+			return errors.New("shutting down")
+		}
+		return nil
+	}}
 }
 
 // httpDrainTimeout caps the HTTP drain so the remaining shutdown steps keep most
@@ -331,8 +352,11 @@ func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, 
 		return nil, fmt.Errorf("http listen on %q: %w", srv.Addr, err)
 	}
 	go func() {
+		// Exiting, not just logging: readiness probes NATS, so a dead listener would
+		// otherwise leave the pod in rotation serving nothing.
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("http server stopped", "error", err)
+			os.Exit(1)
 		}
 	}()
 	return srv, nil
