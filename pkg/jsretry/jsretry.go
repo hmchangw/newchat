@@ -58,13 +58,17 @@ var DefaultBackoff = []time.Duration{
 }
 
 // BackpressureBackoff suits workers fronting a downstream that reports it is
-// shedding load (an ES 429, a saturated pool). It starts where DefaultBackoff
-// ends: a backend that just rejected the write needs time to drain, and a
-// one-second retry only feeds the overload that caused the rejection.
+// shedding load (an ES 429, a saturated pool). It skips DefaultBackoff's fast
+// rungs: a backend that just rejected the write needs time to drain, and a
+// one-second retry only feeds the overload that caused the rejection. It then
+// keeps DefaultBackoff's 10m tail, so shedding load never buys a message a
+// *smaller* retry budget than an ordinary failure would have got.
 var BackpressureBackoff = []time.Duration{
 	30 * time.Second,
 	1 * time.Minute,
 	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
 }
 
 // LowLatencyBackoff suits fan-out / delivery workers where the first retry must
