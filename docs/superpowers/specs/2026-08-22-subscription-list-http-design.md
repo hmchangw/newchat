@@ -304,6 +304,20 @@ the same arrival rate needs ~165 in flight, and at 1 s it needs ~330.
 ≈ 150 KB, gzip window ≈ 64 KB, plus slack). At 256 that is ~310 MB live, ~620 MB
 heap target at `GOGC=100`.
 
+**Measured** (`BenchmarkPageMarshal`, `BenchmarkPageMarshalGzip`, rows carrying a
+full `previewMessage`):
+
+| Page | JSON bytes | Marshal allocs |
+|---|---|---|
+| 40 rows (NATS default) | 29.6 KB | 38.6 KB / 121 allocs |
+| 200 rows (frontend default) | 148 KB | 185 KB / 601 allocs |
+| 400 rows (HTTP max) | 296 KB | 361 KB / 1201 allocs |
+
+The 200-row payload landed at 148 KB against a 150–300 KB estimate, so the
+sizing above holds. The integration test measured a real page compressing
+131 KB → 4.9 KB; that ratio is flattered by uniform seed data, but even a
+conservative 5× puts a 200-row page under 30 KB on the wire.
+
 | Pod memory limit | Safe `HTTP_MAX_CONCURRENCY` |
 |---|---|
 | 1 GiB | 256 |

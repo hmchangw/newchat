@@ -186,3 +186,38 @@ func TestGzip_ReusesPooledWritersAcrossRequests(t *testing.T) {
 		require.Equal(t, body, gunzip(t, w.Body.Bytes()), "pooled writer must be fully reset, request %d", i)
 	}
 }
+
+// A panicking handler unwinds through the writer's deferred close. Recovery must
+// still be able to report the failure rather than the process dying.
+func TestGzip_PanicIsRecoverable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(gin.Recovery(), Gzip(1024))
+	r.GET("/x", func(c *gin.Context) { panic("boom") })
+
+	assert.NotPanics(t, func() {
+		assert.Equal(t, http.StatusInternalServerError, doGet(r, "gzip").Code)
+	})
+}
+
+// The writer must be usable again after a panic left one mid-flight, or a pooled
+// writer could carry a half-finished stream into the next request.
+func TestGzip_PoolSurvivesPanicMidBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := strings.Repeat("a", 4096)
+	r := gin.New()
+	r.Use(gin.Recovery(), Gzip(1024))
+	r.GET("/boom", func(c *gin.Context) {
+		_, _ = c.Writer.WriteString(body)
+		panic("boom")
+	})
+	r.GET("/x", writeBody(body))
+
+	doGet(r, "gzip")
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, body, gunzip(t, w.Body.Bytes()), "a later request must get a clean writer")
+}

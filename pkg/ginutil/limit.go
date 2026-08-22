@@ -7,7 +7,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 )
 
 // defaultRetryAfter is long enough to let a burst drain, short enough that a
@@ -49,6 +48,10 @@ func MaxConcurrency(n int, opts ...LimiterOption) gin.HandlerFunc {
 		opt(&cfg)
 	}
 	sem := make(chan struct{}, n)
+	// Built once: the envelope is constant, and it is read-only from here on.
+	shedErr := errcode.TooManyRequests("server is at capacity, retry shortly",
+		errcode.WithReason(errcode.UserOverloaded))
+	retryAfter := strconv.Itoa(int(cfg.retryAfter.Seconds()))
 
 	return func(c *gin.Context) {
 		select {
@@ -60,12 +63,12 @@ func MaxConcurrency(n int, opts ...LimiterOption) gin.HandlerFunc {
 			if cfg.onShed != nil {
 				cfg.onShed()
 			}
-			// errhttp.Write sets no headers, so Retry-After has to be set here.
-			c.Header("Retry-After", strconv.Itoa(int(cfg.retryAfter.Seconds())))
-			errhttp.Write(c.Request.Context(), c, errcode.TooManyRequests(
-				"server is at capacity, retry shortly",
-				errcode.WithReason(errcode.UserOverloaded)))
-			c.Abort()
+			// Deliberately not errhttp.Write: it runs Classify, which logs once per
+			// error. Under the burst this exists to survive that is one log line per
+			// rejected request, spending I/O the pod has already run out of. The shed
+			// counter is the signal instead — a metric to alert on, not a log flood.
+			c.Header("Retry-After", retryAfter)
+			c.AbortWithStatusJSON(shedErr.HTTPStatus(), shedErr)
 		}
 	}
 }

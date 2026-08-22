@@ -1,6 +1,8 @@
 package ginutil
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -140,4 +142,20 @@ func TestMaxConcurrency_AdmitsUpToCapConcurrently(t *testing.T) {
 
 	// fillAndShed only returns once all `capacity` requests were admitted at once.
 	assert.Equal(t, http.StatusTooManyRequests, fillAndShed(t, r, admitted, capacity).Code)
+}
+
+// Shedding must not log per request: the burst this exists to survive is exactly
+// when the pod cannot afford one log line per rejection. The shed counter is the
+// signal instead.
+func TestMaxConcurrency_ShedDoesNotLog(t *testing.T) {
+	var logged bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	r, admitted, release := blockingEngine(t, 1)
+	defer close(release)
+
+	require.Equal(t, http.StatusTooManyRequests, fillAndShed(t, r, admitted, 1).Code)
+	assert.Empty(t, logged.String(), "the shed path must stay silent")
 }
