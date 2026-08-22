@@ -132,28 +132,36 @@ export function ThreadEventsProvider({ children }) {
           // The chain is per subscription, so a decrypt stalled on a key fetch
           // cannot delay the thread the user opens next.
           const work = async () => {
-            // Checked before decrypting too: a stale event should not hold the
-            // chain for the length of a key fetch it will be discarded after.
-            if (myGen !== generationRef.current) return
-            // Channel rooms are encrypted, so this lane must decrypt exactly as
-            // the room lane does or every reply arrives as an empty envelope.
-            const evt = await decryptRoomEvent(raw, {
-              decrypt: decryptRef.current,
-              ensureKey: ensureKeyRef.current,
-              fallbackSiteId: parent.siteId,
-            })
-            if (myGen !== generationRef.current) return
-            if (evt?.type === 'new_thread_message') {
-              applyReply(parent.messageId, threadReplyMessage(evt))
-            } else if (evt?.type === 'message_edited') {
-              applyMutation({
-                kind: 'edited',
-                messageId: evt.messageId,
-                content: evt.newContent,
-                editedAt: normalizeEditedAt(evt.editedAt),
+            try {
+              // Checked before decrypting too: a stale event should not hold the
+              // chain for the length of a key fetch it will be discarded after.
+              if (myGen !== generationRef.current) return
+              // Channel rooms are encrypted, so this lane must decrypt exactly as
+              // the room lane does or every reply arrives as an empty envelope.
+              const evt = await decryptRoomEvent(raw, {
+                decrypt: decryptRef.current,
+                ensureKey: ensureKeyRef.current,
+                fallbackSiteId: parent.siteId,
               })
-            } else if (evt?.type === 'message_deleted') {
-              applyMutation({ kind: 'deleted', messageId: evt.messageId })
+              if (myGen !== generationRef.current) return
+              if (evt?.type === 'new_thread_message') {
+                applyReply(parent.messageId, threadReplyMessage(evt))
+              } else if (evt?.type === 'message_edited') {
+                applyMutation({
+                  kind: 'edited',
+                  messageId: evt.messageId,
+                  content: evt.newContent,
+                  editedAt: normalizeEditedAt(evt.editedAt),
+                })
+              } else if (evt?.type === 'message_deleted') {
+                applyMutation({ kind: 'deleted', messageId: evt.messageId })
+              }
+            } catch (err) {
+              // The subscribe loop ignores this promise, so a rejection would be
+              // an unhandled one and the event would vanish unlogged. The panel's
+              // next open refetches, so the lane stays alive.
+              // eslint-disable-next-line no-console
+              console.error('thread event processing failed', err)
             }
           }
           chain = chain.then(work, work)

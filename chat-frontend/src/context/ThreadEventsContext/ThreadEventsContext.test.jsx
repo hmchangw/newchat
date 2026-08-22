@@ -697,3 +697,39 @@ describe('ThreadEventsContext logout lifecycle', () => {
     expect(screen.getByText('count:0')).toBeInTheDocument()
   })
 })
+
+describe('ThreadEventsContext thread-lane failure isolation', () => {
+  beforeEach(() => {
+    request.mockReset().mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    subscribe.mockClear()
+    unsubscribe.mockClear()
+    threadEventHandler = null
+    threadHandlers.clear()
+    currentUser = { account: 'alice', siteId: 's1' }
+    decrypt.mockReset().mockResolvedValue(null)
+    ensureKey.mockReset().mockResolvedValue(false)
+  })
+
+  // A malformed event must not reject the chain: the subscribe loop ignores the
+  // returned promise, so the rejection would surface as an unhandled rejection
+  // and the event would vanish with nothing logged.
+  it('settles and logs when an event throws, and keeps the lane alive', async () => {
+    const onError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+
+    // A non-string, unparseable editedAt makes normalizeEditedAt throw.
+    await act(async () => {
+      await expect(
+        threadEventHandler({ type: 'message_edited', messageId: 'm1', newContent: 'x', editedAt: {} })
+      ).resolves.toBeUndefined()
+    })
+    expect(onError).toHaveBeenCalled()
+
+    await act(async () => {
+      await threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'still working' } })
+    })
+    expect(screen.getByText('firstContent:still working')).toBeInTheDocument()
+    onError.mockRestore()
+  })
+})
