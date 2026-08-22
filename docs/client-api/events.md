@@ -420,6 +420,7 @@ Cassandra projection).
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Optional. |
 | `pinnedAt` | string | Optional. RFC 3339. |
 | `pinnedBy` | [Participant](../client-api.md#participant) | Optional. |
+| `truncated` | boolean | Optional. `true` when the server blanked this row because it alone exceeded the transport's `max_payload`; identifiers, `sender`, `createdAt` and `type` are retained for placeholder rendering. Absent on every ordinary row. |
 
 Channel example (encrypted):
 
