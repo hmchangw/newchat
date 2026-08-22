@@ -34,6 +34,14 @@ export function roomEvent(roomId: string, crossSite: boolean): string {
   return crossSite === false ? `chat.local.room.${roomId}.event` : `chat.room.${roomId}.event`
 }
 
+// roomThreadEvent is the thread-scoped lane a client subscribes to while a
+// thread panel is open, so a viewer who follows nothing still sees replies.
+// Same fail-safe as roomEvent: only an explicit `false` routes site-local.
+export function roomThreadEvent(roomId: string, parentMessageId: string, crossSite: boolean): string {
+  const base = crossSite === false ? `chat.local.room.${roomId}` : `chat.room.${roomId}`
+  return `${base}.thread.${parentMessageId}.event`
+}
+
 // roomCreate is the room-service create subject. The site segment is the
 // requester's site — room-service queue-subscribes on its own siteID, so a
 // caller from site-A always lands its create on the site-A room-service.
