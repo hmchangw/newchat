@@ -42,6 +42,8 @@ services:
       - HTTP_SUBSCRIPTION_MAX_LIMIT=${HTTP_SUBSCRIPTION_MAX_LIMIT:-400}
       # Room ids per enrichment RPC; history-service hard-rejects over 100.
       - ROOM_BATCH_CHUNK=${ROOM_BATCH_CHUNK:-100}
+      # Caps preview bytes per page; bodies are 20 KB each and a page holds 400.
+      - PREVIEW_BYTE_BUDGET=${PREVIEW_BYTE_BUDGET:-2097152}
       - MAX_SITE_FANOUT=${MAX_SITE_FANOUT:-8}
       - HEALTH_ADDR=${HEALTH_ADDR:-:8081}
       # Unset leaves HTTP auth on ssoToken only.

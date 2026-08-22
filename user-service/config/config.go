@@ -73,6 +73,10 @@ type Config struct {
 	// RoomBatchChunk caps room ids per enrichment RPC. 100 is history-service's hard
 	// batch cap and keeps each reply well under the 128 KB NATS payload.
 	RoomBatchChunk int `env:"ROOM_BATCH_CHUNK" envDefault:"100"`
+	// PreviewByteBudget caps the preview bytes one page assembles, across both
+	// transports. 2 MB is ~25x a typical 400-row page and only bites on bodies near
+	// the gatekeeper's 20 KB ceiling. 0 disables it.
+	PreviewByteBudget int64 `env:"PREVIEW_BYTE_BUDGET" envDefault:"2097152"`
 	// MaxSiteFanout bounds concurrent enrichment RPCs per request. Chunking makes a
 	// large page issue several per site, so this is the knob that throttles the
 	// resulting downstream load without a rebuild.
@@ -175,11 +179,19 @@ func Load() (Config, error) {
 	if cfg.HTTP.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("HTTP_MAX_CONCURRENCY must be >= 0, got %d", cfg.HTTP.MaxConcurrency)
 	}
+	if cfg.PreviewByteBudget < 0 {
+		return Config{}, fmt.Errorf("PREVIEW_BYTE_BUDGET must be >= 0, got %d", cfg.PreviewByteBudget)
+	}
 	if cfg.HTTP.MaxConns < 0 {
 		return Config{}, fmt.Errorf("HTTP_MAX_CONNS must be >= 0, got %d", cfg.HTTP.MaxConns)
 	}
 	if cfg.HTTP.MaxConns > 0 && cfg.HTTP.MaxConns <= cfg.HTTP.MaxConcurrency {
 		return Config{}, fmt.Errorf("HTTP_MAX_CONNS (%d) must exceed HTTP_MAX_CONCURRENCY (%d): keep-alive connections outnumber in-flight requests", cfg.HTTP.MaxConns, cfg.HTTP.MaxConcurrency)
+	}
+	// Checked before the comparison below: ginutil.Timeout disables itself at <= 0,
+	// so a zero would pass "write exceeds handler" while dropping the budget.
+	if cfg.HTTP.HandlerTimeout <= 0 {
+		return Config{}, fmt.Errorf("HTTP_HANDLER_TIMEOUT must be > 0, got %s", cfg.HTTP.HandlerTimeout)
 	}
 	if cfg.HTTP.WriteTimeout <= cfg.HTTP.HandlerTimeout {
 		return Config{}, fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must exceed HTTP_HANDLER_TIMEOUT (%s)", cfg.HTTP.WriteTimeout, cfg.HTTP.HandlerTimeout)

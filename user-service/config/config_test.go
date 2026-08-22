@@ -492,3 +492,21 @@ func TestLoad_RejectsNegativeHTTPMongoMaxIdleTime(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP_MONGO_MAX_IDLE_TIME")
 }
+
+func TestLoad_RejectsNonPositiveHandlerTimeout(t *testing.T) {
+	// ginutil.Timeout disables itself at <= 0, so a zero or negative value would
+	// silently drop the request budget instead of failing loudly at startup.
+	for _, v := range []string{"0s", "-1s"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("MONGO_URI", "mongodb://x")
+			t.Setenv("NATS_URL", "nats://x")
+			t.Setenv("SITE_ID", "site-a")
+			t.Setenv("HTTP_HANDLER_TIMEOUT", v)
+
+			_, err := Load()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "HTTP_HANDLER_TIMEOUT")
+		})
+	}
+}

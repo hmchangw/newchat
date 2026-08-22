@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	o11y "github.com/flywindy/o11y"
@@ -245,7 +246,10 @@ func main() {
 
 	svc.RegisterHandlers(router)
 
-	httpSrv, cancelInFlight, err := startHTTPServer(&cfg, httpSvc, sdk, tokenValidator)
+	// Set when the listener dies on its own; read after the drain so the pod still
+	// exits non-zero and gets restarted.
+	var serveFailed atomic.Bool
+	httpSrv, cancelInFlight, err := startHTTPServer(&cfg, httpSvc, sdk, tokenValidator, &serveFailed)
 	if err != nil {
 		slog.Error("http server failed to start", "error", err)
 		os.Exit(1)
@@ -304,6 +308,10 @@ func main() {
 		healthStop,
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+
+	if serveFailed.Load() {
+		os.Exit(1)
+	}
 }
 
 // drainingCheck fails readiness once shutdown begins, so the load balancer stops
@@ -324,7 +332,7 @@ const httpDrainTimeout = 10 * time.Second
 // startHTTPServer builds the Gin engine and serves it in the background. It
 // returns once the listener is bound, so a port clash fails startup rather than
 // surfacing later as a silently missing API.
-func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, sso ssoValidator) (*http.Server, context.CancelFunc, error) {
+func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, sso ssoValidator, serveFailed *atomic.Bool) (*http.Server, context.CancelFunc, error) {
 	shedCounter, err := sdk.MeterProvider().Meter("user-service").Int64Counter(
 		"http_requests_shed_total",
 		metric.WithDescription("HTTP requests rejected with 429 because the in-flight cap was reached."))
@@ -376,11 +384,16 @@ func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, 
 		ln = netutil.LimitListener(ln, cfg.HTTP.MaxConns)
 	}
 	go func() {
-		// Exiting, not just logging: readiness probes NATS, so a dead listener would
-		// otherwise leave the pod in rotation serving nothing.
+		// SIGTERM to self, not os.Exit: a dead listener must still take the pod out
+		// of rotation, but exiting here would skip the NATS drain and lose the
+		// replies in-flight RPC handlers still owe their requestors.
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("http server stopped", "error", err)
-			os.Exit(1)
+			serveFailed.Store(true)
+			if kerr := syscall.Kill(os.Getpid(), syscall.SIGTERM); kerr != nil {
+				slog.Error("self-signal failed, exiting without drain", "error", kerr)
+				os.Exit(1)
+			}
 		}
 	}()
 	// Reported as a cause so a handler can tell the drain apart from a client

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -404,6 +405,29 @@ func isResponseTooLarge(err error) bool {
 	return errors.As(err, &e) && e.Reason == errcode.ResponseTooLarge
 }
 
+// errBudgetSpent degrades a chunk that would push the page past previewBudget.
+// Not client-facing: enrichment failures never fail the list.
+var errBudgetSpent = errors.New("preview byte budget exhausted")
+
+// overBudget adds n to spent and reports whether the page has exceeded its
+// preview budget. A budget of 0 disables the check.
+func (s *UserService) overBudget(spent *atomic.Int64, n int64) bool {
+	if s.previewBudget <= 0 {
+		return false
+	}
+	return spent.Add(n) > s.previewBudget
+}
+
+// previewBytes approximates a chunk's retained size by its message bodies, which
+// dominate: everything else in a PreviewMessage is ids and timestamps.
+func previewBytes(m map[string]model.PreviewMessage) int64 {
+	var n int64
+	for k := range m {
+		n += int64(len(m[k].Content))
+	}
+	return n
+}
+
 // chunkHints returns the walk bounds for this chunk's rows, letting
 // history-service skip its own room-times read. Scoped to the chunk because
 // history-service caps hints at the same 100 as room ids.
@@ -482,13 +506,27 @@ func (s *UserService) enrichLastMessage(ctx context.Context, account string, sub
 	for site := range idxBySite {
 		sites = append(sites, site)
 	}
+	// Charged across the whole page, not per chunk: chunks are concurrent, so only a
+	// shared counter bounds what they collectively hold.
+	var spent atomic.Int64
 	lastMsgBySite := fanOutChunks(ctx, planChunks(subs, sites, idxBySite, s.roomBatchChunk), len(sites), s.fanout(),
 		func(ctx context.Context, job chunkJob) (map[string]model.PreviewMessage, error) {
+			if s.overBudget(&spent, 0) {
+				return nil, errBudgetSpent
+			}
 			m, err := s.roomsGetSplitting(ctx, job.site, subs, job.rows, job.roomIDs)
 			if err != nil {
 				slog.WarnContext(ctx, "last-message enrichment degraded", "account", account, "site", job.site,
 					"chunk_size", len(job.roomIDs), "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 				return nil, err
+			}
+			// Dropped whole rather than partially: a half-kept chunk would make which
+			// previews survive depend on map iteration order.
+			if s.overBudget(&spent, previewBytes(m)) {
+				slog.WarnContext(ctx, "last-message enrichment over byte budget", "account", account,
+					"site", job.site, "budget", s.previewBudget, "chunk_size", len(job.roomIDs),
+					"request_id", natsutil.RequestIDFromContext(ctx))
+				return nil, errBudgetSpent
 			}
 			return m, nil
 		})

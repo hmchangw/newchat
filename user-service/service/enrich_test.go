@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -738,4 +739,36 @@ func TestEnrichLastMessage_UnsetFanoutDoesNotDeadlock(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("enrichment deadlocked on an unbuffered semaphore")
 	}
+}
+
+// A page whose previews would blow the byte budget degrades the overflow instead
+// of assembling it: message bodies are capped at 20 KB each, but 400 of them are
+// not, and the budget is the only thing standing between a max-size page and the
+// pod's memory.
+func TestEnrichLastMessage_StopsAtPreviewByteBudget(t *testing.T) {
+	svc, _, history := newSvcRawHistory(t)
+	svc.previewBudget = 40 * 1024 // fits two 20 KB previews, not four
+	subs, idxBySite := enrichFixture(4, "site-a")
+	svc.roomBatchChunk = 1 // one room per RPC, so the budget bites between chunks
+
+	big := strings.Repeat("x", 20*1024)
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg", Content: big}
+			}
+			return out, nil
+		}).AnyTimes()
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	var attached int
+	for i := range subs {
+		if subs[i].Room.PreviewMessage != nil {
+			attached++
+		}
+	}
+	assert.Greater(t, attached, 0, "the budget must not degrade the whole page")
+	assert.Less(t, attached, 4, "previews past the budget must be dropped")
 }

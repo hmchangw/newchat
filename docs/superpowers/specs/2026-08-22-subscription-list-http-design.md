@@ -438,6 +438,7 @@ existing `MONGO_` / `NATS_` blocks:
 | `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` | `40` | Page size when `limit` omitted |
 | `HTTP_SUBSCRIPTION_MAX_LIMIT` | `400` | Hard page ceiling |
 | `ROOM_BATCH_CHUNK` | `100` | Enrichment fan-out chunk size |
+| `PREVIEW_BYTE_BUDGET` | `2097152` | Preview bytes one page may assemble; 0 = unbounded |
 | `MAX_SITE_FANOUT` | `8` | Concurrent enrichment calls in flight |
 | `MONGO_MAX_POOL_SIZE` | `100` | NATS-path pool, now explicit |
 | `HEALTH_ADDR` | `:8081` | Probe listener |
@@ -445,9 +446,15 @@ existing `MONGO_` / `NATS_` blocks:
 | `GOMEMLIMIT_FRACTION` | `0.8` | Soft memory limit as a fraction of the cgroup limit |
 
 `Load()` validates: `HTTP_SUBSCRIPTION_DEFAULT_LIMIT ≤ HTTP_SUBSCRIPTION_MAX_LIMIT`,
-`HTTP_WRITE_TIMEOUT > HTTP_HANDLER_TIMEOUT`, `ROOM_BATCH_CHUNK` in `[1, 100]`,
-`HTTP_MAX_CONCURRENCY ≥ 0`, `GOMEMLIMIT_FRACTION` in `(0, 1]` — fail fast at
-startup, matching the existing validation style.
+`HTTP_HANDLER_TIMEOUT > 0` (checked before the next rule — `ginutil.Timeout`
+disables itself at `≤ 0`, so a zero would pass "write exceeds handler" while
+silently dropping the budget), `HTTP_WRITE_TIMEOUT > HTTP_HANDLER_TIMEOUT`,
+`ROOM_BATCH_CHUNK` in `[1, 100]`, `HTTP_MAX_CONCURRENCY ≥ 0`,
+`HTTP_MAX_CONNS ≥ 0` with `0` disabling the limiter and any positive value
+required to exceed `HTTP_MAX_CONCURRENCY` (keep-alive connections outnumber
+in-flight requests), `HTTP_MONGO_MAX_IDLE_TIME ≥ 0`, `PREVIEW_BYTE_BUDGET ≥ 0`,
+`GOMEMLIMIT_FRACTION` in `(0, 1]` — fail fast at startup, matching the existing
+validation style.
 
 ## 13. Isolation: a dedicated Mongo client for HTTP
 
@@ -458,6 +465,7 @@ the pool the NATS RPC handlers depend on:
 httpMongo, err := mongoutil.ConnectRead(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
     mongoutil.WithMaxPoolSize(cfg.HTTP.MongoMaxPoolSize),   // 128
     mongoutil.WithMinPoolSize(cfg.HTTP.MongoMinPoolSize),   // 16
+    mongoutil.WithMaxIdleTime(cfg.HTTP.MongoMaxIdleTime),   // 5m, see the reaping note below
     mongoutil.WithObservability(sdk),
 )
 ```
