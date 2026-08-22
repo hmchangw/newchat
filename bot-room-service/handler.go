@@ -17,7 +17,9 @@ import (
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // Rocket.Chat-legacy single-char rooms.t values.
@@ -62,6 +64,10 @@ type handler struct {
 	now        func() time.Time
 	newMsgID   func() string
 	newUUIDv7  func() string
+	// valkey is the L2 (Valkey) client used only to invalidate subauthcache
+	// entries after a member removal. nil disables invalidation (best-effort).
+	// Set post-construction, mirroring room-worker/room-service/inbox-worker.
+	valkey valkeyutil.Client
 }
 
 func newHandler(store RoomStore, siteID string, allSiteIDs []string, pub outboxPublisher,
@@ -382,8 +388,21 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	}
 
 	removed := []string{}
+	removedAccounts := []string{}
+	// Deferred, not called at the end of the loop: every path out of here from
+	// this point on has already committed subscription deletes, so the cached
+	// positive subauthcache decisions must die on the error paths too. A
+	// federation failure that returned before the bust would leave every account
+	// in the batch still passing authorization for the rest of the L2 TTL. One
+	// round trip for the whole set — the {roomID} hash tag keeps the keys in one
+	// slot — and BustSubs no-ops on an empty set.
+	defer func() { subauthcache.BustSubs(c, h.valkey, roomID, removedAccounts) }()
 	for _, userID := range req.UserIDs {
-		wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
+		// The account comes from the delete itself, so the bust below cannot be
+		// skipped by the enrichment lookup failing. It is the same value
+		// UpsertSubscription wrote into subscriptions.u.account at add-time,
+		// which is what subauthcache.SubKey is keyed on.
+		account, wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
 		if err != nil {
 			return nil, fmt.Errorf("delete subscription: %w", err)
 		}
@@ -392,6 +411,9 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 			continue
 		}
 		removed = append(removed, userID)
+		if account != "" {
+			removedAccounts = append(removedAccounts, account)
+		}
 
 		u, err := h.store.FindUser(c, userID)
 		if err != nil {

@@ -17,6 +17,13 @@ import (
 // Client is the interface exposed by ConnectCluster. Tests can substitute their own implementation without depending on go-redis directly.
 type Client interface {
 	Get(ctx context.Context, key string) (string, error)
+	// MGet fetches many keys at once, returning only the ones that were present
+	// — an absent key is simply missing from the map, since a cache miss is not
+	// an error. Prefer it over a Get loop for any lookup whose key count is
+	// driven by input (a mention list, a member list): in cluster mode the keys
+	// span slots, so a loop costs one serialized round-trip each, while this
+	// costs roughly one per node regardless of key count.
+	MGet(ctx context.Context, keys []string) (map[string]string, error)
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
 	// SetNX atomically sets key to value with ttl iff key is absent: (true,nil) acquired,
 	// (false,nil) refused, (false,err) transport failure. ttl must be > 0 — a zero ttl stores without expiry.
@@ -25,6 +32,11 @@ type Client interface {
 	// on the 0->1 transition (standard fixed-window rate-limit recipe), via INCR + conditional EXPIRE.
 	IncrEx(ctx context.Context, key string, ttl time.Duration) (int64, error)
 	Del(ctx context.Context, keys ...string) error
+	// Expire re-arms an existing key's TTL without touching its value, reporting
+	// whether the key existed. Prefer it over a re-Set when only the deadline
+	// should move: a re-Set would resurrect a key deleted since it was read, and
+	// would clobber a value another writer updated in the meantime.
+	Expire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 	Close() error
 }
 
@@ -99,6 +111,36 @@ func (r *clusterClient) Get(ctx context.Context, key string) (string, error) {
 	return val, nil
 }
 
+// MGet issues one GET per key through a pipeline. go-redis groups the pipelined
+// commands by node and runs the groups concurrently, so cross-slot keys — which
+// a plain MGET would reject — cost about one round-trip per node.
+func (r *clusterClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	cmds := make([]*redis.StringCmd, len(keys))
+	_, err := r.c.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for i, k := range keys {
+			cmds[i] = p.Get(ctx, k)
+		}
+		return nil
+	})
+	// Pipelined surfaces the first command error, and redis.Nil is the expected
+	// answer for any absent key — only a genuine transport failure is an error.
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("valkey mget: %w", err)
+	}
+	out := make(map[string]string, len(keys))
+	for i, cmd := range cmds {
+		val, cmdErr := cmd.Result()
+		if cmdErr != nil {
+			continue // absent, or unreadable — both are a miss to the caller
+		}
+		out[keys[i]] = val
+	}
+	return out, nil
+}
+
 func (r *clusterClient) Set(ctx context.Context, key, value string, ttl time.Duration) error {
 	if err := r.c.Set(ctx, key, value, ttl).Err(); err != nil {
 		return fmt.Errorf("valkey set: %w", err)
@@ -142,6 +184,14 @@ func (r *clusterClient) Del(ctx context.Context, keys ...string) error {
 	return nil
 }
 
+func (r *clusterClient) Expire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	existed, err := r.c.Expire(ctx, key, ttl).Result()
+	if err != nil {
+		return false, fmt.Errorf("valkey expire: %w", err)
+	}
+	return existed, nil
+}
+
 func (r *clusterClient) Close() error {
 	return r.c.Close()
 }
@@ -169,4 +219,89 @@ func SetJSONWithTTL(ctx context.Context, client Client, key string, value any, t
 		return fmt.Errorf("valkey set json: %w", err)
 	}
 	return nil
+}
+
+// CacheRecorder records the outcome of an L2 cache lookup. Every cache package's
+// own Recorder satisfies it structurally, so callers pass theirs unchanged.
+type CacheRecorder interface {
+	Hit(ctx context.Context)
+	Miss(ctx context.Context)
+	Error(ctx context.Context)
+}
+
+// ReadCachedJSON GETs key, unmarshals the stored JSON into T, and records the
+// outcome. It is the shared read half of every read-through cache tier in this
+// repo, which otherwise reimplement the same five branches and drift apart.
+//
+// ok is true only for a usable hit. There are three ways to not have one, and
+// they are deliberately not the same thing to the metrics:
+//
+//   - A clean miss records Miss.
+//   - A decoded value that fails valid records Miss and warns. Any well-formed
+//     JSON that is not a T unmarshals to the zero value, so without this an
+//     entry of "null" — or a foreign value written under the same key — is
+//     served as a real one for the rest of its TTL. What "usable" means is the
+//     caller's to decide, hence the predicate; a nil valid accepts anything
+//     that decodes.
+//   - A transport or decode failure records Error and warns.
+//
+// All three return ok=false, so the caller falls through to its source of
+// truth: this half is fail-open by construction and never returns an error.
+//
+// label names the cache in log messages; logAttrs are appended to them so each
+// caller keeps its own structured fields.
+func ReadCachedJSON[T any](ctx context.Context, client Client, key, label string,
+	rec CacheRecorder, valid func(*T) bool, logAttrs ...any,
+) (T, bool) {
+	var cached T
+	err := GetJSON(ctx, client, key, &cached)
+	return decodeCached(ctx, cached, err, label, rec, valid, logAttrs...)
+}
+
+// DecodeCachedJSON applies ReadCachedJSON's outcome rules to a raw entry a
+// caller already has in hand — the MGet path, where the fetch is one round trip
+// for many keys and so cannot go through GetJSON. An empty raw means the key
+// was absent.
+//
+// It exists so the bulk path and the single-key path cannot disagree about what
+// counts as a hit, a miss or an error, or about the validity rule. They had
+// already drifted in their log wording while both claiming to be identical.
+func DecodeCachedJSON[T any](ctx context.Context, raw, label string,
+	rec CacheRecorder, valid func(*T) bool, logAttrs ...any,
+) (T, bool) {
+	var cached T
+	// An absent key is reported as a clean miss, exactly as GetJSON does, so the
+	// two paths land on the same branch of the shared outcome table.
+	err := ErrCacheMiss
+	if raw != "" {
+		err = json.Unmarshal([]byte(raw), &cached)
+	}
+	return decodeCached(ctx, cached, err, label, rec, valid, logAttrs...)
+}
+
+// decodeCached is the shared outcome table: hit, failed-validation, clean miss,
+// or read/decode error.
+func decodeCached[T any](ctx context.Context, cached T, err error, label string,
+	rec CacheRecorder, valid func(*T) bool, logAttrs ...any,
+) (T, bool) {
+	var zero T
+	switch {
+	case err == nil && (valid == nil || valid(&cached)):
+		rec.Hit(ctx)
+		return cached, true
+	case err == nil:
+		rec.Miss(ctx)
+		slog.WarnContext(ctx, label+" L2 entry failed validation, treating as miss", logAttrs...)
+		return zero, false
+	case errors.Is(err, ErrCacheMiss):
+		rec.Miss(ctx)
+		return zero, false
+	default:
+		rec.Error(ctx)
+		attrs := make([]any, 0, len(logAttrs)+2)
+		attrs = append(attrs, logAttrs...)
+		attrs = append(attrs, "error", err)
+		slog.WarnContext(ctx, label+" L2 read failed, falling back to the source of truth", attrs...)
+		return zero, false
+	}
 }

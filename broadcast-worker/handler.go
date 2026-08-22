@@ -178,7 +178,7 @@ func (h *Handler) HandleServerBroadcast(ctx context.Context, data []byte) {
 // broadcast path. True when the message is a thread reply hidden from the main
 // channel (TShow=false).
 func shouldUseThreadFanOut(msg *model.Message) bool {
-	return msg.ThreadParentMessageID != "" && !msg.TShow
+	return msg.IsHiddenThreadReply()
 }
 
 func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) error {
@@ -204,26 +204,9 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
-	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
-		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
-	}
-	// Sending implies the sender has read up to their own message: advance the
-	// sender's lastSeenAt so the room read-floor (minUserLastSeenAt) doesn't count
-	// the sender against their own message (#396). Best-effort.
-	if err := h.store.AdvanceSubscriptionLastSeen(ctx, msg.RoomID, msg.UserAccount, msg.CreatedAt); err != nil {
-		slog.WarnContext(ctx, "advance sender lastSeenAt failed",
-			"error", err, "room_id", msg.RoomID, "account", msg.UserAccount,
-			"request_id", natsutil.RequestIDFromContext(ctx))
-	}
 	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
 	if err != nil {
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
-	}
-
-	if len(resolved.Accounts) > 0 {
-		if err := h.store.SetSubscriptionMentions(ctx, meta.ID, resolved.Accounts, msg.CreatedAt); err != nil {
-			return fmt.Errorf("set subscription mentions: %w", err)
-		}
 	}
 
 	clientMsg := buildClientMessage(&msg, userByAccount)
@@ -253,7 +236,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 	parsed := mention.Parse(msg.Content)
 
 	// Fetch room type first so DM/BotDM rooms skip the thread-subscription query
-	// entirely — their fan-out uses ListSubscriptions, not thread subscribers.
+	// entirely — their fan-out uses ListRoomMembers, not thread subscribers.
 	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
 	if err != nil {
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
@@ -286,8 +269,9 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
-		// Do NOT call SetSubscriptionMentions here: TShow=false replies are invisible
-		// in the main channel, so a room-level mention badge would appear with no
+		// unread-worker (not broadcast-worker) owns the room-level mention badge
+		// derived from MESSAGES-CANONICAL, and correctly skips it here: TShow=false
+		// replies are invisible in the main channel, so a badge would appear with no
 		// visible message to explain it.
 		roomEvt := buildRoomEvent(&meta, clientMsg, evt.Timestamp)
 		roomEvt.Type = model.RoomEventNewThreadMessage
@@ -337,10 +321,6 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
-		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
-	}
-
 	edit := buildEditRoomEvent(room, evt)
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
@@ -348,18 +328,6 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		}
 	}
 	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
-}
-
-// badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
-// handleCreated. Additive only: SetSubscriptionMentions' filter skips
-// non-subscribers and accounts that have already read past the edit, so a
-// removed mention is never cleared and an already-read one is never re-flagged.
-func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
-	parsed := mention.Parse(msg.Content)
-	if len(parsed.Accounts) == 0 {
-		return nil
-	}
-	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
@@ -981,9 +949,12 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string, roomEventType model.RoomEventType) error {
 	labels := broadcastLabels(ctx)
 	ctx = withBroadcastMetricLabels(ctx, roomKind(meta.Type), labels.eventType)
-	subs, err := h.store.ListSubscriptions(ctx, meta.ID)
+	// Cache-fronted: a DM's membership is fixed at its two participants for the
+	// room's lifetime, so TTL staleness cannot misroute here — and a warm entry
+	// keeps DMs flowing when Mongo is down.
+	subs, err := h.store.ListRoomMembers(ctx, meta.ID)
 	if err != nil {
-		return fmt.Errorf("list subscriptions for DM room %s: %w", meta.ID, err)
+		return fmt.Errorf("list members for DM room %s: %w", meta.ID, err)
 	}
 
 	mentionSet := make(map[string]struct{}, len(mentionedAccounts))
@@ -993,7 +964,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 
 	recipients, failed := 0, 0
 	for i := range subs {
-		account := subs[i].User.Account
+		account := subs[i].Account
 		// Skip bots: live UI events go to human clients only, consistent with
 		// publishMutation and publishThreadMetadata. Bots receive messages via
 		// their own server-side integration, not the websocket event channel.

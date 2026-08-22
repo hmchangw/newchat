@@ -111,3 +111,45 @@ func (s ConsumerSettings) backOffSchedule() []time.Duration {
 	}
 	return out
 }
+
+// DefaultMaxDeliver mirrors the MaxDeliver struct tag. A consumer left at this
+// value drops a message after roughly 12.6 minutes of jsretry backoff, which is
+// the right answer for work that is cheap to lose and wrong for work that must
+// survive a dependency outage.
+const DefaultMaxDeliver = 6
+
+// OutageRetryMaxDeliver is the delivery budget for consumers that must ride out
+// a dependency outage rather than drop the message.
+//
+// The window is set by jsretry.DefaultBackoff, whose last entry repeats. n
+// deliveries means n-1 waits: the first four are 1s + 5s + 30s + 2m = 156s and
+// the remaining n-5 are 10m each, so the window is 156s + 600s*(n-5). 12 gives
+// about 72 minutes, comfortably past the one-hour MongoDB outage the
+// outage-survival work targets.
+//
+// TestOutageRetryBudget_ExceedsOneHour walks the real schedule rather than this
+// formula, so a change to DefaultBackoff re-checks the budget instead of
+// quietly invalidating the arithmetic above — which is exactly what happened
+// when the tail grew from 2m to 10m.
+const OutageRetryMaxDeliver = 12
+
+// WithOutageRetryBudget raises s.MaxDeliver to OutageRetryMaxDeliver when it is
+// still at the package default, and leaves any other value alone.
+//
+// It exists because the default lives on a struct tag shared by every consumer
+// in the repo, and only some of them should ride out an outage — a service that
+// needs the longer budget has to opt in somewhere, and a deployment env var is
+// not that place: per-service docker-compose files are local-dev only, so a
+// budget set there is absent in production, which is exactly where it matters.
+//
+// An operator who deliberately sets MAX_DELIVER to the default value is
+// indistinguishable from one who set nothing, and gets the outage budget. That
+// ambiguity is deliberate: the failure it causes (a poison message retried for
+// the outage window before dropping) is far cheaper than the one it avoids (a
+// user's message accepted, then silently dropped mid-outage).
+func WithOutageRetryBudget(s ConsumerSettings) ConsumerSettings {
+	if s.MaxDeliver == DefaultMaxDeliver {
+		s.MaxDeliver = OutageRetryMaxDeliver
+	}
+	return s
+}

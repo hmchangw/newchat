@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +165,14 @@ func TestHandler_ProcessMessage(t *testing.T) {
 		Account:     msg.UserAccount,
 	}
 
+	// failOpenSender is the sender projected from the event when the Mongo user
+	// lookup fails for a non-system message (Task 4 fail-open contract).
+	failOpenSender := cassParticipant{
+		ID:      msg.UserID,
+		EngName: msg.UserDisplayName,
+		Account: msg.UserAccount,
+	}
+
 	tests := []struct {
 		name       string
 		data       []byte
@@ -180,22 +189,40 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "user not found — NAK without saving",
+			// Fail-open (Task 4): a non-system message's sender lookup failure no
+			// longer blocks the persist — the sender is projected from the event.
+			name: "user not found — falls open to event-projected sender",
 			data: validData,
 			setupMocks: func(store *MockStore, us *MockUserStore, ts *MockThreadStore) {
 				us.EXPECT().FindUserByAccount(gomock.Any(), "alice").
 					Return(nil, errors.New("user not found"))
+				store.EXPECT().SaveMessage(gomock.Any(), &msg, &failOpenSender, "site-a").Return(nil)
 			},
-			wantErr: true,
 		},
 		{
-			name: "user store DB error — NAK without saving",
+			// Fail-open (Task 4): same contract for a transient Mongo/DB error.
+			name: "user store DB error — falls open to event-projected sender",
 			data: validData,
 			setupMocks: func(store *MockStore, us *MockUserStore, ts *MockThreadStore) {
 				us.EXPECT().FindUserByAccount(gomock.Any(), "alice").
 					Return(nil, errors.New("mongo: connection refused"))
+				store.EXPECT().SaveMessage(gomock.Any(), &msg, &failOpenSender, "site-a").Return(nil)
 			},
-			wantErr: true,
+		},
+		{
+			// The UserStore interface permits (nil, nil) for a miss even though every
+			// implementation of it reports ErrUserNotFound. The shape is not
+			// hypothetical: mongoHRIdentityStore in this same package has an
+			// identical FindUserByAccount signature documented to return (nil, nil)
+			// — it is a different interface, so it cannot be injected here, but it
+			// shows the convention is live. A nil user must take the fail-open
+			// branch, not dereference and kill the sole message-persistence path.
+			name: "user store returns (nil, nil) — falls open to event-projected sender",
+			data: validData,
+			setupMocks: func(store *MockStore, us *MockUserStore, ts *MockThreadStore) {
+				us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, nil)
+				store.EXPECT().SaveMessage(gomock.Any(), &msg, &failOpenSender, "site-a").Return(nil)
+			},
 		},
 		{
 			name: "save error — NAK after user lookup",
@@ -284,14 +311,35 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "mention user lookup error — NAK before sender lookup",
+			// Fail-open (Task 4): a mention-resolution failure no longer blocks the
+			// persist — the message is saved with its Mentions left unresolved
+			// (empty), and the sender lookup proceeds normally.
+			name: "mention user lookup error — persists without mentions",
 			data: dataWithMention,
 			setupMocks: func(store *MockStore, us *MockUserStore, ts *MockThreadStore) {
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
 					Return(nil, errors.New("mongo: connection refused"))
-				// FindUserByAccount and SaveMessage must NOT be called
+				us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+				msgWithoutMentions := evtWithMention.Message
+				store.EXPECT().SaveMessage(gomock.Any(), &msgWithoutMentions, &expectedSender, "site-a").Return(nil)
 			},
-			wantErr: true,
+		},
+		{
+			// A degraded lookup that answers some accounts must persist those. The
+			// L1 in pkg/userstore returns exactly this shape while Mongo is down;
+			// dropping it would bake a resolvable mention into Cassandra as plain
+			// text, unfixable after the outage ends.
+			name: "mention lookup degrades with partial hits — persists the resolved half",
+			data: dataWithMention,
+			setupMocks: func(store *MockStore, us *MockUserStore, ts *MockThreadStore) {
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+					Return([]model.User{{
+						ID: "u-bob", Account: "bob", SiteID: "site-a",
+						ChineseName: "鮑勃", EngName: "Bob Chen",
+					}}, errors.New("mongo: connection refused"))
+				us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+				store.EXPECT().SaveMessage(gomock.Any(), &msgWithMention, &expectedSender, "site-a").Return(nil)
+			},
 		},
 		{
 			name: "system message with unknown user — saved with nil sender",
@@ -317,13 +365,40 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "regular message with user lookup error — still returns error",
+			// Same nil-user guard as above, on the system-message branch: a system
+			// message has no real sender, so a (nil, nil) lookup must still persist
+			// with a nil sender rather than panic.
+			name: "system message with (nil, nil) user — saved with nil sender",
+			data: func() []byte {
+				sysMsg := model.Message{
+					ID: "msg-sys-2", RoomID: "r1", Content: "added members",
+					CreatedAt: now, Type: "members_added",
+					SysMsgData: []byte(`{"individuals":["bob"]}`),
+				}
+				e := model.MessageEvent{Message: sysMsg, SiteID: "site-a", Timestamp: now.UnixMilli()}
+				d, _ := json.Marshal(e)
+				return d
+			}(),
+			setupMocks: func(store *MockStore, us *MockUserStore, _ *MockThreadStore) {
+				us.EXPECT().FindUserByAccount(gomock.Any(), "").Return(nil, nil)
+				expectedMsg := model.Message{
+					ID: "msg-sys-2", RoomID: "r1", Content: "added members",
+					CreatedAt: now, Type: "members_added",
+					SysMsgData: []byte(`{"individuals":["bob"]}`),
+				}
+				store.EXPECT().SaveMessage(gomock.Any(), &expectedMsg, (*cassParticipant)(nil), "site-a").Return(nil)
+			},
+		},
+		{
+			// Fail-open (Task 4): duplicates the "user not found" case above at a
+			// different call site in the table to lock down the same contract.
+			name: "regular message with user lookup error — falls open, no error",
 			data: validData,
-			setupMocks: func(_ *MockStore, us *MockUserStore, _ *MockThreadStore) {
+			setupMocks: func(store *MockStore, us *MockUserStore, _ *MockThreadStore) {
 				us.EXPECT().FindUserByAccount(gomock.Any(), "alice").
 					Return(nil, errors.New("user not found"))
+				store.EXPECT().SaveMessage(gomock.Any(), &msg, &failOpenSender, "site-a").Return(nil)
 			},
-			wantErr: true,
 		},
 		{
 			name: "thread reply mentioning non-participant — marks that user's subscription",
@@ -539,6 +614,169 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProcessMessage_UserLookupError_FailsOpenFromEvent verifies that a Mongo
+// outage on the sender lookup does not block the Cassandra persist: the
+// non-system message's sender is projected from the canonical event instead.
+func TestProcessMessage_UserLookupError_FailsOpenFromEvent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	users := NewMockUserStore(ctrl)
+	threadStore := NewMockThreadStore(ctrl)
+
+	// Mongo is down: both enrichment lookups fail.
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, errors.New("mongo down")).AnyTimes()
+	users.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
+
+	// The persist must still happen, with the sender projected from the event.
+	var savedSender *cassParticipant
+	store.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site1").
+		DoAndReturn(func(_ context.Context, _ *model.Message, sender *cassParticipant, _ string) error {
+			savedSender = sender
+			return nil
+		})
+
+	h := NewHandler(store, users, threadStore, "site1", func(_ context.Context, _ string, _ []byte, _ string) error {
+		return nil
+	})
+
+	evt := model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site1",
+		Message: model.Message{
+			ID: "msg1", RoomID: "room1", Content: "hello",
+			UserID: "u1", UserAccount: "alice", UserDisplayName: "Alice Anderson",
+			CreatedAt: time.Now().UTC(),
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	require.NoError(t, h.processMessage(context.Background(), data, false),
+		"a Mongo enrichment failure must not block the Cassandra persist")
+	require.NotNil(t, savedSender)
+	assert.Equal(t, "u1", savedSender.ID)
+	assert.Equal(t, "alice", savedSender.Account)
+	assert.Equal(t, "Alice Anderson", savedSender.EngName,
+		"the event's composed display name is the fallback for the sender name")
+}
+
+// TestProcessMessage_UserLookupError_FailsOpen_ThreadReply_CreatesReplierSubscription
+// verifies that a Mongo outage on the sender lookup does not silently drop the
+// replier's own ThreadSubscription: even though FindUserByAccount fails for the
+// replier, the fail-open branch projects a minimal *model.User so `replier` is
+// non-nil in handleFirstThreadReply/handleSubsequentThreadReply, and their
+// thread subscription is still inserted (not skipped).
+func TestProcessMessage_UserLookupError_FailsOpen_ThreadReply_CreatesReplierSubscription(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	users := NewMockUserStore(ctrl)
+	threadStore := NewMockThreadStore(ctrl)
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	parentCreatedAt := now.Add(-time.Hour)
+
+	// Mongo is down for the replier's own lookup, but the parent author's
+	// lookup still succeeds (isolates the regression to the replier branch).
+	users.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
+	users.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
+		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site1"}, nil)
+
+	threadStore.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().GetMessageSender(gomock.Any(), "parent1").
+		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
+	threadStore.EXPECT().AddReplyAccounts(gomock.Any(), gomock.Any(), []string{"parent-user"}).Return(nil)
+	// The parent author is the thread's only pre-existing follower on a first reply;
+	// the batched lookup that follows resolves their home site for federation.
+	threadStore.EXPECT().AddThreadUnread(gomock.Any(), "room1", "parent1", []string{"parent-user"}).Return(nil)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+		Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site1"}}, nil)
+
+	var insertedSubs []*model.ThreadSubscription
+	threadStore.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Times(2).
+		DoAndReturn(func(_ context.Context, sub *model.ThreadSubscription) error {
+			insertedSubs = append(insertedSubs, sub)
+			return nil
+		})
+
+	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "parent1", "room1", parentCreatedAt, gomock.Any()).Return(nil)
+	threadStore.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
+	store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site1", gomock.Any()).
+		Return((*int)(nil), nil)
+
+	h := NewHandler(store, users, threadStore, "site1", func(_ context.Context, _ string, _ []byte, _ string) error {
+		return nil
+	})
+
+	evt := model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site1",
+		Message: model.Message{
+			ID: "reply1", RoomID: "room1", Content: "thread reply while mongo is down",
+			UserID: "u1", UserAccount: "alice", UserDisplayName: "Alice Anderson",
+			CreatedAt:                    now,
+			ThreadParentMessageID:        "parent1",
+			ThreadParentMessageCreatedAt: &parentCreatedAt,
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	require.NoError(t, h.processMessage(context.Background(), data, false))
+
+	require.Len(t, insertedSubs, 2, "both the parent author's and the replier's own thread subscription must be inserted")
+	var replierSub *model.ThreadSubscription
+	for _, s := range insertedSubs {
+		if s.UserID == "u1" {
+			replierSub = s
+		}
+	}
+	require.NotNil(t, replierSub, "replier's own thread subscription must be created even when the Mongo sender lookup failed")
+	assert.Equal(t, "alice", replierSub.UserAccount)
+}
+
+// TestProcessMessage_MentionResolveError_PersistsWithoutMentions verifies that a
+// Mongo outage on mention resolution does not block the Cassandra persist: the
+// message persists with an empty Mentions list and its content (including the
+// literal @token) untouched.
+func TestProcessMessage_MentionResolveError_PersistsWithoutMentions(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	users := NewMockUserStore(ctrl)
+	threadStore := NewMockThreadStore(ctrl)
+
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, errors.New("mongo down")).AnyTimes()
+	users.EXPECT().FindUserByAccount(gomock.Any(), "alice").
+		Return(&model.User{ID: "u1", Account: "alice", EngName: "Alice"}, nil)
+
+	var saved *model.Message
+	store.EXPECT().SaveMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site1").
+		DoAndReturn(func(_ context.Context, m *model.Message, _ *cassParticipant, _ string) error {
+			saved = m
+			return nil
+		})
+
+	h := NewHandler(store, users, threadStore, "site1", func(_ context.Context, _ string, _ []byte, _ string) error {
+		return nil
+	})
+
+	evt := model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site1",
+		Message: model.Message{
+			ID: "msg2", RoomID: "room1", Content: "hey @bob",
+			UserID: "u1", UserAccount: "alice", UserDisplayName: "Alice",
+			CreatedAt: time.Now().UTC(),
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	require.NoError(t, h.processMessage(context.Background(), data, false))
+	require.NotNil(t, saved)
+	assert.Empty(t, saved.Mentions, "unresolved mentions degrade to empty, not an error")
+	assert.Equal(t, "hey @bob", saved.Content, "content including the @token persists intact")
 }
 
 // TestHandler_ProcessMessage_ThreadReply_PublishesBadgeEvent verifies that when
@@ -2894,4 +3132,71 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 	h := NewHandler(mockStore, mockUserStore, mockThreadStore, "site-a",
 		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
 	require.NoError(t, h.processMessage(context.Background(), data, false))
+}
+
+// TestProcessMessage_UserLookupError_FailsOpen_DoesNotFabricateReplierHomeSite
+// guards the fail-open projection against inventing the replier's home site.
+// The projected user's SiteID feeds publishThreadSubInboxIfRemote as
+// ownerSiteID — the subscription owner's HOME site, which is not the room's
+// site. Projecting the event's (room's) site therefore routes the federated
+// thread_subscription_upserted to whatever site owns the room, which for a
+// replier from elsewhere is simply the wrong destination. An unknown home site
+// must stay empty so the publish is skipped and logged, not misdirected.
+func TestProcessMessage_UserLookupError_FailsOpen_DoesNotFabricateReplierHomeSite(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	users := NewMockUserStore(ctrl)
+	threadStore := NewMockThreadStore(ctrl)
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	parentCreatedAt := now.Add(-time.Hour)
+
+	// The replier's user doc is unreachable; the parent author's resolves to the
+	// local site so only the replier branch can produce a federated publish.
+	users.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(nil, errors.New("mongo down"))
+	users.EXPECT().FindUserByAccount(gomock.Any(), "parent-user").
+		Return(&model.User{ID: "u-parent", Account: "parent-user", SiteID: "site1"}, nil)
+
+	threadStore.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().GetMessageSender(gomock.Any(), "parent1").
+		Return(&cassParticipant{ID: "u-parent", Account: "parent-user"}, nil)
+	threadStore.EXPECT().AddReplyAccounts(gomock.Any(), gomock.Any(), []string{"parent-user"}).Return(nil)
+	// The parent author is the thread's only pre-existing follower on a first reply;
+	// the batched lookup that follows resolves their home site for federation.
+	threadStore.EXPECT().AddThreadUnread(gomock.Any(), "room1", "parent1", []string{"parent-user"}).Return(nil)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"parent-user"}).
+		Return([]model.User{{ID: "u-parent", Account: "parent-user", SiteID: "site1"}}, nil)
+	threadStore.EXPECT().InsertThreadSubscription(gomock.Any(), gomock.Any()).Times(2).Return(nil)
+	store.EXPECT().UpdateParentMessageThreadRoomID(gomock.Any(), "parent1", "room1", parentCreatedAt, gomock.Any()).Return(nil)
+	threadStore.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
+	store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), gomock.Any(), "site2", gomock.Any()).
+		Return((*int)(nil), nil)
+
+	var outboxSubjects []string
+	h := NewHandler(store, users, threadStore, "site1", func(_ context.Context, subj string, _ []byte, _ string) error {
+		if strings.Contains(subj, ".outbox.") {
+			outboxSubjects = append(outboxSubjects, subj)
+		}
+		return nil
+	})
+
+	// The room lives at site2 while this worker is site1, so a projected
+	// SiteID of evt.SiteID would read as "remote owner" and get published.
+	evt := model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site2",
+		Message: model.Message{
+			ID: "reply1", RoomID: "room1", Content: "thread reply while mongo is down",
+			UserID: "u1", UserAccount: "alice", UserDisplayName: "Alice Anderson",
+			CreatedAt:                    now,
+			ThreadParentMessageID:        "parent1",
+			ThreadParentMessageCreatedAt: &parentCreatedAt,
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	require.NoError(t, h.processMessage(context.Background(), data, false))
+	assert.Empty(t, outboxSubjects,
+		"an unknown replier home site must skip the federated publish, not route it to the room's site")
 }

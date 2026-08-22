@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
@@ -224,4 +225,64 @@ func TestDurableConsumerDefaults_StepsAreBounded(t *testing.T) {
 	})
 
 	assert.LessOrEqual(t, len(cc.BackOff), 32, "an absurd step count must be bounded")
+}
+
+func TestWithOutageRetryBudget(t *testing.T) {
+	tests := []struct {
+		name string
+		in   stream.ConsumerSettings
+		want int
+	}{
+		{
+			name: "package default is raised to the outage budget",
+			in:   stream.ConsumerSettings{MaxDeliver: stream.DefaultMaxDeliver},
+			want: stream.OutageRetryMaxDeliver,
+		},
+		{
+			name: "an operator's higher value is left alone",
+			in:   stream.ConsumerSettings{MaxDeliver: 100},
+			want: 100,
+		},
+		{
+			name: "unlimited is left alone",
+			in:   stream.ConsumerSettings{MaxDeliver: -1},
+			want: -1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, stream.WithOutageRetryBudget(tc.in).MaxDeliver)
+		})
+	}
+}
+
+// The budget must outlast the one-hour outage the branch targets.
+//
+// The window is DERIVED from jsretry.DefaultBackoff rather than restated as a
+// literal here: the two drifted apart once already, when the schedule's tail
+// grew from 2m to 10m and this test kept asserting the old arithmetic. Walking
+// the real schedule means changing it re-checks this budget automatically.
+func TestOutageRetryBudget_ExceedsOneHour(t *testing.T) {
+	schedule := jsretry.DefaultBackoff
+	require.NotEmpty(t, schedule)
+
+	// n deliveries means n-1 redelivery waits; jsretry reuses the last entry
+	// once the attempt count runs past the schedule.
+	var window time.Duration
+	for i := range stream.OutageRetryMaxDeliver - 1 {
+		window += schedule[min(i, len(schedule)-1)]
+	}
+
+	assert.Greater(t, window, time.Hour,
+		"budget must ride out a one-hour outage; got %s across %d deliveries",
+		window, stream.OutageRetryMaxDeliver)
+}
+
+// Other fields must pass through untouched.
+func TestWithOutageRetryBudget_LeavesOtherSettings(t *testing.T) {
+	in := stream.ConsumerSettings{AckWait: 42 * time.Second, MaxDeliver: stream.DefaultMaxDeliver, MaxWaiting: 7, MaxAckPending: 9}
+	got := stream.WithOutageRetryBudget(in)
+	assert.Equal(t, in.AckWait, got.AckWait)
+	assert.Equal(t, in.MaxWaiting, got.MaxWaiting)
+	assert.Equal(t, in.MaxAckPending, got.MaxAckPending)
 }

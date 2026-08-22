@@ -38,6 +38,14 @@ type MongoConfig struct {
 	// ceiling, not a count of connections that get opened. Operators must keep
 	// pods × MaxPoolSize under the cluster's connection limit.
 	MaxPoolSize uint64 `env:"MAX_POOL_SIZE" envDefault:"500"`
+	// ServerSelectionTimeout bounds how long a read waits for a usable server.
+	// Deliberately far below the driver's 30s default and below REQUEST_TIMEOUT,
+	// so a stopped MongoDB errors while the request still has budget to serve a
+	// cached fallback rather than dying on an expired deadline.
+	// Bare suffix, not MONGO_SERVER_…: this struct is mounted envPrefix:"MONGO_",
+	// so the prefix is supplied once and the operator-facing name stays
+	// MONGO_SERVER_SELECTION_TIMEOUT, as everywhere else in the repo.
+	ServerSelectionTimeout time.Duration `env:"SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	// MinPoolSize keeps a warm connection floor; 0 lets the pool drain to empty.
 	MinPoolSize uint64 `env:"MIN_POOL_SIZE" envDefault:"0"`
 }
@@ -92,6 +100,36 @@ type Config struct {
 	// Positives-only; lastMsgAt volatility ⇒ short TTL. Set size or ttl to 0 to disable.
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
+
+	// Valkey cluster fronting the shared subauthcache L2. Empty ValkeyAddrs
+	// disables the L2 tier (the L1 subscription cache falls straight through
+	// to Mongo, breaker-guarded).
+	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
+	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+
+	// SubL2TTL is the shared Valkey L2 retention for subscription authz — the
+	// outage buffer. Long by design (default 90m) so an L2 hit carries the
+	// access decision through a Mongo outage. 0 disables the L2 tier.
+	SubL2TTL time.Duration `env:"HISTORY_SUB_L2_TTL" envDefault:"90m"`
+
+	// MongoBreakerFails/MongoBreakerCooldown configure the circuit breaker
+	// guarding the subauthcache Mongo loader: opens after MongoBreakerFails
+	// consecutive failures and stays open for MongoBreakerCooldown before a
+	// half-open probe.
+	MongoBreakerFails    int           `env:"HISTORY_MONGO_BREAKER_FAILS"    envDefault:"5"`
+	MongoBreakerCooldown time.Duration `env:"HISTORY_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
+
+	// DEKL2TTL is the Valkey L2 retention for Vault-wrapped at-rest DEKs — the
+	// outage buffer for decrypting history. The in-process DEK cache expires on
+	// a fixed TTL stamped at fetch time, so without this L2 an active room loses
+	// its key partway through a Mongo outage. 0 disables the DEK L2 tier.
+	DEKL2TTL time.Duration `env:"ATREST_DEK_L2_TTL" envDefault:"90m"`
+
+	// DEKBreakerFails/DEKBreakerCooldown configure the circuit breaker guarding
+	// the Mongo DEK fetch. Kept separate from the subscription breaker so the
+	// two failure signals never reset each other.
+	DEKBreakerFails    int           `env:"ATREST_DEK_BREAKER_FAILS"    envDefault:"5"`
+	DEKBreakerCooldown time.Duration `env:"ATREST_DEK_BREAKER_COOLDOWN" envDefault:"10s"`
 
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
@@ -150,6 +188,36 @@ func validate(cfg *Config) error {
 	}
 	if cfg.RequestTimeout < 0 {
 		return fmt.Errorf("REQUEST_TIMEOUT must be >= 0, got %s", cfg.RequestTimeout)
+	}
+	if cfg.Mongo.ServerSelectionTimeout <= 0 {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT must be > 0, got %s", cfg.Mongo.ServerSelectionTimeout)
+	}
+	// A server-selection bound at or above the request budget cannot do its job:
+	// the handler deadline fires first, so the read never returns an error and
+	// the fail-open paths that depend on one never run. RequestTimeout == 0 means
+	// unbounded, so there is no budget to undercut.
+	if cfg.RequestTimeout > 0 && cfg.Mongo.ServerSelectionTimeout >= cfg.RequestTimeout {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT (%s) must be less than REQUEST_TIMEOUT (%s), "+
+			"otherwise a stalled MongoDB consumes the whole request budget instead of failing open",
+			cfg.Mongo.ServerSelectionTimeout, cfg.RequestTimeout)
+	}
+	if cfg.SubL2TTL < 0 {
+		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2TTL)
+	}
+	if cfg.MongoBreakerFails < 0 {
+		return fmt.Errorf("HISTORY_MONGO_BREAKER_FAILS must be >= 0, got %d", cfg.MongoBreakerFails)
+	}
+	if cfg.MongoBreakerCooldown < 0 {
+		return fmt.Errorf("HISTORY_MONGO_BREAKER_COOLDOWN must be >= 0, got %s", cfg.MongoBreakerCooldown)
+	}
+	if cfg.DEKL2TTL < 0 {
+		return fmt.Errorf("ATREST_DEK_L2_TTL must be >= 0, got %s", cfg.DEKL2TTL)
+	}
+	if cfg.DEKBreakerFails < 0 {
+		return fmt.Errorf("ATREST_DEK_BREAKER_FAILS must be >= 0, got %d", cfg.DEKBreakerFails)
+	}
+	if cfg.DEKBreakerCooldown < 0 {
+		return fmt.Errorf("ATREST_DEK_BREAKER_COOLDOWN must be >= 0, got %s", cfg.DEKBreakerCooldown)
 	}
 	return nil
 }

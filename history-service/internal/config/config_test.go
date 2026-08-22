@@ -14,17 +14,24 @@ import (
 // doesn't touch them.
 func baseValid() Config {
 	return Config{
-		SubCacheSize:     100000,
-		SubCacheTTL:      2 * time.Minute,
-		RoomCacheSize:    50000,
-		RoomCacheTTL:     10 * time.Second,
-		PreviewCacheSize: 50000,
-		PreviewCacheTTL:  10 * time.Second,
-		MaxConcurrency:   256,
-		RequestTimeout:   10 * time.Second,
+		SubCacheSize:         100000,
+		SubCacheTTL:          2 * time.Minute,
+		RoomCacheSize:        50000,
+		RoomCacheTTL:         10 * time.Second,
+		PreviewCacheSize:     50000,
+		PreviewCacheTTL:      10 * time.Second,
+		MaxConcurrency:       256,
+		RequestTimeout:       10 * time.Second,
+		SubL2TTL:             90 * time.Minute,
+		MongoBreakerFails:    5,
+		MongoBreakerCooldown: 10 * time.Second,
+		DEKL2TTL:             90 * time.Minute,
+		DEKBreakerFails:      5,
+		DEKBreakerCooldown:   10 * time.Second,
 		Mongo: MongoConfig{
-			MaxPoolSize: 100,
-			MinPoolSize: 0,
+			MaxPoolSize:            100,
+			MinPoolSize:            0,
+			ServerSelectionTimeout: 2 * time.Second,
 		},
 	}
 }
@@ -42,6 +49,9 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	cfg.RoomCacheTTL = 0
 	cfg.PreviewCacheSize = 0
 	cfg.PreviewCacheTTL = 0
+	cfg.SubL2TTL = 0
+	cfg.MongoBreakerFails = 0
+	cfg.MongoBreakerCooldown = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
@@ -195,4 +205,78 @@ func unsetEnv(t *testing.T, key string) {
 			_ = os.Setenv(key, prev)
 		}
 	})
+}
+
+// Every knob this branch added is rejected when negative. Table-driven: the
+// next validated field is one row, not another six-line copy.
+func TestValidate_RejectsNegativeValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		set     func(*Config)
+		wantEnv string
+	}{
+		{"sub L2 TTL", func(c *Config) { c.SubL2TTL = -time.Second }, "HISTORY_SUB_L2_TTL"},
+		{"mongo breaker fails", func(c *Config) { c.MongoBreakerFails = -1 }, "HISTORY_MONGO_BREAKER_FAILS"},
+		{"mongo breaker cooldown", func(c *Config) { c.MongoBreakerCooldown = -time.Second }, "HISTORY_MONGO_BREAKER_COOLDOWN"},
+		{"DEK L2 TTL", func(c *Config) { c.DEKL2TTL = -time.Second }, "ATREST_DEK_L2_TTL"},
+		{"DEK breaker fails", func(c *Config) { c.DEKBreakerFails = -1 }, "ATREST_DEK_BREAKER_FAILS"},
+		{"DEK breaker cooldown", func(c *Config) { c.DEKBreakerCooldown = -time.Second }, "ATREST_DEK_BREAKER_COOLDOWN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseValid()
+			tt.set(&cfg)
+			err := validate(&cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantEnv)
+		})
+	}
+}
+
+// The knob only exists to be turned. MongoConfig is mounted with
+// envPrefix:"MONGO_", so its tag must carry the bare suffix — spelling the
+// prefix again inside the tag yields MONGO_MONGO_… and leaves every operator
+// setting the documented name silently on the 2s default.
+func TestLoad_ServerSelectionTimeoutIsSettable(t *testing.T) {
+	t.Setenv("CASSANDRA_HOSTS", "cassandra:9042")
+	t.Setenv("MONGO_URI", "mongodb://mongo:27017")
+	t.Setenv("NATS_URL", "nats://nats:4222")
+	t.Setenv("MONGO_SERVER_SELECTION_TIMEOUT", "7s")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 7*time.Second, cfg.Mongo.ServerSelectionTimeout)
+}
+
+// The doubled name is what the mis-prefixed tag produced. Nothing may answer
+// to it, or the fix silently keeps both spellings alive.
+func TestLoad_DoublePrefixedServerSelectionTimeoutIsNotHonored(t *testing.T) {
+	t.Setenv("CASSANDRA_HOSTS", "cassandra:9042")
+	t.Setenv("MONGO_URI", "mongodb://mongo:27017")
+	t.Setenv("NATS_URL", "nats://nats:4222")
+	t.Setenv("MONGO_MONGO_SERVER_SELECTION_TIMEOUT", "9s")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 2*time.Second, cfg.Mongo.ServerSelectionTimeout)
+}
+
+func TestValidate_RejectsNonPositiveServerSelectionTimeout(t *testing.T) {
+	cfg := baseValid()
+	cfg.Mongo.ServerSelectionTimeout = 0
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_SERVER_SELECTION_TIMEOUT")
+}
+
+// The bound only works if it undercuts the request budget — otherwise the
+// handler deadline fires first and the read never returns the error the
+// fail-open paths need.
+func TestValidate_RejectsServerSelectionTimeoutAtOrAboveRequestTimeout(t *testing.T) {
+	cfg := baseValid()
+	cfg.RequestTimeout = 5 * time.Second
+	cfg.Mongo.ServerSelectionTimeout = 5 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be less than REQUEST_TIMEOUT")
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -418,6 +419,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 			if err := h.store.RemoveRole(ctx, req.Account, req.RoomID, model.RoleOwner); err != nil {
 				return fmt.Errorf("demote dual-member owner: %w", err)
 			}
+			// Bust AFTER the write: the cached Roles drove canBypassLargeRoomCap
+			// in the gatekeeper and must not keep serving owner-level authz.
+			subauthcache.BustSub(ctx, h.valkey, req.RoomID, req.Account)
 		}
 		return nil
 	}
@@ -426,6 +430,10 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	if _, err := h.store.DeleteSubscription(ctx, req.RoomID, req.Account); err != nil {
 		return fmt.Errorf("delete subscription: %w", err)
 	}
+	// Bust AFTER the write: a removed member's cached positive decision must
+	// die immediately, not linger for the L2 TTL (the security case this
+	// invalidation exists for).
+	subauthcache.BustSub(ctx, h.valkey, req.RoomID, req.Account)
 
 	// Individual-only branch (dual-members returned above), so the account has
 	// truly left: scrub its thread footprint (#308).
@@ -632,6 +640,10 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts); err != nil {
 			return fmt.Errorf("delete subscriptions by accounts: %w", err)
 		}
+		// Bust AFTER the write, in one batched round trip: each removed
+		// account's cached positive decision must die immediately, not linger
+		// for the L2 TTL.
+		subauthcache.BustSubs(ctx, h.valkey, req.RoomID, accounts)
 		// accounts is exactly the set that truly lost membership (survivors
 		// filtered out above), so scrub their thread footprint too (#308).
 		if err := h.cleanupThreadMembership(ctx, req.RoomID, accounts); err != nil {

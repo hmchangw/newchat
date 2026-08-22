@@ -30,7 +30,7 @@ func (s *HistoryService) checkAccessAndRoomTimes(
 	}()
 	go func() {
 		defer wg.Done()
-		lastMsgAt, createdAt, rtErr = s.resolveRoomTimesOrError(ctx, roomID, meta, now)
+		lastMsgAt, createdAt, _, rtErr = s.resolveRoomTimesOrError(ctx, roomID, meta, now)
 	}()
 	wg.Wait()
 	if accessErr != nil {

@@ -34,26 +34,27 @@ type config struct {
 	// Mode selects which stream/consumer this pod binds: "default" runs the ROOMS
 	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
 	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
-	Mode              string                  `env:"MODE"            envDefault:"default"`
-	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
-	MongoURI          string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB           string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername     string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword     string                  `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers        int                     `env:"MAX_WORKERS"        envDefault:"100"`
-	KeyFanoutWorkers  int                     `env:"KEY_FANOUT_WORKERS" envDefault:"32"` // see defaultKeyFanoutWorkers in handler.go
-	UserCacheSize     int                     `env:"USER_CACHE_SIZE"    envDefault:"10000"`
-	UserCacheTTL      time.Duration           `env:"USER_CACHE_TTL"     envDefault:"5m"`
-	RoomMetaCacheSize int                     `env:"ROOM_META_CACHE_SIZE" envDefault:"10000"`
-	RoomMetaCacheTTL  time.Duration           `env:"ROOM_META_CACHE_TTL"  envDefault:"60s"`
-	Consumer          stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap         bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr        string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled      bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr       string                  `env:"METRICS_ADDR" envDefault:":9090"`
-	DebugLog          logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	Mode               string                  `env:"MODE"            envDefault:"default"`
+	NatsURL            string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile      string                  `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID             string                  `env:"SITE_ID"         envDefault:"site-local"`
+	MongoURI           string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB            string                  `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername      string                  `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword      string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	MongoSelectTimeout time.Duration           `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	MaxWorkers         int                     `env:"MAX_WORKERS"        envDefault:"100"`
+	KeyFanoutWorkers   int                     `env:"KEY_FANOUT_WORKERS" envDefault:"32"` // see defaultKeyFanoutWorkers in handler.go
+	UserCacheSize      int                     `env:"USER_CACHE_SIZE"    envDefault:"10000"`
+	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"     envDefault:"5m"`
+	RoomMetaCacheSize  int                     `env:"ROOM_META_CACHE_SIZE" envDefault:"10000"`
+	RoomMetaCacheTTL   time.Duration           `env:"ROOM_META_CACHE_TTL"  envDefault:"60s"`
+	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr         string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr        string                  `env:"METRICS_ADDR" envDefault:":9090"`
+	DebugLog           logctx.Config           `envPrefix:"DEBUG_LOG_"`
 
 	// Grace window during which a rotated-out previous key remains valid for decrypt.
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
@@ -137,7 +138,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk),
+		mongoutil.WithServerSelectionTimeout(cfg.MongoSelectTimeout))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)

@@ -413,3 +413,65 @@ func TestCache_FindUserByAccount_CallerCancelReturnsCtxErr(t *testing.T) {
 		t.Fatal("caller did not return on its own ctx cancel within 2s")
 	}
 }
+
+// The L2 below deliberately returns the users it DID resolve alongside its
+// error — that is the whole point of the tier during a Mongo outage, and
+// mention resolution one layer up is built to keep a partial answer. Dropping
+// the slice here threw away a completed MGet round trip per message and left
+// the L1 cold, so the next message repeated it forever.
+func TestCache_FindUsersByAccounts_KeepsPartialResultsOnStoreError(t *testing.T) {
+	partial := []model.User{{ID: "u1", Account: "alice", EngName: "Alice"}}
+	store := &partialBatchStore{
+		batch: func(context.Context, []string) ([]model.User, error) {
+			return partial, errors.New("mongo down")
+		},
+	}
+	c, err := userstore.NewCache(store, 10, time.Minute)
+	require.NoError(t, err)
+
+	got, err := c.FindUsersByAccounts(context.Background(), []string{"alice", "bob"})
+	require.Error(t, err, "the caller must still learn the lookup degraded")
+
+	require.Len(t, got, 1, "the resolved half must survive")
+	assert.Equal(t, "alice", got[0].Account)
+}
+
+// And the survivors must populate the L1, or every later message pays the same
+// failed round trip for a user that was already resolved.
+func TestCache_FindUsersByAccounts_PartialResultsPopulateL1(t *testing.T) {
+	partial := []model.User{{ID: "u1", Account: "alice", EngName: "Alice"}}
+	calls := 0
+	store := &partialBatchStore{
+		batch: func(context.Context, []string) ([]model.User, error) {
+			calls++
+			return partial, errors.New("mongo down")
+		},
+	}
+	c, err := userstore.NewCache(store, 10, time.Minute)
+	require.NoError(t, err)
+
+	_, _ = c.FindUsersByAccounts(context.Background(), []string{"alice"})
+	got, err := c.FindUsersByAccounts(context.Background(), []string{"alice"})
+
+	require.NoError(t, err, "alice is warm now, so nothing needs the failing store")
+	require.Len(t, got, 1)
+	assert.Equal(t, 1, calls, "the second lookup must be served from L1")
+}
+
+// partialBatchStore is a UserStore whose batch read is scripted per test. The
+// single-key methods are unused here and fail loudly if that changes.
+type partialBatchStore struct {
+	batch func(context.Context, []string) ([]model.User, error)
+}
+
+func (p *partialBatchStore) FindUserByID(context.Context, string) (*model.User, error) {
+	return nil, errors.New("partialBatchStore: FindUserByID not scripted")
+}
+
+func (p *partialBatchStore) FindUserByAccount(context.Context, string) (*model.User, error) {
+	return nil, errors.New("partialBatchStore: FindUserByAccount not scripted")
+}
+
+func (p *partialBatchStore) FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error) {
+	return p.batch(ctx, accounts)
+}
