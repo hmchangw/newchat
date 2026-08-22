@@ -158,13 +158,13 @@ func (r *soakSearchReader) IndexedAt(
 	ctx context.Context,
 	account, roomID, messageID, term string,
 	publishedAt time.Time,
-) (soakSearchIndexResult, error) {
+) (soakSearchIndexResult, bool, error) {
 	if account == "" || roomID == "" || messageID == "" {
-		return soakSearchIndexUnknown,
+		return soakSearchIndexUnknown, false,
 			fmt.Errorf("search index probe requires an account, room and message")
 	}
 	if r.now().UTC().Sub(publishedAt.UTC()) < r.cfg.Settle {
-		return soakSearchIndexTooEarly, nil
+		return soakSearchIndexTooEarly, false, nil
 	}
 
 	var response model.SearchMessagesResponse
@@ -184,14 +184,14 @@ func (r *soakSearchReader) IndexedAt(
 		// A search-service or Elasticsearch outage proves nothing about the
 		// message. Reporting missing here would turn every dependency outage
 		// longer than the deadline into a data-loss claim.
-		return soakSearchIndexUnknown, err
+		return soakSearchIndexUnknown, true, err
 	}
 	for i := range response.Messages {
 		if response.Messages[i].MessageID == messageID {
-			return soakSearchIndexFound, nil
+			return soakSearchIndexFound, true, nil
 		}
 	}
-	return soakSearchIndexMissing, nil
+	return soakSearchIndexMissing, true, nil
 }
 
 // searchProbeTerm reduces a payload to a term the analyzer will match. The
@@ -268,22 +268,26 @@ func newSoakSearchIndexProbe(
 	return &soakSearchIndexProbe{reader: reader, catalog: catalog}
 }
 
+// Indexed reports the verdict and whether it issued a query. Every path that
+// answers from local state returns false: the reconciler refunds the read
+// allowance for a claim that reached no service, and charging it here would
+// make the run deliver less read traffic than it was configured for.
 func (p *soakSearchIndexProbe) Indexed(
 	ctx context.Context,
 	operation *failureOperation,
-) (soakSearchIndexResult, error) {
+) (soakSearchIndexResult, bool, error) {
 	if p == nil || p.reader == nil || p.catalog == nil || operation == nil {
-		return soakSearchIndexUnknown, nil
+		return soakSearchIndexUnknown, false, nil
 	}
 	roomID := operation.Targets["roomId"]
 	messageID := operation.Targets["messageId"]
 	account := operation.Attributes[soakFailureAttributeAccount]
 	if roomID == "" || messageID == "" || account == "" {
-		return soakSearchIndexUnknown, nil
+		return soakSearchIndexUnknown, false, nil
 	}
 	message, known := p.catalog.Get(roomID, messageID)
 	if !known || message.SearchTerm == "" {
-		return soakSearchIndexUnknown, nil
+		return soakSearchIndexUnknown, false, nil
 	}
 	return p.reader.IndexedAt(
 		ctx, account, roomID, messageID, message.SearchTerm, operation.StartedAt,

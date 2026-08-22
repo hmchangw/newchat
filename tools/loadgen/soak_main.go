@@ -393,11 +393,23 @@ func runSoakSeed(
 	return 0
 }
 
+// soakShutdownExitCode folds a ledger close failure into the run's result. A
+// close that could not make an invalidation durable means this run's evidence
+// will not be recognised as disowned when it is replayed, which is a failed run
+// however well the traffic went. An earlier failure keeps its own code: it is
+// closer to the cause.
+func soakShutdownExitCode(current int, closeErr error) int {
+	if closeErr == nil || current != 0 {
+		return current
+	}
+	return 2
+}
+
 func runSoakWorkload(
 	ctx context.Context,
 	cfg *config,
 	opts soakOptions,
-) int {
+) (exitCode int) {
 	seed := opts.Seed
 	client, err := mongoutil.Connect(
 		ctx,
@@ -424,6 +436,7 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
+	reconcileBreaches := warnSoakReconcileConfig(&cfg.Soak)
 	setSoakRunInfo(metrics, cfg.Soak.Environment)
 	defer metrics.stopNATSHealth()
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
@@ -513,13 +526,22 @@ func runSoakWorkload(
 	if degradedLedger {
 		slog.Error("durable failure ledger unavailable; continuing with invalid in-memory observation")
 	}
+	if err := recordSoakStartupInvalidations(ledger, reconcileBreaches); err != nil {
+		slog.Error("record Cassandra soak startup invalidation", "error", err)
+		if closeErr := ledger.Close(); closeErr != nil {
+			slog.Error("close Cassandra soak failure ledger", "error", closeErr)
+		}
+		return 2
+	}
 	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
 		metrics.FailureDropped.Add(float64(dropped))
 	}
 	defer func() {
-		if err := ledger.Close(); err != nil {
+		err := ledger.Close()
+		if err != nil {
 			slog.Error("close Cassandra soak failure ledger", "error", err)
 		}
+		exitCode = soakShutdownExitCode(exitCode, err)
 	}()
 	observationRuntime := newSoakFailureObservationRuntime(
 		cfg.Soak.RecipientObserverEnabled,
@@ -759,7 +781,8 @@ func runSoakWorkload(
 		slog.Error("build Cassandra soak search reader", "error", searchReaderErr)
 		return 1
 	}
-	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 2)
+	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 3)
+	reconcilerOptions = append(reconcilerOptions, withSoakFailureReconcileMetrics(metrics))
 	if cfg.Soak.SearchObserverEnabled {
 		reconcilerOptions = append(reconcilerOptions, withSoakFailureSearchIndexProbe(
 			newSoakSearchIndexProbe(searchReader, catalog),
@@ -970,14 +993,8 @@ func runSoakWorkload(
 			// Reconciliation borrows read slots so verification adds no read RPS,
 			// but it may only take its configured share: a large unresolved
 			// backlog must not stop the production-like read mix mid-fault.
-			if reconcileGate.Allow() {
-				reconciled, err := failureReconciler.Try(actionCtx)
-				if err != nil {
-					slog.Error("reconcile Cassandra soak operation", "error", err)
-				}
-				if reconciled {
-					return nil
-				}
+			if reconcileReadAction(actionCtx, failureReconciler, reconcileGate) {
+				return nil
 			}
 			_, _ = reader.ReadMixed(actionCtx, selector.nextRoom())
 			return nil

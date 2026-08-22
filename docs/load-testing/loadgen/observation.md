@@ -96,13 +96,13 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_LEDGER_COMPACT_EVERY` | `10000` | Finalizations before the journal is reclaimed |
 | `SOAK_LEDGER_MAX_BYTES` | `536870912` | Journal size that reclaims it regardless of the finalize count |
 | `SOAK_LEDGER_EXPIRE_BATCH` | `0` | Operations one expiry sweep may retire; `0` is unbounded. A bound below the arrival rate grows a backlog until capacity invalidates the ledger — size it above (operations/sec x sweep interval) |
-| `SOAK_RECONCILE_DEADLINE` | `10m` | Authoritative absence deadline |
+| `SOAK_RECONCILE_DEADLINE` | `10m` | Authoritative absence deadline. Past `1h` the reconcile-lag histogram can no longer resolve lag near the deadline, so the run starts but is recorded inconclusive with `reconcile_lag_range` |
 | `SOAK_RECONCILE_RETRY_INTERVAL` | `1s` | Earliest history retry |
 | `SOAK_RECONCILE_READ_SHARE` | `0.5` | Maximum read-lane reconciliation share |
 | `SOAK_RECIPIENT_OBSERVER_ENABLED` | `false` | Opt in to exact recipient observation |
 | `SOAK_RECIPIENT_OBSERVER_QUEUE` | `8192` | Bounded recipient callback queue |
 | `SOAK_RECIPIENT_OBSERVER_CONNECTIONS` | `32` | Bounded account-attributed NATS connection pool |
-| `SOAK_LEDGER_EPOCH` | `v1` | Evidence-journal identity, separate from the run ID |
+| `SOAK_LEDGER_EPOCH` | `v2` | Evidence-journal identity, separate from the run ID. `v2` adds the `invalidated` record; an image that predates it rejects that record and cannot replay a `v2` journal, so rolling the image back means rolling the epoch back with it |
 | `SOAK_MEMBER_MUTATION_RATE` | `2` | Member add/remove cycles per second |
 | `SOAK_ROOM_MUTATION_RATE` | `1` | Rename and mute toggles per second, alternating |
 | `SOAK_ROOM_READ_RATE` | `20` | Room reads per second; also funds reconciliation |
@@ -332,10 +332,21 @@ roughly `SOAK_SEND_RATE x 20` reconcile slots per second against a budget of
 reconciliation backlog would grow without bound and the run would report a
 search problem it had created itself.
 
-Startup refuses a configuration where that cannot work: the observer adds a
-second reconcile step to every admitted message, so `SOAK_READ_RATE x
-SOAK_RECONCILE_READ_SHARE` must be at least `2 x SOAK_SEND_RATE`, and
-`SOAK_SEARCH_SETTLE` must be shorter than `SOAK_RECONCILE_DEADLINE`.
+Startup checks the two configurations where that cannot work, and treats them
+differently. `SOAK_SEARCH_SETTLE` must be shorter than
+`SOAK_RECONCILE_DEADLINE`, or the probe never gets an answer before the
+operation expires — that one is **refused**, because no window of any length
+produces evidence.
+
+The capacity rule is **not** refused. The observer adds a second reconcile step
+to every admitted message, so `SOAK_READ_RATE x SOAK_RECONCILE_READ_SHARE`
+should be at least `2 x SOAK_SEND_RATE`; below that, every message eventually
+expires `unverified` for want of a claim. The run still starts, because only the
+operator knows whether a degraded lane is worth the window, but it is recorded
+inconclusive rather than left to a log line: the ledger is invalidated with
+`reconcile_capacity`, which sets `InvalidReason`, raises
+`loadgen_failure_invalidations_total`, is journaled so a restart recovers it,
+and appears on the **Reconcile lane capacity** dashboard panel.
 
 An outage proves nothing about the message, so an unreachable search-service is
 never a loss claim.
