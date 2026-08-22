@@ -57,6 +57,11 @@ type broadcastMetrics struct {
 	deliveries   metric.Int64Counter
 	fanoutOpts   map[fanoutKey]metric.MeasurementOption
 	deliveryOpts map[deliveryKey]metric.MeasurementOption
+
+	// Failures only: the thread-view lane is best-effort, so its volume is
+	// already covered by the delivery counter and only errors need a series.
+	threadViewFailures metric.Int64Counter
+	threadViewOpts     map[natsmetrics.EventType]metric.MeasurementOption
 }
 
 func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
@@ -73,11 +78,21 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 	if err != nil {
 		deliveries, _ = noopMeter.Int64Counter("broadcast_worker_recipient_deliveries_total")
 	}
+	threadViewFailures, err := meter.Int64Counter("broadcast_worker_thread_view_publish_failures_total",
+		metric.WithDescription("Publishes to the thread-scoped view subject that failed."))
+	if err != nil {
+		threadViewFailures, _ = noopMeter.Int64Counter("broadcast_worker_thread_view_publish_failures_total")
+	}
 	m := &broadcastMetrics{
-		fanout:       fanout,
-		deliveries:   deliveries,
-		fanoutOpts:   make(map[fanoutKey]metric.MeasurementOption),
-		deliveryOpts: make(map[deliveryKey]metric.MeasurementOption),
+		fanout:             fanout,
+		deliveries:         deliveries,
+		threadViewFailures: threadViewFailures,
+		threadViewOpts:     make(map[natsmetrics.EventType]metric.MeasurementOption, len(allBroadcastEvents)),
+		fanoutOpts:         make(map[fanoutKey]metric.MeasurementOption),
+		deliveryOpts:       make(map[deliveryKey]metric.MeasurementOption),
+	}
+	for _, event := range allBroadcastEvents {
+		m.threadViewOpts[event] = metric.WithAttributes(attribute.String("event_type", string(event)))
 	}
 	for _, room := range allRoomKinds {
 		roomAttr := attribute.String("room_kind", string(room))
@@ -137,6 +152,16 @@ func (m *broadcastMetrics) Delivery(ctx context.Context, room roomKindLabel, eve
 		result = deliveryFailed
 	}
 	m.deliveries.Add(ctx, 1, m.deliveryOpts[deliveryKey{normalizeRoomKind(room), normalizeBroadcastEvent(event), result}])
+}
+
+// ThreadViewPublishFailed counts a failed publish to the thread-scoped view
+// subject. Failures only: viewers refetch on panel open, so a drop is
+// recoverable and only its rate is worth alerting on.
+func (m *broadcastMetrics) ThreadViewPublishFailed(ctx context.Context, event natsmetrics.EventType) {
+	if m == nil || m.threadViewFailures == nil {
+		return
+	}
+	m.threadViewFailures.Add(ctx, 1, m.threadViewOpts[normalizeBroadcastEvent(event)])
 }
 
 type broadcastMetricLabels struct {
