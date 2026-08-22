@@ -177,7 +177,7 @@ New `user-service/middleware.go`, following `upload-service/middleware.go`
   **already constructs** for `sso.set` / `sso.refresh` (`user-service/oidc.go`).
   Account from `claims.PreferredUsername`, falling back to `claims.Name`.
 - **`x-user-id` + `x-auth-token`** → `botauth.Authenticate` against botplatform.
-- Both present → 400 `ambiguous_token`. Neither → 401 `missing_token`.
+- Both present → 400 `ambiguous_token`. Neither → 401 `missing_fields`.
 
 New dependency for user-service: `BOTPLATFORM_URL` plus a Resty client. When
 unset, the session-token branch returns 503 `upstream_unavailable` and the SSO
@@ -428,6 +428,7 @@ existing `MONGO_` / `NATS_` blocks:
 |---|---|---|
 | `HTTP_PORT` | `8080` | Gin listener |
 | `HTTP_MAX_CONCURRENCY` | `256` | In-flight cap; 0 disables |
+| `HTTP_MAX_CONNS` | `2048` | Accepted-connection cap; 0 disables |
 | `HTTP_HANDLER_TIMEOUT` | `30s` | Per-request context budget |
 | `HTTP_WRITE_TIMEOUT` | `35s` | Must exceed the handler timeout |
 | `HTTP_GZIP_MIN_BYTES` | `1024` | Compression threshold |
@@ -436,6 +437,7 @@ existing `MONGO_` / `NATS_` blocks:
 | `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` | `40` | Page size when `limit` omitted |
 | `HTTP_SUBSCRIPTION_MAX_LIMIT` | `400` | Hard page ceiling |
 | `ROOM_BATCH_CHUNK` | `100` | Enrichment fan-out chunk size |
+| `MAX_SITE_FANOUT` | `8` | Concurrent enrichment calls in flight |
 | `MONGO_MAX_POOL_SIZE` | `100` | NATS-path pool, now explicit |
 | `HEALTH_ADDR` | `:8081` | Probe listener |
 | `BOTPLATFORM_URL` | *(unset)* | Session-token auth; unset ⇒ SSO only |

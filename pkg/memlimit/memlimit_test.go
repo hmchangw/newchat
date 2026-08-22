@@ -108,7 +108,7 @@ func TestSetFromFiles_QuotaTooSmallToSplit(t *testing.T) {
 }
 
 func TestSetFromCgroup_DoesNotPanicOnThisHost(t *testing.T) {
-	// Exercises the real cgroup paths; any outcome is valid, a panic is not.
-	_, err := SetFromCgroup(0.8)
-	assert.NoError(t, err)
+	// Exercises the real cgroup paths; any outcome is valid, a panic is not — an
+	// unreadable cgroup file is a property of the host, not a bug in this package.
+	assert.NotPanics(t, func() { _, _ = SetFromCgroup(0.8) })
 }

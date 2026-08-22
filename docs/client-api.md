@@ -8558,7 +8558,7 @@ The HTTP form of [`subscription.list`](#subscriptionlist). Same enrichment, same
 
 > **Send `limit=200`.** It covers a typical sidebar in one request. Larger pages cost the server nothing extra in database work — the room join and activity sort run over the account's full subscription set regardless of page size, so one 200-row page is roughly 5× cheaper in total than five 40-row pages.
 
-```
+```http
 GET /api/v1/subscriptions?type=current&limit=200 HTTP/1.1
 ssoToken: <oidc-access-token>
 Accept-Encoding: gzip
@@ -8635,7 +8635,7 @@ Same envelope as every other endpoint (see [§6](#6-error-envelope-reference)).
 
 The pod caps concurrent in-flight requests (`HTTP_MAX_CONCURRENCY`, default `256`) and sheds the overflow immediately rather than queueing work whose client has already timed out.
 
-```
+```http
 HTTP/1.1 429 Too Many Requests
 Retry-After: 1
 Content-Type: application/json
