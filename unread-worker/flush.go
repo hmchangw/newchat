@@ -227,7 +227,15 @@ func classifyFlushErr(err error) error {
 // process, and with MaxDeliver=-1 the held-but-un-acked batch redelivers
 // forever after every restart, turning a deterministic panic into a crash
 // loop with no way for the message to fall out of the stream.
-func (f *flusher) Run(ctx context.Context, interval, finalTimeout time.Duration) {
+// perFlushTimeout bounds each periodic flush. Flush is driven synchronously
+// here, so an unbounded write does not merely delay its own batch — it stops
+// every later flush, the pending batch keeps growing, and the held messages
+// behind it pass AckWait and redeliver into a MongoDB that is evidently already
+// unwell. Bounding it turns that into an ordinary transient failure: the batch
+// is Nak'd, the loop keeps ticking, and back-pressure engages instead of a
+// silent stall. Must stay comfortably below CONSUMER_ACK_WAIT for the same
+// reason MongoSelectTimeout stays below it.
+func (f *flusher) Run(ctx context.Context, interval, finalTimeout, perFlushTimeout time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -238,7 +246,9 @@ func (f *flusher) Run(ctx context.Context, interval, finalTimeout time.Duration)
 			cancel()
 			return
 		case <-t.C:
-			jobguard.Guard("unread-state flush", func() { f.Flush(ctx) })
+			flushCtx, cancel := context.WithTimeout(ctx, perFlushTimeout)
+			jobguard.Guard("unread-state flush", func() { f.Flush(flushCtx) })
+			cancel()
 		}
 	}
 }

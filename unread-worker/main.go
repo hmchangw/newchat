@@ -44,9 +44,14 @@ type config struct {
 	// engages promptly instead of a flush goroutine parking on a dead socket.
 	MongoSelectTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	FlushInterval      time.Duration `env:"FLUSH_INTERVAL" envDefault:"250ms"`
-	HealthAddr         string        `env:"HEALTH_ADDR"    envDefault:":8081"`
-	MetricsAddr        string        `env:"METRICS_ADDR"   envDefault:":9090"`
-	PProfEnabled       bool          `env:"PPROF_ENABLED"  envDefault:"false"`
+	// FlushTimeout bounds ONE periodic flush. Run drives Flush synchronously, so
+	// an unbounded write stalls every later flush too. Keep it below
+	// CONSUMER_ACK_WAIT (default 30s) or a wedged flush still outlives the ack
+	// deadline and the batch redelivers underneath it; main validates that.
+	FlushTimeout time.Duration `env:"FLUSH_TIMEOUT"  envDefault:"10s"`
+	HealthAddr   string        `env:"HEALTH_ADDR"    envDefault:":8081"`
+	MetricsAddr  string        `env:"METRICS_ADDR"   envDefault:":9090"`
+	PProfEnabled bool          `env:"PPROF_ENABLED"  envDefault:"false"`
 	// Mode selects the canonical stream/subject wiring via pkg/stream.Resolve.
 	Mode      stream.Pipeline         `env:"MODE,required"`
 	Consumer  stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -61,6 +66,14 @@ func main() {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	// Fail fast rather than run with a flush that can outlive the ack deadline:
+	// the whole point of bounding the flush is that it gives up BEFORE JetStream
+	// redelivers the batch underneath it.
+	if cfg.FlushTimeout >= cfg.Consumer.AckWait {
+		slog.Error("FLUSH_TIMEOUT must be less than CONSUMER_ACK_WAIT, or a wedged flush outlives the ack deadline and the batch redelivers while it is still running",
+			"flush_timeout", cfg.FlushTimeout, "ack_wait", cfg.Consumer.AckWait)
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
@@ -111,8 +124,9 @@ func main() {
 	f := newFlusher(store)
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	flushDone := make(chan struct{})
-	go func() { f.Run(flushCtx, cfg.FlushInterval, 5*time.Second); close(flushDone) }()
-	slog.Info("unread-state flusher started", "flush_interval", cfg.FlushInterval)
+	go func() { f.Run(flushCtx, cfg.FlushInterval, 5*time.Second, cfg.FlushTimeout); close(flushDone) }()
+	slog.Info("unread-state flusher started",
+		"flush_interval", cfg.FlushInterval, "flush_timeout", cfg.FlushTimeout)
 
 	// PullMaxMessages is bounded by MaxAckPending anyway; a modest buffer keeps
 	// the single consume goroutine fed without over-fetching during an outage.

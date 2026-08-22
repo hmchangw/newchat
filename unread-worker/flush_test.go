@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,14 +19,27 @@ import (
 // independently. ctx.Err() is checked first so tests can prove Run's final
 // flush truly uses a fresh context rather than the already-cancelled one.
 type stubStore struct {
+	mu       sync.Mutex
 	order    []string
 	rooms    map[string]roomLastMsgUpdate
 	lastSeen map[subKey]time.Time
 	mentions map[subKey]time.Time
 	failWith map[string]error // stage name ("rooms"/"lastSeen"/"mentions") -> error to return
+	// sawDeadline records whether the write context carried one, which is what
+	// keeps a wedged Mongo write from stalling the flusher past AckWait.
+	sawDeadline bool
+}
+
+func (s *stubStore) deadlineSeen() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sawDeadline
 }
 
 func (s *stubStore) BulkUpdateRoomLastMessage(ctx context.Context, u map[string]roomLastMsgUpdate) error {
+	s.mu.Lock()
+	_, s.sawDeadline = ctx.Deadline()
+	s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -219,7 +233,7 @@ func TestFlusher_RunFlushesOnCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { f.Run(ctx, time.Hour, 5*time.Second); close(done) }()
+	go func() { f.Run(ctx, time.Hour, 5*time.Second, 10*time.Second); close(done) }()
 	cancel()
 
 	select {
@@ -260,7 +274,7 @@ func TestFlusher_RunRecoversPanicAndStillReturns(t *testing.T) {
 	// fire before we cancel — deterministic, no ticker race, no time.Sleep.
 	// (An unguarded panic here would crash the whole test binary, not just
 	// fail this assertion — the select below only proves the guarded case.)
-	go func() { f.Run(ctx, time.Hour, 5*time.Second); close(done) }()
+	go func() { f.Run(ctx, time.Hour, 5*time.Second, 10*time.Second); close(done) }()
 	cancel()
 
 	select {
@@ -334,3 +348,99 @@ func TestClassifyFlushErr(t *testing.T) {
 		})
 	}
 }
+
+// Run drives Flush SYNCHRONOUSLY, so a write that never returns stops every
+// later flush too — the batch stops draining, held messages stay un-acked past
+// AckWait, and JetStream redelivers them into a Mongo that is already
+// struggling. Only the shutdown branch used to bound its flush; the periodic
+// one inherited the worker's long-lived context and could wedge forever.
+func TestFlusher_RunBoundsEachPeriodicFlush(t *testing.T) {
+	store := &stubStore{}
+	f := newFlusher(store)
+	f.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: time.Now().UTC()}, held(&fakeMsg{}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { f.Run(ctx, time.Millisecond, 5*time.Second, time.Second); close(done) }()
+
+	require.Eventually(t, store.deadlineSeen, 2*time.Second, 5*time.Millisecond,
+		"the periodic flush must bound the write context, not hand it the worker's")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// A flush that outruns its bound must not hold the batch: it has to fail so the
+// held messages are Nak'd and redelivered rather than sitting un-acked while
+// the flusher is stuck behind them.
+func TestFlusher_RunWedgedFlushGivesUpAndKeepsFlushing(t *testing.T) {
+	store := &blockingStore{released: make(chan struct{})}
+	f := newFlusher(store)
+	f.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: time.Now().UTC()}, held(&fakeMsg{}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { f.Run(ctx, time.Millisecond, 5*time.Second, 20*time.Millisecond); close(done) }()
+
+	// Keep feeding intents: a flush swaps the batch out, so without new work the
+	// later ticks would find it empty and return before reaching the store —
+	// proving nothing about whether the loop is still turning.
+	feeding := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-feeding:
+				return
+			default:
+				f.add(writeIntents{RoomID: "r1", LastMsgID: "m", LastMsgAt: time.Now().UTC()}, held(&fakeMsg{}))
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	require.Eventually(t, func() bool { return store.calls() >= 2 }, 3*time.Second, 5*time.Millisecond,
+		"a wedged flush must time out and let the next flush run, not block the loop forever")
+
+	close(feeding)
+	close(store.released)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// blockingStore's first write blocks until its context expires, standing in for
+// a Mongo that has stopped answering rather than refusing.
+type blockingStore struct {
+	mu       sync.Mutex
+	n        int
+	released chan struct{}
+}
+
+func (s *blockingStore) calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
+func (s *blockingStore) BulkUpdateRoomLastMessage(ctx context.Context, _ map[string]roomLastMsgUpdate) error {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.released:
+		return nil
+	}
+}
+func (s *blockingStore) BulkAdvanceLastSeen(context.Context, map[subKey]time.Time) error { return nil }
+func (s *blockingStore) BulkSetMentions(context.Context, map[subKey]time.Time) error     { return nil }
