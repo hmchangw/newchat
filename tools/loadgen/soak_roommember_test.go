@@ -253,6 +253,30 @@ func TestSoakRoomLanes_ReconcileSchedulesProbeFromVerificationCompletion(t *test
 		"verification latency must not make the released probe immediately due")
 }
 
+func TestSoakRoomLanes_RepeatedAbsentProbesStillReachTheDeadlineVerdict(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+	fixture.store.member = false
+
+	probes := 0
+	for probes < 16 && len(fixture.ledger.ActiveOperations()) > 0 {
+		operation := soakSingleActiveOperation(t, fixture.ledger)
+		if operation.nextVerifyAt.After(fixture.now) {
+			fixture.advance(operation.nextVerifyAt.Sub(fixture.now))
+		}
+		reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+		require.NoError(t, err)
+		require.True(t, reconciled)
+		probes++
+	}
+
+	assert.Greater(t, probes, 2, "the regression requires a real backoff walk")
+	assert.Empty(t, fixture.ledger.ActiveOperations())
+	assert.Equal(t, uint64(1),
+		fixture.ledger.Snapshot().Results[failureResultMissingAfterDeadline],
+		"the last authoritative probe must run at the deadline instead of expiring unverified")
+}
+
 func TestSoakRoomLanes_AcceptedThenAbsentAtDeadlineIsMissing(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))

@@ -17,6 +17,7 @@ type fakeSoakMongoPinger struct {
 	mu        sync.Mutex
 	errors    []error
 	deadlines []time.Time
+	called    chan struct{}
 }
 
 func (p *fakeSoakMongoPinger) Ping(ctx context.Context, _ *readpref.ReadPref) error {
@@ -24,6 +25,12 @@ func (p *fakeSoakMongoPinger) Ping(ctx context.Context, _ *readpref.ReadPref) er
 	defer p.mu.Unlock()
 	if deadline, ok := ctx.Deadline(); ok {
 		p.deadlines = append(p.deadlines, deadline)
+	}
+	if p.called != nil {
+		select {
+		case p.called <- struct{}{}:
+		default:
+		}
 	}
 	if len(p.errors) == 0 {
 		return nil
@@ -86,6 +93,27 @@ func TestRunSoakMongoProbe_StopsWhenTicksClose(t *testing.T) {
 	completedAt := probe.Snapshot().CompletedAt
 	require.False(t, completedAt.IsZero())
 	assert.Equal(t, completedAt, probe.Snapshot().CompletedAt)
+}
+
+func TestSoakMongoProbe_StartsImmediatelyAndStopsIdempotently(t *testing.T) {
+	called := make(chan struct{}, 1)
+	pinger := &fakeSoakMongoPinger{called: called}
+	metrics := NewMetrics()
+	now := time.Unix(456, 0).UTC()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	shutdown := startSoakMongoProbe(ctx, pinger, metrics, func() time.Time { return now })
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("Mongo probe did not run immediately")
+	}
+	shutdown()
+	shutdown()
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.MongoUp))
+	assert.Equal(t, float64(now.Unix()), testutil.ToFloat64(metrics.MongoProbeTimestamp))
 }
 
 func TestSoakHeartbeatStatus_ExportsAttemptsHealthAndFreshness(t *testing.T) {
