@@ -17,6 +17,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -115,23 +116,30 @@ func main() {
 	}
 
 	streamName := stream.MigrationOplog(cfg.SiteID).Name
-	cons, err := createConsumerWithRetry(ctx, js, streamName, jetstream.ConsumerConfig{
+	consumerCfg := jetstream.ConsumerConfig{
 		Durable:        cfg.ConsumerDurable,
 		AckPolicy:      jetstream.AckExplicitPolicy,
 		DeliverPolicy:  jetstream.DeliverAllPolicy,
 		MaxDeliver:     cfg.MaxDeliver,
 		FilterSubjects: filterSubjects,
-	})
-	if err != nil {
-		slog.Error("create consumer failed", "stream", streamName, "error", err)
-		_ = nc.Drain()
-		mongoutil.Disconnect(ctx, targetClient)
-		mongoutil.Disconnect(ctx, source)
-		os.Exit(1)
 	}
 
-	cc, err := cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
+	// Without an error handler a Consume the server stops reports nothing at
+	// all — the handler simply never fires again — so supervise it.
+	process := func(msgCtx context.Context, msg jetstream.Msg) {
 		processOne(msgCtx, h, msg, m, cfg.MaxDeliver)
+	}
+	// The consumer is re-resolved on every restart, not captured once: one the
+	// server dropped has to be recreated, and restarting onto a stale handle
+	// would leave this migration silently consuming nothing.
+	cc, err := jsiter.Supervise(ctx, "oplog-direct-transfer", func(ctx context.Context, onError func(error)) (jsiter.ConsumeContext, error) {
+		cons, err := createConsumerWithRetry(ctx, js, streamName, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create %s consumer: %w", streamName, err)
+		}
+		return cons.Consume(ctx, process, jetstream.ConsumeErrHandler(
+			func(_ jetstream.ConsumeContext, err error) { onError(err) },
+		))
 	})
 	if err != nil {
 		slog.Error("consume failed", "stream", streamName, "error", err)

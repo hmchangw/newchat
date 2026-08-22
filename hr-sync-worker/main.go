@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -67,7 +68,11 @@ func main() {
 
 	handler := NewHandler(newMongoStore(mongoClient.Database(cfg.MongoWriteDB)))
 
-	consumeCtxs := make([]o11ynats.ConsumeContext, 0, len(cfg.SiteIDs))
+	consumeCtxs := make([]*jsiter.Supervisor, 0, len(cfg.SiteIDs))
+	// A live NATS connection says nothing about whether these consumers are
+	// still delivering — that gap is what let a dead consumer keep reporting
+	// healthy — so each site's own state is probed alongside it.
+	siteChecks := make([]health.Check, 0, len(cfg.SiteIDs))
 	for _, siteID := range cfg.SiteIDs {
 		cc, err := startSiteConsumer(ctx, otelJS, handler, siteID, cfg.Consumer)
 		if err != nil {
@@ -75,10 +80,11 @@ func main() {
 			os.Exit(1)
 		}
 		consumeCtxs = append(consumeCtxs, cc)
+		siteChecks = append(siteChecks, cc.HealthCheck())
 	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, false,
-		natsutil.HealthCheck(nc),
+		append([]health.Check{natsutil.HealthCheck(nc)}, siteChecks...)...,
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -107,13 +113,9 @@ func main() {
 // startSiteConsumer wires one durable, strictly-sequential consumer on the
 // site's HR stream. MaxAckPending=1 so a quit can never overtake the upsert
 // that precedes it (low volume — one publish burst per sync run).
-func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string, s stream.ConsumerSettings) (o11ynats.ConsumeContext, error) {
+func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string, s stream.ConsumerSettings) (*jsiter.Supervisor, error) {
 	streamCfg := stream.OrgSyncStream(siteID)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(s))
-	if err != nil {
-		return nil, err
-	}
-	return cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
+	process := func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 			data, err := natsutil.DecodePayload(msg)
@@ -124,7 +126,27 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 			}
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Subject(), data))
 		})
-	})
+	}
+
+	// The consumer is re-resolved on every restart, not captured once: a
+	// consumer the server stopped has to be recreated, and restarting onto a
+	// stale handle would leave this site's feed silently frozen.
+	newConsume := func(ctx context.Context, onError func(error)) (jsiter.ConsumeContext, error) {
+		cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(s))
+		if err != nil {
+			return nil, fmt.Errorf("create %s consumer: %w", streamCfg.Name, err)
+		}
+		// Without an error handler a Consume the server stops reports nothing at
+		// all — the handler simply never fires again.
+		cc, err := cons.Consume(ctx, process, jetstream.ConsumeErrHandler(
+			func(_ jetstream.ConsumeContext, err error) { onError(err) },
+		))
+		if err != nil {
+			return nil, fmt.Errorf("consume %s: %w", streamCfg.Name, err)
+		}
+		return cc, nil
+	}
+	return jsiter.Supervise(ctx, "hr-sync-"+siteID, newConsume)
 }
 
 // buildConsumerConfig adds the durable name and this worker's two overrides;

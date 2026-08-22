@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -171,13 +172,25 @@ func main() {
 		Stream: messagesCfg.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
+	// The consumer is re-resolved on every iterator build, not captured once: an
+	// iterator the server stopped usually means the durable itself is gone, and
+	// rebuilding onto a stale handle would just stop again.
+	newIter := func(ctx context.Context) (jsiter.Iterator, error) {
+		cons, err := js.CreateOrUpdateConsumer(ctx, messagesCfg.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create messages consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("open messages iterator: %w", err)
+		}
+		return iter, nil
 	}
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	// jsiter.Pump absorbs the errors that leave the iterator usable (a missed idle
+	// heartbeat) and rebuilds the ones that do not, so an error out of Next below
+	// means consumption is genuinely over.
+	iter, err := jsiter.New(ctx, consumerCfg.Durable, newIter)
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -195,8 +208,12 @@ func main() {
 			handler.HandleJetStreamMsg(handlerCtx, msg)
 		})
 
+	// A live NATS connection says nothing about whether this consumer is still
+	// receiving — that gap is what let a dead pump keep reporting healthy — so
+	// the pump's own state is probed alongside it.
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)

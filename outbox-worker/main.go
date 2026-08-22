@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -124,37 +124,63 @@ func main() {
 		slog.Warn("no remote peers in ALL_SITE_IDS — federation events published to OUTBOX would sit unconsumed",
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
-	iters := make([]o11ynats.MessagesContext, 0, len(peers))
-	orderedCtxs := make([]o11ynats.ConsumeContext, 0, len(peers))
+	iters := make([]*jsiter.Pump, 0, len(peers))
+	orderedCtxs := make([]*jsiter.Supervisor, 0, len(peers))
+	// A live NATS connection says nothing about whether these lanes are still
+	// consuming — that gap is what let a dead lane keep reporting healthy — so
+	// every lane's own state is probed alongside it.
+	laneChecks := make([]health.Check, 0, 2*len(peers))
 	for _, dest := range peers {
-		ccons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
-		if err != nil {
-			slog.Error("create concurrent consumer failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
+		// Both lanes re-resolve their consumer on every rebuild rather than
+		// capturing it: a lane the server stopped usually means the durable
+		// itself is gone, and rebuilding onto a stale handle would just stop
+		// again — with this lane's forwards to that peer silently frozen.
+		newIter := func(ctx context.Context) (jsiter.Iterator, error) {
+			ccons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
+			if err != nil {
+				return nil, fmt.Errorf("create concurrent consumer for %s: %w", dest, err)
+			}
+			iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+			if err != nil {
+				return nil, fmt.Errorf("open concurrent message iterator for %s: %w", dest, err)
+			}
+			return iter, nil
 		}
-		iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		iter, err := jsiter.New(ctx, "outbox-concurrent-"+dest, newIter)
 		if err != nil {
 			slog.Error("concurrent messages failed", "dest_site_id", dest, "error", err)
 			os.Exit(1)
 		}
 		iters = append(iters, iter)
-		drainPool(ctx, iter, sem, &wg, process)
+		laneChecks = append(laneChecks, iter.HealthCheck())
+		drainPool(ctx, "outbox-concurrent-"+dest, iter, sem, &wg, process)
 
-		ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
-		if err != nil {
-			slog.Error("create ordered consumer failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
+		newConsume := func(ctx context.Context, onError func(error)) (jsiter.ConsumeContext, error) {
+			ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
+			if err != nil {
+				return nil, fmt.Errorf("create ordered consumer for %s: %w", dest, err)
+			}
+			// Without an error handler a Consume the server stops reports
+			// nothing at all — the handler simply never fires again.
+			cc, err := ocons.Consume(ctx, process, jetstream.ConsumeErrHandler(
+				func(_ jetstream.ConsumeContext, err error) { onError(err) },
+			))
+			if err != nil {
+				return nil, fmt.Errorf("consume ordered lane for %s: %w", dest, err)
+			}
+			return cc, nil
 		}
-		cc, err := ocons.Consume(ctx, process)
+		cc, err := jsiter.Supervise(ctx, "outbox-ordered-"+dest, newConsume)
 		if err != nil {
 			slog.Error("ordered consume failed", "dest_site_id", dest, "error", err)
 			os.Exit(1)
 		}
 		orderedCtxs = append(orderedCtxs, cc)
+		laneChecks = append(laneChecks, cc.HealthCheck())
 	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
-		natsutil.HealthCheck(nc),
+		append([]health.Check{natsutil.HealthCheck(nc)}, laneChecks...)...,
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -190,6 +216,12 @@ func main() {
 	)
 }
 
+// laneIterator is the pull surface drainPool needs. Narrowing it to Next keeps
+// the pump testable with a fake while production passes a *jsiter.Pump.
+type laneIterator interface {
+	Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error)
+}
+
 // drainPool pumps one per-destination concurrent consumer's messages into the
 // shared worker pool, spawning a goroutine per message bounded by sem. Each
 // concurrent lane has its own iterator (and its own server-side ack-pending
@@ -199,17 +231,18 @@ func main() {
 // also cover the pump, or a message received between Next() and the
 // per-message Add(1) could slip past the wait and race nc.Drain(). The pump
 // exits when the iterator is Stop()'d on shutdown.
-func drainPool(ctx context.Context, iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
+func drainPool(ctx context.Context, lane string, iter laneIterator, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
-				// ErrMsgIteratorClosed is the normal stop (iter.Stop() on shutdown);
-				// any other error means consumption died unexpectedly — surface it.
-				if !errors.Is(err, jetstream.ErrMsgIteratorClosed) {
-					slog.ErrorContext(ctx, "outbox concurrent iterator stopped", "error", err)
+				// The pump absorbs everything it can recover from, so ErrStopped
+				// (iter.Stop() on shutdown) is the only expected error here; any
+				// other means consumption died for good — surface it.
+				if !errors.Is(err, jsiter.ErrStopped) {
+					slog.ErrorContext(ctx, "outbox concurrent iterator stopped", "lane", lane, "error", err)
 				}
 				return
 			}

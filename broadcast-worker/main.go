@@ -18,6 +18,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -191,10 +192,19 @@ func main() {
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
+	// The consumer is re-resolved on every iterator build, not captured once: an
+	// iterator the server stopped usually means the durable itself is gone, and
+	// rebuilding onto a stale handle would just stop again.
+	newIter := func(ctx context.Context) (jsiter.Iterator, error) {
+		cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create canonical consumer: %w", err)
+		}
+		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, fmt.Errorf("open canonical message iterator: %w", err)
+		}
+		return iter, nil
 	}
 
 	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
@@ -239,7 +249,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	// jsiter.Pump absorbs the errors that leave the iterator usable (a missed idle
+	// heartbeat) and rebuilds the ones that do not, so an error out of Next below
+	// means consumption is genuinely over.
+	iter, err := jsiter.New(ctx, consumerCfg.Durable, newIter)
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -251,8 +264,12 @@ func main() {
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		guardedProcessor(broadcastProcessor(handler)))
 
+	// A live NATS connection says nothing about whether this consumer is still
+	// receiving — that gap is what let a dead pump keep reporting healthy — so
+	// the pump's own state is probed alongside it.
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
