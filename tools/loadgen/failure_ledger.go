@@ -448,6 +448,10 @@ type failureLedger struct {
 	// at startup can still lose its WAL an hour later and that is the failure
 	// an operator has to act on.
 	invalidReasons []string
+	// persistedInvalidReasons is the subset the journal actually accepted. A
+	// reason absent here is retried on the next invalidation rather than being
+	// treated as durably recorded.
+	persistedInvalidReasons []string
 	// replaying suppresses the journal write while recovery re-applies records
 	// that are already in the file.
 	replaying             bool
@@ -1591,26 +1595,43 @@ func (l *failureLedger) ensureOpen() error {
 // counted and journaled, so a startup invalidation cannot silence the runtime
 // failures an operator still has to act on.
 func (l *failureLedger) invalidateLocked(reason string) {
-	if slices.Contains(l.invalidReasons, reason) {
+	if !slices.Contains(l.invalidReasons, reason) {
+		l.invalidReasons = append(l.invalidReasons, reason)
+		if l.invalidReason == "" {
+			l.invalidReason = reason
+		}
+		if l.recorder != nil {
+			l.recorder.Invalidated(reason)
+		}
+	}
+	// Outside the guard above: a cause already counted in memory can still be
+	// missing from the journal, and durability is what the retry is for.
+	l.persistInvalidationLocked(reason)
+}
+
+// persistInvalidationLocked writes the cause to the journal and remembers only
+// what actually landed. A reason held in memory but missing from the file is
+// not durable, so it stays eligible for the next attempt rather than being
+// deduplicated away — otherwise one transient append failure would be
+// permanent, and a restart would replay the run's evidence without the verdict
+// that disqualifies it.
+func (l *failureLedger) persistInvalidationLocked(reason string) {
+	if slices.Contains(l.persistedInvalidReasons, reason) {
 		return
 	}
-	l.invalidReasons = append(l.invalidReasons, reason)
-	if l.invalidReason == "" {
-		l.invalidReason = reason
+	if err := l.journalInvalidationLocked(reason); err != nil {
+		return
 	}
-	if l.recorder != nil {
-		l.recorder.Invalidated(reason)
-	}
-	l.journalInvalidationLocked(reason)
+	l.persistedInvalidReasons = append(l.persistedInvalidReasons, reason)
 }
 
 // journalInvalidationLocked persists the cause on a best effort. It cannot
 // route its own failure back through invalidateLocked — that is how the WAL
 // paths report, and it would recurse — and a lost record is strictly better
 // than losing the in-memory verdict too, so the error is logged and dropped.
-func (l *failureLedger) journalInvalidationLocked(reason string) {
+func (l *failureLedger) journalInvalidationLocked(reason string) error {
 	if l.replaying || l.journal == nil {
-		return
+		return nil
 	}
 	err := l.journal.Append(&failureLedgerEvent{
 		Type: failureLedgerEventInvalidated, InvalidReason: reason, At: l.now().UTC(),
@@ -1618,14 +1639,16 @@ func (l *failureLedger) journalInvalidationLocked(reason string) {
 	if err != nil {
 		slog.Error("persist failure ledger invalidation",
 			"reason", reason,
-			"consequence", "a restart will not know this run's evidence was in question",
+			"consequence", "a restart will not know this run's evidence was in question "+
+				"unless a later invalidation or compaction rewrites it",
 			"error", err,
 		)
-		return
+		return err
 	}
 	if l.recorder != nil {
 		l.recorder.JournalSize(l.journal.Size())
 	}
+	return nil
 }
 
 func validateFailureOperation(operation *failureOperation) error {
