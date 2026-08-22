@@ -248,9 +248,21 @@ func main() {
 		slog.Info("room-key cache enabled", "size", cfg.RoomKeyCacheSize, "ttl", cfg.RoomKeyCacheTTL)
 	}
 
+	// JetStream publish for the OUTBOX mention relay; the client fan-out stays on
+	// core NATS (publisher above).
+	outboxPublish := func(ctx context.Context, subj string, data []byte, msgID string) error {
+		_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
+		publishMetrics.Attempt(ctx, natsmetrics.DestinationOutbox, natsmetrics.OperationOutboxPublish, err)
+		if err != nil {
+			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
+		}
+		return nil
+	}
+
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
 	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
-		withBroadcastMetrics(domainMetrics), withThreadViewSubject(cfg.ThreadViewSubjectEnabled))
+		withBroadcastMetrics(domainMetrics), withThreadViewSubject(cfg.ThreadViewSubjectEnabled),
+		withOutboxFederation(cfg.SiteID, outboxPublish))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
