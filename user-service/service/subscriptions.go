@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -27,7 +28,17 @@ const maxSiteFanout = 8
 // "Del-"+name); such rooms are surfaced on the subscription with no room object.
 const deletedRoomNamePrefix = "Del-"
 
+// ListSubscriptions serves the NATS transport; the account comes from the subject.
 func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.SubscriptionListRequest) (*models.PagedSubscriptionListResponse, error) {
+	account := c.Param("account")
+	c.WithLogValues("account", account)
+	return s.ListSubscriptionsFor(c, account, req, s.defaultLimit, s.maxSubs)
+}
+
+// ListSubscriptionsFor is the transport-neutral core behind subscription.list.
+// Page bounds are parameters because HTTP and NATS have different ceilings: the
+// NATS reply is capped by the 128 KB payload, an HTTP response is not.
+func (s *UserService) ListSubscriptionsFor(ctx context.Context, account string, req models.SubscriptionListRequest, defaultLimit, maxLimit int) (*models.PagedSubscriptionListResponse, error) {
 	if !validListTypes[req.Type] {
 		return nil, errcode.BadRequest("unknown subscription type")
 	}
@@ -35,21 +46,18 @@ func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.Subscr
 		// A negative window computes a FUTURE cutoff and silently returns empty.
 		return nil, errcode.BadRequest("updatedWithinDays must be non-negative")
 	}
-	account := c.Param("account")
-	c.WithLogValues("account", account)
-	page := normalizePage(req.Offset, req.Limit, s.defaultLimit, s.maxSubs)
+	page := normalizePage(req.Offset, req.Limit, defaultLimit, maxLimit)
 	favorite := req.Favorite != nil && *req.Favorite
 	// Favorite filtering and the self-DM pin are applied in the query so the page
 	// slice and hasMore stay consistent (filtering after slicing would undercount).
-	res, err := s.subs.AggregateSubscriptions(c, account, req.Type, favorite, req.UpdatedWithinDays, page)
+	res, err := s.subs.AggregateSubscriptions(ctx, account, req.Type, favorite, req.UpdatedWithinDays, page)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
-	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, true, withLastMsg)
-	items := s.buildListItems(c, res.Data)
+	res.Data = s.enrichWithRoomInfoAndLastMsg(ctx, account, res.Data, true, withLastMsg)
 	return &models.PagedSubscriptionListResponse{
-		Subscriptions: items,
+		Subscriptions: s.buildListItems(ctx, account, res.Data),
 		HasMore:       res.HasMore,
 	}, nil
 }
@@ -79,11 +87,11 @@ func normalizePage(offset, limit, defaultLimit, maxLimit int) mongoutil.OffsetPa
 //
 // App and HR lookups degrade independently: a failed/missing lookup keeps the base
 // name and omits the app object — it never fails the request.
-func (s *UserService) buildListItems(c *natsrouter.Context, subs []model.EnrichedSubscription) []model.SubscriptionItem {
+func (s *UserService) buildListItems(ctx context.Context, account string, subs []model.EnrichedSubscription) []model.SubscriptionItem {
 	// One pass over subs yields both name sets the lookups need.
 	bots, dmCounterparts := distinctListNames(subs)
-	apps := s.lookupApps(c, bots)
-	hrInfo := s.lookupHRInfo(c, dmCounterparts)
+	apps := s.lookupApps(ctx, account, bots)
+	hrInfo := s.lookupHRInfo(ctx, account, dmCounterparts)
 	items := make([]model.SubscriptionItem, len(subs))
 	for i := range subs {
 		base := &subs[i].Subscription
@@ -113,13 +121,13 @@ func (s *UserService) buildListItems(c *natsrouter.Context, subs []model.Enriche
 
 // lookupApps fetches the full app docs for the given distinct bot accounts; a
 // lookup failure degrades to nil (base name kept, no overlay).
-func (s *UserService) lookupApps(c *natsrouter.Context, bots []string) map[string]*model.App {
+func (s *UserService) lookupApps(ctx context.Context, account string, bots []string) map[string]*model.App {
 	if len(bots) == 0 {
 		return nil
 	}
-	apps, err := s.apps.GetAppsByAssistants(c, bots)
+	apps, err := s.apps.GetAppsByAssistants(ctx, bots)
 	if err != nil {
-		slog.WarnContext(c, "app metadata lookup degraded", "account", c.Param("account"), "request_id", natsutil.RequestIDFromContext(c), "error", err)
+		slog.WarnContext(ctx, "app metadata lookup degraded", "account", account, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 		return nil
 	}
 	return apps
@@ -127,13 +135,13 @@ func (s *UserService) lookupApps(c *natsrouter.Context, bots []string) map[strin
 
 // lookupHRInfo fetches the HR records for the given distinct dm counterpart
 // accounts; a lookup failure degrades to nil (no hrInfo).
-func (s *UserService) lookupHRInfo(c *natsrouter.Context, accounts []string) map[string]*model.SubscriptionHRInfo {
+func (s *UserService) lookupHRInfo(ctx context.Context, account string, accounts []string) map[string]*model.SubscriptionHRInfo {
 	if len(accounts) == 0 {
 		return nil
 	}
-	hr, err := s.users.GetHRInfoByAccounts(c, accounts)
+	hr, err := s.users.GetHRInfoByAccounts(ctx, accounts)
 	if err != nil {
-		slog.WarnContext(c, "hr info lookup degraded", "account", c.Param("account"), "request_id", natsutil.RequestIDFromContext(c), "error", err)
+		slog.WarnContext(ctx, "hr info lookup degraded", "account", account, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 		return nil
 	}
 	return hr
@@ -184,7 +192,7 @@ func distinctListNames(subs []model.EnrichedSubscription) (bots, dmCounterparts 
 // enrichLocal. Callers MUST use the returned slice, not the input.
 //
 // alert/hasMention are stored subscription state and are never touched here.
-func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs []model.EnrichedSubscription, dropDeleted, withLastMsg bool) []model.EnrichedSubscription {
+func (s *UserService) enrichWithRoomInfoAndLastMsg(ctx context.Context, account string, subs []model.EnrichedSubscription, dropDeleted, withLastMsg bool) []model.EnrichedSubscription {
 	if len(subs) == 0 {
 		return subs
 	}
@@ -203,9 +211,9 @@ func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs [
 	}
 
 	s.enrichLocal(subs, idxBySite[s.siteID])
-	dropped := s.enrichCrossSite(c, subs, idxBySite, roomIDsBySite)
+	dropped := s.enrichCrossSite(ctx, account, subs, idxBySite, roomIDsBySite)
 	if withLastMsg {
-		s.enrichLastMessage(c, subs, idxBySite, roomIDsBySite)
+		s.enrichLastMessage(ctx, account, subs, idxBySite, roomIDsBySite)
 	}
 	// Single-item lookups (dropDeleted=false) keep a cross-site Del- sub room-less;
 	// only the list/count paths remove it.
@@ -252,7 +260,7 @@ func (s *UserService) enrichLocal(subs []model.EnrichedSubscription, localIdx []
 // leaves that site's subs without a room object (no baseline fallback — there is
 // no local room doc for a cross-site room). It returns the indices of subs whose
 // remote room is soft-deleted ("Del-"), for the caller to drop.
-func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) []int {
+func (s *UserService) enrichCrossSite(ctx context.Context, account string, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) []int {
 	// The grouping includes the local site (served from the $lookup baseline); skip it here.
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {
@@ -272,7 +280,7 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 		// Client already gone — stop firing further ~5s RPCs; the remaining sites
 		// would only waste round-trips. In-flight calls fail fast via the ctx we
 		// pass to GetRoomsInfo.
-		if c.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
 		wg.Add(1)
@@ -282,12 +290,12 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 			defer func() { <-sem }()
 			// Re-check after parking on the semaphore: cancellation may have
 			// landed while this goroutine waited its turn behind earlier RPCs.
-			if c.Err() != nil {
+			if ctx.Err() != nil {
 				return
 			}
-			infos, err := s.rooms.GetRoomsInfo(c, site, roomIDsBySite[site])
+			infos, err := s.rooms.GetRoomsInfo(ctx, site, roomIDsBySite[site])
 			if err != nil {
-				slog.WarnContext(c, "room-info enrichment degraded", "account", c.Param("account"), "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
+				slog.WarnContext(ctx, "room-info enrichment degraded", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 				return
 			}
 			m := make(map[string]model.RoomInfo, len(infos))
@@ -327,7 +335,7 @@ func (s *UserService) enrichCrossSite(c *natsrouter.Context, subs []model.Enrich
 // enrichCrossSite, which both run before this) is passed as a hint so
 // history-service can skip its own room-times read for that room; rooms with no
 // Room (soft-deleted/degraded) contribute no hint.
-func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) {
+func (s *UserService) enrichLastMessage(ctx context.Context, account string, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) {
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {
 		sites = append(sites, site)
@@ -336,7 +344,7 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxSiteFanout)
 	for i, site := range sites {
-		if c.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
 		wg.Add(1)
@@ -344,7 +352,7 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if c.Err() != nil {
+			if ctx.Err() != nil {
 				return
 			}
 			hints := map[string]model.RoomTimeHint{}
@@ -354,9 +362,9 @@ func (s *UserService) enrichLastMessage(c *natsrouter.Context, subs []model.Enri
 				}
 				hints[subs[j].RoomID] = model.RoomTimeHint{LastMsgAt: timeutil.TimeToMillis(subs[j].Room.LastMsgAt)}
 			}
-			m, err := s.history.RoomsGet(c, site, roomIDsBySite[site], hints)
+			m, err := s.history.RoomsGet(ctx, site, roomIDsBySite[site], hints)
 			if err != nil {
-				slog.WarnContext(c, "last-message enrichment degraded", "account", c.Param("account"), "site", site, "request_id", natsutil.RequestIDFromContext(c), "error", err)
+				slog.WarnContext(ctx, "last-message enrichment degraded", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 				return
 			}
 			lastMsgBySite[i] = m
@@ -487,8 +495,8 @@ func (s *UserService) GetChannels(c *natsrouter.Context, req models.GetChannelsR
 	if err != nil {
 		return nil, fmt.Errorf("get channels: %w", err)
 	}
-	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, true, false)
-	items := s.buildListItems(c, res.Data)
+	res.Data = s.enrichWithRoomInfoAndLastMsg(c, c.Param("account"), res.Data, true, false)
+	items := s.buildListItems(c, c.Param("account"), res.Data)
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: items,
 		HasMore:       res.HasMore,
@@ -516,7 +524,7 @@ func (s *UserService) GetDM(c *natsrouter.Context, req models.GetDMRequest) (*mo
 	// Del- DM is kept room-less. The wire DMSubscription points at the boxed stored
 	// sub plus HRInfo.
 	one := []model.EnrichedSubscription{dm.EnrichedSubscription}
-	one = s.enrichWithRoomInfoAndLastMsg(c, one, false, false)
+	one = s.enrichWithRoomInfoAndLastMsg(c, c.Param("account"), one, false, false)
 	return &models.DMResponse{Subscription: model.DMSubscription{
 		Subscription: &one[0].Subscription,
 		HRInfo:       dm.HRInfo,
@@ -539,8 +547,8 @@ func (s *UserService) GetByRoomID(c *natsrouter.Context, req models.GetByRoomIDR
 		return &models.SubscriptionListResponse{Subscriptions: []model.SubscriptionItem{}, Total: 0}, nil
 	}
 	one := []model.EnrichedSubscription{*sub}
-	one = s.enrichWithRoomInfoAndLastMsg(c, one, false, false)
-	items := s.buildListItems(c, one)
+	one = s.enrichWithRoomInfoAndLastMsg(c, c.Param("account"), one, false, false)
+	items := s.buildListItems(c, c.Param("account"), one)
 	return &models.SubscriptionListResponse{Subscriptions: items, Total: len(items)}, nil
 }
 

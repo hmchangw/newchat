@@ -1182,3 +1182,74 @@ func TestApplyRoomInfo_CrossSite_Nil(t *testing.T) {
 	require.NotNil(t, sub.Room)
 	assert.Nil(t, sub.Room.CrossSite)
 }
+
+func TestListSubscriptionsFor_AppliesSuppliedPageBounds(t *testing.T) {
+	tests := []struct {
+		name                   string
+		reqLimit, reqOffset    int
+		defaultLimit, maxLimit int
+		wantLimit, wantOffset  int64
+	}{
+		{"omitted limit takes the caller's default", 0, 0, 40, 400, 40, 0},
+		{"explicit limit passes through", 200, 0, 40, 400, 200, 0},
+		{"limit clamps to the caller's max", 5000, 0, 40, 400, 400, 0},
+		{"negative offset floors at zero", 200, -5, 40, 400, 200, 0},
+		{"offset passes through", 200, 400, 40, 400, 200, 400},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, subs, _, _, rooms, _, _ := newSvc(t)
+			var got mongoutil.OffsetPageRequest
+			subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+				DoAndReturn(func(_ context.Context, _, _ string, _ bool, _ *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
+					got = page
+					return mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{}, nil
+				})
+			rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+			_, err := svc.ListSubscriptionsFor(context.Background(), "alice",
+				models.SubscriptionListRequest{Type: "current", Limit: tc.reqLimit, Offset: tc.reqOffset},
+				tc.defaultLimit, tc.maxLimit)
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantLimit, got.Limit)
+			assert.Equal(t, tc.wantOffset, got.Offset)
+		})
+	}
+}
+
+func TestListSubscriptionsFor_ValidatesRequest(t *testing.T) {
+	negative := -1
+	tests := []struct {
+		name string
+		req  models.SubscriptionListRequest
+	}{
+		{"unknown type", models.SubscriptionListRequest{Type: "bogus"}},
+		{"empty type", models.SubscriptionListRequest{Type: ""}},
+		{"negative updatedWithinDays", models.SubscriptionListRequest{Type: "rooms", UpdatedWithinDays: &negative}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _, _, _, _, _ := newSvc(t)
+			_, err := svc.ListSubscriptionsFor(context.Background(), "alice", tc.req, 40, 400)
+			requireCode(t, err, errcode.CodeBadRequest)
+		})
+	}
+}
+
+// The NATS handler must keep its own configured bounds, not the HTTP ones.
+func TestListSubscriptions_NATSHandlerUsesServiceBounds(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	var got mongoutil.OffsetPageRequest
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _, _ string, _ bool, _ *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
+			got = page
+			return mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{}, nil
+		})
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	_, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(40), got.Limit, "SUBSCRIPTION_DEFAULT_LIMIT")
+}
