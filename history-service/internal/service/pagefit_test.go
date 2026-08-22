@@ -1,0 +1,234 @@
+package service_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+
+	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/history-service/internal/service"
+	"github.com/hmchangw/chat/pkg/pagefit"
+)
+
+// fatMessages builds rows whose encoded size is dominated by Msg, so a test can
+// pick a budget that admits a known number of them.
+func fatMessages(n, width int) []models.Message {
+	out := make([]models.Message, n)
+	for i := range out {
+		out[i] = models.Message{
+			MessageID: fmt.Sprintf("m%02d", i),
+			RoomID:    "r1",
+			// DESC: index 0 is newest, so the tail is the oldest.
+			CreatedAt: joinTime.Add(time.Duration(n-i) * time.Minute),
+			Msg:       strings.Repeat("x", width),
+		}
+	}
+	return out
+}
+
+func encodedSize(t *testing.T, v any) int {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return len(b)
+}
+
+// budgetFor returns a budget that admits about n of the given rows.
+func budgetFor(t *testing.T, msgs []models.Message, n int) pagefit.Budget {
+	t.Helper()
+	return pagefit.NewBudget(int64(encodedSize(t, msgs[:n])), 0)
+}
+
+func TestLoadHistory_TrimsOversizePageAndSetsHasNext(t *testing.T) {
+	all := fatMessages(20, 512)
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(budgetFor(t, all, 5)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+
+	assert.Less(t, len(resp.Messages), len(all), "an oversize page must be trimmed")
+	assert.NotEmpty(t, resp.Messages)
+	assert.True(t, resp.HasNext, "dropped rows must be advertised as more")
+	assert.Equal(t, all[0].MessageID, resp.Messages[0].MessageID, "the newest row is kept")
+}
+
+func TestLoadHistory_PageThatFitsIsUntouched(t *testing.T) {
+	all := fatMessages(4, 64)
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(1<<20, 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	assert.Len(t, resp.Messages, 4)
+	assert.False(t, resp.HasNext)
+}
+
+// The whole point of the trim: walking the pages must yield every row exactly
+// once. Page 2 is requested the way the client does it — before = the oldest
+// createdAt page 1 returned.
+func TestLoadHistory_TrimmedPaginationLosesNoRows(t *testing.T) {
+	all := fatMessages(20, 512)
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(budgetFor(t, all, 5)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil).Times(2)
+	// The store answers with whatever is strictly older than the requested bound.
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, _ time.Time, before time.Time, _ any) (any, error) {
+			var rest []models.Message
+			for _, m := range all {
+				if m.CreatedAt.Before(before) {
+					rest = append(rest, m)
+				}
+			}
+			return makePage(rest, false), nil
+		}).Times(2)
+
+	first, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	require.True(t, first.HasNext)
+
+	oldestKept := first.Messages[len(first.Messages)-1].CreatedAt.UnixMilli()
+	second, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{Before: &oldestKept})
+	require.NoError(t, err)
+	require.NotEmpty(t, second.Messages)
+
+	assert.Equal(t, all[len(first.Messages)].MessageID, second.Messages[0].MessageID,
+		"page 2 must resume at the first row page 1 dropped")
+
+	seen := map[string]int{}
+	for _, m := range append(append([]models.Message{}, first.Messages...), second.Messages...) {
+		seen[m.MessageID]++
+	}
+	for id, n := range seen {
+		assert.Equal(t, 1, n, "row %s must appear exactly once across pages", id)
+	}
+}
+
+// A row that alone exceeds the budget is blanked rather than dropped or
+// errored, so the client can page past it instead of dead-ending.
+func TestLoadHistory_SingleOversizeRowIsBlankedNotDropped(t *testing.T) {
+	at := joinTime.Add(time.Minute)
+	huge := models.Message{
+		MessageID: "m-huge", RoomID: "r1", CreatedAt: at,
+		Msg:                 strings.Repeat("x", 4096),
+		Type:                "important",
+		Sender:              models.Participant{ID: "u-1", Account: "alice"},
+		Mentions:            []models.Participant{{ID: "u-2", Account: "bob"}},
+		SysMsgData:          []byte(`{"a":1}`),
+		QuotedParentMessage: &models.QuotedParentMessage{MessageID: "m-parent"},
+	}
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(256, 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{huge}, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1, "the row must survive so pagination can advance")
+
+	got := resp.Messages[0]
+	assert.True(t, got.Truncated, "the client needs to know this row was blanked")
+	assert.Empty(t, got.Msg)
+	assert.Nil(t, got.Mentions)
+	assert.Nil(t, got.QuotedParentMessage)
+	assert.Nil(t, got.SysMsgData)
+	assert.Nil(t, got.Reactions)
+
+	assert.Equal(t, "m-huge", got.MessageID, "identifiers are kept for placeholder rendering")
+	assert.Equal(t, at, got.CreatedAt, "the client pages by createdAt — it must survive")
+	assert.Equal(t, "alice", got.Sender.Account)
+	assert.Equal(t, "important", got.Type, "type is kept so the client can pick a placeholder")
+}
+
+// The centred window trims from both ends and reports which end lost rows, so
+// the client can page outward in the direction it wants.
+func TestLoadSurrounding_TrimsBothEndsAndKeepsTheCentralMessage(t *testing.T) {
+	before := fatMessages(10, 512) // DESC as the store returns it
+	after := fatMessages(10, 512)
+	for i := range after {
+		after[i].MessageID = fmt.Sprintf("a%02d", i)
+	}
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(int64(encodedSize(t, before[:3])), 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).
+		Return(makePage(before, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).
+		Return(makePage(after, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(testContext(), models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 30})
+	require.NoError(t, err)
+
+	assert.Less(t, len(resp.Messages), len(before)+len(after)+1, "an oversize window must be trimmed")
+	assert.True(t, resp.MoreBefore, "rows dropped from the front are advertised as moreBefore")
+	assert.True(t, resp.MoreAfter, "rows dropped from the back are advertised as moreAfter")
+
+	var found bool
+	for _, m := range resp.Messages {
+		if m.MessageID == "mC" {
+			found = true
+		}
+	}
+	assert.True(t, found, "the central message is what the caller asked to centre on — it must survive")
+}
+
+func TestLoadSurrounding_WindowThatFitsIsUntouched(t *testing.T) {
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+	before := fatMessages(2, 32)
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(1<<20, 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).
+		Return(makePage(before, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(testContext(), models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, resp.Messages, 3)
+	assert.False(t, resp.MoreBefore)
+	assert.False(t, resp.MoreAfter)
+}
+
+// Timestamp mode has no central row; the pivot is the boundary between the
+// before-page and the after-page.
+func TestLoadSurrounding_TimestampModeTrimsAroundThePivot(t *testing.T) {
+	before := fatMessages(8, 512)
+	after := fatMessages(8, 512)
+	for i := range after {
+		after[i].MessageID = fmt.Sprintf("a%02d", i)
+	}
+	pivot := joinTime.Add(5 * time.Minute).UnixMilli()
+
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(int64(encodedSize(t, before[:3])), 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(before, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(after, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(testContext(), models.LoadSurroundingMessagesRequest{Timestamp: &pivot, Limit: 30})
+	require.NoError(t, err)
+	assert.NotEmpty(t, resp.Messages)
+	assert.Less(t, len(resp.Messages), 16)
+	assert.True(t, resp.MoreBefore || resp.MoreAfter)
+}

@@ -24,7 +24,10 @@ const (
 	defaultPageSize     = 20
 	surroundingPageSize = 50
 	maxPageSize         = 100
-	maxContentBytes     = 20 * 1024 // 20 KB; mirrors message-gatekeeper's content cap
+	// pageEnvelope reserves bytes for a paginated response's non-item fields
+	// plus JSON punctuation. History and surrounding share one envelope shape.
+	pageEnvelope    = 256
+	maxContentBytes = 20 * 1024 // 20 KB; mirrors message-gatekeeper's content cap
 )
 
 func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHistoryRequest) (*models.LoadHistoryResponse, error) {
@@ -93,12 +96,15 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
+	// Trim last: both passes above change encoded size. Rows are DESC, so
+	// dropping the tail leaves the client's next before = oldest kept createdAt.
+	kept, trimmed := s.fitPage(page.Data, pageEnvelope)
 	// An empty page must never claim hasNext: this RPC pages by before = oldest
 	// returned createdAt, so an empty resumable page (budget-exhausted walk over
 	// a long silent gap) would leave the client no way to advance.
 	return &models.LoadHistoryResponse{
-		Messages:          page.Data,
-		HasNext:           page.HasNext && len(page.Data) > 0,
+		Messages:          kept,
+		HasNext:           (page.HasNext || trimmed) && len(kept) > 0,
 		MinUserLastSeenAt: minMs,
 	}, nil
 }
@@ -378,10 +384,14 @@ func (s *HistoryService) assembleSurrounding(
 
 	redactUnavailableQuotes(messages, accessSince)
 	setDecodedAttachments(c, messages)
+	// Trim outward from the pivot so the caller keeps the row they centred on;
+	// each end that loses rows sets its own "more" flag.
+	pivotIdx := len(beforePage.Data)
+	lo, hi := s.fitWindow(messages, pivotIdx, pageEnvelope)
 	return &models.LoadSurroundingMessagesResponse{
-		Messages:          messages,
-		MoreBefore:        beforePage.HasNext,
-		MoreAfter:         afterPage.HasNext,
+		Messages:          messages[lo:hi],
+		MoreBefore:        beforePage.HasNext || lo > 0,
+		MoreAfter:         afterPage.HasNext || hi < len(messages),
 		MinUserLastSeenAt: minMs,
 	}, nil
 }

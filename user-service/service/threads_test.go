@@ -20,7 +20,7 @@ import (
 // newThreadSvc builds a UserService whose fan-out set is site-a (local) + site-b
 // (cross), from ALL_SITE_IDS. The thread inbox only depends on the history
 // client, so the other deps are fresh no-expectation mocks.
-func newThreadSvc(t *testing.T) (*UserService, *mocks.MockHistoryClient, *mocks.MockUserRepository, *mocks.MockAppRepository) {
+func newThreadSvc(t *testing.T, opts ...Option) (*UserService, *mocks.MockHistoryClient, *mocks.MockUserRepository, *mocks.MockAppRepository) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	history := mocks.NewMockHistoryClient(ctrl)
@@ -40,6 +40,7 @@ func newThreadSvc(t *testing.T) (*UserService, *mocks.MockHistoryClient, *mocks.
 		&fakeBadgeCache{},
 		nil, nil, nil,
 		cfg,
+		opts...,
 	)
 	return svc, history, users, apps
 }

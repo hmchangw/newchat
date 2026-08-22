@@ -12,6 +12,8 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
+      # 0 derives the paginated-reply cap from the broker max_payload.
+      - MAX_RESPONSE_BYTES=${MAX_RESPONSE_BYTES:-0}
       - ALL_SITE_IDS=${ALL_SITE_IDS:-${SITE_ID:-site-local}}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}

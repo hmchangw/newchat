@@ -2891,6 +2891,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `threadRoomId` | string | Optional. The thread room ID when this is a thread message. |
 | `pinnedAt` | string | Optional. RFC 3339. With the `messages_by_room` `pinned_at` mirror, room-timeline history loads now return this on pinned rows too (previously only `pin.list` and point lookups carried it). |
 | `pinnedBy` | [MessageParticipant](#messageparticipant) | Optional. |
+| `truncated` | boolean | Optional. `true` when the server blanked this row because it alone exceeded the transport's `max_payload`. `msg`, `mentions`, `attachments`, `card`, `cardAction`, `quotedParentMessage`, `reactions` and `sysMsgData` are cleared; identifiers, `sender`, `createdAt` and `type` are retained so a placeholder can be rendered. Absent on every ordinary row. |
 
 ##### System-message `sysMsgData` payloads
 
@@ -6413,6 +6414,7 @@ The canonical broadcast message (distinct from the history [Message schema](#mes
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Optional. |
 | `pinnedAt` | string | Optional. RFC 3339. |
 | `pinnedBy` | [Participant](#participant) | Optional. |
+| `truncated` | boolean | Optional. `true` when the server blanked this row because it alone exceeded the transport's `max_payload`. `msg`, `mentions`, `attachments`, `card`, `cardAction`, `quotedParentMessage`, `reactions` and `sysMsgData` are cleared; identifiers, `sender`, `createdAt` and `type` are retained so a placeholder can be rendered. Absent on every ordinary row. |
 
 ```json
 {
@@ -6763,6 +6765,14 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 
 > [!IMPORTANT]
 > **Oversize replies.** If a reply would exceed the transport's maximum payload size, it is returned as `code: internal` with `reason: response_too_large` instead. This covers both a success body that is too large and an error envelope that is too large; either way the caller gets an answer rather than a timeout. This is most likely on large history reads (e.g. Load History / Load Next / Load Surrounding / Get Thread Messages with a high `limit`); the client should retry with a smaller `limit`. Branch on `reason` (`response_too_large`), not the message text.
+
+
+> [!IMPORTANT]
+> **A page may be shorter than `limit`.** `limit` is a maximum, never a guarantee. Load History, Load Surrounding and Thread List size each page against the transport's `max_payload` and return fewer rows when the full page would not fit. The "more" flag is authoritative — `hasNext` for Load History and Thread List, `moreBefore` / `moreAfter` for Load Surrounding. Page until the flag clears; never treat a short page as the end of the collection, and never assume `len(items) < limit` means there is nothing more.
+>
+> A single row too large to ship inside a page is returned blanked with `truncated: true` rather than dropped, so pagination always advances past it.
+>
+> Load Next, List Pinned and Get Thread Messages are **not** sized this way — their cursors are opaque and cannot be re-derived after trimming — so they still return `internal` / `response_too_large` on an oversize page. Retry those with a smaller `limit`.
 
 ### `reason` catalog (present today)
 

@@ -11,6 +11,7 @@ import (
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -119,6 +120,12 @@ func WithPreviewCache(pc PreviewCache) Option {
 	return func(s *HistoryService) { s.previewCache = pc }
 }
 
+// WithPageBudget caps paginated replies at b so an oversize page is trimmed
+// rather than refused by the broker.
+func WithPageBudget(b pagefit.Budget) Option {
+	return func(s *HistoryService) { s.pageBudget = b }
+}
+
 // HistoryService handles message history queries and mutations. Transport-agnostic.
 type HistoryService struct {
 	msgReader          MessageReader
@@ -135,6 +142,9 @@ type HistoryService struct {
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
+	// pageBudget caps a paginated reply so it is trimmed to fit the broker
+	// rather than refused by it. Zero value disables trimming.
+	pageBudget pagefit.Budget
 }
 
 func New(

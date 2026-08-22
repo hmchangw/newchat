@@ -8,6 +8,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/oidc"
+	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/models"
@@ -155,11 +156,22 @@ type UserService struct {
 	maxApps         int
 	defaultApps     int
 	maxAccountNames int
+	// pageBudget caps a paginated reply so it is trimmed to fit the broker
+	// rather than refused by it. Zero value disables trimming.
+	pageBudget pagefit.Budget
+}
+
+// Option customises a UserService after construction.
+type Option func(*UserService)
+
+// WithPageBudget caps paginated replies at b.
+func WithPageBudget(b pagefit.Budget) Option {
+	return func(s *UserService) { s.pageBudget = b }
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, badge badgeCache, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config) *UserService {
-	return &UserService{
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, badge badgeCache, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config, opts ...Option) *UserService {
+	s := &UserService{
 		subs:             subs,
 		users:            users,
 		apps:             apps,
@@ -184,6 +196,10 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		defaultApps:      cfg.DefaultAppsLimit,
 		maxAccountNames:  cfg.MaxAccountNames,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // RegisterHandlers wires all UserService endpoints onto the router.

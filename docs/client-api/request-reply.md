@@ -951,9 +951,18 @@ Get Thread, 50 for Load Surrounding; max 100) and `meta` (room time hints to ski
 lookup; `{ lastMsgAt, createdAt }`). See [../client-api.md §3.2](../client-api.md#32-history-service).
 
 **Common errors:** `forbidden` (`not subscribed to room`), `not_found` (`room/message not
-found`), `bad_request` (invalid pagination cursor), `internal`. A reply that would exceed
-the transport's max payload returns `internal`/`response_too_large` instead of the success
-body (most likely with a high `limit`) — retry with a smaller `limit`.
+found`), `bad_request` (invalid pagination cursor), `internal`.
+
+**Short pages.** `limit` is a maximum, never a guarantee. Load History and Load Surrounding
+size each page against the transport's max payload and return fewer rows when the full page
+would not fit; the more-flag (`hasNext`, or `moreBefore`/`moreAfter`) is authoritative, so
+page until it clears rather than treating a short page as the end. A row too large to ship
+inside a page comes back blanked with `truncated: true` instead of being dropped.
+
+Load Next, List Pinned and Get Thread Messages are not sized this way — their cursors are
+opaque and cannot be re-derived after trimming — so a reply that would exceed the transport's
+max payload returns `internal`/`response_too_large` instead of the success body (most likely
+with a high `limit`) — retry with a smaller `limit`.
 
 Message schema: see [../client-api.md § Message schema](../client-api.md#message-schema).
 

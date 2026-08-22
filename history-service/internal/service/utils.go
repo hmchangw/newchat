@@ -9,6 +9,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/pagefit"
 )
 
 // checkAccessAndRoomTimes runs the subscription access check and the room-times
@@ -167,4 +168,51 @@ func canModify(msg *models.Message, account string) bool {
 		return false
 	}
 	return msg.Sender.Account == account
+}
+
+// stripRichContent clears the heavy fields shared by both placeholder paths,
+// so "which fields are heavy" lives in one place as the model grows.
+func stripRichContent(m *models.Message) {
+	m.Mentions = nil
+	m.Attachments = nil
+	m.DecodedAttachments = nil
+	m.Card = nil
+	m.CardAction = nil
+	m.QuotedParentMessage = nil
+	m.Reactions = nil
+	m.SysMsgData = nil
+}
+
+// blankOversize strips a row that alone exceeds the budget so the page can be
+// sent and the client can page past it; identifiers, sender, timestamps and
+// Type stay for placeholder rendering. Type is kept unlike
+// redactUnavailablePins — the caller may see this row, it is merely too large.
+func blankOversize(m *models.Message) {
+	stripRichContent(m)
+	m.Msg = ""
+	// The encrypted body is the payload in an E2E room — leaving it would
+	// defeat the strip for exactly the rooms most likely to overflow.
+	m.EncPayload = nil
+	m.EncMeta = nil
+	m.Truncated = true
+}
+
+// fitPage trims msgs to the budget, blanking a lone row that still will not
+// fit. Reports whether rows were dropped, for the caller's "more" flag.
+func (s *HistoryService) fitPage(msgs []models.Message, envelope int) ([]models.Message, bool) {
+	kept, dropped, oversize := pagefit.Fit(msgs, s.pageBudget, envelope)
+	if oversize {
+		blankOversize(&kept[0])
+	}
+	return kept, dropped
+}
+
+// fitWindow trims a centred window to the budget, blanking the pivot when it
+// alone will not fit so the caller still gets the row they asked for.
+func (s *HistoryService) fitWindow(msgs []models.Message, pivot, envelope int) (int, int) {
+	lo, hi, oversize := pagefit.FitWindow(msgs, pivot, s.pageBudget, envelope)
+	if oversize {
+		blankOversize(&msgs[lo])
+	}
+	return lo, hi
 }

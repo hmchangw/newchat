@@ -42,8 +42,8 @@ func ptrTime(t time.Time) *time.Time { return &t }
 var defaultRoomLastMsgAt = joinTime.Add(24 * time.Hour)
 var defaultRoomCreatedAt = joinTime.Add(-30 * 24 * time.Hour)
 
-func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository) {
-	svc, msgs, subs, rooms, pub, threadRooms, _, _ := newServiceWithRoomMock(t)
+func newService(t *testing.T, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository) {
+	svc, msgs, subs, rooms, pub, threadRooms, _, _ := newServiceWithRoomMock(t, opts...)
 	// Permissive defaults: existing tests don't care about the room reads.
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	rooms.EXPECT().
@@ -57,7 +57,7 @@ func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageReposi
 
 // newServiceWithRoomMock additionally exposes the room mock, pre-stubbed with a permissive
 // GetRoomTimes default (override with Times(N) to assert resolver behaviour); no UserStore/AppStore pre-stubs.
-func newServiceWithRoomMock(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockRoomRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository, *mocks.MockUserStore, *mocks.MockAppStore) {
+func newServiceWithRoomMock(t *testing.T, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockRoomRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository, *mocks.MockUserStore, *mocks.MockAppStore) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -81,7 +81,7 @@ func newServiceWithRoomMock(t *testing.T) (*service.HistoryService, *mocks.MockM
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
 	}
-	return service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg), msgs, subs, rooms, pub, threadRooms, users, apps
+	return service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, opts...), msgs, subs, rooms, pub, threadRooms, users, apps
 }
 
 // assertInternalErr verifies err collapses to the generic "internal error" envelope at the

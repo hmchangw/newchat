@@ -11,11 +11,15 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/pagefit"
 )
 
 const (
 	defaultThreadListLimit = 20
 	maxThreadListLimit     = 100
+	// threadListEnvelope reserves bytes for hasNext/nextCursor/unavailableSites
+	// plus JSON punctuation.
+	threadListEnvelope = 256
 )
 
 // threadCursor is the composite, value-based pagination position on the global
@@ -109,6 +113,20 @@ func (s *UserService) ListUserThreads(c *natsrouter.Context, req model.ThreadLis
 	// Enrich only the returned page: DM rows gain the counterpart's HR record, and
 	// botDM rows swap their bot account for the app's display name.
 	s.enrichThreadPage(c, merged)
+
+	// Trim after enrichment — it adds bytes, so a page measured before it can
+	// still overflow. The cursor below then resumes at the last kept row.
+	//
+	// The oversize return is ignored: a lone row too large to send has no
+	// blanked form here (unlike a message, a thread item carries no truncated
+	// flag), and one cannot occur in practice — its parent body inherits the
+	// 20 KB content cap. Such a row falls through to the router's
+	// response_too_large reply rather than being silently degraded.
+	kept, dropped, _ := pagefit.Fit(merged, s.pageBudget, threadListEnvelope)
+	if dropped {
+		merged = kept
+		hasNext = true
+	}
 
 	resp := &model.ThreadListResponse{Items: merged, HasNext: hasNext, UnavailableSites: unavailable}
 	if hasNext && len(merged) > 0 {
