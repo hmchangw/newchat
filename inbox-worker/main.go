@@ -482,6 +482,24 @@ func (s *mongoInboxStore) ensureIndexes(ctx context.Context) {
 // $setOnInsert and $max operate on disjoint fields (hasMention is set by $max
 // only — never by $setOnInsert) so MongoDB doesn't reject the update with a
 // "conflicting update operators" error.
+// SetSubscriptionMentions flags the accounts' subscriptions as mentioned. The
+// guard is $not/$gte rather than $lt so a never-read subscription (missing
+// lastSeenAt) still matches — plain $lt skips missing fields (#467).
+func (s *mongoInboxStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
+	_, err := s.subCol.UpdateMany(ctx,
+		bson.M{
+			"roomId":     roomID,
+			"u.account":  bson.M{"$in": accounts},
+			"lastSeenAt": bson.M{"$not": bson.M{"$gte": msgCreatedAt}},
+		},
+		bson.M{"$set": bson.M{"hasMention": true}},
+	)
+	if err != nil {
+		return fmt.Errorf("set subscription mentions for room %s: %w", roomID, err)
+	}
+	return nil
+}
+
 func (s *mongoInboxStore) UpsertThreadSubscription(ctx context.Context, sub *model.ThreadSubscription) error {
 	filter := bson.M{"threadRoomId": sub.ThreadRoomID, "userAccount": sub.UserAccount}
 	update := bson.M{
