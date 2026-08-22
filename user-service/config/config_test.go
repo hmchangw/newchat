@@ -213,6 +213,34 @@ func TestLoad_AppsDefaultExceedsAppsMax(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestLoad_SortKeyCacheDefaults(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 100000, cfg.SortKeyCacheSize)
+	require.Equal(t, 15*time.Second, cfg.SortKeyCacheTTL)
+}
+
+func TestLoad_SortKeyCacheOverrideAndDisable(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("SUBS_SORTKEY_CACHE_SIZE", "500")
+	t.Setenv("SUBS_SORTKEY_CACHE_TTL", "30s")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 500, cfg.SortKeyCacheSize)
+	require.Equal(t, 30*time.Second, cfg.SortKeyCacheTTL)
+
+	// Zero disables the cache (ops escape hatch) — must load, not error.
+	t.Setenv("SUBS_SORTKEY_CACHE_TTL", "0s")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.Equal(t, time.Duration(0), cfg.SortKeyCacheTTL)
+}
+
 func TestLoad_SSODisabledByDefault(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")

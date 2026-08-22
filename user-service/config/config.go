@@ -37,6 +37,11 @@ type Config struct {
 	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
 	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
 	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
+	// Room sort-key cache for subscription.list (see
+	// mongorepo.NewSubscriptionRepo). An entry is at most TTL old and staleness
+	// only affects ordering; zero or less for either knob turns the cache off.
+	SortKeyCacheSize int           `env:"SUBS_SORTKEY_CACHE_SIZE" envDefault:"100000"`
+	SortKeyCacheTTL  time.Duration `env:"SUBS_SORTKEY_CACHE_TTL"  envDefault:"15s"`
 	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
 	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
 	// disables the cap (unbounded spawn).
