@@ -18,9 +18,9 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
-	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -779,25 +779,7 @@ func main() {
 		jobguard.Run(m.msg, func() {
 			msg := m.msg
 			handlerCtx, _ := natsutil.StampRequestID(m.ctx, msg.Headers(), msg.Subject())
-			if err := handler.HandleEvent(handlerCtx, msg.Data()); err != nil {
-				// Permanent failures (poison messages) Ack so JetStream stops
-				// redelivering; transient infra errors Nak for redelivery.
-				if _, isPermanent := errcode.IsPermanent(err); isPermanent {
-					slog.Warn("permanent event failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-					if err := msg.Ack(); err != nil {
-						slog.Error("failed to ack permanent message", "error", err)
-					}
-					return
-				}
-				slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-				if err := msg.Nak(); err != nil {
-					slog.Error("failed to nak message", "error", err)
-				}
-				return
-			}
-			if err := msg.Ack(); err != nil {
-				slog.Error("failed to ack message", "error", err)
-			}
+			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Data()))
 		})
 	}
 

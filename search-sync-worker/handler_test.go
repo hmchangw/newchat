@@ -23,16 +23,17 @@ import (
 
 // stubMsg implements jetstream.Msg for testing.
 type stubMsg struct {
-	data    []byte
-	headers nats.Header
-	acked   bool
-	nacked  bool
+	data     []byte
+	headers  nats.Header
+	acked    bool
+	nacked   bool
+	nakDelay time.Duration
 }
 
 func (m *stubMsg) Data() []byte                              { return m.data }
 func (m *stubMsg) Ack() error                                { m.acked = true; return nil }
 func (m *stubMsg) Nak() error                                { m.nacked = true; return nil }
-func (m *stubMsg) NakWithDelay(time.Duration) error          { return nil }
+func (m *stubMsg) NakWithDelay(d time.Duration) error        { m.nacked = true; m.nakDelay = d; return nil }
 func (m *stubMsg) InProgress() error                         { return nil }
 func (m *stubMsg) Term() error                               { return nil }
 func (m *stubMsg) TermWithReason(string) error               { return nil }
@@ -194,6 +195,9 @@ func TestHandler_Flush(t *testing.T) {
 
 		assert.True(t, msg1.nacked)
 		assert.True(t, msg2.nacked)
+		// A bare Nak() would redeliver instantly, ignoring the consumer BackOff.
+		assert.Positive(t, msg1.nakDelay, "nak must carry a backoff delay")
+		assert.Positive(t, msg2.nakDelay)
 		assert.Equal(t, 0, h.MessageCount())
 	})
 

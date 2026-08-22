@@ -1,5 +1,7 @@
 package main
 
+import "github.com/hmchangw/chat/pkg/stream"
+
 // config is hr-sync-worker's environment configuration. One durable consumer
 // per entry in SITE_IDS (each site's HR-{siteID} stream).
 type config struct {
@@ -13,6 +15,7 @@ type config struct {
 	MongoWritePassword string `env:"MONGO_WRITE_PASSWORD" envDefault:""`
 	MongoWriteDB       string `env:"MONGO_WRITE_DB" envDefault:"chat"`
 
-	Bootstrap  bootstrapConfig `envPrefix:"BOOTSTRAP_"`
-	HealthAddr string          `env:"HEALTH_ADDR" envDefault:":8081"`
+	Consumer   stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap  bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 }

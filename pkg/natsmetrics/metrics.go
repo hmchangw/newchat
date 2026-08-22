@@ -439,6 +439,10 @@ func (m *Message) DoubleAck(ctx context.Context) error {
 	m.finish(OutcomeAck, err)
 	return err
 }
+
+// Nak instruments a bare -NAK. Production code must not call it — a bare -NAK
+// redelivers instantly, ignoring the consumer's BackOff; the jsretry-no-bare-nak
+// semgrep rule enforces that. Kept so a test that does call it stays instrumented.
 func (m *Message) Nak() error { err := m.Msg.Nak(); m.finish(OutcomeNak, err); return err }
 func (m *Message) NakWithDelay(delay time.Duration) error {
 	err := m.Msg.NakWithDelay(delay)

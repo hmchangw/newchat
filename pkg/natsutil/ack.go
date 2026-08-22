@@ -9,12 +9,6 @@ type Acker interface {
 	Ack() error
 }
 
-// Naker is the minimal JetStream message interface the Nak helper needs.
-// Same compatibility story as Acker.
-type Naker interface {
-	Nak() error
-}
-
 // Ack acks `msg` and logs any failure under a consistent structured-log
 // shape (`reason` + `error`). `reason` is a short label describing WHY
 // the message is being acked — e.g. "handler succeeded", "filtered",
@@ -25,18 +19,11 @@ type Naker interface {
 // an `if err := msg.Ack(); err != nil { slog.Error(...) }` block. Consolidating
 // the pattern gives us one place to add tracing spans, metrics counters, or
 // delivery-context fields later, and keeps log keys consistent across services.
+//
+// There is deliberately no Nak counterpart: a bare Nak() redelivers instantly,
+// ignoring the consumer's BackOff. Use jsretry.Nak.
 func Ack(msg Acker, reason string) {
 	if err := msg.Ack(); err != nil {
 		slog.Error("ack failed", "reason", reason, "error", err)
-	}
-}
-
-// Nak naks `msg` for redelivery and logs any failure under the same
-// structured-log shape as Ack. `reason` describes WHY the message is being
-// redelivered — e.g. "handler error", "bulk index failure", "transient
-// downstream error".
-func Nak(msg Naker, reason string) {
-	if err := msg.Nak(); err != nil {
-		slog.Error("nak failed", "reason", reason, "error", err)
 	}
 }

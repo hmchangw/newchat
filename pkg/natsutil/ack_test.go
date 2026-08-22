@@ -9,23 +9,15 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
-// stubMsg is a tiny test double for the Acker/Naker interfaces. Records
-// whether Ack/Nak was called and returns a configurable error.
+// stubMsg is a tiny test double for the Acker interface.
 type stubMsg struct {
 	ackCalled bool
-	nakCalled bool
 	ackErr    error
-	nakErr    error
 }
 
 func (s *stubMsg) Ack() error {
 	s.ackCalled = true
 	return s.ackErr
-}
-
-func (s *stubMsg) Nak() error {
-	s.nakCalled = true
-	return s.nakErr
 }
 
 func TestAck_Success(t *testing.T) {
@@ -43,22 +35,6 @@ func TestAck_ErrorIsLoggedNotReturned(t *testing.T) {
 	assert.True(t, msg.ackCalled)
 }
 
-func TestNak_Success(t *testing.T) {
-	msg := &stubMsg{}
-	natsutil.Nak(msg, "handler error")
-	assert.True(t, msg.nakCalled, "Nak() should be invoked on the message")
-}
-
-func TestNak_ErrorIsLoggedNotReturned(t *testing.T) {
-	msg := &stubMsg{nakErr: errors.New("consumer deleted")}
-	natsutil.Nak(msg, "bulk failure")
-	assert.True(t, msg.nakCalled)
-}
-
-// Compile-time checks that the stub implements the interfaces the helpers
-// require — this is what lets production code pass `jetstream.Msg` and
-// `oteljetstream.Msg` to the helpers without a wrapper.
-var (
-	_ natsutil.Acker = (*stubMsg)(nil)
-	_ natsutil.Naker = (*stubMsg)(nil)
-)
+// Compile-time check that the stub satisfies Acker — this is what lets
+// production code pass jetstream.Msg / oteljetstream.Msg without a wrapper.
+var _ natsutil.Acker = (*stubMsg)(nil)

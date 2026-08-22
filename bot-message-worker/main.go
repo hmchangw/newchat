@@ -36,8 +36,8 @@ type config struct {
 
 	MessageBucketHours int `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
 
-	MaxWorkers int `env:"MAX_WORKERS" envDefault:"100"`
-	MaxDeliver int `env:"MAX_DELIVER" envDefault:"5"`
+	MaxWorkers int                     `env:"MAX_WORKERS" envDefault:"100"`
+	Consumer   stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 
 	MongoURI      string `env:"MONGO_URI"`
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
@@ -120,14 +120,7 @@ func run() error {
 	h := newHandler(store, cfg.SiteID)
 
 	streamCfg := stream.BotMessagesCanonical(cfg.SiteID)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, jetstream.ConsumerConfig{
-		Durable:       "bot-message-worker",
-		FilterSubject: subject.BotCanonicalCreated(cfg.SiteID),
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       30 * time.Second,
-		MaxDeliver:    cfg.MaxDeliver,
-		BackOff:       []time.Duration{1 * time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second},
-	})
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
 	if err != nil {
 		return fmt.Errorf("create consumer: %w", err)
 	}
@@ -186,4 +179,13 @@ func run() error {
 		func(dctx context.Context) error { return obsShutdown(dctx) },
 	)
 	return nil
+}
+
+// buildConsumerConfig adds the durable name and filter; everything else comes
+// from ConsumerSettings.
+func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "bot-message-worker"
+	cc.FilterSubject = subject.BotCanonicalCreated(siteID)
+	return cc
 }

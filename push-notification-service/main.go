@@ -19,14 +19,14 @@ import (
 )
 
 type config struct {
-	NatsURL       string          `env:"NATS_URL,required"`
-	NatsCredsFile string          `env:"NATS_CREDS_FILE"`
-	SiteID        string          `env:"SITE_ID,required"`
-	MaxWorkers    int             `env:"MAX_WORKERS" envDefault:"100"`
-	MaxDeliver    int             `env:"MAX_DELIVER" envDefault:"5"`
-	HealthAddr    string          `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled  bool            `env:"PPROF_ENABLED" envDefault:"false"`
-	Mode          stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	NatsURL       string                  `env:"NATS_URL,required"`
+	NatsCredsFile string                  `env:"NATS_CREDS_FILE"`
+	SiteID        string                  `env:"SITE_ID,required"`
+	MaxWorkers    int                     `env:"MAX_WORKERS" envDefault:"100"`
+	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	Mode          stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 
 }
 
@@ -62,14 +62,7 @@ func run() error {
 
 	wiring := stream.Resolve(cfg.Mode, cfg.SiteID)
 
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.PushStream.Name, jetstream.ConsumerConfig{
-		Durable:       cfg.Mode.ConsumerName("push-notification-service"),
-		FilterSubject: wiring.PushInputWildcard,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       30 * time.Second,
-		MaxDeliver:    cfg.MaxDeliver,
-		BackOff:       []time.Duration{1 * time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second},
-	})
+	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.PushStream.Name, buildConsumerConfig(cfg.Consumer, cfg.Mode, wiring.PushInputWildcard))
 	if err != nil {
 		return fmt.Errorf("create consumer: %w", err)
 	}
@@ -120,4 +113,13 @@ func run() error {
 		func(dctx context.Context) error { return obsShutdown(dctx) },
 	)
 	return nil
+}
+
+// buildConsumerConfig adds the durable name and filter; everything else comes
+// from ConsumerSettings.
+func buildConsumerConfig(s stream.ConsumerSettings, mode stream.Pipeline, filterSubject string) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = mode.ConsumerName("push-notification-service")
+	cc.FilterSubject = filterSubject
+	return cc
 }

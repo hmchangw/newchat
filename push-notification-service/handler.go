@@ -8,6 +8,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -41,7 +42,7 @@ func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		}
 		slog.WarnContext(ctx, "push-notification-service transient — nak",
 			"id", evt.ID, "roomID", evt.RoomID, "error", err)
-		_ = msg.NakWithDelay(0)
+		jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, "transient dispatch error")
 		return
 	}
 	if err := msg.Ack(); err != nil {
