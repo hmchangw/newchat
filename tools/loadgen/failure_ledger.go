@@ -1194,12 +1194,7 @@ func (l *failureLedger) unpersistedInvalidationsLocked() []string {
 }
 
 func (l *failureLedger) flushInvalidationsLocked() error {
-	// Over a copy, because a failed attempt records the wal cause and appends to
-	// the slice being walked. Ranging the original would rely on Go fixing the
-	// length at loop entry — true, but too subtle to leave a reader deducing.
-	for _, reason := range slices.Clone(l.invalidReasons) {
-		l.persistInvalidationLocked(reason)
-	}
+	l.retryPendingInvalidationsLocked()
 	unpersisted := l.unpersistedInvalidationsLocked()
 	if len(unpersisted) == 0 {
 		return nil
@@ -1359,7 +1354,23 @@ func (l *failureLedger) appendLocked(event *failureLedgerEvent) error {
 	if l.recorder != nil {
 		l.recorder.JournalSize(l.journal.Size())
 	}
+	l.retryPendingInvalidationsLocked()
 	return nil
+}
+
+// retryPendingInvalidationsLocked lands verdicts the journal refused earlier.
+// A successful append is proof the file is accepting records again, and it is
+// the cheapest such proof there is: waiting for the next invalidation, a
+// compaction or Close leaves the cause in memory only, and a run that is killed
+// rather than closed — OOM, node drain, SIGKILL — replays without it.
+func (l *failureLedger) retryPendingInvalidationsLocked() {
+	if len(l.persistedInvalidReasons) == len(l.invalidReasons) {
+		return
+	}
+	// Over a copy: a failed attempt appends the wal cause to the slice below.
+	for _, reason := range slices.Clone(l.invalidReasons) {
+		l.persistInvalidationLocked(reason)
+	}
 }
 
 // recoverFrom rebuilds ledger state from the journal, streaming the records
