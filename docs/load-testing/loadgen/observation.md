@@ -102,7 +102,7 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_RECIPIENT_OBSERVER_ENABLED` | `false` | Opt in to exact recipient observation |
 | `SOAK_RECIPIENT_OBSERVER_QUEUE` | `8192` | Bounded recipient callback queue |
 | `SOAK_RECIPIENT_OBSERVER_CONNECTIONS` | `32` | Bounded account-attributed NATS connection pool |
-| `SOAK_LEDGER_EPOCH` | `v1` | Evidence-journal identity, separate from the run ID |
+| `SOAK_LEDGER_EPOCH` | `v2` | Evidence-journal identity, separate from the run ID. `v2` adds the `invalidated` record; an image that predates it rejects that record and cannot replay a `v2` journal, so rolling the image back means rolling the epoch back with it |
 | `SOAK_MEMBER_MUTATION_RATE` | `2` | Member add/remove cycles per second |
 | `SOAK_ROOM_MUTATION_RATE` | `1` | Rename and mute toggles per second, alternating |
 | `SOAK_ROOM_READ_RATE` | `20` | Room reads per second; also funds reconciliation |

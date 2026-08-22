@@ -480,7 +480,7 @@ func TestSoakConfig_RoomLaneDefaults(t *testing.T) {
 	assert.Equal(t, 5, cfg.RoomCreateSize)
 	assert.InDelta(t, 0.5, cfg.RoomReconcileReadShare, 0.0001)
 	assert.Equal(t, 10000, cfg.MemberQuarantineMax)
-	assert.Equal(t, "v1", cfg.LedgerEpoch)
+	assert.Equal(t, "v2", cfg.LedgerEpoch)
 	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
 }
 

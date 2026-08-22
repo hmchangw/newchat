@@ -80,7 +80,7 @@ type soakConfig struct {
 	RecentPerRoom               int           `env:"RECENT_PER_ROOM"                  envDefault:"128"`
 	RecentTotal                 int           `env:"RECENT_TOTAL"                     envDefault:"200000"`
 	LedgerDir                   string        `env:"LEDGER_DIR"                       envDefault:""`
-	LedgerEpoch                 string        `env:"LEDGER_EPOCH"                     envDefault:"v1"`
+	LedgerEpoch                 string        `env:"LEDGER_EPOCH"                     envDefault:"v2"`
 	LedgerCapacity              int           `env:"LEDGER_CAPACITY"                  envDefault:"200000"`
 	// LedgerCompactEvery and LedgerMaxBytes both bound the journal. The finalize
 	// count alone is not enough: a run whose operations all outlive their

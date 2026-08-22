@@ -52,7 +52,12 @@ ledger:
   # The run ID owns the seeded topology; the epoch owns the evidence journal.
   # Bump the epoch whenever a loadgen image changes the ledger contract, so a
   # fresh journal starts without re-seeding the room set.
-  epoch: v1
+  #
+  # v2 adds the `invalidated` journal record. A v1 journal written by this image
+  # cannot be replayed by an image that predates it — the older reader rejects
+  # the unknown record and loses the evidence — so rolling this image back means
+  # rolling the epoch back with it.
+  epoch: v2
   existingClaim: ""
   storageClassName: ""
   accessMode: ReadWriteOnce
