@@ -81,6 +81,14 @@ these prefixes, with or without an `Id`/`_id`/`UID` tail; anything ending in
 `errorType`, `error_class`, `reason`, `outcome`, `result` and `status` are all
 outside the pattern — as does `run_info`.
 
+The rule sees the key however it is spelled and however it is built: any
+`attribute.*` constructor rather than `String` alone, since an int room id opens
+exactly as many series as a string one; the `attribute.Key("k").String(v)`
+builder form as well as the two-argument one; and dotted separators as well as
+underscored, because OTel semconv spells these keys `user.id`, `session.id` and
+`error.stack`. Widening the separator does not widen the tails, so `error.type`
+and `user.agent` stay legal.
+
 A key the rule cannot recognise as bounded but which genuinely is takes a
 `nosemgrep` with a justification naming *what enforces* the boundedness. A claim
 with nothing behind it is how the `_INBOX` leak survived review once already.
@@ -728,4 +736,4 @@ to this contract.
    so `pkg/natsmetrics` caches per combination through `optTable` and keeps the
    warm lookup lock-free and allocation-free. Precomputing all of it cost 8,094
    allocations per `Publisher`, retained for the life of the process.
-4. Add the row here. The guard test fails otherwise.
+5. Add the row here. The guard test fails otherwise.
