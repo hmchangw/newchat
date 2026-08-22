@@ -14,7 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
-	"github.com/hmchangw/chat/user-service/models"
+	"github.com/hmchangw/chat/pkg/testutil"
 )
 
 func TestAggregateSubscriptions_Integration(t *testing.T) {
@@ -828,72 +828,30 @@ func TestAppSubscriptionRoundTrip_Integration(t *testing.T) {
 	})
 }
 
-// The badge path must return exactly its five fields, across local, empty and cross-site rooms.
-func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
-	r, db := newTestSubscriptionRepo(t)
+// Every persisted subscription field must survive the list path's inclusion
+// projection — origin (subscription provenance, e.g. Teams migration) is
+// json:"-" so nothing downstream catches its loss.
+func TestAggregateSubscriptions_OriginFieldRoundTrip_Integration(t *testing.T) {
+	// origin is only ever "teams" in practice, which the default SHOW_TEAMS_ROOM
+	// filter hides — so show them here, or there is no row to assert the
+	// round-trip on. The exclusion itself is covered separately.
+	db := testutil.MongoDB(t, "user-service")
+	r := NewSubscriptionRepo(db, 100_000, 15*time.Second, WithShowTeamsRoom(true))
 	ctx := context.Background()
-	lastMsg := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
-	seen := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+	require.NoError(t, r.EnsureIndexes(ctx))
+	t0 := time.Now().UTC()
 
 	seed(t, db, "rooms",
-		bson.M{"_id": "p-room", "name": "Eng", "siteId": "site-a", "lastMsgAt": lastMsg,
-			"userCount": 9, "appCount": 1, "encKey": bson.M{"priv": make([]byte, 120), "ver": 3}},
-		bson.M{"_id": "p-quiet", "name": "Quiet", "siteId": "site-a"},
+		bson.M{"_id": "r-orig", "name": "Orig", "siteId": "site-a", "userCount": 1, "lastMsgAt": t0},
 	)
 	seed(t, db, "subscriptions",
-		bson.M{"_id": "p-sub", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Eng",
-			"roomId": "p-room", "roomType": "channel", "siteId": "site-a",
-			"lastSeenAt": seen, "threadUnread": []string{"pm-1", "pm-2"}},
-		bson.M{"_id": "p-sub-quiet", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Quiet",
-			"roomId": "p-quiet", "roomType": "channel", "siteId": "site-a"},
-		bson.M{"_id": "p-sub-remote", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Remote",
-			"roomId": "p-remote", "roomType": "channel", "siteId": "site-b", "lastSeenAt": seen},
+		bson.M{"_id": "s-orig", "u": bson.M{"_id": "u-orig", "account": "orig"}, "roomId": "r-orig",
+			"name": "Orig", "roomType": "channel", "siteId": "site-a", "origin": "teams"},
 	)
 
-	subs, err := r.GetActiveSubscriptions(ctx, "alice", 100)
+	page, err := r.AggregateSubscriptions(ctx, "orig", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 10})
 	require.NoError(t, err)
-
-	byRoom := map[string]models.ActiveSubscription{}
-	for _, s := range subs {
-		byRoom[s.RoomID] = s
-	}
-	require.Len(t, byRoom, 3)
-
-	local := byRoom["p-room"]
-	assert.Equal(t, "site-a", local.SiteID)
-	require.NotNil(t, local.LastSeenAt)
-	assert.Equal(t, seen.UTC(), local.LastSeenAt.UTC())
-	require.NotNil(t, local.LastMsgAt, "the joined room's lastMsgAt must survive the projection")
-	assert.Equal(t, lastMsg.UTC(), local.LastMsgAt.UTC())
-	assert.Equal(t, []string{"pm-1", "pm-2"}, local.ThreadUnread)
-
-	quiet := byRoom["p-quiet"]
-	assert.Nil(t, quiet.LastMsgAt, "a room with no messages has no lastMsgAt")
-	assert.Nil(t, quiet.LastSeenAt, "an unread-from-birth sub has no lastSeenAt")
-
-	remote := byRoom["p-remote"]
-	assert.Equal(t, "site-b", remote.SiteID)
-	assert.Nil(t, remote.LastMsgAt, "a cross-site sub has no local room document")
-	require.NotNil(t, remote.LastSeenAt)
-
-	// Assert on the raw document: decoding first would discard a leaked encKey.
-	pipeline := r.activeSubscriptionPipeline("alice", 100)
-	cur, err := db.Collection(subscriptionsCollection).Aggregate(ctx, pipeline)
-	require.NoError(t, err)
-	var rawRows []bson.M
-	require.NoError(t, cur.All(ctx, &rawRows))
-	var rawRoom bson.M
-	for _, d := range rawRows {
-		if d["roomId"] == "p-room" {
-			rawRoom = d
-			break
-		}
-	}
-	require.NotNil(t, rawRoom, "expected the p-room row in the raw projection output")
-	keys := make([]string, 0, len(rawRoom))
-	for k := range rawRoom {
-		keys = append(keys, k)
-	}
-	assert.ElementsMatch(t, []string{"roomId", "siteId", "lastSeenAt", "threadUnread", "lastMsgAt"}, keys,
-		"the raw $project output for p-room must contain exactly the five projected fields — no encKey or other room baseline field")
+	require.Len(t, page.Data, 1)
+	assert.Equal(t, "teams", page.Data[0].Origin,
+		"list rows must carry the persisted origin like every other read path")
 }

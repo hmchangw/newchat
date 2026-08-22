@@ -29,7 +29,7 @@ func TestNewSortKeyCache_DisabledOnNonPositiveSizeOrTTL(t *testing.T) {
 
 func TestSortKeyCache_NilIsSafeAndAlwaysMisses(t *testing.T) {
 	var c *sortKeyCache
-	c.add("r1", roomSortKey{Name: "Eng"}) // must not panic
+	c.add("r1", roomSortKey{}) // must not panic
 	_, ok := c.get(context.Background(), "r1")
 	assert.False(t, ok, "disabled cache never hits")
 }
@@ -40,11 +40,10 @@ func TestSortKeyCache_AddGetRoundTrip(t *testing.T) {
 
 	at := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	created := at.Add(-time.Hour)
-	c.add("r1", roomSortKey{Name: "Eng", LastMsgAt: &at, CreatedAt: &created})
+	c.add("r1", roomSortKey{LastMsgAt: &at, CreatedAt: &created})
 
 	got, ok := c.get(context.Background(), "r1")
 	require.True(t, ok)
-	assert.Equal(t, "Eng", got.Name)
 	require.NotNil(t, got.LastMsgAt)
 	assert.True(t, at.Equal(*got.LastMsgAt))
 	require.NotNil(t, got.CreatedAt)
@@ -76,7 +75,7 @@ func TestSortKeyCache_EntriesExpireAfterTTL(t *testing.T) {
 	c := newSortKeyCache(10, 20*time.Millisecond)
 	require.NotNil(t, c)
 
-	c.add("r1", roomSortKey{Name: "Eng"})
+	c.add("r1", roomSortKey{})
 	_, ok := c.get(context.Background(), "r1")
 	require.True(t, ok, "entry readable before TTL")
 

@@ -10,12 +10,11 @@ import (
 )
 
 // roomSortKey holds the room fields that decide where a subscription lands in
-// the list: Name for the "Del-" check, LastMsgAt for the activity sort and the
-// withinDays window, CreatedAt as the fallback for a room with no messages.
-// Missing means no room document on this site — normal for a room owned by
-// another site, and caching that keeps repeat lists from looking it up again.
+// the list: LastMsgAt for the activity sort and the withinDays window,
+// CreatedAt as the fallback for a room with no messages. Missing means no room
+// document on this site — normal for a room owned by another site, and caching
+// that keeps repeat lists from looking it up again.
 type roomSortKey struct {
-	Name      string
 	LastMsgAt *time.Time
 	CreatedAt *time.Time
 	Missing   bool
