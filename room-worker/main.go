@@ -35,7 +35,6 @@ type config struct {
 	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
 	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
 	Mode               string                  `env:"MODE"            envDefault:"default"`
-	ServiceName        string                  `env:"OTEL_SERVICE_NAME" envDefault:"unknown-service"`
 	NatsURL            string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
 	NatsCredsFile      string                  `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID             string                  `env:"SITE_ID"         envDefault:"site-local"`

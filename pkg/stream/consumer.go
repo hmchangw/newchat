@@ -121,11 +121,17 @@ const DefaultMaxDeliver = 6
 // OutageRetryMaxDeliver is the delivery budget for consumers that must ride out
 // a dependency outage rather than drop the message.
 //
-// The window is set by jsretry.DefaultBackoff, whose last entry repeats: 1s + 5s
-// + 30s + 2m for the first four attempts, then 10m each. So n attempts span
-// 156s + 600s*(n-4) — 11 gives about 72 minutes, enough to outlast the one-hour
-// MongoDB outage the outage-survival work targets.
-const OutageRetryMaxDeliver = 11
+// The window is set by jsretry.DefaultBackoff, whose last entry repeats. n
+// deliveries means n-1 waits: the first four are 1s + 5s + 30s + 2m = 156s and
+// the remaining n-5 are 10m each, so the window is 156s + 600s*(n-5). 12 gives
+// about 72 minutes, comfortably past the one-hour MongoDB outage the
+// outage-survival work targets.
+//
+// TestOutageRetryBudget_ExceedsOneHour walks the real schedule rather than this
+// formula, so a change to DefaultBackoff re-checks the budget instead of
+// quietly invalidating the arithmetic above — which is exactly what happened
+// when the tail grew from 2m to 10m.
+const OutageRetryMaxDeliver = 12
 
 // WithOutageRetryBudget raises s.MaxDeliver to OutageRetryMaxDeliver when it is
 // still at the package default, and leaves any other value alone.
@@ -139,8 +145,8 @@ const OutageRetryMaxDeliver = 11
 // An operator who deliberately sets MAX_DELIVER to the default value is
 // indistinguishable from one who set nothing, and gets the outage budget. That
 // ambiguity is deliberate: the failure it causes (a poison message retried for
-// 72 minutes before dropping) is far cheaper than the one it avoids (a user's
-// message accepted, then silently dropped mid-outage).
+// the outage window before dropping) is far cheaper than the one it avoids (a
+// user's message accepted, then silently dropped mid-outage).
 func WithOutageRetryBudget(s ConsumerSettings) ConsumerSettings {
 	if s.MaxDeliver == DefaultMaxDeliver {
 		s.MaxDeliver = OutageRetryMaxDeliver

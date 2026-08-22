@@ -13,8 +13,11 @@ import (
 func TestBuildConsumerConfig(t *testing.T) {
 	t.Run("propagates settings", func(t *testing.T) {
 		cc := buildConsumerConfig(stream.ConsumerSettings{
-			AckWait:       30 * time.Second,
-			MaxDeliver:    5,
+			AckWait: 30 * time.Second,
+			// The symbol, not a literal: the default moved 5→6 when main added
+			// exponential backoff, and a literal here silently stopped matching it,
+			// so the outage budget was no longer being applied under test.
+			MaxDeliver:    stream.DefaultMaxDeliver,
 			MaxWaiting:    512,
 			MaxAckPending: 1000,
 		}, "broadcast-worker", "chat.msg.canonical.site-a.>")
