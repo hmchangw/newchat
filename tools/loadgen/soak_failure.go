@@ -53,6 +53,38 @@ func soakFailureExpiryInterval(deadline time.Duration) time.Duration {
 	return min(30*time.Second, max(time.Second, deadline/10))
 }
 
+// watchSoakLedgerDurability stops a run whose ledger can no longer record the
+// verdict that disqualifies its own evidence. A refused invalidation is retried
+// on the next successful append, so a transient failure never reaches here; a
+// cause still owed a whole sweep later is a journal that is not coming back,
+// and every message accepted from that point produces evidence the run could
+// not disown if it were killed. It reports once and returns — the caller stops
+// the workload, and the ordinary shutdown path decides the exit code.
+func watchSoakLedgerDurability(
+	ctx context.Context,
+	ledger *failureLedger,
+	ticks <-chan time.Time,
+	onUnrecordedVerdict func([]string),
+) {
+	if ledger == nil || ticks == nil || onUnrecordedVerdict == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+			if owed := ledger.UnpersistedInvalidations(); len(owed) > 0 {
+				onUnrecordedVerdict(owed)
+				return
+			}
+		}
+	}
+}
+
 func runSoakFailureExpiry(
 	ctx context.Context,
 	ledger *failureLedger,

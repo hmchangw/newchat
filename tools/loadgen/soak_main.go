@@ -555,6 +555,27 @@ func runSoakWorkload(
 	// Collected at scrape time so a stalled expiry sweep cannot freeze the one
 	// number that would reveal the stall.
 	metrics.SetRecipientExpectationSource(observationRuntime.Evidence().Len)
+	// The workload gets its own cancel so the run can be stopped from inside:
+	// a ledger that can no longer record its own verdict has nothing to gain
+	// from the hours it would otherwise keep running.
+	workloadCtx, stopWorkload := context.WithCancel(ctx)
+	defer stopWorkload()
+	durabilityTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
+	go func() {
+		defer durabilityTicker.Stop()
+		watchSoakLedgerDurability(
+			workloadCtx, ledger, durabilityTicker.C,
+			func(reasons []string) {
+				slog.Error(
+					"failure ledger cannot record the verdict disqualifying its evidence",
+					"reasons", reasons,
+					"consequence", "stopping the run rather than accepting messages "+
+						"whose evidence a restart would replay as trustworthy",
+				)
+				stopWorkload()
+			},
+		)
+	}()
 	expiryCtx, stopExpiry := context.WithCancel(ctx)
 	expiryTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
 	expiryDone := make(chan struct{})
@@ -1115,7 +1136,7 @@ func runSoakWorkload(
 		nil,
 		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
 	)
-	result, runErr := workload.Run(ctx)
+	result, runErr := workload.Run(workloadCtx)
 	shutdownExpiry()
 	shutdownConsumerSamplers()
 	if err := observationRuntime.Close(); err != nil {
