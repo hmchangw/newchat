@@ -56,5 +56,8 @@ func (h *handler) ListSubscriptions(c *gin.Context) {
 		errhttp.Write(ctx, c, err)
 		return
 	}
+	// The credential is a non-standard header, so Vary cannot protect this: a cache
+	// keyed on method+URL would serve one account's sidebar to another.
+	c.Header("Cache-Control", "private, no-store")
 	c.JSON(http.StatusOK, resp)
 }

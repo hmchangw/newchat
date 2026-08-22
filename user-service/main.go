@@ -256,17 +256,21 @@ func main() {
 
 	slog.Info("user-service running", "site", cfg.SiteID, "http_port", cfg.HTTP.Port, "health_addr", cfg.HealthAddr)
 
-	// HTTP drains first so in-flight requests can still reach NATS and Mongo, but
-	// bounded: shutdown.Wait shares one budget across every step, and a handler may
-	// run for HTTP_HANDLER_TIMEOUT, so an unbounded drain would skip the NATS drain
-	// and the database disconnects entirely.
+	// Readiness goes first: shutdown.Wait runs these in order, so closing the API
+	// listener while /readyz still answers 200 would earn new connections an
+	// ECONNREFUSED instead of a graceful removal from rotation.
+	//
+	// HTTP then drains ahead of NATS and Mongo so in-flight requests can still
+	// reach them, but bounded — the budget is shared across every step and a
+	// handler may run for HTTP_HANDLER_TIMEOUT, so an unbounded drain would skip
+	// the NATS drain and the database disconnects entirely.
 	shutdown.Wait(ctx, 25*time.Second,
+		healthStop,
 		func(ctx context.Context) error {
 			ctx, cancel := context.WithTimeout(ctx, httpDrainTimeout)
 			defer cancel()
 			return httpSrv.Shutdown(ctx)
 		},
-		healthStop,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },

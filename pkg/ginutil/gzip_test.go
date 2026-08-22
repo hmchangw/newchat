@@ -254,3 +254,24 @@ func TestGzip_FlushAfterThresholdStreams(t *testing.T) {
 	assert.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
 	assert.Equal(t, body+body, gunzip(t, w.Body.Bytes()), "a flush must not truncate the stream")
 }
+
+// The first bytes on the wire are deflate output, so net/http would sniff
+// application/x-gzip. The type must be settled from the plaintext prefix.
+func TestGzip_DetectsContentTypeBeforeCompressing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(Gzip(1024))
+	r.GET("/x", func(c *gin.Context) {
+		_, _ = c.Writer.WriteString("<html><body>" + strings.Repeat("a", 4096) + "</body></html>")
+	})
+	w := doGet(r, "gzip")
+
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
+	assert.NotContains(t, w.Header().Get("Content-Type"), "gzip")
+}
+
+// An explicit Content-Type must win over sniffing.
+func TestGzip_KeepsExplicitContentType(t *testing.T) {
+	w := doGet(gzipEngine(t, 1024, writeBody(strings.Repeat("a", 4096))), "gzip")
+	assert.Contains(t, w.Header().Get("Content-Type"), "application/json")
+}

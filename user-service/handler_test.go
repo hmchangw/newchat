@@ -112,14 +112,30 @@ func TestHandler_SerializesResponse(t *testing.T) {
 	assert.True(t, got.HasMore)
 }
 
-func TestHandler_EmptyPageSerializesAsArray(t *testing.T) {
+// An empty page serializes `subscriptions` as null, not []. That is pre-existing
+// on both transports (one shared response struct); pinned here so a change to it
+// is a deliberate contract decision rather than an accident.
+func TestHandler_EmptyPageSerializesSubscriptionsAsNull(t *testing.T) {
 	lister := NewMocksubscriptionLister(gomock.NewController(t))
 	lister.EXPECT().ListSubscriptionsFor(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(&models.PagedSubscriptionListResponse{}, nil)
 
 	w := getSubs(t, handlerEngine(t, lister, "alice"), "type=current")
+
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), `"hasMore":false`)
+	assert.JSONEq(t, `{"subscriptions":null,"hasMore":false}`, w.Body.String())
+}
+
+// Per-account data must never be shared-cacheable: the credential is a
+// non-standard header, so Vary cannot keep one user's sidebar from another.
+func TestHandler_MarksResponsePrivate(t *testing.T) {
+	lister := NewMocksubscriptionLister(gomock.NewController(t))
+	lister.EXPECT().ListSubscriptionsFor(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&models.PagedSubscriptionListResponse{}, nil)
+
+	w := getSubs(t, handlerEngine(t, lister, "alice"), "type=current")
+
+	assert.Equal(t, "private, no-store", w.Header().Get("Cache-Control"))
 }
 
 func TestHandler_RejectsMalformedQuery(t *testing.T) {

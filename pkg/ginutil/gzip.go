@@ -104,16 +104,17 @@ func (w *gzipResponseWriter) write(p []byte) (int, error) {
 		w.buf = append(w.buf, p...)
 		return len(p), nil
 	}
-	if err := w.commit(); err != nil {
+	if err := w.commit(p); err != nil {
 		return 0, err
 	}
 	return w.write(p)
 }
 
 // commit decides the encoding once the threshold is reached and drains whatever
-// sub-threshold prefix was buffered. A handler that set its own Content-Encoding
-// is left alone.
-func (w *gzipResponseWriter) commit() error {
+// sub-threshold prefix was buffered. pending is the write that triggered the
+// commit — not written here, only sniffed, since a large first write never lands
+// in buf. A handler that set its own Content-Encoding is left alone.
+func (w *gzipResponseWriter) commit(pending []byte) error {
 	h := w.Header()
 	buf := w.buf
 	w.buf = nil
@@ -128,6 +129,13 @@ func (w *gzipResponseWriter) commit() error {
 		return err
 	}
 
+	// net/http sniffs the type from the first bytes written, which are about to be
+	// deflate output. Settle it from the plaintext while we still have it.
+	if h.Get("Content-Type") == "" {
+		if probe := sniffProbe(buf, pending); len(probe) > 0 {
+			h.Set("Content-Type", http.DetectContentType(probe))
+		}
+	}
 	h.Set("Content-Encoding", "gzip")
 	// A Content-Length measured on the uncompressed body would truncate the response.
 	h.Del("Content-Length")
@@ -140,6 +148,18 @@ func (w *gzipResponseWriter) commit() error {
 	}
 	_, err := w.gz.Write(buf)
 	return err
+}
+
+// sniffProbe returns up to the 512 bytes net/http's detector reads, drawn from
+// the buffered prefix and then the pending write.
+func sniffProbe(buf, pending []byte) []byte {
+	const sniffLen = 512
+	if len(buf) >= sniffLen || len(pending) == 0 {
+		return buf
+	}
+	probe := make([]byte, 0, min(len(buf)+len(pending), sniffLen))
+	probe = append(probe, buf...)
+	return append(probe, pending[:min(len(pending), sniffLen-len(probe))]...)
 }
 
 func (w *gzipResponseWriter) flushStatus() {
@@ -182,7 +202,7 @@ func (w *gzipResponseWriter) close() {
 // and the buffered prefix.
 func (w *gzipResponseWriter) Flush() {
 	if w.gz == nil && !w.plain && !w.closed {
-		if err := w.commit(); err != nil {
+		if err := w.commit(nil); err != nil {
 			return
 		}
 	}

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -54,16 +55,21 @@ func (s *UserService) ListSubscriptionsFor(ctx context.Context, account string, 
 	}
 	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
 	res.Data = s.enrichWithRoomInfoAndLastMsg(ctx, account, res.Data, true, withLastMsg)
-	// Enrichment degrades silently, which is right for a failed RPC but wrong for a
-	// deadline: the page would come back 200 with rooms indistinguishable from
-	// deleted ones. Fail instead, so the client retries rather than caches a
-	// half-empty sidebar.
-	if ctx.Err() != nil {
+	items := s.buildListItems(ctx, account, res.Data)
+	// Every lookup above degrades silently, which is right for a failed RPC and
+	// wrong for a deadline: the page would return 200 with rooms indistinguishable
+	// from deleted ones, and the client would cache a half-empty sidebar. Checked
+	// after the app/HR overlays, which degrade the same way.
+	//
+	// Deadline only: a cancellation means the client is already gone, and turning
+	// that into a 503 would log an ERROR per abandoned request during exactly the
+	// reconnect burst this endpoint serves.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, errcode.Unavailable("subscription list timed out, please retry",
 			errcode.WithCause(ctx.Err()))
 	}
 	return &models.PagedSubscriptionListResponse{
-		Subscriptions: s.buildListItems(ctx, account, res.Data),
+		Subscriptions: items,
 		HasMore:       res.HasMore,
 	}, nil
 }

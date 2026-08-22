@@ -1266,12 +1266,32 @@ func TestListSubscriptionsFor_DeadlineDuringEnrichmentFails(t *testing.T) {
 		}, nil)
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, err := svc.ListSubscriptionsFor(ctx, "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
+
+	requireCode(t, err, errcode.CodeUnavailable)
+}
+
+// A cancelled client is already gone. Turning that into a 503 would log an ERROR
+// per abandoned request during exactly the reconnect burst this endpoint serves.
+func TestListSubscriptionsFor_ClientCancellationIsNotAServerError(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{
+			Data: []model.EnrichedSubscription{
+				{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-b"}},
+			},
+		}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	_, err := svc.ListSubscriptionsFor(ctx, "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
 
-	requireCode(t, err, errcode.CodeUnavailable)
+	require.NoError(t, err)
 }
 
 // The happy path must not be tripped by the deadline guard.
