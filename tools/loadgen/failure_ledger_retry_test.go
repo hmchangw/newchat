@@ -69,3 +69,71 @@ func (j *flakyInvalidationJournal) Append(event *failureLedgerEvent) error {
 	}
 	return j.memoryFailureJournal.Append(event)
 }
+
+// A restart that drops recovered operations over capacity disqualifies the run,
+// and that verdict is derived during replay rather than read from the journal —
+// so nothing has written it. Marking it persisted anyway breaks the invariant
+// the retry depends on: the reason is never retried, Close never reports it,
+// and only a later compaction happens to rewrite it.
+func TestFailureLedger_ACapacityVerdictFromReplayIsOwedToTheJournal(t *testing.T) {
+	now := time.Date(2026, 8, 22, 13, 0, 0, 0, time.UTC)
+	journal := &memoryFailureJournal{}
+	for _, id := range []string{"m1", "m2"} {
+		operation := testFailureOperation(id, now)
+		operation.LifecycleState = failureOperationJournaled
+		journal.events = append(journal.events, failureLedgerEvent{
+			Type: failureLedgerEventStarted, Operation: operation, At: now,
+		})
+	}
+
+	// Capacity one against two recovered operations: the second is dropped.
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 1, Journal: journal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, ledger.Snapshot().Dropped)
+	require.Equal(t, invalidReasonCapacity, ledger.Snapshot().InvalidReason)
+
+	assert.Equal(t, []string{invalidReasonCapacity}, ledger.UnpersistedInvalidations(),
+		"replay writes nothing, so the verdict is still owed to the journal")
+
+	// The first ordinary write pays that debt.
+	require.NoError(t, ledger.Activate("m1", now))
+	assert.Empty(t, ledger.UnpersistedInvalidations())
+	assert.Equal(t, []string{invalidReasonCapacity},
+		journaledMemoryInvalidationReasons(journal))
+}
+
+func journaledMemoryInvalidationReasons(journal *memoryFailureJournal) []string {
+	var reasons []string
+	for i := range journal.events {
+		if journal.events[i].Type == failureLedgerEventInvalidated {
+			reasons = append(reasons, journal.events[i].InvalidReason)
+		}
+	}
+	return reasons
+}
+
+// Start appends off the mutex rather than through appendLocked, so it is the
+// one write that would otherwise leave an owed verdict owed. A run whose next
+// journal activity happens to be a start must settle the debt like any other.
+func TestFailureLedger_AStartSettlesAnOwedVerdictToo(t *testing.T) {
+	now := time.Date(2026, 8, 22, 14, 0, 0, 0, time.UTC)
+	journal := &flakyInvalidationJournal{failures: 1}
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 4, Journal: journal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	ledger.Invalidate(invalidReasonReconcileCapacity)
+	require.NotEmpty(t, ledger.UnpersistedInvalidations())
+
+	operation := testFailureOperation("m1", now)
+	operation.LifecycleState = failureOperationJournaled
+	require.NoError(t, ledger.Start(operation))
+
+	assert.Empty(t, ledger.UnpersistedInvalidations())
+	assert.ElementsMatch(t,
+		[]string{invalidReasonReconcileCapacity, invalidReasonWAL},
+		journaledInvalidationReasons(journal))
+}

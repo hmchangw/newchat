@@ -635,6 +635,9 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 	if l.recorder != nil && l.journal != nil {
 		l.recorder.JournalSize(l.journal.Size())
 	}
+	// This append bypasses appendLocked to stay off the mutex, so it settles
+	// owed verdicts itself rather than leaving that to the next write.
+	l.retryPendingInvalidationsLocked()
 	l.active[tracked.ID] = tracked
 	l.enqueueLocked(tracked)
 	if l.recorder != nil {
@@ -1608,7 +1611,11 @@ func (l *failureLedger) finishReplay() error {
 			"dropped", l.dropped,
 			"capacity", l.capacity,
 		)
-		l.invalidateLocked(invalidReasonCapacity)
+		// Noted rather than invalidated: this verdict is derived here, not read
+		// from the journal, and replay suppresses the append — claiming it
+		// persisted would retire a debt no write ever paid. The next successful
+		// append settles it.
+		l.noteInvalidationLocked(invalidReasonCapacity)
 	}
 	for _, operation := range l.active {
 		l.enqueueLocked(operation)
