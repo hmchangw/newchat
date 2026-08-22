@@ -682,9 +682,23 @@ func withSoakFailureReconcileMetrics(metrics *Metrics) soakFailureReconcilerOpti
 // persist actually landed. Recording before the call counts a failed write as
 // progress, which is the opposite of what the split is for.
 func (r *soakFailureReconciler) recordObserved(err error) error {
+	return r.recordObservedProbe(err, true)
+}
+
+// recordObservedProbe is the terminal form: the observation always lands, but
+// what the claim bought depends on whether anything answered. An unreachable
+// dependency at the deadline resolves the observer as unverified, and calling
+// that advanced hides the outage in the one window where the board is being
+// read to tell an outage from a persistence backlog. It is the same rule the
+// pre-deadline branches already follow.
+func (r *soakFailureReconciler) recordObservedProbe(err error, answered bool) error {
 	if err != nil {
 		r.recordClaim(soakReconcileClaimFailed)
 		return err
+	}
+	if !answered {
+		r.recordClaim(soakReconcileClaimUnavailable)
+		return nil
 	}
 	r.recordClaim(soakReconcileClaimAdvanced)
 	return nil
@@ -888,7 +902,8 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, bool, error) {
 	case result == soakFailureHistoryMismatch:
 		observation = failureObservationBad
 	}
-	return true, true, r.recordObserved(r.observe(operation.ID, observation, now))
+	return true, true, r.recordObservedProbe(
+		r.observe(operation.ID, observation, now), verifyErr == nil)
 }
 
 // observeSearchIndex asks the query side whether the message reached the index.
@@ -944,8 +959,9 @@ func (r *soakFailureReconciler) observeSearchIndex(
 		// which is a configuration problem, not evidence.
 		observation = failureObservationUnverified
 	}
-	return probed, r.recordObserved(
-		r.observeAs(operation.ID, failureObserverSearchIndex, observation, now))
+	return probed, r.recordObservedProbe(
+		r.observeAs(operation.ID, failureObserverSearchIndex, observation, now),
+		probed && probeErr == nil)
 }
 
 func (r *soakFailureReconciler) observeAs(
