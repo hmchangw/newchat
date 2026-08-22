@@ -61,7 +61,6 @@ type broadcastMetrics struct {
 	// Failures only: the thread-view lane is best-effort, so its volume is
 	// already covered by the delivery counter and only errors need a series.
 	threadViewFailures metric.Int64Counter
-	threadViewOpts     map[natsmetrics.EventType]metric.MeasurementOption
 }
 
 func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
@@ -87,12 +86,8 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 		fanout:             fanout,
 		deliveries:         deliveries,
 		threadViewFailures: threadViewFailures,
-		threadViewOpts:     make(map[natsmetrics.EventType]metric.MeasurementOption, len(allBroadcastEvents)),
 		fanoutOpts:         make(map[fanoutKey]metric.MeasurementOption),
 		deliveryOpts:       make(map[deliveryKey]metric.MeasurementOption),
-	}
-	for _, event := range allBroadcastEvents {
-		m.threadViewOpts[event] = metric.WithAttributes(attribute.String("event_type", string(event)))
 	}
 	for _, room := range allRoomKinds {
 		roomAttr := attribute.String("room_kind", string(room))
@@ -161,7 +156,10 @@ func (m *broadcastMetrics) ThreadViewPublishFailed(ctx context.Context, event na
 	if m == nil || m.threadViewFailures == nil {
 		return
 	}
-	m.threadViewFailures.Add(ctx, 1, m.threadViewOpts[normalizeBroadcastEvent(event)])
+	// Built inline rather than prebuilt like fanoutOpts/deliveryOpts: this runs
+	// only after a publish already failed, never on the hot path.
+	m.threadViewFailures.Add(ctx, 1,
+		metric.WithAttributes(attribute.String("event_type", string(normalizeBroadcastEvent(event)))))
 }
 
 type broadcastMetricLabels struct {

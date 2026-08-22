@@ -268,11 +268,6 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("channel thread fan-out for parent %s: %w", parentMsgID, err)
 		}
-		if len(fanOut) == 0 {
-			slog.DebugContext(ctx, "no thread subscribers to notify for thread reply",
-				"parentMessageID", parentMsgID,
-				"request_id", natsutil.RequestIDFromContext(ctx))
-		}
 	}
 
 	lookupAccounts := dedupedAccounts(msg.UserAccount, parsed.Accounts)
@@ -304,8 +299,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread created event for parent %s: %w", parentMsgID, err)
 		}
-		h.publishThreadViewEvent(ctx, meta.ID, parentMsgID, meta.CrossSite, meta.CrossSiteAt, payload)
-		return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
+		return h.publishChannelThreadEvent(ctx, meta.ID, parentMsgID, meta.CrossSite, meta.CrossSiteAt, payload, fanOut)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies fan out to all members. The thread-sub mention badge is
 		// owned by message-worker (markThreadMentions), so broadcast-worker doesn't
@@ -385,17 +379,11 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("channel thread fan-out for thread update of parent %s: %w", parentMsgID, err)
 		}
-		if len(fanOut) == 0 {
-			slog.DebugContext(ctx, "no thread subscribers to notify for thread update",
-				"parentMessageID", parentMsgID,
-				"request_id", natsutil.RequestIDFromContext(ctx))
-		}
 		payload, err := sonic.Marshal(&edit)
 		if err != nil {
 			return fmt.Errorf("marshal thread edit event for parent %s: %w", parentMsgID, err)
 		}
-		h.publishThreadViewEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload)
-		return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
+		return h.publishChannelThreadEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload, fanOut)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies are visible to every member, so edits fan out to
 		// all members (consistent with handleThreadCreated), not just thread
@@ -442,8 +430,7 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread delete event for parent %s: %w", parentMsgID, err)
 		}
-		h.publishThreadViewEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload)
-		if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
+		if err := h.publishChannelThreadEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload, fanOut); err != nil {
 			return fmt.Errorf("publish thread delete event for parent %s: %w", parentMsgID, err)
 		}
 	case model.RoomTypeDM, model.RoomTypeBotDM:
@@ -901,6 +888,15 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 	return pubErr
 }
 
+// publishChannelThreadEvent delivers one channel thread event on both lanes:
+// the thread-scoped view subject that open panels subscribe to, then the
+// per-follower fan-out. Keeping them in one call is what stops a future thread
+// branch from serving followers and silently missing viewers.
+func (h *Handler) publishChannelThreadEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, fanOut []string) error {
+	h.publishThreadViewEvent(ctx, roomID, parentMsgID, crossSite, crossSiteAt, payload)
+	return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
+}
+
 // publishThreadViewEvent mirrors an already-built thread event onto the
 // thread-scoped subject open thread panels subscribe to, so a viewer who
 // follows nothing still sees the reply.
@@ -909,10 +905,13 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 // Returning one would NAK a delivery whose per-follower fan-out already ran,
 // and viewers reconcile when the panel reopens.
 func (h *Handler) publishThreadViewEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, payload []byte) {
-	if !h.threadViewSubject || parentMsgID == "" || len(payload) == 0 {
+	if !h.threadViewSubject || parentMsgID == "" {
 		return
 	}
 	eventType := broadcastLabels(ctx).eventType
+	// Label the publishes as thread traffic; without this they land in the
+	// shared delivery counter's "unknown" room-kind bucket.
+	ctx = withBroadcastMetricLabels(ctx, roomThread, eventType)
 	now := time.Now().UTC()
 	for _, subj := range subject.RoomThreadEventTargets(roomID, parentMsgID, crossSite, crossSiteAt, h.routeMode, now) {
 		if err := h.pub.Publish(ctx, subj, payload); err != nil {

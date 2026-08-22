@@ -267,3 +267,29 @@ describe('threadEventsReducer — REPLY_EDITED / REPLY_DELETED live broadcast', 
     expect(d).toBe(open)
   })
 })
+
+// A follower with the panel open receives every mutation on both lanes; the
+// reducer must return the identical state object so React bails out.
+describe('threadEventsReducer duplicate-lane delivery', () => {
+  const opened = threadEventsReducer(
+    threadEventsReducer(initialState, {
+      type: 'OPEN_THREAD',
+      parent: { roomId: 'r1', siteId: 's1', messageId: 'p1', createdAtMs: 1000 },
+    }),
+    { type: 'THREAD_REPLY_RECEIVED', parentId: 'p1', message: { id: 'm1', content: 'hi' } }
+  )
+
+  it('REPLY_EDITED applied twice returns the identical state the second time', () => {
+    const edit = { type: 'REPLY_EDITED', messageId: 'm1', content: 'edited', editedAt: '2026-08-22T10:00:00Z' }
+    const once = threadEventsReducer(opened, edit)
+    expect(once).not.toBe(opened)
+    expect(threadEventsReducer(once, edit)).toBe(once)
+  })
+
+  it('REPLY_DELETED applied twice returns the identical state the second time', () => {
+    const del = { type: 'REPLY_DELETED', messageId: 'm1' }
+    const once = threadEventsReducer(opened, del)
+    expect(once).not.toBe(opened)
+    expect(threadEventsReducer(once, del)).toBe(once)
+  })
+})

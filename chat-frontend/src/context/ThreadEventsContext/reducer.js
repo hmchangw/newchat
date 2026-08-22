@@ -102,7 +102,11 @@ export function threadEventsReducer(state, action) {
       // Live broadcast edit applied to the open thread, if it matches.
       const idx = state.messages.findIndex((m) => m.id === action.messageId)
       if (idx < 0) return state
-      const updated = { ...state.messages[idx], content: action.content, editedAt: action.editedAt }
+      const current = state.messages[idx]
+      // A follower with the panel open receives this on both the per-subscriber
+      // and thread lanes; returning state keeps the second one from re-rendering.
+      if (current.content === action.content && current.editedAt === action.editedAt) return state
+      const updated = { ...current, content: action.content, editedAt: action.editedAt }
       const messages = [...state.messages.slice(0, idx), updated, ...state.messages.slice(idx + 1)]
       return { ...state, messages }
     }
@@ -110,7 +114,10 @@ export function threadEventsReducer(state, action) {
       // Live broadcast delete applied to the open thread, if it matches.
       const idx = state.messages.findIndex((m) => m.id === action.messageId)
       if (idx < 0) return state
-      const updated = { ...state.messages[idx], deleted: true }
+      const current = state.messages[idx]
+      // Idempotent for the same reason as REPLY_EDITED above.
+      if (current.deleted) return state
+      const updated = { ...current, deleted: true }
       const messages = [...state.messages.slice(0, idx), updated, ...state.messages.slice(idx + 1)]
       return { ...state, messages }
     }

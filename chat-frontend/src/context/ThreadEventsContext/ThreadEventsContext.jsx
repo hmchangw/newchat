@@ -10,6 +10,12 @@ import { generateMessageID } from '@/lib/idgen'
 import { fetchThreadMessages, sendMessage, subscribeToThreadEvents } from '@/api'
 import { threadEventsReducer, initialState } from './reducer'
 
+/** Mirrors the room lane's coercion so both lanes hand the reducer an ISO
+ *  string regardless of what the wire carried. */
+function normalizeEditedAt(editedAt) {
+  return typeof editedAt === 'string' ? editedAt : new Date(editedAt ?? Date.now()).toISOString()
+}
+
 const ThreadEventsContext = createContext(null)
 
 export function ThreadEventsProvider({ children }) {
@@ -29,34 +35,43 @@ export function ThreadEventsProvider({ children }) {
     if (!user) dispatch({ type: 'RESET' })
   }, [user])
 
+  // The three reducer actions are authored here once. Both the room-lane
+  // bridges below and the thread-lane subscription in openThread feed them, so
+  // a reply cannot mean two different things depending on which lane won.
+  const applyReply = useCallback((parentId, message) => {
+    dispatch({ type: 'THREAD_REPLY_RECEIVED', parentId, message })
+  }, [])
+
+  const applyMutation = useCallback((mut) => {
+    if (mut.kind === 'edited') {
+      // Drop edits without a plaintext body, matching the room lane: an
+      // encrypted edit carries encryptedNewContent, and blanking to '' would
+      // wipe the rendered message.
+      if (typeof mut.content !== 'string') return
+      dispatch({
+        type: 'REPLY_EDITED',
+        messageId: mut.messageId,
+        content: mut.content,
+        editedAt: mut.editedAt,
+      })
+    } else if (mut.kind === 'deleted') {
+      dispatch({ type: 'REPLY_DELETED', messageId: mut.messageId })
+    }
+  }, [])
+
   // Bridge live room-channel thread replies → THREAD_REPLY_RECEIVED.
   useEffect(() => {
     const unsubscribe = registerThreadReplyHandler((evt) => {
-      dispatch({
-        type: 'THREAD_REPLY_RECEIVED',
-        parentId: evt.parentMessageId,
-        message: evt.message,
-      })
+      applyReply(evt.parentMessageId, evt.message)
     })
     return unsubscribe
-  }, [registerThreadReplyHandler])
+  }, [registerThreadReplyHandler, applyReply])
 
   // Bridge live edit/delete mutations → REPLY_EDITED / REPLY_DELETED.
   useEffect(() => {
-    const unsubscribe = registerThreadMessageMutationHandler((mut) => {
-      if (mut.kind === 'edited') {
-        dispatch({
-          type: 'REPLY_EDITED',
-          messageId: mut.messageId,
-          content: mut.content ?? '',
-          editedAt: mut.editedAt,
-        })
-      } else if (mut.kind === 'deleted') {
-        dispatch({ type: 'REPLY_DELETED', messageId: mut.messageId })
-      }
-    })
+    const unsubscribe = registerThreadMessageMutationHandler(applyMutation)
     return unsubscribe
-  }, [registerThreadMessageMutationHandler])
+  }, [registerThreadMessageMutationHandler, applyMutation])
 
   // Drops the open panel's thread subscription. NATS reaps the interest, which
   // is what removes this client from the thread's delivery set.
@@ -81,18 +96,17 @@ export function ThreadEventsProvider({ children }) {
         nats,
         { roomId: parent.roomId, parentMessageId: parent.messageId, crossSite: parent.crossSite },
         (evt) => {
-          if (myGen !== generationRef.current) return
           if (evt?.type === 'new_thread_message') {
-            dispatch({ type: 'THREAD_REPLY_RECEIVED', parentId: parent.messageId, message: evt.message })
+            applyReply(parent.messageId, evt.message)
           } else if (evt?.type === 'message_edited') {
-            dispatch({
-              type: 'REPLY_EDITED',
+            applyMutation({
+              kind: 'edited',
               messageId: evt.messageId,
-              content: evt.newContent ?? '',
-              editedAt: evt.editedAt,
+              content: evt.newContent,
+              editedAt: normalizeEditedAt(evt.editedAt),
             })
           } else if (evt?.type === 'message_deleted') {
-            dispatch({ type: 'REPLY_DELETED', messageId: evt.messageId })
+            applyMutation({ kind: 'deleted', messageId: evt.messageId })
           }
         }
       )
@@ -117,7 +131,7 @@ export function ThreadEventsProvider({ children }) {
           })
         })
     },
-    [user, nats, closeThreadSub]
+    [user, nats, closeThreadSub, applyReply, applyMutation]
   )
 
   const closeThread = useCallback(() => {

@@ -417,6 +417,32 @@ describe('ThreadEventsContext thread-view subscription', () => {
     expect(screen.getByText('firstEditedAt:2026-08-22T10:00:00Z')).toBeInTheDocument()
   })
 
+  // Matches the room lane: an encrypted edit carries encryptedNewContent, and
+  // blanking to '' would wipe the rendered reply.
+  it('ignores an edit whose newContent is not a plaintext string', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'keep me' } })
+    })
+    await act(async () => {
+      threadEventHandler({ type: 'message_edited', messageId: 'm9', encryptedNewContent: { version: 3 } })
+    })
+    expect(screen.getByText('firstContent:keep me')).toBeInTheDocument()
+  })
+
+  it('normalizes a non-string editedAt to an ISO string', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'before' } })
+    })
+    await act(async () => {
+      threadEventHandler({ type: 'message_edited', messageId: 'm9', newContent: 'after', editedAt: 1756000000000 })
+    })
+    expect(screen.getByText('firstEditedAt:2025-08-24T01:46:40.000Z')).toBeInTheDocument()
+  })
+
   it('applies a delete arriving on the thread subject', async () => {
     setup()
     await act(async () => { screen.getByText('open').click() })

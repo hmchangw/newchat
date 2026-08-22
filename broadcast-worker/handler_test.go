@@ -3612,7 +3612,6 @@ func TestPublishThreadViewEvent_Skips(t *testing.T) {
 	}{
 		{"kill switch off", false, "parent-1", []byte(`{}`)},
 		{"empty parent id is an unroutable token", true, "", []byte(`{}`)},
-		{"empty payload", true, "parent-1", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
