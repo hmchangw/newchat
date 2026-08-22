@@ -436,3 +436,14 @@ func TestIntegration_ThreadSubscriptionUpsertedForwardedViaConcurrentLane(t *tes
 		[]byte(`{"id":"sub-1","threadRoomId":"tr-1","userId":"u-bob","userAccount":"bob","roomId":"room-ts-roundtrip","siteId":"site-ts-origin","hasMention":false}`),
 		"thread-sub-inbox:tr-1:u-bob:msg-1:false:site-ts-dest")
 }
+
+func TestIntegration_SubscriptionMentionForwardedViaConcurrentLane(t *testing.T) {
+	// broadcast-worker's mention badge must ride the concurrent lane (whose
+	// FilterSubjects derive from outbox.ConcurrentEventTypes) and reach the
+	// destination INBOX verbatim. A subject matching no lane would park the event
+	// in OUTBOX with a green publish metric, so this pins the wiring.
+	assertConcurrentLaneForwards(t, "site-sm-origin", "site-sm-dest", "room-sm-roundtrip",
+		model.InboxSubscriptionMention,
+		[]byte(`{"roomId":"room-sm-roundtrip","accounts":["bob"],"mentionedAt":1755820800000,"timestamp":1755820800123}`),
+		"mention:room-sm-roundtrip:msg-1:1755820800000:site-sm-dest")
+}

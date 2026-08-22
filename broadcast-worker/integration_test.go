@@ -12,13 +12,16 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/userstore"
@@ -749,4 +752,105 @@ func TestBroadcastWorker_ThreadViewSubject_EncryptedForRoomNamespace_Integration
 	evt, clientMsg := decryptClientMessage(t, msg.Data, key)
 	assert.Equal(t, model.RoomEventNewThreadMessage, evt.Type)
 	assert.Equal(t, "secret thread body", clientMsg.Content)
+}
+
+// TestBroadcastWorker_MentionFederation_Integration is the producer leg of the
+// cross-site badge chain: a real message mentioning a remote-homed user must
+// land on the local OUTBOX stream as an OutboxEvent addressed to that user's
+// site, while the local-homed mentionee is badged in Mongo and never federated.
+// outbox-worker's own suite covers the OUTBOX→INBOX forward, and inbox-worker's
+// covers the destination write.
+func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-fed", Name: "dev", Type: model.RoomTypeChannel, UserCount: 3, SiteID: "site-a",
+	})
+	require.NoError(t, err)
+	_, err = db.Collection("subscriptions").InsertMany(ctx, []interface{}{
+		model.Subscription{ID: "sf1", User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomID: "r-fed"},
+		model.Subscription{ID: "sf2", User: model.SubscriptionUser{ID: "u-bob", Account: "bob"}, RoomID: "r-fed"},
+		model.Subscription{ID: "sf3", User: model.SubscriptionUser{ID: "u-carol", Account: "carol"}, RoomID: "r-fed"},
+	})
+	require.NoError(t, err)
+	seedUsers(t, db)
+	// carol is homed on site-b, so her badge has to cross sites.
+	_, err = db.Collection("users").InsertOne(ctx,
+		model.User{ID: "u-carol", Account: "carol", SiteID: "site-b", EngName: "Carol Lin"})
+	require.NoError(t, err)
+
+	nc, err := nats.Connect(testutil.NATS(t))
+	require.NoError(t, err)
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	outboxCfg := stream.Outbox("site-a")
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{Name: outboxCfg.Name, Subjects: outboxCfg.Subjects})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), outboxCfg.Name) })
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	us := userstore.NewMongoStore(db.Collection("users"))
+	key := testRoomKey(t)
+	handler := NewHandler(store, us, &recordingPublisher{}, &fakeRoomKeyProvider{pair: key},
+		defaultParentFetcher, true, subject.RouteGlobal,
+		withOutboxFederation("site-a", func(ctx context.Context, subj string, data []byte, msgID string) error {
+			_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
+			return err
+		}))
+
+	msgTime := time.Now().UTC().Truncate(time.Millisecond)
+	data, err := json.Marshal(model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "m-fed", RoomID: "r-fed", UserID: "u-alice", UserAccount: "alice",
+			Content: "hey @bob @carol", CreatedAt: msgTime,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, handler.HandleMessage(ctx, data))
+
+	// Both mentionees are badged locally; only the remote one is federated.
+	for _, account := range []string{"bob", "carol"} {
+		var sub model.Subscription
+		require.NoError(t, db.Collection("subscriptions").
+			FindOne(ctx, bson.M{"u.account": account, "roomId": "r-fed"}).Decode(&sub))
+		assert.True(t, sub.HasMention, "account %s", account)
+	}
+
+	cons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, jetstream.ConsumerConfig{
+		Name: "mention-fed-assert", FilterSubject: subject.OutboxWildcard("site-a"),
+	})
+	require.NoError(t, err)
+	msgs, err := cons.Fetch(10, jetstream.FetchMaxWait(3*time.Second))
+	require.NoError(t, err)
+
+	var got []*nats.Msg
+	for msg := range msgs.Messages() {
+		got = append(got, &nats.Msg{Subject: msg.Subject(), Data: msg.Data()})
+	}
+	require.NoError(t, msgs.Error())
+	require.Len(t, got, 1, "exactly one destination site should be federated")
+	assert.Equal(t, subject.Outbox("site-a", "site-b", model.InboxSubscriptionMention), got[0].Subject)
+
+	var relay model.OutboxEvent
+	require.NoError(t, json.Unmarshal(got[0].Data, &relay))
+	assert.Equal(t, "r-fed", relay.RoomID)
+	assert.Equal(t, fmt.Sprintf("mention:r-fed:m-fed:%d:site-b", msgTime.UnixMilli()), relay.DedupID)
+
+	var envelope model.InboxEvent
+	require.NoError(t, json.Unmarshal(relay.Envelope, &envelope))
+	assert.Equal(t, model.InboxSubscriptionMention, envelope.Type)
+	assert.Equal(t, "site-a", envelope.SiteID)
+	assert.Equal(t, "site-b", envelope.DestSiteID)
+
+	var payload model.SubscriptionMentionEvent
+	require.NoError(t, json.Unmarshal(envelope.Payload, &payload))
+	assert.Equal(t, "r-fed", payload.RoomID)
+	assert.Equal(t, []string{"carol"}, payload.Accounts, "only the remote-homed mentionee")
+	assert.Equal(t, msgTime.UnixMilli(), payload.MentionedAt)
+	assert.NotZero(t, payload.Timestamp)
 }

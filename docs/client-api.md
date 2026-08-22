@@ -965,7 +965,7 @@ it is absent on every other action.
 | `name` | string | Display name per room type (see above). |
 | `roles` | string[] | The user's roles in the room (e.g. `["member"]`, `["owner"]`). |
 | `joinedAt` | RFC3339 timestamp | When the user joined. |
-| `hasMention` | boolean | Whether the user has an unread mention. Authoritative subscription state maintained by the write path (set when the user is @-mentioned, cleared on read); **not** modified by read enrichment. |
+| `hasMention` | boolean | Whether the user has an unread mention. Authoritative subscription state maintained by the write path (set when the user is @-mentioned, cleared on read); **not** modified by read enrichment. For a mentionee homed on another site, `broadcast-worker` also relays a cross-site `subscription_mention` event so the badge lands on the site that serves their `subscription.list`. |
 | `hasUnread` | boolean | Whether the room has unread messages — computed at read time by comparing the room's `lastMsgAt` to the subscription's `lastSeenAt` (not persisted). |
 | `hasGroupMention` | boolean | Whether the room has an unread @all/@channel mention — computed at read time by comparing the room's `lastMentionAllAt` to the subscription's `lastSeenAt` (not persisted). |
 | `alert` | boolean | Whether the room has an unread alert for the user. Authoritative subscription state maintained by the write path (set on new message, cleared on read receipt); **not** modified by read enrichment. |
@@ -5192,7 +5192,7 @@ Results are **paginated** by `offset`/`limit` (offset-based): the server returns
 <a id="enrichment"></a>
 **Enrichment behavior** (shared by `subscription.list`, `subscription.getChannels`, `subscription.getDM`, `subscription.getByRoomID`):
 - Room-derived fields are returned under the nested `room` object ([SubscriptionRoom](#subscriptionroom)): **local** rows from the Mongo `$lookup` baseline (no RPC), **cross-site** rows from room-service's per-site `GetRoomsInfo` RPC. The subscription's own fields are never overwritten by room data.
-- `alert` and `hasMention` are **subscription** state, not room state: they are returned as stored on the subscription (maintained by the write path — `message-worker` sets `hasMention` when the user is @-mentioned, read receipts clear `alert`) and are **never** overwritten or recomputed by enrichment.
+- `alert` and `hasMention` are **subscription** state, not room state: they are returned as stored on the subscription (maintained by the write path — `broadcast-worker` sets `hasMention` when the user is @-mentioned, read receipts clear `alert`) and are **never** overwritten or recomputed by enrichment.
 - `room.privateKey` / `room.keyVersion` deliver the room's current E2E key to the member when the room has one (the initial key bootstrap on (re)connect; see §5). Both fields are omitted for rooms with no key.
 - Soft-deleted rooms (a `Del-` name prefix) are treated **identically whether the room is local or cross-site**, but differ by endpoint shape:
   - **List paths** (`subscription.list`, `subscription.getChannels`) and `subscription.count`: the subscription is **dropped**. Local rooms are filtered in the Mongo query; cross-site rooms are dropped after the per-site `GetRoomsInfo` lookup reveals the `Del-` name — this happens post-pagination, so a page can be shorter than `limit` (`hasMore` is computed from the database page, before the cross-site drop).
