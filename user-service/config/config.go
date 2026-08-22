@@ -18,6 +18,28 @@ type MongoConfig struct {
 	// ReadPreference routes staleness-tolerant reads to secondaries per read site;
 	// the client stays on primary for dedup/read-after-write.
 	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// MaxPoolSize is the NATS-path pool. Explicit rather than inherited: it is the
+	// backpressure point the RPC handlers actually queue on.
+	MaxPoolSize uint64 `env:"MAX_POOL_SIZE" envDefault:"100"`
+}
+
+// HTTPConfig configures the client-facing HTTP listener (env prefix: HTTP_).
+type HTTPConfig struct {
+	Port string `env:"PORT" envDefault:"8080"`
+	// MaxConcurrency caps in-flight HTTP handlers, shedding the overflow with 429.
+	// A budget of its own, so a client burst cannot starve the NATS handlers. 0 disables.
+	MaxConcurrency int           `env:"MAX_CONCURRENCY" envDefault:"256"`
+	HandlerTimeout time.Duration `env:"HANDLER_TIMEOUT" envDefault:"30s"`
+	// WriteTimeout must exceed HandlerTimeout: net/http starts its clock when the
+	// request headers are read, so an equal value cuts the response mid-write.
+	WriteTimeout     time.Duration `env:"WRITE_TIMEOUT"      envDefault:"35s"`
+	GzipMinBytes     int           `env:"GZIP_MIN_BYTES"     envDefault:"1024"`
+	MongoMaxPoolSize uint64        `env:"MONGO_MAX_POOL_SIZE" envDefault:"128"`
+	MongoMinPoolSize uint64        `env:"MONGO_MIN_POOL_SIZE" envDefault:"16"`
+	// Page bounds, copied in from the SUBSCRIPTION_HTTP_* vars whose names predate
+	// this prefix.
+	DefaultLimit int `env:"-"`
+	MaxLimit     int `env:"-"`
 }
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
@@ -91,6 +113,19 @@ type Config struct {
 	// ShowTeamsAccounts allowlists accounts that see Teams rooms even when
 	// ShowTeamsRoom is false — an ops-managed set, comma-separated.
 	ShowTeamsAccounts []string `env:"SHOW_TEAMS_ROOM_ACCOUNTS" envSeparator:","`
+	// HTTPDefaultLimit/HTTPMaxLimit bound the HTTP page. The default matches the
+	// NATS one so an omitted limit behaves identically on both transports; the max
+	// is far higher because no 128 KB payload ceiling applies.
+	HTTPDefaultLimit int `env:"SUBSCRIPTION_HTTP_DEFAULT_LIMIT" envDefault:"40"`
+	HTTPMaxLimit     int `env:"SUBSCRIPTION_HTTP_MAX_LIMIT"     envDefault:"400"`
+	// HealthAddr serves /healthz and /readyz on their own listener, so a shed API
+	// request can never fail a kubelet probe.
+	HealthAddr string `env:"HEALTH_ADDR" envDefault:":8081"`
+	// BotplatformURL enables the session-token auth branch; unset leaves SSO only.
+	BotplatformURL string `env:"BOTPLATFORM_URL" envDefault:""`
+	// GoMemLimitFraction sets GOMEMLIMIT to this share of the cgroup quota.
+	GoMemLimitFraction float64    `env:"GOMEMLIMIT_FRACTION" envDefault:"0.8"`
+	HTTP               HTTPConfig `envPrefix:"HTTP_"`
 }
 
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.
@@ -116,6 +151,33 @@ func Load() (Config, error) {
 	}
 	if cfg.DefaultAppsLimit > cfg.MaxAppsLimit {
 		return Config{}, fmt.Errorf("APPS_DEFAULT_LIMIT (%d) must be <= APPS_MAX_LIMIT (%d)", cfg.DefaultAppsLimit, cfg.MaxAppsLimit)
+	}
+	if cfg.HTTPMaxLimit < 1 {
+		return Config{}, fmt.Errorf("SUBSCRIPTION_HTTP_MAX_LIMIT must be >= 1, got %d", cfg.HTTPMaxLimit)
+	}
+	if cfg.HTTPDefaultLimit < 1 {
+		return Config{}, fmt.Errorf("SUBSCRIPTION_HTTP_DEFAULT_LIMIT must be >= 1, got %d", cfg.HTTPDefaultLimit)
+	}
+	if cfg.HTTPDefaultLimit > cfg.HTTPMaxLimit {
+		return Config{}, fmt.Errorf("SUBSCRIPTION_HTTP_DEFAULT_LIMIT (%d) must be <= SUBSCRIPTION_HTTP_MAX_LIMIT (%d)", cfg.HTTPDefaultLimit, cfg.HTTPMaxLimit)
+	}
+	if cfg.HTTP.MaxConcurrency < 0 {
+		return Config{}, fmt.Errorf("HTTP_MAX_CONCURRENCY must be >= 0, got %d", cfg.HTTP.MaxConcurrency)
+	}
+	if cfg.HTTP.WriteTimeout <= cfg.HTTP.HandlerTimeout {
+		return Config{}, fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must exceed HTTP_HANDLER_TIMEOUT (%s)", cfg.HTTP.WriteTimeout, cfg.HTTP.HandlerTimeout)
+	}
+	if cfg.HTTP.MongoMaxPoolSize < 1 {
+		return Config{}, fmt.Errorf("HTTP_MONGO_MAX_POOL_SIZE must be >= 1, got %d", cfg.HTTP.MongoMaxPoolSize)
+	}
+	if cfg.HTTP.MongoMinPoolSize > cfg.HTTP.MongoMaxPoolSize {
+		return Config{}, fmt.Errorf("HTTP_MONGO_MIN_POOL_SIZE (%d) must be <= HTTP_MONGO_MAX_POOL_SIZE (%d)", cfg.HTTP.MongoMinPoolSize, cfg.HTTP.MongoMaxPoolSize)
+	}
+	if cfg.Mongo.MaxPoolSize < 1 {
+		return Config{}, fmt.Errorf("MONGO_MAX_POOL_SIZE must be >= 1, got %d", cfg.Mongo.MaxPoolSize)
+	}
+	if cfg.GoMemLimitFraction <= 0 || cfg.GoMemLimitFraction > 1 {
+		return Config{}, fmt.Errorf("GOMEMLIMIT_FRACTION must be in (0,1], got %v", cfg.GoMemLimitFraction)
 	}
 	if cfg.RoomBatchChunk < 1 || cfg.RoomBatchChunk > 100 {
 		return Config{}, fmt.Errorf("ROOM_BATCH_CHUNK must be in [1,100], got %d", cfg.RoomBatchChunk)
@@ -149,5 +211,8 @@ func Load() (Config, error) {
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return Config{}, fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
 	}
+	// The page bounds live under SUBSCRIPTION_HTTP_*, outside the HTTP_ prefix.
+	cfg.HTTP.DefaultLimit = cfg.HTTPDefaultLimit
+	cfg.HTTP.MaxLimit = cfg.HTTPMaxLimit
 	return cfg, nil
 }
