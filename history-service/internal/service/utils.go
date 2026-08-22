@@ -170,9 +170,8 @@ func canModify(msg *models.Message, account string) bool {
 	return msg.Sender.Account == account
 }
 
-// stripRichContent clears the heavy, variable-size fields shared by the two
-// placeholder paths (blankOversize and redactUnavailablePins), so "which
-// fields are heavy" lives in one place as the model grows.
+// stripRichContent clears the heavy fields shared by both placeholder paths,
+// so "which fields are heavy" lives in one place as the model grows.
 func stripRichContent(m *models.Message) {
 	m.Mentions = nil
 	m.Attachments = nil
@@ -184,13 +183,10 @@ func stripRichContent(m *models.Message) {
 	m.SysMsgData = nil
 }
 
-// blankOversize strips a row that alone exceeds the reply budget so the page
-// can be sent and the client can page past it. Identifiers, sender, timestamps
-// and Type stay for placeholder rendering.
-//
-// Type is deliberately kept, unlike redactUnavailablePins: that path clears it
-// so a pre-access system message cannot leak event details, but here the caller
-// is authorised to see this row and needs Type to pick a placeholder.
+// blankOversize strips a row that alone exceeds the budget so the page can be
+// sent and the client can page past it; identifiers, sender, timestamps and
+// Type stay for placeholder rendering. Type is kept unlike
+// redactUnavailablePins — the caller may see this row, it is merely too large.
 func blankOversize(m *models.Message) {
 	stripRichContent(m)
 	m.Msg = ""
@@ -201,9 +197,8 @@ func blankOversize(m *models.Message) {
 	m.Truncated = true
 }
 
-// fitPage trims msgs to the reply budget, blanking a lone row that still will
-// not fit. Reports whether anything was dropped so the caller can set its
-// "more" flag.
+// fitPage trims msgs to the budget, blanking a lone row that still will not
+// fit. Reports whether rows were dropped, for the caller's "more" flag.
 func (s *HistoryService) fitPage(msgs []models.Message, envelope int) ([]models.Message, bool) {
 	kept, dropped, oversize := pagefit.Fit(msgs, s.pageBudget, envelope)
 	if oversize {
@@ -212,8 +207,8 @@ func (s *HistoryService) fitPage(msgs []models.Message, envelope int) ([]models.
 	return kept, dropped
 }
 
-// fitWindow trims a centred window to the reply budget, blanking the pivot row
-// when it alone will not fit so the caller still gets the row they asked for.
+// fitWindow trims a centred window to the budget, blanking the pivot when it
+// alone will not fit so the caller still gets the row they asked for.
 func (s *HistoryService) fitWindow(msgs []models.Message, pivot, envelope int) (int, int) {
 	lo, hi, oversize := pagefit.FitWindow(msgs, pivot, s.pageBudget, envelope)
 	if oversize {

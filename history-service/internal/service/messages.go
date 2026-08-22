@@ -25,8 +25,7 @@ const (
 	surroundingPageSize = 50
 	maxPageSize         = 100
 	// pageEnvelope reserves bytes for a paginated response's non-item fields
-	// (more-flags, minUserLastSeenAt) plus JSON punctuation. Shared by the
-	// history and surrounding reads, whose envelopes are the same shape.
+	// plus JSON punctuation. History and surrounding share one envelope shape.
 	pageEnvelope    = 256
 	maxContentBytes = 20 * 1024 // 20 KB; mirrors message-gatekeeper's content cap
 )

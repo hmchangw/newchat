@@ -9,9 +9,8 @@ import (
 	"math"
 )
 
-// oversizeRow is the width charged to a row that cannot be marshalled. Large
-// enough to lose against any real budget, small enough not to overflow the
-// running total.
+// oversizeRow is charged to an unmarshalable row: big enough to lose against
+// any real budget, small enough not to overflow the running total.
 const oversizeRow = math.MaxInt32
 
 // DefaultReserve is the headroom services leave under the broker's max_payload
@@ -22,10 +21,9 @@ const DefaultReserve = 4 << 10
 // disabled, which keeps every page whole.
 type Budget struct{ max int }
 
-// NewBudget derives the ceiling from the broker's advertised max_payload, less
-// a reserve for trace headers and the envelope's non-item fields. An unknown
-// cap, or one the reserve swallows, disables trimming instead of rejecting
-// every page — a misconfigured reserve must not empty every reply.
+// NewBudget derives the ceiling from the broker's max_payload less a reserve.
+// An unknown cap, or one the reserve swallows, disables trimming — a
+// misconfigured reserve must not empty every reply.
 func NewBudget(brokerMaxPayload int64, reserve int) Budget {
 	if brokerMaxPayload <= 0 || reserve < 0 {
 		return Budget{}
@@ -40,9 +38,8 @@ func NewBudget(brokerMaxPayload int64, reserve int) Budget {
 	return Budget{max: max}
 }
 
-// Resolve picks the reply ceiling at startup: an explicit override (from
-// MAX_RESPONSE_BYTES) when positive, otherwise the broker's advertised
-// max_payload. Both are reduced by reserve.
+// Resolve picks the startup ceiling: a positive override (MAX_RESPONSE_BYTES)
+// wins, else the broker's max_payload. Both are reduced by reserve.
 func Resolve(override, brokerMaxPayload int64, reserve int) Budget {
 	if override > 0 {
 		return NewBudget(override, reserve)
@@ -57,12 +54,9 @@ func (b Budget) Enabled() bool { return b.max > 0 }
 func (b Budget) Bytes() int { return b.max }
 
 // Fit trims items to the longest prefix that fits b, charging envelope for the
-// response's non-item bytes.
-//
-// dropped reports that rows were removed, so the caller can set its "more"
-// flag. oversize reports that the single kept row still exceeds the budget:
-// a non-empty slice always keeps at least one row, because a caller handed
-// zero rows with "more" set would have no position to page from.
+// response's non-item bytes. dropped drives the caller's "more" flag; oversize
+// says the one kept row still overflows. A non-empty slice always keeps a row —
+// zero rows with "more" set would leave the client no position to page from.
 func Fit[T any](items []T, b Budget, envelope int) (kept []T, dropped, oversize bool) {
 	if fitsWhole(items, b, envelope) {
 		return items, false, false
@@ -85,9 +79,8 @@ func Fit[T any](items []T, b Budget, envelope int) (kept []T, dropped, oversize 
 }
 
 // FitWindow trims a centred window to the span [lo,hi) that fits b, grown
-// outward one row at a time from each side so it stays centred on pivot.
-// pivot is always kept — it is the row the caller centred on — and is clamped
-// into range. oversize reports that pivot alone exceeds the budget.
+// outward from pivot so it stays centred. pivot is clamped into range and
+// always kept; oversize says pivot alone overflows.
 func FitWindow[T any](items []T, pivot int, b Budget, envelope int) (lo, hi int, oversize bool) {
 	if len(items) == 0 {
 		return 0, 0, false
@@ -118,9 +111,8 @@ func FitWindow[T any](items []T, pivot int, b Budget, envelope int) (lo, hi int,
 	}
 }
 
-// fitsWhole is the fast path both trims share: one streamed encode of the whole
-// slice answers the common "nothing needs trimming" case, so a page that fits
-// never pays the per-row marshal below.
+// fitsWhole is the shared fast path: one streamed encode answers the common
+// "nothing to trim" case, so a fitting page never pays the per-row marshal.
 func fitsWhole[T any](items []T, b Budget, envelope int) bool {
 	if !b.Enabled() || len(items) == 0 {
 		return true
@@ -128,8 +120,8 @@ func fitsWhole[T any](items []T, b Budget, envelope int) bool {
 	return envelope+encodedLen(items) <= b.max
 }
 
-// widths marshals each row once so the trim loops can scan encoded sizes
-// without re-encoding. Only reached when the whole slice already overflowed.
+// widths marshals each row once so the trim loops can scan sizes without
+// re-encoding. Only reached once the whole slice has already overflowed.
 func widths[T any](items []T) []int {
 	out := make([]int, len(items))
 	for i := range items {

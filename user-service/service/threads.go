@@ -17,8 +17,8 @@ import (
 const (
 	defaultThreadListLimit = 20
 	maxThreadListLimit     = 100
-	// threadListEnvelope reserves bytes for the response's non-item fields
-	// (hasNext, nextCursor, unavailableSites) plus JSON punctuation.
+	// threadListEnvelope reserves bytes for hasNext/nextCursor/unavailableSites
+	// plus JSON punctuation.
 	threadListEnvelope = 256
 )
 
