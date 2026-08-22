@@ -178,6 +178,38 @@ func unboundedInsideNewSet(v string) attribute.Set {
 	return attribute.NewSet(attribute.String("roomID", v))
 }
 
+// The constructor is a metavariable, not String. An int room id is one series
+// per room exactly like a string one, so narrowing $CTOR back to String would
+// reopen the hole these two lines close.
+func nonStringConstructors(ctx context.Context, c metric.Int64Counter, n int64) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Int64("room_id", n)))
+	// ruleid: metrics-no-unbounded-label
+	_ = attribute.NewSet(attribute.Int("account_id", 3))
+}
+
+// attribute.Key("k").String(v) builds the same attribute the other way round.
+// Both wrappers need their own pattern, so both get their own line.
+func keyBuilderForm(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Key("room_id").String(v)))
+	// ruleid: metrics-no-unbounded-label
+	_ = attribute.NewSet(attribute.Key("roomID").String(v))
+}
+
+// One line per position where the regex's separator turned from _ into [._],
+// because OTel semconv spells all of these dotted.
+func dottedSemconvKeys(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("user.id", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("inbox.subject", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("error.text", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("error.stack", v)))
+}
+
 // Bounded labels, including the error *classifications* the contract allows.
 // The per-call rule still fires on each — that is the separate complaint about
 // building the set inline — but the cardinality rule must not, and the absence
@@ -207,4 +239,20 @@ func boundedLabels(ctx context.Context, c metric.Int64Counter, v string) {
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("event_type", v)))
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("destination_kind", v)))
+}
+
+// The same negative assertion for the forms the rule only just learned to see.
+// Widening the constructor and the separator must not start swallowing bounded
+// classifications, or the metric loses the one dimension worth slicing on.
+func boundedLabelsInWidenedForms(ctx context.Context, c metric.Int64Counter, v string, n int64) {
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("error.type", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("user.agent", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Key("outcome").String(v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Int64("recipients", n)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Bool("run_info", true)))
 }
