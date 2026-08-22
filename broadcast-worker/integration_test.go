@@ -573,19 +573,16 @@ func TestBroadcastWorker_GetHistorySharedSince_Integration(t *testing.T) {
 	assert.Empty(t, empty)
 }
 
-// natsConnPublisher adapts a raw *nats.Conn to Publisher so an integration test
-// can assert what a subscribed client actually receives, not what a fake
-// recorded.
+// natsConnPublisher adapts a raw *nats.Conn so the test asserts on what a
+// subscribed client receives, not on what a fake recorded.
 type natsConnPublisher struct{ nc *nats.Conn }
 
 func (p *natsConnPublisher) Publish(_ context.Context, subj string, data []byte) error {
 	return p.nc.Publish(subj, data)
 }
 
-// The reported bug, end to end: dave is a room member who never replied, so he
-// is absent from thread_rooms.replyAccounts and the per-follower fan-out skips
-// him. With the thread panel open he subscribes to the thread subject and must
-// receive the reply over real NATS.
+// dave never replied, so replyAccounts omits him and the per-follower fan-out
+// skips him; with the panel open the thread subject must still reach him.
 func TestBroadcastWorker_ThreadViewSubject_NonFollowerReceivesReply_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
@@ -647,8 +644,7 @@ func TestBroadcastWorker_ThreadViewSubject_NonFollowerReceivesReply_Integration(
 	assert.Equal(t, followerMsg.Data, viewerMsg.Data, "both lanes carry the identical envelope")
 }
 
-// A same-site room keeps its thread lane on the leaf-filtered local namespace,
-// so a viewer on the global subject hears nothing.
+// A same-site room keeps its thread lane local; the global subject stays silent.
 func TestBroadcastWorker_ThreadViewSubject_SameSiteRoomRoutesLocal_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()

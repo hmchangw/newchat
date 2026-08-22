@@ -453,8 +453,7 @@ func RoomThreadEvent(roomID, parentMessageID string, global bool) string {
 }
 
 // RoomThreadEventTargets returns the thread-scoped subject(s) to publish to.
-// Shares roomRouteGlobals with RoomEventTargets so a same-site room's thread
-// events stay local and a flipped room dual-publishes for the grace window.
+// Shares roomRouteGlobals with RoomEventTargets, so locality routing matches.
 func RoomThreadEventTargets(roomID, parentMessageID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
 	globals := roomRouteGlobals(crossSite, crossSiteAt, mode, now)
 	out := make([]string, len(globals))

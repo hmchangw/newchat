@@ -888,29 +888,21 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 	return pubErr
 }
 
-// publishChannelThreadEvent delivers one channel thread event on both lanes:
-// the thread-scoped view subject that open panels subscribe to, then the
-// per-follower fan-out. Keeping them in one call is what stops a future thread
-// branch from serving followers and silently missing viewers.
+// publishChannelThreadEvent delivers a channel thread event on both lanes.
+// One call, so a new thread branch cannot serve followers but miss viewers.
 func (h *Handler) publishChannelThreadEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, fanOut []string) error {
 	h.publishThreadViewEvent(ctx, roomID, parentMsgID, crossSite, crossSiteAt, payload)
 	return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
 }
 
-// publishThreadViewEvent mirrors an already-built thread event onto the
-// thread-scoped subject open thread panels subscribe to, so a viewer who
-// follows nothing still sees the reply.
-//
-// Best-effort by contract: a failure is counted and logged, never returned.
-// Returning one would NAK a delivery whose per-follower fan-out already ran,
-// and viewers reconcile when the panel reopens.
+// publishThreadViewEvent mirrors a thread event onto the subject open panels
+// subscribe to. Never returns an error: a NAK would re-run the fan-out.
 func (h *Handler) publishThreadViewEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, payload []byte) {
 	if !h.threadViewSubject || parentMsgID == "" {
 		return
 	}
 	eventType := broadcastLabels(ctx).eventType
-	// Label the publishes as thread traffic; without this they land in the
-	// shared delivery counter's "unknown" room-kind bucket.
+	// Unlabelled, these land in the delivery counter's "unknown" room-kind.
 	ctx = withBroadcastMetricLabels(ctx, roomThread, eventType)
 	now := time.Now().UTC()
 	for _, subj := range subject.RoomThreadEventTargets(roomID, parentMsgID, crossSite, crossSiteAt, h.routeMode, now) {

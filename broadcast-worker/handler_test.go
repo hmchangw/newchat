@@ -3399,8 +3399,7 @@ func terminalCountFor(t *testing.T, reason string, fn func(context.Context)) int
 	return sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": reason})
 }
 
-// threadViewSubjects returns the captured subjects on the thread-scoped view
-// lane, so a test can assert it independently of the per-follower lane.
+// threadViewSubjects isolates the view lane from the per-follower lane.
 func (m *mockPublisher) threadViewSubjects() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -3438,8 +3437,8 @@ func threadReplyEventJSON(t *testing.T, event model.EventType, msgTime time.Time
 	return data
 }
 
-// A viewer who follows nothing still gets the reply: the thread-scoped subject
-// is published independently of the follower set.
+// A viewer who follows nothing still gets the reply: the subject is
+// published independently of the follower set.
 func TestHandleThreadCreated_PublishesThreadViewSubject(t *testing.T) {
 	crossSite, sameSite := true, false
 	tests := []struct {
@@ -3476,8 +3475,7 @@ func TestHandleThreadCreated_PublishesThreadViewSubject(t *testing.T) {
 	}
 }
 
-// The view lane carries the same envelope as the per-follower lane, so an open
-// panel needs no separate decoding path.
+// Same envelope on both lanes, so an open panel needs no separate decoder.
 func TestHandleThreadCreated_ThreadViewPayloadMatchesFollowerPayload(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
@@ -3525,9 +3523,8 @@ func TestHandleThreadCreated_ThreadViewSubjectDisabled(t *testing.T) {
 	assert.NotEmpty(t, pub.records, "the per-follower lane is unaffected by the kill switch")
 }
 
-// A bot-only follower set is the closest unit-level stand-in for "nobody
-// follows this thread" — the case a lone viewer hits, where the handler used to
-// return before publishing anything.
+// A bot-only follower set is the unit-level stand-in for "nobody follows this
+// thread" — a lone viewer's case.
 func TestHandleThreadCreated_EmptyFanOutStillPublishesThreadViewSubject(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
@@ -3584,8 +3581,7 @@ func TestHandleThreadDeleted_PublishesThreadViewSubject(t *testing.T) {
 	assert.Equal(t, []string{"chat.room.room-1.thread.parent-1.event"}, pub.threadViewSubjects())
 }
 
-// Best-effort: a view-lane failure must not NAK, or the redelivery would re-run
-// a per-follower fan-out that already succeeded.
+// A view-lane failure must not NAK: redelivery would re-run the fan-out.
 func TestHandleThreadCreated_ThreadViewPublishFailureDoesNotFailHandler(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store, us := NewMockStore(ctrl), NewMockUserStore(ctrl)
@@ -3627,8 +3623,7 @@ func TestPublishThreadViewEvent_Skips(t *testing.T) {
 	}
 }
 
-// DM thread replies already reach every member, so they must not also open a
-// thread lane.
+// DM thread replies already reach every member; no thread lane needed.
 func TestHandleThreadCreated_DMRoom_PublishesNoThreadViewSubject(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}

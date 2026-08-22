@@ -58,8 +58,7 @@ type broadcastMetrics struct {
 	fanoutOpts   map[fanoutKey]metric.MeasurementOption
 	deliveryOpts map[deliveryKey]metric.MeasurementOption
 
-	// Failures only: the thread-view lane is best-effort, so its volume is
-	// already covered by the delivery counter and only errors need a series.
+	// Failures only: the delivery counter already carries this lane's volume.
 	threadViewFailures metric.Int64Counter
 }
 
@@ -149,15 +148,13 @@ func (m *broadcastMetrics) Delivery(ctx context.Context, room roomKindLabel, eve
 	m.deliveries.Add(ctx, 1, m.deliveryOpts[deliveryKey{normalizeRoomKind(room), normalizeBroadcastEvent(event), result}])
 }
 
-// ThreadViewPublishFailed counts a failed publish to the thread-scoped view
-// subject. Failures only: viewers refetch on panel open, so a drop is
-// recoverable and only its rate is worth alerting on.
+// ThreadViewPublishFailed counts a failed thread-view publish. Failures only:
+// viewers refetch on panel open, so only the rate is worth alerting on.
 func (m *broadcastMetrics) ThreadViewPublishFailed(ctx context.Context, event natsmetrics.EventType) {
 	if m == nil || m.threadViewFailures == nil {
 		return
 	}
-	// Built inline rather than prebuilt like fanoutOpts/deliveryOpts: this runs
-	// only after a publish already failed, never on the hot path.
+	// Inline, not prebuilt: this runs only after a publish already failed.
 	m.threadViewFailures.Add(ctx, 1,
 		metric.WithAttributes(attribute.String("event_type", string(normalizeBroadcastEvent(event)))))
 }

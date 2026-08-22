@@ -68,8 +68,7 @@ type config struct {
 	RoomSubjectMode      string          `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
-	// ThreadViewSubjectEnabled: kill switch for the thread-scoped view lane that
-	// serves open thread panels.
+	// ThreadViewSubjectEnabled: kill switch for the thread-scoped view lane.
 	ThreadViewSubjectEnabled bool                    `env:"THREAD_VIEW_SUBJECT_ENABLED" envDefault:"true"`
 	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
