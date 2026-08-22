@@ -20,10 +20,12 @@ Two exposure paths feed Prometheus:
 
 Two shapes of metric behave oppositely; confusing them is the most common misread.
 
-- **Gauge (point-in-time state).** Reflects *now*. Rises during an incident, **returns to 0
-  once resolved**. All `jetstream_*` series are gauges — e.g. `jetstream_consumer_num_redelivered`
-  spikes while messages are looping and drops back to 0 the moment they clear. A gauge at 0
-  means "nothing stuck right now," **not** "nothing ever went wrong."
+- **Gauge (point-in-time state).** Reflects *now*; may rise or fall and is **not** necessarily
+  monotonic or expected to return to 0 (e.g. `jetstream_stream_last_seq`, the ack-floor seq, and
+  retained-message/byte gauges all sit at healthy nonzero baselines). All `jetstream_*` series are
+  gauges. The **return-to-0** behavior applies specifically to the *backlog/redelivery* gauges —
+  e.g. `jetstream_consumer_num_redelivered` spikes while messages loop and drops back to 0 the
+  moment they clear; there, 0 means "nothing stuck right now," **not** "nothing ever went wrong."
 - **Counter (cumulative, `_total` suffix).** Monotonic — only ever counts up, resetting to 0
   only on process restart. Never read raw; wrap in `rate()` / `increase()[window]`. All
   `chat_nats_*_total` series are counters — e.g. `increase(chat_nats_consumer_redeliveries_total[1h])`
@@ -95,7 +97,7 @@ Read the dashboard backwards: match the shape you see to the cause.
 |---|---|---|
 | Consumer can't keep up with ingest | `num_pending` ↑ (sustained), `processing_duration` p99 ↑ | Backlog growing faster than drain. Scale workers / speed up the handler. |
 | A handler is wedged (stuck on a dependency) | `num_ack_pending` → pinned at `MaxAckPending`, `num_pending` ↑ | Delivered work not acking. The producer is fine; the consumer isn't. (Use `num_ack_pending`, not the `ack_floor` seq delta — the latter is a sequence span, not the in-flight count.) |
-| A dependency has a brief blip, handler naks + retries | `num_redelivered` ↑ then → 0, `chat_nats_consumer_redeliveries_total` rate ↑, then recovers | Self-heal in progress — **but only if `chat_nats_terminal_failures_total{reason="max_deliver"}` stayed flat.** The gauge returns to 0 whether messages were acked *or* abandoned after MaxDeliver, so confirm no `max_deliver` uptick before calling it cleared (next row). |
+| A dependency has a brief blip, handler naks + retries | `num_redelivered` ↑ then → 0, `chat_nats_consumer_redeliveries_total` rate ↑, then recovers | Self-heal in progress — **but only if `chat_nats_terminal_failures_total{reason="max_deliver"}` stayed flat.** The gauge returns to 0 whether messages were acked *or* abandoned after MaxDeliver. And since the app `max_deliver` counter is best-effort (a final-attempt crash loses the increment, §1), don't call it cleared from a flat counter alone — confirm the broker MaxDeliver advisory / broker state shows nothing exhausted (next row). |
 | A dependency outage lasts longer than the retry budget | `num_redelivered` ↑ then falls to 0 **while** `chat_nats_terminal_failures_total{reason="max_deliver"}` ↑ | **Not healed — abandoned.** Messages exhausted MaxDeliver; the consumer stops delivering them and no handler processed them. They remain in the stream until retention (recoverable via replay/advisory), but nothing auto-routes them (no DLQ). The most important row: the pending/redelivered gauges *look* recovered. |
 | Consumer loop exited / process crashed | **Graceful** loop exit → `chat_nats_consumer_loop_up` → 0; a **hard crash** removes the series (it can't emit 0 — the last value goes stale, then disappears), `num_pending` ↑ | Page-worthy. Page on the gauge `== 0` **and** on `up == 0` (whole target down); for one durable dying while its process survives, use a label-scoped `absent(chat_nats_consumer_loop_up{…consumer=…})` per expected durable — a crash won't show as 0. Nothing is being processed for that durable. |
 | A cross-site peer is unreachable | that destination's `num_ack_pending` ↑ (concurrent lane) and `num_pending` ↑ (FIFO ordered lane, stuck behind one in-flight message) | Isolate by `consumer_name` (`…-{dest}`). Self-clears when the peer recovers; healthy peers' lanes stay flat. |
