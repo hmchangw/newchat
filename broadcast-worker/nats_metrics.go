@@ -57,6 +57,9 @@ type broadcastMetrics struct {
 	deliveries   metric.Int64Counter
 	fanoutOpts   map[fanoutKey]metric.MeasurementOption
 	deliveryOpts map[deliveryKey]metric.MeasurementOption
+	// threadViewOpts is keyed by event type alone — that is the only label this
+	// counter carries.
+	threadViewOpts map[natsmetrics.EventType]metric.MeasurementOption
 
 	// Failures only: the delivery counter already carries this lane's volume.
 	threadViewFailures metric.Int64Counter
@@ -87,12 +90,14 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 		threadViewFailures: threadViewFailures,
 		fanoutOpts:         make(map[fanoutKey]metric.MeasurementOption),
 		deliveryOpts:       make(map[deliveryKey]metric.MeasurementOption),
+		threadViewOpts:     make(map[natsmetrics.EventType]metric.MeasurementOption),
 	}
 	for _, room := range allRoomKinds {
 		roomAttr := attribute.String("room_kind", string(room))
 		for _, event := range allBroadcastEvents {
 			eventAttr := attribute.String("event_type", string(event))
 			m.fanoutOpts[fanoutKey{room, event}] = metric.WithAttributes(roomAttr, eventAttr)
+			m.threadViewOpts[event] = metric.WithAttributes(eventAttr)
 			for _, result := range allDeliveryResults {
 				m.deliveryOpts[deliveryKey{room, event, result}] = metric.WithAttributes(
 					roomAttr, eventAttr, attribute.String("result", string(result)))
@@ -150,13 +155,17 @@ func (m *broadcastMetrics) Delivery(ctx context.Context, room roomKindLabel, eve
 
 // ThreadViewPublishFailed counts a failed thread-view publish. Failures only:
 // viewers refetch on panel open, so only the rate is worth alerting on.
+//
+// The option is looked up, not built here. "It only runs after a failure" does
+// not make this a cold path: publishThreadViewEvent calls it once per target
+// subject inside its fan-out loop, so a broker outage runs it for every target
+// of every thread event — the moment the label set stops being cheap is exactly
+// the moment this counter matters.
 func (m *broadcastMetrics) ThreadViewPublishFailed(ctx context.Context, event natsmetrics.EventType) {
 	if m == nil || m.threadViewFailures == nil {
 		return
 	}
-	// Inline, not prebuilt: this runs only after a publish already failed.
-	m.threadViewFailures.Add(ctx, 1,
-		metric.WithAttributes(attribute.String("event_type", string(normalizeBroadcastEvent(event)))))
+	m.threadViewFailures.Add(ctx, 1, m.threadViewOpts[normalizeBroadcastEvent(event)])
 }
 
 type broadcastMetricLabels struct {

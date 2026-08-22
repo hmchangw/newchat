@@ -421,6 +421,7 @@ Recommended domain additions:
 | `message_worker_persistence_total` | counter | `message_kind,result` | message-worker |
 | `broadcast_worker_fanout_recipients` | histogram | `room_kind,event_type` | broadcast-worker |
 | `broadcast_worker_recipient_deliveries_total` | counter | `room_kind,event_type,result` | broadcast-worker |
+| `broadcast_worker_thread_view_publish_failures_total` | counter | `event_type` | broadcast-worker |
 | `notification_worker_outcomes_total` | counter | `kind,result` | notification-worker |
 
 These domain counters explain user impact. They supplement, but do not replace,
@@ -690,6 +691,7 @@ to this contract.
 | `message_worker_persistence_total` | counter | message-worker | on first persist | none | campaign; SLO-1a |
 | `broadcast_worker_fanout_recipients` | histogram | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
 | `broadcast_worker_recipient_deliveries_total` | counter | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
+| `broadcast_worker_thread_view_publish_failures_total` | counter | broadcast-worker | on first failed thread-view mirror | none — the mirror is a Core NATS publish the broker keeps no record of | thread-panel delivery health. Failures only, by the author's design (#349): an open panel refetches on open, so the rate is what is worth alerting on, not the absolute count |
 | `notification_worker_outcomes_total` | counter | notification-worker | on first notification | none | campaign; SLO-6 |
 | `notification_worker_mention_resolution_total` | counter | notification-worker | on first push body containing an @mention | none | push-body quality: the fail-open path is invisible otherwise, since a users-collection outage leaves `notification_worker_outcomes_total` fully green while every body ships raw @tokens |
 | `room_key_fanout_errors_total` | counter | room-worker | on first failure | none | room-key delivery health. Carries no label: the room id lives on the log line beside it |
