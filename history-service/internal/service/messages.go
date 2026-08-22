@@ -384,10 +384,14 @@ func (s *HistoryService) assembleSurrounding(
 
 	redactUnavailableQuotes(messages, accessSince)
 	setDecodedAttachments(c, messages)
+	// Trim outward from the pivot so the caller keeps the row they centred on;
+	// each end that loses rows sets its own "more" flag.
+	pivotIdx := len(beforePage.Data)
+	lo, hi := s.fitWindow(messages, pivotIdx, loadHistoryEnvelope)
 	return &models.LoadSurroundingMessagesResponse{
-		Messages:          messages,
-		MoreBefore:        beforePage.HasNext,
-		MoreAfter:         afterPage.HasNext,
+		Messages:          messages[lo:hi],
+		MoreBefore:        beforePage.HasNext || lo > 0,
+		MoreAfter:         afterPage.HasNext || hi < len(messages),
 		MinUserLastSeenAt: minMs,
 	}, nil
 }

@@ -152,3 +152,82 @@ func TestLoadHistory_SingleOversizeRowIsBlankedNotDropped(t *testing.T) {
 	assert.Equal(t, "alice", got.Sender.Account)
 	assert.Equal(t, "important", got.Type, "type is kept so the client can pick a placeholder")
 }
+
+// The centred window trims from both ends and reports which end lost rows, so
+// the client can page outward in the direction it wants.
+func TestLoadSurrounding_TrimsBothEndsAndKeepsTheCentralMessage(t *testing.T) {
+	before := fatMessages(10, 512) // DESC as the store returns it
+	after := fatMessages(10, 512)
+	for i := range after {
+		after[i].MessageID = fmt.Sprintf("a%02d", i)
+	}
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+
+	svc, msgs, subs, _, _ := newServiceWithBudget(t, pagefit.NewBudget(int64(encodedSize(t, before[:3])), 0))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).
+		Return(makePage(before, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).
+		Return(makePage(after, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(testContext(), models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 30})
+	require.NoError(t, err)
+
+	assert.Less(t, len(resp.Messages), len(before)+len(after)+1, "an oversize window must be trimmed")
+	assert.True(t, resp.MoreBefore, "rows dropped from the front are advertised as moreBefore")
+	assert.True(t, resp.MoreAfter, "rows dropped from the back are advertised as moreAfter")
+
+	var found bool
+	for _, m := range resp.Messages {
+		if m.MessageID == "mC" {
+			found = true
+		}
+	}
+	assert.True(t, found, "the central message is what the caller asked to centre on — it must survive")
+}
+
+func TestLoadSurrounding_WindowThatFitsIsUntouched(t *testing.T) {
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
+	before := fatMessages(2, 32)
+	svc, msgs, subs, _, _ := newServiceWithBudget(t, pagefit.NewBudget(1<<20, 0))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).
+		Return(makePage(before, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(testContext(), models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, resp.Messages, 3)
+	assert.False(t, resp.MoreBefore)
+	assert.False(t, resp.MoreAfter)
+}
+
+// Timestamp mode has no central row; the pivot is the boundary between the
+// before-page and the after-page.
+func TestLoadSurrounding_TimestampModeTrimsAroundThePivot(t *testing.T) {
+	before := fatMessages(8, 512)
+	after := fatMessages(8, 512)
+	for i := range after {
+		after[i].MessageID = fmt.Sprintf("a%02d", i)
+	}
+	pivot := joinTime.Add(5 * time.Minute).UnixMilli()
+
+	svc, msgs, subs, _, _ := newServiceWithBudget(t, pagefit.NewBudget(int64(encodedSize(t, before[:3])), 0))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(before, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(after, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(testContext(), models.LoadSurroundingMessagesRequest{Timestamp: &pivot, Limit: 30})
+	require.NoError(t, err)
+	assert.NotEmpty(t, resp.Messages)
+	assert.Less(t, len(resp.Messages), 16)
+	assert.True(t, resp.MoreBefore || resp.MoreAfter)
+}

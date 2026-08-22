@@ -205,3 +205,16 @@ func (s *HistoryService) fitPage(msgs []models.Message, envelope int) ([]models.
 	}
 	return kept, len(kept) < len(msgs)
 }
+
+// fitWindow trims a centred window to the reply budget, blanking the pivot row
+// when it alone will not fit so the caller still gets the row they asked for.
+func (s *HistoryService) fitWindow(msgs []models.Message, pivot, envelope int) (int, int) {
+	if len(msgs) == 0 || pagefit.Fits(msgs, s.pageBudget, envelope) {
+		return 0, len(msgs)
+	}
+	lo, hi := pagefit.Window(msgs, pivot, s.pageBudget, envelope)
+	if hi-lo == 1 && !pagefit.Fits(msgs[lo:hi], s.pageBudget, envelope) {
+		blankOversize(&msgs[lo])
+	}
+	return lo, hi
+}
