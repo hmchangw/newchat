@@ -286,20 +286,22 @@ func TestESParentResolver_RecordsResolveDuration(t *testing.T) {
 	sm, reader := newTestSyncMetrics(t)
 
 	resolved := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	replyAt := time.Date(2026, 2, 14, 0, 0, 0, 0, time.UTC)
+	// The duration covers the whole resolution, so the miss walks both month probes and
+	// the fallback search before it is recorded as unresolved.
 	r := &esParentResolver{
-		esRead: func(ctx context.Context, messageID string) (time.Time, bool) {
-			if messageID == "hit" {
-				return resolved, true
-			}
-			return time.Time{}, false
+		esGet: func(_ context.Context, _, messageID string) (time.Time, bool) {
+			return resolved, messageID == "hit"
 		},
-		timeout: time.Second,
-		metrics: sm.forCollection("message-sync"),
+		esSearch:    func(context.Context, string) (time.Time, bool) { return time.Time{}, false },
+		indexPrefix: "msgs-v1",
+		timeout:     time.Second,
+		metrics:     sm.forCollection("message-sync"),
 	}
 
-	_, ok := r.ResolveParentCreatedAt(context.Background(), "hit")
+	_, ok := r.ResolveParentCreatedAt(context.Background(), "hit", replyAt)
 	require.True(t, ok)
-	_, ok = r.ResolveParentCreatedAt(context.Background(), "miss")
+	_, ok = r.ResolveParentCreatedAt(context.Background(), "miss", replyAt)
 	require.False(t, ok)
 
 	rm := collectMetrics(t, reader)
