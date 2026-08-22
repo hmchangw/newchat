@@ -93,6 +93,12 @@ type threadUnreadAdded struct {
 	accounts        []string
 }
 
+type mentionBadge struct {
+	roomID       string
+	accounts     []string
+	msgCreatedAt time.Time
+}
+
 type stubInboxStore struct {
 	mu                    sync.Mutex
 	subscriptions         []model.Subscription
@@ -126,6 +132,8 @@ type stubInboxStore struct {
 	roomSubscribed        map[string]bool
 	deletedRemoteRooms    []string
 	hasRoomSubErr         error
+	mentionBadges         []mentionBadge
+	mentionErr            error
 }
 
 type permissionsApply struct {
@@ -461,6 +469,22 @@ func (s *stubInboxStore) AddThreadUnread(_ context.Context, roomID, parentMessag
 		roomID: roomID, parentMessageID: parentMessageID, accounts: accounts,
 	})
 	return nil
+}
+
+func (s *stubInboxStore) SetSubscriptionMentions(_ context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mentionErr != nil {
+		return s.mentionErr
+	}
+	s.mentionBadges = append(s.mentionBadges, mentionBadge{roomID: roomID, accounts: accounts, msgCreatedAt: msgCreatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) getMentionBadges() []mentionBadge {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]mentionBadge(nil), s.mentionBadges...)
 }
 
 func (s *stubInboxStore) UpsertThreadSubscription(_ context.Context, sub *model.ThreadSubscription) error {
@@ -2874,4 +2898,67 @@ func TestHandleEvent_MemberAdded_ChannelUnchanged(t *testing.T) {
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType)
 	assert.Equal(t, "deployments", subs[0].Name, "channel subscription name is the room name")
+}
+
+func TestHandleEvent_SubscriptionMention(t *testing.T) {
+	msgAt := time.UnixMilli(1755820800000).UTC()
+	valid := model.SubscriptionMentionEvent{
+		RoomID: "room-1", Accounts: []string{"alice", "bob"},
+		MessageCreatedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
+	}
+
+	tests := []struct {
+		name      string
+		payload   any
+		storeErr  error
+		wantErr   string
+		wantBadge []mentionBadge
+	}{
+		{
+			name:      "applies the badge to the destination accounts",
+			payload:   valid,
+			wantBadge: []mentionBadge{{roomID: "room-1", accounts: []string{"alice", "bob"}, msgCreatedAt: msgAt}},
+		},
+		{
+			name:    "malformed payload",
+			payload: "not-an-object",
+			wantErr: "unmarshal subscription_mention payload",
+		},
+		{
+			name:    "empty account list is a no-op",
+			payload: model.SubscriptionMentionEvent{RoomID: "room-1", MessageCreatedAt: msgAt.UnixMilli()},
+		},
+		{
+			name:     "store error propagates for redelivery",
+			payload:  valid,
+			storeErr: errors.New("mongo down"),
+			wantErr:  "set subscription mentions",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &stubInboxStore{mentionErr: tc.storeErr}
+
+			payload, err := json.Marshal(tc.payload)
+			require.NoError(t, err)
+			data, err := json.Marshal(model.InboxEvent{
+				Type:       model.InboxSubscriptionMention,
+				SiteID:     "site-a",
+				DestSiteID: "site-b",
+				Payload:    payload,
+				Timestamp:  msgAt.UnixMilli(),
+			})
+			require.NoError(t, err)
+
+			err = NewHandler(store).HandleEvent(context.Background(), data)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantBadge, store.getMentionBadges())
+		})
+	}
 }
