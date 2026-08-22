@@ -120,7 +120,7 @@ material; read receipts / unread badges → dashboard, v2 candidate (§8 P7).
 | SLO-2 | J1 | room-subject broadcast **enqueue-accepted within 1 s** of canonical acceptance (late = bad) / canonical messages on the room-subject path (`broadcast_path=room_subject`) | 99% | 🔧 P2 · approximate · enqueue-only |
 | SLO-3 | J2 | successful login **within 1 s** / eligible login attempts | 99% | ✅ (auth leg — proxy) |
 | SLO-4 | J2 | channel load succeeds **within 500 ms** / eligible channel loads | 95% | 🔧 P1 |
-| SLO-5 | J2 | thread open succeeds **within 300 ms** / eligible thread opens | 99% | 🔧 P1 |
+| SLO-5 | J2 | thread open succeeds **within 250 ms** / eligible thread opens | 95% | 🔧 P1 · target provisional — no baseline yet |
 | SLO-6 | J3 | **recipients** accepted into `PUSH_NOTIFICATION` / notifiable recipients | 99.9% | 🔧 P4 · approximate · handoff only (see §4) |
 | SLO-7 | J4 | search returns ok / **eligible** search requests | 99.5% | ✅ partial-failure · outage needs backstop (§5) |
 | SLO-8 | J4 | **successful** search returns **within 1 s** / successful searches | 95% | 🔧 P4 (needs status label) |
@@ -336,6 +336,25 @@ partition slice). Targets: §1.
   errcode table. Names follow the OTel RPC semantic conventions rather than the
   spelling this document first proposed — `error_type` is absent on success, so
   the good/valid split is `…{error_type=""}` over the family total.
+
+  **Both bounds sit exactly on a histogram bucket boundary, and that is why they
+  are the numbers they are.** The SLI is `rate(…_bucket{le="0.5"})` for SLO-4 and
+  `le="0.25"` for SLO-5, over the family's `_count` — an exact ratio, not an
+  interpolation. A bound between boundaries cannot be computed at all: the draft's
+  earlier 300 ms fell between `0.25` and `0.5`, so it could only be read as 250 ms
+  (understating the good share) or 500 ms (overstating it), and the gap between
+  those two readings — all traffic in 250–500 ms, which for a 300 ms threshold is
+  exactly where the distribution's tail sits — is far wider than the error budget
+  it would be judged against. §0.1's 50 ms rounding rule leaves plenty of legal
+  bounds; pick one the histogram can measure.
+
+  SLO-5's 250 ms is tighter than the 300 ms first drafted, deliberately.
+  `.msg.thread` slices a single partition with no bucket walk (§3), so the bound
+  expresses what a user should experience from the cheapest interaction in J2.
+  §0.2's achievable-first slack is taken in the **target** instead — 95% to start,
+  no baseline yet — because that knob has no measurability constraint and can be
+  tightened on evidence. A tight bound with a loose target degrades honestly; a
+  bound nobody can compute does not degrade, it reports nothing.
 - 🔧 Client-side v1.5: spanmetrics.
 
 ### Caveats

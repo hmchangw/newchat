@@ -295,9 +295,22 @@ Rules:
   names, unit and labels still match, so a generic RPC dashboard still finds and
   groups the series; only `histogram_quantile`'s interpolation points differ.
 
-  Note that no set in play has a boundary at `0.3`, so SLO-5's 300 ms threshold
-  falls mid-bucket under any of them. That is a separate question from this
-  rule.
+- **A latency SLO's bound must land on a bucket boundary.** This is a constraint
+  on the SLO, not on the histogram. `rate(…_bucket{le="B"}) / rate(…_count)` is
+  an exact ratio only when `B` is a boundary; otherwise the nearest boundary
+  below understates the good share and the one above overstates it, and the gap
+  between those two readings is all the traffic in that bucket — which, for a
+  threshold chosen near the interesting part of the distribution, is where the
+  tail lives. That gap is routinely wider than the error budget being judged, so
+  the SLI cannot decide compliance at all.
+
+  This is not hypothetical: SLO-5 was drafted at 300 ms, which falls between
+  `0.25` and `0.5` in every set in play — ours and both semantic conventions'.
+  It was resolved by moving the bound to **250 ms**, not by adding a boundary,
+  because `sli-slo.md` §0.1 rounds latency bounds to 50 ms and therefore had
+  legal, measurable alternatives available. Adding `0.3` for one family would
+  have cost the shared-boundary property this section exists to protect.
+  SLO-4's 500 ms already sat on `0.5` and needed nothing.
 - There is no publish-retry family. It was declared for "a future retry loop"
   and never acquired one — no service loops around its own publish, and
   JetStream's internal PubAck retries and the consumer Nak path are not
