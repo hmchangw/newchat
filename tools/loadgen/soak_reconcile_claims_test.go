@@ -331,3 +331,30 @@ func soakReconcileLagCount(t *testing.T, metrics *Metrics) uint64 {
 	t.Helper()
 	return soakReconcileLagHistogram(t, metrics).GetSampleCount()
 }
+
+// The documented saturation rule is rate(...{outcome="idle"}[5m]) == 0, and a
+// counter child only exists once something increments it. A lane so saturated
+// that it never takes an idle claim would therefore publish no idle series at
+// all, and the rule that detects saturation cannot be evaluated against an
+// absent series — the board shows the same nothing for "saturated" and "this
+// build has no instrumentation". Every outcome starts at zero.
+func TestMetrics_ReconcileClaimOutcomesArePublishedBeforeTheyHappen(t *testing.T) {
+	metrics := NewMetrics()
+
+	// Counted before anything touches a child, because WithLabelValues creates
+	// one: asking for the series first would manufacture the thing under test.
+	assert.Equal(t, 5, testutil.CollectAndCount(metrics.FailureReconcileClaims),
+		"every documented outcome must be a series from the first scrape")
+
+	for _, outcome := range []string{
+		soakReconcileClaimAdvanced,
+		soakReconcileClaimRetried,
+		soakReconcileClaimIdle,
+		soakReconcileClaimFailed,
+		soakReconcileClaimUnavailable,
+	} {
+		assert.Equal(t, float64(0), testutil.ToFloat64(
+			metrics.FailureReconcileClaims.WithLabelValues(outcome)),
+			"outcome %q must start at zero", outcome)
+	}
+}

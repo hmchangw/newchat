@@ -429,6 +429,15 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"outcome"},
 	)
+	// Published at zero before anything happens. The documented saturation rule
+	// reads rate(...{outcome="idle"}[5m]) == 0, and a counter child exists only
+	// once something increments it — so a lane saturated from the first second
+	// would emit no idle series at all, and the rule that detects saturation
+	// cannot be evaluated against a series that is absent. Without this the
+	// board shows the same nothing for "saturated" and "not instrumented".
+	for _, outcome := range soakReconcileClaimOutcomes() {
+		m.FailureReconcileClaims.WithLabelValues(outcome)
+	}
 	m.FailureReconcileLag = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:    "loadgen_failure_reconcile_lag_seconds",

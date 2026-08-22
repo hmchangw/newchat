@@ -597,6 +597,18 @@ const (
 	soakReconcileClaimUnavailable = "unavailable"
 )
 
+// soakReconcileClaimOutcomes is the closed label set, listed so the metric can
+// publish every outcome at zero rather than only the ones that have happened.
+func soakReconcileClaimOutcomes() []string {
+	return []string{
+		soakReconcileClaimAdvanced,
+		soakReconcileClaimRetried,
+		soakReconcileClaimIdle,
+		soakReconcileClaimFailed,
+		soakReconcileClaimUnavailable,
+	}
+}
+
 // reconcileProbeOutcome names a claim that reached a probe but not a verdict.
 // A probe that could not be answered proves nothing about the message, so it
 // must not share a label with one that answered and found nothing — that is how
