@@ -1,0 +1,65 @@
+name: roomrace
+
+# NATS topologies for the new-room -> first-message race harness.
+#   nats-single      : one server            -> host :4222
+#   nats-a/b/c       : 3-node full mesh      -> host :4223 / :4224 / :4225
+#
+# The cluster exists to measure interest propagation: the harness subscribes on
+# one server and publishes from another, which is the production shape (clients
+# and workers land on different servers of the cluster/supercluster).
+#
+# Core NATS only - the room/user event subjects under test are core publishes,
+# not JetStream, so JetStream would add nothing to the measurement.
+
+services:
+  nats-single:
+    image: nats:2.11-alpine
+    container_name: roomrace-nats-single
+    command: ["-p", "4222", "-m", "8222", "-server_name", "single"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  nats-a:
+    image: nats:2.11-alpine
+    container_name: roomrace-nats-a
+    command: ["-p","4222","-m","8222","-server_name","a","-cluster_name","roomrace","-cluster","nats://0.0.0.0:6222","-routes","nats://nats-b:6222,nats://nats-c:6222"]
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  nats-b:
+    image: nats:2.11-alpine
+    container_name: roomrace-nats-b
+    command: ["-p","4222","-m","8222","-server_name","b","-cluster_name","roomrace","-cluster","nats://0.0.0.0:6222","-routes","nats://nats-a:6222,nats://nats-c:6222"]
+    ports:
+      - "4224:4222"
+      - "8224:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  nats-c:
+    image: nats:2.11-alpine
+    container_name: roomrace-nats-c
+    command: ["-p","4222","-m","8222","-server_name","c","-cluster_name","roomrace","-cluster","nats://0.0.0.0:6222","-routes","nats://nats-a:6222,nats://nats-b:6222"]
+    ports:
+      - "4225:4222"
+      - "8225:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

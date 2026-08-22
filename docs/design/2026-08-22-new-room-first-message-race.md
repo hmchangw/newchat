@@ -1,393 +1,294 @@
-# New-room → first-message race: analysis and recommendation
+# New-room → first-message race: analysis, measurements, recommendation
 
-**Status:** analysis / recommendation (no code changed)
+**Status:** analysis + reproduction (no production code changed)
 **Date:** 2026-08-22
-**Scope:** `room-service`, `room-worker`, `message-gatekeeper`, `broadcast-worker`, client event contract
+**Repro:** `./tools/roomrace/run.sh` (real NATS in Docker, production subjects from `pkg/subject`)
+**Scope:** `room-worker`, `broadcast-worker`, `message-gatekeeper`, client event contract
 
 ---
 
-## 1. TL;DR
+## 1. Answer up front
 
-The reported symptom ("B gets the subscription event but misses `new_message`") is not one race —
-it is **three independent races** stacked on the same transition, and they have different fixes:
+**Can the current architecture solve these two problems? Yes — both. Neither needs a new RPC.**
 
-| # | Race | Who loses | Applies to |
-|---|------|-----------|-----------|
-| **R1** | A sends before `room-worker` materialized the subscription → `message-gatekeeper` rejects with *not subscribed* | the **sender** | DM + channel |
-| **R2** | B has not yet issued `SUB chat.room.{id}.event` (and NATS has not yet propagated that interest) when `broadcast-worker` publishes | the **recipient** | **channel only** |
-| **R3** | B receives `new_message` on a subject it *is* subscribed to, but its local store has no room yet, so the client drops/misfiles the event | the **recipient** | DM + channel |
+| | Where the message is lost | Fixable with today's architecture? |
+|---|---|---|
+| **Problem 1 — DM** | NATS delivers it to client B; **B's client discards it** because the room isn't in local state yet | **Yes, client-only.** No backend change. |
+| **Problem 2 — channel** | NATS drops it: nobody is subscribed to `chat.room.{id}.event` yet | **Yes, client-only** via subscribe → backfill over the existing `msg.history` RPC. A small server change upgrades that from *recovered* to *delivered live*. |
 
-A combined "create room + send message" RPC — the proposed idea — **fully closes R1**, and closes
-R3 *if and only if* the combined event carries the message payload on a subject the recipient is
-already subscribed to. **It does not close R2 at all**, and R2 is the only one of the three that is
-structurally unfixable on the client side alone.
+The measured, decisive fact:
 
-**Recommendation (layered, in priority order):**
-
-1. **Client contract fix (today, no server change):** the client must wait for the *phase-2* async
-   job result before sending, and must tolerate a `new_message` for a room it does not know yet.
-2. **Server, small:** on the `subscription.update{action:"added"}` event, populate the already-existing
-   `subscription.room.lastMsgId` / `previewMessage` fields so the recipient can render and detect a gap.
-3. **Server, targeted — the actual R2 fix:** a **join grace window** in `broadcast-worker` — additionally
-   publish a channel's room event to `chat.user.{account}.event.room` for members whose `joinedAt` is
-   within N seconds. This mirrors the `roomLocalityGrace` pattern already in `pkg/subject`.
-4. **Client, structural:** subscribe-then-backfill on every room entry, dedupe by message ID
-   (the Zulip guarantee, adapted). This also fixes the strictly larger bug class: events lost while
-   the client was disconnected.
-5. **Optional, and only for DMs:** the proposed combined RPC — but built as a *thin orchestrator over
-   the existing synchronous DM-create RPC*, not as a second implementation of create + send.
+> **The race window is dominated by the client, not by NATS.**
+> With an instant client, the channel window is under 1 ms. With a realistic 30 ms
+> render-then-subscribe, it is 30 ms — a 30–1000× larger target. Making the client
+> subscribe faster narrows the window; only a backfill or a per-user delivery path closes it.
 
 ---
 
-## 2. What the code does today
+## 2. Reproduction
 
-### 2.1 Create
+`tools/roomrace` drives a real NATS server using the production subject builders, so the
+topology under test is the one the services publish on:
 
-`chat.user.{A}.request.room.{siteID}.room.create` → `room-service` `Handler.createRoom`
-(`room-service/handler.go`):
+| Actor | Modelled as |
+|---|---|
+| `room-worker` | publish `subscription.update{added}` → `chat.user.{B}.event.subscription.update` |
+| `broadcast-worker` | DM → `chat.user.{B}.event.room` (per member); channel → `chat.room.{id}.event` |
+| `message-worker` | persists the message before fan-out (so a backfill can find it) |
+| `history-service` | request/reply stub on the real `…msg.history` subject |
+| desktop client B | login-time subs to its own user subjects; per-room sub opened only when it handles `subscription.update`, after a render delay |
 
-1. `classifyAndValidate` → `RoomTypeDM` (empty name, one counterpart).
-2. `handleCreateRoomDMOrBotDM` → `idgen.BuildDMRoomID(requester.ID, other.ID)` (deterministic),
-   `FindDMSubscription` dedup (returns `status:"exists"` when the DM already exists).
-3. `publishCreateRoom` → `EnsureDEK`, then JetStream publish to `chat.room.canonical.{site}.create`.
-4. Replies **`{status:"accepted", roomId, roomType}`** — this is only an *acknowledgement of handoff*.
-   No room document and no subscription exists yet at this point.
+The DM/channel split is not an assumption — it is what `broadcast-worker` does
+(`publishDMEvents` vs `publishChannelEvent`) and what its own tests already assert
+(`subject.UserRoomEvent("alice")` vs `subject.RoomEvent("room-1", true)` in
+`broadcast-worker/handler_test.go`). Those tests were re-run and pass.
 
-`room-worker` `processCreateRoom` then does the real work asynchronously:
-room insert → `BulkCreateSubscriptions` → `finishCreateRoom` → `publishSubscriptionAdded`
-(core publish, per member, to `chat.user.{X}.event.subscription.update`) → federation →
-**`defer publishAsyncJobResult`** to `chat.user.{A}.response.{requestID}` (phase 2).
+### 2.1 Realistic client (30 ms to render + subscribe)
 
-So the ordering guarantee that *does* exist server-side is:
-`subscriptions written` → `subscription.update` published to B → `async job result` published to A.
+Cell = % of first messages user B never saw. Columns = delay between `subscription.update`
+and the first message. 40 iterations per cell.
 
-### 2.2 Send
+**Single NATS server**
 
-`chat.user.{A}.room.{roomID}.{siteID}.msg.send` → MESSAGES stream → `message-gatekeeper.processMessage`,
-which validates and then:
+| scenario | +0ms | +10ms | +20ms | +25ms | +28ms | +30ms | +32ms | +35ms |
+|---|---|---|---|---|---|---|---|---|
+| dm / client drops unknown room | 100% | 100% | 100% | 100% | 98% | 0% | 0% | 0% |
+| dm / client buffers unknown room | 0% | 0% | 0% | 0% | 0% | 0% | 0% | 0% |
+| channel / subscribe on update | 100% | 100% | 100% | 100% | 100% | 70% | 0% | 0% |
+| channel / subscribe + flush | 100% | 100% | 100% | 100% | 100% | 60% | 0% | 0% |
+| channel / subscribe + flush + backfill | 0% | 0% | 0% | 0% | 0% | 0% | 0% | 0% |
+| channel / server join grace window | 0% | 0% | 0% | 0% | 0% | 0% | 0% | 0% |
+| channel / grace window, client still drops | 100% | 100% | 100% | 100% | 92% | 12% | 0% | 0% |
 
-```go
-sub, err := h.store.GetSubscription(ctx, account, roomID)
-if errors.Is(err, errNotSubscribed) { return nil, err }   // → rejected
+**3-node cluster (B on node a, services on node b)** — same shape, wider:
+`channel / subscribe on update` stays at 100% through +28ms and is still 98% at +30ms.
+
+### 2.2 Instant client (render delay 0) — isolating the transport
+
+| scenario | +0ms | +1ms | +2ms | +3ms | +5ms |
+|---|---|---|---|---|---|
+| channel / subscribe on update — single server | 78% | 0% | 0% | 0% | 0% |
+| channel / subscribe on update — 3-node cluster | 98% | 0% | 0% | 0% | 0% |
+| dm (any client behaviour) — both topologies | 0% | 0% | 0% | 0% | 0% |
+
+Subscription interest window (`Subscribe()` returns → a publisher actually reaches it),
+measured with ~0.5 ms probe granularity, so read these as upper bounds:
+
+| topology | median | p95 | max | `Flush()` RTT |
+|---|---|---|---|---|
+| single server | 40–67 µs | ~1.5 ms | 1.6 ms | ~290 µs |
+| 3-node cluster (publisher on another node) | ~1.44 ms | ~1.8 ms | 5.0 ms | ~250 µs |
+
+Gateways (their real supercluster) were **not** measured; route propagation across a
+gateway is slower than an intra-cluster route, so treat the cluster column as a floor.
+
+---
+
+## 3. Problem 1 — DM
+
+### What actually happens
+
+```
+room-worker  ──► chat.user.B.event.subscription.update      (B is subscribed from login)
+             ──► async job result ──► A ──► msg.send ──► gatekeeper ──► CANONICAL
+broadcast-worker ──► chat.user.B.event.room                 (B is subscribed from login)
 ```
 
-→ MESSAGES-CANONICAL → `broadcast-worker`.
+`broadcast-worker.publishDMEvents` fans a DM out **per member on the user subject**. B holds
+that subject from login and never opens a per-room subscription for a DM — the reference
+frontend's own test asserts this (`expect(subjects).not.toContain('chat.room.d1.event')`).
 
-### 2.3 Fan-out (the decisive detail)
+So the `new_message` event **is delivered to B's connection**. Your own description says as
+much — *"new_message event is already arrived"*. What follows is a client decision: the
+handler runs, finds no room in local state, and discards the event.
 
-`broadcast-worker/handler.go` has **two different delivery shapes**:
+The harness isolates exactly this. Same transport, same timing, two client behaviours:
 
-| Room type | Function | Subject |
-|---|---|---|
-| DM / botDM | `publishDMEvents` | **`chat.user.{account}.event.room`** — one publish per member |
-| channel | `publishChannelEvent` → `publishRoomEvent` | **`chat.room.{roomID}.event`** (or `chat.local.room.…`) |
+* `dm / client drops unknown room` → **100% lost** whenever the message beats the render.
+* `dm / client buffers unknown room` → **0% lost, at every delay, on both topologies.**
 
-And the reference client (`chat-frontend/src/context/RoomEventsContext/useRoomSubscriptions.js`):
+### Fix — client only, no backend change
 
-* subscribes **once at login** to `chat.user.{me}.event.room`, `…event.subscription.update`,
-  `…event.room.metadata.update`, `…event.room.key`;
-* subscribes **lazily, per room** to `chat.room.{id}.event` — and only for channels:
-  `if (sub.roomType === 'channel') openChannelSub(sub.roomId, room.crossSite)`, driven by the
-  `subscription.update{added}` event. Its own test asserts
-  `expect(subjects).not.toContain('chat.room.d1.event')` for a DM.
+Make the `new_message` handler **upsert the room from the event payload** instead of
+requiring it to pre-exist. `model.RoomEvent` already carries everything a sidebar row and a
+first bubble need: `roomId`, `roomName`, `roomType`, `siteId`, `userCount`, `lastMsgAt`,
+`lastMsgId`, and the full `message`. When `subscription.update` lands (before or after), it
+reconciles the row with the authoritative subscription record.
 
-**Consequence:** for a *DM*, B's client is already listening on the delivery subject before the room
-even exists. There is no transport-level race for DMs. Which means the reported DM symptom is
-**R1 and/or R3, not R2** — unless the desktop client (unlike the reference frontend) subscribes
-per-room for DMs too. This is worth confirming before building anything.
+Upsert beats "buffer and replay" because it also survives the case where
+`subscription.update` is **lost outright** — `room-worker.publishSubscriptionUpdate` is a
+best-effort core publish that logs and continues, so a B that is mid-reconnect never sees it.
 
----
-
-## 3. The three races in detail
-
-### R1 — sender-side: "room not ready"
-
-A gets `{status:"accepted"}` and sends immediately. `room-worker` has not yet written the
-subscription, so `GetSubscription` returns `errNotSubscribed` and the message is **rejected outright**
-(it never reaches MESSAGES-CANONICAL — it is not merely delayed).
-
-Window: one JetStream hop + `GetUser` + room insert + `BulkCreateSubscriptions` + reconcile — typically
-tens of ms, but unbounded under load or Mongo pressure.
-
-The contract already provides the fix: `createRoom` is a **two-phase async job**
-(`requestWithAsyncResult` in `chat-frontend/src/api/createRoom/index.ts`). A client that sends on the
-*sync* reply instead of the *async job result* has this bug by construction.
-
-### R2 — transport-side: "no interest yet" (channels only)
-
-B learns about the room, then calls `nc.subscribe("chat.room.{id}.event")`. That subscription must
-reach B's NATS server and be gossiped to every other server (and across gateways, for cross-site).
-Core NATS is **at-most-once with no replay**: anything published into that window is gone from the
-live path permanently.
-
-NATS gives you **no signal for this**. From
-[nats-server#1142](https://github.com/nats-io/nats-server/issues/1142): *"there is no guarantee that
-in the moment when the 'server' is publishing the message 'data.xyz', the subscription (RS+) from
-'nats-server-A' has been propagated to 'nats-server-B'"* — and the issue is still open, with no
-"subscription is now live cluster-wide" primitive. `flush()` only confirms *your own* server processed
-the SUB; it says nothing about the rest of the cluster or the gateways.
-
-This is why **no amount of server-side atomicity fixes R2**. Even a perfect single combined
-operation that emits the subscription event and the message event in one breath still publishes the
-message before B has finished subscribing, because B's subscribe *causally follows* the event it is
-reacting to.
-
-### R3 — application-state-side: "unknown room"
-
-`subscription.update` (from `room-worker`) and the room event (from `broadcast-worker`) are published
-by **different processes on different subjects**. There is no ordering guarantee between them —
-neither NATS nor the code provides one. B can legitimately receive `new_message` for a room it has
-never heard of.
-
-The reference frontend survives this: `MESSAGE_RECEIVED` uses
-`state.roomState[roomId] ?? emptyRoomState()` and records a preview regardless. A client that
-requires the room to exist first will silently drop the event.
-
-### The common root cause
-
-> The system delivers live events over an **at-most-once transport whose subscription set is derived
-> from state the client learns over that same at-most-once transport.**
-
-That circularity guarantees a window between *"you are a member"* and *"you are listening"*. Only two
-things remove it: (a) don't require a per-room subscription, or (b) reconcile against the durable log
-after subscribing. Everything else just narrows the window.
-
-Worth noting the same reasoning covers a strictly larger bug: `publishSubscriptionUpdate` and
-`publishDMEvents` are **best-effort core publishes** (both log-and-continue on error). If B is
-mid-reconnect, the events are lost with no race involved at all. Whatever you build should fix that
-too, or you will be back here.
+One caveat: cross-site. `subscription.update` is published on the origin site and routed to
+B's home site over the supercluster (`inbox-worker.handleMemberAdded` deliberately does not
+re-publish it). Both events then cross a gateway on different subjects with no ordering
+guarantee between them, so the arrival order can genuinely invert. The upsert fix handles
+that too; a buffer-and-replay fix keyed on "subscription first" does not.
 
 ---
 
-## 4. How comparable systems solve this
+## 4. Problem 2 — channel
 
-| System | Mechanism | Takeaway |
-|---|---|---|
-| **Zulip** | `POST /register` creates the event queue **before** the initial state is fetched; events that arrive during the fetch are replayed onto the fetched state via `apply_events`. Documented goal: the client sees *either* old state + event, *or* new state + no event — never a mix. ([events-system](https://zulip.readthedocs.io/en/stable/subsystems/events-system.html)) | **Subscribe first, fetch second, merge.** Solve it once on the server side of the contract, not in N clients. |
-| **Zulip (DMs)** | There is no "create DM" call at all: `POST /messages` with `type:"direct"`, `to:[user_ids]` — the conversation is implicit. ([send-message](https://zulip.com/api/send-message)) | If DM identity is deterministic, "create" is a redundant step you can delete. |
-| **Slack** | `conversations.open` exists, but `chat.postMessage` with a user ID as `channel` **opens the DM if it isn't open already**. ([conversations.open](https://docs.slack.dev/reference/methods/conversations.open/), [chat.postMessage](https://api.slack.com/methods/chat.postMessage)) | Same conclusion, from the biggest product in the category. |
-| **Matrix** | `/sync` with a `since` token; clients are told to **de-duplicate by event ID** because ordering across APIs can produce duplicates. ([spec](https://spec.matrix.org/latest/client-server-api/)) | Idempotent merge by ID is the price of admission for any backfill design. |
-| **Discord** | Every gateway event carries a sequence `s`; `RESUME` replays from the last `s`. Replay is **bounded** — overflow → `INVALID_SESSION` → full re-fetch. ([gateway](https://docs.discord.com/developers/events/gateway)) | Gap detection + bounded replay + full-resync fallback. |
-| **General chat architecture** | The live pub/sub path is best-effort; the durable per-conversation log is the source of truth; clients re-read on reconnect. | The message is already durable in Cassandra here. The fix belongs in *reconciliation*, not in making the live event perfect. |
+Your description matches the code exactly, and the harness confirms it is real — and worse
+than intuition suggests.
 
-Not one of these systems solves this with a compound "create + send" endpoint. Slack and Zulip
-converge on **implicit creation on send**; everyone converges on **subscribe-then-backfill with
-idempotent merge**.
+`broadcast-worker.publishChannelEvent` publishes **once** to `chat.room.{id}.event`. B only
+subscribes to that subject inside its `subscription.update` handler. Everything published
+before that subscription is live is gone: core NATS is at-most-once with no replay.
 
----
+Three things the measurements settle:
 
-## 5. Solution catalogue
+1. **It is not a narrow window.** With a 30 ms render-then-subscribe, every message sent
+   within ~30 ms of the subscription event is lost — 100%, not "occasionally".
+2. **`Flush()` does not fix it.** 100% → 100% at short delays; it only helps in the
+   coin-flip millisecond at the boundary (70% → 60%). `Flush()` confirms your *own* server
+   processed the SUB; it says nothing about the publisher's server. On the cluster it
+   barely moves (98% → 95%).
+3. **Even an instantaneous client loses.** Render delay 0, message at +0 ms: 78% lost on one
+   server, 98% on a cluster. There is no client-side "subscribe faster" that reaches 0%.
+   NATS exposes no cluster-wide "interest is live" signal — [nats-server#1142](https://github.com/nats-io/nats-server/issues/1142)
+   is still open on exactly this.
 
-### S1 — Client waits for the phase-2 async job result before sending
+### Fix A — client backfill (works today, zero backend change)
 
-* **Fixes:** R1 only.
-* **Pros:** zero server change; it is already the documented contract and what the reference client does.
-* **Cons:** adds the full create latency to the first send; nothing else improves.
-* **Verdict:** mandatory baseline, not a solution on its own.
+On `subscription.update{added}` for a channel: **subscribe first, then read the durable log,
+then merge by message ID.**
 
-### S2 — Combined `create room + send message` RPC (the proposal)
+```
+open chat.room.{id}.event  →  Flush()  →  msg.history{limit:N}  →  merge, dedupe by messageId
+```
 
-Server creates the room, writes the message, emits one combined fan-out.
+`msg.history` already exists —
+`chat.user.{account}.request.room.{roomID}.{siteID}.msg.history`, documented in
+`docs/client-api.md`. Harness result: **0% lost at every delay on both topologies** (215 and
+241 messages recovered that the live path had dropped).
 
-* **Fixes:** R1 completely (the room provably exists before the message is accepted).
-  R3 **only if** the combined event carries the message and lands on a subject B already holds.
-  R2: **not at all**.
-* **Pros:**
-  * One round trip; best possible latency for "start a conversation" — the single most latency-visible
-    action in the product.
-  * Creates a **server-side ordering point**: subscription-added can be published *after* the message
-    exists, so the event can carry `room.lastMsgId` / `previewMessage` — B renders the DM with its
-    first message from a single event.
-  * Matches Slack/Zulip product semantics.
-  * Message IDs are client-supplied 20-char base62, so a retry is naturally idempotent.
-* **Cons:**
-  * **Only fixes the first message.** A second message 50 ms later hits the identical R2/R3 window in a
-    channel. The race is not about *the first* message; it is about *any* message that arrives before
-    the recipient is listening.
-  * If it re-implements create and send, it duplicates: validation, attachments/quote/thread
-    resolution, mention extraction, large-room gating, encryption, DEK provisioning, sys-messages,
-    federation. Two code paths that must not drift — exactly the failure mode CLAUDE.md's
-    "define interfaces in the consumer" discipline exists to avoid.
-  * If instead it publishes into MESSAGES, the send is async again and the "single atomic fan-out" is
-    gone (which is fine — see the recommendation).
-  * Combinatorial API growth: create-channel+message, add-member+message, …
-  * A synchronous RPC now covers Vault (DEK), Mongo writes, fan-out and federation — the reply timeout
-    budget has to cover the slowest of those, and partial failure ("room created, message rejected")
-    needs an explicit reply shape.
+The ordering is the whole point, and it is Zulip's documented guarantee applied per room:
+register the listener before reading state, so anything that arrives during the read is
+still delivered. Backfill-then-subscribe re-opens the window.
 
-### S3 — Fat `subscription.update{added}` event (embed the first message)
+**One caveat the harness is optimistic about.** It persists before fanning out. In
+production `message-worker` and `broadcast-worker` are **separate durable consumers of
+MESSAGES-CANONICAL** and run concurrently, so a backfill issued milliseconds after the
+fan-out can read Cassandra *before* the write lands. Backfill therefore needs a companion:
+gap detection on `lastMsgId` (already on every `RoomEvent` and on `SubscriptionRoom`) — if
+the id doesn't chain onto what the client holds, re-fetch. Without it, a backfill can come
+back one message short and stay short.
 
-`SubscriptionRoom` **already has** `LastMsgID`, `LastMsgAt` and `PreviewMessage`; they are simply not
-populated at create time (there is no message yet). Combined with S2's ordering point they can be.
+### Fix B — server join grace window (small change, delivers live)
 
-* **Fixes:** R3 for the first message.
-* **Pros:** tiny delta; no new subjects; no new RPC; helps every client immediately.
-* **Cons:** covers only what is known at publish time. Not a general fix.
+Have `broadcast-worker` **also** publish a channel's room event to
+`chat.user.{X}.event.room` for members whose `joinedAt` is inside a grace window (say 30 s).
+Harness result: **0% lost at every delay on both topologies** — and delivered *live*, with
+no backfill round trip and no empty-room flicker.
 
-### S4 — Client: subscribe-then-backfill, dedupe by message ID (the Zulip pattern)
+Cost is the obvious objection, and it is answerable. The channel path today does exactly one
+publish and never lists subscriptions — that is the point of the room subject. Listing
+subscriptions per message would be a real regression for large rooms. Avoid it by gating on
+room metadata:
 
-On `subscription.update{added}` — and on every room entry: (1) open the room subscription first,
-(2) buffer incoming events, (3) `loadHistory` since `joinedAt`/`historySharedSince`, (4) merge and
-dedupe by message ID.
+```go
+if meta.LastJoinAt != nil && now.Before(meta.LastJoinAt.Add(joinGrace)) {
+    // only now pay for the subscription lookup
+}
+```
 
-* **Fixes:** R2 and R3, generally — plus everything lost to disconnects.
-* **Pros:** the industry-standard answer; no API surface change; self-healing; the durable message is
-  already in Cassandra and `history-service` already exposes it.
-* **Cons:** frontend work in every client; one extra history RPC per new room; must be genuinely
-  idempotent (Matrix's warning). Does not by itself close the sub-millisecond interest-propagation
-  gap — the backfill must run *after* the subscribe, which is exactly why the ordering matters.
+`roommetacache.Meta` already carries `CrossSiteAt` for a structurally identical grace window
+(`pkg/subject.RoomEventTargets` dual-publishes during the local/global flip so
+not-yet-resubscribed clients keep receiving). Adding `LastJoinAt` follows that precedent
+exactly. Steady state — no recent joins — costs one nil check and nothing else. Only rooms
+with a join in the last N seconds pay for the lookup, and `broadcast-worker.Store` already
+exposes `ListSubscriptions`.
 
-### S5 — Gap detection from `lastMsgId`
+**Fix B requires Fix (Problem 1) first.** The grace-window copy arrives on the per-user
+subject, so a client that still discards unknown rooms discards it too. The harness makes
+this explicit: `channel / grace window, client still drops` = **100% lost**. Server-side
+delivery cannot rescue a client that throws the event away.
 
-`RoomEvent` already carries `LastMsgID`/`LastMsgAt` (`buildRoomEvent`). Keep a per-room
-`lastKnownMsgId`; when an event's `lastMsgId` doesn't chain, backfill. Re-reconcile on reconnect.
-
-* **Fixes:** all three, after the fact (self-healing rather than preventive).
-* **Pros:** cheap; makes every loss cause recoverable, not just this one; Discord's model.
-* **Cons:** eventually-consistent — the user may see the message a beat late; needs a per-room cursor.
-
-### S6 — Durable per-user delivery (JetStream consumer per client)
-
-* **Fixes:** everything, including offline delivery.
-* **Cons:** a consumer per connected user does not scale the way core-NATS fan-out does; ack/state
-  management; replaces the deliberate core-NATS FE design. Long-term option, not this fix.
-
-### S7 — Route channel events per-user (or: a **join grace window**)
-
-Full version: deliver channel events on `chat.user.{X}.event.room` like DMs, so no per-room
-subscription ever exists. Fixes R2 by deleting it — but moves fan-out cost from NATS into
-`broadcast-worker` (N publishes per message), against the direction of the current
-`chat.local.room.>` traffic-reduction work.
-
-**Narrow version — recommended:** publish the channel room event **additionally** to
-`chat.user.{X}.event.room` for members whose `joinedAt` is within a grace window (e.g. 30 s).
-
-* **Fixes:** R2, precisely, for exactly the members who can be affected by it.
-* **Pros:** steady-state fan-out cost unchanged; there is already a grace-window precedent in
-  `pkg/subject` (`roomLocalityGrace` dual-publishes during the local/global flip so
-  not-yet-resubscribed clients keep receiving) — this is the same idea applied to the join transition.
-  Clients dedupe by message ID, which S4/S5 require anyway.
-* **Cons:** duplicate delivery during the window (harmless once dedupe exists); needs `joinedAt` in the
-  fan-out path (`ListSubscriptions` already returns subscriptions; room-meta cache may need the field).
-
-### S8 — Implicit DM creation on send (Zulip/Slack semantics)
-
-Client sends to the deterministic DM room ID; `message-gatekeeper`, on `errNotSubscribed` for a
-well-formed DM room ID that includes the sender, calls the **existing synchronous**
-`chat.server.request.room.{site}.create.dm` RPC (`room-worker.serverCreateDM`, already implemented and
-already used by `user-service/roomclient`), then proceeds.
-
-* **Fixes:** R1; deletes the "create" step from the client flow entirely.
-* **Pros:** no new client API; reuses one create implementation and the whole existing send pipeline;
-  matches Slack/Zulip.
-* **Cons:** the client must compute the DM room ID, which is `sortedConcat(userA.ID, userB.ID)` — that
-  leaks an ID-construction rule into clients (and `docs/client-api.md` currently describes it as a
-  concat of *accounts*, which does not match `idgen.BuildDMRoomID`; that doc drift needs fixing either
-  way). Also puts a synchronous room-create in the gatekeeper hot path — needs a guard so it can only
-  fire for DM-shaped IDs.
+Fix B also produces duplicates by construction (both the room subject and the user subject
+carry the message) — 142 and 300 in the runs above. **Dedupe by message ID is mandatory.**
 
 ---
 
-## 6. Verdict on the proposed combined RPC
+## 5. On the combined create-room + send-message RPC
 
-**It is a good idea for the sender's problem and a decent idea for the product, but it is not the fix
-for the recipient's problem.** Specifically:
+The idea is directionally right, and the measurements show what it is really doing.
 
-* ✅ It removes R1 by construction — the strongest argument for it.
-* ✅ It creates the ordering point that lets `subscription.update{added}` carry the first message (S3),
-  which closes R3 for the common case.
-* ❌ It does nothing for R2. For a channel, B still has to subscribe to `chat.room.{id}.event` *after*
-  processing the combined event, and NATS provides no way to know when that subscription is live
-  ([nats-server#1142](https://github.com/nats-io/nats-server/issues/1142)).
-* ❌ It fixes exactly one message. The same race recurs on message #2, and on *every* add-member +
-  immediate-post in a channel.
+Its value is not "one RPC instead of two". It is that the server gets to put the first
+message on **a subject the recipient already holds** instead of one they have to go
+subscribe to. That is the same mechanism as Fix B — the grace window is simply that idea
+generalised from *the first message* to *every message in the vulnerable window*.
 
-If you build it, build it as a **thin orchestrator, not a second implementation**:
+Which exposes the limitation: the combined RPC covers message #1. Message #2, sent 40 ms
+later, is back to 100% loss (row 3 of the table). Same for every add-member-then-post in an
+existing channel, which the combined RPC does not touch at all.
 
-1. Call the existing synchronous `RoomCreateDMSync` (`room-worker.serverCreateDM`) — it already does
-   deterministic ID, idempotent insert, dup-key reconcile, DEK provisioning, subscription pair
-   creation, `subscription.update` fan-out, and cross-site inbox.
-2. Then publish the client's message to MESSAGES exactly as `msg.send` would, so it flows through
-   `message-gatekeeper` → MESSAGES-CANONICAL → `broadcast-worker` unchanged.
-3. Reply with `{roomId, subscription, messageAccepted}` — and define the partial-failure shape
-   explicitly (room created + message rejected must not read as total failure).
+There is also a construction problem. For the combined event to carry the message, the
+server must build the payload itself rather than let it flow through MESSAGES-CANONICAL. But
+the message has to reach that pipeline anyway — `message-worker` (Cassandra), `notification-worker`,
+`search-sync-worker` all consume it — and `broadcast-worker` will then emit its own
+`new_message`. So you end up with two events regardless, and Problem 2 is untouched.
 
-That gets one round trip and zero duplicated logic. It does **not** get a single combined fan-out
-event — and it shouldn't try to: the message must go through the canonical pipeline so that
-`message-worker` (Cassandra), `notification-worker`, and `search-sync-worker` all see it.
+**Recommendation:** build it if you want the round-trip latency win on "start a
+conversation", and build it as a *thin orchestrator* — call the existing synchronous
+`chat.server.request.room.{site}.create.dm` (`room-worker.serverCreateDM`, already used by
+`user-service/roomclient`), then publish the message into MESSAGES exactly as `msg.send`
+does. Zero duplicated validation. But do not schedule it as the fix for either problem.
 
----
-
-## 7. Recommended plan
-
-**Phase 0 — confirm which race you actually have (do this first).**
-For a DM, `broadcast-worker` delivers on `chat.user.{B}.event.room`, which B holds from login. So
-either the desktop client subscribes per-room for DMs (unlike the reference frontend), or it is
-dropping a `new_message` for an unknown room (R3), or it is sending on the sync `accepted` reply (R1).
-These have different fixes; picking one blind risks building the wrong thing. Add a client-side counter
-for "room event received for unknown room" and a `message-gatekeeper` metric for `errNotSubscribed`
-rejections within N seconds of a room create.
-
-**Phase 1 — cheap, no new API.**
-* Client: send only after the **phase-2 async job result** (fixes R1).
-* Client: accept `new_message` for an unknown room — synthesize the room and refetch the subscription
-  (fixes R3, matching the reference frontend's reducer).
-* Client: on `subscription.update{added}` for a channel, **open the room subscription before** applying
-  state, then backfill (S4 ordering).
-
-**Phase 2 — the actual R2 fix.**
-* `broadcast-worker`: join grace window (S7 narrow) — dual-publish channel events to
-  `chat.user.{X}.event.room` for members with `joinedAt` inside the window.
-* Client: dedupe by message ID (required by the dual publish; also required by Phase 3).
-
-**Phase 3 — make it self-healing.**
-* Client: gap detection on `lastMsgId` (S5) + full reconcile on reconnect. This retires the whole bug
-  class, including best-effort publishes lost while disconnected.
-
-**Phase 4 — optional product/latency work.**
-* The combined DM RPC as a thin orchestrator (S2 + S3), or the implicit-create-on-send variant (S8).
-  Do this for the UX win, once Phases 1–3 mean it is not load-bearing for correctness.
-
-**Explicitly not recommended now:** S6 (per-user JetStream consumers) and full S7 (all channel events
-per-user). Both are large, and Phases 1–3 make them unnecessary.
+For reference, neither Slack nor Zulip built a compound endpoint: both made DM creation
+*implicit on send* ([Slack `chat.postMessage`](https://api.slack.com/methods/chat.postMessage),
+[Zulip `POST /messages type=direct`](https://zulip.com/api/send-message)).
 
 ---
+
+## 6. Recommended plan
+
+| # | Change | Side | Fixes | Evidence |
+|---|---|---|---|---|
+| 1 | `new_message` upserts the room from the event payload instead of dropping it | client | **Problem 1, completely** | `dm / client buffers unknown room`: 0% at every delay |
+| 2 | On channel join: subscribe → flush → `msg.history` → merge by message id | client | **Problem 2**, recovered | `channel / … + backfill`: 0% at every delay |
+| 3 | Gap detection on `lastMsgId` + reconcile on reconnect | client | the `message-worker`/`broadcast-worker` write race, and every event lost to a disconnect | see §4 caveat |
+| 4 | Join grace window: dual-publish to the per-user subject for members joined < N s ago, gated on `Meta.LastJoinAt` | server | **Problem 2**, delivered live | `channel / server join grace window`: 0% at every delay |
+| 5 | *(optional)* combined DM create+send as a thin orchestrator | server | latency/UX only | §5 |
+
+Steps 1–3 need no backend change at all. Step 4 is one cache field plus a gated lookup, and
+is worth doing because it turns Problem 2 from "recovered a beat later" into "never
+happened" — but it is strictly dependent on step 1.
+
+Do **not** start with step 4 alone: measured, it fixes nothing.
+
+## 7. Non-recommendations
+
+* **Per-user JetStream consumers for client delivery.** Solves everything including offline,
+  but a consumer per connected user does not scale the way core-NATS fan-out does, and it
+  replaces a deliberate design.
+* **A short-TTL JetStream replay buffer for room events** (Discord's `RESUME` model). More
+  general than the grace window, but it puts a JetStream write on the message hot path.
+* **Routing all channel events per-user.** Deletes Problem 2 outright, but moves fan-out
+  cost from NATS into `broadcast-worker` for every message in every room — the opposite
+  direction from the current `chat.local.room.>` traffic-reduction work.
+* **"Just subscribe faster / add a Flush."** Measured: 100% → 100%.
 
 ## 8. Things to get right
 
-* **Idempotency.** Message IDs are client-supplied 20-char base62 — dedupe on that everywhere. Matrix
-  makes this explicit for exactly this reason.
-* **Ordering assumptions.** Do not assume `subscription.update` precedes the room event. Different
-  publishers, different subjects, no guarantee. Write the client so either order works.
-* **Federation.** A cross-site B receives the same events via INBOX. The grace window must key off the
-  *subscription's* `joinedAt` at the delivering site, not wall-clock at the origin.
-* **Docs.** Any change to a client-facing subject or to a `pkg/model` client-facing struct requires
-  updating `docs/client-api.md` **and** both derived views in the same PR (CLAUDE.md §5). Note the
-  existing drift: §"ID formats" describes the DM room ID as a concat of *accounts*, but
-  `idgen.BuildDMRoomID` concatenates `user.ID` values.
-* **TDD.** All of the above is new behaviour — tests first (CLAUDE.md §4).
-
----
-
-## 9. Open questions
-
-1. Does the desktop client subscribe per-room for **DMs**, or only for channels like the reference
-   frontend? This determines whether the reported bug is R2 or R3.
-2. Does the desktop client send the first message on the **sync** `accepted` reply or on the **async
-   job result**? This determines whether R1 is in play.
-3. Is "create channel + immediately post" (not just DM) a real flow in the product? If yes, R2 is
-   in scope and Phase 2 is required, not optional.
-
----
+* **Dedupe by message ID everywhere.** Steps 2 and 4 both produce duplicates by design.
+* **Never assume `subscription.update` precedes `new_message`.** Different services,
+  different subjects, no ordering guarantee — and cross-site they cross a gateway
+  independently.
+* **Grace window keys off the local subscription's `joinedAt`**, not origin wall-clock, or
+  federated members get the wrong window.
+* **Docs.** A new `Meta` field is internal, but any client-facing subject or `pkg/model`
+  change requires `docs/client-api.md` plus both derived views in the same PR (CLAUDE.md §5).
+* **Pre-existing doc drift**, unrelated but worth fixing: `docs/client-api.md` §"ID formats"
+  describes the DM room ID as a concat of *accounts*; `idgen.BuildDMRoomID` concatenates
+  `user.ID` values.
 
 ## References
 
-* [NATS — cannot say when a subscription is registered across the entire cluster (nats-server#1142)](https://github.com/nats-io/nats-server/issues/1142)
-* [NATS — Publish-Subscribe (core NATS is at-most-once)](https://docs.nats.io/nats-concepts/core-nats/pubsub)
-* [NATS — Super-cluster with Gateways](https://docs.nats.io/running-a-nats-service/configuration/gateways)
-* [Zulip — Real-time push and events (queue-before-fetch atomicity, `apply_events`)](https://zulip.readthedocs.io/en/stable/subsystems/events-system.html)
-* [Zulip — Send a message (`type:"direct"`, implicit conversation)](https://zulip.com/api/send-message)
-* [Slack — `conversations.open`](https://docs.slack.dev/reference/methods/conversations.open/)
-* [Slack — `chat.postMessage` (opens the DM if not already open)](https://api.slack.com/methods/chat.postMessage)
-* [Matrix — Client-Server API `/sync`, de-duplicate by event ID](https://spec.matrix.org/latest/client-server-api/)
-* [Discord — Gateway sequence numbers and `RESUME`](https://docs.discord.com/developers/events/gateway)
+* [nats-server#1142 — no signal for cluster-wide subscription registration](https://github.com/nats-io/nats-server/issues/1142)
+* [NATS — core NATS is at-most-once](https://docs.nats.io/nats-concepts/core-nats/pubsub)
+* [Zulip — register the event queue before fetching state](https://zulip.readthedocs.io/en/stable/subsystems/events-system.html)
+* [Zulip — send a direct message (implicit conversation)](https://zulip.com/api/send-message)
+* [Slack — `chat.postMessage` opens the DM if needed](https://api.slack.com/methods/chat.postMessage)
+* [Matrix — de-duplicate by event ID](https://spec.matrix.org/latest/client-server-api/)
+* [Discord — gateway sequence numbers and `RESUME`](https://docs.discord.com/developers/events/gateway)
