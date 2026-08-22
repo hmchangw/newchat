@@ -489,6 +489,44 @@
         }
       ],
       "description": "Validity gate for a fault window. rate(...{outcome=\"idle\"}[5m]) == 0 is the lane saturating; p99 lag approaching SOAK_RECONCILE_DEADLINE means operations expire unverified for want of a probe, so that window's verdicts are not evidence. A non-zero startup invalidation means the run was already in question before any of that: reconcile_capacity is a run started below the floor, whose messages all expire unverified; reconcile_lag_range is a SOAK_RECONCILE_DEADLINE past the resolvable lag range, which leaves the p99 reading above unable to answer. They are split by reason because they need different fixes."
+    },
+    {
+      "type": "timeseries",
+      "title": "Loadgen Mongo and heartbeat validity",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 120
+      },
+      "targets": [
+        {
+          "expr": "loadgen_mongo_up",
+          "legendFormat": "Mongo primary Ping up",
+          "refId": "A"
+        },
+        {
+          "expr": "time() - loadgen_mongo_probe_timestamp_seconds",
+          "legendFormat": "Mongo probe age seconds",
+          "refId": "B"
+        },
+        {
+          "expr": "loadgen_soak_heartbeat_degraded",
+          "legendFormat": "heartbeat degraded",
+          "refId": "C"
+        },
+        {
+          "expr": "time() - loadgen_soak_heartbeat_success_timestamp_seconds",
+          "legendFormat": "heartbeat success age seconds",
+          "refId": "D"
+        },
+        {
+          "expr": "sum by (outcome) (increase(loadgen_soak_heartbeat_attempts_total[5m]))",
+          "legendFormat": "heartbeat {{outcome}} attempts/5m",
+          "refId": "E"
+        }
+      ],
+      "description": "Loadgen-side validity gate, not service health. Mongo absence evidence is inconclusive while Ping is down or the probe timestamp is stale. A stale heartbeat-success timestamp exposes a stuck watcher even when its degraded gauge froze at the last value."
     }
   ]
 }

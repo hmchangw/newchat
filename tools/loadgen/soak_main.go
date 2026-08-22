@@ -458,6 +458,9 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
+	heartbeatStatus := newSoakHeartbeatStatus(metrics)
+	shutdownMongoProbe := startSoakMongoProbe(ctx, client, metrics, time.Now)
+	defer shutdownMongoProbe()
 	reconcileBreaches := warnSoakReconcileConfig(&cfg.Soak)
 	setSoakRunInfo(metrics, cfg.Soak.Environment)
 	defer metrics.stopNATSHealth()
@@ -1159,6 +1162,7 @@ func runSoakWorkload(
 		now,
 		nil,
 		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
+		withSoakHeartbeatObserver(heartbeatStatus),
 	)
 	result, runErr := workload.Run(workloadCtx)
 	shutdownExpiry()

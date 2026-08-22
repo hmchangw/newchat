@@ -18,6 +18,8 @@ type Metrics struct {
 	// which is well after the registry is built, and is read on the scrape
 	// goroutine.
 	recipientExpectations atomic.Pointer[func() int]
+	soakHeartbeatSource   atomic.Pointer[func() soakHeartbeatSnapshot]
+	mongoProbeSource      atomic.Pointer[func() soakMongoProbeSnapshot]
 	Registry              *prometheus.Registry
 	Published             *prometheus.CounterVec
 	PublishErrors         *prometheus.CounterVec
@@ -71,6 +73,11 @@ type Metrics struct {
 	SoakPresenceSignals           *prometheus.CounterVec
 	SoakPresenceChecks            *prometheus.CounterVec
 	SoakPresenceConnections       *prometheus.GaugeVec
+	SoakHeartbeatDegraded         prometheus.GaugeFunc
+	SoakHeartbeatSuccessTimestamp prometheus.GaugeFunc
+	SoakHeartbeatAttempts         *prometheus.CounterVec
+	MongoUp                       prometheus.GaugeFunc
+	MongoProbeTimestamp           prometheus.GaugeFunc
 
 	FailureOperations            *prometheus.CounterVec
 	FailureObservations          *prometheus.CounterVec
@@ -375,6 +382,41 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"scenario", "lane", "observer", "result"},
 	)
+	m.SoakHeartbeatDegraded = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "loadgen_soak_heartbeat_degraded",
+			Help: "Whether the latest soak heartbeat attempt failed while the run remains active (1 degraded, 0 otherwise).",
+		},
+		m.soakHeartbeatDegraded,
+	)
+	m.SoakHeartbeatSuccessTimestamp = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "loadgen_soak_heartbeat_success_timestamp_seconds",
+			Help: "Unix timestamp of the latest successful soak manifest heartbeat; zero until the first success.",
+		},
+		m.soakHeartbeatSuccessTimestamp,
+	)
+	m.SoakHeartbeatAttempts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_heartbeat_attempts_total",
+			Help: "Soak manifest heartbeat attempts by bounded outcome (success, error, not_active).",
+		},
+		[]string{"outcome"},
+	)
+	m.MongoUp = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "loadgen_mongo_up",
+			Help: "Whether loadgen's latest bounded Ping to the Mongo primary succeeded (1 up, 0 down or not yet probed).",
+		},
+		m.mongoUp,
+	)
+	m.MongoProbeTimestamp = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "loadgen_mongo_probe_timestamp_seconds",
+			Help: "Unix timestamp when loadgen's latest Mongo primary Ping completed, regardless of outcome; zero until the first probe.",
+		},
+		m.mongoProbeTimestamp,
+	)
 	m.FailureObservationReasons = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_observation_reasons_total",
@@ -579,6 +621,8 @@ func NewMetrics() *Metrics {
 		m.SoakEncryptionPreflight,
 		m.SoakLaneAttempts,
 		m.SoakPresenceSignals, m.SoakPresenceChecks, m.SoakPresenceConnections,
+		m.SoakHeartbeatDegraded, m.SoakHeartbeatSuccessTimestamp,
+		m.SoakHeartbeatAttempts, m.MongoUp, m.MongoProbeTimestamp,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecipientExpectations,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
@@ -627,4 +671,66 @@ func (m *Metrics) recipientExpectationCount() float64 {
 		return float64((*source)())
 	}
 	return 0
+}
+
+func (m *Metrics) SetSoakHeartbeatSource(source func() soakHeartbeatSnapshot) {
+	if m == nil || source == nil {
+		return
+	}
+	m.soakHeartbeatSource.Store(&source)
+}
+
+func (m *Metrics) soakHeartbeatSnapshot() soakHeartbeatSnapshot {
+	if m != nil {
+		if source := m.soakHeartbeatSource.Load(); source != nil {
+			return (*source)()
+		}
+	}
+	return soakHeartbeatSnapshot{}
+}
+
+func (m *Metrics) soakHeartbeatDegraded() float64 {
+	if m.soakHeartbeatSnapshot().Degraded {
+		return 1
+	}
+	return 0
+}
+
+func (m *Metrics) soakHeartbeatSuccessTimestamp() float64 {
+	success := m.soakHeartbeatSnapshot().LastSuccess
+	if success.IsZero() {
+		return 0
+	}
+	return float64(success.Unix())
+}
+
+func (m *Metrics) SetMongoProbeSource(source func() soakMongoProbeSnapshot) {
+	if m == nil || source == nil {
+		return
+	}
+	m.mongoProbeSource.Store(&source)
+}
+
+func (m *Metrics) mongoProbeSnapshot() soakMongoProbeSnapshot {
+	if m != nil {
+		if source := m.mongoProbeSource.Load(); source != nil {
+			return (*source)()
+		}
+	}
+	return soakMongoProbeSnapshot{}
+}
+
+func (m *Metrics) mongoUp() float64 {
+	if m.mongoProbeSnapshot().Up {
+		return 1
+	}
+	return 0
+}
+
+func (m *Metrics) mongoProbeTimestamp() float64 {
+	completedAt := m.mongoProbeSnapshot().CompletedAt
+	if completedAt.IsZero() {
+		return 0
+	}
+	return float64(completedAt.Unix())
 }

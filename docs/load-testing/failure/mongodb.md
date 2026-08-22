@@ -3,7 +3,7 @@
 > Verified against the code on 2026-08-21. Scope for this round: the services
 > that serve ordinary chat traffic. Cross-site federation, push delivery, the
 > Teams synchronisation processes and the data-migration processes are out of
-> scope and are listed in §5.
+> scope and are listed in §6.
 >
 > Loadgen generates traffic and records what it can observe. It does not inject
 > faults and it does not decide whether the campaign passed.
@@ -118,7 +118,43 @@ The query-time rules for turning these counters into `VALID` / `INCONCLUSIVE`,
 impact and correctness live in
 [`../loadgen/dashboard-contract.md`](../loadgen/dashboard-contract.md).
 
-## 5. Out of scope this round
+## 5. Campaign control-plane configuration
+
+For a planned two-minute Mongo outage, use a campaign overlay rather than
+changing the Chart defaults:
+
+```yaml
+soak:
+  heartbeatStaleAfter: 30m
+  roomReadRate: "30"
+
+ledger:
+  reconcileDeadline: 10m
+  roomReconcileReadShare: 0.5
+
+recipientObserver:
+  enabled: true
+```
+
+`heartbeatStaleAfter` is the active-run lease used by seed and teardown, not a
+dashboard freshness threshold. It must exceed the longest planned outage plus
+Mongo/client recovery and operator margin; otherwise a stale `running`
+manifest can authorize teardown while loadgen is still dispatching. The longer
+lease also delays cleanup after a real loadgen crash. The emergency override
+for that case is documented in the Kubernetes runbook and is permitted only
+after the Deployment is stopped and the heartbeat is proven not to advance.
+
+At the configured mutation/read-receipt rates the room-state demand is 8.05
+operations/second. The default room-read capacity leaves only
+`20 * 0.5 - 8.05 = 1.95` operations/second for catch-up; the campaign overlay
+raises that to `30 * 0.5 - 8.05 = 6.95`. A two-minute outage therefore creates
+at most about 966 pending operations and takes about 139 seconds to drain under
+the steady-rate model. This recovery calculation applies only while the outage
+and recovery remain well below the ten-minute reconciliation deadline. Once an
+operation expires, extra read capacity cannot turn its `unverified` result back
+into evidence.
+
+## 6. Out of scope this round
 
 - **Cross-site federation** (OUTBOX, remote INBOX, inbox-worker convergence)
   and **push delivery** — next round.
@@ -130,7 +166,7 @@ impact and correctness live in
   and the "is the service itself alive" question harder to answer. Client
   metrics carry that signal instead.
 
-## 6. Code evidence
+## 7. Code evidence
 
 - Connection, instrumentation, pool tuning, read preference: `pkg/mongoutil/`
 - Transaction path: `admin-service/store_mongo.go`

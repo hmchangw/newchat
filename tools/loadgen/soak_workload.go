@@ -191,14 +191,19 @@ func withSoakPacingMetrics(recorder *soakPacingMetrics) soakWorkloadOption {
 	return func(workload *soakWorkload) { workload.pacing = recorder }
 }
 
+func withSoakHeartbeatObserver(observer soakHeartbeatObserver) soakWorkloadOption {
+	return func(workload *soakWorkload) { workload.heartbeatObserver = observer }
+}
+
 type soakWorkload struct {
-	cfg          soakWorkloadConfig
-	store        soakLifecycleStore
-	actions      soakWorkloadActions
-	dispatch     soakLaneDispatcher
-	now          func() time.Time
-	onSaturation func()
-	pacing       *soakPacingMetrics
+	cfg               soakWorkloadConfig
+	store             soakLifecycleStore
+	actions           soakWorkloadActions
+	dispatch          soakLaneDispatcher
+	now               func() time.Time
+	onSaturation      func()
+	pacing            *soakPacingMetrics
+	heartbeatObserver soakHeartbeatObserver
 }
 
 func newSoakWorkload(
@@ -328,7 +333,7 @@ func (w *soakWorkload) Run(
 			soakHeartbeatRetryInterval,
 			nil,
 			w.now,
-			nil,
+			w.heartbeatObserver,
 		)
 		if heartbeatErr != nil &&
 			!errors.Is(heartbeatErr, context.Canceled) &&

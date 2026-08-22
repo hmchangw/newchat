@@ -259,6 +259,28 @@ The Chart refuses to render `phase=teardown` without the approval flag.
 Loadgen additionally refuses teardown while the manifest has a fresh active
 heartbeat.
 
+For a Mongo fault campaign, set `soak.heartbeatStaleAfter` well beyond the
+longest planned outage and recovery window (for example `30m` for a planned
+two-minute outage). This value is a destructive-operation lease; it is not the
+dashboard heartbeat freshness threshold.
+
+If loadgen actually crashed, there is no force flag. The emergency escape hatch
+is a teardown-only lease override. First promote to `phase=stopped`, confirm no
+loadgen Pod exists, and verify across at least two normal heartbeat intervals
+that the manifest heartbeat no longer advances. Only then render the teardown
+Job with a shorter still-valid lease:
+
+```bash
+helm upgrade cassandra-soak tools/loadgen/deploy/k8s \
+  -n loadgen-smoke -f tools/loadgen/deploy/k8s/values-local.yaml \
+  --set phase=teardown --set teardown.approved=true \
+  --set soak.heartbeatStaleAfter=1m \
+  --wait --wait-for-jobs --timeout 10m
+```
+
+Never shorten this lease while a loadgen Pod may still be running. Doing so
+permits teardown to delete a live run's topology.
+
 Mongo cleanup pages the run's ownership room IDs and deletes serial batches.
 Tune `batchRooms` and `batchDelay` downward/upward to reduce or increase
 cleanup pressure; `batchTimeout` limits one batch without imposing a deadline
