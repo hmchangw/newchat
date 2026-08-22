@@ -620,6 +620,28 @@ func reconcileProbeOutcome(probeErr error) string {
 	return soakReconcileClaimRetried
 }
 
+// searchProbeOutcome separates a probe that answered from one that never ran.
+// Indexed reports unknown without an error when it had no query to issue — an
+// unconfigured probe, an operation missing its targets, or a catalog entry
+// evicted before the probe was due — and "retried" is defined as a probe that
+// answered and found the effect absent. Counting an unissued query as retried
+// would show the dashboard persistence lag where there was no query at all.
+// too_early is the one unqueried result that is intentional: the settle window
+// has not elapsed, so nothing is unavailable.
+func searchProbeOutcome(
+	result soakSearchIndexResult,
+	probed bool,
+	probeErr error,
+) string {
+	if probeErr != nil {
+		return soakReconcileClaimUnavailable
+	}
+	if !probed && result != soakSearchIndexTooEarly {
+		return soakReconcileClaimUnavailable
+	}
+	return soakReconcileClaimRetried
+}
+
 func withSoakFailureReconcileMetrics(metrics *Metrics) soakFailureReconcilerOption {
 	return func(reconciler *soakFailureReconciler) { reconciler.metrics = metrics }
 }
@@ -880,7 +902,7 @@ func (r *soakFailureReconciler) observeSearchIndex(
 				"reschedule soak search index probe for %q: %w", operation.ID, err,
 			)
 		}
-		r.recordClaim(reconcileProbeOutcome(probeErr))
+		r.recordClaim(searchProbeOutcome(result, probed, probeErr))
 		return probed, nil
 	}
 	observation := failureObservationMissingAfterDeadline
