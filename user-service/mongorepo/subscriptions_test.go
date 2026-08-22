@@ -34,7 +34,7 @@ func TestAggregateSubscriptions_Integration(t *testing.T) {
 		bson.M{"_id": "r-eng-old", "name": "EngOld", "siteId": "site-a", "userCount": 1, "lastMsgAt": old},
 		bson.M{"_id": "r-dm", "name": "DM-bob", "siteId": "site-a", "userCount": 2,
 			"lastMsgId": "m-dm", "lastMsgAt": now},
-		// botDM rooms — production always pairs a room with a botDM; missing rooms cause the deleted-filter to drop those subs.
+		// botDM rooms — production always pairs a room with a botDM.
 		bson.M{"_id": "r-bot", "name": "helper.bot", "siteId": "site-a", "userCount": 1},
 		bson.M{"_id": "r-bot2", "name": "off.bot", "siteId": "site-a", "userCount": 1},
 		bson.M{"_id": "r-del", "name": "Del-Old", "siteId": "site-a", "userCount": 3},
@@ -56,10 +56,11 @@ func TestAggregateSubscriptions_Integration(t *testing.T) {
 		// local unsubscribed botDM (excluded from apps/current)
 		bson.M{"_id": "sub-bot-off", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-bot2",
 			"name": "off.bot", "roomType": "botDM", "siteId": "site-a", "isSubscribed": false, "_updatedAt": now},
-		// local channel whose room is Del-prefixed (DROPPED)
+		// local channel whose room name happens to start with "Del-" (KEPT — no name
+		// carries special meaning any more)
 		bson.M{"_id": "sub-del", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-del",
 			"name": "Del-Old", "roomType": "channel", "siteId": "site-a", "_updatedAt": now},
-		// local channel whose room is missing (DROPPED)
+		// local channel whose room is missing (KEPT, unenriched)
 		bson.M{"_id": "sub-missing", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-missing",
 			"name": "Gone", "roomType": "channel", "siteId": "site-a", "_updatedAt": now},
 		// cross-site channel (KEPT even though no local room doc)
@@ -74,7 +75,7 @@ func TestAggregateSubscriptions_Integration(t *testing.T) {
 			"name": "Muted", "roomType": "channel", "siteId": "site-a", "muted": true, "_updatedAt": now, "createdAt": now},
 	)
 
-	t.Run("rooms returns dm+channel, drops Del-, keeps missing+cross-site", func(t *testing.T) {
+	t.Run("rooms returns dm+channel, keeps missing+cross-site, filters no name", func(t *testing.T) {
 		page, err := r.AggregateSubscriptions(ctx, "alice", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
 		require.NoError(t, err)
 		subs := page.Data
@@ -86,8 +87,8 @@ func TestAggregateSubscriptions_Integration(t *testing.T) {
 		assert.True(t, got["sub-dm"], "local dm kept")
 		assert.True(t, got["sub-xsite"], "cross-site channel kept")
 		assert.True(t, got["sub-muted"], "muted channel kept — mute suppresses notifications only, not list visibility")
-		assert.False(t, got["sub-del"], "Del- local room filtered out of the list")
-		assert.True(t, got["sub-missing"], "missing local room kept (empty enrichment) — no local room.name to match ^Del-")
+		assert.True(t, got["sub-del"], "no room name is filtered out of the list")
+		assert.True(t, got["sub-missing"], "missing local room kept (empty enrichment)")
 		assert.False(t, got["sub-bot"], "botDM excluded from rooms")
 	})
 
@@ -142,8 +143,8 @@ func TestAggregateSubscriptions_Integration(t *testing.T) {
 		assert.True(t, got["sub-bot"], "subscribed botDM in current")
 		assert.True(t, got["sub-muted"], "muted channel in current — mute suppresses notifications only, not list visibility")
 		assert.False(t, got["sub-bot-off"], "unsubscribed botDM excluded from current")
-		assert.False(t, got["sub-del"], "Del- local room filtered out of current")
-		assert.True(t, got["sub-missing"], "missing local room kept (empty enrichment) — no local room.name to match ^Del-")
+		assert.True(t, got["sub-del"], "no room name is filtered out of current")
+		assert.True(t, got["sub-missing"], "missing local room kept (empty enrichment)")
 	})
 
 	t.Run("rooms window drops rooms stale by lastMsgAt, keeps fresh", func(t *testing.T) {
@@ -502,13 +503,15 @@ func TestFindChannelsByMembers_Integration(t *testing.T) {
 		assert.Empty(t, page.Data, "$-prefixed member must not bypass the member filter")
 	})
 
-	t.Run("soft-deleted and missing-room channels are dropped", func(t *testing.T) {
-		// roomMatchStages drops subs whose local room is ^Del- or absent (empty __matchedRoom, $ne: []).
+	t.Run("missing-room channels are dropped, present ones are kept whatever their name", func(t *testing.T) {
+		// roomMatchStages drops subs whose local room is absent (empty __matchedRoom,
+		// $ne: []). Room NAME is no longer part of that test — member matching only
+		// needs the room to exist locally.
 		seed(t, db, "rooms",
 			bson.M{"_id": "r-del", "name": "Del-Team", "siteId": "site-a", "userCount": 2, "createdAt": now},
 		)
 		seed(t, db, "subscriptions",
-			// alice+carol both members of a Del- room and of a room with no local doc.
+			// alice+carol both members of a Del--named room and of a room with no local doc.
 			bson.M{"_id": "a-del", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-del",
 				"name": "Del-Team", "roomType": "channel", "siteId": "site-a", "createdAt": now},
 			bson.M{"_id": "c-del", "u": bson.M{"_id": "u-carol", "account": "carol"}, "roomId": "r-del",
@@ -520,11 +523,12 @@ func TestFindChannelsByMembers_Integration(t *testing.T) {
 		)
 		page, err := r.FindChannelsByMembers(ctx, "alice", []string{"carol"}, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
 		require.NoError(t, err)
-		subs := page.Data
-		for _, sub := range subs {
-			assert.NotEqual(t, "r-del", sub.RoomID, "Del- room channel must be dropped")
-			assert.NotEqual(t, "r-missing", sub.RoomID, "missing-room channel must be dropped")
+		byRoom := map[string]bool{}
+		for _, sub := range page.Data {
+			byRoom[sub.RoomID] = true
 		}
+		assert.True(t, byRoom["r-del"], "a room that exists locally is kept whatever it is called")
+		assert.False(t, byRoom["r-missing"], "missing-room channel must still be dropped")
 	})
 
 	t.Run("bot accounts (.bot suffix) are excluded from member matching", func(t *testing.T) {
@@ -610,14 +614,14 @@ func TestGetSubscriptionByRoomID_Integration(t *testing.T) {
 
 	seed(t, db, "rooms",
 		bson.M{"_id": "ch1", "name": "General", "siteId": "site-a", "userCount": 5, "lastMsgId": "m9"},
-		bson.M{"_id": "del1", "name": "Del-Old", "siteId": "site-a", "userCount": 2}, // soft-deleted
+		bson.M{"_id": "del1", "name": "Del-Old", "siteId": "site-a", "userCount": 2},
 	)
 	seed(t, db, "subscriptions",
 		bson.M{"_id": "sub-ch1", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "ch1",
 			"name": "General", "roomType": "channel", "siteId": "site-a"},
 		bson.M{"_id": "sub-del", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "del1",
 			"name": "Old", "roomType": "channel", "siteId": "site-a"},
-		// cross-site sub: no local room doc, must be kept by the deleted-filter.
+		// cross-site sub: no local room doc, kept and simply unenriched.
 		bson.M{"_id": "sub-x", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "rx",
 			"name": "Remote", "roomType": "channel", "siteId": "site-b"},
 	)
@@ -637,11 +641,12 @@ func TestGetSubscriptionByRoomID_Integration(t *testing.T) {
 		assert.Equal(t, "sub-x", sub.ID)
 	})
 
-	t.Run("soft-deleted local room is kept (room nulled by the service)", func(t *testing.T) {
+	t.Run("a Del- prefixed room name is enriched like any other", func(t *testing.T) {
 		sub, err := r.GetSubscriptionByRoomID(ctx, "alice", "del1")
 		require.NoError(t, err)
-		require.NotNil(t, sub, "Del- room sub is now kept; the service drops the room object")
+		require.NotNil(t, sub)
 		assert.Equal(t, "sub-del", sub.ID)
+		assert.Equal(t, 2, sub.UserCount, "room enrichment applied — the name is not a filter")
 	})
 
 	t.Run("not subscribed yields nil", func(t *testing.T) {
@@ -666,7 +671,7 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		bson.M{"_id": "r-ch", "name": "Eng", "siteId": "site-a"},
 		bson.M{"_id": "r-noisy", "name": "Noisy", "siteId": "site-a"},
 		bson.M{"_id": "r-bot", "name": "helper.bot", "siteId": "site-a"},
-		bson.M{"_id": "r-del", "name": "Del-Gone", "siteId": "site-a"}, // soft-deleted
+		bson.M{"_id": "r-del", "name": "Del-Gone", "siteId": "site-a"},
 		bson.M{"_id": "r-closed", "name": "Closed", "siteId": "site-a"},
 		bson.M{"_id": "r-open", "name": "Opened", "siteId": "site-a"},
 	)
@@ -686,15 +691,15 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		// unsubscribed botDM (excluded)
 		bson.M{"_id": "u-bot", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "off.bot", "roomId": "r-offbot",
 			"roomType": "botDM", "siteId": "site-a", "isSubscribed": false},
-		// muted subscribed botDM (excluded — its room r-mutedbot is missing, dropped by the deleted-filter)
+		// muted subscribed botDM (excluded by mute)
 		bson.M{"_id": "mu-bot", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "muted.bot", "roomId": "r-mutedbot",
 			"roomType": "botDM", "siteId": "site-a", "isSubscribed": true, "muted": true},
-		// active by type, local room carries a ^Del- name. The active set no longer
-		// filters on it, so this counts — the deployment guarantees such a room never
-		// exists; the row is kept in the fixture to pin that the filter is really gone.
+		// active by type, local room carries a ^Del- name. No name is filtered anywhere
+		// any more — the deployment guarantees such a room never exists; the row stays
+		// in the fixture to pin that the filter is really gone.
 		bson.M{"_id": "del-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Gone", "roomId": "r-del",
 			"roomType": "channel", "siteId": "site-a"},
-		// active by type, local room is missing — now KEPT (deleted-filter is room.name-based; missing room has no name, passes $not-regex)
+		// active by type, local room is missing — KEPT (nothing filters on the room)
 		bson.M{"_id": "gone-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Vanished", "roomId": "r-missing",
 			"roomType": "channel", "siteId": "site-a"},
 		// cross-site sub: no local room doc, kept by the room filter
@@ -708,7 +713,7 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 			"roomType": "channel", "siteId": "site-a", "open": true},
 	)
 
-	t.Run("count excludes unsubscribed and muted; keeps missing-room, cross-site and Del- rooms", func(t *testing.T) {
+	t.Run("count excludes unsubscribed and muted; keeps missing-room, cross-site and Del- named rooms", func(t *testing.T) {
 		n, err := r.CountActiveSubscriptions(ctx, "alice")
 		require.NoError(t, err)
 		// a-dm, a-ch, a-bot, x-ch, gone-ch, open-ch and del-ch. Excluded: muted m-ch,
@@ -756,7 +761,7 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		assert.False(t, got["m-ch"], "muted channel excluded from the active/count set")
 		assert.False(t, got["u-bot"])
 		assert.False(t, got["mu-bot"], "muted botDM excluded by activeSubscriptionFilter before room lookup")
-		assert.True(t, got["del-ch"], "the active set no longer filters ^Del- rooms")
+		assert.True(t, got["del-ch"], "no room name is filtered from the active set")
 	})
 
 	t.Run("limit caps active set exactly", func(t *testing.T) {

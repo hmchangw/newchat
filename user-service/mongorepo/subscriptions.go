@@ -14,11 +14,8 @@ import (
 
 const subscriptionsCollection = "subscriptions"
 
-// roomsCollection is the $lookup target for the deleted-filter and enrichment; owned by room-service, referenced only by name.
+// roomsCollection is the $lookup target for room enrichment; owned by room-service, referenced only by name.
 const roomsCollection = "rooms"
-
-// deletedRoomNameRegex matches room-service's soft-delete rename ("Del-"+name); the deleted-filter excludes matching local subs.
-const deletedRoomNameRegex = "^Del-"
 
 // SubscriptionRepo is the Mongo implementation of service.SubscriptionRepository.
 type SubscriptionRepo struct {
@@ -31,7 +28,7 @@ type SubscriptionRepo struct {
 	// primary handle.
 	subscriptionsSecondary *mongoutil.Collection[model.Subscription]
 	enrichedSecondary      *mongoutil.Collection[model.EnrichedSubscription]
-	siteID                 string // this instance's site — distinguishes local vs cross-site rows in the deleted-filter
+	siteID                 string // this instance's site — distinguishes local vs cross-site rows
 	// showTeamsRoom mirrors SHOW_TEAMS_ROOM: false (default) excludes
 	// Teams-migrated rooms (origin "teams") from list/count results.
 	showTeamsRoom bool
@@ -40,7 +37,7 @@ type SubscriptionRepo struct {
 	showTeamsAccounts map[string]bool
 }
 
-// NewSubscriptionRepo builds a SubscriptionRepo over db; the deleted-filter keeps cross-site rows, drops local rows with missing/soft-deleted rooms.
+// NewSubscriptionRepo builds a SubscriptionRepo over db.
 func NewSubscriptionRepo(db *mongo.Database, siteID string, opts ...Option) *SubscriptionRepo {
 	s := applyOptions(opts)
 	col := db.Collection(subscriptionsCollection)
@@ -72,12 +69,11 @@ func (r *SubscriptionRepo) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
 
-// roomsEnrichStages builds the shared rooms-join + enrichment. When dropDeleted is true
-// it drops local soft-deleted (^Del-) rooms — only the list path passes true; the count
-// and active paths no longer filter Del- rooms at all. A missing/cross-site room has no room.name so it is kept either way. The
+// roomsEnrichStages builds the shared rooms-join + enrichment. It never removes a
+// subscription: a missing or cross-site room simply yields no room fields. The
 // rooms-type activity window is applied separately by the caller on the room's
 // lastMsgAt (surfaced here).
-func roomsEnrichStages(dropDeleted bool) bson.A {
+func roomsEnrichStages() bson.A {
 	stages := bson.A{
 		// Project only the room fields this enrichment surfaces (not the whole room doc) so
 		// the join+sort working set stays lean; the correlated $expr/_id match uses the _id
@@ -104,10 +100,6 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 			"as": "room",
 		}},
 		bson.M{"$unwind": bson.M{"path": "$room", "preserveNullAndEmptyArrays": true}},
-	}
-	if dropDeleted {
-		// A local Del- room.name matches the regex → inverted by $not → dropped.
-		stages = append(stages, bson.M{"$match": bson.M{"room.name": bson.M{"$not": bson.M{"$regex": deletedRoomNameRegex}}}})
 	}
 	return append(stages,
 		bson.M{"$addFields": bson.M{
@@ -137,22 +129,18 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 // room into; stripped by subscriptionProjection before the result decodes.
 const matchedRoomField = "__matchedRoom"
 
-// roomMatchStages joins the local rooms collection into the matchedRoomField array
-// — excluding soft-deleted (^Del-) rooms inside the $lookup — then drops any sub
-// whose room is missing/deleted (empty array, via $ne: []). It runs BEFORE the
-// heavier co-member self-join so the cheap room filter shrinks the candidate set
-// first. Unlike roomsEnrichStages this DROPS missing/cross-site rooms (no local
-// room doc ⇒ empty array): member matching is inherently local.
+// roomMatchStages joins the local rooms collection into the matchedRoomField array,
+// then drops any sub whose room is missing (empty array, via $ne: []). It runs
+// BEFORE the heavier co-member self-join so the cheap room filter shrinks the
+// candidate set first. Unlike roomsEnrichStages this DROPS missing/cross-site rooms
+// (no local room doc ⇒ empty array): member matching is inherently local.
 func roomMatchStages() []bson.D {
 	return []bson.D{
 		{{Key: "$lookup", Value: bson.M{
 			"from": roomsCollection,
 			"let":  bson.M{"rid": "$roomId"},
 			"pipeline": bson.A{
-				bson.M{"$match": bson.M{
-					"$expr": bson.M{"$eq": bson.A{"$_id", "$$rid"}},
-					"name":  bson.M{"$not": bson.M{"$regex": deletedRoomNameRegex}},
-				}},
+				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$_id", "$$rid"}}}},
 				// Project only the fields FindChannelsByMembers copies out of
 				// matchedRoomField (mirrors roomsEnrichStages) so the whole room doc —
 				// including prior E2E key slots — doesn't transit the pipeline.
@@ -243,10 +231,9 @@ func dedupeStrings(in []string) []string {
 
 // AggregateSubscriptions returns one page of account's subscriptions for listType
 // (rooms = dm+channel, apps = subscribed botDMs, current = both) ordered by room
-// activity (lastMsgAt) desc, plus a hasMore flag (over-fetch by one). Locally soft-deleted
-// (^Del-) rooms are excluded. favorite restricts to favorited rows and pins the
-// caller's self-DM first; withinDays windows the rooms type on the room's lastMsgAt
-// (ignored for apps/current).
+// activity (lastMsgAt) desc, plus a hasMore flag (over-fetch by one). favorite
+// restricts to favorited rows and pins the caller's self-DM first; withinDays windows
+// the rooms type on the room's lastMsgAt (ignored for apps/current).
 func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, listType string, favorite bool, withinDays *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
 	match := bson.M{"u.account": account}
 	switch listType {
@@ -267,11 +254,9 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	// Exclude rooms explicitly closed by the user; a missing field (defensive)
 	// and open:true both pass. Applied to subscription.list only.
 	match["open"] = bson.M{"$ne": false}
-	// roomsEnrichStages(true) drops locally soft-deleted (^Del-) rooms; cross-site
-	// rooms have no local room doc and are kept (their deletion isn't visible here).
 	pipeline := bson.A{bson.M{"$match": match}}
 	pipeline = append(pipeline, r.originFilterStage(account)...)
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	pipeline = append(pipeline, roomsEnrichStages()...)
 	// Activity window keys on the room's lastMsgAt (surfaced by the enrich stage),
 	// not the subscription's _updatedAt. rooms-type only; cross-site / no-message
 	// rooms (null lastMsgAt) fall outside the window.
@@ -390,7 +375,7 @@ func (r *SubscriptionRepo) GetDMSubscription(ctx context.Context, account, targe
 		bson.M{"$match": bson.M{"u.account": account, "name": target, "roomType": "dm"}},
 		bson.M{"$limit": int64(1)}, // (account, name, roomType=dm) is unique — short-circuit defensively
 	}
-	pipeline = append(pipeline, roomsEnrichStages(false)...)
+	pipeline = append(pipeline, roomsEnrichStages()...)
 	pipeline = append(pipeline,
 		bson.M{"$lookup": bson.M{"from": usersCollection, "localField": "name", "foreignField": "account", "as": "hrUser"}},
 		bson.M{"$unwind": bson.M{"path": "$hrUser", "preserveNullAndEmptyArrays": true}},
@@ -421,10 +406,10 @@ func (r *SubscriptionRepo) GetDMSubscription(ctx context.Context, account, targe
 	return &out[0], nil
 }
 
-// GetSubscriptionByRoomID returns the requester's deleted-filtered sub for roomID, or (nil, nil); (account, roomId) is unique in practice.
+// GetSubscriptionByRoomID returns the requester's room-enriched sub for roomID, or (nil, nil); (account, roomId) is unique in practice.
 func (r *SubscriptionRepo) GetSubscriptionByRoomID(ctx context.Context, account, roomID string) (*model.EnrichedSubscription, error) {
 	pipeline := bson.A{bson.M{"$match": bson.M{"u.account": account, "roomId": roomID}}}
-	pipeline = append(pipeline, roomsEnrichStages(false)...)
+	pipeline = append(pipeline, roomsEnrichStages()...)
 	pipeline = append(pipeline, bson.M{"$limit": int64(1)}) // (roomId, u.account) is unique — short-circuit defensively
 	out, err := r.enrichedSecondary.Aggregate(ctx, pipeline)
 	if err != nil {
@@ -464,11 +449,11 @@ func (r *SubscriptionRepo) countActiveFilter(account string) bson.M {
 	return filter
 }
 
-// CountActiveSubscriptions counts the active set as a plain CountDocuments. It does
-// NOT exclude soft-deleted (^Del-) rooms: the deployment guarantees no Del- rename
-// reaches the database, so the rooms $lookup that existed only to read room.name is
-// gone — with it, the per-subscription join, the eleven transported room fields and
-// the twelve $addFields that $count discarded.
+// CountActiveSubscriptions counts the active set as a plain CountDocuments. No room
+// state is consulted: the deployment guarantees no soft-delete rename reaches the
+// database, so the rooms $lookup that existed only to read room.name is gone — with
+// it, the per-subscription join, the eleven transported room fields and the twelve
+// $addFields that $count discarded.
 func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account string) (int, error) {
 	n, err := r.subscriptionsSecondary.Raw().CountDocuments(ctx, r.countActiveFilter(account))
 	if err != nil {
@@ -488,9 +473,7 @@ func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account s
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
-	// dropDeleted=false: the active set does not filter Del- rooms (see
-	// CountActiveSubscriptions), and the unread count must select the same rows.
-	pipeline = append(pipeline, roomsEnrichStages(false)...)
+	pipeline = append(pipeline, roomsEnrichStages()...)
 	return r.enrichedSecondary.Aggregate(ctx, pipeline)
 }
 
