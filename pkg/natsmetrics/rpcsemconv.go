@@ -61,8 +61,10 @@ const (
 // still finds and groups these series, and only histogram_quantile's
 // interpolation points differ.
 //
-// Neither set has a boundary at 0.3, so SLO-5's 300 ms threshold falls mid
-// bucket either way. That is a separate question from this one.
+// A latency SLO's bound therefore has to be chosen from this set. SLO-5 was
+// drafted at 300 ms, which no set in play has a boundary for; it now reads
+// le="0.25" at a 250 ms bound rather than this set gaining a boundary for one
+// family. SLO-4's 500 ms already sat on 0.5. See the contract's §7 rule.
 var rpcDurationBuckets = o11y.DefaultLatencyBuckets()
 
 // rpcSystemName is constant for the process; the attribute is built once.
