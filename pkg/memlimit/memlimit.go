@@ -22,31 +22,32 @@ const (
 )
 
 // SetFromCgroup sets GOMEMLIMIT to fraction of the container's memory quota and
-// reports the limit applied. An explicit GOMEMLIMIT, an unlimited cgroup, or a
-// host with no cgroup files are all no-ops rather than errors.
-func SetFromCgroup(fraction float64) (int64, bool, error) {
+// returns the limit applied, or 0 when none was. An explicit GOMEMLIMIT, an
+// unlimited cgroup, and a host with no cgroup files are all no-ops rather than
+// errors.
+func SetFromCgroup(fraction float64) (int64, error) {
 	return setFromFiles(cgroupV2Path, cgroupV1Path, fraction, os.Getenv("GOMEMLIMIT"), debug.SetMemoryLimit)
 }
 
-func setFromFiles(v2Path, v1Path string, fraction float64, envLimit string, set func(int64) int64) (int64, bool, error) {
+func setFromFiles(v2Path, v1Path string, fraction float64, envLimit string, set func(int64) int64) (int64, error) {
 	if math.IsNaN(fraction) || fraction <= 0 || fraction > 1 {
-		return 0, false, fmt.Errorf("memory limit fraction must be in (0,1], got %v", fraction)
+		return 0, fmt.Errorf("memory limit fraction must be in (0,1], got %v", fraction)
 	}
 	// An operator-set GOMEMLIMIT is deliberate; never second-guess it.
 	if envLimit != "" {
-		return 0, false, nil
+		return 0, nil
 	}
 
 	quota, err := readQuota(v2Path, v1Path)
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
 	limit := int64(float64(quota) * fraction)
 	if quota <= 0 || limit <= 0 {
-		return 0, false, nil
+		return 0, nil
 	}
 	set(limit)
-	return limit, true, nil
+	return limit, nil
 }
 
 // readQuota returns the cgroup memory quota in bytes, preferring v2; 0 means
@@ -60,9 +61,7 @@ func readQuota(v2Path, v1Path string) (int64, error) {
 }
 
 func readLimitFile(path string) (int64, error) {
-	if path == "" {
-		return 0, nil
-	}
+	// An empty path yields ENOENT, handled as "absent" below like any missing file.
 	b, err := os.ReadFile(path) // #nosec G304 -- paths are package constants, never caller input
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

@@ -25,4 +25,9 @@ const (
 	// NatsRequestTimeout marks a request that was delivered but not answered
 	// within the caller's timeout. Retryable.
 	NatsRequestTimeout Reason = "upstream_timeout"
+
+	// Overloaded marks a request shed at an HTTP listener's in-flight cap
+	// (ginutil.MaxConcurrency). Retryable after the Retry-After it ships with;
+	// it says the pod is momentarily full, not that the request was wrong.
+	Overloaded Reason = "overloaded"
 )

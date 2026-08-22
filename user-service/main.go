@@ -89,9 +89,9 @@ func main() {
 	// Before anything allocates: the concurrency cap is sized from an estimate of
 	// per-request memory, and a soft limit turns a wrong estimate into GC pressure
 	// rather than an OOMKill that would cascade across the fleet.
-	if limit, applied, err := memlimit.SetFromCgroup(cfg.GoMemLimitFraction); err != nil {
+	if limit, err := memlimit.SetFromCgroup(cfg.GoMemLimitFraction); err != nil {
 		slog.Warn("could not derive GOMEMLIMIT from the cgroup; using the runtime default", "error", err)
-	} else if applied {
+	} else if limit > 0 {
 		slog.Info("GOMEMLIMIT derived from cgroup", "bytes", limit, "fraction", cfg.GoMemLimitFraction)
 	}
 
@@ -212,7 +212,9 @@ func main() {
 	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 
 	// A second service instance over the HTTP-only Mongo pool. Everything else --
-	// the NATS clients, publishers, badge cache -- is shared and stateless.
+	// the NATS clients, publishers, badge cache -- is shared and stateless. It is
+	// handed to startHTTPServer as a subscriptionLister, so the read-only pool
+	// cannot be reached by a write path.
 	httpDB := httpMongoClient.Database(cfg.Mongo.DB)
 	httpSvc := service.New(
 		mongorepo.NewSubscriptionRepo(httpDB, cfg.SiteID,
@@ -274,7 +276,7 @@ func main() {
 // startHTTPServer builds the Gin engine and serves it in the background. It
 // returns once the listener is bound, so a port clash fails startup rather than
 // surfacing later as a silently missing API.
-func startHTTPServer(cfg *config.Config, svc *service.UserService, sdk *o11y.SDK, sso ssoValidator) (*http.Server, error) {
+func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, sso ssoValidator) (*http.Server, error) {
 	shedCounter, err := sdk.MeterProvider().Meter("user-service").Int64Counter(
 		"http_requests_shed_total",
 		metric.WithDescription("HTTP requests rejected with 429 because the in-flight cap was reached."))

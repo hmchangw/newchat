@@ -8550,7 +8550,7 @@ The HTTP form of [`subscription.list`](#subscriptionlist). Same enrichment, same
 | `updatedWithinDays` | number | no | `rooms` only. Must be non-negative. |
 | `includeLastMessage` | boolean | no | Omitted ⇒ include. Send `false` to skip the per-room `previewMessage` resolve. |
 | `offset` | integer | no | Zero-based. Negative ⇒ `0`. Default `0`. |
-| `limit` | integer | no | Omitted or ≤ 0 ⇒ `SUBSCRIPTION_HTTP_DEFAULT_LIMIT` (default `40`); values above `SUBSCRIPTION_HTTP_MAX_LIMIT` (default `400`) are capped to it. |
+| `limit` | integer | no | Omitted or ≤ 0 ⇒ `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); values above `HTTP_SUBSCRIPTION_MAX_LIMIT` (default `400`) are capped to it. |
 
 > **Send `limit=200`.** It covers a typical sidebar in one request. Larger pages cost the server nothing extra in database work — the room join and activity sort run over the account's full subscription set regardless of page size, so one 200-row page is roughly 5× cheaper in total than five 40-row pages.
 

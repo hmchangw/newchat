@@ -25,7 +25,6 @@ func TestEnrichCrossSite_ContextCancelled_SkipsRPC(t *testing.T) {
 		{Subscription: model.Subscription{ID: "b", RoomID: "r2", SiteID: "site-b"}},
 	}
 	idxBySite := map[string][]int{"site-b": {0}}
-	roomIDsBySite := map[string][]string{"site-b": {"r2"}}
 
 	c := ctx("alice", "site-a")
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -34,7 +33,7 @@ func TestEnrichCrossSite_ContextCancelled_SkipsRPC(t *testing.T) {
 
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
-	svc.enrichCrossSite(c, "alice", subs, idxBySite, roomIDsBySite)
+	svc.enrichCrossSite(c, "alice", subs, idxBySite)
 
 	assert.Nil(t, subs[0].Room, "cancelled fan-out leaves the sub without a room object")
 }
@@ -489,49 +488,12 @@ func TestEnrichWithRoomInfo_BotRequester_KeepsKeyMaterial(t *testing.T) {
 	}
 }
 
-func TestChunkRoomIDs(t *testing.T) {
-	ids := func(n int) []string {
-		out := make([]string, n)
-		for i := range out {
-			out[i] = fmt.Sprintf("r%d", i)
-		}
-		return out
-	}
-	tests := []struct {
-		name      string
-		n, size   int
-		wantSizes []int
-	}{
-		{"empty", 0, 100, nil},
-		{"single", 1, 100, []int{1}},
-		{"just under the cap", 99, 100, []int{99}},
-		{"exactly the cap", 100, 100, []int{100}},
-		{"one over the cap", 101, 100, []int{100, 1}},
-		{"two and a half chunks", 250, 100, []int{100, 100, 50}},
-		{"non-positive size yields one chunk", 250, 0, []int{250}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := chunkRoomIDs(ids(tc.n), tc.size)
-			require.Len(t, got, len(tc.wantSizes))
-
-			seen := []string{}
-			for i, chunk := range got {
-				assert.Len(t, chunk, tc.wantSizes[i])
-				seen = append(seen, chunk...)
-			}
-			assert.Equal(t, ids(tc.n), seen, "chunking must preserve order and drop nothing")
-		})
-	}
-}
-
 // enrichFixture builds n local subscriptions on one site, each with a room whose
 // LastMsgAt makes it hint-eligible.
-func enrichFixture(n int, site string) ([]model.EnrichedSubscription, map[string][]int, map[string][]string) {
+func enrichFixture(n int, site string) ([]model.EnrichedSubscription, map[string][]int) {
 	last := time.Now().UTC()
 	subs := make([]model.EnrichedSubscription, n)
 	idx := make([]int, n)
-	ids := make([]string, n)
 	for i := range subs {
 		id := fmt.Sprintf("r%d", i)
 		subs[i] = model.EnrichedSubscription{
@@ -539,16 +501,15 @@ func enrichFixture(n int, site string) ([]model.EnrichedSubscription, map[string
 		}
 		subs[i].Room = &model.SubscriptionRoom{SiteID: site, LastMsgAt: &last}
 		idx[i] = i
-		ids[i] = id
 	}
-	return subs, map[string][]int{site: idx}, map[string][]string{site: ids}
+	return subs, map[string][]int{site: idx}
 }
 
 // history-service hard-rejects rooms.get above 100 ids AND above 100 hints, so an
 // unchunked 250-room page would come back with no previews at all.
 func TestEnrichLastMessage_ChunksBeyondBatchCap(t *testing.T) {
 	svc, _, history := newSvcRawHistory(t)
-	subs, idxBySite, roomIDsBySite := enrichFixture(250, "site-a")
+	subs, idxBySite := enrichFixture(250, "site-a")
 
 	var mu sync.Mutex
 	var batchSizes []int
@@ -568,7 +529,7 @@ func TestEnrichLastMessage_ChunksBeyondBatchCap(t *testing.T) {
 			return out, nil
 		}).Times(3)
 
-	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite, roomIDsBySite)
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
 
 	sort.Ints(batchSizes)
 	assert.Equal(t, []int{50, 100, 100}, batchSizes)
@@ -580,7 +541,7 @@ func TestEnrichLastMessage_ChunksBeyondBatchCap(t *testing.T) {
 
 func TestEnrichLastMessage_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 	svc, _, history := newSvcRawHistory(t)
-	subs, idxBySite, roomIDsBySite := enrichFixture(250, "site-a")
+	subs, idxBySite := enrichFixture(250, "site-a")
 
 	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
@@ -594,7 +555,7 @@ func TestEnrichLastMessage_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 			return out, nil
 		}).Times(3)
 
-	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite, roomIDsBySite)
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
 
 	var withPreview int
 	for i := range subs {
@@ -607,7 +568,7 @@ func TestEnrichLastMessage_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 
 func TestEnrichCrossSite_ChunksBeyondBatchCap(t *testing.T) {
 	svc, _, _, _, rooms, _, _ := newSvc(t)
-	subs, idxBySite, roomIDsBySite := enrichFixture(250, "site-b")
+	subs, idxBySite := enrichFixture(250, "site-b")
 	for i := range subs {
 		subs[i].Room = nil // cross-site rows have no local room doc
 	}
@@ -628,7 +589,7 @@ func TestEnrichCrossSite_ChunksBeyondBatchCap(t *testing.T) {
 			return out, nil
 		}).Times(3)
 
-	dropped := svc.enrichCrossSite(context.Background(), "alice", subs, idxBySite, roomIDsBySite)
+	dropped := svc.enrichCrossSite(context.Background(), "alice", subs, idxBySite)
 
 	sort.Ints(batchSizes)
 	assert.Equal(t, []int{50, 100, 100}, batchSizes)
@@ -640,7 +601,7 @@ func TestEnrichCrossSite_ChunksBeyondBatchCap(t *testing.T) {
 
 func TestEnrichCrossSite_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 	svc, _, _, _, rooms, _, _ := newSvc(t)
-	subs, idxBySite, roomIDsBySite := enrichFixture(250, "site-b")
+	subs, idxBySite := enrichFixture(250, "site-b")
 	for i := range subs {
 		subs[i].Room = nil
 	}
@@ -657,7 +618,7 @@ func TestEnrichCrossSite_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 			return out, nil
 		}).Times(3)
 
-	svc.enrichCrossSite(context.Background(), "alice", subs, idxBySite, roomIDsBySite)
+	svc.enrichCrossSite(context.Background(), "alice", subs, idxBySite)
 
 	var enriched int
 	for i := range subs {

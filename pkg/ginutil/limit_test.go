@@ -13,17 +13,20 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 )
 
 // blockingEngine serves /x from a handler that announces its admission on the
 // returned channel and then parks until release is closed.
-func blockingEngine(t *testing.T, n int, opts ...LimiterOption) (r *gin.Engine, admitted <-chan struct{}, release chan struct{}) {
+func blockingEngine(t *testing.T, n int, onShed func()) (r *gin.Engine, admitted <-chan struct{}, release chan struct{}) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	rel := make(chan struct{})
 	adm := make(chan struct{}, n)
 	e := gin.New()
-	e.Use(MaxConcurrency(n, opts...))
+	e.Use(MaxConcurrency(n, onShed))
 	e.GET("/x", func(c *gin.Context) {
 		adm <- struct{}{}
 		<-rel
@@ -57,29 +60,22 @@ func fillAndShed(t *testing.T, r *gin.Engine, admitted <-chan struct{}, n int) *
 }
 
 func TestMaxConcurrency_ShedsBeyondCap(t *testing.T) {
-	r, admitted, release := blockingEngine(t, 1, WithRetryAfter(2*time.Second))
+	r, admitted, release := blockingEngine(t, 1, nil)
 	defer close(release)
 
 	w := fillAndShed(t, r, admitted, 1)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
-	assert.Equal(t, "2", w.Header().Get("Retry-After"))
+	assert.Equal(t, "1", w.Header().Get("Retry-After"))
 	assert.JSONEq(t,
 		`{"code":"too_many_requests","reason":"overloaded","error":"server is at capacity, retry shortly"}`,
 		w.Body.String())
 }
 
-func TestMaxConcurrency_DefaultRetryAfterIsOneSecond(t *testing.T) {
-	r, admitted, release := blockingEngine(t, 1)
-	defer close(release)
-
-	assert.Equal(t, "1", fillAndShed(t, r, admitted, 1).Header().Get("Retry-After"))
-}
-
 func TestMaxConcurrency_ReleasesSlotAfterCompletion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(MaxConcurrency(1))
+	r.Use(MaxConcurrency(1, nil))
 	r.GET("/x", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	for i := 0; i < 5; i++ {
@@ -92,7 +88,7 @@ func TestMaxConcurrency_ReleasesSlotAfterCompletion(t *testing.T) {
 func TestMaxConcurrency_ReleasesSlotOnPanic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(gin.Recovery(), MaxConcurrency(1))
+	r.Use(gin.Recovery(), MaxConcurrency(1, nil))
 	r.GET("/boom", func(c *gin.Context) { panic("boom") })
 	r.GET("/ok", func(c *gin.Context) { c.Status(http.StatusOK) })
 
@@ -109,7 +105,7 @@ func TestMaxConcurrency_NonPositiveDisablesLimiting(t *testing.T) {
 	for _, n := range []int{0, -1} {
 		gin.SetMode(gin.TestMode)
 		r := gin.New()
-		r.Use(MaxConcurrency(n))
+		r.Use(MaxConcurrency(n, nil))
 		r.GET("/x", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 		var wg sync.WaitGroup
@@ -128,7 +124,7 @@ func TestMaxConcurrency_NonPositiveDisablesLimiting(t *testing.T) {
 
 func TestMaxConcurrency_OnShedObserverFires(t *testing.T) {
 	var shed atomic.Int64
-	r, admitted, release := blockingEngine(t, 1, WithOnShed(func() { shed.Add(1) }))
+	r, admitted, release := blockingEngine(t, 1, func() { shed.Add(1) })
 	defer close(release)
 
 	require.Equal(t, http.StatusTooManyRequests, fillAndShed(t, r, admitted, 1).Code)
@@ -137,7 +133,7 @@ func TestMaxConcurrency_OnShedObserverFires(t *testing.T) {
 
 func TestMaxConcurrency_AdmitsUpToCapConcurrently(t *testing.T) {
 	const capacity = 4
-	r, admitted, release := blockingEngine(t, capacity)
+	r, admitted, release := blockingEngine(t, capacity, nil)
 	defer close(release)
 
 	// fillAndShed only returns once all `capacity` requests were admitted at once.
@@ -153,9 +149,30 @@ func TestMaxConcurrency_ShedDoesNotLog(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	r, admitted, release := blockingEngine(t, 1)
+	r, admitted, release := blockingEngine(t, 1, nil)
 	defer close(release)
 
 	require.Equal(t, http.StatusTooManyRequests, fillAndShed(t, r, admitted, 1).Code)
 	assert.Empty(t, logged.String(), "the shed path must stay silent")
+}
+
+// The shed path writes the envelope itself rather than going through
+// errhttp.Write (which would log per rejection), so pin that the two produce
+// the same body — a client must not be able to tell them apart.
+func TestMaxConcurrency_ShedEnvelopeMatchesErrhttp(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ref := gin.New()
+	ref.GET("/x", func(c *gin.Context) {
+		errhttp.Write(c.Request.Context(), c, errcode.TooManyRequests(
+			"server is at capacity, retry shortly", errcode.WithReason(errcode.Overloaded)))
+	})
+	w := httptest.NewRecorder()
+	ref.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	r, admitted, release := blockingEngine(t, 1, nil)
+	defer close(release)
+	shed := fillAndShed(t, r, admitted, 1)
+
+	assert.Equal(t, w.Code, shed.Code)
+	assert.JSONEq(t, w.Body.String(), shed.Body.String())
 }

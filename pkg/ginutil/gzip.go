@@ -9,9 +9,13 @@ import (
 	"github.com/klauspost/compress/gzip"
 )
 
+// BestSpeed, not the default level: on a 200-row subscription page it compresses
+// 39% faster (695µs vs 1142µs) for 3 KB more on the wire (10.3x vs 12.4x). These
+// endpoints exist to survive reconnect bursts, where CPU is the scarce resource
+// and a few KB over a LAN is not.
 var gzipPool = sync.Pool{
 	New: func() any {
-		w, _ := gzip.NewWriterLevel(nil, gzip.DefaultCompression)
+		w, _ := gzip.NewWriterLevel(nil, gzip.BestSpeed)
 		return w
 	},
 }
@@ -56,6 +60,11 @@ func acceptsGzip(header string) bool {
 
 // gzipResponseWriter buffers the first minSize bytes, then either switches to
 // gzip or, at close, flushes the buffer uncompressed.
+//
+// Written() and Size() are left delegating to the wrapped writer, so they report
+// what reached the wire: false/0 while the body is still buffered, and the
+// compressed length afterwards. That is what gin.Recovery needs (can it still
+// write a status?) but it is not the handler's byte count.
 type gzipResponseWriter struct {
 	gin.ResponseWriter
 	minSize int
@@ -86,25 +95,32 @@ func (w *gzipResponseWriter) Write(p []byte) (int, error) { return w.write(p) }
 func (w *gzipResponseWriter) WriteString(s string) (int, error) { return w.write([]byte(s)) }
 
 // write is the shared sniff-then-commit path behind Write and WriteString.
+//
+// The threshold is tested before buffering, so a body that clears it in one
+// write — which is every JSON render, since gin marshals whole — is handed
+// straight to the encoder instead of being copied into buf first.
 func (w *gzipResponseWriter) write(p []byte) (int, error) {
 	switch {
 	case w.gz != nil:
 		return w.gz.Write(p)
-	case w.plain:
+	case w.plain, w.closed:
+		// After close the wrapper is inert: taking another pooled writer here
+		// would be one no close() will ever return.
 		return w.ResponseWriter.Write(p)
 	}
-	w.buf = append(w.buf, p...)
-	if len(w.buf) < w.minSize {
+	if len(w.buf)+len(p) < w.minSize {
+		w.buf = append(w.buf, p...)
 		return len(p), nil
 	}
 	if err := w.commit(); err != nil {
 		return 0, err
 	}
-	return len(p), nil
+	return w.write(p)
 }
 
-// commit decides the encoding once the threshold is reached and drains the sniff
-// buffer. A handler that set its own Content-Encoding is left alone.
+// commit decides the encoding once the threshold is reached and drains whatever
+// sub-threshold prefix was buffered. A handler that set its own Content-Encoding
+// is left alone.
 func (w *gzipResponseWriter) commit() error {
 	h := w.Header()
 	buf := w.buf
@@ -113,6 +129,9 @@ func (w *gzipResponseWriter) commit() error {
 	if h.Get("Content-Encoding") != "" {
 		w.plain = true
 		w.flushStatus()
+		if len(buf) == 0 {
+			return nil
+		}
 		_, err := w.ResponseWriter.Write(buf)
 		return err
 	}
@@ -124,6 +143,9 @@ func (w *gzipResponseWriter) commit() error {
 
 	w.gz = gzipPool.Get().(*gzip.Writer)
 	w.gz.Reset(w.ResponseWriter)
+	if len(buf) == 0 {
+		return nil
+	}
 	_, err := w.gz.Write(buf)
 	return err
 }

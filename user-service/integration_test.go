@@ -101,24 +101,6 @@ func (s *stubHistory) GetThreadList(context.Context, string, model.ThreadSubscri
 	return model.ThreadSubscriptionListResponse{}, nil
 }
 
-// stubBadge satisfies the unexported badgeCache interface structurally; the
-// list path never touches it.
-type stubBadge struct{}
-
-func (stubBadge) BumpBatch(context.Context, []string, string) map[string]int { return nil }
-func (stubBadge) Seed(context.Context, string, []string, string) (int, bool) { return 0, false }
-func (stubBadge) Reseed(context.Context, string, []string)                   {}
-func (stubBadge) Count(context.Context, string) (int, bool)                  { return 0, false }
-
-type stubSSO struct{}
-
-func (stubSSO) Validate(_ context.Context, token string) (pkgoidc.Claims, error) {
-	if token != testSSOToken {
-		return pkgoidc.Claims{}, fmt.Errorf("unknown token")
-	}
-	return pkgoidc.Claims{PreferredUsername: testAccount}, nil
-}
-
 // seedSubscriptions inserts n local channel subscriptions and their rooms.
 func seedSubscriptions(t *testing.T, db *mongo.Database, n int) {
 	t.Helper()
@@ -167,11 +149,13 @@ func newTestAPI(t *testing.T) (*gin.Engine, *stubRooms, *stubHistory) {
 	}
 	svc := service.New(subRepo, mongorepo.NewUserRepo(db), mongorepo.NewAppRepo(db),
 		mongorepo.NewThreadSubscriptionRepo(db), rooms, history, nil, nil, nil,
-		stubBadge{}, nil, nil, nil, cfg)
+		noopBadgeCache{}, nil, nil, nil, cfg)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, newHandler(svc, 40, 400), authDeps{sso: stubSSO{}}, httpDeps{
+	registerRoutes(r, newHandler(svc, 40, 400), authDeps{sso: fakeSSO{claims: map[string]pkgoidc.Claims{
+		testSSOToken: {PreferredUsername: testAccount},
+	}}}, httpDeps{
 		maxConcurrency: 256, gzipMinBytes: 1024, handlerTimeout: 30 * time.Second,
 	})
 	return r, rooms, history

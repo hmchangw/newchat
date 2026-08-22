@@ -406,9 +406,9 @@ func TestLoad_RejectsInvalidConfig(t *testing.T) {
 	tests := []struct {
 		name, env, val, wantMsg string
 	}{
-		{"http default above max", "SUBSCRIPTION_HTTP_DEFAULT_LIMIT", "500", "SUBSCRIPTION_HTTP_DEFAULT_LIMIT"},
-		{"http default below one", "SUBSCRIPTION_HTTP_DEFAULT_LIMIT", "0", "SUBSCRIPTION_HTTP_DEFAULT_LIMIT"},
-		{"http max below one", "SUBSCRIPTION_HTTP_MAX_LIMIT", "0", "SUBSCRIPTION_HTTP_MAX_LIMIT"},
+		{"http default above max", "HTTP_SUBSCRIPTION_DEFAULT_LIMIT", "500", "HTTP_SUBSCRIPTION_DEFAULT_LIMIT"},
+		{"http default below one", "HTTP_SUBSCRIPTION_DEFAULT_LIMIT", "0", "HTTP_SUBSCRIPTION_DEFAULT_LIMIT"},
+		{"http max below one", "HTTP_SUBSCRIPTION_MAX_LIMIT", "0", "HTTP_SUBSCRIPTION_MAX_LIMIT"},
 		{"write timeout equals handler timeout", "HTTP_WRITE_TIMEOUT", "30s", "HTTP_WRITE_TIMEOUT"},
 		{"write timeout below handler timeout", "HTTP_WRITE_TIMEOUT", "10s", "HTTP_WRITE_TIMEOUT"},
 		{"negative concurrency", "HTTP_MAX_CONCURRENCY", "-1", "HTTP_MAX_CONCURRENCY"},
@@ -435,8 +435,8 @@ func TestLoad_HTTPOverrides(t *testing.T) {
 	requiredEnv(t)
 	t.Setenv("HTTP_PORT", "9090")
 	t.Setenv("HTTP_MAX_CONCURRENCY", "512")
-	t.Setenv("SUBSCRIPTION_HTTP_DEFAULT_LIMIT", "200")
-	t.Setenv("SUBSCRIPTION_HTTP_MAX_LIMIT", "500")
+	t.Setenv("HTTP_SUBSCRIPTION_DEFAULT_LIMIT", "200")
+	t.Setenv("HTTP_SUBSCRIPTION_MAX_LIMIT", "500")
 	t.Setenv("BOTPLATFORM_URL", "http://botplatform:8080")
 
 	cfg, err := Load()
