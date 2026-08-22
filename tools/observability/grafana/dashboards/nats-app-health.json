@@ -307,7 +307,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Scrape health \u2014 target up (0 = crashed / unreachable)",
-      "description": "up per scrape target for the app-metrics + jetstream-exporter jobs. A target dropping to 0 = the process crashed or is unreachable (the case chat_nats_consumer_loop_up cannot show). Pair with the loop-status panel: gauge stuck green + up==0 = crashed consumer.",
+      "description": "up per scrape target for the app-metrics + jetstream-exporter jobs. A target dropping to 0 = the whole process/pod crashed or is unreachable. NOTE this is TARGET-level: it will NOT catch a single durable whose chat_nats_consumer_loop_up series disappears while sibling consumers keep the process alive (up stays 1). Per-durable liveness needs an inventory-backed alert rule \u2014 a label-scoped absent(chat_nats_consumer_loop_up{service_name,site,stream,consumer}) per expected durable \u2014 which belongs in the alerting layer (a maintained expected-durable list), not this dev dashboard.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

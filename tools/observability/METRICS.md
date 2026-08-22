@@ -34,6 +34,13 @@ have been abandoned after MaxDeliver (the consumer stops delivering them; they s
 stream, unprocessed). To tell healed from abandoned, pair the gauge with the
 `chat_nats_terminal_failures_total{reason="max_deliver"}` counter (see §4).
 
+> ⚠️ The app counter is **best-effort, not authoritative**: it's incremented by the
+> consumer when it observes the final attempt, so if the process **crashes on that last
+> delivery before recording it**, JetStream still exhausts MaxDeliver and stops — but the
+> increment is lost, and no later attempt repairs it. The authoritative signal is the
+> **broker's MaxDeliver advisory** (`$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>`); capture
+> and alert on that for a guarantee. Treat the app counter as a fast secondary diagnostic.
+
 ---
 
 ## 2. JetStream metrics (exporter)
