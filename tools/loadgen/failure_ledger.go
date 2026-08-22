@@ -1131,11 +1131,11 @@ func registeredInvalidationReason(reason string) string {
 // only payload, so skipping it would drop the invalidation itself and let a run
 // that had disowned its evidence come back looking sound. It fails the replay
 // like every other malformed record, which degrades the run to an in-memory
-// ledger already invalidated for "wal" rather than taking it down.
-func (l *failureLedger) invalidateReplayedLocked(index int, reason string) error {
+// ledger already invalidated for "wal" rather than taking it down. The caller
+// names the record, as it does for every other replay failure.
+func (l *failureLedger) invalidateReplayedLocked(reason string) error {
 	if reason == "" {
-		return fmt.Errorf(
-			"replay failure ledger event %d: invalidation is missing its reason", index)
+		return fmt.Errorf("invalidation is missing its reason")
 	}
 	l.invalidateLocked(registeredInvalidationReason(reason))
 	return nil
@@ -1493,8 +1493,8 @@ func (l *failureLedger) replayEvent(
 			// build does not know folds to "other" instead of widening the
 			// label set — a journal from a newer build is exactly where one
 			// arrives.
-			if err := l.invalidateReplayedLocked(index, event.InvalidReason); err != nil {
-				return err
+			if err := l.invalidateReplayedLocked(event.InvalidReason); err != nil {
+				return fmt.Errorf("replay failure ledger event %d: %w", index, err)
 			}
 		default:
 			return fmt.Errorf("replay failure ledger event %d: unknown type %q", index, event.Type)
