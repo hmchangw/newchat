@@ -6580,11 +6580,13 @@ Channel rooms only. DM and botDM thread replies already reach every member, so n
 
 | Type | Payload |
 |---|---|
-| `new_thread_message` | The `RoomEvent` of [Send Message](#send-message) — byte-identical to the per-subscriber copy, `encryptedMessage` envelope included |
+| `new_thread_message` | The `RoomEvent` of [Send Message](#send-message) |
 | `message_edited` | The `EditRoomEvent` of [Edit Message](#edit-message) |
 | `message_deleted` | The `DeleteRoomEvent` of [Delete Message](#delete-message) |
 
-Decrypt with the room key exactly as for the per-subscriber copy — see [§5 Room Encryption](#5-room-encryption).
+**The body is encrypted on this subject, unlike the per-subscriber copy.** In an encrypted channel the per-subscriber copy on `chat.user.{account}.event.room` carries a plaintext `message` / `newContent`, because that subject is scoped to one account. The thread subject sits in the room namespace, so its copy carries `encryptedMessage` / `encryptedNewContent` instead — decrypt with the room key exactly as for `chat.room.{roomID}.event`, see [§5 Room Encryption](#5-room-encryption). In an unencrypted channel both copies are identical and plaintext. `message_deleted` carries no body and is never encrypted.
+
+If the body cannot be sealed, nothing is published on this subject — the lane fails closed rather than emitting a plaintext body into the room namespace.
 
 ### Client handling
 

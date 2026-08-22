@@ -299,7 +299,14 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread created event for parent %s: %w", parentMsgID, err)
 		}
-		return h.publishChannelThreadEvent(ctx, meta.ID, parentMsgID, meta.CrossSite, meta.CrossSiteAt, payload, fanOut)
+		viewPayload := h.sealThreadViewPayload(ctx, meta.ID, payload, func() (any, error) {
+			sealed := roomEvt
+			if err := h.encryptRoomEvent(ctx, meta.ID, clientMsg, &sealed); err != nil {
+				return nil, err
+			}
+			return &sealed, nil
+		})
+		return h.publishChannelThreadEvent(ctx, meta.ID, parentMsgID, meta.CrossSite, meta.CrossSiteAt, viewPayload, payload, fanOut)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies fan out to all members. The thread-sub mention badge is
 		// owned by message-worker (markThreadMentions), so broadcast-worker doesn't
@@ -383,7 +390,14 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread edit event for parent %s: %w", parentMsgID, err)
 		}
-		return h.publishChannelThreadEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload, fanOut)
+		viewPayload := h.sealThreadViewPayload(ctx, room.ID, payload, func() (any, error) {
+			sealed := edit
+			if err := h.encryptEditedContent(ctx, room.ID, &sealed); err != nil {
+				return nil, err
+			}
+			return &sealed, nil
+		})
+		return h.publishChannelThreadEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, viewPayload, payload, fanOut)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies are visible to every member, so edits fan out to
 		// all members (consistent with handleThreadCreated), not just thread
@@ -430,7 +444,8 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread delete event for parent %s: %w", parentMsgID, err)
 		}
-		if err := h.publishChannelThreadEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload, fanOut); err != nil {
+		// A delete carries ids and timestamps, no body, so both lanes share it.
+		if err := h.publishChannelThreadEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload, payload, fanOut); err != nil {
 			return fmt.Errorf("publish thread delete event for parent %s: %w", parentMsgID, err)
 		}
 	case model.RoomTypeDM, model.RoomTypeBotDM:
@@ -890,15 +905,42 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 
 // publishChannelThreadEvent delivers a channel thread event on both lanes.
 // One call, so a new thread branch cannot serve followers but miss viewers.
-func (h *Handler) publishChannelThreadEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, fanOut []string) error {
-	h.publishThreadViewEvent(ctx, roomID, parentMsgID, crossSite, crossSiteAt, payload)
-	return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
+// The lanes carry different copies: see sealThreadViewPayload.
+func (h *Handler) publishChannelThreadEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, viewPayload, followerPayload []byte, fanOut []string) error {
+	h.publishThreadViewEvent(ctx, roomID, parentMsgID, crossSite, crossSiteAt, viewPayload)
+	return h.publishToThreadAccounts(ctx, fanOut, followerPayload, parentMsgID)
+}
+
+// sealThreadViewPayload returns the thread-subject copy of a thread event. That
+// subject lives in the room namespace every authenticated client may subscribe
+// to, so its body is sealed with the room key; the per-follower copy stays
+// plaintext because chat.user.{account}.> is scoped to a single account.
+//
+// Returns nil when sealing fails, so the caller drops the view lane — a
+// room-namespace subject must never carry a plaintext body.
+func (h *Handler) sealThreadViewPayload(ctx context.Context, roomID string, plain []byte, seal func() (any, error)) []byte {
+	if !h.encrypt {
+		return plain
+	}
+	sealed, err := seal()
+	if err == nil {
+		var payload []byte
+		if payload, err = sonic.Marshal(sealed); err == nil {
+			return payload
+		}
+	}
+	h.metrics.ThreadViewPublishFailed(ctx, broadcastLabels(ctx).eventType)
+	slog.ErrorContext(ctx, "seal thread view event failed",
+		"error", err,
+		"room_id", roomID,
+		"request_id", natsutil.RequestIDFromContext(ctx))
+	return nil
 }
 
 // publishThreadViewEvent mirrors a thread event onto the subject open panels
 // subscribe to. Never returns an error: a NAK would re-run the fan-out.
 func (h *Handler) publishThreadViewEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, payload []byte) {
-	if !h.threadViewSubject || parentMsgID == "" {
+	if !h.threadViewSubject || parentMsgID == "" || len(payload) == 0 {
 		return
 	}
 	eventType := broadcastLabels(ctx).eventType

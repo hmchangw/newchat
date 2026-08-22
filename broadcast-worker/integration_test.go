@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -692,4 +693,60 @@ func TestBroadcastWorker_ThreadViewSubject_SameSiteRoomRoutesLocal_Integration(t
 
 	_, err = globalSub.NextMsg(200 * time.Millisecond)
 	assert.Error(t, err, "a same-site room must not leak its thread lane onto the global namespace")
+}
+
+// The view lane rides the room namespace, which any authenticated client may
+// subscribe to, so what actually reaches the wire must be ciphertext a room-key
+// holder can open — and nothing a non-member could read.
+func TestBroadcastWorker_ThreadViewSubject_EncryptedForRoomNamespace_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	seedUsers(t, db)
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-enc", Name: "general", Type: model.RoomTypeChannel, UserCount: 3, SiteID: "site-a",
+	})
+	require.NoError(t, err)
+	_, err = db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+		"_id": "tr-enc", "parentMessageId": "parent-enc", "replyAccounts": []string{"bob"},
+	})
+	require.NoError(t, err)
+
+	nc, err := nats.Connect(testutil.NATS(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = nc.Drain() })
+
+	secret := make([]byte, 32)
+	_, err = rand.Read(secret)
+	require.NoError(t, err)
+	key := &roomkeystore.VersionedKeyPair{Version: 7, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: secret}}
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
+		&fakeRoomKeyProvider{pair: key}, stubParentFetcher{}, true, subject.RouteGlobal, withThreadViewSubject(true))
+
+	viewerSub, err := nc.SubscribeSync(subject.RoomThreadEvent("r-enc", "parent-enc", true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = viewerSub.Unsubscribe() })
+	require.NoError(t, nc.Flush())
+
+	msgTime := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	data, err := json.Marshal(model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-enc", RoomID: "r-enc", UserID: "u-alice", UserAccount: "alice",
+			Content: "secret thread body", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-enc", TShow: false,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(ctx, data))
+
+	msg, err := viewerSub.NextMsg(5 * time.Second)
+	require.NoError(t, err)
+	assert.NotContains(t, string(msg.Data), "secret thread body", "the body must not cross the wire in the clear")
+
+	evt, clientMsg := decryptClientMessage(t, msg.Data, key)
+	assert.Equal(t, model.RoomEventNewThreadMessage, evt.Type)
+	assert.Equal(t, "secret thread body", clientMsg.Content)
 }

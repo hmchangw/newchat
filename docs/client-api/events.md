@@ -551,9 +551,17 @@ as the panel is open:
 
 | Type | Payload |
 |---|---|
-| `new_thread_message` | [RoomEvent](#new_thread_message-roomevent) — byte-identical to the per-subscriber copy, `encryptedMessage` envelope included |
+| `new_thread_message` | [RoomEvent](#new_thread_message-roomevent) |
 | `message_edited` | [EditRoomEvent](#message_edited-editroomevent) |
 | `message_deleted` | [DeleteRoomEvent](#message_deleted-deleteroomevent) |
+
+**Encrypted here, plaintext on the per-subscriber lane.** In an encrypted channel the
+per-subscriber copy carries a plaintext `message` / `newContent` because
+`chat.user.{account}.event.room` is scoped to one account; this subject is in the room
+namespace, so its copy carries `encryptedMessage` / `encryptedNewContent` — decrypt with the
+room key as for `chat.room.{roomID}.event`. Unencrypted channels send identical plaintext on
+both. `message_deleted` has no body and is never encrypted. If sealing fails nothing is
+published here, rather than a plaintext body reaching the room namespace.
 
 **Client handling.** Subscribe *before* calling `msg.thread`, or a reply published in the gap is
 lost. Unsubscribe on panel close, on a switch to another parent, and on teardown.

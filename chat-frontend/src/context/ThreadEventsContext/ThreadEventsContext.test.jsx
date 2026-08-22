@@ -497,6 +497,26 @@ describe('ThreadEventsContext thread-view subscription', () => {
     expect(screen.getByText('firstDeleted:true')).toBeInTheDocument()
   })
 
+  // Edits ride the room namespace sealed too, so the lane must open them.
+  it('decrypts an encrypted edit arriving on the thread subject', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      await threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'before' } })
+    })
+    decrypt.mockResolvedValue('after')
+    await act(async () => {
+      await threadEventHandler({
+        type: 'message_edited',
+        roomId: 'r1',
+        messageId: 'm9',
+        encryptedNewContent: { version: 3, nonce: 'bm9uY2U=', ciphertext: 'Y2lwaGVy' },
+        editedAt: '2026-08-22T10:00:00Z',
+      })
+    })
+    expect(screen.getByText('firstContent:after')).toBeInTheDocument()
+  })
+
   it('applies a delete arriving on the thread subject', async () => {
     setup()
     await act(async () => { screen.getByText('open').click() })
