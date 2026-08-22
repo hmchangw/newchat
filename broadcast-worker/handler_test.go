@@ -3629,3 +3629,37 @@ func TestHandler_HandleUpdated_NoMentionsSkipsLookup(t *testing.T) {
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 	assert.Empty(t, rec.sorted())
 }
+
+func TestHandler_HandleUpdated_LookupFailureStillBadgesLocally(t *testing.T) {
+	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	editedAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	rec := &mentionOutboxRecorder{}
+
+	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return(nil, errors.New("mongo down"))
+	store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", []string{"bob"}, editedAt).Return(nil)
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
+		withOutboxFederation("site-a", rec.publish))
+
+	data, err := json.Marshal(model.MessageEvent{
+		Event:  model.EventUpdated,
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Content: "hi @bob", CreatedAt: createdAt, EditedAt: &editedAt, UpdatedAt: &editedAt,
+		},
+	})
+	require.NoError(t, err)
+
+	// The local badge is the durable part; only the cross-site relay is lost.
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+	assert.Empty(t, rec.sorted())
+}
