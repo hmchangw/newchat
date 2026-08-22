@@ -938,10 +938,21 @@ func (r *soakFailureReconciler) observeSearchIndex(
 		// times the whole reconciliation budget on queries that cannot succeed,
 		// starving the lanes that share it.
 		retryAt := now.Add(r.retryInterval)
-		if result == soakSearchIndexTooEarly && r.searchIndex != nil {
+		switch {
+		case result == soakSearchIndexTooEarly && r.searchIndex != nil:
 			if boundary := r.searchIndex.SettleBoundary(operation.StartedAt); boundary.After(retryAt) {
 				retryAt = boundary
 			}
+		case probeErr == nil && result == soakSearchIndexMissing:
+			// The same amplification the history poll was backed off for: one
+			// message delayed in the index would otherwise cost a full-text
+			// search every retry interval until its deadline, and during an
+			// indexing backlog those probes saturate the reconcile share while
+			// newer messages expire for want of a look. A probe that could not
+			// answer keeps the flat interval — that retries a call, not a
+			// pending effect.
+			retryAt = nextReconcileProbe(
+				now, r.searchProbeAnchor(operation), operation.Deadline, r.retryInterval)
 		}
 		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
 			r.recordClaim(soakReconcileClaimFailed)
@@ -962,6 +973,20 @@ func (r *soakFailureReconciler) observeSearchIndex(
 	return probed, r.recordObservedProbe(
 		r.observeAs(operation.ID, failureObserverSearchIndex, observation, now),
 		probed && probeErr == nil)
+}
+
+// searchProbeAnchor is where the backoff measures elapsed wait from. No probe
+// before the settle boundary can find the message, so anchoring at VerifyAfter
+// would open the sequence already a settle window wide and put the first two
+// probes minutes apart.
+func (r *soakFailureReconciler) searchProbeAnchor(operation *failureOperation) time.Time {
+	if r.searchIndex == nil {
+		return operation.VerifyAfter
+	}
+	if boundary := r.searchIndex.SettleBoundary(operation.StartedAt); boundary.After(operation.VerifyAfter) {
+		return boundary
+	}
+	return operation.VerifyAfter
 }
 
 func (r *soakFailureReconciler) observeAs(
