@@ -61,7 +61,7 @@ const deletedRoomNamePrefix = "Del-"
 func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.SubscriptionListRequest) (*models.PagedSubscriptionListResponse, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
-	return s.ListSubscriptionsFor(c, account, req, s.defaultLimit, s.maxSubs)
+	return s.ListSubscriptionsFor(payloadCapped(c), account, req, s.defaultLimit, s.maxSubs)
 }
 
 // ListSubscriptionsFor is the transport-neutral core behind subscription.list.
@@ -379,23 +379,60 @@ func planChunks(subs []model.EnrichedSubscription, sites []string, idxBySite map
 // previews carry untruncated message bodies — so even a 100-room chunk can
 // overflow, and without this the whole chunk's previews vanish from an otherwise
 // successful page. A half that still fails degrades alone.
-func (s *UserService) roomsGetSplitting(ctx context.Context, site string, subs []model.EnrichedSubscription, rows []int, roomIDs []string) (map[string]model.PreviewMessage, error) {
+func (s *UserService) roomsGetSplitting(ctx context.Context, site string, subs []model.EnrichedSubscription, rows []int, roomIDs []string, depth int) (map[string]model.PreviewMessage, error) {
 	m, err := s.history.RoomsGet(ctx, site, roomIDs, chunkHints(subs, rows))
 	if err == nil || len(roomIDs) < 2 || !isResponseTooLarge(err) {
 		return m, err
 	}
+	// Recovering data that overflowed history's reply is pointless when our own
+	// reply shares the ceiling: the page embeds these previews plus more fields, so
+	// it would fail at publish after dozens of extra RPCs. Clients retry over HTTP.
+	if isPayloadCapped(ctx) {
+		return nil, err
+	}
+	// Halving is exponential in RPCs — 20 KB bodies need ~6-room batches, so an
+	// unbounded recursion turns one page into hundreds of calls. Past the cap the
+	// chunk degrades like any other.
+	if depth >= maxSplitDepth {
+		return nil, err
+	}
 
 	mid := len(roomIDs) / 2
-	left, lErr := s.roomsGetSplitting(ctx, site, subs, rows[:mid], roomIDs[:mid])
-	right, rErr := s.roomsGetSplitting(ctx, site, subs, rows[mid:], roomIDs[mid:])
+	left, lErr := s.roomsGetSplitting(ctx, site, subs, rows[:mid], roomIDs[:mid], depth+1)
+	right, rErr := s.roomsGetSplitting(ctx, site, subs, rows[mid:], roomIDs[mid:], depth+1)
 	if lErr != nil && rErr != nil {
 		return nil, lErr
+	}
+	// Logged per branch: a sibling's success would otherwise return a nil error and
+	// hide half a chunk going missing from an apparently complete page.
+	for _, e := range []error{lErr, rErr} {
+		if e != nil {
+			slog.WarnContext(ctx, "split branch degraded", "site", site, "chunk_size", len(roomIDs),
+				"request_id", natsutil.RequestIDFromContext(ctx), "error", e)
+		}
 	}
 	// Partial success is kept: losing half the previews beats losing all of them.
 	merged := make(map[string]model.PreviewMessage, len(left)+len(right))
 	maps.Copy(merged, left)
 	maps.Copy(merged, right)
 	return merged, nil
+}
+
+// maxSplitDepth bounds the halving recursion: 100 rooms reach ~6 per batch, which
+// fits 128 KB even at the 20 KB body ceiling, for at most 31 RPCs per chunk.
+const maxSplitDepth = 4
+
+type payloadCappedKey struct{}
+
+// payloadCapped marks a transport whose own reply carries the same size ceiling
+// history hit, so splitting cannot produce a deliverable response.
+func payloadCapped(ctx context.Context) context.Context {
+	return context.WithValue(ctx, payloadCappedKey{}, true)
+}
+
+func isPayloadCapped(ctx context.Context) bool {
+	v, _ := ctx.Value(payloadCappedKey{}).(bool)
+	return v
 }
 
 // isResponseTooLarge reports whether the reply was refused for exceeding the
@@ -514,7 +551,7 @@ func (s *UserService) enrichLastMessage(ctx context.Context, account string, sub
 			if s.overBudget(&spent, 0) {
 				return nil, errBudgetSpent
 			}
-			m, err := s.roomsGetSplitting(ctx, job.site, subs, job.rows, job.roomIDs)
+			m, err := s.roomsGetSplitting(ctx, job.site, subs, job.rows, job.roomIDs, 0)
 			if err != nil {
 				slog.WarnContext(ctx, "last-message enrichment degraded", "account", account, "site", job.site,
 					"chunk_size", len(job.roomIDs), "request_id", natsutil.RequestIDFromContext(ctx), "error", err)

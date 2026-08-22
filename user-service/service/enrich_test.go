@@ -772,3 +772,43 @@ func TestEnrichLastMessage_StopsAtPreviewByteBudget(t *testing.T) {
 	assert.Greater(t, attached, 0, "the budget must not degrade the whole page")
 	assert.Less(t, attached, 4, "previews past the budget must be dropped")
 }
+
+// On a payload-capped transport the page's own reply shares the ceiling history
+// just hit, so splitting spends RPCs on data that can never be delivered.
+func TestEnrichLastMessage_NoSplitOnPayloadCappedTransport(t *testing.T) {
+	svc, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		Return(nil, errcode.Internal("too large", errcode.WithReason(errcode.ResponseTooLarge))).Times(1)
+
+	svc.enrichLastMessage(payloadCapped(context.Background()), "alice", subs, idxBySite)
+
+	for i := range subs {
+		assert.Nil(t, subs[i].Room.PreviewMessage, "row %d degrades without a split", i)
+	}
+}
+
+// Unbounded halving is exponential in RPCs; past the depth cap the chunk degrades.
+func TestEnrichLastMessage_BoundsSplitDepth(t *testing.T) {
+	svc, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	var mu sync.Mutex
+	var calls int
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			// Never satisfiable, so only the cap can stop the recursion.
+			return nil, errcode.Internal("too large", errcode.WithReason(errcode.ResponseTooLarge))
+		}).AnyTimes()
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	assert.LessOrEqual(t, calls, 31, "a chunk must not exceed 2^(maxSplitDepth+1)-1 RPCs")
+	for i := range subs {
+		assert.Nil(t, subs[i].Room.PreviewMessage, "row %d degrades once the cap is hit", i)
+	}
+}
