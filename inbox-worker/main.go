@@ -39,7 +39,8 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers    int    `env:"MAX_WORKERS"     envDefault:"100"`
+	Pool          mongoutil.PoolConfig
+	MaxWorkers    int `env:"MAX_WORKERS"     envDefault:"100"`
 	// RoomSubCache memoizes the room-membership check on the activity-refresh
 	// lane, which would otherwise cost a Mongo read per broadcast message.
 	// Either value non-positive disables it.
@@ -745,6 +746,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
+		os.Exit(1)
+	}
+
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -758,7 +764,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)

@@ -26,13 +26,14 @@ import (
 )
 
 type config struct {
-	NatsURL            string                  `env:"NATS_URL,required"`
-	NatsCredsFile      string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID             string                  `env:"SITE_ID,required"`
-	MongoURI           string                  `env:"MONGO_URI,required"`
-	MongoDB            string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername      string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword      string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	NatsURL            string `env:"NATS_URL,required"`
+	NatsCredsFile      string `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID             string `env:"SITE_ID,required"`
+	MongoURI           string `env:"MONGO_URI,required"`
+	MongoDB            string `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername      string `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword      string `env:"MONGO_PASSWORD"  envDefault:""`
+	Pool               mongoutil.PoolConfig
 	MaxWorkers         int                     `env:"MAX_WORKERS"     envDefault:"100"`
 	LargeRoomThreshold int                     `env:"LARGE_ROOM_THRESHOLD" envDefault:"500"`
 	MaxAttachments     int                     `env:"MAX_ATTACHMENTS"      envDefault:"1"`
@@ -71,6 +72,11 @@ func main() {
 	}
 	logctx.Configure(cfg.DebugLog)
 
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -98,7 +104,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)

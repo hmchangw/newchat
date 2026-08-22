@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // Config is the job's environment configuration. One replica-set serves both
@@ -13,6 +15,8 @@ type Config struct {
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// Pool caps the MongoDB connection pool for both the read and write clients.
+	Pool mongoutil.PoolConfig
 
 	NatsURL       string `env:"NATS_URL,required,notEmpty"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
@@ -35,6 +39,9 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.MaxWorkers <= 0 {
 		return fmt.Errorf("invalid config: MAX_WORKERS must be positive")
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
 	}
 	return nil
 }

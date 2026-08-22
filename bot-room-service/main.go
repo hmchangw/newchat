@@ -38,9 +38,16 @@ type config struct {
 	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
 	RoomKeyRetiredTTL time.Duration `env:"ROOM_KEY_RETIRED_TTL" envDefault:"20m"`
 
-	MaxConcurrency int    `env:"MAX_CONCURRENCY" envDefault:"200"`
-	HealthAddr     string `env:"HEALTH_ADDR"     envDefault:":8081"`
-	PProfEnabled   bool   `env:"PPROF_ENABLED"   envDefault:"false"`
+	// Pool caps the Mongo connection pool. MaxConcurrency bounds in-flight
+	// handlers — kept at this service's historical 200 default (below the fleet
+	// 256) — and RequestTimeout bounds each handler, so a burst or slow
+	// dependency can't saturate the pool with unbounded work.
+	Pool           mongoutil.PoolConfig
+	MaxConcurrency int           `env:"MAX_CONCURRENCY" envDefault:"200"`
+	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
+
+	HealthAddr   string `env:"HEALTH_ADDR"     envDefault:":8081"`
+	PProfEnabled bool   `env:"PPROF_ENABLED"   envDefault:"false"`
 }
 
 func main() {
@@ -55,6 +62,13 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate pool config: %w", err)
+	}
+	guard := natsrouter.GuardConfig{MaxConcurrency: cfg.MaxConcurrency, RequestTimeout: cfg.RequestTimeout}
+	if err := guard.Validate(); err != nil {
+		return fmt.Errorf("validate guard config: %w", err)
 	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
@@ -71,7 +85,8 @@ func run() error {
 		return fmt.Errorf("init jetstream: %w", err)
 	}
 
-	mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
@@ -101,8 +116,7 @@ func run() error {
 	// LOCAL sysmsg emission on create/add/remove; never federated cross-site.
 	h.sysmsgPub = jsPublishAdapter{js: js}
 
-	router := natsrouter.New(nc, "bot-room-service", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency), natsrouter.WithSiteID(cfg.SiteID))
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router := natsrouter.DefaultGuarded(nc, "bot-room-service", guard)
 	h.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

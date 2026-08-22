@@ -76,3 +76,12 @@ func TestLoadConfig_RejectsUnusableHandlerTimeouts(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfig_ZeroMaxPoolSizeFails(t *testing.T) {
+	t.Setenv("SITE_ID", "site-local")
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
+	_, err := loadConfig()
+	assert.Error(t, err)
+}
