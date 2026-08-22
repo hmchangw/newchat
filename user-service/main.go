@@ -98,7 +98,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -186,7 +187,9 @@ func main() {
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Logging())
 	// After Logging so the timeout wraps the handler chain; bounds the Mongo
-	// aggregations from hanging past the configured deadline.
+	// aggregations from hanging past the configured deadline. user-service uses
+	// its own HANDLER_TIMEOUT (not REQUEST_TIMEOUT) as the single per-request
+	// deadline.
 	router.Use(natsrouter.HandlerTimeout(cfg.HandlerTimeout))
 
 	svc.RegisterHandlers(router)

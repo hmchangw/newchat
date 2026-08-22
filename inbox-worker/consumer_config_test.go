@@ -62,6 +62,13 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
 }
 
+func TestConfig_PoolValidate_RejectsZeroMaxPoolSize(t *testing.T) {
+	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Error(t, cfg.Pool.Validate())
+}
+
 func TestIsMembershipSubject(t *testing.T) {
 	const siteID = "site-a"
 	t.Run("member_added is membership", func(t *testing.T) {

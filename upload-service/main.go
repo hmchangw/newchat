@@ -37,6 +37,11 @@ type config struct {
 	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
 
+	Pool mongoutil.PoolConfig
+	// No blanket request timeout here: upload-service streams potentially-large
+	// file downloads bounded by MinioDownloadTimeout and the server WriteTimeout
+	// (both 5m); a short per-request context deadline would cancel those streams.
+
 	// MaxImages caps the number of images per image-upload request.
 	MaxImages int `env:"MAX_IMAGES" envDefault:"10"`
 	// MaxAttachments caps the number of files the single-file upload endpoint accepts.
@@ -93,6 +98,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate mongo pool: %w", err)
+	}
 
 	ctx := context.Background()
 	cfg.Drive.LoadBaseURLs()
@@ -103,7 +111,7 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("mongo connect: %w", err)
 	}

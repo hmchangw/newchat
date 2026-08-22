@@ -56,6 +56,15 @@ func TestConfig_Overrides(t *testing.T) {
 	assert.Equal(t, mongoConfig{URI: "mongodb://write:27017", DB: "writedb", Username: "writer", Password: "writepw"}, cfg.MongoWrite)
 }
 
+func TestConfig_ZeroMaxPoolSizeFails(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Error(t, cfg.Pool.Validate(), "a zero MONGO_MAX_POOL_SIZE must be rejected")
+}
+
 func TestConfig_MissingRequiredFails(t *testing.T) {
 	tests := []struct {
 		name  string

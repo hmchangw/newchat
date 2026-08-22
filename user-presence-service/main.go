@@ -34,6 +34,9 @@ type MongoConfig struct {
 	DB       string `env:"DB" envDefault:"chat"`
 	Username string `env:"USERNAME"`
 	Password string `env:"PASSWORD"`
+	// ReadPreference routes staleness-tolerant reads to secondaries per read site;
+	// the client stays on primary for dedup/read-after-write.
+	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
 }
 
 type PresenceConfig struct {
@@ -53,6 +56,13 @@ type Config struct {
 	Valkey        ValkeyConfig   `envPrefix:"VALKEY_"`
 	Mongo         MongoConfig    `envPrefix:"MONGO_"`
 	Presence      PresenceConfig `envPrefix:"PRESENCE_"`
+
+	// Pool caps the Mongo connection pool. RequestTimeout bounds each handler so
+	// a slow op frees its connection. No concurrency cap: the presence routes are
+	// fire-and-forget (RegisterVoid), which admission control would silently drop
+	// under saturation — so this service takes only the timeout knob.
+	Pool           mongoutil.PoolConfig
+	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
 }
 
 // Compile-time guarantee that the extracted store satisfies the daemon's
@@ -63,6 +73,14 @@ func main() {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid pool config", "error", err)
+		os.Exit(1)
+	}
+	if cfg.RequestTimeout < 0 {
+		slog.Error("invalid REQUEST_TIMEOUT", "value", cfg.RequestTimeout)
 		os.Exit(1)
 	}
 	// Fail fast on non-positive tunables: a zero/negative SweepInterval panics
@@ -101,7 +119,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -128,7 +153,15 @@ func main() {
 	peer := NewNATSPeerPresenceClient(nc.NatsConn(), cfg.Presence.PeerTimeout)
 	handler := NewHandler(store, userDir, peer, publish, cfg.SiteID, cfg.Presence.BatchMax)
 
+	// No admission cap here: Hello/Ping/Activity/Bye are fire-and-forget
+	// (RegisterVoid), and under a saturated concurrency semaphore those are
+	// silently dropped (no reply, no redelivery) — a reconnect storm would lose
+	// presence updates and strand users online/offline. Only the per-request
+	// timeout is applied.
 	router := natsrouter.Default(nc, "user-presence-service", natsrouter.WithSiteID(cfg.SiteID))
+	if cfg.RequestTimeout > 0 {
+		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
+	}
 	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
 	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
 	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)

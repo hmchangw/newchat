@@ -34,14 +34,22 @@ type config struct {
 	// Mode selects which stream/consumer this pod binds: "default" runs the ROOMS
 	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
 	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
-	Mode              string                  `env:"MODE"            envDefault:"default"`
-	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
-	MongoURI          string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB           string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername     string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword     string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	Mode          string `env:"MODE"            envDefault:"default"`
+	NatsURL       string `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string `env:"SITE_ID"         envDefault:"site-local"`
+	MongoURI      string `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
+	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE/MONGO_MIN_POOL_SIZE)
+	// so a burst can't open unbounded connections. Env tags already carry the
+	// MONGO_ prefix, so this stays a top-level field (never under envPrefix:"MONGO_").
+	Pool mongoutil.PoolConfig
+	// Guard bounds in-flight request handlers (MAX_CONCURRENCY) and per-request
+	// duration (REQUEST_TIMEOUT) for the serverCreateDM RPC so a burst can't
+	// saturate the Mongo pool with unbounded, indefinitely-held work.
+	Guard             natsrouter.GuardConfig
 	MaxWorkers        int                     `env:"MAX_WORKERS"        envDefault:"100"`
 	KeyFanoutWorkers  int                     `env:"KEY_FANOUT_WORKERS" envDefault:"32"` // see defaultKeyFanoutWorkers in handler.go
 	UserCacheSize     int                     `env:"USER_CACHE_SIZE"    envDefault:"10000"`
@@ -97,6 +105,14 @@ func main() {
 		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
 		os.Exit(1)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid guard config", "error", err)
+		os.Exit(1)
+	}
 
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
@@ -137,7 +153,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -253,8 +270,7 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.New(nc, "room-worker", natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard)
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
