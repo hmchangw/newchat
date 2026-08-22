@@ -393,11 +393,23 @@ func runSoakSeed(
 	return 0
 }
 
+// soakShutdownExitCode folds a ledger close failure into the run's result. A
+// close that could not make an invalidation durable means this run's evidence
+// will not be recognised as disowned when it is replayed, which is a failed run
+// however well the traffic went. An earlier failure keeps its own code: it is
+// closer to the cause.
+func soakShutdownExitCode(current int, closeErr error) int {
+	if closeErr == nil || current != 0 {
+		return current
+	}
+	return 2
+}
+
 func runSoakWorkload(
 	ctx context.Context,
 	cfg *config,
 	opts soakOptions,
-) int {
+) (exitCode int) {
 	seed := opts.Seed
 	client, err := mongoutil.Connect(
 		ctx,
@@ -525,9 +537,11 @@ func runSoakWorkload(
 		metrics.FailureDropped.Add(float64(dropped))
 	}
 	defer func() {
-		if err := ledger.Close(); err != nil {
+		err := ledger.Close()
+		if err != nil {
 			slog.Error("close Cassandra soak failure ledger", "error", err)
 		}
+		exitCode = soakShutdownExitCode(exitCode, err)
 	}()
 	observationRuntime := newSoakFailureObservationRuntime(
 		cfg.Soak.RecipientObserverEnabled,
