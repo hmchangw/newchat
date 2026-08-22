@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -85,6 +86,181 @@ func TestCoalescingStore_Flush_WritesPendingBatch(t *testing.T) {
 	assert.True(t, got["room-a"].lastMentionAllAt.IsZero())
 	assert.Equal(t, "msg-b", got["room-b"].msgID)
 	assert.Equal(t, t0.Add(time.Second), got["room-b"].lastMentionAllAt, "mentionAll=true must record lastMentionAllAt")
+}
+
+// fakeActivityPublisher records the cross-site activity refreshes a flush emits.
+type fakeActivityPublisher struct {
+	mu    sync.Mutex
+	sent  []roomActivityRefresh
+	fails bool
+}
+
+func (f *fakeActivityPublisher) publish(_ context.Context, r roomActivityRefresh) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fails {
+		return errors.New("publish failed")
+	}
+	f.sent = append(f.sent, r)
+	return nil
+}
+
+func (f *fakeActivityPublisher) all() []roomActivityRefresh {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]roomActivityRefresh(nil), f.sent...)
+}
+
+func TestCoalescingStore_Flush_PublishesActivityForCrossSiteRoomsOnly(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	pub := &fakeActivityPublisher{}
+	c := newCoalescer(bulk)
+	// r-x is cross-site; r-local is not. Only the former needs a refresh — the
+	// destination is the only site without a rooms doc to order by.
+	c.crossSite = func(_ context.Context, roomID string) bool { return roomID == "r-x" }
+	c.publishActivity = pub.publish
+
+	t0 := time.Unix(1700000000, 0).UTC()
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-x", "m1", t0, false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-local", "m2", t0, false))
+	require.NoError(t, c.Flush(context.Background()))
+
+	sent := pub.all()
+	require.Len(t, sent, 1, "only the cross-site room is refreshed")
+	assert.Equal(t, "r-x", sent[0].roomID)
+	assert.Equal(t, t0, sent[0].at)
+}
+
+func TestCoalescingStore_Flush_CoalescesActivityToOnePublishPerRoom(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	pub := &fakeActivityPublisher{}
+	c := newCoalescer(bulk)
+	c.crossSite = func(_ context.Context, _ string) bool { return true }
+	c.publishActivity = pub.publish
+
+	t0 := time.Unix(1700000000, 0).UTC()
+	// Many messages in one window collapse to a single refresh carrying the latest
+	// position — this is what keeps the cost independent of message rate.
+	for i := range 50 {
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-busy", "m", t0.Add(time.Duration(i)*time.Millisecond), false))
+	}
+	require.NoError(t, c.Flush(context.Background()))
+
+	sent := pub.all()
+	require.Len(t, sent, 1)
+	assert.Equal(t, t0.Add(49*time.Millisecond), sent[0].at, "the latest position wins")
+}
+
+func TestCoalescingStore_Flush_ThrottlesRefreshPerRoom(t *testing.T) {
+	pub := &fakeActivityPublisher{}
+	c := newCoalescer(&fakeBulkWriter{})
+	c.crossSite = func(_ context.Context, _ string) bool { return true }
+	c.publishActivity = pub.publish
+	c.refreshInterval = 5 * time.Second
+	clock := time.Unix(1700000000, 0).UTC()
+	c.now = func() time.Time { return clock }
+
+	msgAt := clock
+	send := func() {
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-x", "m", msgAt, false))
+		require.NoError(t, c.Flush(context.Background()))
+	}
+
+	send() // first flush publishes
+	require.Len(t, pub.all(), 1)
+
+	// Nineteen more flush windows, landing at 4.75s — still inside the interval.
+	// The Mongo batch runs every time, but the room must not be re-announced.
+	for range 19 {
+		clock = clock.Add(250 * time.Millisecond)
+		msgAt = clock
+		send()
+	}
+	assert.Len(t, pub.all(), 1, "throttled within the refresh interval")
+
+	clock = clock.Add(5 * time.Second)
+	msgAt = clock
+	send()
+	sent := pub.all()
+	require.Len(t, sent, 2, "publishes again once the interval elapses")
+	assert.Equal(t, msgAt, sent[1].at, "and carries the latest position, not the one it skipped")
+}
+
+func TestCoalescingStore_Flush_ThrottlesRoomsIndependently(t *testing.T) {
+	pub := &fakeActivityPublisher{}
+	c := newCoalescer(&fakeBulkWriter{})
+	c.crossSite = func(_ context.Context, _ string) bool { return true }
+	c.publishActivity = pub.publish
+	c.refreshInterval = 5 * time.Second
+	clock := time.Unix(1700000000, 0).UTC()
+	c.now = func() time.Time { return clock }
+
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-a", "m", clock, false))
+	require.NoError(t, c.Flush(context.Background()))
+
+	// r-b is newly active — its own watermark is unset, so it publishes even
+	// though r-a is mid-interval.
+	clock = clock.Add(250 * time.Millisecond)
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-a", "m", clock, false))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-b", "m", clock, false))
+	require.NoError(t, c.Flush(context.Background()))
+
+	var rooms []string
+	for _, r := range pub.all() {
+		rooms = append(rooms, r.roomID)
+	}
+	assert.Equal(t, []string{"r-a", "r-b"}, rooms)
+}
+
+func TestCoalescingStore_Flush_ZeroIntervalPublishesEveryFlush(t *testing.T) {
+	pub := &fakeActivityPublisher{}
+	c := newCoalescer(&fakeBulkWriter{})
+	c.crossSite = func(_ context.Context, _ string) bool { return true }
+	c.publishActivity = pub.publish
+	c.refreshInterval = 0 // throttling disabled
+
+	for range 3 {
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-x", "m", time.Now(), false))
+		require.NoError(t, c.Flush(context.Background()))
+	}
+	assert.Len(t, pub.all(), 3)
+}
+
+func TestCoalescingStore_Flush_ForgetsWatermarksForQuietRooms(t *testing.T) {
+	// The watermark map must stay bounded by rooms active within the interval,
+	// not grow with every room ever seen.
+	pub := &fakeActivityPublisher{}
+	c := newCoalescer(&fakeBulkWriter{})
+	c.crossSite = func(_ context.Context, _ string) bool { return true }
+	c.publishActivity = pub.publish
+	c.refreshInterval = time.Second
+	clock := time.Unix(1700000000, 0).UTC()
+	c.now = func() time.Time { return clock }
+
+	for i := range 100 {
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), fmt.Sprintf("r-%d", i), "m", clock, false))
+	}
+	require.NoError(t, c.Flush(context.Background()))
+	assert.Len(t, c.lastRefreshed, 100)
+
+	// Those rooms go quiet; a later flush prunes their watermarks.
+	clock = clock.Add(10 * time.Second)
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-live", "m", clock, false))
+	require.NoError(t, c.Flush(context.Background()))
+	assert.Len(t, c.lastRefreshed, 1, "only the still-active room retains a watermark")
+}
+
+func TestCoalescingStore_Flush_PublishFailureDoesNotFailTheFlush(t *testing.T) {
+	// The refresh is decorative and self-healing on the next message; a publish
+	// failure must not lose the Mongo batch it rides with.
+	bulk := &fakeBulkWriter{}
+	c := newCoalescer(bulk)
+	c.crossSite = func(_ context.Context, _ string) bool { return true }
+	c.publishActivity = (&fakeActivityPublisher{fails: true}).publish
+
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), "r-x", "m1", time.Now(), false))
+	require.NoError(t, c.Flush(context.Background()), "flush must still succeed")
+	assert.Equal(t, 1, bulk.callCount(), "and the room batch must still land")
 }
 
 func TestCoalescingStore_Update_LatestMessageWinsPerRoom(t *testing.T) {
