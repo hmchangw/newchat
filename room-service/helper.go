@@ -106,7 +106,8 @@ var (
 	// caller is neither a room member nor a platform admin; Internal when a
 	// reply would exceed the negotiated NATS max_payload.
 	errAppAccessDenied  = errcode.Forbidden("not authorized to access this room's apps", errcode.WithReason(errcode.RoomNotMember))
-	errResponseTooLarge = errcode.Internal("response payload exceeds maximum size")
+	errResponseTooLarge = errcode.Internal("response payload exceeds maximum size",
+		errcode.WithReason(errcode.ResponseTooLarge))
 )
 
 // platformAdminRegex matches the platform-admin pseudo-account by its configured

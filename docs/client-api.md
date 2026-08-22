@@ -6718,7 +6718,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 > **Malformed request bodies.** Any room request/reply RPC whose payload is not valid JSON for its schema is rejected uniformly with `code: bad_request` and the message `"invalid request payload"` — the transport layer rejects it before the handler runs. Treat this as a generic encoding error; do not pattern-match the message text.
 
 > [!IMPORTANT]
-> **Oversize replies.** If a successful response would exceed the transport's maximum payload size, the reply is returned as `code: internal` with `reason: response_too_large` instead of the success body. This is most likely on large history reads (e.g. Load History / Load Next / Load Surrounding / Get Thread Messages with a high `limit`); the client should retry with a smaller `limit`. Branch on `reason` (`response_too_large`), not the message text.
+> **Oversize replies.** If a reply would exceed the transport's maximum payload size, it is returned as `code: internal` with `reason: response_too_large` instead. This covers both a success body that is too large and an error envelope that is too large; either way the caller gets an answer rather than a timeout. This is most likely on large history reads (e.g. Load History / Load Next / Load Surrounding / Get Thread Messages with a high `limit`); the client should retry with a smaller `limit`. Branch on `reason` (`response_too_large`), not the message text.
 
 ### `reason` catalog (present today)
 

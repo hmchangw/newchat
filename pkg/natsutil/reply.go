@@ -7,16 +7,12 @@ package natsutil
 
 import (
 	"encoding/json"
-	"errors"
 	"log/slog"
 
 	"github.com/nats-io/nats.go"
-)
 
-// oversizeEnvelope is the small fallback reply when a response exceeds max_payload —
-// it always fits, so the client gets an error instead of a silent timeout. The
-// stable reason lets clients branch on it without parsing the message text.
-const oversizeEnvelope = `{"code":"internal","reason":"response_too_large","error":"response payload exceeds maximum size"}`
+	"github.com/hmchangw/chat/pkg/errcode/errnats"
+)
 
 // MarshalResponse encodes a value as JSON for NATS responses.
 func MarshalResponse(v any) ([]byte, error) {
@@ -40,8 +36,8 @@ func ReplyJSON(msg *nats.Msg, v any) {
 		slog.Error("reply failed", "error", err, "subject", msg.Subject)
 		// An oversize reply never went on the wire — fall back to a compact
 		// error envelope so the client gets an error, not a silent timeout.
-		if errors.Is(err, nats.ErrMaxPayload) {
-			if rErr := msg.Respond([]byte(oversizeEnvelope)); rErr != nil {
+		if errnats.IsOversize(err) {
+			if rErr := msg.Respond(errnats.OversizeEnvelope()); rErr != nil {
 				slog.Error("oversize reply fallback failed", "error", rErr, "subject", msg.Subject)
 			}
 		}

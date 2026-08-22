@@ -259,16 +259,30 @@ func (c *Context) respond(data []byte) {
 		slog.ErrorContext(c, "reply failed", "error", "nil NATS message")
 		return
 	}
-	var err error
+	err := c.send(data)
+	if err == nil {
+		return
+	}
+	c.requestResult = natsmetrics.RequestInternal
+	slog.ErrorContext(c, "reply failed", "error", err, "subject", c.Msg.Subject)
+	// An oversize reply is rejected before it reaches the wire, so the reply
+	// subject is still live and a compact envelope beats leaving the caller to
+	// time out on a failure it would read as a dead service. Sent through send
+	// rather than respond so a failing fallback cannot recurse.
+	if errnats.IsOversize(err) {
+		if fErr := c.send(errnats.OversizeEnvelope()); fErr != nil {
+			slog.ErrorContext(c, "oversize reply fallback failed", "error", fErr, "subject", c.Msg.Subject)
+		}
+	}
+}
+
+// send puts data on the reply subject, preferring the router's instrumented
+// responder and falling back to the raw message for a bare Context.
+func (c *Context) send(data []byte) error {
 	if c.reply != nil {
-		err = c.reply.Respond(c, c.Msg, data)
-	} else {
-		err = c.Msg.Respond(data)
+		return c.reply.Respond(c, c.Msg, data)
 	}
-	if err != nil {
-		c.requestResult = natsmetrics.RequestInternal
-		slog.ErrorContext(c, "reply failed", "error", err, "subject", c.Msg.Subject)
-	}
+	return c.Msg.Respond(data)
 }
 
 func requestResultFromError(err error) natsmetrics.RequestResult {

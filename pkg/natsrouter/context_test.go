@@ -3,7 +3,9 @@ package natsrouter
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -12,8 +14,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
 // TestContext_WithLogValues_NoCycleAndEnriches verifies the seam derives from
@@ -222,4 +226,89 @@ func (r *capturingResponder) Respond(_ context.Context, msg *nats.Msg, data []by
 	r.msg = msg
 	r.data = append([]byte(nil), data...)
 	return nil
+}
+
+// oversizeResponder rejects the first n sends with a wrapped nats.ErrMaxPayload
+// (mirroring how o11ynats.Conn.Respond wraps it) and records every attempt.
+type oversizeResponder struct {
+	failFirst int
+	sends     [][]byte
+}
+
+func (r *oversizeResponder) Respond(_ context.Context, _ *nats.Msg, data []byte) error {
+	r.sends = append(r.sends, append([]byte(nil), data...))
+	if len(r.sends) <= r.failFirst {
+		return fmt.Errorf("nats respond to %q: %w", "_INBOX.reply", nats.ErrMaxPayload)
+	}
+	return nil
+}
+
+func newOversizeContext(reply responder) *Context {
+	msg := &nats.Msg{Subject: "chat.user.alice.request.rooms.info", Reply: "_INBOX.reply"}
+	return acquireContext(context.Background(), msg, Params{}, nil, reply)
+}
+
+// Every client-facing RPC replies through this chokepoint. Without the
+// fallback an oversize response never reaches the wire and the caller sees a
+// bare timeout, indistinguishable from a dead service.
+func TestContext_ReplyJSONOversizeSendsFallbackEnvelope(t *testing.T) {
+	reply := &oversizeResponder{failFirst: 1}
+	c := newOversizeContext(reply)
+	defer releaseContext(c)
+
+	c.ReplyJSON(map[string]string{"huge": "payload"})
+
+	require.Len(t, reply.sends, 2, "oversize send must be followed by exactly one fallback")
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(reply.sends[1], &got))
+	assert.Equal(t, "internal", got["code"])
+	assert.Equal(t, "response_too_large", got["reason"])
+	assert.Equal(t, natsmetrics.RequestInternal, c.requestResult)
+}
+
+func TestContext_ReplyErrorOversizeSendsFallbackEnvelope(t *testing.T) {
+	reply := &oversizeResponder{failFirst: 1}
+	c := newOversizeContext(reply)
+	defer releaseContext(c)
+
+	c.ReplyError(errcode.NotFound("room not found"))
+
+	require.Len(t, reply.sends, 2)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(reply.sends[1], &got))
+	assert.Equal(t, "response_too_large", got["reason"])
+}
+
+// A dropped connection or a closed subscription would fail a second publish
+// exactly as it failed the first; retrying only burns a send.
+func TestContext_RespondDoesNotRetryOnNonOversizeFailure(t *testing.T) {
+	reply := &failingResponder{err: nats.ErrConnectionClosed}
+	c := newOversizeContext(reply)
+	defer releaseContext(c)
+
+	c.ReplyJSON(map[string]string{"ok": "true"})
+
+	assert.Equal(t, 1, reply.calls, "non-oversize failures must not trigger the fallback")
+}
+
+// The fallback is itself sent through respond(); if that path retried on its
+// own failure it would recurse without bound.
+func TestContext_RespondRetriesFallbackAtMostOnce(t *testing.T) {
+	reply := &oversizeResponder{failFirst: 10}
+	c := newOversizeContext(reply)
+	defer releaseContext(c)
+
+	c.ReplyJSON(map[string]string{"huge": "payload"})
+
+	assert.Len(t, reply.sends, 2, "a failing fallback must not be retried again")
+}
+
+type failingResponder struct {
+	err   error
+	calls int
+}
+
+func (r *failingResponder) Respond(_ context.Context, _ *nats.Msg, _ []byte) error {
+	r.calls++
+	return r.err
 }
