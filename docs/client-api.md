@@ -6565,7 +6565,7 @@ Apply `newTcount` directly to the parent message's badge — do not compute a de
 
 A **channel** thread reply fans out per-subscriber (see [`new_thread_message`](#send-message)), so a client that opens a thread panel without following the thread receives nothing until it refetches. `broadcast-worker` therefore publishes the same events a second time on a thread-scoped subject that a client subscribes to for exactly as long as the panel is open.
 
-#### Subjects
+### Subjects
 
 | Room `crossSite` | Subject |
 |---|---|
@@ -6576,7 +6576,7 @@ Resolve `crossSite` exactly as for the room's own `chat.room.{roomID}.event` sub
 
 Channel rooms only. DM and botDM thread replies already reach every member, so no thread subject is published for them.
 
-#### Events carried
+### Events carried
 
 | Type | Payload |
 |---|---|
@@ -6586,7 +6586,7 @@ Channel rooms only. DM and botDM thread replies already reach every member, so n
 
 Decrypt with the room key exactly as for the per-subscriber copy — see [§5 Room Encryption](#5-room-encryption).
 
-#### Client handling
+### Client handling
 
 - **Subscribe before fetching.** Open the subscription, then call [Get Thread Messages](#get-thread-messages), then merge. Fetching first leaves a window in which a reply is published before the subscription exists and is lost.
 - **Unsubscribe when the panel closes**, when it switches to another parent, and on teardown. The subscription is the only thing that makes the server deliver here, so a leaked one keeps consuming events.

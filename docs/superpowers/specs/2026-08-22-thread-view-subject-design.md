@@ -99,7 +99,7 @@ through to marshal and publish. `publishToThreadAccounts` already no-ops on an e
 per-follower fan-out has already committed; returning an error would NAK and redeliver,
 duplicating that fan-out. A failure is logged and counted. Viewers reconcile on panel open.
 
-No-ops when the flag is off, when `parentMsgID` is empty, or when the payload is empty.
+No-ops when the flag is off or when `parentMsgID` is empty (an unroutable subject token).
 
 ### Metrics
 

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -577,7 +578,10 @@ func TestBroadcastWorker_GetHistorySharedSince_Integration(t *testing.T) {
 type natsConnPublisher struct{ nc *nats.Conn }
 
 func (p *natsConnPublisher) Publish(_ context.Context, subj string, data []byte) error {
-	return p.nc.Publish(subj, data)
+	if err := p.nc.Publish(subj, data); err != nil {
+		return fmt.Errorf("publish to %s: %w", subj, err)
+	}
+	return nil
 }
 
 // dave never replied, so the per-follower fan-out skips him; the panel must not.
