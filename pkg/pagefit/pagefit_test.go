@@ -272,3 +272,14 @@ func TestFit_OversizeChargeNeverWrapsAround(t *testing.T) {
 		assert.True(t, oversize)
 	})
 }
+
+// assembleSurrounding derives the pivot as len(beforePage) — which is one past
+// the end when there is no central row and nothing after it. Callers rely on
+// the clamp rather than guarding, so pin it.
+func TestFitWindow_PivotOnePastTheEndIsClamped(t *testing.T) {
+	items := rows(3, 10)
+	lo, hi, oversize := FitWindow(items, len(items), NewBudget(1<<20, 0), 0)
+	assert.Equal(t, 0, lo)
+	assert.Equal(t, 3, hi)
+	assert.False(t, oversize)
+}

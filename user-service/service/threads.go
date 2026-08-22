@@ -116,7 +116,14 @@ func (s *UserService) ListUserThreads(c *natsrouter.Context, req model.ThreadLis
 
 	// Trim after enrichment — it adds bytes, so a page measured before it can
 	// still overflow. The cursor below then resumes at the last kept row.
-	if kept, dropped, _ := pagefit.Fit(merged, s.pageBudget, threadListEnvelope); dropped {
+	//
+	// The oversize return is ignored: a lone row too large to send has no
+	// blanked form here (unlike a message, a thread item carries no truncated
+	// flag), and one cannot occur in practice — its parent body inherits the
+	// 20 KB content cap. Such a row falls through to the router's
+	// response_too_large reply rather than being silently degraded.
+	kept, dropped, _ := pagefit.Fit(merged, s.pageBudget, threadListEnvelope)
+	if dropped {
 		merged = kept
 		hasNext = true
 	}
