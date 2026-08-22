@@ -571,10 +571,15 @@ A follower with the panel open receives every event twice, and the copies are id
 unconditionally — deduplicating those by message ID drops a later edit of an already-seen reply,
 and both are idempotent anyway.
 
-Process one thread's events in arrival order. In an encrypted room a plaintext `message_deleted`
+Reject a `message_edited` whose `editedAt` is at or before the applied one — a redelivered older
+edit would otherwise overwrite a newer one. When an `encryptedMessage` cannot be opened because the
+room key has not arrived, render a placeholder from `lastMsgId` / `lastMsgAt` rather than dropping
+the reply.
+
+Process one thread's events in arrival order, serializing per thread rather than globally. In an encrypted room a plaintext `message_deleted`
 resolves faster than a preceding `new_thread_message` that must be decrypted first, so a
 concurrent handler can apply the delete to a reply it has not inserted yet and then render that
-reply as live.
+reply as live. A single shared queue instead lets one thread's stalled decrypt delay another's.
 
 Delivery here is best-effort and never retried — the panel's next open refetches, and the
 per-subscriber lane is unaffected.

@@ -103,8 +103,10 @@ export function threadEventsReducer(state, action) {
       const idx = state.messages.findIndex((m) => m.id === action.messageId)
       if (idx < 0) return state
       const current = state.messages[idx]
-      // A follower with the panel open receives this on both the per-subscriber
-      // and thread lanes; returning state keeps the second one from re-rendering.
+      // editedAt is the domain edit time, so it orders edits even though arrival
+      // order does not: a redelivered older edit must not overwrite a newer one.
+      // Equal timestamps also cover the duplicate a follower gets on both lanes.
+      if (current.editedAt && action.editedAt && action.editedAt <= current.editedAt) return state
       if (current.content === action.content && current.editedAt === action.editedAt) return state
       const updated = { ...current, content: action.content, editedAt: action.editedAt }
       const messages = [...state.messages.slice(0, idx), updated, ...state.messages.slice(idx + 1)]

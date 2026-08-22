@@ -12,6 +12,21 @@ import { fetchThreadMessages, sendMessage, subscribeToThreadEvents } from '@/api
 import { decryptRoomEvent } from '@/lib/decryptRoomEvent'
 import { threadEventsReducer, initialState } from './reducer'
 
+/** The body of a reply, or a placeholder when the room key has not arrived.
+ *  Mirrors the room timeline's `[encrypted message]` fallback: silently
+ *  dropping it leaves the panel missing a message with no explanation. */
+function threadReplyMessage(evt) {
+  const msg = evt.message
+  if (msg?.id || !evt.encryptedMessage || !evt.lastMsgId) return msg
+  return {
+    id: evt.lastMsgId,
+    roomId: evt.roomId,
+    content: '[encrypted message]',
+    createdAt: evt.lastMsgAt ?? new Date(evt.timestamp ?? Date.now()).toISOString(),
+    encrypted: true,
+  }
+}
+
 /** Mirrors the room lane's coercion so both lanes hand the reducer an ISO
  *  string regardless of what the wire carried. */
 function normalizeEditedAt(editedAt) {
@@ -30,7 +45,6 @@ export function ThreadEventsProvider({ children }) {
   const [state, dispatch] = useReducer(threadEventsReducer, initialState)
   const generationRef = useRef(0)
   const threadSubRef = useRef(null)
-  const threadChainRef = useRef(Promise.resolve())
   const decryptRef = useRef(decrypt)
   decryptRef.current = decrypt
   const ensureKeyRef = useRef(ensureKey)
@@ -100,14 +114,20 @@ export function ThreadEventsProvider({ children }) {
       if (!user) return
       // Subscribe before fetching: a reply landing in the gap would be lost,
       // and closing that gap is the whole point of the thread lane.
+      let chain = Promise.resolve()
       threadSubRef.current = subscribeToThreadEvents(
         nats,
         { roomId: parent.roomId, parentMessageId: parent.messageId, crossSite: parent.crossSite },
         (raw) => {
-          // Serialize: the NATS subscribe loop does not await this callback, so
-          // without a chain a plaintext delete finalizes before a prior
-          // encrypted create and lands on a message that is not in the list yet.
+          // Serialize within this thread: the NATS subscribe loop does not await
+          // the callback, so without a chain a plaintext delete finalizes before
+          // a prior encrypted create and lands on a message not yet in the list.
+          // The chain is per subscription, so a decrypt stalled on a key fetch
+          // cannot delay the thread the user opens next.
           const work = async () => {
+            // Checked before decrypting too: a stale event should not hold the
+            // chain for the length of a key fetch it will be discarded after.
+            if (myGen !== generationRef.current) return
             // Channel rooms are encrypted, so this lane must decrypt exactly as
             // the room lane does or every reply arrives as an empty envelope.
             const evt = await decryptRoomEvent(raw, {
@@ -117,7 +137,7 @@ export function ThreadEventsProvider({ children }) {
             })
             if (myGen !== generationRef.current) return
             if (evt?.type === 'new_thread_message') {
-              applyReply(parent.messageId, evt.message)
+              applyReply(parent.messageId, threadReplyMessage(evt))
             } else if (evt?.type === 'message_edited') {
               applyMutation({
                 kind: 'edited',
@@ -129,8 +149,8 @@ export function ThreadEventsProvider({ children }) {
               applyMutation({ kind: 'deleted', messageId: evt.messageId })
             }
           }
-          threadChainRef.current = threadChainRef.current.then(work, work)
-          return threadChainRef.current
+          chain = chain.then(work, work)
+          return chain
         }
       )
       fetchThreadMessages(nats, {

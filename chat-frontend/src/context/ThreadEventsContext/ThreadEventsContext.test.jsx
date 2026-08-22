@@ -9,9 +9,13 @@ const publish = vi.fn()
 const callOrder = []
 const unsubscribe = vi.fn()
 let threadEventHandler = null
+const threadHandlers = new Map()
 const subscribe = vi.fn((subj, handler) => {
   callOrder.push(`subscribe:${subj}`)
-  if (subj.includes('.thread.')) threadEventHandler = handler
+  if (subj.includes('.thread.')) {
+    threadEventHandler = handler
+    threadHandlers.set(subj, handler)
+  }
   return { unsubscribe }
 })
 vi.mock('../NatsContext/NatsContext', () => ({
@@ -338,6 +342,7 @@ describe('ThreadEventsContext thread-view subscription', () => {
     unsubscribe.mockClear()
     callOrder.length = 0
     threadEventHandler = null
+    threadHandlers.clear()
     decrypt.mockReset().mockResolvedValue(null)
     ensureKey.mockReset().mockResolvedValue(false)
     request.mockImplementation(() => {
@@ -527,5 +532,115 @@ describe('ThreadEventsContext thread-view subscription', () => {
       threadEventHandler({ type: 'message_deleted', messageId: 'm9' })
     })
     expect(screen.getByText('firstDeleted:true')).toBeInTheDocument()
+  })
+})
+
+describe('ThreadEventsContext thread-lane robustness', () => {
+  beforeEach(() => {
+    request.mockReset().mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    subscribe.mockClear()
+    unsubscribe.mockClear()
+    threadEventHandler = null
+    threadHandlers.clear()
+    decrypt.mockReset().mockResolvedValue(null)
+    ensureKey.mockReset().mockResolvedValue(false)
+  })
+
+  // decryptRoomEvent returns the event unchanged when the room key has not
+  // arrived, so the reply has no plaintext body. Dropping it leaves the panel
+  // silently missing a message; the room timeline shows a placeholder instead.
+  it('renders a placeholder when the room key has not arrived', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      await threadEventHandler({
+        type: 'new_thread_message',
+        roomId: 'r1',
+        lastMsgId: 'm9',
+        lastMsgAt: '2026-08-22T10:00:00Z',
+        timestamp: 1756000000000,
+        encryptedMessage: { version: 3, nonce: 'bm9uY2U=', ciphertext: 'Y2lwaGVy' },
+      })
+    })
+    expect(screen.getByText('count:1')).toBeInTheDocument()
+    expect(screen.getByText('firstContent:[encrypted message]')).toBeInTheDocument()
+  })
+
+  it('drops an undecryptable reply that carries no id to fall back on', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      await threadEventHandler({
+        type: 'new_thread_message',
+        roomId: 'r1',
+        encryptedMessage: { version: 3, nonce: 'bm9uY2U=', ciphertext: 'Y2lwaGVy' },
+      })
+    })
+    expect(screen.getByText('count:0')).toBeInTheDocument()
+  })
+
+  // Arrival order is not causal order: a redelivered older edit must not
+  // overwrite a newer one already applied.
+  it('ignores an edit older than the one already applied', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      await threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'v0' } })
+    })
+    await act(async () => {
+      await threadEventHandler({
+        type: 'message_edited', messageId: 'm9', newContent: 'v2', editedAt: '2026-08-22T10:00:02Z',
+      })
+    })
+    await act(async () => {
+      await threadEventHandler({
+        type: 'message_edited', messageId: 'm9', newContent: 'v1', editedAt: '2026-08-22T10:00:01Z',
+      })
+    })
+    expect(screen.getByText('firstContent:v2')).toBeInTheDocument()
+  })
+
+  it('still applies a strictly newer edit', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      await threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'v0' } })
+    })
+    for (const [content, at] of [['v1', '2026-08-22T10:00:01Z'], ['v2', '2026-08-22T10:00:02Z']]) {
+      await act(async () => {
+        await threadEventHandler({ type: 'message_edited', messageId: 'm9', newContent: content, editedAt: at })
+      })
+    }
+    expect(screen.getByText('firstContent:v2')).toBeInTheDocument()
+  })
+
+  // A chain shared across threads lets an event stalled on a key fetch for one
+  // thread delay the thread the user just opened.
+  it('does not let a stalled event on one thread block the next', async () => {
+    let releaseStalled
+    const gate = new Promise((resolve) => { releaseStalled = resolve })
+    decrypt.mockImplementation(async () => { await gate; return null })
+
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    const stalledHandler = threadHandlers.get('chat.room.r1.thread.p1.event')
+    let stalled
+    await act(async () => {
+      stalled = stalledHandler({
+        type: 'new_thread_message', roomId: 'r1',
+        encryptedMessage: { version: 3, nonce: 'bm9uY2U=', ciphertext: 'Y2lwaGVy' },
+      })
+      await Promise.resolve()
+    })
+
+    await act(async () => { screen.getByText('open-p2').click() })
+    await act(async () => {
+      await threadHandlers.get('chat.room.r1.thread.p2.event')({
+        type: 'new_thread_message', roomId: 'r1', message: { id: 'm-new', content: 'not blocked' },
+      })
+    })
+    expect(screen.getByText('firstContent:not blocked')).toBeInTheDocument()
+
+    await act(async () => { releaseStalled(); await stalled })
   })
 })
