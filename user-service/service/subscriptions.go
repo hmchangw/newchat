@@ -20,10 +20,6 @@ import (
 
 var validListTypes = map[string]bool{"current": true, "rooms": true, "apps": true}
 
-// maxSiteFanout bounds concurrent per-site room-service RPCs — otherwise a
-// heavily-federated ALL_SITE_IDS fans one request into N simultaneous 5s RPCs.
-const maxSiteFanout = 8
-
 // deletedRoomNamePrefix marks a soft-deleted room (room-service renames it to
 // "Del-"+name); such rooms are surfaced on the subscription with no room object.
 const deletedRoomNamePrefix = "Del-"
@@ -271,39 +267,46 @@ func (s *UserService) enrichCrossSite(ctx context.Context, account string, subs 
 	if len(sites) == 0 {
 		return nil
 	}
-	infoBySite := make([]map[string]model.RoomInfo, len(sites)) // nil ⇒ site degraded
-	// WaitGroup (not errgroup): errgroup.WithContext would cancel sibling site RPCs on the first error; per-site degradation must keep siblings running.
-	// Acquire sem BEFORE spawning so live goroutine COUNT (not just concurrency) stays ≤ maxSiteFanout — a wide federation otherwise spawns one parked goroutine per site.
+	infoBySite := make([]map[string]model.RoomInfo, len(sites)) // nil ⇒ every chunk degraded
+	// WaitGroup (not errgroup): errgroup.WithContext would cancel sibling RPCs on the
+	// first error; per-chunk degradation must keep the others running.
+	// Acquire sem BEFORE spawning so live goroutine COUNT (not just concurrency) stays
+	// ≤ maxFanout — a wide federation otherwise spawns one parked goroutine per chunk.
+	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxSiteFanout)
 	for i, site := range sites {
-		// Client already gone — stop firing further ~5s RPCs; the remaining sites
-		// would only waste round-trips. In-flight calls fail fast via the ctx we
-		// pass to GetRoomsInfo.
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			// Re-check after parking on the semaphore: cancellation may have
-			// landed while this goroutine waited its turn behind earlier RPCs.
+		for _, chunk := range chunkRoomIDs(roomIDsBySite[site], s.roomBatchChunk) {
+			// Client already gone — stop firing further ~5s RPCs; the rest would only
+			// waste round-trips. In-flight calls fail fast via the ctx we pass down.
 			if ctx.Err() != nil {
-				return
+				break
 			}
-			infos, err := s.rooms.GetRoomsInfo(ctx, site, roomIDsBySite[site])
-			if err != nil {
-				slog.WarnContext(ctx, "room-info enrichment degraded", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-				return
-			}
-			m := make(map[string]model.RoomInfo, len(infos))
-			for k := range infos {
-				m[infos[k].RoomID] = infos[k]
-			}
-			infoBySite[i] = m
-		}()
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				// Re-check after parking on the semaphore: cancellation may have landed
+				// while this goroutine waited its turn behind earlier RPCs.
+				if ctx.Err() != nil {
+					return
+				}
+				infos, err := s.rooms.GetRoomsInfo(ctx, site, chunk)
+				if err != nil {
+					slog.WarnContext(ctx, "room-info enrichment degraded", "account", account, "site", site, "chunk_size", len(chunk), "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+					return
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if infoBySite[i] == nil {
+					infoBySite[i] = make(map[string]model.RoomInfo, len(infos))
+				}
+				for k := range infos {
+					infoBySite[i][infos[k].RoomID] = infos[k]
+				}
+			}()
+		}
 	}
 	wg.Wait()
 	// A cross-site room reported soft-deleted ("Del-") is collected for the caller
@@ -325,50 +328,95 @@ func (s *UserService) enrichCrossSite(ctx context.Context, account string, subs 
 	return dropped
 }
 
-// enrichLastMessage populates sub.Room.PreviewMessage (read-time resolve, no denormalized
-// write path) via one rooms.get RPC per site — LOCAL subs need it too (last-message
-// isn't part of the $lookup baseline). One call per site: a subscription page is
-// bounded well under history-service's 100-roomId batch cap, so no chunk-split is
-// needed. Reuses the caller's per-site grouping. A degraded/absent site, or a room the
-// RPC omits, just leaves PreviewMessage nil; it never fails the list.
-// Each room already carrying a resolved sub.Room.LastMsgAt (set by enrichLocal/
-// enrichCrossSite, which both run before this) is passed as a hint so
-// history-service can skip its own room-times read for that room; rooms with no
-// Room (soft-deleted/degraded) contribute no hint.
+// maxSiteFanout bounds concurrent enrichment RPCs across all sites and chunks —
+// otherwise a heavily-federated ALL_SITE_IDS fans one request into N simultaneous 5s RPCs.
+const maxSiteFanout = 8
+
+// chunkRoomIDs splits ids into batches of at most size, preserving order. A
+// non-positive size yields one chunk: a misconfiguration should be visible as an
+// oversized batch, not as silently dropped rooms.
+func chunkRoomIDs(ids []string, size int) [][]string {
+	if len(ids) == 0 {
+		return nil
+	}
+	if size <= 0 || len(ids) <= size {
+		return [][]string{ids}
+	}
+	chunks := make([][]string, 0, (len(ids)+size-1)/size)
+	for start := 0; start < len(ids); start += size {
+		chunks = append(chunks, ids[start:min(start+size, len(ids))])
+	}
+	return chunks
+}
+
+// chunkHints returns the walk bounds for just this chunk's rooms: history-service
+// caps hints at the same 100 as room ids, so a whole-site hint map would be rejected.
+func chunkHints(subs []model.EnrichedSubscription, siteIdx []int, chunk []string) map[string]model.RoomTimeHint {
+	want := make(map[string]struct{}, len(chunk))
+	for _, id := range chunk {
+		want[id] = struct{}{}
+	}
+	hints := make(map[string]model.RoomTimeHint, len(chunk))
+	for _, j := range siteIdx {
+		if _, ok := want[subs[j].RoomID]; !ok {
+			continue
+		}
+		if subs[j].Room == nil || subs[j].Room.LastMsgAt == nil {
+			continue
+		}
+		hints[subs[j].RoomID] = model.RoomTimeHint{LastMsgAt: timeutil.TimeToMillis(subs[j].Room.LastMsgAt)}
+	}
+	return hints
+}
+
+// enrichLastMessage populates sub.Room.PreviewMessage (read-time resolve, no
+// denormalized write path) via rooms.get — LOCAL subs need it too, since
+// last-message is not part of the $lookup baseline. Reuses the caller's per-site
+// grouping, split into chunks of roomBatchChunk: history-service hard-rejects a
+// batch over 100 ids, and the reply must fit the 128 KB NATS payload. A degraded
+// chunk, or a room the RPC omits, just leaves PreviewMessage nil; it never fails
+// the list.
+//
+// Each room already carrying a resolved sub.Room.LastMsgAt (set by enrichLocal /
+// enrichCrossSite, which both run first) is passed as a hint so history-service
+// can skip its own room-times read; rooms with no Room contribute no hint.
 func (s *UserService) enrichLastMessage(ctx context.Context, account string, subs []model.EnrichedSubscription, idxBySite map[string][]int, roomIDsBySite map[string][]string) {
 	sites := make([]string, 0, len(idxBySite))
 	for site := range idxBySite {
 		sites = append(sites, site)
 	}
-	lastMsgBySite := make([]map[string]model.PreviewMessage, len(sites)) // nil ⇒ site degraded
+	lastMsgBySite := make([]map[string]model.PreviewMessage, len(sites)) // nil ⇒ every chunk degraded
+	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxSiteFanout)
 	for i, site := range sites {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
+		for _, chunk := range chunkRoomIDs(roomIDsBySite[site], s.roomBatchChunk) {
 			if ctx.Err() != nil {
-				return
+				break
 			}
-			hints := map[string]model.RoomTimeHint{}
-			for _, j := range idxBySite[site] {
-				if subs[j].Room == nil || subs[j].Room.LastMsgAt == nil {
-					continue
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if ctx.Err() != nil {
+					return
 				}
-				hints[subs[j].RoomID] = model.RoomTimeHint{LastMsgAt: timeutil.TimeToMillis(subs[j].Room.LastMsgAt)}
-			}
-			m, err := s.history.RoomsGet(ctx, site, roomIDsBySite[site], hints)
-			if err != nil {
-				slog.WarnContext(ctx, "last-message enrichment degraded", "account", account, "site", site, "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-				return
-			}
-			lastMsgBySite[i] = m
-		}()
+				m, err := s.history.RoomsGet(ctx, site, chunk, chunkHints(subs, idxBySite[site], chunk))
+				if err != nil {
+					slog.WarnContext(ctx, "last-message enrichment degraded", "account", account, "site", site, "chunk_size", len(chunk), "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+					return
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if lastMsgBySite[i] == nil {
+					lastMsgBySite[i] = make(map[string]model.PreviewMessage, len(m))
+				}
+				for k := range m {
+					lastMsgBySite[i][k] = m[k]
+				}
+			}()
+		}
 	}
 	wg.Wait()
 	for i, site := range sites {

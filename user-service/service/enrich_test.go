@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -484,4 +487,183 @@ func TestEnrichWithRoomInfo_BotRequester_KeepsKeyMaterial(t *testing.T) {
 			require.NotNil(t, got[0].Room.KeyVersion)
 		})
 	}
+}
+
+func TestChunkRoomIDs(t *testing.T) {
+	ids := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("r%d", i)
+		}
+		return out
+	}
+	tests := []struct {
+		name      string
+		n, size   int
+		wantSizes []int
+	}{
+		{"empty", 0, 100, nil},
+		{"single", 1, 100, []int{1}},
+		{"just under the cap", 99, 100, []int{99}},
+		{"exactly the cap", 100, 100, []int{100}},
+		{"one over the cap", 101, 100, []int{100, 1}},
+		{"two and a half chunks", 250, 100, []int{100, 100, 50}},
+		{"non-positive size yields one chunk", 250, 0, []int{250}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := chunkRoomIDs(ids(tc.n), tc.size)
+			require.Len(t, got, len(tc.wantSizes))
+
+			seen := []string{}
+			for i, chunk := range got {
+				assert.Len(t, chunk, tc.wantSizes[i])
+				seen = append(seen, chunk...)
+			}
+			assert.Equal(t, ids(tc.n), seen, "chunking must preserve order and drop nothing")
+		})
+	}
+}
+
+// enrichFixture builds n local subscriptions on one site, each with a room whose
+// LastMsgAt makes it hint-eligible.
+func enrichFixture(n int, site string) ([]model.EnrichedSubscription, map[string][]int, map[string][]string) {
+	last := time.Now().UTC()
+	subs := make([]model.EnrichedSubscription, n)
+	idx := make([]int, n)
+	ids := make([]string, n)
+	for i := range subs {
+		id := fmt.Sprintf("r%d", i)
+		subs[i] = model.EnrichedSubscription{
+			Subscription: model.Subscription{ID: fmt.Sprintf("s%d", i), RoomID: id, SiteID: site},
+		}
+		subs[i].Room = &model.SubscriptionRoom{SiteID: site, LastMsgAt: &last}
+		idx[i] = i
+		ids[i] = id
+	}
+	return subs, map[string][]int{site: idx}, map[string][]string{site: ids}
+}
+
+// history-service hard-rejects rooms.get above 100 ids AND above 100 hints, so an
+// unchunked 250-room page would come back with no previews at all.
+func TestEnrichLastMessage_ChunksBeyondBatchCap(t *testing.T) {
+	svc, _, history := newSvcRawHistory(t)
+	subs, idxBySite, roomIDsBySite := enrichFixture(250, "site-a")
+
+	var mu sync.Mutex
+	var batchSizes []int
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, hints map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			assert.LessOrEqual(t, len(ids), 100, "history-service rejects batches over 100 ids")
+			assert.LessOrEqual(t, len(hints), 100, "history-service rejects over 100 hints too")
+			assert.Len(t, hints, len(ids), "each chunk carries hints for exactly its own rooms")
+			mu.Lock()
+			batchSizes = append(batchSizes, len(ids))
+			mu.Unlock()
+
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg"}
+			}
+			return out, nil
+		}).Times(3)
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite, roomIDsBySite)
+
+	sort.Ints(batchSizes)
+	assert.Equal(t, []int{50, 100, 100}, batchSizes)
+	for i := range subs {
+		require.NotNil(t, subs[i].Room, "row %d lost its room", i)
+		assert.NotNil(t, subs[i].Room.PreviewMessage, "row %d lost its preview", i)
+	}
+}
+
+func TestEnrichLastMessage_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
+	svc, _, history := newSvcRawHistory(t)
+	subs, idxBySite, roomIDsBySite := enrichFixture(250, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			if len(ids) == 50 {
+				return nil, errors.New("chunk boom")
+			}
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg"}
+			}
+			return out, nil
+		}).Times(3)
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite, roomIDsBySite)
+
+	var withPreview int
+	for i := range subs {
+		if subs[i].Room.PreviewMessage != nil {
+			withPreview++
+		}
+	}
+	assert.Equal(t, 200, withPreview, "a failed chunk must cost only its own 50 rooms, not the whole site")
+}
+
+func TestEnrichCrossSite_ChunksBeyondBatchCap(t *testing.T) {
+	svc, _, _, _, rooms, _, _ := newSvc(t)
+	subs, idxBySite, roomIDsBySite := enrichFixture(250, "site-b")
+	for i := range subs {
+		subs[i].Room = nil // cross-site rows have no local room doc
+	}
+
+	var mu sync.Mutex
+	var batchSizes []int
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string) ([]model.RoomInfo, error) {
+			assert.LessOrEqual(t, len(ids), 100)
+			mu.Lock()
+			batchSizes = append(batchSizes, len(ids))
+			mu.Unlock()
+
+			out := make([]model.RoomInfo, 0, len(ids))
+			for _, id := range ids {
+				out = append(out, model.RoomInfo{RoomID: id, Found: true, Name: "room-" + id})
+			}
+			return out, nil
+		}).Times(3)
+
+	dropped := svc.enrichCrossSite(context.Background(), "alice", subs, idxBySite, roomIDsBySite)
+
+	sort.Ints(batchSizes)
+	assert.Equal(t, []int{50, 100, 100}, batchSizes)
+	assert.Empty(t, dropped)
+	for i := range subs {
+		assert.NotNil(t, subs[i].Room, "row %d must be enriched from its chunk", i)
+	}
+}
+
+func TestEnrichCrossSite_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
+	svc, _, _, _, rooms, _, _ := newSvc(t)
+	subs, idxBySite, roomIDsBySite := enrichFixture(250, "site-b")
+	for i := range subs {
+		subs[i].Room = nil
+	}
+
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string) ([]model.RoomInfo, error) {
+			if len(ids) == 50 {
+				return nil, errors.New("chunk boom")
+			}
+			out := make([]model.RoomInfo, 0, len(ids))
+			for _, id := range ids {
+				out = append(out, model.RoomInfo{RoomID: id, Found: true, Name: "room-" + id})
+			}
+			return out, nil
+		}).Times(3)
+
+	svc.enrichCrossSite(context.Background(), "alice", subs, idxBySite, roomIDsBySite)
+
+	var enriched int
+	for i := range subs {
+		if subs[i].Room != nil {
+			enriched++
+		}
+	}
+	assert.Equal(t, 200, enriched, "a failed chunk must not blank the whole site")
 }

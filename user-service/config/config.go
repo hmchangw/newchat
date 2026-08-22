@@ -29,14 +29,18 @@ type NATSConfig struct {
 // Config is the top-level configuration for user-service.
 type Config struct {
 	// SiteID is required: baked into subscription subjects and inbox routing; missing it would silently federate under a wrong ID.
-	SiteID                   string        `env:"SITE_ID,notEmpty"`
-	AllSiteIDs               []string      `env:"ALL_SITE_IDS"           envDefault:"" envSeparator:","`
-	MaxSubscriptionLimit     int           `env:"MAX_SUBSCRIPTION_LIMIT" envDefault:"1000"`
-	DefaultSubscriptionLimit int           `env:"SUBSCRIPTION_DEFAULT_LIMIT" envDefault:"40"`
-	MaxAppsLimit             int           `env:"APPS_MAX_LIMIT" envDefault:"100"`
-	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
-	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
-	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
+	SiteID                   string   `env:"SITE_ID,notEmpty"`
+	AllSiteIDs               []string `env:"ALL_SITE_IDS"           envDefault:"" envSeparator:","`
+	MaxSubscriptionLimit     int      `env:"MAX_SUBSCRIPTION_LIMIT" envDefault:"1000"`
+	DefaultSubscriptionLimit int      `env:"SUBSCRIPTION_DEFAULT_LIMIT" envDefault:"40"`
+	MaxAppsLimit             int      `env:"APPS_MAX_LIMIT" envDefault:"100"`
+	DefaultAppsLimit         int      `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
+	MaxAccountNames          int      `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
+	// RoomBatchChunk caps room ids per enrichment RPC. 100 is history-service's hard
+	// batch cap and keeps each reply well under the 128 KB NATS payload.
+	RoomBatchChunk int `env:"ROOM_BATCH_CHUNK" envDefault:"100"`
+
+	HandlerTimeout time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
 	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
 	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
 	// disables the cap (unbounded spawn).
@@ -112,6 +116,9 @@ func Load() (Config, error) {
 	}
 	if cfg.DefaultAppsLimit > cfg.MaxAppsLimit {
 		return Config{}, fmt.Errorf("APPS_DEFAULT_LIMIT (%d) must be <= APPS_MAX_LIMIT (%d)", cfg.DefaultAppsLimit, cfg.MaxAppsLimit)
+	}
+	if cfg.RoomBatchChunk < 1 || cfg.RoomBatchChunk > 100 {
+		return Config{}, fmt.Errorf("ROOM_BATCH_CHUNK must be in [1,100], got %d", cfg.RoomBatchChunk)
 	}
 	if cfg.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)

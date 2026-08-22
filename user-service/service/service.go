@@ -152,6 +152,9 @@ type UserService struct {
 	badgeCacheFirst bool
 	maxSubs         int
 	defaultLimit    int
+	// roomBatchChunk caps room ids per enrichment RPC (history-service hard-rejects
+	// over 100, and each reply must fit the 128 KB NATS payload).
+	roomBatchChunk  int
 	maxApps         int
 	defaultApps     int
 	maxAccountNames int
@@ -179,6 +182,7 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		badgeCap:         cfg.BadgeCountCap,
 		badgeCacheFirst:  cfg.BadgeCountCacheFirst,
 		maxSubs:          cfg.MaxSubscriptionLimit,
+		roomBatchChunk:   cfg.RoomBatchChunk,
 		defaultLimit:     cfg.DefaultSubscriptionLimit,
 		maxApps:          cfg.MaxAppsLimit,
 		defaultApps:      cfg.DefaultAppsLimit,
