@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -103,11 +104,13 @@ var (
 
 func metaOf(r *model.Room) roommetacache.Meta {
 	return roommetacache.Meta{
-		ID:        r.ID,
-		Type:      r.Type,
-		Name:      r.Name,
-		SiteID:    r.SiteID,
-		UserCount: r.UserCount,
+		ID:          r.ID,
+		Type:        r.Type,
+		Name:        r.Name,
+		SiteID:      r.SiteID,
+		UserCount:   r.UserCount,
+		CrossSite:   r.CrossSite,
+		CrossSiteAt: r.CrossSiteAt,
 	}
 }
 
@@ -3394,4 +3397,261 @@ func terminalCountFor(t *testing.T, reason string, fn func(context.Context)) int
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 	return sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": reason})
+}
+
+// threadViewSubjects returns the captured subjects on the thread-scoped view
+// lane, so a test can assert it independently of the per-follower lane.
+func (m *mockPublisher) threadViewSubjects() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, r := range m.records {
+		if strings.Contains(r.subject, ".thread.") {
+			out = append(out, r.subject)
+		}
+	}
+	return out
+}
+
+func threadReplyEventJSON(t *testing.T, event model.EventType, msgTime time.Time) []byte {
+	t.Helper()
+	msg := model.Message{
+		ID:                    "reply-1",
+		RoomID:                "room-1",
+		UserID:                "u-alice",
+		UserAccount:           "alice",
+		Content:               "a thread reply",
+		CreatedAt:             msgTime,
+		ThreadParentMessageID: "parent-1",
+		TShow:                 false,
+	}
+	if event == model.EventUpdated {
+		msg.EditedAt, msg.UpdatedAt = &msgTime, &msgTime
+	}
+	if event == model.EventDeleted {
+		msg.UpdatedAt = &msgTime
+	}
+	data, err := json.Marshal(model.MessageEvent{
+		Event: event, SiteID: "site-a", Timestamp: msgTime.UnixMilli(), Message: msg,
+	})
+	require.NoError(t, err)
+	return data
+}
+
+// A viewer who follows nothing still gets the reply: the thread-scoped subject
+// is published independently of the follower set.
+func TestHandleThreadCreated_PublishesThreadViewSubject(t *testing.T) {
+	crossSite, sameSite := true, false
+	tests := []struct {
+		name      string
+		crossSite *bool
+		mode      subject.RoomRouteMode
+		want      []string
+	}{
+		{"cross-site room routes global", &crossSite, subject.RouteGlobal, []string{"chat.room.room-1.thread.parent-1.event"}},
+		{"unclassified room falls back to global", nil, subject.RouteLocal, []string{"chat.room.room-1.thread.parent-1.event"}},
+		{"same-site room routes local", &sameSite, subject.RouteLocal, []string{"chat.local.room.room-1.thread.parent-1.event"}},
+		{"same-site room dual-publishes in dual mode", &sameSite, subject.RouteDual, []string{
+			"chat.local.room.room-1.thread.parent-1.event", "chat.room.room-1.thread.parent-1.event",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
+			msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+			meta := metaOf(testChannelRoom)
+			meta.CrossSite = tt.crossSite
+			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(meta, nil)
+			store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+			us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+			h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, tt.mode,
+				withThreadViewSubject(true))
+			require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
+
+			assert.Equal(t, tt.want, pub.threadViewSubjects())
+		})
+	}
+}
+
+// The view lane carries the same envelope as the per-follower lane, so an open
+// panel needs no separate decoding path.
+func TestHandleThreadCreated_ThreadViewPayloadMatchesFollowerPayload(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+		withThreadViewSubject(true))
+	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
+
+	var viewPayload, followerPayload []byte
+	for _, r := range pub.records {
+		switch r.subject {
+		case "chat.room.room-1.thread.parent-1.event":
+			viewPayload = r.data
+		case subject.UserRoomEvent("bob"):
+			followerPayload = r.data
+		}
+	}
+	require.NotNil(t, viewPayload)
+	require.NotNil(t, followerPayload)
+	assert.Equal(t, followerPayload, viewPayload)
+
+	evt := decodeRoomEvent(t, viewPayload)
+	assert.Equal(t, model.RoomEventNewThreadMessage, evt.Type)
+	assert.Equal(t, "room-1", evt.RoomID)
+}
+
+func TestHandleThreadCreated_ThreadViewSubjectDisabled(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
+
+	assert.Empty(t, pub.threadViewSubjects())
+	assert.NotEmpty(t, pub.records, "the per-follower lane is unaffected by the kill switch")
+}
+
+// A bot-only follower set is the closest unit-level stand-in for "nobody
+// follows this thread" — the case a lone viewer hits, where the handler used to
+// return before publishing anything.
+func TestHandleThreadCreated_EmptyFanOutStillPublishesThreadViewSubject(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	data, err := json.Marshal(model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "room-1", UserAccount: "weather.site-a.bot",
+			Content: "a thread reply", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	})
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+		withThreadViewSubject(true))
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	assert.Equal(t, []string{"chat.room.room-1.thread.parent-1.event"}, pub.threadViewSubjects())
+}
+
+func TestHandleThreadUpdated_PublishesThreadViewSubject(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+		withThreadViewSubject(true))
+	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventUpdated, msgTime)))
+
+	assert.Equal(t, []string{"chat.room.room-1.thread.parent-1.event"}, pub.threadViewSubjects())
+}
+
+func TestHandleThreadDeleted_PublishesThreadViewSubject(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+		withThreadViewSubject(true))
+	require.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventDeleted, msgTime)))
+
+	assert.Equal(t, []string{"chat.room.room-1.thread.parent-1.event"}, pub.threadViewSubjects())
+}
+
+// Best-effort: a view-lane failure must not NAK, or the redelivery would re-run
+// a per-follower fan-out that already succeeded.
+func TestHandleThreadCreated_ThreadViewPublishFailureDoesNotFailHandler(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store, us := NewMockStore(ctrl), NewMockUserStore(ctrl)
+	pub := &mockPublisher{failOn: map[string]error{
+		"chat.room.room-1.thread.parent-1.event": errors.New("publish failed"),
+	}}
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+		withThreadViewSubject(true))
+	assert.NoError(t, h.HandleMessage(context.Background(), threadReplyEventJSON(t, model.EventCreated, msgTime)))
+}
+
+func TestPublishThreadViewEvent_Skips(t *testing.T) {
+	tests := []struct {
+		name        string
+		enabled     bool
+		parentMsgID string
+		payload     []byte
+	}{
+		{"kill switch off", false, "parent-1", []byte(`{}`)},
+		{"empty parent id is an unroutable token", true, "", []byte(`{}`)},
+		{"empty payload", true, "parent-1", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			pub := &mockPublisher{}
+			h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), pub, NewMockRoomKeyProvider(ctrl),
+				defaultParentFetcher, false, subject.RouteGlobal, withThreadViewSubject(tt.enabled))
+
+			h.publishThreadViewEvent(context.Background(), "room-1", tt.parentMsgID, nil, nil, tt.payload)
+
+			assert.Empty(t, pub.records)
+		})
+	}
+}
+
+// DM thread replies already reach every member, so they must not also open a
+// thread lane.
+func TestHandleThreadCreated_DMRoom_PublishesNoThreadViewSubject(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{testUsers[0]}, nil)
+
+	data, err := json.Marshal(model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "a thread reply", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-dm", TShow: false,
+		},
+	})
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
+		withThreadViewSubject(true))
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	assert.Empty(t, pub.threadViewSubjects())
 }

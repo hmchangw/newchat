@@ -71,16 +71,23 @@ type Handler struct {
 	encoder       *roomcrypto.Encoder
 	routeMode     subject.RoomRouteMode
 	metrics       *broadcastMetrics
+	// threadViewSubject gates the thread-scoped view lane; see publishThreadViewEvent.
+	threadViewSubject bool
 }
 
 type handlerOption func(*handlerOptions)
 
 type handlerOptions struct {
-	metrics *broadcastMetrics
+	metrics           *broadcastMetrics
+	threadViewSubject bool
 }
 
 func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
 	return func(opts *handlerOptions) { opts.metrics = metrics }
+}
+
+func withThreadViewSubject(enabled bool) handlerOption {
+	return func(opts *handlerOptions) { opts.threadViewSubject = enabled }
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
@@ -92,15 +99,16 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		opts.metrics = newBroadcastMetrics(otel.Meter("broadcast-worker"))
 	}
 	return &Handler{
-		store:         store,
-		userStore:     userStore,
-		pub:           &broadcastMetricPublisher{next: pub, metrics: opts.metrics},
-		keyStore:      keyStore,
-		parentFetcher: parentFetcher,
-		encrypt:       encrypt,
-		encoder:       roomcrypto.NewEncoder(),
-		routeMode:     routeMode,
-		metrics:       opts.metrics,
+		store:             store,
+		userStore:         userStore,
+		pub:               &broadcastMetricPublisher{next: pub, metrics: opts.metrics},
+		keyStore:          keyStore,
+		parentFetcher:     parentFetcher,
+		encrypt:           encrypt,
+		encoder:           roomcrypto.NewEncoder(),
+		routeMode:         routeMode,
+		metrics:           opts.metrics,
+		threadViewSubject: opts.threadViewSubject,
 	}
 }
 
@@ -264,7 +272,6 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 			slog.DebugContext(ctx, "no thread subscribers to notify for thread reply",
 				"parentMessageID", parentMsgID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
-			return nil
 		}
 	}
 
@@ -297,6 +304,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread created event for parent %s: %w", parentMsgID, err)
 		}
+		h.publishThreadViewEvent(ctx, meta.ID, parentMsgID, meta.CrossSite, meta.CrossSiteAt, payload)
 		return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies fan out to all members. The thread-sub mention badge is
@@ -381,12 +389,12 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 			slog.DebugContext(ctx, "no thread subscribers to notify for thread update",
 				"parentMessageID", parentMsgID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
-			return nil
 		}
 		payload, err := sonic.Marshal(&edit)
 		if err != nil {
 			return fmt.Errorf("marshal thread edit event for parent %s: %w", parentMsgID, err)
 		}
+		h.publishThreadViewEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload)
 		return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies are visible to every member, so edits fan out to
@@ -430,14 +438,13 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("channel thread fan-out for thread delete of parent %s: %w", parentMsgID, err)
 		}
-		if len(fanOut) > 0 {
-			payload, err := sonic.Marshal(&del)
-			if err != nil {
-				return fmt.Errorf("marshal thread delete event for parent %s: %w", parentMsgID, err)
-			}
-			if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
-				return fmt.Errorf("publish thread delete event for parent %s: %w", parentMsgID, err)
-			}
+		payload, err := sonic.Marshal(&del)
+		if err != nil {
+			return fmt.Errorf("marshal thread delete event for parent %s: %w", parentMsgID, err)
+		}
+		h.publishThreadViewEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload)
+		if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
+			return fmt.Errorf("publish thread delete event for parent %s: %w", parentMsgID, err)
 		}
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies are visible to every member, so deletes fan out to
@@ -892,6 +899,32 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 		}
 	}
 	return pubErr
+}
+
+// publishThreadViewEvent mirrors an already-built thread event onto the
+// thread-scoped subject open thread panels subscribe to, so a viewer who
+// follows nothing still sees the reply.
+//
+// Best-effort by contract: a failure is counted and logged, never returned.
+// Returning one would NAK a delivery whose per-follower fan-out already ran,
+// and viewers reconcile when the panel reopens.
+func (h *Handler) publishThreadViewEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, payload []byte) {
+	if !h.threadViewSubject || parentMsgID == "" || len(payload) == 0 {
+		return
+	}
+	eventType := broadcastLabels(ctx).eventType
+	now := time.Now().UTC()
+	for _, subj := range subject.RoomThreadEventTargets(roomID, parentMsgID, crossSite, crossSiteAt, h.routeMode, now) {
+		if err := h.pub.Publish(ctx, subj, payload); err != nil {
+			h.metrics.ThreadViewPublishFailed(ctx, eventType)
+			slog.ErrorContext(ctx, "publish thread view event failed",
+				"error", err,
+				"subject", subj,
+				"parentMessageID", parentMsgID,
+				"room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(ctx))
+		}
+	}
 }
 
 // debugFlowFanout emits the flow-rung outcome of a per-recipient fan-out:
