@@ -1167,10 +1167,6 @@ func (l *failureLedger) invalidateReplayedLocked(reason string) error {
 	return nil
 }
 
-// flushInvalidationsLocked makes one last attempt at every cause the journal
-// never accepted, and reports what still did not land. A run that closes with
-// an invalidation only in memory would leave the next replay presenting
-// evidence this run had already disowned.
 // UnpersistedInvalidations reports the causes held only in memory. A caller
 // that cannot afford to continue on evidence whose disqualifier the journal
 // never accepted asks before it commits to the run.
@@ -1193,6 +1189,10 @@ func (l *failureLedger) unpersistedInvalidationsLocked() []string {
 	return unpersisted
 }
 
+// flushInvalidationsLocked makes one last attempt at every cause the journal
+// never accepted, and reports what still did not land. A run that closes with
+// an invalidation only in memory would leave the next replay presenting
+// evidence this run had already disowned.
 func (l *failureLedger) flushInvalidationsLocked() error {
 	l.retryPendingInvalidationsLocked()
 	unpersisted := l.unpersistedInvalidationsLocked()
