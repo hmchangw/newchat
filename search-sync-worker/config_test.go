@@ -23,6 +23,14 @@ func setRequiredConfigEnv(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
 }
 
+func TestConfig_PoolValidate_RejectsZeroMaxPoolSize(t *testing.T) {
+	setRequiredConfigEnv(t)
+	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Error(t, cfg.Pool.Validate())
+}
+
 func TestConfig_HRJetStreamDomain(t *testing.T) {
 	t.Run("defaults to empty when unset", func(t *testing.T) {
 		setRequiredConfigEnv(t)

@@ -97,10 +97,6 @@ type Config struct {
 	UserRoomIndex     string `env:"USER_ROOM_INDEX,required,notEmpty"`
 	SpotlightIndex    string `env:"SPOTLIGHT_INDEX,required,notEmpty"`
 	SpotlightOrgIndex string `env:"SPOTLIGHT_ORG_INDEX,required,notEmpty"`
-	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
-	// door (ErrUnavailable) instead of piling unbounded work onto Elasticsearch/
-	// MongoDB. 0 disables the cap (unbounded spawn).
-	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 	// ShowTeamsRoom controls whether Teams-migrated rooms/messages (origin
 	// "teams") appear in search results; false hides them (reversible read-time
 	// filter — see pkg/model.OriginTeams).
@@ -108,6 +104,11 @@ type Config struct {
 	// ShowTeamsAccounts allowlists accounts that see Teams rooms/messages even when
 	// ShowTeamsRoom is false — an ops-managed set, comma-separated.
 	ShowTeamsAccounts []string `env:"SHOW_TEAMS_ROOM_ACCOUNTS" envSeparator:","`
+	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE / MONGO_MIN_POOL_SIZE).
+	Pool mongoutil.PoolConfig
+	// Guard bounds in-flight handlers (MAX_CONCURRENCY) and per-request duration
+	// (REQUEST_TIMEOUT) so a burst can't saturate the Mongo pool.
+	Guard natsrouter.GuardConfig
 }
 
 // teamsAccountSet builds a lookup set from the SHOW_TEAMS_ROOM_ACCOUNTS list, dropping blanks.
@@ -130,6 +131,14 @@ func main() {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
@@ -195,7 +204,7 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -233,17 +242,11 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
-	// instead of piling unbounded work onto Elasticsearch/MongoDB.
-	// MAX_CONCURRENCY=0 disables.
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
-	if cfg.MaxConcurrency > 0 {
-		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
-	}
-	router := natsrouter.New(nc, "search-service", routerOpts...)
+	router := natsrouter.New(nc, "search-service", cfg.Guard.Options()...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())
+	router.Use(cfg.Guard.TimeoutMiddleware()...)
 	handler.Register(router)
 
 	// Health-only listener. All four timeouts guard against hung probes tying

@@ -7,6 +7,8 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
 func TestClusterBaseURL(t *testing.T) {
@@ -80,14 +82,14 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 256, cfg.MaxConcurrency)
+		assert.Equal(t, 256, cfg.Guard.MaxConcurrency)
 	})
 
 	t.Run("override", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "64")
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 64, cfg.MaxConcurrency)
+		assert.Equal(t, 64, cfg.Guard.MaxConcurrency)
 	})
 }
 
@@ -141,4 +143,10 @@ func TestConfig_NATSURLRequired(t *testing.T) {
 	_, err := env.ParseAs[config]()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "NATS_URL")
+}
+
+func TestConfig_GuardsDelegateValidation(t *testing.T) {
+	assert.Error(t, config{}.Pool.Validate(), "zero MaxPoolSize must fail")
+	assert.Error(t, config{Guard: natsrouter.GuardConfig{MaxConcurrency: -1}}.Guard.Validate(),
+		"negative MaxConcurrency must fail")
 }

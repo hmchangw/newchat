@@ -44,6 +44,7 @@ type config struct {
 	MongoDB             string `env:"MONGO_DB"      envDefault:"chat"`
 	MongoUsername       string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword       string `env:"MONGO_PASSWORD" envDefault:""`
+	Pool                mongoutil.PoolConfig
 	SearchURL           string `env:"SEARCH_URL,required"`
 	SearchBackend       string `env:"SEARCH_BACKEND"         envDefault:"elasticsearch"`
 	SearchUsername      string `env:"SEARCH_USERNAME"        envDefault:""`
@@ -98,6 +99,11 @@ func main() {
 
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
+		os.Exit(1)
+	}
+
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
 		os.Exit(1)
 	}
 
@@ -163,7 +169,7 @@ func main() {
 	}
 
 	// Mongo backs the migrated-Teams-history author lookup (teams_user → account → user _id).
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongodb connect failed", "error", err)
 		os.Exit(1)

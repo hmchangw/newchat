@@ -29,6 +29,8 @@ type Config struct {
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// Pool caps the MongoDB connection pool for both the read and write clients.
+	Pool mongoutil.PoolConfig
 
 	MaxWorkers int `env:"MAX_WORKERS" envDefault:"8"`
 
@@ -63,6 +65,9 @@ func validateConfig(cfg Config) error {
 	if cfg.MaxWorkers <= 0 {
 		return fmt.Errorf("invalid config: MAX_WORKERS must be positive")
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
 	return nil
 }
 
@@ -83,13 +88,13 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool))
 	if err != nil {
 		return fmt.Errorf("mongo read connect: %w", err)
 	}
 	defer mongoutil.Disconnect(context.Background(), readClient)
 
-	writeClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	writeClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool))
 	if err != nil {
 		return fmt.Errorf("mongo write connect: %w", err)
 	}

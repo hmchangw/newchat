@@ -18,6 +18,10 @@ services:
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
+      # Above the 150 fleet default: history-service is read-heavy with
+      # MAX_CONCURRENCY=256, so it wants pool headroom at/above that cap.
+      # Set the same in the production deployment.
+      - MONGO_MAX_POOL_SIZE=${MONGO_MAX_POOL_SIZE:-500}
       - CASSANDRA_HOSTS=${CASSANDRA_HOSTS:-cassandra}
       - CASSANDRA_KEYSPACE=${CASSANDRA_KEYSPACE:-chat}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}

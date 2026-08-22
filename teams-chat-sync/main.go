@@ -26,6 +26,8 @@ type Config struct {
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// Pool caps the MongoDB connection pool for the sync client.
+	Pool mongoutil.PoolConfig
 
 	MaxWorkers int `env:"MAX_WORKERS" envDefault:"8"`
 	// DefaultFrom is the RFC3339 UTC watermark used for users that have never
@@ -74,6 +76,9 @@ func validateConfig(cfg Config) (time.Time, error) {
 	if cfg.GraphChatsPageSize <= 0 {
 		return time.Time{}, fmt.Errorf("invalid config: GRAPH_CHATS_PAGE_SIZE must be positive")
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return time.Time{}, fmt.Errorf("invalid config: %w", err)
+	}
 	defaultFrom, err := time.Parse(time.RFC3339, cfg.DefaultFrom)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse SYNC_DEFAULT_FROM: %w", err)
@@ -99,7 +104,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool))
 	if err != nil {
 		return fmt.Errorf("mongo connect: %w", err)
 	}

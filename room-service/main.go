@@ -43,7 +43,15 @@ type config struct {
 	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference routes the store's display/list reads to secondaries; the
 	// client stays on primary for authz/dedup/read-after-write.
-	MongoReadPreference      string          `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE/MONGO_MIN_POOL_SIZE)
+	// so a burst can't open unbounded connections. Env tags already carry the
+	// MONGO_ prefix, so this stays a top-level field (never under envPrefix:"MONGO_").
+	Pool mongoutil.PoolConfig
+	// Guard bounds in-flight request handlers (MAX_CONCURRENCY) and per-request
+	// duration (REQUEST_TIMEOUT) so a burst or slow dependency can't saturate the
+	// Mongo pool with unbounded, indefinitely-held work.
+	Guard                    natsrouter.GuardConfig
 	MaxRoomSize              int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
 	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
 	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
@@ -136,6 +144,14 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid guard config", "error", err)
+		os.Exit(1)
+	}
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -176,7 +192,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -327,14 +344,7 @@ func main() {
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
-	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
-	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
-	if cfg.MaxConcurrency > 0 {
-		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
-	}
-	router := natsrouter.New(nc, "room-service", routerOpts...)
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard)
 	handler.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

@@ -1,5 +1,7 @@
 package main
 
+import "github.com/hmchangw/chat/pkg/mongoutil"
+
 // config is teams-user-sync's environment configuration. The binary runs
 // exactly one sync per invocation — scheduling and overlap prevention are
 // owned by the Kubernetes CronJob that triggers it (concurrencyPolicy:
@@ -29,6 +31,11 @@ type config struct {
 	// may be identical in dev).
 	MongoRead  mongoConfig `envPrefix:"MONGO_READ_"`
 	MongoWrite mongoConfig `envPrefix:"MONGO_WRITE_"`
+
+	// Pool caps the MongoDB connection pool for both the read and write clients.
+	// Kept at the top level (not inside a MONGO_-prefixed block) so its env tags
+	// carry the MONGO_ prefix exactly once.
+	Pool mongoutil.PoolConfig
 }
 
 // mongoConfig is one Mongo lane's connection settings. The connection string

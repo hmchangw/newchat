@@ -45,7 +45,8 @@ type config struct {
 	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: read-only service (fan-out lookups); secondaryPreferred
 	// offloads the primary.
-	MongoReadPreference    string                  `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	MongoReadPreference    string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	Pool                   mongoutil.PoolConfig
 	MaxWorkers             int                     `env:"MAX_WORKERS"               envDefault:"100"`
 	LargeRoomThreshold     int                     `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
 	PushRecipientBatchSize int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
@@ -188,6 +189,10 @@ func main() {
 		slog.Error("VALKEY_ADDRS required")
 		os.Exit(1)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
 
 	ctx := context.Background()
 
@@ -206,7 +211,7 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
