@@ -85,11 +85,16 @@ A key the rule cannot recognise as bounded but which genuinely is takes a
 `nosemgrep` with a justification naming *what enforces* the boundedness. A claim
 with nothing behind it is how the `_INBOX` leak survived review once already.
 
-The rule has no fixture suite yet; it is verified by hand against a probe file
-when changed. Wiring `semgrep --test` and back-filling positive/negative
-fixtures for all six rule files in `.semgrep/` is worth doing and is deliberately
-not scoped here, since it needs a Makefile target and a CI step that would apply
-to every rule, not just this one.
+The rules are themselves tested. `.semgrep/metrics.go` is a fixture file whose
+annotations name every rule that must fire on the line below, while unannotated
+lines assert the opposite — so a regex that stops catching `stackTrace`, and one
+that starts catching `error_type`, both fail. `make sast-semgrep-test` runs it
+and is part of `make sast`, which is what CI enforces.
+
+That matters because the alternative was a guard nobody guards: a pattern edit
+could have disabled enforcement while this section went on claiming it, which is
+the same shape as the `_INBOX` suppression above. The fixtures are
+mutation-verified in both directions rather than merely passing.
 
 ## 3. Outcome Vocabularies
 
