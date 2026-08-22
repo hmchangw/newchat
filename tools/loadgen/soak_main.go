@@ -526,12 +526,12 @@ func runSoakWorkload(
 	if degradedLedger {
 		slog.Error("durable failure ledger unavailable; continuing with invalid in-memory observation")
 	}
-	// Recorded here rather than at the checks themselves: the ledger is what
-	// makes the verdict part of the run's own evidence — journaled, replayed,
-	// and reported by Snapshot — instead of a number on a dashboard the
-	// snapshot contradicts.
-	for _, reason := range reconcileBreaches {
-		ledger.Invalidate(reason)
+	if err := recordSoakStartupInvalidations(ledger, reconcileBreaches); err != nil {
+		slog.Error("record Cassandra soak startup invalidation", "error", err)
+		if closeErr := ledger.Close(); closeErr != nil {
+			slog.Error("close Cassandra soak failure ledger", "error", closeErr)
+		}
+		return 2
 	}
 	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
 		metrics.FailureDropped.Add(float64(dropped))

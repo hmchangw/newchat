@@ -1171,19 +1171,36 @@ func (l *failureLedger) invalidateReplayedLocked(reason string) error {
 // never accepted, and reports what still did not land. A run that closes with
 // an invalidation only in memory would leave the next replay presenting
 // evidence this run had already disowned.
-func (l *failureLedger) flushInvalidationsLocked() error {
+// UnpersistedInvalidations reports the causes held only in memory. A caller
+// that cannot afford to continue on evidence whose disqualifier the journal
+// never accepted asks before it commits to the run.
+func (l *failureLedger) UnpersistedInvalidations() []string {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.unpersistedInvalidationsLocked()
+}
+
+func (l *failureLedger) unpersistedInvalidationsLocked() []string {
 	var unpersisted []string
-	// Over a copy, because a failed attempt records the wal cause and appends to
-	// the slice being walked. Ranging the original would rely on Go fixing the
-	// length at loop entry — true, but too subtle to leave a reader deducing.
-	// A cause added by this loop needs no attempt of its own: whatever failed
-	// is already reported below, so Close errors either way.
-	for _, reason := range slices.Clone(l.invalidReasons) {
-		l.persistInvalidationLocked(reason)
+	for _, reason := range l.invalidReasons {
 		if !slices.Contains(l.persistedInvalidReasons, reason) {
 			unpersisted = append(unpersisted, reason)
 		}
 	}
+	return unpersisted
+}
+
+func (l *failureLedger) flushInvalidationsLocked() error {
+	// Over a copy, because a failed attempt records the wal cause and appends to
+	// the slice being walked. Ranging the original would rely on Go fixing the
+	// length at loop entry — true, but too subtle to leave a reader deducing.
+	for _, reason := range slices.Clone(l.invalidReasons) {
+		l.persistInvalidationLocked(reason)
+	}
+	unpersisted := l.unpersistedInvalidationsLocked()
 	if len(unpersisted) == 0 {
 		return nil
 	}

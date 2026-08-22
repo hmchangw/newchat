@@ -688,3 +688,26 @@ func warnSoakReconcileCapacity(cfg *soakConfig) bool {
 	)
 	return true
 }
+
+// recordSoakStartupInvalidations puts a configuration breach into the run's own
+// evidence rather than only into a log line: the ledger journals it, replay
+// restores it, and Snapshot reports it, so the run cannot later be read as
+// though it had never been disowned.
+//
+// A breach only warns and the run proceeds — but that bargain depends on the
+// verdict outliving the process. If the journal refuses the record, a crash
+// before Close would replay this run without its disqualifier and present the
+// evidence as trustworthy, so the caller is told to stop instead.
+func recordSoakStartupInvalidations(ledger *failureLedger, reasons []string) error {
+	for _, reason := range reasons {
+		ledger.Invalidate(reason)
+	}
+	unpersisted := ledger.UnpersistedInvalidations()
+	if len(unpersisted) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"failure ledger could not persist startup invalidation %s",
+		strings.Join(unpersisted, ", "),
+	)
+}
