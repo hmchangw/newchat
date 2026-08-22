@@ -21,9 +21,12 @@ func (f fakeCollection) FilterSubjects(_ string) []string { return f.filters }
 func TestBuildConsumerConfig(t *testing.T) {
 	defaultSettings := stream.ConsumerSettings{
 		AckWait:       30 * time.Second,
-		MaxDeliver:    5,
+		MaxDeliver:    6,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
+		BackOffSteps:  5,
+		BackOffFactor: 2,
+		BackOffMax:    8 * time.Minute,
 	}
 
 	t.Run("propagates settings", func(t *testing.T) {
@@ -54,10 +57,12 @@ func TestBuildConsumerConfig(t *testing.T) {
 				assert.Equal(t, tt.coll.name, cc.Durable)
 				assert.Equal(t, 1000, cc.MaxAckPending)
 				assert.Equal(t, tt.wantFilters, cc.FilterSubjects)
-				assert.Equal(t, []time.Duration{1 * time.Second, 5 * time.Second, 30 * time.Second}, cc.BackOff)
+				// A hardcoded BackOff{1s,...} used to set the server-side
+				// AckWait to 1s (server/consumer.go:677-682).
+				assert.Equal(t, stream.DurableConsumerDefaults(defaultSettings).BackOff, cc.BackOff)
 				assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 				assert.Equal(t, 30*time.Second, cc.AckWait)
-				assert.Equal(t, 5, cc.MaxDeliver)
+				assert.Equal(t, 6, cc.MaxDeliver)
 				assert.Equal(t, 512, cc.MaxWaiting)
 				assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)
 			})
@@ -78,8 +83,6 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 45*time.Second, cc.AckWait)
 		assert.Equal(t, 3, cc.MaxDeliver)
 		assert.Equal(t, 256, cc.MaxWaiting)
-		// BackOff is hardcoded by buildConsumerConfig, not from settings.
-		assert.Equal(t, []time.Duration{1 * time.Second, 5 * time.Second, 30 * time.Second}, cc.BackOff)
 	})
 }
 

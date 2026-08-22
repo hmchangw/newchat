@@ -91,33 +91,102 @@ func TestSettleQuiet_SameDecisions(t *testing.T) {
 	})
 }
 
+// assertJittered asserts d is within the equal-jitter band [base/2, base].
+func assertJittered(t *testing.T, base, d time.Duration) {
+	t.Helper()
+	assert.GreaterOrEqual(t, d, base/2, "equal jitter guarantees at least half the base delay")
+	assert.LessOrEqual(t, d, base, "jitter never exceeds the base delay")
+}
+
 func TestSettle_BackoffSelectedByAttempt(t *testing.T) {
 	m := &fakeMsg{numDelivered: 2} // second delivery -> testSchedule[1]
 	Settle(context.Background(), m, testSchedule, errors.New("boom"))
-	assert.Equal(t, testSchedule[1], m.nakDelay)
+	assertJittered(t, testSchedule[1], m.nakDelay)
 }
 
 func TestBackoffFor(t *testing.T) {
 	tests := []struct {
 		name         string
 		numDelivered uint64
-		want         time.Duration
+		base         time.Duration
 	}{
-		{name: "metadata zero — first", numDelivered: 0, want: testSchedule[0]},
-		{name: "first delivery — first", numDelivered: 1, want: testSchedule[0]},
-		{name: "second delivery — second", numDelivered: 2, want: testSchedule[1]},
-		{name: "third delivery — third", numDelivered: 3, want: testSchedule[2]},
-		{name: "beyond schedule — reuses last", numDelivered: 99, want: testSchedule[2]},
+		{name: "metadata zero — first", numDelivered: 0, base: testSchedule[0]},
+		{name: "first delivery — first", numDelivered: 1, base: testSchedule[0]},
+		{name: "second delivery — second", numDelivered: 2, base: testSchedule[1]},
+		{name: "third delivery — third", numDelivered: 3, base: testSchedule[2]},
+		{name: "beyond schedule — reuses last", numDelivered: 99, base: testSchedule[2]},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, backoffFor(&fakeMsg{numDelivered: tt.numDelivered}, testSchedule))
+			assertJittered(t, tt.base, backoffFor(&fakeMsg{numDelivered: tt.numDelivered}, testSchedule))
 		})
 	}
 }
 
 func TestBackoffFor_MetadataError(t *testing.T) {
-	assert.Equal(t, testSchedule[0], backoffFor(&fakeMsg{metaErr: errors.New("no meta")}, testSchedule))
+	assertJittered(t, testSchedule[0], backoffFor(&fakeMsg{metaErr: errors.New("no meta")}, testSchedule))
+}
+
+// Jitter must actually vary, otherwise a fleet that parked during one outage
+// retries in lockstep the moment the dependency recovers.
+func TestBackoffFor_JitterVaries(t *testing.T) {
+	seen := make(map[time.Duration]struct{})
+	for range 200 {
+		seen[backoffFor(&fakeMsg{numDelivered: 3}, testSchedule)] = struct{}{}
+	}
+	assert.Greater(t, len(seen), 1, "equal jitter should produce a spread of delays")
+}
+
+// A non-positive base must floor to minNakDelay, never pass through: a zero
+// delay serializes as a bare -NAK.
+func TestJitter_NonPositiveFloorsToMinimum(t *testing.T) {
+	assert.Equal(t, minNakDelay, jitter(0))
+	assert.Equal(t, minNakDelay, jitter(-time.Second))
+	assert.Equal(t, minNakDelay, jitter(minNakDelay))
+}
+
+func TestNak_UsesJitteredBackoffForAttempt(t *testing.T) {
+	m := &fakeMsg{numDelivered: 2}
+	Nak(context.Background(), m, testSchedule, "downstream unavailable")
+	assert.True(t, m.naked)
+	assert.False(t, m.acked)
+	assertJittered(t, testSchedule[1], m.nakDelay)
+}
+
+func TestNak_LogsWhenTheNakCallFails(t *testing.T) {
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	var n int
+	slog.SetDefault(slog.New(countHandler{n: &n}))
+	Nak(context.Background(), &fakeMsg{numDelivered: 1, nakErr: errors.New("conn closed")}, testSchedule, "transient")
+	assert.Equal(t, 1, n, "a failed nak network call is logged once")
+}
+
+func TestNak_SilentOnSuccess(t *testing.T) {
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	var n int
+	slog.SetDefault(slog.New(countHandler{n: &n}))
+	Nak(context.Background(), &fakeMsg{numDelivered: 1}, testSchedule, "transient")
+	assert.Zero(t, n, "the caller owns the business-error log; Nak must not double-log")
+}
+
+// Synadia's published four-entry schedule plus a 10m tail — 12m36s over five
+// gaps, the agreed ~15 min retry budget.
+func TestDefaultBackoff_Shape(t *testing.T) {
+	assert.Equal(t, []time.Duration{
+		1 * time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute,
+	}, DefaultBackoff)
+}
+
+// Deliberately not extended: broadcast fan-out is user-visible and a
+// 15-minute-late broadcast is worthless.
+func TestLowLatencyBackoff_StaysShort(t *testing.T) {
+	assert.Equal(t, []time.Duration{
+		200 * time.Millisecond, 1 * time.Second, 5 * time.Second, 30 * time.Second,
+	}, LowLatencyBackoff)
 }
 
 // countHandler records how many log records were emitted.
@@ -173,4 +242,26 @@ func TestSettle_NetworkErrors(t *testing.T) {
 			assert.Equal(t, 1, n, "the network-failure path should log exactly once")
 		})
 	}
+}
+
+// jitter halves the base, so a sub-2ns entry can round to zero — and
+// NakWithDelay(0) is the bare -NAK this package exists to prevent.
+func TestNak_SubNanosecondScheduleNeverSendsZero(t *testing.T) {
+	for range 200 {
+		m := &fakeMsg{numDelivered: 1}
+		Nak(context.Background(), m, []time.Duration{1}, "tiny")
+		assert.Positive(t, m.nakDelay, "a nak delay of 0 is a bare -NAK")
+	}
+}
+
+func TestNak_EmptyScheduleDoesNotPanic(t *testing.T) {
+	m := &fakeMsg{numDelivered: 1}
+	assert.NotPanics(t, func() { Nak(context.Background(), m, nil, "empty") })
+}
+
+func TestSettle_EmptyScheduleDoesNotPanic(t *testing.T) {
+	m := &fakeMsg{numDelivered: 1}
+	assert.NotPanics(t, func() {
+		Settle(context.Background(), m, nil, errors.New("boom"))
+	})
 }

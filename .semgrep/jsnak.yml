@@ -1,0 +1,52 @@
+rules:
+  - id: jsretry-no-bare-nak
+    languages: [go]
+    severity: ERROR
+    message: >
+      A bare Nak() is an instant redelivery — nats-server puts the message
+      straight on the redeliver queue without consulting the consumer's BackOff
+      (server/consumer.go:3308-3311), so a sub-second downstream blip burns
+      MaxDeliver in milliseconds and the message is dropped. Use jsretry.Settle,
+      jsretry.SettleQuiet, or jsretry.Nak.
+    paths:
+      exclude:
+        # data-migration tools run their own MaxDeliver=1000 retry semantics.
+        - "**/data-migration/**"
+        # natsmetrics wraps the primitive to instrument it; this rule is what
+        # keeps production callers off the wrapper's Nak.
+        - "**/pkg/natsmetrics/**"
+        - "**/*_test.go"
+    patterns:
+      - pattern: $MSG.Nak()
+
+  - id: jsretry-no-zero-nak-delay
+    languages: [go]
+    severity: ERROR
+    message: >
+      NakWithDelay(0) is a bare -NAK: the nats.go client only serializes a delay
+      when it is > 0 (jetstream/message.go:374), so this redelivers instantly and
+      ignores the consumer's BackOff. Use jsretry.Settle, jsretry.SettleQuiet, or
+      jsretry.Nak.
+    paths:
+      exclude:
+        - "**/*_test.go"
+    patterns:
+      - pattern: $MSG.NakWithDelay(0)
+
+  - id: jsretry-no-hardcoded-consumer-backoff
+    languages: [go]
+    severity: ERROR
+    message: >
+      Never assign ConsumerConfig.BackOff directly — nats-server overwrites
+      AckWait with BackOff[0] (server/consumer.go:677-682), so a hardcoded
+      schedule silently shortens the consumer's AckWait. Let
+      stream.DurableConsumerDefaults derive it from the CONSUMER_BACKOFF_* knobs.
+    paths:
+      exclude:
+        - "**/pkg/stream/**"
+        - "**/*_test.go"
+    patterns:
+      - pattern-either:
+          - pattern: $CC.BackOff = $X
+          - pattern: |
+              jetstream.ConsumerConfig{..., BackOff: $X, ...}

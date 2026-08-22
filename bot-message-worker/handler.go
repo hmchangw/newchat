@@ -8,6 +8,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -41,10 +42,7 @@ func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 		}
 		slog.WarnContext(ctx, "bot-message-worker transient error — nak",
 			"messageID", m.ID, "roomID", m.RoomID, "error", err)
-		// NakWithDelay(0) defers to the consumer's BackOff schedule.
-		if nakErr := msg.NakWithDelay(0); nakErr != nil {
-			slog.WarnContext(ctx, "bot-message-worker nak failed", "error", nakErr)
-		}
+		jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, "transient cassandra error")
 		return
 	}
 	if err := msg.Ack(); err != nil {

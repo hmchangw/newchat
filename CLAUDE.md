@@ -338,6 +338,30 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Match the pattern already used by the service being modified — don't mix patterns within a single consumer
 - Follow existing worker services (`message-worker`, `broadcast-worker`, etc.) as reference implementations
 
+### JetStream Redelivery Backoff
+
+Two levers space redeliveries, and they fire on **disjoint** failure modes. Set both.
+
+- **Consumer `BackOff`** (server-side, `pkg/stream.ConsumerSettings`) fires only when a
+  message goes un-acked past `AckWait` — pod crash, OOM, hang, or a handler slower than
+  `AckWait`. Derived as `AckWait * BackOffFactor^i` capped at `BackOffMax`; defaults give
+  `{30s, 1m, 2m, 4m, 8m}` over `MaxDeliver=6`. `CONSUMER_BACKOFF_STEPS=0` disables it.
+- **`pkg/jsretry`** (client-side `NakWithDelay`) fires when a handler catches a transient
+  error. `DefaultBackoff` for non-latency-sensitive work, `LowLatencyBackoff` for
+  user-visible fan-out. Equal-jittered; the server-side lever cannot jitter.
+
+Three server rules the code must respect (`nats-io/nats-server`, `server/consumer.go`):
+
+- **A bare `Nak()` ignores `BackOff` entirely** — it goes straight on the redeliver queue
+  (`:3308-3311`), so a sub-second blip burns `MaxDeliver` in milliseconds. `NakWithDelay(0)`
+  is the same thing, because nats.go only serializes a delay when it is `> 0`. **Never call
+  either** — use `jsretry.Settle`, `jsretry.SettleQuiet`, or `jsretry.Nak`.
+- **`BackOff[0]` overwrites `AckWait`** (`:677-682`). Never hardcode a `cc.BackOff` in a
+  service; let `stream.DurableConsumerDefaults` derive it so the two cannot disagree.
+- **`len(BackOff) > MaxDeliver` is a hard create/update error** (`:807`, `:2588`), except
+  when MaxDeliver means unlimited — the server normalizes `0` and `< -1` to `-1` first
+  (`:612-617`). `DurableConsumerDefaults` clamps and warns.
+
 ### Graceful Shutdown
 - Use `pkg/shutdown.Wait` in every service's `main.go`
 - JetStream workers cleanup order: `iter.Stop()` → `wg.Wait()` (with timeout) → `nc.Drain()` → disconnect databases

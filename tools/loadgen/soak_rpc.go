@@ -155,11 +155,9 @@ func parseSoakErrorEnvelope(data []byte) error {
 	return parsed
 }
 
-// soakReasonResponseTooLarge mirrors the reason in pkg/natsutil's oversize
-// reply envelope. Declared here rather than in pkg/errcode so this change stays
-// inside tools/loadgen; if a named constant is ever added upstream, this should
-// become an alias for it.
-const soakReasonResponseTooLarge errcode.Reason = "response_too_large"
+// soakReasonResponseTooLarge aliases the platform reason carried by the
+// oversize reply envelope, so the harness cannot drift from the wire contract.
+const soakReasonResponseTooLarge = errcode.ResponseTooLarge
 
 // soakErrorReason is the service-supplied errcode reason, kept beside the
 // collapsed class because the two forbidden answers a soak read can get need
