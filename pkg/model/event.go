@@ -184,6 +184,7 @@ const (
 	InboxUserPermissionsUpdated      InboxEventType = "user_permissions_updated"
 	InboxUserChatlistUpdated         InboxEventType = "user_chatlist_updated"
 	InboxSubscriptionSectionMoved    InboxEventType = "subscription_section_moved"
+	InboxSubscriptionMention         InboxEventType = "subscription_mention"
 )
 
 // UserSettingsUpdated is the cross-site inbox event user-service publishes on settings.set, applied
@@ -216,6 +217,18 @@ type SubscriptionReadEvent struct {
 	// reading a room clears the alert.
 	Alert     bool  `json:"alert"      bson:"alert"`
 	Timestamp int64 `json:"timestamp"  bson:"timestamp"`
+}
+
+// SubscriptionMentionEvent is InboxEvent.Payload for "subscription_mention":
+// sent room-home→user-home so a federated mentionee's badge lands on the site
+// they read from. Accounts holds only the accounts homed at the destination.
+type SubscriptionMentionEvent struct {
+	RoomID   string   `json:"roomId"   bson:"roomId"`
+	Accounts []string `json:"accounts" bson:"accounts"`
+	// MessageCreatedAt is the message's createdAt (editedAt on the edit path) as
+	// UnixMilli UTC; it feeds the destination's already-read guard.
+	MessageCreatedAt int64 `json:"messageCreatedAt" bson:"messageCreatedAt"`
+	Timestamp        int64 `json:"timestamp"        bson:"timestamp"`
 }
 
 // ThreadReadEvent is the InboxEvent.Payload for "thread_read": the destination
