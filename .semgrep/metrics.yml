@@ -29,6 +29,13 @@ rules:
           - pattern: $C.Add($CTX, $N, metric.WithAttributeSet(attribute.NewSet(...)))
           - pattern: $C.Record($CTX, $V, metric.WithAttributes(...))
           - pattern: $C.Record($CTX, $V, metric.WithAttributeSet(attribute.NewSet(...)))
+          # Observe takes no context — its signature is Observe(value, ...ObserveOption)
+          # — so it needs its own patterns rather than reusing the two above. An
+          # observable callback runs once per collection interval for as long as
+          # the process lives, so building the set inline there is the same cost
+          # in a shape that is easy to miss.
+          - pattern: $C.Observe($V, metric.WithAttributes(...))
+          - pattern: $C.Observe($V, metric.WithAttributeSet(attribute.NewSet(...)))
 
   - id: metrics-no-unbounded-label
     languages: [go]
