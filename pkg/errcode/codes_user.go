@@ -7,6 +7,9 @@ const (
 	UserSubscriptionNotFound Reason = "subscription_not_found"
 	UserSSOTokenNotFound     Reason = "sso_token_not_found"
 
+	// UserOverloaded: 429 when the HTTP listener is at its in-flight cap.
+	UserOverloaded Reason = "overloaded"
+
 	// Chatlist section reasons — the client branches on each.
 	UserChatlistInvalidName      Reason = "chatlist_invalid_name"
 	UserChatlistDuplicateName    Reason = "chatlist_duplicate_name"
