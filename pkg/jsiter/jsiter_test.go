@@ -438,3 +438,35 @@ func TestBackoffStep_ClampsPastTheSchedule(t *testing.T) {
 	assert.Equal(t, last, backoffStep(len(RebuildBackoff)))
 	assert.Equal(t, last, backoffStep(1000))
 }
+
+// A Stop landing while newIter is in flight must not leave the freshly built
+// iterator running: nothing would ever stop it, and its pull subscription keeps
+// taking messages nobody reads until AckWait expires them.
+func TestPump_Next_StopDuringRebuildStopsTheNewIterator(t *testing.T) {
+	dead := newScriptedIter(step{err: jetstream.ErrConsumerDeleted})
+	fresh := newScriptedIter(step{msg: &stubMsg{}})
+	var p *Pump
+	f := &factory{}
+	f.iters = []Iterator{dead, fresh}
+	built := make(chan struct{})
+
+	var err error
+	p, err = New(context.Background(), "test", func(ctx context.Context) (Iterator, error) {
+		it, buildErr := f.new(ctx)
+		if f.callCount() == 2 {
+			// Stop lands after rebuild's stopped check, while the build runs.
+			p.Stop()
+			close(built)
+		}
+		return it, buildErr
+	})
+	require.NoError(t, err)
+	p.sleepFn = func(context.Context, time.Duration) bool { return true }
+
+	_, _, nextErr := p.Next()
+
+	<-built
+	require.ErrorIs(t, nextErr, ErrStopped)
+	assert.Equal(t, 1, fresh.stopCount(), "the iterator built during Stop must be released")
+	assert.False(t, p.IsUp())
+}

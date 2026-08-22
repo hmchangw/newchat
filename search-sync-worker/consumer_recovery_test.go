@@ -165,20 +165,46 @@ func TestRecoveringFetcher_Recover_EscalatesRepeatedTransientsToRebuild(t *testi
 	assert.Equal(t, 2, b.callCount(), "a consumer that only ever misses heartbeats is rebuilt")
 }
 
-func TestRecoveringFetcher_Fetch_ResetsTransientRun(t *testing.T) {
+// runConsumer always calls Fetch before Recover, and Fetch returns (batch, nil)
+// even when the server-side failure is waiting in batch.Error(). Resetting the
+// run on a Fetch that merely returned would make escalation unreachable, so
+// only a batch that completed cleanly counts as progress.
+func TestRecoveringFetcher_EscalatesAcrossTheRealLoopOrder(t *testing.T) {
+	b := &builder{fetchers: []msgFetcher{&stubFetcher{}, &stubFetcher{}}}
+	r, _ := newTestRecoveringFetcher(t, b)
+
+	for range transientEscalation {
+		_, err := r.Fetch(context.Background(), 1)
+		require.NoError(t, err)
+		require.True(t, r.Recover(context.Background(), jetstream.ErrNoHeartbeat))
+	}
+
+	assert.Equal(t, 2, b.callCount(), "a fetch that keeps failing must still rebuild")
+}
+
+func TestRecoveringFetcher_CleanBatchResetsTransientRun(t *testing.T) {
 	b := &builder{fetchers: []msgFetcher{&stubFetcher{}, &stubFetcher{}}}
 	r, _ := newTestRecoveringFetcher(t, b)
 
 	for range transientEscalation - 1 {
 		require.True(t, r.Recover(context.Background(), jetstream.ErrNoHeartbeat))
 	}
-	_, err := r.Fetch(context.Background(), 1)
-	require.NoError(t, err)
+	require.True(t, r.Recover(context.Background(), nil), "a clean batch is progress")
 	for range transientEscalation - 1 {
 		require.True(t, r.Recover(context.Background(), jetstream.ErrNoHeartbeat))
 	}
 
-	assert.Equal(t, 1, b.callCount(), "a successful fetch resets the transient run")
+	assert.Equal(t, 1, b.callCount(), "a clean batch resets the transient run")
+}
+
+func TestRecoveringFetcher_Recover_NilNeverRebuilds(t *testing.T) {
+	b := &builder{fetchers: []msgFetcher{&stubFetcher{}}}
+	r, delays := newTestRecoveringFetcher(t, b)
+
+	assert.True(t, r.Recover(context.Background(), nil))
+	assert.Equal(t, 1, b.callCount())
+	assert.Empty(t, *delays, "a clean batch must not back off")
+	assert.True(t, r.IsUp())
 }
 
 func TestRecoveringFetcher_Recover_RebuildRetriesUntilItSucceeds(t *testing.T) {
@@ -320,9 +346,7 @@ func TestRunConsumer_RecoversWhenBatchReportsConsumerDeleted(t *testing.T) {
 
 	runLoop(t, src, stopCh)
 
-	recoveries := src.recoveries()
-	require.Len(t, recoveries, 1)
-	assert.ErrorIs(t, recoveries[0], jetstream.ErrConsumerDeleted)
+	assert.Contains(t, src.recoveries(), error(jetstream.ErrConsumerDeleted))
 }
 
 func TestRunConsumer_RecoversFromFetchError(t *testing.T) {
@@ -337,9 +361,7 @@ func TestRunConsumer_RecoversFromFetchError(t *testing.T) {
 
 	runLoop(t, src, stopCh)
 
-	recoveries := src.recoveries()
-	require.Len(t, recoveries, 1)
-	assert.ErrorIs(t, recoveries[0], wantErr)
+	assert.Contains(t, src.recoveries(), wantErr)
 }
 
 func TestRunConsumer_ExitsWhenRecoveryGivesUp(t *testing.T) {
@@ -350,7 +372,7 @@ func TestRunConsumer_ExitsWhenRecoveryGivesUp(t *testing.T) {
 
 	runLoop(t, src, make(chan struct{}))
 
-	assert.Len(t, src.recoveries(), 1)
+	assert.Contains(t, src.recoveries(), error(jetstream.ErrConnectionClosed))
 }
 
 func TestRunConsumer_HealthyBatchNeverRecovers(t *testing.T) {
@@ -363,7 +385,9 @@ func TestRunConsumer_HealthyBatchNeverRecovers(t *testing.T) {
 
 	runLoop(t, src, stopCh)
 
-	assert.Empty(t, src.recoveries(), "an empty batch with no error is a quiet stream, not a failure")
+	for _, err := range src.recoveries() {
+		assert.NoError(t, err, "an empty batch with no error is a quiet stream, not a failure")
+	}
 }
 
 func TestBackoffStep_ClampsPastTheSchedule(t *testing.T) {

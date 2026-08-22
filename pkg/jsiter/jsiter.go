@@ -273,6 +273,14 @@ func (p *Pump) rebuild() error {
 		p.mu.Lock()
 		p.iter = iter
 		p.mu.Unlock()
+
+		// Stop landing while the build was in flight already released the old
+		// iterator, so this one would be left running with nobody reading it —
+		// its messages sit un-acked until AckWait.
+		if p.stopped.Load() {
+			iter.Stop()
+			return ErrStopped
+		}
 		p.up.Store(true)
 		slog.InfoContext(p.ctx, "jetstream iterator rebuilt",
 			"consumer", p.name, "attempts", attempt+1)

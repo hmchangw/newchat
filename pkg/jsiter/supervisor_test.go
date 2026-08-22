@@ -272,3 +272,120 @@ func TestSupervisor_ContextCancellationEndsRestart(t *testing.T) {
 	}
 	assert.False(t, s.IsUp())
 }
+
+// A status error can reach observe while start is still returning. Acting on a
+// nil handle there would leave the just-created subscription running alongside
+// its replacement — two consumers on a MaxAckPending=1 FIFO lane.
+func TestSupervise_ErrorDuringStartDoesNotLeaveTwoSubscriptions(t *testing.T) {
+	handle := &stubConsume{}
+	var calls int
+	start := func(_ context.Context, onError func(error)) (ConsumeContext, error) {
+		calls++
+		onError(jetstream.ErrConsumerDeleted)
+		return handle, nil
+	}
+
+	s, err := Supervise(context.Background(), "ordered", start)
+
+	require.Error(t, err, "a subscription that dies during start is a startup failure")
+	assert.Nil(t, s)
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, 1, handle.stopCount(), "the doomed subscription must be released, not orphaned")
+}
+
+// An error still buffered on a superseded subscription's errs channel must not
+// tear down the healthy replacement.
+func TestSupervisor_StaleErrorFromSupersededRoundIsIgnored(t *testing.T) {
+	f := newConsumeFactory(nil, nil)
+	s := newTestSupervisor(t, f)
+
+	f.mu.Lock()
+	staleOnError := f.lastFail
+	f.mu.Unlock()
+
+	staleOnError(jetstream.ErrConsumerDeleted)
+	waitStarts(t, f, 1)
+	require.Equal(t, 2, f.callCount())
+
+	// The first round is gone; its late error must be dropped.
+	staleOnError(jetstream.ErrConsumerDeleted)
+
+	select {
+	case <-f.started:
+		t.Fatal("a stale error from a superseded round restarted consumption")
+	case <-time.After(200 * time.Millisecond):
+	}
+	assert.Equal(t, 2, f.callCount())
+	assert.True(t, s.IsUp())
+}
+
+// transientEscalation is meant to catch a back-to-back run, not a lifetime
+// tally: unrelated heartbeat misses that nats.go already self-healed must not
+// eventually tear down a healthy subscription and discard its buffered messages.
+func TestSupervisor_TransientRunResetsAfterAQuietWindow(t *testing.T) {
+	f := newConsumeFactory(nil, nil)
+	s := newTestSupervisor(t, f)
+	now := time.Unix(0, 0)
+	s.nowFn = func() time.Time { return now }
+
+	for range transientEscalation - 1 {
+		f.fail(jetstream.ErrNoHeartbeat)
+	}
+	now = now.Add(transientWindow + time.Second)
+	f.fail(jetstream.ErrNoHeartbeat)
+
+	select {
+	case <-f.started:
+		t.Fatal("transient errors spread beyond the window escalated to a restart")
+	case <-time.After(200 * time.Millisecond):
+	}
+	assert.Equal(t, 1, f.callCount())
+}
+
+func TestSupervisor_TransientRunWithinTheWindowStillEscalates(t *testing.T) {
+	f := newConsumeFactory(nil, nil)
+	s := newTestSupervisor(t, f)
+	now := time.Unix(0, 0)
+	s.nowFn = func() time.Time { return now }
+
+	for range transientEscalation {
+		now = now.Add(time.Second)
+		f.fail(jetstream.ErrNoHeartbeat)
+	}
+	waitStarts(t, f, 1)
+
+	assert.Equal(t, 2, f.callCount())
+}
+
+// Stop landing while begin is still starting the replacement must leave the
+// supervisor reported down, not up on a subscription it just released.
+func TestSupervisor_StopDuringRestartLeavesItDown(t *testing.T) {
+	handles := []ConsumeContext{&stubConsume{}, &stubConsume{}}
+	f := newConsumeFactory(handles, nil)
+
+	var s *Supervisor
+	var stopOnce sync.Once
+	// Wired before Supervise so the closure is never reassigned under a reader.
+	start := func(ctx context.Context, onError func(error)) (ConsumeContext, error) {
+		cc, err := f.start(ctx, onError)
+		if f.callCount() > 1 {
+			// Stop lands after the restart's stopped check, while start runs.
+			stopOnce.Do(s.Stop)
+		}
+		return cc, err
+	}
+
+	var err error
+	s, err = Supervise(context.Background(), "ordered", start)
+	require.NoError(t, err)
+	waitStarts(t, f, 1)
+	s.sleepFn = func(context.Context, time.Duration) bool { return true }
+
+	f.fail(jetstream.ErrConsumerDeleted)
+	waitStarts(t, f, 1)
+
+	assert.Eventually(t, func() bool { return !s.IsUp() }, 2*time.Second, 10*time.Millisecond,
+		"a supervisor stopped mid-restart must report down")
+	assert.Equal(t, 1, handles[1].(*stubConsume).stopCount(),
+		"the replacement started during Stop must be released")
+}

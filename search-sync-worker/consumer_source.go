@@ -39,9 +39,10 @@ type msgBatch interface {
 // a fetch that failed.
 type fetchSource interface {
 	msgFetcher
-	// Recover reacts to a failed fetch — backing off, and rebuilding the
-	// consumer when the failure means the old one will never produce again. It
-	// reports false when consumption is over and the loop must stop.
+	// Recover reacts to one fetch's outcome — backing off, and rebuilding the
+	// consumer when the failure means the old one will never produce again. A
+	// nil error reports a clean batch, which clears the failure run. It reports
+	// false when consumption is over and the loop must stop.
 	Recover(context.Context, error) bool
 }
 
@@ -151,19 +152,23 @@ func (r *recoveringFetcher) Fetch(ctx context.Context, n int, opts ...jetstream.
 	cur := r.cur
 	r.mu.Unlock()
 
-	batch, err := cur.Fetch(ctx, n, opts...)
-	if err != nil {
-		return nil, err
-	}
-	r.mu.Lock()
-	r.transients = 0
-	r.mu.Unlock()
-	return batch, nil
+	// A fetch that merely returned is not progress: Fetch hands back a batch and
+	// a nil error even when the server-side failure is waiting in batch.Error().
+	// Only Recover, which sees that outcome, clears the transient run.
+	return cur.Fetch(ctx, n, opts...)
 }
 
-// Recover applies the disposition of a failed fetch, reporting whether the loop
-// should keep going.
+// Recover applies the outcome of one fetch, reporting whether the loop should
+// keep going. A nil err means the batch completed cleanly — the consumer is
+// demonstrably still answering, so it clears the recoverable-failure run.
 func (r *recoveringFetcher) Recover(ctx context.Context, err error) bool {
+	if err == nil {
+		r.mu.Lock()
+		r.transients = 0
+		r.mu.Unlock()
+		return true
+	}
+
 	disposition := jsiter.Classify(err)
 
 	if disposition == jsiter.Transient {

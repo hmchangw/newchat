@@ -42,9 +42,19 @@ type Supervisor struct {
 	// restart path without real delays.
 	sleepFn func(context.Context, time.Duration) bool
 
-	mu         sync.Mutex
+	// nowFn stamps the transient run; a field so tests can drive the window
+	// without real time.
+	nowFn func() time.Time
+
+	mu sync.Mutex
+	// gen identifies the current subscription round. Every onError callback
+	// carries the round it was wired for, so an error still buffered on a
+	// superseded subscription cannot tear down its replacement.
+	gen        uint64
+	failedGen  uint64
 	cur        ConsumeContext
 	transients int
+	lastTrans  time.Time
 	restarting bool
 
 	up      atomic.Bool
@@ -53,6 +63,13 @@ type Supervisor struct {
 	once    sync.Once
 }
 
+// transientWindow bounds the back-to-back run transientEscalation counts.
+// Consume gives no progress signal — messages reach the caller's handler, not
+// the error handler — so the run is bounded by time instead: misses that are
+// part of one stall arrive together, while unrelated ones must not accumulate
+// until they tear down a healthy subscription.
+const transientWindow = 2 * time.Minute
+
 // Supervise starts consumption and returns the supervisor watching it. A
 // failure here is a startup failure — the caller decides whether to exit.
 //
@@ -60,13 +77,11 @@ type Supervisor struct {
 func Supervise(ctx context.Context, name string, start NewConsume) (*Supervisor, error) {
 	s := &Supervisor{name: name, ctx: ctx, start: start, done: make(chan struct{})}
 	s.sleepFn = s.sleep
+	s.nowFn = time.Now
 
-	cc, err := s.begin()
-	if err != nil {
+	if err := s.begin(); err != nil {
 		return nil, err
 	}
-	s.cur = cc
-	s.up.Store(true)
 	return s, nil
 }
 
@@ -106,18 +121,40 @@ func (s *Supervisor) Stop() {
 	})
 }
 
-// begin starts one round of consumption wired to observe.
-func (s *Supervisor) begin() (ConsumeContext, error) {
-	cc, err := s.start(s.ctx, s.observe)
+// begin starts one round of consumption and installs its handle.
+//
+// A status error can reach observe while start is still returning, before the
+// handle exists. observe marks the round instead of acting on a nil handle, and
+// begin drops the subscription here — otherwise the doomed one would keep
+// running beside its replacement, which on a MaxAckPending=1 lane means two
+// consumers on a durable that must stay strictly sequential.
+func (s *Supervisor) begin() error {
+	s.mu.Lock()
+	s.gen++
+	gen := s.gen
+	s.mu.Unlock()
+
+	cc, err := s.start(s.ctx, func(err error) { s.observe(gen, err) })
 	if err != nil {
-		return nil, fmt.Errorf("start %s consumption: %w", s.name, err)
+		return fmt.Errorf("start %s consumption: %w", s.name, err)
 	}
-	return cc, nil
+
+	s.mu.Lock()
+	s.cur = cc
+	failed := s.failedGen == gen
+	s.mu.Unlock()
+
+	if failed {
+		cc.Stop()
+		return fmt.Errorf("start %s consumption: subscription failed while starting", s.name)
+	}
+	s.up.Store(true)
+	return nil
 }
 
 // observe is the ConsumeErrHandler. It runs on a nats.go goroutine, so it must
 // never block: a restart is handed to a goroutine of our own.
-func (s *Supervisor) observe(err error) {
+func (s *Supervisor) observe(gen uint64, err error) {
 	if s.stopped.Load() {
 		return
 	}
@@ -125,7 +162,18 @@ func (s *Supervisor) observe(err error) {
 	disposition := Classify(err)
 	if disposition == Transient {
 		s.mu.Lock()
+		if gen != s.gen {
+			s.mu.Unlock()
+			return
+		}
+		// A gap wider than the window starts a fresh run rather than adding to
+		// one that ended long ago.
+		now := s.nowFn()
+		if s.transients > 0 && now.Sub(s.lastTrans) > transientWindow {
+			s.transients = 0
+		}
 		s.transients++
+		s.lastTrans = now
 		attempts := s.transients
 		s.mu.Unlock()
 
@@ -149,12 +197,19 @@ func (s *Supervisor) observe(err error) {
 	// One restart at a time: a single failure can surface as a burst of errors,
 	// and each one spawning its own restart would leave competing subscriptions.
 	s.mu.Lock()
-	if s.restarting {
+	if gen != s.gen || s.restarting {
+		s.mu.Unlock()
+		return
+	}
+	cur := s.cur
+	if cur == nil {
+		// start has not returned the handle yet; begin drops this round.
+		s.failedGen = gen
 		s.mu.Unlock()
 		return
 	}
 	s.restarting = true
-	cur := s.cur
+	s.cur = nil
 	s.mu.Unlock()
 
 	s.up.Store(false)
@@ -184,24 +239,26 @@ func (s *Supervisor) restart() {
 			return
 		}
 
-		cc, err := s.begin()
-		if err != nil {
+		if err := s.begin(); err != nil {
 			slog.ErrorContext(s.ctx, "jetstream consumption restart failed, retrying",
 				"consumer", s.name, "attempt", attempt+1, "error", err)
 			continue
 		}
 
 		s.mu.Lock()
-		s.cur = cc
 		s.transients = 0
+		cur := s.cur
 		s.mu.Unlock()
 
-		// Stop landing mid-restart would otherwise leave this round running.
+		// Stop landing mid-restart would otherwise leave this round running, and
+		// begin's up.Store(true) reporting a subscription we just released.
 		if s.stopped.Load() {
-			cc.Stop()
+			s.up.Store(false)
+			if cur != nil {
+				cur.Stop()
+			}
 			return
 		}
-		s.up.Store(true)
 		slog.InfoContext(s.ctx, "jetstream consumption restarted",
 			"consumer", s.name, "attempts", attempt+1)
 		return

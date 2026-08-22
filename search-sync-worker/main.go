@@ -495,11 +495,9 @@ func runConsumer(
 		// which a Fetch loop learns its consumer was deleted or its leader moved
 		// — Fetch itself keeps returning empty batches and a nil error — so
 		// skipping it turns a dead consumer into an indefinitely quiet one.
-		if err := batch.Error(); err != nil {
-			if !cons.Recover(ctx, err) {
-				flush()
-				return
-			}
+		if !cons.Recover(ctx, batch.Error()) {
+			flush()
+			return
 		}
 	}
 }
