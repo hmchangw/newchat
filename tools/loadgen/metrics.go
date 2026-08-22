@@ -431,11 +431,9 @@ func NewMetrics() *Metrics {
 	)
 	m.FailureReconcileLag = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name: "loadgen_failure_reconcile_lag_seconds",
-			Help: "Seconds past its scheduled probe an operation was when the reconciler claimed it; the capacity floor cannot model fault-time retries, so lag is what shows the lane falling behind, and lag near SOAK_RECONCILE_DEADLINE means operations expire unverified for want of a probe.",
-			Buckets: []float64{
-				0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600,
-			},
+			Name:    "loadgen_failure_reconcile_lag_seconds",
+			Help:    "Seconds past its scheduled probe an operation was when the reconciler claimed it; the capacity floor cannot model fault-time retries, so lag is what shows the lane falling behind, and lag near SOAK_RECONCILE_DEADLINE means operations expire unverified for want of a probe.",
+			Buckets: soakReconcileLagBuckets(),
 		},
 	)
 	m.FailureDropped = prometheus.NewCounter(

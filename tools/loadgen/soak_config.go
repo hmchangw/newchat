@@ -633,6 +633,15 @@ func soakReconcileCapacityFor(cfg *soakConfig) soakReconcileCapacity {
 	}
 }
 
+// warnSoakReconcileConfig reports every reconcile-configuration problem the
+// startup path can see. It exists so a new check has one place to be reached
+// from: both checks warn rather than refuse, so an unreached one is silent
+// instead of loud, and nothing else would catch it.
+func warnSoakReconcileConfig(cfg *soakConfig, metrics *Metrics) {
+	warnSoakReconcileCapacity(cfg, metrics)
+	warnSoakReconcileLagRange(cfg)
+}
+
 // warnSoakReconcileCapacity reports an under-provisioned reconcile lane without
 // refusing the run. Below the floor the unresolved backlog grows and every
 // message eventually expires unverified — a run that reports a storage problem

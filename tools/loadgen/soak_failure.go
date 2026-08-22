@@ -908,6 +908,38 @@ func (r *soakFailureReconciler) observe(
 	return nil
 }
 
+// soakReconcileLagCeiling is the largest reconcile deadline the lag histogram
+// resolves. Lag is read against SOAK_RECONCILE_DEADLINE, so a deadline beyond
+// this leaves the region the validity rule actually reads in the +Inf bucket,
+// where no quantile can place it.
+const soakReconcileLagCeiling = time.Hour
+
+// soakReconcileLagBuckets spans a claim taken on schedule through a lane a full
+// hour behind. The top bucket is deliberately past soakReconcileLagCeiling so a
+// deadline at the ceiling still falls inside a finite bucket rather than on its
+// edge.
+func soakReconcileLagBuckets() []float64 {
+	return []float64{
+		0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600, 5400,
+	}
+}
+
+// warnSoakReconcileLagRange reports a deadline the lag histogram cannot resolve.
+// It warns rather than refuses for the same reason the capacity floor does: the
+// run is the operator's to judge. But lag is the signal that says whether a
+// window counted, so a deadline that outruns it must not be silent.
+func warnSoakReconcileLagRange(cfg *soakConfig) {
+	if cfg == nil || cfg.ReconcileDeadline <= soakReconcileLagCeiling {
+		return
+	}
+	slog.Warn("soak reconcile deadline outruns the lag histogram",
+		"soakReconcileDeadline", cfg.ReconcileDeadline.String(),
+		"resolvableCeiling", soakReconcileLagCeiling.String(),
+		"consequence", "loadgen_failure_reconcile_lag_seconds cannot place a quantile near the deadline",
+		"remedy", "lower SOAK_RECONCILE_DEADLINE or widen the lag buckets",
+	)
+}
+
 // soakReadLaneReconciler is the reconciler seen from the read lane: one claim
 // per call, reporting whether that claim queried the system under test.
 type soakReadLaneReconciler interface {
