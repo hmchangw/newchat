@@ -370,13 +370,18 @@ func TestRunSoakHeartbeat_UpdatesEveryTick(t *testing.T) {
 		store,
 		"run-1",
 		ticks,
+		5*time.Second,
+		5*time.Second,
+		nil,
+		time.Now,
+		nil,
 	))
 
 	assert.Equal(t, []time.Time{first, second}, store.heartbeats)
 	assert.Equal(t, second, *store.snapshot().LastHeartbeatAt)
 }
 
-func TestRunSoakHeartbeat_StopsOnCancellationAndStoreFailure(t *testing.T) {
+func TestRunSoakHeartbeat_ClassifiesCancellationDegradedAndInactive(t *testing.T) {
 	t.Run("cancellation", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -386,28 +391,96 @@ func TestRunSoakHeartbeat_StopsOnCancellationAndStoreFailure(t *testing.T) {
 			seededLifecycleStore("run-1"),
 			"run-1",
 			make(chan time.Time),
+			5*time.Second,
+			5*time.Second,
+			nil,
+			time.Now,
+			nil,
 		)
 
 		assert.ErrorIs(t, err, context.Canceled)
 	})
 
-	t.Run("store failure", func(t *testing.T) {
+	t.Run("transient store failure retries without stopping", func(t *testing.T) {
 		wantErr := errors.New("mongo unavailable")
 		store := seededLifecycleStore("run-1")
 		store.manifest.State = soakManifestRunning
-		store.heartbeatErr = wantErr
-		ticks := make(chan time.Time, 1)
-		ticks <- time.Now()
+		store.heartbeatErrors = []error{wantErr, nil}
+		store.heartbeatAttempted = make(chan struct{}, 2)
+		healthyTicks := make(chan time.Time)
+		retryRequested := make(chan time.Duration, 1)
+		retryRelease := make(chan struct{})
+		waitRetry := func(ctx context.Context, interval time.Duration) error {
+			retryRequested <- interval
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-retryRelease:
+				return nil
+			}
+		}
+		done := make(chan error, 1)
+		second := time.Unix(105, 0).UTC()
+		go func() {
+			done <- runSoakHeartbeat(
+				context.Background(), store, "run-1",
+				healthyTicks, 5*time.Second, 5*time.Second, waitRetry,
+				func() time.Time { return second }, nil,
+			)
+		}()
+
+		first := time.Unix(100, 0).UTC()
+		healthyTicks <- first
+		<-store.heartbeatAttempted
+		select {
+		case err := <-done:
+			require.Failf(t, "heartbeat stopped", "transient failure returned %v", err)
+		default:
+		}
+		assert.Equal(t, 5*time.Second, <-retryRequested)
+		select {
+		case <-store.heartbeatAttempted:
+			t.Fatal("heartbeat retried before the post-failure delay completed")
+		default:
+		}
+		close(retryRelease)
+		<-store.heartbeatAttempted
+		close(healthyTicks)
+
+		require.NoError(t, <-done)
+		assert.Equal(t, []time.Time{second}, store.snapshotHeartbeats())
+	})
+
+	t.Run("inactive run remains fatal", func(t *testing.T) {
+		store := seededLifecycleStore("run-1")
+		store.heartbeatErrors = []error{errSoakRunNotActive}
+		healthyTicks := make(chan time.Time, 1)
+		healthyTicks <- time.Unix(100, 0)
 
 		err := runSoakHeartbeat(
-			context.Background(),
-			store,
-			"run-1",
-			ticks,
+			context.Background(), store, "run-1",
+			healthyTicks, 5*time.Second, 5*time.Second, nil, time.Now, nil,
 		)
 
-		require.Error(t, err)
-		assert.ErrorIs(t, err, wantErr)
+		assert.ErrorIs(t, err, errSoakRunNotActive)
+	})
+
+	t.Run("attempt has a bounded context", func(t *testing.T) {
+		store := seededLifecycleStore("run-1")
+		store.heartbeatFn = func(ctx context.Context) error {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok)
+			assert.WithinDuration(t, time.Now().Add(5*time.Second), deadline, time.Second)
+			return nil
+		}
+		healthyTicks := make(chan time.Time, 1)
+		healthyTicks <- time.Unix(100, 0)
+		close(healthyTicks)
+
+		require.NoError(t, runSoakHeartbeat(
+			context.Background(), store, "run-1",
+			healthyTicks, 5*time.Second, 5*time.Second, nil, time.Now, nil,
+		))
 	})
 }
 
@@ -495,30 +568,48 @@ func (d *singleSoakDispatcher) Dispatch(
 }
 
 type fakeSoakLifecycleStore struct {
-	mu           sync.Mutex
-	manifest     soakManifest
-	heartbeats   []time.Time
-	heartbeatErr error
+	mu                 sync.Mutex
+	manifest           soakManifest
+	heartbeats         []time.Time
+	heartbeatErrors    []error
+	heartbeatAttempted chan struct{}
+	heartbeatFn        func(context.Context) error
 }
 
 func (s *fakeSoakLifecycleStore) TouchHeartbeat(
-	_ context.Context,
+	ctx context.Context,
 	runID string,
 	at time.Time,
 ) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.heartbeatErr != nil {
-		return s.heartbeatErr
+	if s.heartbeatAttempted != nil {
+		s.heartbeatAttempted <- struct{}{}
+	}
+	if s.heartbeatFn != nil {
+		return s.heartbeatFn(ctx)
+	}
+	if len(s.heartbeatErrors) > 0 {
+		err := s.heartbeatErrors[0]
+		s.heartbeatErrors = s.heartbeatErrors[1:]
+		if err != nil {
+			return err
+		}
 	}
 	if s.manifest.ID != runID || s.manifest.State != soakManifestRunning {
-		return errors.New("manifest is not running")
+		return errSoakRunNotActive
 	}
 	heartbeat := at.UTC()
 	s.manifest.LastHeartbeatAt = &heartbeat
 	s.manifest.UpdatedAt = heartbeat
 	s.heartbeats = append(s.heartbeats, heartbeat)
 	return nil
+}
+
+func (s *fakeSoakLifecycleStore) snapshotHeartbeats() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.heartbeats...)
 }
 
 func (s *fakeSoakLifecycleStore) GetManifest(

@@ -221,7 +221,9 @@ func (s *mongoSoakStore) TouchHeartbeat(
 		return fmt.Errorf("touch soak manifest %q heartbeat: %w", runID, err)
 	}
 	if result.MatchedCount == 0 {
-		return fmt.Errorf("touch soak manifest %q heartbeat: run is not active", runID)
+		return fmt.Errorf(
+			"touch soak manifest %q heartbeat: %w", runID, errSoakRunNotActive,
+		)
 	}
 	return nil
 }

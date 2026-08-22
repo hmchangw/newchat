@@ -4,8 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
+)
+
+const (
+	soakHeartbeatAttemptTimeout = 5 * time.Second
+	soakHeartbeatRetryInterval  = 5 * time.Second
 )
 
 type soakWorkloadAction func(context.Context, bool) error
@@ -106,7 +112,22 @@ type soakLifecycleStore interface {
 	TouchHeartbeat(context.Context, string, time.Time) error
 }
 
-var errSoakManifestNotFound = errors.New("soak run manifest not found")
+var (
+	errSoakManifestNotFound = errors.New("soak run manifest not found")
+	errSoakRunNotActive     = errors.New("soak run is not active")
+)
+
+type soakHeartbeatOutcome string
+
+const (
+	soakHeartbeatSuccess   soakHeartbeatOutcome = "success"
+	soakHeartbeatError     soakHeartbeatOutcome = "error"
+	soakHeartbeatNotActive soakHeartbeatOutcome = "not_active"
+)
+
+type soakHeartbeatObserver interface {
+	RecordHeartbeatAttempt(soakHeartbeatOutcome, bool, time.Time)
+}
 
 type soakLaneDispatcher func(
 	ctx context.Context,
@@ -303,6 +324,11 @@ func (w *soakWorkload) Run(
 			w.store,
 			w.cfg.RunID,
 			heartbeatTicker.C,
+			soakHeartbeatAttemptTimeout,
+			soakHeartbeatRetryInterval,
+			nil,
+			w.now,
+			nil,
 		)
 		if heartbeatErr != nil &&
 			!errors.Is(heartbeatErr, context.Canceled) &&
@@ -610,24 +636,125 @@ func stopSoakRun(
 	return nil
 }
 
+type soakHeartbeatRetryWait func(context.Context, time.Duration) error
+
+func waitSoakHeartbeatRetry(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func runSoakHeartbeat(
 	ctx context.Context,
 	store soakLifecycleStore,
 	runID string,
-	ticks <-chan time.Time,
+	healthyTicks <-chan time.Time,
+	attemptTimeout time.Duration,
+	retryInterval time.Duration,
+	waitRetry soakHeartbeatRetryWait,
+	now func() time.Time,
+	observer soakHeartbeatObserver,
 ) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case at, ok := <-ticks:
-			if !ok {
-				return nil
+	if attemptTimeout <= 0 {
+		attemptTimeout = soakHeartbeatAttemptTimeout
+	}
+	if now == nil {
+		now = time.Now
+	}
+	if retryInterval <= 0 {
+		retryInterval = soakHeartbeatRetryInterval
+	}
+	if waitRetry == nil {
+		waitRetry = waitSoakHeartbeatRetry
+	}
+	degraded := false
+	var degradedAt time.Time
+	for healthyTicks != nil || degraded {
+		var at time.Time
+		if degraded {
+			if err := waitRetry(ctx, retryInterval); err != nil {
+				return err
 			}
-			if err := store.TouchHeartbeat(ctx, runID, at.UTC()); err != nil {
-				return fmt.Errorf("update soak heartbeat: %w", err)
+			at = now().UTC()
+		} else {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case tick, ok := <-healthyTicks:
+				if !ok {
+					healthyTicks = nil
+					continue
+				}
+				at = tick
 			}
 		}
+
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		err := store.TouchHeartbeat(attemptCtx, runID, at.UTC())
+		cancel()
+		completedAt := now().UTC()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		switch {
+		case errors.Is(err, errSoakRunNotActive):
+			recordSoakHeartbeatAttempt(
+				observer, soakHeartbeatNotActive, false, completedAt,
+			)
+			return fmt.Errorf("update soak heartbeat: %w", err)
+		case err != nil:
+			recordSoakHeartbeatAttempt(observer, soakHeartbeatError, true, completedAt)
+			if !degraded {
+				degraded = true
+				degradedAt = completedAt
+				slog.Warn("soak heartbeat entered degraded state",
+					"runId", runID, "error", err)
+			}
+			continue
+		default:
+			recordSoakHeartbeatAttempt(observer, soakHeartbeatSuccess, false, completedAt)
+			if degraded {
+				slog.Info("soak heartbeat recovered",
+					"runId", runID, "degradedDuration", completedAt.Sub(degradedAt))
+				if !drainSoakHeartbeatTicks(healthyTicks) {
+					healthyTicks = nil
+				}
+			}
+			degraded = false
+		}
+	}
+	return nil
+}
+
+// drainSoakHeartbeatTicks discards the stale healthy tick a time.Ticker may
+// buffer while retries own the schedule, preventing an immediate second
+// heartbeat after recovery.
+func drainSoakHeartbeatTicks(ticks <-chan time.Time) bool {
+	for {
+		select {
+		case _, ok := <-ticks:
+			if !ok {
+				return false
+			}
+		default:
+			return true
+		}
+	}
+}
+
+func recordSoakHeartbeatAttempt(
+	observer soakHeartbeatObserver,
+	outcome soakHeartbeatOutcome,
+	degraded bool,
+	completedAt time.Time,
+) {
+	if observer != nil {
+		observer.RecordHeartbeatAttempt(outcome, degraded, completedAt)
 	}
 }
 
