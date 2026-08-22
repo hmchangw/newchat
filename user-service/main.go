@@ -2,20 +2,33 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"time"
 
+	o11y "github.com/flywindy/o11y"
+	o11ygin "github.com/flywindy/o11y/gin"
 	o11yredis "github.com/flywindy/o11y/redis"
+	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
+	"github.com/hmchangw/chat/pkg/botauth"
+	"github.com/hmchangw/chat/pkg/ginutil"
+	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/memlimit"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
+	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/historyclient"
@@ -73,6 +86,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Before anything allocates: the concurrency cap is sized from an estimate of
+	// per-request memory, and a soft limit turns a wrong estimate into GC pressure
+	// rather than an OOMKill that would cascade across the fleet.
+	if limit, applied, err := memlimit.SetFromCgroup(cfg.GoMemLimitFraction); err != nil {
+		slog.Warn("could not derive GOMEMLIMIT from the cgroup; using the runtime default", "error", err)
+	} else if applied {
+		slog.Info("GOMEMLIMIT derived from cgroup", "bytes", limit, "fraction", cfg.GoMemLimitFraction)
+	}
+
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -98,9 +120,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithObservability(sdk),
+		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
+	)
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
+		os.Exit(1)
+	}
+
+	// A pool of its own for HTTP, so a large page cannot exhaust the connections
+	// the NATS handlers share. ConnectRead bakes in secondaryPreferred, which is
+	// what this read-only path wants.
+	httpMongoClient, err := mongoutil.ConnectRead(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithObservability(sdk),
+		mongoutil.WithMaxPoolSize(cfg.HTTP.MongoMaxPoolSize),
+		mongoutil.WithMinPoolSize(cfg.HTTP.MongoMinPoolSize),
+	)
+	if err != nil {
+		slog.Error("http mongo connect failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -173,6 +211,16 @@ func main() {
 
 	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 
+	// A second service instance over the HTTP-only Mongo pool. Everything else --
+	// the NATS clients, publishers, badge cache -- is shared and stateless.
+	httpDB := httpMongoClient.Database(cfg.Mongo.DB)
+	httpSvc := service.New(
+		mongorepo.NewSubscriptionRepo(httpDB, cfg.SiteID,
+			mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts)),
+		mongorepo.NewUserRepo(httpDB), mongorepo.NewAppRepo(httpDB), threadSubRepo,
+		roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc),
+		publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
+
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
 	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
@@ -191,12 +239,28 @@ func main() {
 
 	svc.RegisterHandlers(router)
 
-	slog.Info("user-service running", "site", cfg.SiteID)
+	httpSrv, err := startHTTPServer(&cfg, httpSvc, sdk, tokenValidator)
+	if err != nil {
+		slog.Error("http server failed to start", "error", err)
+		os.Exit(1)
+	}
 
+	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second, natsutil.HealthCheck(nc))
+	if err != nil {
+		slog.Error("health server failed to start", "error", err)
+		os.Exit(1)
+	}
+
+	slog.Info("user-service running", "site", cfg.SiteID, "http_port", cfg.HTTP.Port, "health_addr", cfg.HealthAddr)
+
+	// HTTP drains first so in-flight requests can still reach NATS and Mongo.
 	shutdown.Wait(ctx, 25*time.Second,
+		func(ctx context.Context) error { return httpSrv.Shutdown(ctx) },
+		healthStop,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		func(ctx context.Context) error { mongoutil.Disconnect(ctx, httpMongoClient); return nil },
 		func(ctx context.Context) error {
 			if valkeyClient == nil {
 				return nil
@@ -205,4 +269,53 @@ func main() {
 		},
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// startHTTPServer builds the Gin engine and serves it in the background. It
+// returns once the listener is bound, so a port clash fails startup rather than
+// surfacing later as a silently missing API.
+func startHTTPServer(cfg *config.Config, svc *service.UserService, sdk *o11y.SDK, sso ssoValidator) (*http.Server, error) {
+	shedCounter, err := sdk.MeterProvider().Meter("user-service").Int64Counter(
+		"http_requests_shed_total",
+		metric.WithDescription("HTTP requests rejected with 429 because the in-flight cap was reached."))
+	if err != nil {
+		return nil, fmt.Errorf("create http_requests_shed_total counter: %w", err)
+	}
+
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	// CORS handles preflight before tracing so OPTIONS noise stays out of Tempo.
+	r.Use(ginutil.CORS())
+	r.Use(o11ygin.Middleware("user-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
+	r.Use(gin.Recovery())
+	// RequestID precedes AccessLog and the handlers, which both read it.
+	r.Use(ginutil.RequestID())
+	r.Use(ginutil.AccessLog())
+
+	auth := authDeps{sso: sso}
+	if cfg.BotplatformURL != "" {
+		auth.bot = botauth.NewValidator(restyutil.New("", restyutil.WithTimeout(5*time.Second)), cfg.BotplatformURL)
+		slog.Info("session-token auth enabled", "botplatform_url", cfg.BotplatformURL)
+	} else {
+		slog.Warn("BOTPLATFORM_URL unset — HTTP session-token auth disabled, ssoToken only")
+	}
+
+	registerRoutes(r, newHandler(svc, cfg.HTTP.DefaultLimit, cfg.HTTP.MaxLimit), auth, httpDeps{
+		maxConcurrency: cfg.HTTP.MaxConcurrency,
+		gzipMinBytes:   cfg.HTTP.GzipMinBytes,
+		handlerTimeout: cfg.HTTP.HandlerTimeout,
+		onShed:         func() { shedCounter.Add(context.Background(), 1) },
+	})
+
+	srv := newHTTPServer(net.JoinHostPort("", cfg.HTTP.Port), r, &cfg.HTTP)
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("http listen on %q: %w", srv.Addr, err)
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("http server stopped", "error", err)
+		}
+	}()
+	return srv, nil
 }
