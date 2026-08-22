@@ -36,9 +36,8 @@ type notifyKey struct {
 }
 
 type notificationMetrics struct {
-	outcomes        metric.Int64Counter
-	opts            map[notifyKey]metric.MeasurementOption
-	mentionFailures metric.Int64Counter
+	outcomes metric.Int64Counter
+	opts     map[notifyKey]metric.MeasurementOption
 }
 
 func newNotificationMetrics(meter metric.Meter) *notificationMetrics {
@@ -50,20 +49,9 @@ func newNotificationMetrics(meter metric.Meter) *notificationMetrics {
 		// the service runs blind on this metric rather than not at all.
 		counter, _ = noopMeter.Int64Counter("notification_worker_outcomes_total")
 	}
-	// Failures only, and attribute-free: a mention lookup that errors or times out
-	// ships raw @tokens in every push body, which nothing else in this service
-	// reports. Per-token resolved/unresolved accounting was deliberately dropped —
-	// it costs a counter add per message on the hot path to report something an
-	// operator cannot act on.
-	mentionFailures, err := meter.Int64Counter("notification_worker_mention_lookup_failures_total",
-		metric.WithDescription("Push-body @mention lookups that errored or timed out."))
-	if err != nil {
-		mentionFailures, _ = noopMeter.Int64Counter("notification_worker_mention_lookup_failures_total")
-	}
 	m := &notificationMetrics{
-		outcomes:        counter,
-		opts:            make(map[notifyKey]metric.MeasurementOption, len(allNotifyKinds)*len(allNotifyResults)),
-		mentionFailures: mentionFailures,
+		outcomes: counter,
+		opts:     make(map[notifyKey]metric.MeasurementOption, len(allNotifyKinds)*len(allNotifyResults)),
 	}
 	for _, kind := range allNotifyKinds {
 		for _, result := range allNotifyResults {
@@ -74,15 +62,6 @@ func newNotificationMetrics(meter metric.Meter) *notificationMetrics {
 		}
 	}
 	return m
-}
-
-// RecordMentionFailure counts one failed mention lookup — the push still goes
-// out, with raw @tokens in the body.
-func (m *notificationMetrics) RecordMentionFailure(ctx context.Context) {
-	if m == nil || m.mentionFailures == nil {
-		return
-	}
-	m.mentionFailures.Add(ctx, 1)
 }
 
 func (m *notificationMetrics) Record(ctx context.Context, kind notifyKind, result notifyResult) {

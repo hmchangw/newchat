@@ -434,7 +434,7 @@ func (h *Handler) resolveBody(ctx context.Context, content string, parsed mentio
 			resolved, err := h.deps.MentionNames.Resolve(ctx, lookup)
 			names = resolved
 			if err != nil {
-				h.metrics.RecordMentionFailure(ctx)
+				// Not counted in notificationMetrics: the warn line is the signal.
 				slog.WarnContext(ctx, "mention name lookup failed, body keeps raw mentions",
 					"error", err, "mentions", len(lookup), "resolved", len(resolved),
 					"request_id", natsutil.RequestIDFromContext(ctx))
