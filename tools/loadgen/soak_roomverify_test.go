@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,15 +28,20 @@ type soakRoomStateStoreStub struct {
 	seenErr    error
 	appended   []string
 	appendErr  error
+	appendHook func()
 	byName     string
 	byNameOK   bool
 	byNameErr  error
 	ownedRooms int
 	ownedErr   error
 	reads      int
+	contextErr func(context.Context) error
 }
 
-func (s *soakRoomStateStoreStub) RoomName(context.Context, string) (string, bool, error) {
+func (s *soakRoomStateStoreStub) RoomName(ctx context.Context, _ string) (string, bool, error) {
+	if err := s.checkContext(ctx); err != nil {
+		return "", false, err
+	}
 	return s.name, s.nameFound, s.nameErr
 }
 
@@ -44,33 +50,57 @@ func (s *soakRoomStateStoreStub) CountCreatedRooms(context.Context, string) (int
 }
 
 func (s *soakRoomStateStoreStub) RoomIDByName(
-	context.Context,
-	string,
-	string,
+	ctx context.Context,
+	_ string,
+	_ string,
 ) (string, bool, error) {
+	if err := s.checkContext(ctx); err != nil {
+		return "", false, err
+	}
 	return s.byName, s.byNameOK, s.byNameErr
 }
 
-func (s *soakRoomStateStoreStub) IsRoomMember(context.Context, string, string) (bool, error) {
+func (s *soakRoomStateStoreStub) IsRoomMember(
+	ctx context.Context, _ string, _ string,
+) (bool, error) {
 	s.reads++
+	if err := s.checkContext(ctx); err != nil {
+		return false, err
+	}
 	return s.member, s.memberErr
 }
 
 func (s *soakRoomStateStoreStub) SubscriptionMuted(
-	context.Context, string, string,
+	ctx context.Context, _ string, _ string,
 ) (bool, bool, error) {
+	if err := s.checkContext(ctx); err != nil {
+		return false, false, err
+	}
 	return s.muted, s.mutedFound, s.mutedErr
 }
 
 func (s *soakRoomStateStoreStub) SubscriptionLastSeen(
-	context.Context, string, string,
+	ctx context.Context, _ string, _ string,
 ) (time.Time, bool, error) {
+	if err := s.checkContext(ctx); err != nil {
+		return time.Time{}, false, err
+	}
 	return s.lastSeen, s.seenFound, s.seenErr
+}
+
+func (s *soakRoomStateStoreStub) checkContext(ctx context.Context) error {
+	if s.contextErr != nil {
+		return s.contextErr(ctx)
+	}
+	return nil
 }
 
 func (s *soakRoomStateStoreStub) AppendOwnedRooms(
 	_ context.Context, _ string, roomIDs []string,
 ) error {
+	if s.appendHook != nil {
+		s.appendHook()
+	}
 	// A failed write records nothing, the way a rejected Mongo update does.
 	if s.appendErr != nil {
 		return s.appendErr
@@ -117,6 +147,100 @@ func soakMemberOperation(add bool) *failureOperation {
 			soakFailureAttributeRequester:      "user-a0",
 		},
 	}
+}
+
+func TestSoakRoomStateVerifier_BoundsEveryAuthoritativeRead(t *testing.T) {
+	readBaseline := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		operation *failureOperation
+	}{
+		{name: "member", operation: soakMemberOperation(true)},
+		{name: "rename", operation: soakRenameOperation()},
+		{name: "mute", operation: soakMuteOperation(true)},
+		{name: "create", operation: &failureOperation{
+			ID: "operation-create", OperationType: failureOperationRoomCreate,
+			Targets: map[string]string{"roomName": "soak-run-1-created-timeout"},
+		}},
+		{name: "read cursor", operation: soakReadOperation(readBaseline, true)},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &soakRoomStateStoreStub{contextErr: func(ctx context.Context) error {
+				deadline, ok := ctx.Deadline()
+				require.True(t, ok)
+				assert.WithinDuration(
+					t, time.Now().Add(soakRoomStateTimeout), deadline, time.Second,
+				)
+				return errors.New("primary unavailable")
+			}}
+			verifier, _ := newSoakRoomVerifyFixture(
+				t, &soakRoomOpsTransport{err: nats.ErrTimeout}, store,
+			)
+
+			result, _, err := verifier.Verify(context.Background(), testCase.operation)
+
+			require.NoError(t, err)
+			assert.Equal(t, soakRoomStateUnknown, result)
+		})
+	}
+}
+
+func TestSoakRoomStateVerifier_ReservesBudgetForAuthoritativeReadAfterRPCTimeout(
+	t *testing.T,
+) {
+	const (
+		totalBudget = 120 * time.Millisecond
+		rpcBudget   = 70 * time.Millisecond
+	)
+	transport := &soakRoomOpsTransport{requestFn: func(ctx context.Context) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	storeCalled := make(chan time.Duration, 1)
+	store := &soakRoomStateStoreStub{
+		member: true,
+		contextErr: func(ctx context.Context) error {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok)
+			storeCalled <- time.Until(deadline)
+			return nil
+		},
+	}
+	verifier, _ := newSoakRoomVerifyFixture(t, transport, store)
+	verifier.timeout = totalBudget
+	verifier.rpcTimeout = rpcBudget
+
+	startedAt := time.Now()
+	result, reason, err := verifier.Verify(context.Background(), soakMemberOperation(true))
+
+	require.NoError(t, err)
+	assert.Equal(t, soakRoomStateMatched, result)
+	assert.Equal(t, failureReasonNone, reason)
+	remaining := <-storeCalled
+	assert.Greater(t, remaining, 20*time.Millisecond,
+		"the RPC phase must leave a live budget for the authoritative read")
+	assert.Less(t, time.Since(startedAt), totalBudget+50*time.Millisecond)
+}
+
+func TestSoakRoomStateVerifier_RespectsAnEarlierParentDeadline(t *testing.T) {
+	parentDeadline := time.Now().Add(2 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancel()
+	store := &soakRoomStateStoreStub{contextErr: func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		assert.WithinDuration(t, parentDeadline, deadline, time.Second)
+		return errors.New("primary unavailable")
+	}}
+	verifier, _ := newSoakRoomVerifyFixture(
+		t, &soakRoomOpsTransport{err: nats.ErrTimeout}, store,
+	)
+
+	result, _, err := verifier.Verify(ctx, soakMemberOperation(true))
+
+	require.NoError(t, err)
+	assert.Equal(t, soakRoomStateUnknown, result)
 }
 
 // A positive from room-service settles the operation on its own: no primary
