@@ -106,6 +106,16 @@ func (h *handler) handleSubscription(ctx context.Context, ev oplogEvent) error {
 		return fmt.Errorf("%w: decode source subscription: %v", migration.ErrPoison, uerr) //nolint:errorlint // intentional single-%w sentinel wrap; decode err is informational only
 	}
 
+	if isSoftDeletedName(ss.Name, ss.FName) {
+		// The source renames every subscription's denormalized name along with its room's when the
+		// room is soft-deleted, so the prefix marks a subscription to a deleted room — skip it on
+		// any op, matching the room path.
+		slog.Debug("skip subscription to soft-deleted room",
+			"eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
+		h.metrics.onSkipped(ctx, "subscription_soft_deleted")
+		return migration.ErrSkipped
+	}
+
 	if ev.Op == "update" {
 		return h.handleSubscriptionUpdate(ctx, ev, &ss)
 	}

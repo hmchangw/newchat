@@ -84,6 +84,16 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 		return fmt.Errorf("%w: decode source room: %v", migration.ErrPoison, uerr) //nolint:errorlint // intentional single-%w sentinel wrap; decode err is informational only
 	}
 
+	if isSoftDeletedName(sr.Name, sr.FName) {
+		// Soft-deleted at source ("Del-" rename) — never import it, on any op: an insert/replace
+		// would create a room the destination only ever hides, and a rename INTO the prefix is the
+		// deletion itself, which has no destination equivalent to apply.
+		slog.Debug("skip soft-deleted room",
+			"eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
+		h.metrics.onSkipped(ctx, "room_soft_deleted")
+		return migration.ErrSkipped
+	}
+
 	// hasBot is unresolvable here without a user lookup (botDM detection deferred — see §4.2 /
 	// the design's botDM note); pass false so a 2-party bot DM classifies as a plain dm for now.
 	class := classifyRoom(sr.T, sr.Prid != "", sr.TeamID != "", false, sr.participantCount())

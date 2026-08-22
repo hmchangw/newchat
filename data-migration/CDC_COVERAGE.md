@@ -31,14 +31,14 @@ The connector forwards raw change-stream events with **no `updateLookup`** and *
 | # | Source event | Op + payload | Source lookup (by `_id`) | Current-system facts | Handling / impact |
 |---|---|---|---|---|---|
 | **Rooms** |
-| 1 | Room create | `insert` — full doc | in payload | `t` ∈ `c,p,d,l,v`; `prid`⇒discussion; `teamId`/`teamMain`; `d` can have >2 users | ✅ map → `room_sync` (skip `l`,`v`,group-DM) |
-| 2 | Room replace | `replace` — full doc | not needed | whole-doc rewrite; can cross type/exclusion boundary; **no delta** to tell which fields changed | ✅ re-classify → `room_renamed` + `room_restricted` + `room_sync` (conservative — field events are idempotent + guarded; subs' denormalized name/visibility must not go stale) |
-| 3 | Room change | `update` — changed fields only | full current doc | — | ✅ re-read doc → `room_renamed` / `room_restricted` / `room_sync` |
+| 1 | Room create | `insert` — full doc | in payload | `t` ∈ `c,p,d,l,v`; `prid`⇒discussion; `teamId`/`teamMain`; `d` can have >2 users | ✅ map → `room_sync` (skip `l`,`v`,group-DM, soft-deleted) |
+| 2 | Room replace | `replace` — full doc | not needed | whole-doc rewrite; can cross type/exclusion boundary; **no delta** to tell which fields changed | ✅ re-classify → `room_renamed` + `room_restricted` + `room_sync` (skip soft-deleted; conservative — field events are idempotent + guarded; subs' denormalized name/visibility must not go stale) |
+| 3 | Room change | `update` — changed fields only | full current doc | — | ✅ re-read doc → `room_renamed` / `room_restricted` / `room_sync` (skip soft-deleted) |
 | 4 | Room delete | `delete` — `_id` only | nothing — doc gone | app has no room-delete operation | ❌ skip (no app deletion; un-actionable) |
 | **Subscriptions** |
-| 5 | Sub create | `insert` — full doc | in payload | `u`, `rid`, `roles[]`, `open`, `f`, `disableNotifications`, `ls`/`lr`, `alert` | ✅ `member_added` + state events |
-| 6 | Sub replace | `replace` — full doc | not needed | whole-doc rewrite | ✅ re-classify → `member_added` + state |
-| 7 | Sub change (incl. leave/rejoin) | `update` — changed fields only | full current doc | leaving sets `open:false` (not a row delete) | ✅ re-read doc → `open`-toggle → `member_added`/`member_removed`; mute/fav/role/read → matching event |
+| 5 | Sub create | `insert` — full doc | in payload | `u`, `rid`, `roles[]`, `open`, `f`, `disableNotifications`, `ls`/`lr`, `alert` | ✅ `member_added` + state events (skip soft-deleted) |
+| 6 | Sub replace | `replace` — full doc | not needed | whole-doc rewrite | ✅ re-classify → `member_added` + state (skip soft-deleted) |
+| 7 | Sub change (incl. leave/rejoin) | `update` — changed fields only | full current doc | leaving sets `open:false` (not a row delete) | ✅ re-read doc → `open`-toggle → `member_added`/`member_removed`; mute/fav/role/read → matching event (skip soft-deleted) |
 | 8 | Sub delete (true row removal) | `delete` — `_id` only | nothing — doc gone | destination subs key by generated `UUIDv7`, not source `_id`; removal needs `(roomID, account)` | ❌ skip (un-actionable; rare — leave is `open:false`) |
 | **Thread subscriptions** |
 | 9 | Follow / first reply | `insert` — full doc | in payload | keyed `(u._id, parentMessage._id)`; carries `rid`, `lastSeenAt`, `unreadMention` | ✅ resolve thread-room+user → `thread_subscription_upserted` |
@@ -53,6 +53,20 @@ The connector forwards raw change-stream events with **no `updateLookup`** and *
 | 16 | User deactivate / delete | `update` (`active:false`) or `delete` | `update`: full doc · `delete`: nothing | source sets `active:false` (no row deletion); no destination apply-path wired | ❌ deferred (out of scope) |
 | **All collections** |
 | 17 | Collection drop / rename | collection-level (`drop`/`rename`/`invalidate`) | n/a | terminates/invalidates the per-collection change stream | ⚠️ out of scope, deferred — connector re-point, not migration logic |
+
+### Soft-deleted rooms (`Del-` prefix)
+
+The source "deletes" a room by renaming it — and every subscription's denormalized name — to
+`Del-`+name; there is no delete flag and no row removal. Rooms and subscriptions whose `name` **or**
+`fname` carries that exact prefix are **never imported**, on any op (`insert`/`replace`/`update`),
+metered as `room_soft_deleted` / `subscription_soft_deleted`. Only the exact `Del-` prefix counts
+(`delta`, `del-general`, `team-Del-old` are live rooms) — the same marker `user-service` filters
+subscription reads on.
+
+**Consequence:** a room soft-deleted *after* the CDC checkpoint arrives as a rename-into-`Del-`
+update, which is skipped like any other soft-deleted record — the destination room (imported while
+it was live) stays as it was. The new stack has no room deletion to apply, so this is the same
+end-state as row 4 (`Room delete` → skip).
 
 ## Direct-transfer collections (oplog-direct-transfer)
 

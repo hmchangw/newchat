@@ -358,3 +358,56 @@ func TestHandleRoom_NonDegradedInsertWithoutFullDocument_Poisons(t *testing.T) {
 	ev := oplogEvent{Op: "insert", Collection: roomsColl, DocumentKey: json.RawMessage(`{"_id":"r1"}`)}
 	assert.ErrorIs(t, h.handleRoom(context.Background(), ev), migration.ErrPoison)
 }
+
+// TestHandleRoom_SoftDeletedSkipped: the legacy app soft-deletes a room by renaming it to
+// "Del-"+name; such rooms must never be imported, on any op.
+func TestHandleRoom_SoftDeletedSkipped(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{"fname carries the prefix", `{"_id":"r1","t":"c","name":"general","fname":"Del-General","uids":["u1"]}`},
+		{"name carries the prefix", `{"_id":"r1","t":"c","name":"Del-general","fname":"General","uids":["u1"]}`},
+		{"both carry the prefix", `{"_id":"r1","t":"c","name":"Del-general","fname":"Del-General","uids":["u1"]}`},
+		{"discussion", `{"_id":"r1","t":"p","prid":"p1","fname":"Del-Topic","uids":["u1"]}`},
+		{"dm", `{"_id":"r1","t":"d","name":"Del-bob","uids":["u1","u2"]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, op := range []string{"insert", "replace"} {
+				pub := &fakePublisher{}
+				h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
+				err := h.handleRoom(context.Background(), roomEv(op, tc.doc, ""))
+				assert.ErrorIs(t, err, migration.ErrSkipped, "op %s", op)
+				assert.Empty(t, pub.events, "op %s", op)
+			}
+			// update re-reads the current source doc through the lookup.
+			pub := &fakePublisher{}
+			h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(tc.doc)})
+			err := h.handleRoom(context.Background(), roomEv("update", "", `{"updatedFields":{"fname":"x"}}`))
+			assert.ErrorIs(t, err, migration.ErrSkipped)
+			assert.Empty(t, pub.events)
+		})
+	}
+}
+
+// TestHandleRoom_NonDeletedNameKept: only the exact "Del-" prefix marks a soft delete — a name
+// that merely starts with those letters is a live room.
+func TestHandleRoom_NonDeletedNameKept(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{"prefix without hyphen", `{"_id":"r1","t":"c","name":"delta","fname":"Delta","uids":["u1"]}`},
+		{"lowercase del-", `{"_id":"r1","t":"c","name":"del-general","fname":"del-General","uids":["u1"]}`},
+		{"prefix mid-name", `{"_id":"r1","t":"c","name":"team-Del-old","fname":"Team Del-old","uids":["u1"]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &fakePublisher{}
+			h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
+			require.NoError(t, h.handleRoom(context.Background(), roomEv("insert", tc.doc, "")))
+			assert.Len(t, pub.events, 1)
+		})
+	}
+}
