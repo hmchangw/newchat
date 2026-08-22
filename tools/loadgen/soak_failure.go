@@ -789,14 +789,20 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, bool, error) {
 		return true, true, r.recordObserved(r.observe(operation.ID, failureObservationGood, now))
 	}
 	if now.Before(operation.Deadline) {
-		// The poll for a message that has not landed yet, and the only retry
-		// here that repeats for the whole deadline — so it is the one that has
-		// to back off. The error paths above keep the flat interval: they
-		// retry a failed call, not a pending effect.
-		if err := r.ledger.ReleaseClaim(
-			operation.ID,
-			nextReconcileProbe(now, operation.VerifyAfter, operation.Deadline, r.retryInterval),
-		); err != nil {
+		// Two different retries share this branch. A probe that answered and
+		// found nothing is a pending effect, and it repeats for the whole
+		// deadline, so it is the one that has to back off. A probe that could
+		// not be answered established nothing about the message: backing it off
+		// would let one timeout push the next look minutes away, and the
+		// operation could reach its deadline unverified because of the retry
+		// policy rather than because of storage. A failed call keeps the flat
+		// interval, which is what the claim outcome recorded below already says.
+		retryAt := now.Add(r.retryInterval)
+		if verifyErr == nil {
+			retryAt = nextReconcileProbe(
+				now, operation.VerifyAfter, operation.Deadline, r.retryInterval)
+		}
+		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
 			r.recordClaim(soakReconcileClaimFailed)
 			return true, true, fmt.Errorf(
 				"reschedule pending soak history probe for %q: %w", operation.ID, err)
