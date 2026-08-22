@@ -556,10 +556,20 @@ as the panel is open:
 | `message_deleted` | [DeleteRoomEvent](#message_deleted-deleteroomevent) |
 
 **Client handling.** Subscribe *before* calling `msg.thread`, or a reply published in the gap is
-lost. Unsubscribe on panel close, on a switch to another parent, and on teardown. Deduplicate by
-message ID: a follower with the panel open receives every event twice, and the copies are
-identical. Delivery here is best-effort and never retried — the panel's next open refetches, and
-the per-subscriber lane is unaffected.
+lost. Unsubscribe on panel close, on a switch to another parent, and on teardown.
+
+A follower with the panel open receives every event twice, and the copies are identical: suppress a
+`new_thread_message` whose ID is already rendered, but apply `message_edited` / `message_deleted`
+unconditionally — deduplicating those by message ID drops a later edit of an already-seen reply,
+and both are idempotent anyway.
+
+Process one thread's events in arrival order. In an encrypted room a plaintext `message_deleted`
+resolves faster than a preceding `new_thread_message` that must be decrypted first, so a
+concurrent handler can apply the delete to a reply it has not inserted yet and then render that
+reply as live.
+
+Delivery here is best-effort and never retried — the panel's next open refetches, and the
+per-subscriber lane is unaffected.
 
 ---
 

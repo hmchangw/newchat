@@ -6590,7 +6590,8 @@ Decrypt with the room key exactly as for the per-subscriber copy — see [§5 Ro
 
 - **Subscribe before fetching.** Open the subscription, then call [Get Thread Messages](#get-thread-messages), then merge. Fetching first leaves a window in which a reply is published before the subscription exists and is lost.
 - **Unsubscribe when the panel closes**, when it switches to another parent, and on teardown. The subscription is the only thing that makes the server deliver here, so a leaked one keeps consuming events.
-- **Deduplicate by message ID.** A thread follower with the panel open receives every event twice — once per-subscriber, once here. The two copies are identical.
+- **Deduplicate replies by message ID, and apply edits and deletes unconditionally.** A thread follower with the panel open receives every event twice — once per-subscriber, once here — and the two copies are identical. Suppress a `new_thread_message` whose ID is already rendered; do **not** suppress `message_edited` / `message_deleted` on that basis, or a later edit of an already-seen reply is dropped. Both mutations are idempotent, so applying a duplicate is a no-op.
+- **Process events for one thread in arrival order.** In an encrypted room a plaintext `message_deleted` resolves faster than a preceding `new_thread_message` that must be decrypted first. A client that handles events concurrently can apply the delete to a reply it has not inserted yet, drop it, and then render the reply as live. Serialize the handler per thread.
 - **Delivery is best-effort.** A publish failure on this subject is not retried; the panel's next open refetches. Followers' per-subscriber delivery is unaffected.
 
 ---

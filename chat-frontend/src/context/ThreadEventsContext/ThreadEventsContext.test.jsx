@@ -466,6 +466,37 @@ describe('ThreadEventsContext thread-view subscription', () => {
     expect(screen.getByText('firstContent:sealed then opened')).toBeInTheDocument()
   })
 
+  // The NATS subscribe loop does not await its callback, so a plaintext delete
+  // can finalize before a prior encrypted create resolves. Without
+  // serialization the delete lands on an absent id, is dropped, and the create
+  // then appends the reply as live — a deleted message rendering until reload.
+  it('applies a fast plaintext delete after a slow encrypted create, not before', async () => {
+    let releaseDecrypt
+    const decryptGate = new Promise((resolve) => { releaseDecrypt = resolve })
+    decrypt.mockImplementation(async () => {
+      await decryptGate
+      return JSON.stringify({ id: 'm9', content: 'slow' })
+    })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+
+    // Both events are handed to the callback before the create's decrypt resolves.
+    let created, deleted
+    await act(async () => {
+      created = threadEventHandler({
+        type: 'new_thread_message',
+        roomId: 'r1',
+        encryptedMessage: { version: 3, nonce: 'bm9uY2U=', ciphertext: 'Y2lwaGVy' },
+      })
+      deleted = threadEventHandler({ type: 'message_deleted', messageId: 'm9' })
+      releaseDecrypt()
+      await Promise.all([created, deleted])
+    })
+
+    expect(screen.getByText('count:1')).toBeInTheDocument()
+    expect(screen.getByText('firstDeleted:true')).toBeInTheDocument()
+  })
+
   it('applies a delete arriving on the thread subject', async () => {
     setup()
     await act(async () => { screen.getByText('open').click() })

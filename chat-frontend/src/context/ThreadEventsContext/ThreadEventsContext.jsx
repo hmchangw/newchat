@@ -30,6 +30,7 @@ export function ThreadEventsProvider({ children }) {
   const [state, dispatch] = useReducer(threadEventsReducer, initialState)
   const generationRef = useRef(0)
   const threadSubRef = useRef(null)
+  const threadChainRef = useRef(Promise.resolve())
   const decryptRef = useRef(decrypt)
   decryptRef.current = decrypt
   const ensureKeyRef = useRef(ensureKey)
@@ -102,27 +103,34 @@ export function ThreadEventsProvider({ children }) {
       threadSubRef.current = subscribeToThreadEvents(
         nats,
         { roomId: parent.roomId, parentMessageId: parent.messageId, crossSite: parent.crossSite },
-        async (raw) => {
-          // Channel rooms are encrypted, so this lane must decrypt exactly as
-          // the room lane does or every reply arrives as an empty envelope.
-          const evt = await decryptRoomEvent(raw, {
-            decrypt: decryptRef.current,
-            ensureKey: ensureKeyRef.current,
-            fallbackSiteId: parent.siteId,
-          })
-          if (myGen !== generationRef.current) return
-          if (evt?.type === 'new_thread_message') {
-            applyReply(parent.messageId, evt.message)
-          } else if (evt?.type === 'message_edited') {
-            applyMutation({
-              kind: 'edited',
-              messageId: evt.messageId,
-              content: evt.newContent,
-              editedAt: normalizeEditedAt(evt.editedAt),
+        (raw) => {
+          // Serialize: the NATS subscribe loop does not await this callback, so
+          // without a chain a plaintext delete finalizes before a prior
+          // encrypted create and lands on a message that is not in the list yet.
+          const work = async () => {
+            // Channel rooms are encrypted, so this lane must decrypt exactly as
+            // the room lane does or every reply arrives as an empty envelope.
+            const evt = await decryptRoomEvent(raw, {
+              decrypt: decryptRef.current,
+              ensureKey: ensureKeyRef.current,
+              fallbackSiteId: parent.siteId,
             })
-          } else if (evt?.type === 'message_deleted') {
-            applyMutation({ kind: 'deleted', messageId: evt.messageId })
+            if (myGen !== generationRef.current) return
+            if (evt?.type === 'new_thread_message') {
+              applyReply(parent.messageId, evt.message)
+            } else if (evt?.type === 'message_edited') {
+              applyMutation({
+                kind: 'edited',
+                messageId: evt.messageId,
+                content: evt.newContent,
+                editedAt: normalizeEditedAt(evt.editedAt),
+              })
+            } else if (evt?.type === 'message_deleted') {
+              applyMutation({ kind: 'deleted', messageId: evt.messageId })
+            }
           }
+          threadChainRef.current = threadChainRef.current.then(work, work)
+          return threadChainRef.current
         }
       )
       fetchThreadMessages(nats, {
