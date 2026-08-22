@@ -924,13 +924,15 @@ func soakReconcileLagBuckets() []float64 {
 	}
 }
 
-// warnSoakReconcileLagRange reports a deadline the lag histogram cannot resolve.
-// It warns rather than refuses for the same reason the capacity floor does: the
-// run is the operator's to judge. But lag is the signal that says whether a
-// window counted, so a deadline that outruns it must not be silent.
-func warnSoakReconcileLagRange(cfg *soakConfig) {
+// warnSoakReconcileLagRange reports a deadline the lag histogram cannot resolve
+// and returns whether it found one. It warns rather than refuses for the same
+// reason the capacity floor does: the run is the operator's to judge. But lag
+// is the signal that says whether a window counted, so a deadline that outruns
+// it leaves that question unanswerable, and the returned breach is what marks
+// the run rather than leaving a log line to close it.
+func warnSoakReconcileLagRange(cfg *soakConfig) bool {
 	if cfg == nil || cfg.ReconcileDeadline <= soakReconcileLagCeiling {
-		return
+		return false
 	}
 	slog.Warn("soak reconcile deadline outruns the lag histogram",
 		"soakReconcileDeadline", cfg.ReconcileDeadline.String(),
@@ -938,6 +940,7 @@ func warnSoakReconcileLagRange(cfg *soakConfig) {
 		"consequence", "loadgen_failure_reconcile_lag_seconds cannot place a quantile near the deadline",
 		"remedy", "lower SOAK_RECONCILE_DEADLINE or widen the lag buckets",
 	)
+	return true
 }
 
 // soakReadLaneReconciler is the reconciler seen from the read lane: one claim

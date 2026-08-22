@@ -95,7 +95,7 @@ func TestWarnSoakReconcileConfig_ReportsTheFloorBreachToItsCaller(t *testing.T) 
 
 	captureSoakLog(t)
 
-	assert.True(t, warnSoakReconcileConfig(&cfg),
+	assert.Contains(t, warnSoakReconcileConfig(&cfg), invalidReasonReconcileCapacity,
 		"a run below the floor must be reported, not only logged")
 }
 
@@ -107,7 +107,7 @@ func TestWarnSoakReconcileConfig_ReportsNoBreachForARunThatFits(t *testing.T) {
 
 	captureSoakLog(t)
 
-	assert.False(t, warnSoakReconcileConfig(&cfg))
+	assert.NotContains(t, warnSoakReconcileConfig(&cfg), invalidReasonReconcileCapacity)
 }
 
 // Counting the invalidation without invalidating the ledger leaves

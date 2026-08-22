@@ -424,7 +424,7 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
-	belowReconcileFloor := warnSoakReconcileConfig(&cfg.Soak)
+	reconcileBreaches := warnSoakReconcileConfig(&cfg.Soak)
 	setSoakRunInfo(metrics, cfg.Soak.Environment)
 	defer metrics.stopNATSHealth()
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
@@ -514,11 +514,12 @@ func runSoakWorkload(
 	if degradedLedger {
 		slog.Error("durable failure ledger unavailable; continuing with invalid in-memory observation")
 	}
-	if belowReconcileFloor {
-		// Recorded here rather than at the check itself: the ledger is what
-		// makes the verdict part of the run's own evidence instead of a number
-		// on a dashboard the snapshot contradicts.
-		ledger.Invalidate(invalidReasonReconcileCapacity)
+	// Recorded here rather than at the checks themselves: the ledger is what
+	// makes the verdict part of the run's own evidence — journaled, replayed,
+	// and reported by Snapshot — instead of a number on a dashboard the
+	// snapshot contradicts.
+	for _, reason := range reconcileBreaches {
+		ledger.Invalidate(reason)
 	}
 	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
 		metrics.FailureDropped.Add(float64(dropped))

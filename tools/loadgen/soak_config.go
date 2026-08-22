@@ -639,13 +639,20 @@ func soakReconcileCapacityFor(cfg *soakConfig) soakReconcileCapacity {
 // from: both checks warn rather than refuse, so an unreached one is silent
 // instead of loud, and nothing else would catch it.
 //
-// The floor breach is returned rather than recorded because it is known before
-// the ledger that must carry it is open. The caller invalidates the ledger once
-// it has one.
-func warnSoakReconcileConfig(cfg *soakConfig) bool {
-	belowFloor := warnSoakReconcileCapacity(cfg)
-	warnSoakReconcileLagRange(cfg)
-	return belowFloor
+// The breaches are returned rather than recorded because they are known before
+// the ledger that must carry them is open. The caller invalidates the ledger
+// once it has one, in the order given: the capacity floor comes first because
+// it is the breach that makes every verdict unverified, where the lag range
+// only makes the window unreadable.
+func warnSoakReconcileConfig(cfg *soakConfig) []string {
+	var reasons []string
+	if warnSoakReconcileCapacity(cfg) {
+		reasons = append(reasons, invalidReasonReconcileCapacity)
+	}
+	if warnSoakReconcileLagRange(cfg) {
+		reasons = append(reasons, invalidReasonReconcileLagRange)
+	}
+	return reasons
 }
 
 // warnSoakReconcileCapacity reports an under-provisioned reconcile lane without

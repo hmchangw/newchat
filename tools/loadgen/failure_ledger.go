@@ -250,10 +250,17 @@ const invalidReasonCapacity = "capacity"
 // want of a claim, so the evidence is in question from the first second.
 const invalidReasonReconcileCapacity = "reconcile_capacity"
 
+// invalidReasonReconcileLagRange marks a run whose reconcile deadline outruns
+// the lag histogram. Nothing is wrong with the lane, but the rule that says
+// whether a window counted reads lag against the deadline, and past the
+// ceiling that reading cannot be made — so the window is unreadable rather
+// than merely imprecise.
+const invalidReasonReconcileLagRange = "reconcile_lag_range"
+
 var failureInvalidationReasonRegistry = map[string]struct{}{
 	"capacity": {}, "wal": {}, "accounting_invariant": {}, "observer_queue": {},
-	invalidReasonReconcileCapacity: {},
-	"observer_malformed":           {}, "recipient_recovery": {}, "recipient_observer": {},
+	invalidReasonReconcileCapacity: {}, invalidReasonReconcileLagRange: {},
+	"observer_malformed": {}, "recipient_recovery": {}, "recipient_observer": {},
 	"timeline": {}, "other": {},
 	"sidecar": {},
 }

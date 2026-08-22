@@ -77,3 +77,53 @@ func TestWarnSoakReconcileConfig_ReportsCapacityAndLagRangeTogether(t *testing.T
 	assert.Contains(t, logged, "outruns the lag histogram",
 		"the lag-range check must be reachable from startup, not only from tests")
 }
+
+// A deadline the lag histogram cannot resolve is not a cosmetic problem: the
+// validity rule reads lag against the deadline, so past the ceiling there is no
+// way to tell whether the window counted. That is the same "inconclusive from
+// the first second" the capacity floor records, and it needs the same
+// machine-readable mark — a log line closes nothing.
+func TestWarnSoakReconcileConfig_MarksARunWhoseLagCannotBeResolved(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.ReconcileDeadline = soakReconcileLagCeiling + time.Minute
+
+	captureSoakLog(t)
+
+	assert.Contains(t, warnSoakReconcileConfig(&cfg), invalidReasonReconcileLagRange,
+		"a deadline past the resolvable range must invalidate the run, not only warn")
+}
+
+// Both breaches at once are reported, and in check order: the capacity floor is
+// what InvalidReason keeps, because it is the one that makes every verdict
+// unverified rather than merely unreadable.
+func TestWarnSoakReconcileConfig_ReportsBothBreachesCapacityFirst(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SendRate = 100
+	cfg.ReadRate = 1
+	cfg.ReconcileReadShare = 0.1
+	cfg.ReconcileDeadline = soakReconcileLagCeiling + time.Minute
+
+	captureSoakLog(t)
+
+	assert.Equal(t,
+		[]string{invalidReasonReconcileCapacity, invalidReasonReconcileLagRange},
+		warnSoakReconcileConfig(&cfg))
+}
+
+func TestWarnSoakReconcileConfig_ReportsNothingForAConfigurationThatFits(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SendRate = 55
+	cfg.ReadRate = 200
+	cfg.ReconcileReadShare = 0.75
+
+	captureSoakLog(t)
+
+	assert.Empty(t, warnSoakReconcileConfig(&cfg))
+}
+
+// The reason has to be in the bounded registry, or a run recovering the same
+// invalidation from its journal would record it as "other" and lose the cause.
+func TestFailureInvalidationRegistry_KnowsTheReconcileLagRangeReason(t *testing.T) {
+	_, known := failureInvalidationReasonRegistry[invalidReasonReconcileLagRange]
+	assert.True(t, known)
+}
