@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -158,4 +159,23 @@ func TestCORS_PreflightOptions_AllowsTracePropagationHeaders(t *testing.T) {
 	// Preflight stays permissive; untrusted identity is dropped at extraction by
 	// obs.PublicIngressPropagator, so a rolling client is not blocked by CORS.
 	assert.Contains(t, allowed, "baggage")
+}
+
+// A browser preflight that omits these fails, making every credentialed endpoint
+// unreachable cross-origin — the failure is invisible server-side, so pin them.
+func TestCORS_PreflightAllowsCredentialHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(CORS())
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/subscriptions", nil)
+	req.Header.Set("Origin", "https://chat.example.com")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	allowed := w.Header().Get("Access-Control-Allow-Headers")
+	for _, h := range []string{"ssoToken", botauth.HeaderUserID, botauth.HeaderAuthToken} {
+		assert.Contains(t, allowed, h, "credential header must survive preflight")
+	}
 }

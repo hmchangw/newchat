@@ -43,9 +43,10 @@ services:
       - BOTPLATFORM_URL=${BOTPLATFORM_URL:-}
       - GOMEMLIMIT_FRACTION=${GOMEMLIMIT_FRACTION:-0.8}
     ports:
-      # 8080 in-container; auth-service already owns host 8080. The health
-      # listener stays unpublished — it is for the kubelet, not the host.
-      - "${USER_SERVICE_HOST_PORT:-8088}:8080"
+      # 8080 in-container; host 8090 because 8080 (auth), 8082 (admin), 8085
+      # (portal), 8086 (upload), 8087 (tcard), 8088 (observability) and 8089
+      # (client-update) are taken. The health listener stays unpublished.
+      - "${USER_SERVICE_HOST_PORT:-8090}:8080"
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

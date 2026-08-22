@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -28,8 +29,9 @@ func RequestID() gin.HandlerFunc {
 	}
 }
 
-// CORS allows any origin and answers preflight OPTIONS with 204. Wildcard is
-// safe here: these endpoints take a JSON body, no cookies or credentials.
+// CORS allows any origin and answers preflight OPTIONS with 204. Wildcard stays
+// safe because no cookies are involved: the credential headers below are bearer
+// tokens the caller must already hold, so a foreign origin gains nothing.
 func CORS() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
@@ -37,7 +39,11 @@ func CORS() gin.HandlerFunc {
 		// baggage stays allowed so a browser already sending it under the previous
 		// contract keeps passing preflight during rollout; its contents are
 		// rejected at extraction by obs.PublicIngressPropagator, not by CORS.
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, traceparent, tracestate, baggage")
+		// ssoToken / x-user-id / x-auth-token are the bearer credentials user-service
+		// and botplatform-service read; omitting them fails the browser preflight and
+		// makes those endpoints unreachable cross-origin.
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, "+
+			"ssoToken, "+botauth.HeaderUserID+", "+botauth.HeaderAuthToken+", traceparent, tracestate, baggage")
 		c.Header("Access-Control-Max-Age", "300")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

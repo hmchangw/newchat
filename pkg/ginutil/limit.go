@@ -35,8 +35,8 @@ func MaxConcurrency(n int, onShed func()) gin.HandlerFunc {
 			if onShed != nil {
 				onShed()
 			}
-			// Not errhttp.Write: Classify logs per error, so a burst would cost one
-			// log line per rejection. The shed counter is the signal instead.
+			// Not errhttp.Write: Classify would add a second log line per rejection on
+			// top of AccessLog's. The shed counter is the signal to alert on.
 			c.Header("Retry-After", retryAfterSeconds)
 			c.AbortWithStatusJSON(shedErr.HTTPStatus(), shedErr)
 		}

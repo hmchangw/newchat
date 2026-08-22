@@ -129,10 +129,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// A pool of its own for HTTP, so a large page cannot exhaust the connections
-	// the NATS handlers share. ConnectRead bakes in secondaryPreferred, which is
-	// what this read-only path wants.
-	httpMongoClient, err := mongoutil.ConnectRead(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+	// A pool of its own for HTTP, so a large page cannot exhaust the connections the
+	// NATS handlers share. Same Connect as above, not ConnectRead: the read
+	// preference must stay the one MONGO_READ_PREFERENCE names, or the two
+	// transports could return differently-stale data with no signal.
+	httpMongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
 		mongoutil.WithObservability(sdk),
 		mongoutil.WithMaxPoolSize(cfg.HTTP.MongoMaxPoolSize),
 		mongoutil.WithMinPoolSize(cfg.HTTP.MongoMinPoolSize),
@@ -217,9 +218,9 @@ func main() {
 	// cannot be reached by a write path.
 	httpDB := httpMongoClient.Database(cfg.Mongo.DB)
 	httpSvc := service.New(
-		mongorepo.NewSubscriptionRepo(httpDB, cfg.SiteID,
+		mongorepo.NewSubscriptionRepo(httpDB, cfg.SiteID, readFromSecondary,
 			mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts)),
-		mongorepo.NewUserRepo(httpDB), mongorepo.NewAppRepo(httpDB), threadSubRepo,
+		mongorepo.NewUserRepo(httpDB, readFromSecondary), mongorepo.NewAppRepo(httpDB, readFromSecondary), threadSubRepo,
 		roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc),
 		publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 

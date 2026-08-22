@@ -140,10 +140,10 @@ func TestMaxConcurrency_AdmitsUpToCapConcurrently(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, fillAndShed(t, r, admitted, capacity).Code)
 }
 
-// Shedding must not log per request: the burst this exists to survive is exactly
-// when the pod cannot afford one log line per rejection. The shed counter is the
-// signal instead.
-func TestMaxConcurrency_ShedDoesNotLog(t *testing.T) {
+// The limiter adds no log line of its own. AccessLog still records the request —
+// that is uniform across every response — but a burst must not also pay for
+// Classify on each rejection.
+func TestMaxConcurrency_ShedAddsNoLogLine(t *testing.T) {
 	var logged bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -153,7 +153,7 @@ func TestMaxConcurrency_ShedDoesNotLog(t *testing.T) {
 	defer close(release)
 
 	require.Equal(t, http.StatusTooManyRequests, fillAndShed(t, r, admitted, 1).Code)
-	assert.Empty(t, logged.String(), "the shed path must stay silent")
+	assert.Empty(t, logged.String(), "the limiter must not log on its own")
 }
 
 // The shed path writes the envelope itself rather than going through
