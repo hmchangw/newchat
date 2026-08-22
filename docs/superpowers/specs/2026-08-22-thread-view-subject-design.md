@@ -81,12 +81,19 @@ New handler field `threadViewSubject bool`, wired through `NewHandler`.
 A single helper mirrors an already-published payload onto the thread subject:
 
 ```go
-func (h *Handler) publishThreadViewEvent(ctx context.Context, meta *roommetacache.Meta,
-    parentMsgID string, payload []byte)
+func (h *Handler) publishThreadViewEvent(ctx context.Context, roomID, parentMsgID string,
+    crossSite *bool, crossSiteAt *time.Time, payload []byte)
 ```
 
 Called from the `RoomTypeChannel` branch of `handleThreadCreated`, `handleThreadUpdated`,
-and `handleThreadDeleted`, after the per-follower fan-out succeeds.
+and `handleThreadDeleted`, immediately after the payload is marshalled and **before** the
+per-follower fan-out — so a per-follower failure that NAKs the message still leaves the
+viewer served.
+
+All three handlers currently short-circuit when the follower set is empty
+(`handleThreadCreated:263`, `handleThreadUpdated:381`, `handleThreadDeleted:433`). That is
+exactly the case a lone viewer hits, so the short-circuits are removed and the handlers fall
+through to marshal and publish. `publishToThreadAccounts` already no-ops on an empty set.
 
 **Best-effort by design.** The helper returns nothing and never fails the handler. The
 per-follower fan-out has already committed; returning an error would NAK and redeliver,
@@ -115,8 +122,9 @@ No success or volume counter. Publish attempts still flow through the existing
 **Ordering matters.** Subscribe *first*, then fetch thread messages, then merge. Fetching
 first leaves a gap in which a reply arrives before the subscription exists and is lost.
 
-**Dedup.** Keyed on `(messageId, eventType)`, so a follower with the panel open applies each
-event once.
+**Dedup.** Already handled: `threadEventsReducer` drops a `THREAD_REPLY_RECEIVED` whose id is
+already present (`reducer.js:78`), and `REPLY_EDITED`/`REPLY_DELETED` are idempotent. A
+follower with the panel open needs no new client logic.
 
 ## Error handling
 
@@ -126,6 +134,7 @@ event once.
 | Per-follower fan-out fails | Unchanged — error returned, JetStream redelivers. |
 | Flag off | No thread-subject publish; per-follower path unchanged. |
 | Empty `parentMessageID` | Skipped — an unroutable subject token. |
+| Empty follower set | Thread-subject publish still happens; per-follower fan-out no-ops. |
 | Client reconnects | NATS drops stale interest; the panel resubscribes and refetches. |
 
 ## Testing
@@ -142,7 +151,8 @@ thread subject as a non-follower, feed a canonical thread-reply event, assert th
 arrives with the expected type and payload.
 
 **`chat-frontend` vitest** — subject builder including the `crossSite` fail-safe;
-subscription opens on panel open and closes on unmount; dedup drops the duplicate.
+subscription opens on `openThread` and closes on `closeThread`; a duplicate reply arriving on
+both lanes lands once.
 
 ## Documentation
 
