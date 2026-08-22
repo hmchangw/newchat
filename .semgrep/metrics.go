@@ -1,17 +1,20 @@
 // Package testdata holds the fixtures for metrics.yml.
 //
 // Those rules are the only enforcement behind the contract's forbidden-label
-// list, and until this file existed they were verified by running a probe by
-// hand. A regex edit could therefore have disabled the gate while the contract
-// went on claiming it was enforced — the same shape of defect as the _INBOX
-// nosemgrep that asserted boundedness nothing checked.
+// list, and before this file existed they were verified by running a probe by
+// hand. A pattern edit could therefore have disabled the gate while the
+// contract went on claiming it was enforced — the same shape of defect as the
+// _INBOX nosemgrep that asserted boundedness nothing checked.
 //
-// `semgrep scan --test` reads the annotations below: a `ruleid:` comment names
-// every rule that must fire on the following line, comma-separated. Lines with
-// no annotation are negative assertions — a rule firing there is reported as a
-// false positive — which is why the bounded labels at the bottom carry no
-// comment. Both directions matter: a rule that stops flagging is broken, and
-// one that starts flagging error_type or reason is broken differently.
+// `semgrep scan --test` reads the annotations: a `ruleid:` comment names every
+// rule that must fire on the following line, comma-separated. Lines with no
+// annotation are negative assertions — a rule firing there is reported as a
+// false positive. Both directions matter: a rule that stops flagging is broken,
+// and one that starts flagging error_type or reason is broken differently.
+//
+// Coverage is per independently editable branch, not per rule. Each structural
+// pattern and each alternative of the cardinality regex gets its own line, so
+// deleting any one of them fails here rather than quietly narrowing the gate.
 //
 // The file sits beside metrics.yml because the test runner matches a rule file
 // to a target of the same basename and does not support a separate tests
@@ -28,36 +31,151 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Identity keys, with and without an id tail.
-func identityKeys(ctx context.Context, c metric.Int64Counter, v string) {
-	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
-	c.Add(ctx, 1, metric.WithAttributes(attribute.String("roomID", v)))
+// --- metrics-no-per-call-attribute-set: one line per structural pattern ---
+
+func addShapes(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("site", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(attribute.String("site", v))))
+}
+
+func recordShapes(ctx context.Context, h metric.Float64Histogram, seconds float64, v string) {
+	// ruleid: metrics-no-per-call-attribute-set
+	h.Record(ctx, seconds, metric.WithAttributes(attribute.String("site", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	h.Record(ctx, seconds, metric.WithAttributeSet(attribute.NewSet(attribute.String("site", v))))
+}
+
+// Observe takes no context, which is why the rule needs patterns of its own.
+func observeShapes(o metric.Int64Observer, n int64, v string) {
+	// ruleid: metrics-no-per-call-attribute-set
+	o.Observe(n, metric.WithAttributes(attribute.String("site", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	o.Observe(n, metric.WithAttributeSet(attribute.NewSet(attribute.String("site", v))))
+}
+
+// The shape every caller should reach for: the option is built once elsewhere
+// and looked up here. No annotation, so any rule firing is a false positive.
+func precomputedShapes(
+	ctx context.Context,
+	c metric.Int64Counter,
+	h metric.Float64Histogram,
+	o metric.Int64Observer,
+	adds map[string]metric.MeasurementOption,
+	key string,
+	seconds float64,
+	n int64,
+) {
+	c.Add(ctx, 1, adds[key])
+	h.Record(ctx, seconds, adds[key])
+	o.Observe(n, adds[key])
+}
+
+// --- metrics-no-unbounded-label: one line per regex alternative ---
+
+// Every identity root, so deleting any single one from the alternation fails.
+func identityRoots(ctx context.Context, c metric.Int64Counter, v string) {
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("room", v)))
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
-	c.Add(ctx, 1, metric.WithAttributes(attribute.String("run_id", v)))
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("account", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("user", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("message", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("request", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("trace", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("doc", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("span", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("session", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("device", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("tenant", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("org", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("run", v)))
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("recipient", v)))
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
-	c.Add(ctx, 1, metric.WithAttributes(attribute.String("podUID", v)))
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("inbox", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("pod", v)))
 }
 
-// Subject-shaped keys, bare and qualified.
-func subjectKeys(ctx context.Context, c metric.Int64Counter, v string) {
+// Each spelling of the optional id tail.
+func identityTails(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("roomID", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("roomId", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("room_id", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("podUID", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("pod_uid", v)))
+}
+
+// Subject forms, bare and qualified, plus the Elasticsearch index name.
+func subjectAndIndexKeys(ctx context.Context, c metric.Int64Counter, v string) {
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("subject", v)))
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("inboxSubject", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("dest_subject", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("index", v)))
 }
 
-// Raw error text and stack traces.
-func errorKeys(ctx context.Context, c metric.Int64Counter, v string) {
+// Raw error text: the bare roots and each message-ish tail.
+func rawErrorKeys(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("err", v)))
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("error", v)))
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("errorText", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("error_message", v)))
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("errMsg", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("errorString", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("errStr", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("rawError", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("raw_error", v)))
+}
+
+// Stack traces, with and without an error prefix or a trace suffix.
+func stackTraceKeys(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("stack", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("stackTrace", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("stack_trace", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("stacktrace", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("errorStack", v)))
+}
+
+// The other matching form: a bare attribute.NewSet, not wrapped in an option.
+func unboundedInsideNewSet(v string) attribute.Set {
+	// ruleid: metrics-no-unbounded-label
+	return attribute.NewSet(attribute.String("roomID", v))
 }
 
 // Bounded labels, including the error *classifications* the contract allows.
@@ -72,16 +190,21 @@ func boundedLabels(ctx context.Context, c metric.Int64Counter, v string) {
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("error_type", v)))
 	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("errorType", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("error_class", v)))
+	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("result", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("status", v)))
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("run_info", v)))
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("event_type", v)))
-}
-
-// A precomputed option looked up by a bounded key is the shape both rules exist
-// to steer callers towards, so neither may fire on it. No annotation is the
-// assertion.
-func precomputed(ctx context.Context, c metric.Int64Counter, opts map[string]metric.MeasurementOption, key string) {
-	c.Add(ctx, 1, opts[key])
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("destination_kind", v)))
 }

@@ -710,9 +710,12 @@ to this contract.
    once and looked up. Two semgrep rules in `.semgrep/metrics.yml` enforce both:
    no per-call `attribute.NewSet`, and no room, account, user, message or
    subject identifier as a label. Identity belongs on the log line and the span.
+   The first rule covers `Add`, `Record` and `Observe` — an observable callback
+   runs once per collection interval for the life of the process, so an inline
+   set there costs the same in a shape that is easier to miss.
 4. Build the sets on first use, not across the cross product. A closed label
    space can still be wide — `destination_kind` x `operation` x `outcome` is
-   1,680 combinations, of which a running service records about fifteen —
+   1,848 combinations, of which a running service records about fifteen —
    so `pkg/natsmetrics` caches per combination through `optTable` and keeps the
    warm lookup lock-free and allocation-free. Precomputing all of it cost 8,094
    allocations per `Publisher`, retained for the life of the process.

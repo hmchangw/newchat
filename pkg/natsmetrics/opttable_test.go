@@ -11,7 +11,7 @@ import (
 )
 
 // A key that never occurs must never be built. The publisher's label space is
-// closed but wide — destination x operation x outcome is 1,680 combinations,
+// closed but wide — destination x operation x outcome is 1,848 combinations,
 // and PublishLabelsFromSubject plus the fixed call sites can only ever produce
 // about seventeen destination/operation pairs. Precomputing the full cross
 // product built 8,094 allocations of attribute sets per Publisher that nothing
@@ -99,6 +99,6 @@ func TestRecorderConstructionDoesNotPrecomputeTheCrossProduct(t *testing.T) {
 		_ = m.Consumer(ConsumerConfig{Site: "site-a", Stream: "ROOMS-site-a", Consumer: "room-worker"})
 	})
 
-	assert.Less(t, publisher, float64(100), "Publisher construction must not precompute 1,680 unused attribute sets")
+	assert.Less(t, publisher, float64(100), "Publisher construction must not precompute 1,848 unused attribute sets")
 	assert.Less(t, consumer, float64(100), "Consumer construction must not precompute 180 unused attribute sets")
 }
