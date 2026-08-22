@@ -66,8 +66,23 @@ func TestRequestOperationFromSubject(t *testing.T) {
 		subj string
 		want Operation
 	}{
-		{name: "history read", subj: subject.MsgHistory("alice", "room-a", "site-a"), want: OperationHistoryRead},
-		{name: "thread parent read", subj: "chat.user.alice.request.room.room-a.site-a.msg.thread.parent", want: OperationHistoryRead},
+		// SLO-4 and SLO-5 each need their own rpc.method. They have different
+		// bounds because their cost models differ — channel load walks
+		// messages_by_room buckets, thread open slices one partition — so a
+		// shared label mixes a slow family into a fast one's ratio and a fast
+		// family into a slow one's, in opposite directions.
+		{name: "channel history is its own method (SLO-4)", subj: subject.MsgHistory("alice", "room-a", "site-a"), want: OperationChannelHistory},
+		{name: "thread open is its own method (SLO-5)", subj: "chat.user.alice.request.room.room-a.site-a.msg.thread", want: OperationThreadOpen},
+		// Everything else stays history_read. Splitting further would put routes
+		// into an SLO denominator that the SLO does not describe: thread.parent is
+		// a second handler, not part of the verified "Enter thread" path, and
+		// next/surrounding are scroll and jump, not an initial load.
+		{name: "thread parent read stays history read", subj: "chat.user.alice.request.room.room-a.site-a.msg.thread.parent", want: OperationHistoryRead},
+		{name: "scroll page stays history read", subj: "chat.user.alice.request.room.room-a.site-a.msg.next", want: OperationHistoryRead},
+		{name: "jump to message stays history read", subj: "chat.user.alice.request.room.room-a.site-a.msg.surrounding", want: OperationHistoryRead},
+		{name: "single message read stays history read", subj: subject.MsgGet("alice", "room-a", "site-a"), want: OperationHistoryRead},
+		{name: "batch message read stays history read", subj: subject.MsgGetIDs("alice", "room-a", "site-a"), want: OperationHistoryRead},
+		{name: "pinned list stays history read", subj: "chat.user.alice.request.room.room-a.site-a.msg.pinned.list", want: OperationHistoryRead},
 		{name: "history mutation", subj: subject.MsgEdit("alice", "room-a", "site-a"), want: OperationHistoryMutation},
 		{name: "history migration mutation", subj: subject.MigrationInternalMsgEdit("site-a"), want: OperationHistoryMutation},
 		{name: "thread subscription read", subj: subject.ThreadSubscriptionList("site-a"), want: OperationHistoryRead},

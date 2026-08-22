@@ -71,7 +71,16 @@ func RequestOperationFromSubject(subj string) Operation {
 		switch {
 		case hasAnySuffix(subj, ".msg.edit", ".msg.delete", ".msg.pin", ".msg.unpin", ".msg.react"):
 			return OperationHistoryMutation
-		case hasAnySuffix(subj, ".msg.history", ".msg.next", ".msg.surrounding", ".msg.get", ".msg.get.ids", ".msg.pinned.list", ".msg.thread", ".msg.thread.parent"):
+		// These two come first and are matched exactly, because each is the
+		// whole numerator and denominator of an SLO. ".msg.thread.parent" does
+		// not end in ".msg.thread", so the suffix test separates them without
+		// depending on case order — but the order is kept anyway so the SLO
+		// routes are the first thing read here.
+		case strings.HasSuffix(subj, ".msg.history"):
+			return OperationChannelHistory
+		case strings.HasSuffix(subj, ".msg.thread"):
+			return OperationThreadOpen
+		case hasAnySuffix(subj, ".msg.next", ".msg.surrounding", ".msg.get", ".msg.get.ids", ".msg.pinned.list", ".msg.thread.parent"):
 			return OperationHistoryRead
 		}
 	case isRequestFamily(tokens, "teams"):

@@ -143,17 +143,30 @@ const (
 	OperationPresenceLookup      Operation = "presence_lookup"
 	OperationThreadTCount        Operation = "thread_tcount"
 	OperationTeamsUserUpsert     Operation = "teams_user_upsert"
-	OperationHistoryRead         Operation = "history_read"
-	OperationHistoryMutation     Operation = "history_mutation"
-	OperationRoomRead            Operation = "room_read"
-	OperationRoomMutation        Operation = "room_mutation"
-	OperationMemberRead          Operation = "member_read"
-	OperationMemberMutation      Operation = "member_mutation"
-	OperationTeamsRoom           Operation = "teams_room"
-	OperationRoomPublish         Operation = "room_publish"
-	OperationMemberPublish       Operation = "member_publish"
-	OperationOutboxPublish       Operation = "outbox_publish"
-	OperationUnknown             Operation = "unknown"
+	// OperationChannelHistory and OperationThreadOpen are split out of
+	// history_read because SLO-4 and SLO-5 measure them separately, against
+	// different bounds. Their cost models differ — channel load walks
+	// messages_by_room buckets, thread open slices one partition of
+	// thread_messages_by_thread — so one shared label would drag the fast
+	// family's ratio down with walk latency and dilute the slow family's
+	// violations with fast traffic, in opposite directions and at a ratio that
+	// drifts with traffic mix.
+	OperationChannelHistory Operation = "channel_history"
+	OperationThreadOpen     Operation = "thread_open"
+	// OperationHistoryRead keeps every other history route: scroll, jump,
+	// single and batch reads, pinned lists, thread parents, and the
+	// server-to-server thread lanes. None of them is described by an SLO.
+	OperationHistoryRead     Operation = "history_read"
+	OperationHistoryMutation Operation = "history_mutation"
+	OperationRoomRead        Operation = "room_read"
+	OperationRoomMutation    Operation = "room_mutation"
+	OperationMemberRead      Operation = "member_read"
+	OperationMemberMutation  Operation = "member_mutation"
+	OperationTeamsRoom       Operation = "teams_room"
+	OperationRoomPublish     Operation = "room_publish"
+	OperationMemberPublish   Operation = "member_publish"
+	OperationOutboxPublish   Operation = "outbox_publish"
+	OperationUnknown         Operation = "unknown"
 )
 
 // Metrics owns the shared instruments. Instrument-creation failures fall back
@@ -621,6 +634,7 @@ func normalizeOperation(operation Operation) Operation {
 	case OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
 		OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
 		OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
+		OperationChannelHistory, OperationThreadOpen,
 		OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
 		OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
 		OperationMemberPublish, OperationOutboxPublish:
