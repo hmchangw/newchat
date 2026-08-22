@@ -104,7 +104,10 @@ func isIndexSpecConflict(err error) bool {
 }
 
 // IsIndexNotFound reports whether err is Mongo's IndexNotFound (27), so dropping an
-// index a peer already removed is not treated as a failure.
+// index a peer already removed is not treated as a failure. NamespaceNotFound (26)
+// is deliberately NOT folded in: callers drop only after ensuring an index on the
+// same collection, so the collection exists — a 26 there means an external actor
+// dropped it, which must surface rather than pass as "nothing to drop".
 func IsIndexNotFound(err error) bool {
 	var se mongo.ServerError
 	return errors.As(err, &se) && se.HasErrorCode(27)

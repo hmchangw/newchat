@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
 
@@ -4291,6 +4292,48 @@ func TestEnsureIndexes_ThreadSubsDropsLegacyAndCreatesUnique_Integration(t *test
 		"the (threadRoomId, userAccount) index must be unique")
 	assert.False(t, names["threadRoomId_1_userId_1"],
 		"EnsureIndexes must drop the legacy (threadRoomId, userId) index")
+}
+
+// Create-before-drop: a FAILED canonical create must leave the legacy index intact,
+// so the collection is never left without either uniqueness constraint. Would fail
+// if the order were reverted to drop-legacy-then-create.
+func TestEnsureIndexes_ThreadSubsCanonicalCreateFailure_KeepsLegacy_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	// Legacy UNIQUE index present (models the real constraint the migration preserves).
+	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
+	// Distinct (threadRoomId, userId) so both rows coexist under the legacy unique index,
+	// but the SAME (threadRoomId, userAccount) so the canonical UNIQUE create fails E11000.
+	_, err = db.Collection("thread_subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "a", "threadRoomId": "tr1", "userId": "u1", "userAccount": "dup"},
+		bson.M{"_id": "b", "threadRoomId": "tr1", "userId": "u2", "userAccount": "dup"},
+	})
+	require.NoError(t, err)
+
+	// EnsureIndexes surfaces the canonical failure...
+	require.Error(t, store.EnsureIndexes(ctx))
+
+	// ...and must NOT have dropped the legacy index (the create ran first and failed).
+	cur, err := db.Collection("thread_subscriptions").Indexes().List(ctx)
+	require.NoError(t, err)
+	var idxs []bson.M
+	require.NoError(t, cur.All(ctx, &idxs))
+	names := make(map[string]bool, len(idxs))
+	for _, ix := range idxs {
+		if n, ok := ix["name"].(string); ok {
+			names[n] = true
+		}
+	}
+	assert.True(t, names["threadRoomId_1_userId_1"],
+		"a failed canonical create must leave the legacy index intact")
+	assert.False(t, names["threadRoomId_1_userAccount_1"],
+		"the canonical unique index must not exist when its create failed")
 }
 
 func TestMongoStore_ClearThreadSubscriptionsForAccount_Integration(t *testing.T) {
