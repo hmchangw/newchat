@@ -84,6 +84,7 @@ export default function ChatPage({ selectedRoom, onSelectRoom }) {
     openThread({
       roomId: selectedRoom.id,
       siteId: selectedRoom.siteId,
+      crossSite: selectedRoom.crossSite,
       messageId: msg.id,
       createdAtMs: new Date(msg.createdAt).getTime(),
     })

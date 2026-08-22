@@ -7,8 +7,31 @@ import {
   useRegisterThreadMessageMutationHandler,
 } from '../RoomEventsContext/RoomEventsContext'
 import { generateMessageID } from '@/lib/idgen'
-import { fetchThreadMessages, sendMessage } from '@/api'
+import { useRoomKeys } from '@/context/RoomKeysContext'
+import { fetchThreadMessages, sendMessage, subscribeToThreadEvents } from '@/api'
+import { decryptRoomEvent } from '@/lib/decryptRoomEvent'
 import { threadEventsReducer, initialState } from './reducer'
+
+/** The body of a reply, or a placeholder when the room key has not arrived.
+ *  Mirrors the room timeline's `[encrypted message]` fallback: silently
+ *  dropping it leaves the panel missing a message with no explanation. */
+function threadReplyMessage(evt) {
+  const msg = evt.message
+  if (msg?.id || !evt.encryptedMessage || !evt.lastMsgId) return msg
+  return {
+    id: evt.lastMsgId,
+    roomId: evt.roomId,
+    content: '[encrypted message]',
+    createdAt: evt.lastMsgAt ?? new Date(evt.timestamp ?? Date.now()).toISOString(),
+    encrypted: true,
+  }
+}
+
+/** Mirrors the room lane's coercion so both lanes hand the reducer an ISO
+ *  string regardless of what the wire carried. */
+function normalizeEditedAt(editedAt) {
+  return typeof editedAt === 'string' ? editedAt : new Date(editedAt ?? Date.now()).toISOString()
+}
 
 const ThreadEventsContext = createContext(null)
 
@@ -16,46 +39,77 @@ export function ThreadEventsProvider({ children }) {
   const nats = useNats()
   const { user } = nats
   const roomDispatch = useRoomDispatch()
+  const { decrypt, ensureKey } = useRoomKeys()
   const registerThreadReplyHandler = useRegisterThreadReplyHandler()
   const registerThreadMessageMutationHandler = useRegisterThreadMessageMutationHandler()
   const [state, dispatch] = useReducer(threadEventsReducer, initialState)
   const generationRef = useRef(0)
+  const threadSubRef = useRef(null)
+  const closeThreadSubRef = useRef(null)
+  const decryptRef = useRef(decrypt)
+  decryptRef.current = decrypt
+  const ensureKeyRef = useRef(ensureKey)
+  ensureKeyRef.current = ensureKey
   const stateRef = useRef(state)
   stateRef.current = state
 
-  // Reset on logout.
+  // Reset on logout. The provider stays mounted across a logout, so unmount
+  // cleanup never runs: drop the subscription and advance the generation here
+  // or the previous session's lane stays live and its queued work still lands.
   useEffect(() => {
-    if (!user) dispatch({ type: 'RESET' })
+    if (user) return
+    generationRef.current++
+    closeThreadSubRef.current?.()
+    dispatch({ type: 'RESET' })
   }, [user])
+
+  // The three reducer actions are authored here once. Both the room-lane
+  // bridges below and the thread-lane subscription in openThread feed them, so
+  // a reply cannot mean two different things depending on which lane won.
+  const applyReply = useCallback((parentId, message) => {
+    dispatch({ type: 'THREAD_REPLY_RECEIVED', parentId, message })
+  }, [])
+
+  const applyMutation = useCallback((mut) => {
+    if (mut.kind === 'edited') {
+      // Drop edits without a plaintext body, matching the room lane: an
+      // encrypted edit carries encryptedNewContent, and blanking to '' would
+      // wipe the rendered message.
+      if (typeof mut.content !== 'string') return
+      dispatch({
+        type: 'REPLY_EDITED',
+        messageId: mut.messageId,
+        content: mut.content,
+        editedAt: mut.editedAt,
+      })
+    } else if (mut.kind === 'deleted') {
+      dispatch({ type: 'REPLY_DELETED', messageId: mut.messageId })
+    }
+  }, [])
 
   // Bridge live room-channel thread replies → THREAD_REPLY_RECEIVED.
   useEffect(() => {
     const unsubscribe = registerThreadReplyHandler((evt) => {
-      dispatch({
-        type: 'THREAD_REPLY_RECEIVED',
-        parentId: evt.parentMessageId,
-        message: evt.message,
-      })
+      applyReply(evt.parentMessageId, evt.message)
     })
     return unsubscribe
-  }, [registerThreadReplyHandler])
+  }, [registerThreadReplyHandler, applyReply])
 
   // Bridge live edit/delete mutations → REPLY_EDITED / REPLY_DELETED.
   useEffect(() => {
-    const unsubscribe = registerThreadMessageMutationHandler((mut) => {
-      if (mut.kind === 'edited') {
-        dispatch({
-          type: 'REPLY_EDITED',
-          messageId: mut.messageId,
-          content: mut.content ?? '',
-          editedAt: mut.editedAt,
-        })
-      } else if (mut.kind === 'deleted') {
-        dispatch({ type: 'REPLY_DELETED', messageId: mut.messageId })
-      }
-    })
+    const unsubscribe = registerThreadMessageMutationHandler(applyMutation)
     return unsubscribe
-  }, [registerThreadMessageMutationHandler])
+  }, [registerThreadMessageMutationHandler, applyMutation])
+
+  // Drops the open panel's thread subscription. NATS reaps the interest, which
+  // is what removes this client from the thread's delivery set.
+  const closeThreadSub = useCallback(() => {
+    threadSubRef.current?.unsubscribe()
+    threadSubRef.current = null
+  }, [])
+  closeThreadSubRef.current = closeThreadSub
+
+  useEffect(() => closeThreadSub, [closeThreadSub])
 
   const openThread = useCallback(
     (parent) => {
@@ -63,7 +117,57 @@ export function ThreadEventsProvider({ children }) {
       if (stateRef.current.activeParent?.messageId === parent.messageId) return
       const myGen = ++generationRef.current
       dispatch({ type: 'OPEN_THREAD', parent })
+      closeThreadSub()
       if (!user) return
+      // Subscribe before fetching: a reply landing in the gap would be lost,
+      // and closing that gap is the whole point of the thread lane.
+      let chain = Promise.resolve()
+      threadSubRef.current = subscribeToThreadEvents(
+        nats,
+        { roomId: parent.roomId, parentMessageId: parent.messageId, crossSite: parent.crossSite },
+        (raw) => {
+          // Serialize within this thread: the NATS subscribe loop does not await
+          // the callback, so without a chain a plaintext delete finalizes before
+          // a prior encrypted create and lands on a message not yet in the list.
+          // The chain is per subscription, so a decrypt stalled on a key fetch
+          // cannot delay the thread the user opens next.
+          const work = async () => {
+            try {
+              // Checked before decrypting too: a stale event should not hold the
+              // chain for the length of a key fetch it will be discarded after.
+              if (myGen !== generationRef.current) return
+              // Channel rooms are encrypted, so this lane must decrypt exactly as
+              // the room lane does or every reply arrives as an empty envelope.
+              const evt = await decryptRoomEvent(raw, {
+                decrypt: decryptRef.current,
+                ensureKey: ensureKeyRef.current,
+                fallbackSiteId: parent.siteId,
+              })
+              if (myGen !== generationRef.current) return
+              if (evt?.type === 'new_thread_message') {
+                applyReply(parent.messageId, threadReplyMessage(evt))
+              } else if (evt?.type === 'message_edited') {
+                applyMutation({
+                  kind: 'edited',
+                  messageId: evt.messageId,
+                  content: evt.newContent,
+                  editedAt: normalizeEditedAt(evt.editedAt),
+                })
+              } else if (evt?.type === 'message_deleted') {
+                applyMutation({ kind: 'deleted', messageId: evt.messageId })
+              }
+            } catch (err) {
+              // The subscribe loop ignores this promise, so a rejection would be
+              // an unhandled one and the event would vanish unlogged. The panel's
+              // next open refetches, so the lane stays alive.
+              // eslint-disable-next-line no-console
+              console.error('thread event processing failed', err)
+            }
+          }
+          chain = chain.then(work, work)
+          return chain
+        }
+      )
       fetchThreadMessages(nats, {
         roomId: parent.roomId,
         siteId: parent.siteId,
@@ -85,13 +189,14 @@ export function ThreadEventsProvider({ children }) {
           })
         })
     },
-    [user, nats]
+    [user, nats, closeThreadSub, applyReply, applyMutation]
   )
 
   const closeThread = useCallback(() => {
     generationRef.current++
+    closeThreadSub()
     dispatch({ type: 'CLOSE_THREAD' })
-  }, [])
+  }, [closeThreadSub])
 
   // publishReply is synchronous — `publish` is sync void and throws if not
   // connected. Callers wrap in try/catch.
