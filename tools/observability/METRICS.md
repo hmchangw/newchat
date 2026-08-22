@@ -51,7 +51,7 @@ have been dropped after MaxDeliver. To tell healed from dropped, pair the gauge 
 
 ## 3. Application metrics (`:9090`)
 
-**`pkg/natsmetrics`** — consumer/publisher instrumentation. Consumer labels: `site`, `stream`, `consumer`.
+**`pkg/natsmetrics`** — consumer/publisher instrumentation. Consumer labels: `service_name` (resource-derived, added to every series via `WithResourceAsConstantLabels`), `site`, `stream`, `consumer`. `service_name` disambiguates two services that happen to share a durable name.
 
 | metric | type | key labels | meaning / use |
 |---|---|---|---|
