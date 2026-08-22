@@ -60,7 +60,12 @@ rules:
           #      the key is usually qualified (inboxSubject, destSubject).
           #   3. index, which is an Elasticsearch index name.
           #
+          #   4. Raw error text and stack traces, the last two entries on that
+          #      list. Bounded *classifications* of an error are allowed and must
+          #      keep passing: error_type, errorType, reason, outcome, result and
+          #      status all fall outside the pattern by construction.
+          #
           # run is here for run_id specifically. A bounded run_info metric
           # describing scenario and traffic profile is allowed by the contract
           # and does not match, because run_info is not run + an id tail.
-          regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)(?:_?[uU]?[iI][dD])?|[a-z]*_?[sS]ubject|index)$
+          regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)(?:_?[uU]?[iI][dD])?|[a-z]*_?[sS]ubject|index|(?:[rR]aw)?_?[eE]rr(?:or)?(?:_?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?_?)?[sS]tack(?:_?[tT]race)?)$
