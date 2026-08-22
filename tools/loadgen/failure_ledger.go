@@ -452,6 +452,10 @@ type failureLedger struct {
 	// at startup can still lose its WAL an hour later and that is the failure
 	// an operator has to act on.
 	invalidReasons []string
+	// journalClosed marks the point after which nothing can be written. It is
+	// distinct from closed: Close flushes owed causes while still open, and a
+	// cause arriving after this point is neither persistable nor a WAL fault.
+	journalClosed bool
 	// persistedInvalidReasons is the subset the journal actually accepted. A
 	// reason absent here is retried on the next invalidation rather than being
 	// treated as durably recorded.
@@ -1226,7 +1230,12 @@ func (l *failureLedger) Close() error {
 	// Before the journal goes away, not after: this is the last chance to land
 	// a cause the file never accepted.
 	flushErr := l.flushInvalidationsLocked()
+	// Taken out under the mutex so a late invalidation cannot append to a file
+	// that is being closed: after this, no locked path holds a journal to write
+	// to, and journalClosed says why.
 	journal := l.journal
+	l.journal = nil
+	l.journalClosed = true
 	l.mu.Unlock()
 	if journal == nil {
 		return flushErr
@@ -1709,6 +1718,16 @@ func (l *failureLedger) noteInvalidationLocked(reason string) {
 // that disqualifies it.
 func (l *failureLedger) persistInvalidationLocked(reason string) {
 	if slices.Contains(l.persistedInvalidReasons, reason) {
+		return
+	}
+	if l.journalClosed {
+		// Nothing can be written any more, and nothing failed: the ledger closed
+		// before this cause arrived. Recording wal here would report a fault the
+		// file never had, so the cause stays owed and says so.
+		slog.Error("failure ledger closed before an invalidation could be recorded",
+			"reason", reason,
+			"consequence", "this cause exists only in memory and will not survive the run",
+		)
 		return
 	}
 	if err := l.journalInvalidationLocked(reason); err != nil {

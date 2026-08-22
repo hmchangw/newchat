@@ -86,3 +86,44 @@ func (j *blockingStartFailureJournal) Append(event *failureLedgerEvent) error {
 	defer j.mu.Unlock()
 	return j.memoryFailureJournal.Append(event)
 }
+
+// Invalidate has no closed check, and observers call it from their own
+// goroutines. Close used to hand the journal to Close() while still leaving it
+// reachable, so a late cause could be appended to a file being closed — and if
+// that append failed, the cause stayed in memory behind a flushErr Close had
+// already computed as nil.
+func TestFailureLedger_ALateInvalidationNeverReachesTheClosedJournal(t *testing.T) {
+	now := time.Date(2026, 8, 22, 15, 0, 0, 0, time.UTC)
+	journal := &closeTrackingFailureJournal{}
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 2, Journal: journal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledger.Close())
+
+	ledger.Invalidate("sidecar")
+
+	assert.False(t, journal.appendedAfterClose,
+		"a closed journal must not be written to")
+	assert.Equal(t, []string{"sidecar"}, ledger.UnpersistedInvalidations(),
+		"a cause the file never took is owed, not recorded as persisted")
+}
+
+type closeTrackingFailureJournal struct {
+	memoryFailureJournal
+	closed             bool
+	appendedAfterClose bool
+}
+
+func (j *closeTrackingFailureJournal) Close() error {
+	j.closed = true
+	return nil
+}
+
+func (j *closeTrackingFailureJournal) Append(event *failureLedgerEvent) error {
+	if j.closed {
+		j.appendedAfterClose = true
+		return errors.New("write on closed journal")
+	}
+	return j.memoryFailureJournal.Append(event)
+}
