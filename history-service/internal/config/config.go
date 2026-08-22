@@ -42,7 +42,10 @@ type MongoConfig struct {
 	// Deliberately far below the driver's 30s default and below REQUEST_TIMEOUT,
 	// so a stopped MongoDB errors while the request still has budget to serve a
 	// cached fallback rather than dying on an expired deadline.
-	ServerSelectionTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
+	// Bare suffix, not MONGO_SERVER_…: this struct is mounted envPrefix:"MONGO_",
+	// so the prefix is supplied once and the operator-facing name stays
+	// MONGO_SERVER_SELECTION_TIMEOUT, as everywhere else in the repo.
+	ServerSelectionTimeout time.Duration `env:"SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 	// MinPoolSize keeps a warm connection floor; 0 lets the pool drain to empty.
 	MinPoolSize uint64 `env:"MIN_POOL_SIZE" envDefault:"0"`
 }

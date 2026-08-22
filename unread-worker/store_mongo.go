@@ -48,22 +48,42 @@ func mentionFilter(k subKey, at time.Time) bson.M {
 	}
 }
 
-func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error {
+// roomLastMsgModels builds the writes for one batch of per-room updates. Split
+// out from BulkUpdateRoomLastMessage so the filter/update pairing is assertable
+// without a live Mongo — the pairing is the whole correctness question here.
+func roomLastMsgModels(updates map[string]roomLastMsgUpdate) []mongo.WriteModel {
 	models := make([]mongo.WriteModel, 0, len(updates))
 	for roomID, u := range updates {
-		fields := bson.M{
-			"lastMsgAt": u.at,
-			"lastMsgId": u.msgID,
-			"updatedAt": u.at,
-		}
-		if !u.lastMentionAllAt.IsZero() {
-			fields["lastMentionAllAt"] = u.lastMentionAllAt
-		}
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(roomLastMsgFilter(roomID, u.at)).
-			SetUpdate(bson.M{"$set": fields}))
+			SetUpdate(bson.M{"$set": bson.M{
+				"lastMsgAt": u.at,
+				"lastMsgId": u.msgID,
+				"updatedAt": u.at,
+			}}))
+		if u.lastMentionAllAt.IsZero() {
+			continue
+		}
+		// A SEPARATE write, matched on identity alone. lastMentionAllAt is not
+		// part of the room pointer — it is its own monotonic dimension — so
+		// gating it on the pointer's regression filter would silently discard
+		// the @all badge whenever a redelivered batch lost the pointer race to
+		// a later message. user-service derives HasGroupMention from this
+		// field, and the batch Acks after the retry, so that loss is permanent.
+		// $max supplies the monotonicity the dropped guard used to imply, and
+		// still writes when the field is missing.
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": roomID}).
+			SetUpdate(bson.M{"$max": bson.M{"lastMentionAllAt": u.lastMentionAllAt}}))
 	}
-	_, err := m.roomCol.BulkWrite(ctx, models)
+	return models
+}
+
+func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	_, err := m.roomCol.BulkWrite(ctx, roomLastMsgModels(updates))
 	return err
 }
 

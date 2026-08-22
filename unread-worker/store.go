@@ -14,9 +14,11 @@ import (
 // BulkWrite and is safe to replay out of order — the flush path retries whole
 // batches, so any write may be applied more than once and after a newer one.
 type Store interface {
-	// BulkUpdateRoomLastMessage sets rooms.lastMsgAt/lastMsgId/updatedAt (and
-	// lastMentionAllAt when non-zero), skipping any room already at or beyond
-	// the supplied time so a stale replay cannot regress the pointer.
+	// BulkUpdateRoomLastMessage sets rooms.lastMsgAt/lastMsgId/updatedAt,
+	// skipping any room already at or beyond the supplied time so a stale
+	// replay cannot regress the pointer. A non-zero lastMentionAllAt is written
+	// separately, via $max and matched on _id alone: the @all badge is its own
+	// monotonic dimension and must survive a replay that loses the pointer race.
 	BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error
 	// BulkAdvanceLastSeen advances each subscription's lastSeenAt via $max, so
 	// it never regresses a user who has already read further.

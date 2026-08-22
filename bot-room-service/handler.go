@@ -389,8 +389,20 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 
 	removed := []string{}
 	removedAccounts := []string{}
+	// Deferred, not called at the end of the loop: every path out of here from
+	// this point on has already committed subscription deletes, so the cached
+	// positive subauthcache decisions must die on the error paths too. A
+	// federation failure that returned before the bust would leave every account
+	// in the batch still passing authorization for the rest of the L2 TTL. One
+	// round trip for the whole set — the {roomID} hash tag keeps the keys in one
+	// slot — and BustSubs no-ops on an empty set.
+	defer func() { subauthcache.BustSubs(c, h.valkey, roomID, removedAccounts) }()
 	for _, userID := range req.UserIDs {
-		wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
+		// The account comes from the delete itself, so the bust below cannot be
+		// skipped by the enrichment lookup failing. It is the same value
+		// UpsertSubscription wrote into subscriptions.u.account at add-time,
+		// which is what subauthcache.SubKey is keyed on.
+		account, wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
 		if err != nil {
 			return nil, fmt.Errorf("delete subscription: %w", err)
 		}
@@ -399,6 +411,9 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 			continue
 		}
 		removed = append(removed, userID)
+		if account != "" {
+			removedAccounts = append(removedAccounts, account)
+		}
 
 		u, err := h.store.FindUser(c, userID)
 		if err != nil {
@@ -412,21 +427,12 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 				"userID", userID, "roomID", roomID, "error", err)
 			continue
 		}
-		// Collect for a single batched bust after the loop. u.Account (not
-		// userID) is the key subauthcache.SubKey uses — it's the same value
-		// UpsertSubscription wrote into subscriptions.u.account at add-time,
-		// sourced from this identical FindUser(userID) lookup.
-		removedAccounts = append(removedAccounts, u.Account)
 		if u.SiteID != "" && u.SiteID != h.siteID {
 			if err := h.federateMemberRemoved(c, roomID, u.ID, u.Account, u.SiteID); err != nil {
 				return nil, err
 			}
 		}
 	}
-	// Bust AFTER the writes: every deleted member's cached positive subauthcache
-	// decision must die immediately, not linger for the L2 TTL. One round trip
-	// for the whole set — the {roomID} hash tag keeps the keys in one slot.
-	subauthcache.BustSubs(c, h.valkey, roomID, removedAccounts)
 	// Only rotate when at least one subscription was actually deleted — a no-op remove must not rotate the room key (matches user pipeline).
 	if len(removed) > 0 {
 		if err := h.rotateAndFanOut(c, roomID); err != nil {

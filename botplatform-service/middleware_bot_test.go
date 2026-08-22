@@ -109,7 +109,7 @@ func TestRequireBot(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
 			r := gin.New()
-			sessions := &fakeSessionStore{FindByHashFn: tt.findByHashFn}
+			sessions := &sessionOnlyStore{FindSessionByHashFn: tt.findByHashFn}
 			nextCalls := 0
 			r.GET("/bot", requireBot(sessions), func(c *gin.Context) {
 				nextCalls++

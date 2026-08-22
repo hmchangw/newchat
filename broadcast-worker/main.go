@@ -166,8 +166,15 @@ func main() {
 	// notification-worker. A lagging secondary there republishes a renamed or
 	// just-deleted room to all of them for the TTL.
 	roomsPrimaryStore := mongoutil.CollectionWithReadPreference(db.Collection("rooms"), readpref.Primary())
+	// users is the third collection behind the same shared key: the roomsubcache
+	// loader reads it to stamp HomeSiteID, and notification-worker routes its
+	// per-site badge RPC off that field. A secondary that has not yet replicated
+	// a just-added member stamps it empty for whoever wins the cold fill, and
+	// every reader of the key inherits that for the TTL — so it is pinned
+	// alongside subscriptions and rooms, as notification-worker already does.
+	usersPrimary := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 	store := NewMongoStore(roomsPrimaryStore, subsPrimary, db.Collection("thread_rooms"),
-		db.Collection("users"), valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
+		usersPrimary, valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}

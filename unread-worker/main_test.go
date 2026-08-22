@@ -44,12 +44,17 @@ func TestValidateFlushBudget(t *testing.T) {
 		wantErr                    bool
 	}{
 		{"defaults fit comfortably", 250 * time.Millisecond, 10 * time.Second, 30 * time.Second, false},
-		// The budget is interval+timeout: a message waits out the interval in the
-		// pending batch BEFORE its bounded flush even starts, so checking the
-		// timeout alone lets a legal config still outlive AckWait.
+		// The budget is 2*timeout+interval: Run drives Flush SYNCHRONOUSLY, so a
+		// message can wait out a stalled flush (timeout), then the next tick
+		// (interval), then its own flush (timeout) before it is settled.
+		// Charging one timeout admits configs that still outlive AckWait.
 		{"timeout alone fits but interval pushes it over", 25 * time.Second, 9 * time.Second, 30 * time.Second, true},
-		{"exactly at the budget is not under it", 10 * time.Second, 20 * time.Second, 30 * time.Second, true},
+		{"exactly at the budget is not under it", 10 * time.Second, 10 * time.Second, 30 * time.Second, true},
 		{"timeout alone exceeds ack wait", time.Second, 31 * time.Second, 30 * time.Second, true},
+		// The case the old arithmetic waved through: 20.25s looks safe against a
+		// 30s AckWait, but a stalled flush plus the wait for the next tick plus
+		// this message's own flush is 40.25s.
+		{"a blocked flush precedes the wait this message must also serve", 250 * time.Millisecond, 20 * time.Second, 30 * time.Second, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

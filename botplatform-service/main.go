@@ -117,7 +117,7 @@ func run() error {
 	r.Use(ginutil.RequestID())
 	r.Use(accessLogMiddleware())
 	registerRoutes(r, h)
-	registerBotRoutes(r, sessionStore, valkey, &cfg, h)
+	registerBotRoutes(r, valkey, &cfg, h)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

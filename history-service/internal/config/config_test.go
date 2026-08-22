@@ -233,6 +233,34 @@ func TestValidate_RejectsNegativeValues(t *testing.T) {
 	}
 }
 
+// The knob only exists to be turned. MongoConfig is mounted with
+// envPrefix:"MONGO_", so its tag must carry the bare suffix — spelling the
+// prefix again inside the tag yields MONGO_MONGO_… and leaves every operator
+// setting the documented name silently on the 2s default.
+func TestLoad_ServerSelectionTimeoutIsSettable(t *testing.T) {
+	t.Setenv("CASSANDRA_HOSTS", "cassandra:9042")
+	t.Setenv("MONGO_URI", "mongodb://mongo:27017")
+	t.Setenv("NATS_URL", "nats://nats:4222")
+	t.Setenv("MONGO_SERVER_SELECTION_TIMEOUT", "7s")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 7*time.Second, cfg.Mongo.ServerSelectionTimeout)
+}
+
+// The doubled name is what the mis-prefixed tag produced. Nothing may answer
+// to it, or the fix silently keeps both spellings alive.
+func TestLoad_DoublePrefixedServerSelectionTimeoutIsNotHonored(t *testing.T) {
+	t.Setenv("CASSANDRA_HOSTS", "cassandra:9042")
+	t.Setenv("MONGO_URI", "mongodb://mongo:27017")
+	t.Setenv("NATS_URL", "nats://nats:4222")
+	t.Setenv("MONGO_MONGO_SERVER_SELECTION_TIMEOUT", "9s")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 2*time.Second, cfg.Mongo.ServerSelectionTimeout)
+}
+
 func TestValidate_RejectsNonPositiveServerSelectionTimeout(t *testing.T) {
 	cfg := baseValid()
 	cfg.Mongo.ServerSelectionTimeout = 0

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -136,6 +137,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Armed BEFORE the consume loop starts, because the loop can raise this
+	// signal itself the moment it fails. Until signal.Notify runs, SIGTERM keeps
+	// its default disposition and would kill the process outright rather than
+	// run the graceful path — and a signal raised before the handler exists is
+	// lost to it. The buffered channel latches an early one for shutdown.WaitOn.
+	// No signal.Stop: the registration must outlive every path that could raise
+	// it, and main returning is the process ending anyway.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
 	var wg sync.WaitGroup
 	consume := consumeState{onUnexpectedStop: requestSelfShutdown}
 	wg.Add(1)
@@ -155,7 +166,7 @@ func main() {
 
 	slog.Info("unread-worker started", "site", cfg.SiteID, "mode", string(cfg.Mode))
 
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
 		// Mark the stop as intended BEFORE iter.Stop(), so the consume loop's
 		// exit is not mistaken for a failure and does not re-signal a process
 		// that is already on its way down.
@@ -243,14 +254,19 @@ func requestSelfShutdown() {
 }
 
 // validateFlushBudget rejects a configuration in which a held message can
-// outlive its ack deadline. The budget is interval+timeout, not timeout alone:
-// a message waits out the flush interval in the pending batch BEFORE its
-// bounded flush even begins, so checking the timeout by itself admits configs
-// that still let JetStream redeliver the batch from underneath a running flush.
+// outlive its ack deadline.
+//
+// The budget is 2*timeout+interval. Run drives Flush SYNCHRONOUSLY, so the
+// worst case for a message is three waits, not one: the flush already running
+// when it arrives can burn a full timeout, the loop then waits out the ticker
+// for up to interval, and only then does its own flush run for up to another
+// timeout. Charging a single timeout understates that by a whole flush and
+// admits configs — FLUSH_TIMEOUT=20s against a 30s AckWait, say — where
+// JetStream redelivers the batch from underneath a flush that is still writing.
 func validateFlushBudget(interval, timeout, ackWait time.Duration) error {
-	if budget := interval + timeout; budget >= ackWait {
-		return fmt.Errorf("FLUSH_INTERVAL (%s) + FLUSH_TIMEOUT (%s) = %s must be less than CONSUMER_ACK_WAIT (%s), or a held message outlives its ack deadline and redelivers while its flush is still running",
-			interval, timeout, budget, ackWait)
+	if budget := 2*timeout + interval; budget >= ackWait {
+		return fmt.Errorf("2 × FLUSH_TIMEOUT (%s) + FLUSH_INTERVAL (%s) = %s must be less than CONSUMER_ACK_WAIT (%s), or a held message outlives its ack deadline and redelivers while its flush is still running",
+			timeout, interval, budget, ackWait)
 	}
 	return nil
 }

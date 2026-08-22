@@ -148,6 +148,69 @@ func TestIntegration_StaleReplayDoesNotRegressRoomPointer(t *testing.T) {
 	assert.WithinDuration(t, newer, room["lastMsgAt"].(bson.DateTime).Time(), time.Millisecond)
 }
 
+// The room pointer and the @all badge are independent dimensions. A batch
+// carrying an @all message can be Nak'd once (a Mongo blip, a step-down, a
+// flush that outran FLUSH_TIMEOUT) and redelivered after a later plain message
+// has already advanced lastMsgAt. Guarding lastMentionAllAt on the pointer
+// filter means that replay writes nothing at all, and since
+// user-service derives HasGroupMention from this field, every member of the
+// room silently loses the badge for that message — permanently, because the
+// batch Acks on the retry that appears to succeed.
+func TestIntegration_StaleReplayStillRecordsGroupMention(t *testing.T) {
+	store, db := setupStore(t)
+	older := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	seedRoom(t, db, "r1")
+
+	// The plain, newer message lands first and advances the pointer.
+	flushOne(t, store, eventProjection{
+		Event:   model.EventCreated,
+		Message: messageProjection{ID: "m2", RoomID: "r1", UserAccount: "alice", CreatedAt: newer},
+	})
+	// The older @all message is the redelivery.
+	flushOne(t, store, eventProjection{
+		Event: model.EventCreated,
+		Message: messageProjection{
+			ID: "m1", RoomID: "r1", UserAccount: "alice",
+			Content: "@all standup in 5", CreatedAt: older,
+		},
+	})
+
+	room := readRoom(t, db, "r1")
+	assert.Equal(t, "m2", room["lastMsgId"], "the older replay must still not win the pointer")
+	assert.WithinDuration(t, newer, room["lastMsgAt"].(bson.DateTime).Time(), time.Millisecond)
+	require.NotNil(t, room["lastMentionAllAt"], "the @all badge must survive a replay that loses the pointer race")
+	assert.WithinDuration(t, older, room["lastMentionAllAt"].(bson.DateTime).Time(), time.Millisecond)
+}
+
+// The badge is monotonic in its own right: a replayed OLDER @all must not drag
+// it back from a newer one already recorded.
+func TestIntegration_GroupMentionNeverRegresses(t *testing.T) {
+	store, db := setupStore(t)
+	older := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	seedRoom(t, db, "r1")
+
+	flushOne(t, store, eventProjection{
+		Event: model.EventCreated,
+		Message: messageProjection{
+			ID: "m2", RoomID: "r1", UserAccount: "alice",
+			Content: "@all later", CreatedAt: newer,
+		},
+	})
+	flushOne(t, store, eventProjection{
+		Event: model.EventCreated,
+		Message: messageProjection{
+			ID: "m1", RoomID: "r1", UserAccount: "alice",
+			Content: "@all earlier", CreatedAt: older,
+		},
+	})
+
+	room := readRoom(t, db, "r1")
+	assert.WithinDuration(t, newer, room["lastMentionAllAt"].(bson.DateTime).Time(), time.Millisecond,
+		"an older @all replay must not regress the badge")
+}
+
 func TestIntegration_MentionSkippedWhenAccountAlreadyRead(t *testing.T) {
 	store, db := setupStore(t)
 	created := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
