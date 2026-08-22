@@ -122,21 +122,33 @@ func TestFailureLedger_CompactionKeepsEveryInvalidationReasonInOrder(t *testing.
 // An unknown reason is folded to "other" rather than widening the label set,
 // and that has to hold on the replay path too — a journal written by a newer
 // build is exactly where an unregistered reason arrives.
+//
+// The record is appended raw rather than through Invalidate, which folds before
+// it writes: going through the API would put "other" in the file and replay
+// would only have to read it back, exercising nothing.
 func TestFailureLedger_AReplayedUnknownReasonBecomesOther(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "unknown.wal")
 
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 8, Journal: wal})
-	require.NoError(t, err)
-	ledger.Invalidate("a_reason_this_build_does_not_know")
-	require.NoError(t, ledger.Close())
+	require.NoError(t, wal.Append(&failureLedgerEvent{
+		Type:          failureLedgerEventInvalidated,
+		InvalidReason: "a_reason_this_build_does_not_know",
+		At:            time.Unix(1000, 0).UTC(),
+	}))
+	require.NoError(t, wal.Close())
 
 	reopened, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(&failureLedgerConfig{Capacity: 8, Journal: reopened})
+	metrics := NewMetrics()
+	recovered, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 8, Journal: reopened, Recorder: newFailureLedgerPromRecorder(metrics),
+	})
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, recovered.Close()) })
 
 	assert.Equal(t, "other", recovered.Snapshot().InvalidReason)
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureInvalidations.WithLabelValues("other")),
+		"the counter must carry the folded label, not the one from the file")
 }
