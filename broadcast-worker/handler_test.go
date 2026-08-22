@@ -3768,6 +3768,7 @@ type mentionOutboxRecorder struct {
 type outboxRecord struct {
 	subject string
 	msgID   string
+	data    []byte
 	event   model.SubscriptionMentionEvent
 }
 
@@ -3777,27 +3778,20 @@ func (r *mentionOutboxRecorder) publish(_ context.Context, subj string, data []b
 	if r.err != nil {
 		return r.err
 	}
-	var outboxEvt model.OutboxEvent
-	if err := json.Unmarshal(data, &outboxEvt); err != nil {
-		return err
-	}
-	var envelope model.InboxEvent
-	if err := json.Unmarshal(outboxEvt.Envelope, &envelope); err != nil {
-		return err
-	}
-	var evt model.SubscriptionMentionEvent
-	if err := json.Unmarshal(envelope.Payload, &evt); err != nil {
-		return err
-	}
-	r.records = append(r.records, outboxRecord{subject: subj, msgID: msgID, event: evt})
+	r.records = append(r.records, outboxRecord{subject: subj, msgID: msgID, data: data})
 	return nil
 }
 
-func (r *mentionOutboxRecorder) sorted() []outboxRecord {
+// sorted returns the captured publishes by subject, payloads decoded.
+func (r *mentionOutboxRecorder) sorted(t *testing.T) []outboxRecord {
+	t.Helper()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := append([]outboxRecord(nil), r.records...)
 	sort.Slice(out, func(i, j int) bool { return out[i].subject < out[j].subject })
+	for i := range out {
+		_, _, out[i].event = unwrapOutbox(t, out[i].data)
+	}
 	return out
 }
 
@@ -3805,12 +3799,13 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 
 	tests := []struct {
-		name        string
-		content     string
-		users       []model.User
-		publishErr  error
-		noFederate  bool
-		wantRecords []outboxRecord
+		name           string
+		content        string
+		users          []model.User
+		publishErr     error
+		noFederate     bool
+		wantMentionAll bool
+		wantRecords    []outboxRecord
 	}{
 		{
 			name:    "all mentionees are local",
@@ -3848,9 +3843,10 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			users:   nil,
 		},
 		{
-			name:    "mention-all alone federates nothing",
-			content: "hi @all",
-			users:   nil,
+			name:           "mention-all alone federates nothing",
+			content:        "hi @all",
+			users:          nil,
+			wantMentionAll: true,
 		},
 		{
 			name:       "publish error is swallowed",
@@ -3875,8 +3871,7 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			keyStore := NewMockRoomKeyProvider(ctrl)
 			rec := &mentionOutboxRecorder{err: tc.publishErr}
 
-			mentionAll := strings.Contains(tc.content, "@all")
-			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, mentionAll).Return(nil)
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
 			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
 			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 			us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(tc.users, nil)
@@ -3889,20 +3884,10 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			}
 			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal, opts...)
 
-			data, err := json.Marshal(model.MessageEvent{
-				Event:  model.EventCreated,
-				SiteID: "site-a",
-				Message: model.Message{
-					ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
-					Content: tc.content, CreatedAt: msgTime,
-				},
-			})
-			require.NoError(t, err)
-
-			require.NoError(t, h.HandleMessage(context.Background(), data))
+			require.NoError(t, h.HandleMessage(context.Background(), makeMessageEvent("room-1", tc.content, msgTime)))
 			assert.Len(t, pub.records, 1, "the client fan-out must still happen")
 
-			got := rec.sorted()
+			got := rec.sorted(t)
 			require.Len(t, got, len(tc.wantRecords))
 			for i, want := range tc.wantRecords {
 				assert.Equal(t, want.subject, got[i].subject)
@@ -3920,103 +3905,75 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
 	editedAt := time.Now().UTC().Truncate(time.Millisecond)
 
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-	rec := &mentionOutboxRecorder{}
-
-	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
-		Return([]model.User{{ID: "u2", Account: "bob", SiteID: "site-b"}}, nil)
-	store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", []string{"bob"}, editedAt).Return(nil)
-	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
-		withOutboxFederation("site-a", rec.publish))
-
-	data, err := json.Marshal(model.MessageEvent{
-		Event:  model.EventUpdated,
-		SiteID: "site-a",
-		Message: model.Message{
-			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
-			Content: "hi @bob", CreatedAt: createdAt, EditedAt: &editedAt, UpdatedAt: &editedAt,
+	tests := []struct {
+		name         string
+		content      string
+		users        []model.User
+		lookupErr    error
+		wantBadged   []string // nil = SetSubscriptionMentions must not be called
+		wantAccounts []string // nil = nothing federated
+	}{
+		{
+			name:         "edit adding a remote mention federates it",
+			content:      "hi @bob",
+			users:        []model.User{{ID: "u2", Account: "bob", SiteID: "site-b"}},
+			wantBadged:   []string{"bob"},
+			wantAccounts: []string{"bob"},
 		},
-	})
-	require.NoError(t, err)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-
-	got := rec.sorted()
-	require.Len(t, got, 1)
-	assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
-	assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
-	assert.Equal(t, []string{"bob"}, got[0].event.Accounts)
-	assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
-}
-
-func TestHandler_HandleUpdated_NoMentionsSkipsLookup(t *testing.T) {
-	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
-	editedAt := time.Now().UTC().Truncate(time.Millisecond)
-
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-	rec := &mentionOutboxRecorder{}
-
-	// No FindUsersByAccounts and no SetSubscriptionMentions expectations: gomock
-	// fails the test if the mention-free edit calls either.
-	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
-	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
-		withOutboxFederation("site-a", rec.publish))
-
-	data, err := json.Marshal(model.MessageEvent{
-		Event:  model.EventUpdated,
-		SiteID: "site-a",
-		Message: model.Message{
-			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
-			Content: "no mentions here", CreatedAt: createdAt, EditedAt: &editedAt, UpdatedAt: &editedAt,
+		{
+			name:    "edit without mentions skips both the badge and the lookup",
+			content: "no mentions here",
 		},
-	})
-	require.NoError(t, err)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-	assert.Empty(t, rec.sorted())
-}
-
-func TestHandler_HandleUpdated_LookupFailureStillBadgesLocally(t *testing.T) {
-	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
-	editedAt := time.Now().UTC().Truncate(time.Millisecond)
-
-	ctrl := gomock.NewController(t)
-	store := NewMockStore(ctrl)
-	us := NewMockUserStore(ctrl)
-	pub := &mockPublisher{}
-	keyStore := NewMockRoomKeyProvider(ctrl)
-	rec := &mentionOutboxRecorder{}
-
-	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
-	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).Return(nil, errors.New("mongo down"))
-	store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", []string{"bob"}, editedAt).Return(nil)
-	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
-
-	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
-		withOutboxFederation("site-a", rec.publish))
-
-	data, err := json.Marshal(model.MessageEvent{
-		Event:  model.EventUpdated,
-		SiteID: "site-a",
-		Message: model.Message{
-			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
-			Content: "hi @bob", CreatedAt: createdAt, EditedAt: &editedAt, UpdatedAt: &editedAt,
+		{
+			name:       "lookup failure still badges locally",
+			content:    "hi @bob",
+			lookupErr:  errors.New("mongo down"),
+			wantBadged: []string{"bob"},
 		},
-	})
-	require.NoError(t, err)
+	}
 
-	// The local badge is the durable part; only the cross-site relay is lost.
-	require.NoError(t, h.HandleMessage(context.Background(), data))
-	assert.Empty(t, rec.sorted())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+			rec := &mentionOutboxRecorder{}
+
+			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+			keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+			// No expectations when wantBadged is nil: gomock fails if either is called.
+			if tc.wantBadged != nil {
+				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", tc.wantBadged, editedAt).Return(nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), tc.wantBadged).Return(tc.users, tc.lookupErr)
+			}
+
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
+				withOutboxFederation("site-a", rec.publish))
+
+			data, err := json.Marshal(model.MessageEvent{
+				Event:  model.EventUpdated,
+				SiteID: "site-a",
+				Message: model.Message{
+					ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+					Content: tc.content, CreatedAt: createdAt, EditedAt: &editedAt, UpdatedAt: &editedAt,
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+
+			got := rec.sorted(t)
+			if tc.wantAccounts == nil {
+				assert.Empty(t, got)
+				return
+			}
+			require.Len(t, got, 1)
+			assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
+			// editedAt in the dedup ID keeps the edit distinct from the original send.
+			assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
+			assert.Equal(t, tc.wantAccounts, got[0].event.Accounts)
+			assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
+		})
+	}
 }

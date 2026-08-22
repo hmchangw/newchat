@@ -1228,7 +1228,7 @@ func TestInboxStore_UpsertThreadSubscription_DedupesByUserAccount_Integration(t 
 	db := setupMongo(t)
 	ctx := context.Background()
 	threadSubs := db.Collection("thread_subscriptions")
-	store := &mongoInboxStore{threadSubCol: threadSubs}
+	store := &mongoInboxStore{threadSubCol: threadSubs, subCol: db.Collection("subscriptions")}
 	store.ensureIndexes(ctx)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)

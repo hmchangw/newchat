@@ -96,7 +96,6 @@ func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
 }
 
 // withOutboxFederation enables the cross-site mention fan-out from siteID.
-// main.go always wires it; omitting it leaves federation off.
 func withOutboxFederation(siteID string, publish PublishFunc) handlerOption {
 	return func(opts *handlerOptions) {
 		opts.siteID = siteID
@@ -363,9 +362,14 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	mentioned, err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg)
-	if err != nil {
-		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
+	// Additive only: SetSubscriptionMentions' filter skips non-subscribers and
+	// accounts that already read past the edit, so a removed mention is never
+	// cleared and an already-read one is never re-flagged.
+	parsed := mention.Parse(msg.Content)
+	if len(parsed.Accounts) > 0 {
+		if err := h.store.SetSubscriptionMentions(ctx, room.ID, parsed.Accounts, *msg.EditedAt); err != nil {
+			return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
+		}
 	}
 
 	edit := buildEditRoomEvent(room, evt)
@@ -377,40 +381,31 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 	if err := h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit); err != nil {
 		return err
 	}
-	h.federateMentions(ctx, room.ID, msg.ID, mentioned, *msg.EditedAt)
+	h.federateEditMentions(ctx, room.ID, msg.ID, parsed, *msg.EditedAt)
 	return nil
 }
 
-// badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
-// handleCreated. Additive only: SetSubscriptionMentions' filter skips
-// non-subscribers and accounts that already read past the edit, so a removed
-// mention is never cleared and an already-read one is never re-flagged.
-func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) ([]model.Participant, error) {
-	parsed := mention.Parse(msg.Content)
-	if len(parsed.Accounts) == 0 {
-		return nil, nil
-	}
-	if err := h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt); err != nil {
-		return nil, err
-	}
-	// The returned mentionees only route the cross-site relay, so skip the
-	// lookup when federation is off and treat a failure as non-fatal.
-	if h.publish == nil {
-		return nil, nil
+// federateEditMentions resolves an edit's mentionees to their home sites and
+// relays the badge. The lookup is routing-only, so it runs after the client
+// broadcast, is skipped when federation is off, and a failure costs the relay
+// rather than the local badge.
+func (h *Handler) federateEditMentions(ctx context.Context, roomID, msgID string, parsed mention.ParseResult, at time.Time) {
+	if h.publish == nil || len(parsed.Accounts) == 0 {
+		return
 	}
 	users, err := h.userStore.FindUsersByAccounts(ctx, parsed.Accounts)
 	if err != nil {
 		slog.WarnContext(ctx, "user lookup failed for edited mentions, skipping federation",
 			"error", err, "room_id", roomID,
 			"request_id", natsutil.RequestIDFromContext(ctx))
-		return nil, nil
+		return
 	}
-	return mention.ResolveFromParsed(parsed, usersByAccount(users)).Participants, nil
+	h.federateMentions(ctx, roomID, msgID, mention.ResolveFromParsed(parsed, usersByAccount(users)).Participants, at)
 }
 
 // federateMentions relays the badge to each mentionee's home site, one event per
-// destination carrying only that site's accounts. Best-effort: a failure is
-// logged, never returned, so it can't NAK the message and re-broadcast to clients.
+// destination. A failure is logged, never returned, so it can't NAK the message
+// and re-broadcast it to clients.
 func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, participants []model.Participant, at time.Time) {
 	if h.publish == nil {
 		return
@@ -434,9 +429,8 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 	now := time.Now().UTC().UnixMilli()
 	for destSiteID, accounts := range accountsBySite {
 		payload, err := sonic.Marshal(model.SubscriptionMentionEvent{
-			RoomID:   roomID,
-			Accounts: accounts,
-			// createdAt, or editedAt when an edit added the mention.
+			RoomID:      roomID,
+			Accounts:    accounts,
 			MentionedAt: at.UnixMilli(),
 			Timestamp:   now,
 		})

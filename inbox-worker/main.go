@@ -462,6 +462,9 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 // crashloop the shared collection, and a missing index must not take the worker down.
 func (s *mongoInboxStore) ensureIndexes(ctx context.Context) {
 	mongoutil.WarnMissingIndexes(ctx, s.threadSubCol, "threadRoomId_1_userAccount_1")
+	// SetSubscriptionMentions filters on (roomId, u.account); without this index
+	// the federated badge write collscans the shared subscriptions collection.
+	mongoutil.WarnMissingIndexes(ctx, s.subCol, "roomId_1_u.account_1")
 }
 
 // SetSubscriptionMentions flags the accounts' subscriptions as mentioned. The

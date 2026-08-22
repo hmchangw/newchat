@@ -492,16 +492,17 @@ func (h *Handler) handleThreadUnreadAdded(ctx context.Context, evt *model.InboxE
 func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionMentionEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
-		return fmt.Errorf("unmarshal subscription_mention payload: %w", err)
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_mention payload"))
 	}
-	// Each of these writes nothing and would Ack silently — a zero mentionedAt
-	// badges as 1970, so the read guard skips everyone who has ever read the room.
-	// No redelivery repairs any of them, so drop loudly as the producer bug it is.
-	if e.RoomID == "" || len(e.Accounts) == 0 || e.MentionedAt <= 0 {
-		slog.WarnContext(ctx, "dropping malformed subscription_mention",
-			"room_id", e.RoomID, "accounts", len(e.Accounts), "mentioned_at", e.MentionedAt,
-			"origin_site", evt.SiteID)
+	if len(e.Accounts) == 0 {
 		return nil
+	}
+	// Poison payload: a blank room matches nothing and a zero mentionedAt badges
+	// as 1970, so the read guard skips everyone who has ever read the room.
+	if e.RoomID == "" || e.MentionedAt <= 0 {
+		slog.WarnContext(ctx, "subscription_mention missing roomId or mentionedAt",
+			"room_id", e.RoomID, "mentioned_at", e.MentionedAt, "origin_site", evt.SiteID)
+		return errcode.Permanent(errcode.BadRequest("subscription_mention missing roomId or mentionedAt"))
 	}
 	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MentionedAt).UTC()); err != nil {
 		return fmt.Errorf("set subscription mentions in room %q: %w", e.RoomID, err)
