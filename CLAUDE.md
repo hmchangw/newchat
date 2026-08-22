@@ -269,7 +269,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - MESSAGES-CANONICAL: `chat.msg.canonical.{siteID}.created` (`.edited`, `.deleted` for future)
 - Inbox (cross-site, remote-origin): `chat.inbox.{destSiteID}.external.{eventType}` — published directly into the destination site's INBOX
 - Inbox (same-site search feed): `chat.inbox.{siteID}.internal.{eventType}`
-- Outbox (origin-side federation buffer): `chat.outbox.{siteID}.{destSiteID}.{eventType}` — `room-service` (subscription-state events) and `room-worker` (membership events) publish one event per destination; `outbox-worker` forwards each to the destination INBOX (destination scoped so the per-peer membership FIFO consumers can filter on one site)
+- Outbox (origin-side federation buffer): `chat.outbox.{siteID}.{destSiteID}.{eventType}` — `room-service` (subscription-state events), `room-worker` (membership events), `message-worker` (thread-subscription events) and `broadcast-worker` (mention badges) publish one event per destination; `outbox-worker` forwards each to the destination INBOX (destination scoped so the per-peer membership FIFO consumers can filter on one site)
 - Wildcards: `*` for single-token, `>` for multi-token tail — define patterns in `pkg/subject`
 
 ### JetStream Streams

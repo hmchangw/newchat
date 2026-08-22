@@ -825,30 +825,30 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 		Name: "mention-fed-assert", FilterSubject: subject.OutboxWildcard("site-a"),
 	})
 	require.NoError(t, err)
-	msgs, err := cons.Fetch(10, jetstream.FetchMaxWait(3*time.Second))
+	// Fetch exactly the one expected message so the pull returns as soon as it
+	// lands; NumPending then proves no second destination was federated.
+	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(3*time.Second))
 	require.NoError(t, err)
 
 	var got []*nats.Msg
 	for msg := range msgs.Messages() {
 		got = append(got, &nats.Msg{Subject: msg.Subject(), Data: msg.Data()})
+		require.NoError(t, msg.Ack())
 	}
 	require.NoError(t, msgs.Error())
-	require.Len(t, got, 1, "exactly one destination site should be federated")
+	require.Len(t, got, 1)
 	assert.Equal(t, subject.Outbox("site-a", "site-b", model.InboxSubscriptionMention), got[0].Subject)
 
-	var relay model.OutboxEvent
-	require.NoError(t, json.Unmarshal(got[0].Data, &relay))
+	info, err := cons.Info(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, info.NumPending, "exactly one destination site should be federated")
+
+	relay, envelope, payload := unwrapOutbox(t, got[0].Data)
 	assert.Equal(t, "r-fed", relay.RoomID)
 	assert.Equal(t, fmt.Sprintf("mention:r-fed:m-fed:%d:site-b", msgTime.UnixMilli()), relay.DedupID)
-
-	var envelope model.InboxEvent
-	require.NoError(t, json.Unmarshal(relay.Envelope, &envelope))
 	assert.Equal(t, model.InboxSubscriptionMention, envelope.Type)
 	assert.Equal(t, "site-a", envelope.SiteID)
 	assert.Equal(t, "site-b", envelope.DestSiteID)
-
-	var payload model.SubscriptionMentionEvent
-	require.NoError(t, json.Unmarshal(envelope.Payload, &payload))
 	assert.Equal(t, "r-fed", payload.RoomID)
 	assert.Equal(t, []string{"carol"}, payload.Accounts, "only the remote-homed mentionee")
 	assert.Equal(t, msgTime.UnixMilli(), payload.MentionedAt)

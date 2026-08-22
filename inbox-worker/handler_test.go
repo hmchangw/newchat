@@ -2908,11 +2908,12 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		payload   any
-		storeErr  error
-		wantErr   string
-		wantBadge []mentionBadge
+		name          string
+		payload       any
+		storeErr      error
+		wantErr       string
+		wantPermanent bool
+		wantBadge     []mentionBadge
 	}{
 		{
 			name:      "applies the badge to the destination accounts",
@@ -2920,25 +2921,30 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 			wantBadge: []mentionBadge{{roomID: "room-1", accounts: []string{"alice", "bob"}, msgCreatedAt: msgAt}},
 		},
 		{
-			name:    "malformed payload",
-			payload: "not-an-object",
-			wantErr: "unmarshal subscription_mention payload",
+			name:          "malformed payload is poison, not retried",
+			payload:       "not-an-object",
+			wantErr:       "unmarshal subscription_mention payload",
+			wantPermanent: true,
 		},
 		{
-			name:    "empty account list is dropped",
+			name:    "empty account list is a benign no-op",
 			payload: model.SubscriptionMentionEvent{RoomID: "room-1", MentionedAt: msgAt.UnixMilli()},
 		},
 		{
-			name: "blank room id is dropped rather than matching nothing",
+			name: "blank room id is poison rather than matching nothing",
 			payload: model.SubscriptionMentionEvent{
 				Accounts: []string{"alice"}, MentionedAt: msgAt.UnixMilli(),
 			},
+			wantErr:       "missing roomId or mentionedAt",
+			wantPermanent: true,
 		},
 		{
-			name: "omitted mentionedAt is dropped rather than badging as 1970",
+			name: "omitted mentionedAt is poison rather than badging as 1970",
 			payload: model.SubscriptionMentionEvent{
 				RoomID: "room-1", Accounts: []string{"alice"},
 			},
+			wantErr:       "missing roomId or mentionedAt",
+			wantPermanent: true,
 		},
 		{
 			name:     "store error propagates for redelivery",
@@ -2967,6 +2973,9 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
+				// Permanent tells the consume loop to Ack-drop instead of Nak-forever.
+				_, permanent := errcode.IsPermanent(err)
+				assert.Equal(t, tc.wantPermanent, permanent)
 				return
 			}
 			require.NoError(t, err)
