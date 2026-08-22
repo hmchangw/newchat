@@ -567,6 +567,8 @@ chunking logic.
 | Service-layer refactor touches helpers shared by three other endpoints | Purely mechanical; existing tests for `getChannels` / `getDM` / `getByRoomID` are the safety net and must stay green unmodified |
 | Session-token auth adds a botplatform dependency to a hot path | SSO is the documented and recommended credential; the branch degrades to 503 when `BOTPLATFORM_URL` is unset |
 | Chunking changes behavior on the existing NATS path | It only makes degradation finer-grained; covered by tests asserting identical output at page sizes under 100 |
+| Chunking multiplies downstream RPC count: a 400-row page issues 4 `rooms.get` calls where it issued 1 | Unavoidable — the single call was rejected outright above 100 ids, so it was 4 calls or no previews. But it raises load on room-service and history-service, which shed at their own `MAX_CONCURRENCY`, and a shed reply degrades silently per the documented enrichment contract (§13.2 / client-api.md). Watch their shed counters when the HTTP fleet scales, and size `HTTP_MAX_CONCURRENCY` with the downstream services in mind, not just this pod's memory |
+| Isolation stops at Mongo | The HTTP path has its own handler budget and connection pool, but shares the NATS connection and the services behind it with the RPC path. Full isolation would need a second NATS connection or a separate deployment — deliberately out of scope |
 
 ## 19. Implementation order
 

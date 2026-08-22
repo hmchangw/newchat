@@ -27,7 +27,9 @@ type MongoConfig struct {
 type HTTPConfig struct {
 	Port string `env:"PORT" envDefault:"8080"`
 	// MaxConcurrency caps in-flight HTTP handlers, shedding the overflow with 429.
-	// A budget of its own, so a client burst cannot starve the NATS handlers. 0 disables.
+	// Its own budget, so a burst cannot take handler slots or Mongo connections from
+	// the NATS path — but the NATS connection and the room/history services behind
+	// it are still shared. 0 disables.
 	MaxConcurrency int           `env:"MAX_CONCURRENCY" envDefault:"256"`
 	HandlerTimeout time.Duration `env:"HANDLER_TIMEOUT" envDefault:"30s"`
 	// WriteTimeout must exceed HandlerTimeout: net/http starts its clock when the
