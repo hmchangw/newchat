@@ -21,10 +21,9 @@ const (
 	v1UnlimitedFloor = int64(1) << 62
 )
 
-// SetFromCgroup sets GOMEMLIMIT to fraction of the container's memory quota and
-// returns the limit applied, or 0 when none was. An explicit GOMEMLIMIT, an
-// unlimited cgroup, and a host with no cgroup files are all no-ops rather than
-// errors.
+// SetFromCgroup sets GOMEMLIMIT to fraction of the container's memory quota,
+// returning the limit applied or 0 if none was. An explicit GOMEMLIMIT, an
+// unlimited cgroup, and a host with no cgroup files are no-ops, not errors.
 func SetFromCgroup(fraction float64) (int64, error) {
 	return setFromFiles(cgroupV2Path, cgroupV1Path, fraction, os.Getenv("GOMEMLIMIT"), debug.SetMemoryLimit)
 }

@@ -304,9 +304,8 @@ func (s *UserService) enrichCrossSite(ctx context.Context, account string, subs 
 // otherwise a heavily-federated ALL_SITE_IDS fans one request into N simultaneous 5s RPCs.
 const maxSiteFanout = 8
 
-// chunkJob is one enrichment RPC: the subscription indices it covers, and their
-// room ids. Chunking indices rather than ids keeps both in step, so a hint map
-// needs no second pass to work out which rows a chunk covers.
+// chunkJob is one enrichment RPC. Chunking indices rather than ids keeps rows and
+// ids in step, so building a hint map needs no second pass.
 type chunkJob struct {
 	site    string
 	siteIdx int
@@ -315,9 +314,8 @@ type chunkJob struct {
 }
 
 // planChunks splits each site's rows into batches of at most size. history-service
-// hard-rejects a batch over 100 ids (and over 100 hints), and each reply must fit
-// the 128 KB NATS payload, so a page larger than one batch must be split or the
-// whole site silently degrades.
+// hard-rejects over 100 ids or hints and each reply must fit the 128 KB payload, so
+// an unsplit page degrades the whole site silently.
 func planChunks(subs []model.EnrichedSubscription, sites []string, idxBySite map[string][]int, size int) []chunkJob {
 	if size <= 0 {
 		size = len(subs)
@@ -349,13 +347,10 @@ func chunkHints(subs []model.EnrichedSubscription, rows []int) map[string]model.
 	return hints
 }
 
-// fanOutChunks runs call once per chunk, at most maxSiteFanout at a time, and
-// returns the merged result per site. A site's map is nil only when every one of
-// its chunks failed, so the caller still distinguishes "site degraded" from "room
-// absent"; a single failed chunk costs only its own rooms.
-//
-// call reports its own degradation — the caller owns the log message — and each
-// chunk writes to a slot of its own, so the merge needs no lock.
+// fanOutChunks runs call once per chunk, maxSiteFanout at a time, merged per site.
+// A site's map is nil only when every one of its chunks failed, so "site degraded"
+// stays distinguishable from "room absent" and one failed chunk costs only its own
+// rooms. Each chunk writes its own slot, so the merge needs no lock.
 func fanOutChunks[T any](ctx context.Context, jobs []chunkJob, sites int, call func(context.Context, chunkJob) (map[string]T, error)) []map[string]T {
 	results := make([]map[string]T, len(jobs))
 	// WaitGroup, not errgroup: errgroup.WithContext cancels siblings on the first

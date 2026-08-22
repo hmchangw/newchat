@@ -9,10 +9,8 @@ import (
 	"github.com/klauspost/compress/gzip"
 )
 
-// BestSpeed, not the default level: on a 200-row subscription page it compresses
-// 39% faster (695µs vs 1142µs) for 3 KB more on the wire (10.3x vs 12.4x). These
-// endpoints exist to survive reconnect bursts, where CPU is the scarce resource
-// and a few KB over a LAN is not.
+// BestSpeed over the default: measured 39% faster for 3 KB more on a 200-row page.
+// These endpoints exist to survive bursts, where CPU is the scarce resource.
 var gzipPool = sync.Pool{
 	New: func() any {
 		w, _ := gzip.NewWriterLevel(nil, gzip.BestSpeed)
@@ -20,12 +18,10 @@ var gzipPool = sync.Pool{
 	},
 }
 
-// Gzip compresses responses of at least minSize bytes for clients that accept
-// it. Smaller bodies pass through: compressing them costs CPU and often grows
-// the payload.
-//
-// The body length is unknown when headers are written, so the writer buffers
-// until the threshold is crossed and only then commits to compression.
+// Gzip compresses responses of at least minSize bytes for clients that accept it;
+// smaller bodies pass through, since compressing them costs CPU and often grows
+// the payload. Body length is unknown at header time, so the writer sniffs until
+// the threshold is crossed before committing.
 func Gzip(minSize int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !acceptsGzip(c.Request.Header.Get("Accept-Encoding")) {
@@ -58,13 +54,11 @@ func acceptsGzip(header string) bool {
 	return false
 }
 
-// gzipResponseWriter buffers the first minSize bytes, then either switches to
-// gzip or, at close, flushes the buffer uncompressed.
+// gzipResponseWriter buffers the first minSize bytes, then either switches to gzip
+// or, at close, flushes the buffer uncompressed.
 //
-// Written() and Size() are left delegating to the wrapped writer, so they report
-// what reached the wire: false/0 while the body is still buffered, and the
-// compressed length afterwards. That is what gin.Recovery needs (can it still
-// write a status?) but it is not the handler's byte count.
+// Written() and Size() deliberately still delegate, reporting what reached the wire
+// rather than what the handler produced — which is what gin.Recovery needs.
 type gzipResponseWriter struct {
 	gin.ResponseWriter
 	minSize int
@@ -94,11 +88,9 @@ func (w *gzipResponseWriter) Write(p []byte) (int, error) { return w.write(p) }
 
 func (w *gzipResponseWriter) WriteString(s string) (int, error) { return w.write([]byte(s)) }
 
-// write is the shared sniff-then-commit path behind Write and WriteString.
-//
-// The threshold is tested before buffering, so a body that clears it in one
-// write — which is every JSON render, since gin marshals whole — is handed
-// straight to the encoder instead of being copied into buf first.
+// write is the shared sniff-then-commit path behind Write and WriteString. The
+// threshold is tested before buffering, so a whole-body write (every JSON render)
+// reaches the encoder without being copied through buf first.
 func (w *gzipResponseWriter) write(p []byte) (int, error) {
 	switch {
 	case w.gz != nil:

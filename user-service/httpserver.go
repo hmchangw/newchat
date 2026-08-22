@@ -7,11 +7,10 @@ import (
 	"github.com/hmchangw/chat/user-service/config"
 )
 
-// newHTTPServer applies the listener tuning: bounded header reads, an idle
-// window long enough for a desktop client to reuse connections, and a write
-// deadline that outlives the handler budget. net/http starts that deadline when
-// the request headers are read, so an equal value would cut a slow page
-// mid-write. Config validation enforces the ordering.
+// newHTTPServer applies the listener tuning: bounded header reads, an idle window
+// long enough for a desktop client to reuse connections, and a write deadline that
+// outlives the handler budget — net/http starts that clock at header read, so an
+// equal value would cut a slow page mid-write (config.Load enforces the ordering).
 func newHTTPServer(addr string, h http.Handler, cfg *config.HTTPConfig) *http.Server {
 	return &http.Server{
 		Addr:              addr,
