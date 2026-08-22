@@ -458,7 +458,10 @@ func runConsumer(
 				return
 			default:
 			}
-			if handler.ActionCount() > 0 && time.Since(lastFlush) >= bulkFlushInterval {
+			// Flush before recovering, not on the usual interval: Recover can
+			// park for a whole outage while it rebuilds, and actions already
+			// built would otherwise sit unindexed for its full duration.
+			if handler.ActionCount() > 0 {
 				flush()
 				lastFlush = time.Now()
 			}
@@ -495,7 +498,14 @@ func runConsumer(
 		// which a Fetch loop learns its consumer was deleted or its leader moved
 		// — Fetch itself keeps returning empty batches and a nil error — so
 		// skipping it turns a dead consumer into an indefinitely quiet one.
-		if !cons.Recover(ctx, batch.Error()) {
+		batchErr := batch.Error()
+		// Same reason as the fetch-error path: a failing batch is about to send
+		// this loop into a rebuild that can outlast the flush interval.
+		if batchErr != nil && handler.ActionCount() > 0 {
+			flush()
+			lastFlush = time.Now()
+		}
+		if !cons.Recover(ctx, batchErr) {
 			flush()
 			return
 		}

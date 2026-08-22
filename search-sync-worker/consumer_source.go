@@ -257,10 +257,12 @@ func backoffStep(attempt int) time.Duration {
 	return jsiter.RebuildBackoff[attempt]
 }
 
-// sleep parks for d, reporting false when shutdown or context cancellation cut
-// the wait short.
+// sleep parks for a jittered d, reporting false when shutdown or context
+// cancellation cut the wait short. Jittered because a gateway outage fails every
+// worker and collection at once, and an unjittered schedule would then aim their
+// CreateOrUpdateConsumer calls at the recovering control plane in lockstep.
 func (r *recoveringFetcher) sleep(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(d)
+	timer := time.NewTimer(jsiter.Jitter(d))
 	defer timer.Stop()
 	select {
 	case <-timer.C:

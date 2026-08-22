@@ -423,10 +423,10 @@ func TestPump_HealthCheck(t *testing.T) {
 }
 
 func TestJitter(t *testing.T) {
-	assert.Zero(t, jitter(0))
-	assert.Zero(t, jitter(-time.Second))
+	assert.Zero(t, Jitter(0))
+	assert.Zero(t, Jitter(-time.Second))
 	for range 50 {
-		d := jitter(time.Second)
+		d := Jitter(time.Second)
 		assert.GreaterOrEqual(t, d, 500*time.Millisecond)
 		assert.LessOrEqual(t, d, time.Second)
 	}

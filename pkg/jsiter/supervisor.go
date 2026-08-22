@@ -80,6 +80,10 @@ func Supervise(ctx context.Context, name string, start NewConsume) (*Supervisor,
 	s.nowFn = time.Now
 
 	if err := s.begin(); err != nil {
+		// A round that died during start spawned a restart before begin could
+		// report the failure. The caller is about to discard this supervisor, so
+		// release that goroutine rather than leave it retrying in the dark.
+		s.Stop()
 		return nil, err
 	}
 	return s, nil
@@ -140,15 +144,24 @@ func (s *Supervisor) begin() error {
 	}
 
 	s.mu.Lock()
-	s.cur = cc
 	failed := s.failedGen == gen
+	if !failed {
+		s.cur = cc
+		// Published under the lock observe takes, so a failure recorded for this
+		// round cannot be overtaken by this store.
+		s.up.Store(true)
+	}
 	s.mu.Unlock()
 
 	if failed {
 		cc.Stop()
 		return fmt.Errorf("start %s consumption: subscription failed while starting", s.name)
 	}
-	s.up.Store(true)
+	// Stop sets stopped before up, so re-reading it here cannot miss a Stop that
+	// already flipped up to false.
+	if s.stopped.Load() {
+		s.up.Store(false)
+	}
 	return nil
 }
 
@@ -197,45 +210,45 @@ func (s *Supervisor) observe(gen uint64, err error) {
 	// One restart at a time: a single failure can surface as a burst of errors,
 	// and each one spawning its own restart would leave competing subscriptions.
 	s.mu.Lock()
-	if gen != s.gen || s.restarting {
+	if gen != s.gen {
 		s.mu.Unlock()
 		return
 	}
+	// Record the failure even while a restart is already running. The
+	// replacement is a new generation, and Consume reports a terminal error
+	// exactly once: discarding it as a duplicate would let begin install an
+	// already-stopped subscription and mark it up, freezing the lane for good
+	// behind a green health check.
+	s.failedGen = gen
 	cur := s.cur
-	if cur == nil {
-		// start has not returned the handle yet; begin drops this round.
-		s.failedGen = gen
-		s.mu.Unlock()
-		return
-	}
-	s.restarting = true
 	s.cur = nil
+	s.up.Store(false)
+	spawn := !s.restarting
+	s.restarting = true
 	s.mu.Unlock()
 
-	s.up.Store(false)
 	slog.ErrorContext(s.ctx, "jetstream consumption stopped, restarting",
 		"consumer", s.name, "error", err)
+	// nil when start has not returned the handle yet; begin releases that round.
 	if cur != nil {
 		cur.Stop()
 	}
-	go s.restart()
+	if spawn {
+		go s.restart()
+	}
 }
 
 // restart re-establishes consumption, retrying on backoff until it succeeds.
 // Giving up would leave the service silently consuming nothing, which is the
 // bug; a peer site that is down comes back.
 func (s *Supervisor) restart() {
-	defer func() {
-		s.mu.Lock()
-		s.restarting = false
-		s.mu.Unlock()
-	}()
-
 	for attempt := 0; ; attempt++ {
 		if !s.sleepFn(s.ctx, backoffStep(attempt)) {
+			s.abandonRestart()
 			return
 		}
 		if s.stopped.Load() {
+			s.abandonRestart()
 			return
 		}
 
@@ -245,8 +258,19 @@ func (s *Supervisor) restart() {
 			continue
 		}
 
+		// Accept the round only if it has not failed already. Clearing
+		// restarting under the same lock observe takes closes the window where a
+		// replacement dies just as this loop declares victory — the flag stays
+		// set, so this loop keeps going instead of stranding a dead round.
 		s.mu.Lock()
+		if s.failedGen == s.gen {
+			s.mu.Unlock()
+			slog.WarnContext(s.ctx, "jetstream replacement failed while starting, retrying",
+				"consumer", s.name, "attempt", attempt+1)
+			continue
+		}
 		s.transients = 0
+		s.restarting = false
 		cur := s.cur
 		s.mu.Unlock()
 
@@ -265,10 +289,18 @@ func (s *Supervisor) restart() {
 	}
 }
 
+// abandonRestart releases the restart slot when the loop gives up without
+// installing a round, so a later failure can start a fresh one.
+func (s *Supervisor) abandonRestart() {
+	s.mu.Lock()
+	s.restarting = false
+	s.mu.Unlock()
+}
+
 // sleep parks for a jittered d, returning false when Stop or context
 // cancellation cut the wait short.
 func (s *Supervisor) sleep(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(jitter(d))
+	timer := time.NewTimer(Jitter(d))
 	defer timer.Stop()
 	select {
 	case <-timer.C:

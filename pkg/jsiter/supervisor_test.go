@@ -84,7 +84,8 @@ func (f *consumeFactory) fail(err error) {
 }
 
 // waitStarts blocks until the factory has been called n times since the last
-// wait, so restart assertions never race the supervisor's goroutine.
+// wait. It fires from inside start, before begin publishes cur and up, so it
+// orders call-count assertions only — read supervisor state with Eventually.
 func waitStarts(t *testing.T, f *consumeFactory, n int) {
 	t.Helper()
 	for range n {
@@ -142,7 +143,7 @@ func TestSupervisor_FatalErrorRestartsConsumption(t *testing.T) {
 
 	assert.Equal(t, 2, f.callCount())
 	assert.Equal(t, 1, dead.stopCount(), "the dead handle must be released")
-	assert.True(t, s.IsUp())
+	require.Eventually(t, s.IsUp, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestSupervisor_RepeatedTransientErrorsRestartConsumption(t *testing.T) {
@@ -155,7 +156,7 @@ func TestSupervisor_RepeatedTransientErrorsRestartConsumption(t *testing.T) {
 	waitStarts(t, f, 1)
 
 	assert.Equal(t, 2, f.callCount())
-	assert.True(t, s.IsUp())
+	require.Eventually(t, s.IsUp, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestSupervisor_RestartRetriesUntilItSucceeds(t *testing.T) {
@@ -166,7 +167,7 @@ func TestSupervisor_RestartRetriesUntilItSucceeds(t *testing.T) {
 	waitStarts(t, f, 3)
 
 	assert.Equal(t, 4, f.callCount())
-	assert.True(t, s.IsUp())
+	require.Eventually(t, s.IsUp, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestSupervisor_ConnectionClosedIsTerminal(t *testing.T) {
@@ -278,9 +279,12 @@ func TestSupervisor_ContextCancellationEndsRestart(t *testing.T) {
 // its replacement — two consumers on a MaxAckPending=1 FIFO lane.
 func TestSupervise_ErrorDuringStartDoesNotLeaveTwoSubscriptions(t *testing.T) {
 	handle := &stubConsume{}
+	var mu sync.Mutex
 	var calls int
 	start := func(_ context.Context, onError func(error)) (ConsumeContext, error) {
+		mu.Lock()
 		calls++
+		mu.Unlock()
 		onError(jetstream.ErrConsumerDeleted)
 		return handle, nil
 	}
@@ -289,8 +293,14 @@ func TestSupervise_ErrorDuringStartDoesNotLeaveTwoSubscriptions(t *testing.T) {
 
 	require.Error(t, err, "a subscription that dies during start is a startup failure")
 	assert.Nil(t, s)
-	assert.Equal(t, 1, calls)
 	assert.Equal(t, 1, handle.stopCount(), "the doomed subscription must be released, not orphaned")
+
+	// A failed Supervise must not leave a restart goroutine retrying behind the
+	// caller's back — it has nothing to hand the retried subscription to.
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, calls, "a failed Supervise must not keep restarting")
 }
 
 // An error still buffered on a superseded subscription's errs channel must not
@@ -316,7 +326,7 @@ func TestSupervisor_StaleErrorFromSupersededRoundIsIgnored(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 	assert.Equal(t, 2, f.callCount())
-	assert.True(t, s.IsUp())
+	require.Eventually(t, s.IsUp, 2*time.Second, 10*time.Millisecond)
 }
 
 // transientEscalation is meant to catch a back-to-back run, not a lifetime
@@ -388,4 +398,65 @@ func TestSupervisor_StopDuringRestartLeavesItDown(t *testing.T) {
 		"a supervisor stopped mid-restart must report down")
 	assert.Equal(t, 1, handles[1].(*stubConsume).stopCount(),
 		"the replacement started during Stop must be released")
+}
+
+// The replacement can die during its own start. Suppressing that as a duplicate
+// leaves begin installing an already-stopped subscription and marking it up:
+// Consume reports a terminal error exactly once, so nothing repairs it and the
+// lane stays frozen behind a green health check.
+func TestSupervisor_ReplacementFailingDuringStartKeepsRestarting(t *testing.T) {
+	var mu sync.Mutex
+	failRounds := map[int]bool{1: true, 2: true, 3: true}
+	handles := make([]*stubConsume, 0, 8)
+	started := make(chan int, 16)
+
+	start := func(_ context.Context, onError func(error)) (ConsumeContext, error) {
+		mu.Lock()
+		round := len(handles) + 1
+		h := &stubConsume{}
+		handles = append(handles, h)
+		fail := failRounds[round]
+		mu.Unlock()
+
+		if fail {
+			// Terminal status lands while start is still returning.
+			onError(jetstream.ErrConsumerDeleted)
+		}
+		started <- round
+		return h, nil
+	}
+
+	s, err := Supervise(context.Background(), "ordered", start)
+	require.Error(t, err, "round 1 dying during start is a startup failure")
+	assert.Nil(t, s)
+
+	// Round 1 failed at startup; drive the same shape through a live supervisor.
+	mu.Lock()
+	failRounds = map[int]bool{2: true, 3: true}
+	handles = handles[:0]
+	mu.Unlock()
+	for len(started) > 0 {
+		<-started
+	}
+
+	s, err = Supervise(context.Background(), "ordered", start)
+	require.NoError(t, err)
+	t.Cleanup(s.Stop)
+	s.sleepFn = func(context.Context, time.Duration) bool { return true }
+	require.Equal(t, 1, <-started)
+
+	// Round 1 is live. Kill it; rounds 2 and 3 then die inside start, and only
+	// round 4 survives. The supervisor must keep going until one sticks.
+	s.observe(1, jetstream.ErrConsumerDeleted)
+
+	require.Eventually(t, s.IsUp, 5*time.Second, 10*time.Millisecond,
+		"the supervisor must keep restarting until a replacement survives")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.GreaterOrEqual(t, len(handles), 4, "rounds that died during start must be retried")
+	for i, h := range handles[:len(handles)-1] {
+		assert.Equal(t, 1, h.stopCount(), "dead round %d must be released", i+1)
+	}
+	assert.Equal(t, 0, handles[len(handles)-1].stopCount(), "the surviving round stays live")
 }

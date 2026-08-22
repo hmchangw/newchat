@@ -274,14 +274,17 @@ func (p *Pump) rebuild() error {
 		p.iter = iter
 		p.mu.Unlock()
 
-		// Stop landing while the build was in flight already released the old
-		// iterator, so this one would be left running with nobody reading it —
-		// its messages sit un-acked until AckWait.
+		// Publish up first, then re-read stopped: Stop sets stopped before it
+		// clears up, so this ordering cannot leave a stopped pump reporting
+		// healthy. A Stop landing while the build was in flight already released
+		// the old iterator, so this one would otherwise be left running with
+		// nobody reading it — its messages sit un-acked until AckWait.
+		p.up.Store(true)
 		if p.stopped.Load() {
+			p.up.Store(false)
 			iter.Stop()
 			return ErrStopped
 		}
-		p.up.Store(true)
 		slog.InfoContext(p.ctx, "jetstream iterator rebuilt",
 			"consumer", p.name, "attempts", attempt+1)
 		return nil
@@ -300,7 +303,7 @@ func backoffStep(attempt int) time.Duration {
 // sleep parks for a jittered d, returning false when Stop or context
 // cancellation cut the wait short.
 func (p *Pump) sleep(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(jitter(d))
+	timer := time.NewTimer(Jitter(d))
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -312,9 +315,10 @@ func (p *Pump) sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// jitter applies AWS "equal jitter": half the step plus a random amount up to
-// the other half, so a fleet that lost one gateway does not rebuild in lockstep.
-func jitter(d time.Duration) time.Duration {
+// Jitter applies AWS "equal jitter": half the step plus a random amount up to
+// the other half, so a fleet that lost one gateway does not rebuild in lockstep
+// — every recovering consumer must space its own retries, not just these two.
+func Jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
 	}

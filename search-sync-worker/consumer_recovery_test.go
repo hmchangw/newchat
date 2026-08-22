@@ -422,3 +422,73 @@ func TestRawBatch_Error_DelegatesToUnderlyingBatch(t *testing.T) {
 
 	assert.ErrorIs(t, batch.Error(), jetstream.ErrConsumerDeleted)
 }
+
+// flushCountingSource reports how many ES actions were still buffered when the
+// loop entered Recover, so a stranded buffer is visible.
+type flushCountingSource struct {
+	*recordingSource
+	handler  *Handler
+	buffered []int
+	mu       sync.Mutex
+}
+
+func (s *flushCountingSource) Recover(ctx context.Context, err error) bool {
+	if err != nil {
+		s.mu.Lock()
+		s.buffered = append(s.buffered, s.handler.ActionCount())
+		s.mu.Unlock()
+	}
+	return s.recordingSource.Recover(ctx, err)
+}
+
+func (s *flushCountingSource) bufferedAtRecover() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.buffered...)
+}
+
+// Recover can park for a whole outage while it rebuilds, so anything already
+// built must reach Elasticsearch first rather than wait out the outage.
+func TestRunConsumer_FlushesBufferedActionsBeforeRecovering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  func(stop chan struct{}) *recordingSource
+	}{
+		{"fetch error", func(stop chan struct{}) *recordingSource {
+			var once sync.Once
+			return &recordingSource{
+				fetchErrs: []error{nil, errors.New("fetch failed")},
+				batches:   []msgBatch{stubBatch{}},
+				keepGoing: true,
+				onRecover: func() { once.Do(func() { close(stop) }) },
+			}
+		}},
+		{"batch error", func(stop chan struct{}) *recordingSource {
+			var once sync.Once
+			return &recordingSource{
+				batches:   []msgBatch{stubBatch{err: jetstream.ErrConsumerDeleted}},
+				keepGoing: true,
+				onRecover: func() { once.Do(func() { close(stop) }) },
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stopCh := make(chan struct{})
+			handler := newLoopHandler(t)
+			src := &flushCountingSource{recordingSource: tc.src(stopCh), handler: handler}
+
+			doneCh := make(chan struct{})
+			go runConsumer(context.Background(), src, handler, 10, 500, time.Hour, stopCh, doneCh)
+			select {
+			case <-doneCh:
+			case <-time.After(5 * time.Second):
+				t.Fatal("runConsumer did not return")
+			}
+
+			for _, buffered := range src.bufferedAtRecover() {
+				assert.Zero(t, buffered,
+					"actions must be flushed before a recovery that can outlast the flush interval")
+			}
+		})
+	}
+}
