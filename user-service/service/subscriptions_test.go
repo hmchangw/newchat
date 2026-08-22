@@ -871,39 +871,54 @@ func TestUnreadRooms_ContextCancelledMultiSite_AllSitesDegraded(t *testing.T) {
 	assert.True(t, degraded, "a cancelled fan-out across multiple sites must never be cached as complete")
 }
 
-func TestUnreadRooms_CrossSiteDeletedRoomNotCounted(t *testing.T) {
-	// A cross-site room soft-deleted at its origin still comes back Found=true with a
-	// stale lastMsgAt over the RPC; it must NOT inflate the unread count — the list
-	// path surfaces it room-less, and the badge must agree.
+// Absence, not the name, is what excludes a cross-site room from the unread count:
+// a room the remote site reports Found=false contributes nothing.
+func TestUnreadRooms_CrossSiteNotFoundRoomNotCounted(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
-	stale := int64(200) // newer than seen → WOULD count if the Del- room weren't skipped
+	newer := int64(200) // newer than seen → WOULD count if the room resolved
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
 		Return([]model.EnrichedSubscription{crossSiteSub("rd", "site-b")}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
-		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &stale}}, nil)
+		Return([]model.RoomInfo{{RoomID: "rd", Found: false, LastMsgAt: &newer}}, nil)
 
 	ids, degraded, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
 	require.NoError(t, err)
-	assert.Empty(t, ids, "a soft-deleted cross-site room must not be counted as unread")
+	assert.Empty(t, ids, "an unresolvable cross-site room must not be counted as unread")
 	assert.False(t, degraded, "a successful RPC that simply excludes the room is not degraded")
 }
 
-func TestUnreadRooms_CrossSiteDeletedRoomThreadNotCounted(t *testing.T) {
-	// A soft-deleted cross-site room must not become a thread candidate either — its
-	// stale ThreadUnread must not resurrect it via the thread phase.
+// A not-found cross-site room must not become a thread candidate either — its stale
+// ThreadUnread must not resurrect it via the thread phase.
+func TestUnreadRooms_CrossSiteNotFoundRoomThreadNotCounted(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
-	stale := int64(50) // older than seen → read at the message level
+	older := int64(50) // older than seen → read at the message level
 	sub := crossSiteSub("rd", "site-b")
 	sub.ThreadUnread = []string{"p1"}
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
 		Return([]model.EnrichedSubscription{sub}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
-		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &stale}}, nil)
+		Return([]model.RoomInfo{{RoomID: "rd", Found: false, LastMsgAt: &older}}, nil)
 
 	ids, degraded, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
 	require.NoError(t, err)
-	assert.Empty(t, ids, "a soft-deleted cross-site room's ThreadUnread must not count")
+	assert.Empty(t, ids, "an unresolvable cross-site room's ThreadUnread must not count")
 	assert.False(t, degraded, "a successful RPC that simply excludes the room is not degraded")
+}
+
+// The room name carries no meaning in the unread count: a resolvable room counts on
+// its timestamps alone, whatever it is called.
+func TestUnreadRooms_CrossSiteRoomNameIsNotAFilter(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	newer := int64(200) // newer than seen → counts
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]model.EnrichedSubscription{crossSiteSub("rd", "site-b")}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
+		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &newer}}, nil)
+
+	ids, degraded, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rd"}, ids, "a resolvable room counts regardless of its name")
+	assert.False(t, degraded)
 }
 
 // A failing cross-site RPC still yields a best-effort count, but nothing may be
@@ -1084,8 +1099,8 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 
 // enrichLastMessage must build a hint from each room's already-resolved
 // LastMsgAt (set by enrichLocal before this runs) so history-service can skip
-// its own room-times read; a room with no Room object (soft-deleted) must
-// contribute no hint entry.
+// its own room-times read; a room with no resolved LastMsgAt contributes no
+// hint entry.
 func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 	svc, subs, history := newSvcRawHistory(t)
 	lastMsgAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -1095,9 +1110,9 @@ func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 			RoomName:     "General", UserCount: 3, LastMsgAt: &lastMsgAt,
 		},
 		{
-			// Soft-deleted: buildLocalRoom returns nil Room, so no hint for r2.
-			Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "old-room", RoomType: model.RoomTypeChannel},
-			RoomName:     "Del-old-room",
+			// No messages yet: nil LastMsgAt ⇒ no hint for r2.
+			Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "quiet-room", RoomType: model.RoomTypeChannel},
+			RoomName:     "Quiet",
 		},
 	}
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
@@ -1108,11 +1123,12 @@ func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
 	require.NoError(t, err)
-	require.Len(t, resp.Subscriptions, 2, "a local soft-deleted sub is kept with no Room, not dropped")
+	require.Len(t, resp.Subscriptions, 2)
 	room1 := resp.Subscriptions[0].Base().Room
 	require.NotNil(t, room1)
 	room2 := resp.Subscriptions[1].Base().Room
-	assert.Nil(t, room2, "soft-deleted local room has no Room object")
+	require.NotNil(t, room2, "a room with no messages still gets a room object")
+	assert.Nil(t, room2.LastMsgAt)
 }
 
 // includeLastMessage:false skips the rooms.get RPC entirely.
@@ -1164,8 +1180,7 @@ func TestBuildLocalRoom_CrossSite(t *testing.T) {
 
 func TestApplyRoomInfo_CrossSite(t *testing.T) {
 	sub := &model.Subscription{}
-	drop := applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan", CrossSite: ptrBool(true)})
-	assert.False(t, drop)
+	applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan", CrossSite: ptrBool(true)})
 	require.NotNil(t, sub.Room)
 	require.NotNil(t, sub.Room.CrossSite)
 	assert.True(t, *sub.Room.CrossSite)
@@ -1177,8 +1192,7 @@ func TestApplyRoomInfo_CrossSite(t *testing.T) {
 // frontend's `?? true` default resolves it to global (fail-safe).
 func TestApplyRoomInfo_CrossSite_Nil(t *testing.T) {
 	sub := &model.Subscription{}
-	drop := applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan"})
-	assert.False(t, drop)
+	applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan"})
 	require.NotNil(t, sub.Room)
 	assert.Nil(t, sub.Room.CrossSite)
 }
