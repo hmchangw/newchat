@@ -109,11 +109,7 @@ func main() {
 // that precedes it (low volume — one publish burst per sync run).
 func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string, s stream.ConsumerSettings) (o11ynats.ConsumeContext, error) {
 	streamCfg := stream.OrgSyncStream(siteID)
-	s.MaxDeliver = -1 // never drop a feed batch; jsretry backoff spaces the retries
-	consCfg := stream.DurableConsumerDefaults(s)
-	consCfg.Durable = durableName
-	consCfg.MaxAckPending = 1
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consCfg)
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(s))
 	if err != nil {
 		return nil, err
 	}
@@ -129,4 +125,17 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Subject(), data))
 		})
 	})
+}
+
+// buildConsumerConfig adds the durable name and this worker's two overrides;
+// everything else comes from ConsumerSettings. MaxDeliver=-1 never drops a feed
+// batch (jsretry backoff spaces the retries) and exempts the schedule from the
+// len(BackOff)<=MaxDeliver rule; MaxAckPending=1 keeps the lane strictly
+// sequential so a quit cannot overtake the upsert before it.
+func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+	s.MaxDeliver = -1
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = durableName
+	cc.MaxAckPending = 1
+	return cc
 }

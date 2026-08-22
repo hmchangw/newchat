@@ -48,7 +48,7 @@ type Msg interface {
 // the work is not latency-sensitive — enough to ride out a brief Cassandra or
 // Mongo outage without exhausting the consumer's MaxDeliver. The first four
 // entries are Synadia's published reference schedule; the 10m tail extends the
-// budget to ~13 minutes across MaxDeliver=6.
+// budget to 12.6 minutes across MaxDeliver=6.
 var DefaultBackoff = []time.Duration{
 	1 * time.Second,
 	5 * time.Second,
