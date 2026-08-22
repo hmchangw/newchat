@@ -294,3 +294,47 @@ func TestGzip_FlushBeforeAnyWriteStaysUncompressed(t *testing.T) {
 	assert.NotContains(t, w.Header().Get("Content-Type"), "gzip")
 	assert.Equal(t, body, w.Body.String())
 }
+
+func TestGzip_HonoursQZeroRefusal(t *testing.T) {
+	body := strings.Repeat("a", 4096)
+	tests := []struct {
+		header string
+		want   bool
+	}{
+		{"gzip;q=0", false},
+		{"gzip; q=0", false},
+		{"gzip;q=0.0", false},
+		{"gzip;q=0.5", true},
+		{"gzip;q=1", true},
+		{"deflate;q=1, gzip;q=0", false},
+		{"gzip;q=bogus", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.header, func(t *testing.T) {
+			w := doGet(gzipEngine(t, 1024, writeBody(body)), tc.header)
+			if tc.want {
+				assert.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
+				return
+			}
+			assert.Empty(t, w.Header().Get("Content-Encoding"), "q=0 is an explicit refusal")
+			assert.Equal(t, body, w.Body.String())
+		})
+	}
+}
+
+// A panic after a sub-threshold write must not commit that body: gin.Recovery
+// has to be able to replace it with a 500.
+func TestGzip_PanicDiscardsBufferedBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(gin.Recovery(), Gzip(1024))
+	r.GET("/x", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.WriteString("partial")
+		panic("boom")
+	})
+	w := doGet(r, "gzip")
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "Recovery must still own the response")
+	assert.NotContains(t, w.Body.String(), "partial", "a buffered body must not survive a panic")
+}

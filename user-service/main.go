@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/net/netutil"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/botauth"
@@ -359,13 +360,19 @@ func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, 
 	// Every request derives from this, so the drain can cancel handlers that
 	// outlive it: Shutdown stops accepting and waits, but never interrupts a
 	// running handler.
-	baseCtx, cancelInFlight := context.WithCancel(context.Background())
+	baseCtx, cancelInFlight := context.WithCancelCause(context.Background())
 	srv.BaseContext = func(net.Listener) context.Context { return baseCtx }
 
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
-		cancelInFlight()
+		cancelInFlight(service.ErrShuttingDown)
 		return nil, nil, fmt.Errorf("http listen on %q: %w", srv.Addr, err)
+	}
+	if cfg.HTTP.MaxConns > 0 {
+		// The handler limiter only counts requests that reached Gin. Accepted
+		// connections cost a goroutine and buffers before that, so a slow-header or
+		// idle-keep-alive flood would grow memory past any handler cap.
+		ln = netutil.LimitListener(ln, cfg.HTTP.MaxConns)
 	}
 	go func() {
 		// Exiting, not just logging: readiness probes NATS, so a dead listener would
@@ -375,5 +382,7 @@ func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, 
 			os.Exit(1)
 		}
 	}()
-	return srv, cancelInFlight, nil
+	// Reported as a cause so a handler can tell the drain apart from a client
+	// hang-up: one must fail the request, the other must stay quiet.
+	return srv, func() { cancelInFlight(service.ErrShuttingDown) }, nil
 }

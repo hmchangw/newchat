@@ -2027,3 +2027,24 @@ is identical in Tasks 4, 8, and the Task 8 interface. `chunkRoomIDs(ids, size)` 
 between Task 5's tests and implementation. `authDeps`/`accountFromContext`/`ctxAccountKey`
 match between Tasks 7 and 8. `httpDeps` fields match between Tasks 8 and 9.
 `newHTTPServer(addr, handler, cfg)` matches between Task 9's test and implementation.
+
+---
+
+## Divergences from this plan
+
+Recorded so the plan stays a faithful record of what was intended, while pointing
+at what actually shipped. The design doc and `docs/client-api.md` are the live
+documents; where they disagree with the code blocks above, they win.
+
+| Planned | Shipped | Why |
+|---|---|---|
+| `SUBSCRIPTION_HTTP_DEFAULT_LIMIT` / `SUBSCRIPTION_HTTP_MAX_LIMIT`, mirrored into `HTTPConfig` with `env:"-"` and a hand-written copy step | `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` / `HTTP_SUBSCRIPTION_MAX_LIMIT`, inside the prefixed block | The mirror stored every value twice and needed a manual sync a future field would forget |
+| `chunkRoomIDs` helper | stdlib `slices.Chunk` | The package already had `chunkStrings`; a third chunker was not worth it |
+| Two hand-written chunked fan-out loops | one generic `fanOutChunks`, per-chunk result slots | The loops were the same skeleton twice, and per-chunk slots removed the merge mutex |
+| Chunk the room ids, rebuild hints per chunk | chunk the row indices | ids and hints then fall out of one pass, deleting a lookup set and a per-chunk rescan |
+| `MaxConcurrency(n, opts...)` with `WithRetryAfter` | `MaxConcurrency(n, onShed)` | The option had no production caller |
+| `memlimit.SetFromCgroup` returning `(int64, bool, error)` | `(int64, error)` | The bool was derivable from the limit |
+| `handlerTimeout` in `user-service/routes.go` | `ginutil.Timeout` | Generic middleware belongs with its two siblings in `pkg/` |
+| gzip at `DefaultCompression` | `BestSpeed` | Measured 39% faster for 3 KB more on a 200-row page |
+| No connection ceiling | `HTTP_MAX_CONNS` via `netutil.LimitListener` | Review: the handler cap does not bound accepted connections |
+| `MAX_SITE_FANOUT` dropped as redundant | restored, per this plan | Review: chunking multiplies downstream RPCs, so the bound has to be tunable |

@@ -145,7 +145,7 @@ func newTestAPI(t *testing.T) (*gin.Engine, *stubRooms, *stubHistory) {
 		SiteID: testSiteID, AllSiteIDs: []string{testSiteID},
 		MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40,
 		MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100,
-		BadgeCountCap: 10, RoomBatchChunk: 100,
+		BadgeCountCap: 10, RoomBatchChunk: 100, MaxSiteFanout: 8,
 	}
 	svc := service.New(subRepo, mongorepo.NewUserRepo(db), mongorepo.NewAppRepo(db),
 		mongorepo.NewThreadSubscriptionRepo(db), rooms, history, nil, nil, nil,

@@ -23,10 +23,33 @@ import (
 
 var validListTypes = map[string]bool{"current": true, "rooms": true, "apps": true}
 
+// ErrShuttingDown is the cancellation cause main attaches when the HTTP drain
+// gives up on a still-running handler. It is a server-side abort, so unlike a
+// client hang-up the caller is still there to receive — and must not receive a
+// partially enriched page dressed as success.
+var ErrShuttingDown = errors.New("server is shutting down")
+
 // errTimedOut is the one 503 the list returns when it runs out of budget, so both
 // the query and the enrichment report the retryable code the API documents.
 func errTimedOut(cause error) error {
 	return errcode.Unavailable("subscription list timed out, please retry", errcode.WithCause(cause))
+}
+
+// abandoned reports whether ctx died in a way the caller will still observe: a
+// deadline, or the shutdown drain. A plain client cancellation is excluded — that
+// caller is gone, and turning it into a 503 would log an ERROR per abandoned
+// request during exactly the reconnect burst this endpoint serves.
+func abandoned(ctx context.Context) error {
+	if err := ctx.Err(); err == nil {
+		return nil
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return ctx.Err()
+	}
+	if cause := context.Cause(ctx); errors.Is(cause, ErrShuttingDown) {
+		return cause
+	}
+	return nil
 }
 
 // deletedRoomNamePrefix marks a soft-deleted room (room-service renames it to
@@ -60,21 +83,20 @@ func (s *UserService) ListSubscriptionsFor(ctx context.Context, account string, 
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, errTimedOut(err)
 		}
+		if aborted := abandoned(ctx); aborted != nil {
+			return nil, errTimedOut(aborted)
+		}
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
 	res.Data = s.enrichWithRoomInfoAndLastMsg(ctx, account, res.Data, true, withLastMsg)
 	items := s.buildListItems(ctx, account, res.Data)
 	// Every lookup above degrades silently, which is right for a failed RPC and
-	// wrong for a deadline: the page would return 200 with rooms indistinguishable
-	// from deleted ones, and the client would cache a half-empty sidebar. Checked
-	// after the app/HR overlays, which degrade the same way.
-	//
-	// Deadline only: a cancellation means the client is already gone, and turning
-	// that into a 503 would log an ERROR per abandoned request during exactly the
-	// reconnect burst this endpoint serves.
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, errTimedOut(ctx.Err())
+	// wrong for an abandoned request: the page would return 200 with rooms
+	// indistinguishable from deleted ones, and the client would cache a half-empty
+	// sidebar. Checked after the app/HR overlays, which degrade the same way.
+	if aborted := abandoned(ctx); aborted != nil {
+		return nil, errTimedOut(aborted)
 	}
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: items,
@@ -288,7 +310,7 @@ func (s *UserService) enrichCrossSite(ctx context.Context, account string, subs 
 	if len(sites) == 0 {
 		return nil
 	}
-	infoBySite := fanOutChunks(ctx, planChunks(subs, sites, idxBySite, s.roomBatchChunk), len(sites),
+	infoBySite := fanOutChunks(ctx, planChunks(subs, sites, idxBySite, s.roomBatchChunk), len(sites), s.fanout(),
 		func(ctx context.Context, job chunkJob) (map[string]model.RoomInfo, error) {
 			infos, err := s.rooms.GetRoomsInfo(ctx, job.site, job.roomIDs)
 			if err != nil {
@@ -322,10 +344,6 @@ func (s *UserService) enrichCrossSite(ctx context.Context, account string, subs 
 	return dropped
 }
 
-// maxSiteFanout bounds concurrent enrichment RPCs across all sites and chunks —
-// otherwise a heavily-federated ALL_SITE_IDS fans one request into N simultaneous 5s RPCs.
-const maxSiteFanout = 8
-
 // chunkJob is one enrichment RPC. Chunking indices rather than ids keeps rows and
 // ids in step, so building a hint map needs no second pass.
 type chunkJob struct {
@@ -355,6 +373,37 @@ func planChunks(subs []model.EnrichedSubscription, sites []string, idxBySite map
 	return jobs
 }
 
+// roomsGetSplitting fetches previews for one chunk, halving and retrying when the
+// reply will not fit the transport. A room count cannot bound reply bytes —
+// previews carry untruncated message bodies — so even a 100-room chunk can
+// overflow, and without this the whole chunk's previews vanish from an otherwise
+// successful page. A half that still fails degrades alone.
+func (s *UserService) roomsGetSplitting(ctx context.Context, site string, subs []model.EnrichedSubscription, rows []int, roomIDs []string) (map[string]model.PreviewMessage, error) {
+	m, err := s.history.RoomsGet(ctx, site, roomIDs, chunkHints(subs, rows))
+	if err == nil || len(roomIDs) < 2 || !isResponseTooLarge(err) {
+		return m, err
+	}
+
+	mid := len(roomIDs) / 2
+	left, lErr := s.roomsGetSplitting(ctx, site, subs, rows[:mid], roomIDs[:mid])
+	right, rErr := s.roomsGetSplitting(ctx, site, subs, rows[mid:], roomIDs[mid:])
+	if lErr != nil && rErr != nil {
+		return nil, lErr
+	}
+	// Partial success is kept: losing half the previews beats losing all of them.
+	merged := make(map[string]model.PreviewMessage, len(left)+len(right))
+	maps.Copy(merged, left)
+	maps.Copy(merged, right)
+	return merged, nil
+}
+
+// isResponseTooLarge reports whether the reply was refused for exceeding the
+// transport payload cap, the one enrichment failure a smaller batch can fix.
+func isResponseTooLarge(err error) bool {
+	var e *errcode.Error
+	return errors.As(err, &e) && e.Reason == errcode.ResponseTooLarge
+}
+
 // chunkHints returns the walk bounds for this chunk's rows, letting
 // history-service skip its own room-times read. Scoped to the chunk because
 // history-service caps hints at the same 100 as room ids.
@@ -373,12 +422,12 @@ func chunkHints(subs []model.EnrichedSubscription, rows []int) map[string]model.
 // A site's map is nil only when every one of its chunks failed, so "site degraded"
 // stays distinguishable from "room absent" and one failed chunk costs only its own
 // rooms. Each chunk writes its own slot, so the merge needs no lock.
-func fanOutChunks[T any](ctx context.Context, jobs []chunkJob, sites int, call func(context.Context, chunkJob) (map[string]T, error)) []map[string]T {
+func fanOutChunks[T any](ctx context.Context, jobs []chunkJob, sites, maxFanout int, call func(context.Context, chunkJob) (map[string]T, error)) []map[string]T {
 	results := make([]map[string]T, len(jobs))
 	// WaitGroup, not errgroup: errgroup.WithContext cancels siblings on the first
 	// error, and per-chunk degradation must leave the others running.
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxSiteFanout)
+	sem := make(chan struct{}, maxFanout)
 	for i, job := range jobs {
 		// Client already gone — stop firing further ~5s RPCs; the rest would only
 		// waste round-trips. In-flight calls fail fast via the ctx we pass down.
@@ -433,9 +482,9 @@ func (s *UserService) enrichLastMessage(ctx context.Context, account string, sub
 	for site := range idxBySite {
 		sites = append(sites, site)
 	}
-	lastMsgBySite := fanOutChunks(ctx, planChunks(subs, sites, idxBySite, s.roomBatchChunk), len(sites),
+	lastMsgBySite := fanOutChunks(ctx, planChunks(subs, sites, idxBySite, s.roomBatchChunk), len(sites), s.fanout(),
 		func(ctx context.Context, job chunkJob) (map[string]model.PreviewMessage, error) {
-			m, err := s.history.RoomsGet(ctx, job.site, job.roomIDs, chunkHints(subs, job.rows))
+			m, err := s.roomsGetSplitting(ctx, job.site, subs, job.rows, job.roomIDs)
 			if err != nil {
 				slog.WarnContext(ctx, "last-message enrichment degraded", "account", account, "site", job.site,
 					"chunk_size", len(job.roomIDs), "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
@@ -699,7 +748,7 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 		results := make([][]string, len(sites))
 		failed := make([]bool, len(sites))
 		var wg sync.WaitGroup
-		sem := make(chan struct{}, maxSiteFanout) // bound concurrent per-site RPCs
+		sem := make(chan struct{}, s.fanout()) // bound concurrent per-site RPCs
 		for i, site := range sites {
 			// Client already gone — stop firing further ~5s RPCs. The remaining sites'
 			// rooms will never be counted, so mark them (and this one) degraded rather

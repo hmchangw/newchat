@@ -2,6 +2,7 @@ package ginutil
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -34,24 +35,41 @@ func Gzip(minSize int) gin.HandlerFunc {
 
 		gw := &gzipResponseWriter{ResponseWriter: c.Writer, minSize: minSize}
 		c.Writer = gw
+		completed := false
 		defer func() {
-			gw.close()
+			gw.finish(completed)
 			c.Writer = gw.ResponseWriter
 		}()
 		c.Next()
+		completed = true
 	}
 }
 
-// acceptsGzip reports whether the Accept-Encoding header lists gzip, ignoring
-// q-values (a q=0 refusal is rare enough not to warrant the parse).
+// acceptsGzip reports whether Accept-Encoding permits gzip. A q of 0 is an
+// explicit refusal (RFC 9110), so it is honoured rather than ignored.
 func acceptsGzip(header string) bool {
 	for enc := range strings.SplitSeq(header, ",") {
-		name, _, _ := strings.Cut(enc, ";")
+		name, params, _ := strings.Cut(enc, ";")
 		if strings.EqualFold(strings.TrimSpace(name), "gzip") {
-			return true
+			return qualityAllows(params)
 		}
 	}
 	return false
+}
+
+// qualityAllows reports whether the parameters permit the encoding. Only an
+// explicit q=0 refuses; an absent or malformed q is acceptable.
+func qualityAllows(params string) bool {
+	for param := range strings.SplitSeq(params, ";") {
+		k, v, ok := strings.Cut(param, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
+			continue
+		}
+		if q, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && q <= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // gzipResponseWriter buffers the first minSize bytes, then either switches to gzip
@@ -167,6 +185,18 @@ func (w *gzipResponseWriter) flushStatus() {
 		w.status = http.StatusOK
 	}
 	w.ResponseWriter.WriteHeader(w.status)
+}
+
+// finish ends the response. When the handler did not complete — it panicked —
+// a still-buffered body is dropped instead of flushed, so gin.Recovery can write
+// its 500 rather than find the response already committed. An encoder that has
+// already written to the wire is still closed, so its pooled writer comes back.
+func (w *gzipResponseWriter) finish(completed bool) {
+	if !completed && w.gz == nil && !w.plain {
+		w.buf, w.status, w.closed = nil, 0, true
+		return
+	}
+	w.close()
 }
 
 // close finalizes the response: flush the encoder, or emit the buffered body

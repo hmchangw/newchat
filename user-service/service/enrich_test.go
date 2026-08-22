@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -627,4 +628,114 @@ func TestEnrichCrossSite_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 200, enriched, "a failed chunk must not blank the whole site")
+}
+
+// A room count cannot bound reply bytes: previews carry untruncated message
+// bodies, so a full chunk can overflow the transport. It must be split, not lost.
+func TestEnrichLastMessage_SplitsOnResponseTooLarge(t *testing.T) {
+	svc, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	var mu sync.Mutex
+	var attempted []int
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			mu.Lock()
+			attempted = append(attempted, len(ids))
+			mu.Unlock()
+			// The full batch is refused; halves fit.
+			if len(ids) > 50 {
+				return nil, errcode.Internal("reply exceeds max_payload",
+					errcode.WithReason(errcode.ResponseTooLarge))
+			}
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg"}
+			}
+			return out, nil
+		}).AnyTimes()
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	sort.Ints(attempted)
+	assert.Equal(t, []int{50, 50, 100}, attempted, "the refused batch must be halved and retried")
+	for i := range subs {
+		assert.NotNil(t, subs[i].Room.PreviewMessage, "row %d must survive the split", i)
+	}
+}
+
+// Splitting applies only to the payload refusal; other failures must not be
+// retried, or a shedding downstream would see the request multiply.
+func TestEnrichLastMessage_DoesNotSplitOtherErrors(t *testing.T) {
+	svc, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		Return(nil, errcode.Unavailable("shed")).Times(1)
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	for i := range subs {
+		assert.Nil(t, subs[i].Room.PreviewMessage, "row %d degrades without a retry", i)
+	}
+}
+
+// A half that still overflows degrades alone rather than taking the page with it.
+func TestEnrichLastMessage_KeepsTheHalfThatFits(t *testing.T) {
+	svc, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			// Only the first half ever fits; the second keeps refusing to one room.
+			if len(ids) > 50 || ids[0] != "r0" {
+				return nil, errcode.Internal("too large", errcode.WithReason(errcode.ResponseTooLarge))
+			}
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg"}
+			}
+			return out, nil
+		}).AnyTimes()
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	var withPreview int
+	for i := range subs {
+		if subs[i].Room.PreviewMessage != nil {
+			withPreview++
+		}
+	}
+	assert.Equal(t, 50, withPreview, "the half that fits must survive")
+}
+
+// The fan-out semaphores send before spawning their receiver, so a capacity of
+// zero is an unbuffered channel that blocks forever. A directly-constructed
+// UserService must not be able to hang the enrichment.
+func TestFanout_NormalisesNonPositive(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		assert.Equal(t, defaultSiteFanout, (&UserService{maxFanout: n}).fanout())
+	}
+	assert.Equal(t, 3, (&UserService{maxFanout: 3}).fanout())
+}
+
+func TestEnrichLastMessage_UnsetFanoutDoesNotDeadlock(t *testing.T) {
+	_, _, history := newSvcRawHistory(t)
+	// maxFanout deliberately left at zero, as the badge/thread fixtures build it.
+	svc := &UserService{siteID: "site-a", history: history, roomBatchChunk: 100}
+	subs, idxBySite := enrichFixture(10, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(map[string]model.PreviewMessage{}, nil).AnyTimes()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enrichment deadlocked on an unbuffered semaphore")
+	}
 }

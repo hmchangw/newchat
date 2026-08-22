@@ -33,7 +33,7 @@ func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionReposi
 	presence := mocks.NewMockPresenceClient(ctrl)
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
-	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100, BadgeCountCap: 10, RoomBatchChunk: 100}
+	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100, BadgeCountCap: 10, RoomBatchChunk: 100, MaxSiteFanout: 8}
 	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, nil, nil, nil, cfg), subs, history
 }
 
@@ -1274,8 +1274,28 @@ func TestListSubscriptionsFor_DeadlineDuringEnrichmentFails(t *testing.T) {
 	requireCode(t, err, errcode.CodeUnavailable)
 }
 
-// A cancelled client is already gone. Turning that into a 503 would log an ERROR
-// per abandoned request during exactly the reconnect burst this endpoint serves.
+// The shutdown drain cancels handlers whose clients are still connected, so that
+// caller would otherwise receive a partially enriched page as 200.
+func TestListSubscriptionsFor_ShutdownCancellationFails(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{
+			Data: []model.EnrichedSubscription{
+				{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-b"}},
+			},
+		}, nil).AnyTimes()
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(ErrShuttingDown)
+
+	_, err := svc.ListSubscriptionsFor(ctx, "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
+
+	requireCode(t, err, errcode.CodeUnavailable)
+}
+
+// A client that hung up is gone; turning that into a 503 would log an ERROR per
+// abandoned request during exactly the reconnect burst this endpoint serves.
 func TestListSubscriptionsFor_ClientCancellationIsNotAServerError(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).

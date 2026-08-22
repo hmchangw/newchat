@@ -26,7 +26,7 @@ func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *moc
 	history := mocks.NewMockHistoryClient(ctrl)
 	presence := mocks.NewMockPresenceClient(ctrl)
 	pub := mocks.NewMockEventPublisher(ctrl)
-	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100, SSORefreshWindow: time.Hour, BadgeCountCap: 10, RoomBatchChunk: 100}
+	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100, SSORefreshWindow: time.Hour, BadgeCountCap: 10, RoomBatchChunk: 100, MaxSiteFanout: 8}
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	ssoTokens := mocks.NewMockSSOTokenRepository(ctrl)
 	validator := mocks.NewMockTokenValidator(ctrl)

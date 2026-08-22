@@ -30,7 +30,13 @@ type HTTPConfig struct {
 	// Its own budget, so a burst cannot take handler slots or Mongo connections from
 	// the NATS path — but the NATS connection and the room/history services behind
 	// it are still shared. 0 disables.
-	MaxConcurrency int           `env:"MAX_CONCURRENCY" envDefault:"256"`
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+	// MaxConns bounds accepted TCP connections. MaxConcurrency only applies once a
+	// full request reaches Gin, so without this a client trickling headers, or
+	// holding idle keep-alives, grows goroutines and buffers independently of it.
+	// Must exceed MaxConcurrency: keep-alive connections outnumber in-flight
+	// requests. 0 disables.
+	MaxConns       int           `env:"MAX_CONNS" envDefault:"2048"`
 	HandlerTimeout time.Duration `env:"HANDLER_TIMEOUT" envDefault:"30s"`
 	// WriteTimeout must exceed HandlerTimeout: net/http starts its clock when the
 	// request headers are read, so an equal value cuts the response mid-write.
@@ -64,6 +70,10 @@ type Config struct {
 	// RoomBatchChunk caps room ids per enrichment RPC. 100 is history-service's hard
 	// batch cap and keeps each reply well under the 128 KB NATS payload.
 	RoomBatchChunk int `env:"ROOM_BATCH_CHUNK" envDefault:"100"`
+	// MaxSiteFanout bounds concurrent enrichment RPCs per request. Chunking makes a
+	// large page issue several per site, so this is the knob that throttles the
+	// resulting downstream load without a rebuild.
+	MaxSiteFanout int `env:"MAX_SITE_FANOUT" envDefault:"8"`
 
 	HandlerTimeout time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
 	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
@@ -162,6 +172,12 @@ func Load() (Config, error) {
 	if cfg.HTTP.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("HTTP_MAX_CONCURRENCY must be >= 0, got %d", cfg.HTTP.MaxConcurrency)
 	}
+	if cfg.HTTP.MaxConns < 0 {
+		return Config{}, fmt.Errorf("HTTP_MAX_CONNS must be >= 0, got %d", cfg.HTTP.MaxConns)
+	}
+	if cfg.HTTP.MaxConns > 0 && cfg.HTTP.MaxConns <= cfg.HTTP.MaxConcurrency {
+		return Config{}, fmt.Errorf("HTTP_MAX_CONNS (%d) must exceed HTTP_MAX_CONCURRENCY (%d): keep-alive connections outnumber in-flight requests", cfg.HTTP.MaxConns, cfg.HTTP.MaxConcurrency)
+	}
 	if cfg.HTTP.WriteTimeout <= cfg.HTTP.HandlerTimeout {
 		return Config{}, fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must exceed HTTP_HANDLER_TIMEOUT (%s)", cfg.HTTP.WriteTimeout, cfg.HTTP.HandlerTimeout)
 	}
@@ -176,6 +192,9 @@ func Load() (Config, error) {
 	}
 	if cfg.GoMemLimitFraction <= 0 || cfg.GoMemLimitFraction > 1 {
 		return Config{}, fmt.Errorf("GOMEMLIMIT_FRACTION must be in (0,1], got %v", cfg.GoMemLimitFraction)
+	}
+	if cfg.MaxSiteFanout < 1 {
+		return Config{}, fmt.Errorf("MAX_SITE_FANOUT must be >= 1, got %d", cfg.MaxSiteFanout)
 	}
 	if cfg.RoomBatchChunk < 1 || cfg.RoomBatchChunk > 100 {
 		return Config{}, fmt.Errorf("ROOM_BATCH_CHUNK must be in [1,100], got %d", cfg.RoomBatchChunk)

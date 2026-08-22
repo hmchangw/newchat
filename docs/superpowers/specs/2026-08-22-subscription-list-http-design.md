@@ -97,7 +97,7 @@ guarantee NATS subject scoping gives today.
 | `updatedWithinDays` | integer | no | `rooms` type only; must be ≥ 0 |
 | `includeLastMessage` | boolean | no | Omitted ⇒ include (backward-compatible) |
 | `offset` | integer | no | Negative ⇒ 0. Default 0 |
-| `limit` | integer | no | Omitted or ≤ 0 ⇒ `SUBSCRIPTION_HTTP_DEFAULT_LIMIT` (**40**); capped at `SUBSCRIPTION_HTTP_MAX_LIMIT` (**400**) |
+| `limit` | integer | no | Omitted or ≤ 0 ⇒ `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` (**40**); capped at `HTTP_SUBSCRIPTION_MAX_LIMIT` (**400**) |
 
 Bound into a dedicated struct using `*bool` / `*int` fields so "omitted" stays
 distinguishable from `false` / `0`. The NATS contract depends on that distinction
@@ -433,15 +433,15 @@ existing `MONGO_` / `NATS_` blocks:
 | `HTTP_GZIP_MIN_BYTES` | `1024` | Compression threshold |
 | `HTTP_MONGO_MAX_POOL_SIZE` | `128` | HTTP-only Mongo pool (§13) |
 | `HTTP_MONGO_MIN_POOL_SIZE` | `16` | Warm floor for burst arrivals |
-| `SUBSCRIPTION_HTTP_DEFAULT_LIMIT` | `40` | Page size when `limit` omitted |
-| `SUBSCRIPTION_HTTP_MAX_LIMIT` | `400` | Hard page ceiling |
+| `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` | `40` | Page size when `limit` omitted |
+| `HTTP_SUBSCRIPTION_MAX_LIMIT` | `400` | Hard page ceiling |
 | `ROOM_BATCH_CHUNK` | `100` | Enrichment fan-out chunk size |
 | `MONGO_MAX_POOL_SIZE` | `100` | NATS-path pool, now explicit |
 | `HEALTH_ADDR` | `:8081` | Probe listener |
 | `BOTPLATFORM_URL` | *(unset)* | Session-token auth; unset ⇒ SSO only |
 | `GOMEMLIMIT_FRACTION` | `0.8` | Soft memory limit as a fraction of the cgroup limit |
 
-`Load()` validates: `SUBSCRIPTION_HTTP_DEFAULT_LIMIT ≤ SUBSCRIPTION_HTTP_MAX_LIMIT`,
+`Load()` validates: `HTTP_SUBSCRIPTION_DEFAULT_LIMIT ≤ HTTP_SUBSCRIPTION_MAX_LIMIT`,
 `HTTP_WRITE_TIMEOUT > HTTP_HANDLER_TIMEOUT`, `ROOM_BATCH_CHUNK` in `[1, 100]`,
 `HTTP_MAX_CONCURRENCY ≥ 0`, `GOMEMLIMIT_FRACTION` in `(0, 1]` — fail fast at
 startup, matching the existing validation style.
@@ -479,10 +479,15 @@ wall time (aggregate ≈ 60 ms, HR + app lookups ≈ 20 ms, of ~200 ms total), s
 in-flight requests imply ~100 concurrent checkouts. 128 leaves headroom without
 overshooting.
 
-**Cost, flagged for the DBA:** 228 connections per pod × 10 pods ≈ **2,280
-connections** to the replica set, with ~320 held idle by the minimum pools. Within
-MongoDB's capacity but a real change in connection footprint, and the first thing
-to revisit if the cluster reports connection pressure.
+**Cost, flagged for the DBA.** `MaxPoolSize` is enforced **per server**, not per
+client, so the ceiling is the pool limits times the number of replica-set members
+a client talks to — with a three-member set that is up to (100 + 128) × 3 ≈ **684
+connections per pod**, ~6,840 across ten pods, not the 228/2,280 an earlier draft
+of this document claimed. `MinPoolSize` is likewise per server, so the HTTP
+minimum of 16 can be held on each active member. Size these against the replica
+set's connection budget rather than against the per-pod intuition, and consider
+dropping the HTTP minimum to 0 if warm-connection latency is not a concern —
+failover shifts pool creation between members and briefly multiplies the count.
 
 ## 14. Deployment and operations
 

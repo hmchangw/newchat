@@ -27,6 +27,7 @@ services:
       # Client-facing HTTP listener (subscription.list without the 128 KB NATS cap).
       - HTTP_PORT=${HTTP_PORT:-8080}
       - HTTP_MAX_CONCURRENCY=${HTTP_MAX_CONCURRENCY:-256}
+      - HTTP_MAX_CONNS=${HTTP_MAX_CONNS:-2048}
       - HTTP_HANDLER_TIMEOUT=${HTTP_HANDLER_TIMEOUT:-30s}
       - HTTP_WRITE_TIMEOUT=${HTTP_WRITE_TIMEOUT:-35s}
       - HTTP_GZIP_MIN_BYTES=${HTTP_GZIP_MIN_BYTES:-1024}
@@ -38,6 +39,7 @@ services:
       - HTTP_SUBSCRIPTION_MAX_LIMIT=${HTTP_SUBSCRIPTION_MAX_LIMIT:-400}
       # Room ids per enrichment RPC; history-service hard-rejects over 100.
       - ROOM_BATCH_CHUNK=${ROOM_BATCH_CHUNK:-100}
+      - MAX_SITE_FANOUT=${MAX_SITE_FANOUT:-8}
       - HEALTH_ADDR=${HEALTH_ADDR:-:8081}
       # Unset leaves HTTP auth on ssoToken only.
       - BOTPLATFORM_URL=${BOTPLATFORM_URL:-}
@@ -46,7 +48,7 @@ services:
       # 8080 in-container; host 8090 because 8080 (auth), 8082 (admin), 8085
       # (portal), 8086 (upload), 8087 (tcard), 8088 (observability) and 8089
       # (client-update) are taken. The health listener stays unpublished.
-      - "${USER_SERVICE_HOST_PORT:-8090}:8080"
+      - "${USER_SERVICE_HOST_PORT:-8090}:${HTTP_PORT:-8080}"
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
