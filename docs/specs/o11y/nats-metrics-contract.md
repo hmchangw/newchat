@@ -132,7 +132,7 @@ the drop keeps its own reason — the first classification per delivery wins.
 | NATS exporter JSZ families | `prometheus-nats-exporter` | Existing in local loadgen/observability compose | Staging/production deployment is external and must be proven by preflight |
 | OTel NATS spans | instrumented services | Existing | Spans do not replace counters, gauges, or terminal advisories |
 | `nats_slow_consumer_events_total{subject,queue}` | `pkg/natsutil` | Existing | Per-episode count; exact drops are in the log fields |
-| `chat_nats_client_connected` / `chat_nats_client_connection_events_total{event}` | `pkg/natsutil` | Existing | Every service connecting through the shared helper; scoped by resource, not by inline `service_name` |
+| `chat_nats_client_connected` / `chat_nats_client_connection_events_total{event}` | `pkg/natsutil` | Existing | Only the 7 services calling `ConnectWithMetrics`, not every helper user (§13.2); scoped by resource, not by inline `service_name` |
 | Section 7 shared application families | `pkg/natsmetrics` | Existing for message-gatekeeper, message-worker, broadcast-worker, notification-worker, history-service, room-service, and room-worker | Adoption depth differs: the first four and room-worker instrument the consumer path; history-service and room-service are publisher-side only |
 | Section 8 domain families | owning service | Existing for the four first-campaign services | See Section 8 for the channel fan-out caveat |
 
@@ -549,7 +549,7 @@ instrument name** you grep for in source underneath where the two differ.
 | `chat_nats_consumer_messages_total`<br><sub>`chat.nats.consumer.messages`</sub> | counter | the 5 JetStream consumers | on first delivery | partial: ack throughput via ack-floor rate; naks and terms have no broker equivalent | campaign; carries the event-type breakdown a redelivery question needs |
 | `chat_nats_consumer_processing_duration_seconds`<br><sub>`chat.nats.consumer.processing.duration`</sub> | histogram | the 5 JetStream consumers | on first delivery | none — the broker does not know handler time | campaign (AckWait headroom) |
 | `chat_nats_terminal_failures_total`<br><sub>`chat.nats.terminal.failures`</sub> | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
-| `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | every service using the shared connect helper | on first failure | none — the broker has no record of a publish that never arrived | campaign |
+| `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | the 14 services that wire a `natsmetrics.Publisher` — **not** every publisher; see below | on first failure | none — the broker has no record of a publish that never arrived | campaign |
 | `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
 | `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4** (`le="0.5"`, `rpc_method="channel_history"`) and **SLO-5** (`le="0.25"`, `rpc_method="thread_open"`) — both exact ratios; see the `rpc.method` coverage note below for the other seven services |
 
@@ -623,12 +623,33 @@ absent there.
 
 | Exported name | Type | Emitted by | Appears | Platform alternative | Read by |
 |---|---|---|---|---|---|
-| `chat_nats_client_connected`<br><sub>`chat.nats.client.connected`</sub> | gauge | every service using the shared connect helper | at startup | none at per-process granularity | **SLO-1b connection-risk backstop** (roadmap P4) |
-| `chat_nats_client_connection_events_total`<br><sub>`chat.nats.client.connection.events`</sub> | counter | every service using the shared connect helper | at startup (initial connect) | none | SLO-1b backstop |
-| `nats_slow_consumer_events_total` | counter | any service using the shared helper | on first episode | none | campaign |
+| `chat_nats_client_connected`<br><sub>`chat.nats.client.connected`</sub> | gauge | the 7 services calling `ConnectWithMetrics` — **not** every service using the helper; see below | at startup | none at per-process granularity | **SLO-1b connection-risk backstop** (roadmap P4) |
+| `chat_nats_client_connection_events_total`<br><sub>`chat.nats.client.connection.events`</sub> | counter | same 7 | at startup (initial connect) | none | SLO-1b backstop |
+| `nats_slow_consumer_events_total` | counter | every service using the shared helper — this one is wired in the error handler, not opt-in | on first episode | none | campaign |
 
 These three carry no `site` label: they are emitted below the layer that knows
 the site, so join them through `target_info`.
+
+**Emitter coverage is partial, and an absent series is not a healthy one.** Both
+families above are opt-in twice over, which the earlier wording ("every service
+using the shared connect helper") hid:
+
+| Family | Requires | Services today |
+|---|---|---|
+| `chat_nats_client_*` | `natsutil.ConnectWithMetrics`, not `natsutil.Connect` | **7** — broadcast-worker, history-service, message-gatekeeper, message-worker, notification-worker, room-service, room-worker |
+| `chat_nats_publish_failures_total` | a separately constructed `natsmetrics.Publisher`, passed to the publish site or to `natsrouter.WithMetrics` | **14** — the 7 above plus bot-message-handler, bot-room-service, media-service, search-service, translation-service, user-presence-service, user-service |
+
+25 call sites use plain `natsutil.Connect`. Four services publish to NATS with no
+publish-failure instrument at all: **outbox-worker**, admin-service,
+teams-hr-sync and teams-room-creation. outbox-worker is the one that matters —
+every cross-site forward is a PubAck-blocking JetStream publish there, so a
+federation outage produces an empty `chat_nats_publish_failures_total` and reads
+as "no failures" rather than "no instrument".
+
+Treat this table as the emitter inventory when a panel is empty: check whether
+the service is on the list before concluding the system is healthy. Wiring the
+missing publishers is tracked separately — it is a change to those services, not
+to this contract.
 
 ### 13.3 Domain families
 
