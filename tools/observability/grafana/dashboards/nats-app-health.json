@@ -99,7 +99,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Retry-exhausted (max_deliver) \u2014 consumer stops delivering (per consumer)",
-      "description": "increase() of terminal failures with reason=max_deliver: messages that exhausted retries. JetStream STOPS delivering them to this consumer (an advisory fires); they remain in the stream until retention \u2014 recoverable via replay, but no handler processed them and no DLQ auto-routes them. Any non-zero value = unprocessed work the num_redelivered gauge hides.",
+      "description": "increase() of terminal failures with reason=max_deliver: messages that exhausted retries. JetStream STOPS delivering them to this consumer (an advisory fires); they remain in the stream until retention \u2014 recoverable via replay, but no handler processed them and no DLQ auto-routes them. Any non-zero value = unprocessed work the num_redelivered gauge hides. NOTE: this app counter is BEST-EFFORT \u2014 a crash on the final delivery loses the increment, and increase() misses it after a restart. The AUTHORITATIVE signal is the broker MaxDeliver advisory (.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>); charting it needs a separate advisory-consumer + exporter (the jsz exporter does not emit advisories), so treat this panel as a fast secondary diagnostic and add the advisory pipeline for a guarantee.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
