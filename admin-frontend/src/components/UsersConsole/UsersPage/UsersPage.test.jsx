@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 
 vi.mock('@/context/AuthContext', () => ({ useAuth: vi.fn() }))
 vi.mock('@/api', async (importOriginal) => {
@@ -12,6 +12,17 @@ vi.mock('../CreateUserForm', () => ({
     <div role="dialog" aria-label="create user">
       <button type="button" onClick={onCreated}>
         Fake create
+      </button>
+    </div>
+  ),
+}))
+
+vi.mock('../ResyncUserDialog', () => ({
+  default: ({ user, onClose }) => (
+    <div role="dialog" aria-label="resync user">
+      resync {user.account}
+      <button type="button" onClick={onClose}>
+        Fake resync close
       </button>
     </div>
   ),
@@ -237,5 +248,48 @@ describe('UsersPage', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('UsersPage cross-site rows', () => {
+  const FOREIGN = {
+    id: 'u-2',
+    account: 'bob',
+    siteId: 'site-2',
+    engName: 'Bob',
+    chineseName: '',
+    roles: ['user'],
+    active: true,
+    requirePasswordChange: false,
+  }
+
+  it('shows every site, hides actions on foreign rows, offers Resync on home rows', async () => {
+    listUsers.mockResolvedValue({ users: [USER, FOREIGN], total: 2 })
+    render(<UsersPage />)
+    await screen.findByText('bob')
+
+    const home = screen.getByText('alice').closest('tr')
+    expect(within(home).getByText('site-1')).toBeInTheDocument()
+    expect(within(home).getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+    expect(within(home).getByRole('button', { name: 'Resync' })).toBeInTheDocument()
+
+    const foreign = screen.getByText('bob').closest('tr')
+    expect(within(foreign).getByText('site-2')).toBeInTheDocument()
+    expect(within(foreign).queryByRole('button', { name: 'Edit' })).toBeNull()
+    expect(within(foreign).queryByRole('button', { name: 'Set password' })).toBeNull()
+    expect(within(foreign).queryByRole('button', { name: 'Sessions' })).toBeNull()
+    expect(within(foreign).queryByRole('button', { name: 'Resync' })).toBeNull()
+  })
+
+  it('Resync opens the resync dialog for that user', async () => {
+    render(<UsersPage />)
+    await screen.findByText('alice')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resync' }))
+    const dialog = await screen.findByRole('dialog', { name: 'resync user' })
+    expect(dialog).toHaveTextContent('resync alice')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Fake resync close' }))
+    expect(screen.queryByRole('dialog', { name: 'resync user' })).toBeNull()
   })
 })

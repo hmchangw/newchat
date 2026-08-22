@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -1228,7 +1230,7 @@ func TestInboxStore_UpsertThreadSubscription_DedupesByUserAccount_Integration(t 
 	db := setupMongo(t)
 	ctx := context.Background()
 	threadSubs := db.Collection("thread_subscriptions")
-	store := &mongoInboxStore{threadSubCol: threadSubs}
+	store := &mongoInboxStore{threadSubCol: threadSubs, userCol: db.Collection("users")}
 	store.ensureIndexes(ctx)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
@@ -1800,4 +1802,195 @@ func TestInboxWorker_ApplyUserPermissions_Integration(t *testing.T) {
 		assert.Equal(t, "keep-me", raw.Permissions["somethingElse"])
 		assert.NotNil(t, raw.Permissions["externalImageView"])
 	})
+}
+
+// setupUserAccountStore hands each user-account test an isolated users
+// collection with the unique account index UpsertUserAccount's E11000-retry
+// branch depends on (owned by user-service in production).
+func setupUserAccountStore(t *testing.T, prefix string) (*mongoInboxStore, *mongo.Collection) {
+	t.Helper()
+	db := testutil.MongoDB(t, prefix)
+	users := db.Collection("users")
+	_, err := users.Indexes().CreateOne(context.Background(), mongo.IndexModel{
+		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
+	return &mongoInboxStore{userCol: users}, users
+}
+
+func TestUpsertUserAccount_Integration(t *testing.T) {
+	store, users := setupUserAccountStore(t, "inbox-user-account")
+	ctx := context.Background()
+
+	snap := func(ts int64, active bool, roles []model.UserRole) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-1", Account: "acct-1", SiteID: "site-a",
+			EngName: "Eng", ChineseName: "Eng CN", Roles: roles, Active: active, Timestamp: ts}
+	}
+	at := func(ts int64) time.Time { return time.UnixMilli(ts).UTC() }
+	readBack := func(t *testing.T) bson.M {
+		t.Helper()
+		var doc bson.M
+		require.NoError(t, users.FindOne(ctx, bson.M{"account": "acct-1"}).Decode(&doc))
+		return doc
+	}
+
+	t.Run("no doc: inserts complete doc", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(1000, true, []model.UserRole{model.UserRoleBot}), at(1000)))
+		doc := readBack(t)
+		assert.Equal(t, "id-1", doc["_id"])
+		assert.Equal(t, "site-a", doc["siteId"])
+		assert.Equal(t, "Eng", doc["engName"])
+		assert.Equal(t, true, doc["active"])
+	})
+	t.Run("existing HR-shaped doc: $set only, _id kept", func(t *testing.T) {
+		_, err := users.UpdateOne(ctx, bson.M{"account": "acct-1"},
+			bson.M{"$set": bson.M{"engName": "FromHR"}, "$unset": bson.M{"accountUpdatedAt": "", "roles": "", "active": ""}})
+		require.NoError(t, err)
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(2000, false, []model.UserRole{}), at(2000)))
+		doc := readBack(t)
+		assert.Equal(t, "id-1", doc["_id"], "existing _id must survive")
+		assert.Equal(t, false, doc["active"])
+	})
+	t.Run("older timestamp: no-op, nil error", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(1500, true, []model.UserRole{}), at(1500)))
+		assert.Equal(t, false, readBack(t)["active"], "older snapshot must not regress")
+	})
+	t.Run("equal timestamp: applied ($lte)", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(2000, true, []model.UserRole{}), at(2000)))
+		assert.Equal(t, true, readBack(t)["active"])
+	})
+	t.Run("doc without watermark (HR raced): applied via non-upsert retry", func(t *testing.T) {
+		_, err := users.UpdateOne(ctx, bson.M{"account": "acct-1"}, bson.M{"$unset": bson.M{"accountUpdatedAt": ""}})
+		require.NoError(t, err)
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(3000, false, []model.UserRole{}), at(3000)))
+		assert.Equal(t, false, readBack(t)["active"])
+	})
+	t.Run("empty roles stored as [], not null", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(4000, false, nil), at(4000)))
+		doc := readBack(t)
+		roles, ok := doc["roles"].(bson.A)
+		require.True(t, ok, "roles must be an array, got %T", doc["roles"])
+		assert.Len(t, roles, 0)
+	})
+}
+
+// TestUpsertUserAccount_ArrivalOrder_Integration pins the create/update ordering
+// contract: the payload watermark decides the winner, never the delivery order.
+// Federation gives no ordering guarantee on this lane (each destination is a
+// direct publish, no OUTBOX FIFO), so a create can land after the edit that
+// supersedes it. Each case owns its account so the subtests stay independent.
+func TestUpsertUserAccount_ArrivalOrder_Integration(t *testing.T) {
+	store, users := setupUserAccountStore(t, "inbox-user-account-order")
+	ctx := context.Background()
+
+	// createSnap is what admin-service fans out on create; updateSnap is what a
+	// later edit fans out (rename + role grant + deactivation), so every field
+	// differs and the assertions can tell which snapshot won.
+	createSnap := func(account string, ts int64) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-" + account, Account: account, SiteID: "site-a",
+			EngName: "Alice", ChineseName: "Alice CN", Roles: []model.UserRole{model.UserRoleUser},
+			Active: true, Timestamp: ts}
+	}
+	updateSnap := func(account string, ts int64) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-" + account, Account: account, SiteID: "site-a",
+			EngName: "Alice Chen", ChineseName: "Alice Chen CN", Roles: []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			Active: false, Timestamp: ts}
+	}
+
+	const (
+		createTS = int64(1000)
+		updateTS = int64(2000)
+	)
+
+	tests := []struct {
+		name string
+		// deliver returns the events in the order the destination receives them.
+		deliver     func(account string) []*model.UserAccountUpdated
+		wantEngName string
+		wantRoles   []model.UserRole
+		wantActive  bool
+		wantMark    int64
+	}{
+		{
+			name: "in order: create then update, update wins",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{createSnap(a, createTS), updateSnap(a, updateTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "reversed: update lands first and creates the doc, late create dropped",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{updateSnap(a, updateTS), createSnap(a, createTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "redelivery: create replayed after update stays dropped",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{
+					createSnap(a, createTS), updateSnap(a, updateTS), createSnap(a, createTS),
+				}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "same millisecond, create last: $lte lets the last delivery win",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{updateSnap(a, createTS), createSnap(a, createTS)}
+			},
+			wantEngName: "Alice",
+			wantRoles:   []model.UserRole{model.UserRoleUser},
+			wantActive:  true,
+			wantMark:    createTS,
+		},
+		{
+			name: "same millisecond, update last: $lte lets the last delivery win",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{createSnap(a, createTS), updateSnap(a, createTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    createTS,
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := fmt.Sprintf("order-%d", i)
+			for _, e := range tt.deliver(account) {
+				require.NoError(t, store.UpsertUserAccount(ctx, e, time.UnixMilli(e.Timestamp).UTC()))
+			}
+
+			count, err := users.CountDocuments(ctx, bson.M{"account": account})
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, count, "every ordering must converge on one doc")
+
+			var doc bson.M
+			require.NoError(t, users.FindOne(ctx, bson.M{"account": account}).Decode(&doc))
+			assert.Equal(t, "id-"+account, doc["_id"], "_id is $setOnInsert, whichever snapshot inserted")
+			assert.Equal(t, "site-a", doc["siteId"])
+			assert.Equal(t, tt.wantEngName, doc["engName"])
+			assert.Equal(t, tt.wantActive, doc["active"])
+			assert.Equal(t, time.UnixMilli(tt.wantMark).UTC(), doc["accountUpdatedAt"].(bson.DateTime).Time().UTC())
+
+			roles, ok := doc["roles"].(bson.A)
+			require.True(t, ok, "roles must be an array, got %T", doc["roles"])
+			got := make([]model.UserRole, len(roles))
+			for j, r := range roles {
+				got[j] = model.UserRole(r.(string))
+			}
+			assert.Equal(t, tt.wantRoles, got)
+		})
+	}
 }

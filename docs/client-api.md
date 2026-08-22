@@ -7206,7 +7206,7 @@ The `userView` returned by all user endpoints is a projected subset — the `ser
 **Endpoint:** `GET /v1/admin/users`
 **Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
 
-Returns a paged list of users scoped to the admin's site.
+Returns a paged list of users across every site — cross-site replicas included. Each row's `siteId` names its home site; mutating endpoints (§9.2–§9.5, §9.16) stay home-site-scoped, so rows homed elsewhere are read-only on this site.
 
 #### Query parameters
 
@@ -7250,6 +7250,8 @@ Returns a paged list of users scoped to the admin's site.
 
 Creates a new user account. The `siteId` is always forced to the admin-service's configured `SITE_ID` — the caller cannot set it.
 
+After the write commits, the account is fanned out to every other site so their copies converge, and onto the durable HR identity feed. Neither failure changes the status code; both surface as response fields.
+
 #### Request body
 
 | Field | Type | Required | Notes |
@@ -7274,7 +7276,12 @@ Creates a new user account. The `siteId` is always forced to the admin-service's
 
 #### Success response
 
-`HTTP 201` — the created [UserView](#userview).
+`HTTP 201` — the created [UserView](#userview), plus the fanout outcome.
+
+| Field | Type | Notes |
+|---|---|---|
+| `syncFailures` | string[] | Remote site IDs whose account-snapshot publish was not acknowledged. Omitted (not `[]`) when every destination landed. Still `201` when present — the account exists on this site. The durable HR feed delivers **identity fields only**, so the listed sites lack this account's roles/status (or the whole account, when `hrSyncFailed` is also set) until healed by [§9.16 resync](#916-resync-user) or the next edit ([§9.4](#94-update-user)). |
+| `hrSyncFailed` | boolean | `true` when the durable HR identity publish failed. Omitted when it landed. Still `201` when present. |
 
 ```json
 {
@@ -7286,6 +7293,23 @@ Creates a new user account. The `siteId` is always forced to the admin-service's
   "roles": [],
   "active": true,
   "requirePasswordChange": true
+}
+```
+
+Same `201` body with a partially-failed fanout — `site-b` did not acknowledge its snapshot and the HR identity publish did not land:
+
+```json
+{
+  "id": "01970a4f8c2d7c9b01970a4f8c2d7c9b",
+  "account": "bob",
+  "siteId": "site-a",
+  "engName": "Bob",
+  "chineseName": "鮑勃",
+  "roles": [],
+  "active": true,
+  "requirePasswordChange": true,
+  "syncFailures": ["site-b"],
+  "hrSyncFailed": true
 }
 ```
 
@@ -7320,6 +7344,8 @@ Returns a single [UserView](#userview) by account. The account is resolved withi
 
 Applies partial updates to a user. All fields are optional; omitting a field leaves it unchanged. When `active` is set to `false`, all active sessions for the user are revoked immediately.
 
+After the write commits, the whole account snapshot is fanned out to every other site so their copies converge. A fanout failure does not change the status code; it surfaces as `syncFailures`.
+
 #### Request body
 
 | Field | Type | Required | Notes |
@@ -7337,8 +7363,19 @@ Applies partial updates to a user. All fields are optional; omitting a field lea
 
 `HTTP 200`
 
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `syncFailures` | string[] | Remote site IDs whose account-snapshot publish was not acknowledged. Omitted (not `[]`) when every destination landed. Still `200` when present — the update is stored on this site; the listed sites converge when healed by [§9.16 resync](#916-resync-user) or the next edit. |
+
 ```json
 { "status": "ok" }
+```
+
+Same `200` body when a destination did not acknowledge its snapshot:
+
+```json
+{ "status": "ok", "syncFailures": ["site-b"] }
 ```
 
 ### 9.5 Set password
@@ -7960,6 +7997,41 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `recordedAt` | string | RFC 3339. Server clock at write time (when the decision was recorded). Independent of the validity window — a grant can be back- or future-dated via `effectiveFrom`/`expiresAt`. |
 
 ---
+
+### 9.16 Resync user
+
+**Endpoint:** `POST /v1/admin/users/:account/resync`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Re-delivers the account's current home-site state on both sync lanes: the durable HR identity bootstrap plus the `user_account_updated` snapshot to every remote site's INBOX. Re-delivery only — no user write and no audit entry — and idempotent on the receivers (the snapshot re-stamps the watermark with the same field values). Only home-site accounts qualify; a replica homed elsewhere returns `404 user_not_found`.
+
+#### Request body
+
+None.
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `syncFailures` | string[] | Remote site IDs whose snapshot publish was not acknowledged. Omitted when every destination landed. The durable HR feed delivers identity fields only, so sites named here lack roles/status (or the whole account, when `hrSyncFailed` is also set) until a later resync or edit lands. |
+| `hrSyncFailed` | boolean | `true` when the durable HR identity publish failed. Omitted when it landed. |
+
+```json
+{
+  "status": "ok"
+}
+```
+
+#### Errors
+
+| HTTP | `code` | `reason` | When |
+|---|---|---|---|
+| 404 | `not_found` | `user_not_found` | No user with that account homed at this site (unknown account, or a cross-site replica). |
+| 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
+| 403 | `forbidden` | `not_admin` | Session lacks the admin role. |
 
 ## 10. Botplatform Service
 

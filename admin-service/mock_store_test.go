@@ -84,11 +84,12 @@ func (mr *MockAdminStoreMockRecorder) CreateUser(ctx, u any) *gomock.Call {
 }
 
 // DeactivateAndRevoke mocks base method.
-func (m *MockAdminStore) DeactivateAndRevoke(ctx context.Context, siteID, account string) error {
+func (m *MockAdminStore) DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DeactivateAndRevoke", ctx, siteID, account)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // DeactivateAndRevoke indicates an expected call of DeactivateAndRevoke.
@@ -247,9 +248,9 @@ func (mr *MockAdminStoreMockRecorder) RecordPermissionChange(ctx, grants, state 
 }
 
 // SearchUsers mocks base method.
-func (m *MockAdminStore) SearchUsers(ctx context.Context, siteID, q string, page, limit int) ([]model.User, int64, error) {
+func (m *MockAdminStore) SearchUsers(ctx context.Context, q string, page, limit int) ([]model.User, int64, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SearchUsers", ctx, siteID, q, page, limit)
+	ret := m.ctrl.Call(m, "SearchUsers", ctx, q, page, limit)
 	ret0, _ := ret[0].([]model.User)
 	ret1, _ := ret[1].(int64)
 	ret2, _ := ret[2].(error)
@@ -257,17 +258,18 @@ func (m *MockAdminStore) SearchUsers(ctx context.Context, siteID, q string, page
 }
 
 // SearchUsers indicates an expected call of SearchUsers.
-func (mr *MockAdminStoreMockRecorder) SearchUsers(ctx, siteID, q, page, limit any) *gomock.Call {
+func (mr *MockAdminStoreMockRecorder) SearchUsers(ctx, q, page, limit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SearchUsers", reflect.TypeOf((*MockAdminStore)(nil).SearchUsers), ctx, siteID, q, page, limit)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SearchUsers", reflect.TypeOf((*MockAdminStore)(nil).SearchUsers), ctx, q, page, limit)
 }
 
 // UpdateUser mocks base method.
-func (m *MockAdminStore) UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) error {
+func (m *MockAdminStore) UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) (*model.User, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateUser", ctx, siteID, account, fields)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(*model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdateUser indicates an expected call of UpdateUser.

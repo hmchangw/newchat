@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.opentelemetry.io/otel/propagation"
@@ -172,19 +171,10 @@ func runDirectMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, 
 	return runDirectSync(ctx, graph, mapper, emit, groups, siteOverrides, cfg.GraphPageSize)
 }
 
-// jetStreamPublish is the JetStream publishFunc main wires in. natsutil.NewMsg
-// returns a nil Header when ctx carries no request-id (the one-shot-job case),
-// so guard before setting the encoding header.
+// jetStreamPublish is the JetStream publishFunc main wires in.
 func jetStreamPublish(js jetstream.JetStream) publishFunc {
 	return func(ctx context.Context, subj string, data []byte, encoding string) error {
-		msg := natsutil.NewMsg(ctx, subj, data)
-		if encoding != "" {
-			if msg.Header == nil {
-				msg.Header = nats.Header{}
-			}
-			msg.Header.Set(natsutil.HeaderNatsEncoding, encoding)
-		}
-		_, err := js.PublishMsg(ctx, msg)
+		_, err := js.PublishMsg(ctx, natsutil.NewMsgEncoded(ctx, subj, data, encoding))
 		return err
 	}
 }
