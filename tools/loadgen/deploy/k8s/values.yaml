@@ -57,6 +57,14 @@ ledger:
   # cannot be replayed by an image that predates it — the older reader rejects
   # the unknown record and loses the evidence — so rolling this image back means
   # rolling the epoch back with it.
+  #
+  # An epoch change starts a new journal rather than upgrading the old one, and
+  # the operations still in flight under the previous epoch are not carried
+  # over: they receive no verdict from either side, and the same applies in
+  # reverse on a rollback. Drain the run before switching if that window has to
+  # be accounted for. `loadgen_failure_abandoned_journals` goes non-zero for as
+  # long as a journal from an earlier epoch is retained, which is the signal
+  # that the evidence either side of the switch is two windows and not one.
   epoch: v2
   existingClaim: ""
   storageClassName: ""
