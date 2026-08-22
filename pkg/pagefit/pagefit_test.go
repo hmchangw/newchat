@@ -147,3 +147,31 @@ func TestPrefix_UnmarshalableRowIsChargedAsOversize(t *testing.T) {
 	items := []any{"ok", make(chan int), "ok"}
 	assert.Equal(t, 1, Prefix(items, NewBudget(1000, 0), 0))
 }
+
+// Prefix returns 1 both when exactly one row fits and when the first row alone
+// overflows; Fits is how a caller tells those apart before degrading the row.
+func TestFits(t *testing.T) {
+	const width = 10
+	const rowCost = width + 2
+
+	tests := []struct {
+		name     string
+		items    []string
+		budget   Budget
+		envelope int
+		want     bool
+	}{
+		{"disabled budget always fits", rows(3, width), Budget{}, 0, true},
+		{"empty always fits", nil, NewBudget(1, 0), 0, true},
+		{"exact fit", rows(1, width), NewBudget(int64(rowCost), 0), 0, true},
+		{"one byte over", rows(1, width), NewBudget(int64(rowCost-1), 0), 0, false},
+		{"envelope tips it over", rows(1, width), NewBudget(int64(rowCost), 0), 1, false},
+		{"multiple rows fit", rows(3, width), NewBudget(1000, 0), 0, true},
+		{"multiple rows do not fit", rows(3, width), NewBudget(int64(rowCost), 0), 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, Fits(tt.items, tt.budget, tt.envelope))
+		})
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/pagefit"
 )
 
 // checkAccessAndRoomTimes runs the subscription access check and the room-times
@@ -167,4 +168,40 @@ func canModify(msg *models.Message, account string) bool {
 		return false
 	}
 	return msg.Sender.Account == account
+}
+
+// blankOversize strips the heavy fields from a row that alone exceeds the reply
+// budget, so the page can be sent and the client can page past it. Identifiers,
+// sender and timestamps stay for placeholder rendering.
+//
+// Type is deliberately kept, unlike redactUnavailablePins: that path clears it
+// so a pre-access system message cannot leak event details, but here the caller
+// is authorised to see this row and needs Type to pick a placeholder.
+func blankOversize(m *models.Message) {
+	m.Msg = ""
+	m.Mentions = nil
+	m.Attachments = nil
+	m.DecodedAttachments = nil
+	m.Card = nil
+	m.CardAction = nil
+	m.QuotedParentMessage = nil
+	m.Reactions = nil
+	m.SysMsgData = nil
+	m.Truncated = true
+}
+
+// fitPage trims msgs to the reply budget, blanking a lone row that still will
+// not fit. Reports whether anything was dropped so the caller can set its
+// "more" flag.
+func (s *HistoryService) fitPage(msgs []models.Message, envelope int) ([]models.Message, bool) {
+	if len(msgs) == 0 || pagefit.Fits(msgs, s.pageBudget, envelope) {
+		return msgs, false
+	}
+	kept := msgs[:pagefit.Prefix(msgs, s.pageBudget, envelope)]
+	// A lone row that still overflows is degraded rather than dropped, so the
+	// client can page past it instead of dead-ending on this position.
+	if len(kept) == 1 && !pagefit.Fits(kept, s.pageBudget, envelope) {
+		blankOversize(&kept[0])
+	}
+	return kept, len(kept) < len(msgs)
 }

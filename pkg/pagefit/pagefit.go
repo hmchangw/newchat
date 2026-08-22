@@ -62,6 +62,23 @@ func Prefix[T any](items []T, b Budget, envelope int) int {
 	return len(items)
 }
 
+// Fits reports whether all of items fits b. Prefix returns 1 both when one row
+// fits and when the first row alone overflows; this is how a caller tells those
+// apart before degrading the row.
+func Fits[T any](items []T, b Budget, envelope int) bool {
+	if !b.Enabled() || len(items) == 0 {
+		return true
+	}
+	total := envelope + len(items) - 1 // separators
+	for _, w := range widths(items) {
+		total += w
+		if total > b.max {
+			return false
+		}
+	}
+	return true
+}
+
 // Window returns the [lo,hi) span around pivot that fits b, grown outward one
 // row at a time from each side so the span stays centred. pivot is always
 // included — it is the row the caller asked to centre on — and is clamped into

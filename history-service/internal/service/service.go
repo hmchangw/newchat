@@ -11,6 +11,7 @@ import (
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -115,6 +116,11 @@ type Option func(*HistoryService)
 
 // WithPreviewCache installs a room-preview cache used by RoomsGet. Without it,
 // previews resolve directly (uncached).
+// WithPageBudget caps paginated replies at b.
+func WithPageBudget(b pagefit.Budget) Option {
+	return func(s *HistoryService) { s.pageBudget = b }
+}
+
 func WithPreviewCache(pc PreviewCache) Option {
 	return func(s *HistoryService) { s.previewCache = pc }
 }
@@ -135,6 +141,9 @@ type HistoryService struct {
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
+	// pageBudget caps a paginated reply so it is trimmed to fit the broker
+	// rather than refused by it. Zero value disables trimming.
+	pageBudget pagefit.Budget
 }
 
 func New(
