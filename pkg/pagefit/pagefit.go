@@ -9,9 +9,10 @@ import (
 	"math"
 )
 
-// oversizeRow is charged to an unmarshalable row: big enough to lose against
-// any real budget, small enough not to overflow the running total.
-const oversizeRow = math.MaxInt32
+// unmeasurable marks a row that will not encode. A negative width rather than
+// a large one: any sentinel big enough to lose against a small budget still
+// ties or overflows against a large one, and a tie reads as "fits".
+const unmeasurable = -1
 
 // DefaultReserve is the headroom services leave under the broker's max_payload
 // for reply headers (trace context, request id) that the budget cannot see.
@@ -63,13 +64,15 @@ func Fit[T any](items []T, b Budget, envelope int) (kept []T, dropped, oversize 
 	}
 	total, n := envelope, 0
 	for i, w := range widths(items) {
+		sep := 0
 		if i > 0 {
-			w++ // separator
+			sep = 1
 		}
-		if total+w > b.max {
+		// Subtraction, never total+w, so a large width cannot overflow int.
+		if w == unmeasurable || total > b.max-sep || w > b.max-sep-total {
 			break
 		}
-		total += w
+		total += sep + w
 		n = i + 1
 	}
 	if n == 0 {
@@ -91,24 +94,30 @@ func FitWindow[T any](items []T, pivot int, b Budget, envelope int) (lo, hi int,
 	}
 
 	w := widths(items)
-	total := envelope + w[pivot]
+	// Subtraction throughout, never total+w, so a large width cannot overflow.
+	pivotOversize := w[pivot] == unmeasurable || w[pivot] > b.max-envelope
+	total := envelope
+	if !pivotOversize {
+		total += w[pivot]
+	}
 	lo, hi = pivot, pivot+1
-	for {
+	for !pivotOversize {
 		grew := false
-		if hi < len(items) && total+w[hi]+1 <= b.max {
+		if hi < len(items) && w[hi] != unmeasurable && total <= b.max-1 && w[hi] <= b.max-1-total {
 			total += w[hi] + 1
 			hi++
 			grew = true
 		}
-		if lo > 0 && total+w[lo-1]+1 <= b.max {
+		if lo > 0 && w[lo-1] != unmeasurable && total <= b.max-1 && w[lo-1] <= b.max-1-total {
 			total += w[lo-1] + 1
 			lo--
 			grew = true
 		}
 		if !grew {
-			return lo, hi, hi-lo == 1 && envelope+w[pivot] > b.max
+			break
 		}
 	}
+	return lo, hi, pivotOversize
 }
 
 // fitsWhole is the shared fast path: one streamed encode answers the common
@@ -117,7 +126,10 @@ func fitsWhole[T any](items []T, b Budget, envelope int) bool {
 	if !b.Enabled() || len(items) == 0 {
 		return true
 	}
-	return envelope+encodedLen(items) <= b.max
+	// A slice that will not encode can never be said to fit — comparing a
+	// sentinel width here would call it fitting at a large enough budget.
+	n, ok := encodedLen(items)
+	return ok && n <= b.max-envelope
 }
 
 // widths marshals each row once so the trim loops can scan sizes without
@@ -127,7 +139,7 @@ func widths[T any](items []T) []int {
 	for i := range items {
 		data, err := json.Marshal(items[i])
 		if err != nil {
-			out[i] = oversizeRow
+			out[i] = unmeasurable
 			continue
 		}
 		out[i] = len(data)
@@ -136,13 +148,14 @@ func widths[T any](items []T) []int {
 }
 
 // encodedLen measures JSON output without keeping it — the size is all we need,
-// so the bytes go to a counter rather than a buffer.
-func encodedLen(v any) int {
+// so the bytes go to a counter rather than a buffer. ok is false when v will
+// not encode, which callers must treat as "no measurable size", never as zero.
+func encodedLen(v any) (n int, ok bool) {
 	var c lenCounter
 	if err := json.NewEncoder(&c).Encode(v); err != nil {
-		return oversizeRow
+		return 0, false
 	}
-	return c.n - 1 // Encode appends a newline
+	return c.n - 1, true // Encode appends a newline
 }
 
 type lenCounter struct{ n int }

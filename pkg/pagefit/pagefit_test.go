@@ -2,6 +2,7 @@ package pagefit
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -244,4 +245,30 @@ func TestResolve(t *testing.T) {
 			assert.Equal(t, tt.wantBytes, Resolve(tt.override, tt.brokerMax, tt.reserve).Bytes())
 		})
 	}
+}
+
+// An unmarshalable row is charged MaxInt32. Summing that into the running total
+// overflows int on a 32-bit build and flips the comparison, so the row would
+// read as fitting. These pin the subtraction-based comparisons that avoid it.
+func TestFit_OversizeChargeNeverWrapsAround(t *testing.T) {
+	bad := make(chan int)
+
+	t.Run("unmarshalable first row is still charged", func(t *testing.T) {
+		kept, _, oversize := Fit([]any{bad, "ok"}, NewBudget(math.MaxInt32, 0), 0)
+		assert.Len(t, kept, 1)
+		assert.True(t, oversize, "an unmarshalable row must never be counted as fitting")
+	})
+
+	t.Run("unmarshalable row stops the prefix", func(t *testing.T) {
+		kept, dropped, _ := Fit([]any{"ok", bad, "ok"}, NewBudget(math.MaxInt32, 0), 0)
+		assert.Len(t, kept, 1, "the scan must stop at the row it cannot size")
+		assert.True(t, dropped)
+	})
+
+	t.Run("unmarshalable pivot is reported oversize", func(t *testing.T) {
+		lo, hi, oversize := FitWindow([]any{"ok", bad, "ok"}, 1, NewBudget(math.MaxInt32, 0), 0)
+		assert.Equal(t, 1, lo)
+		assert.Equal(t, 2, hi)
+		assert.True(t, oversize)
+	})
 }
