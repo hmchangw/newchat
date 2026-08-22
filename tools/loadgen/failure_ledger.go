@@ -1199,13 +1199,20 @@ func (l *failureLedger) Close() error {
 		l.mu.Unlock()
 		return nil
 	}
+	l.closed = true
+	l.mu.Unlock()
+	// Before the flush, not after. Start appends outside the mutex, so a starter
+	// already past the closed check can still be writing; if that append fails
+	// it raises the wal cause, and a flush that ran first would have declared
+	// the journal complete without it.
+	l.startingWG.Wait()
+
+	l.mu.Lock()
 	// Before the journal goes away, not after: this is the last chance to land
 	// a cause the file never accepted.
 	flushErr := l.flushInvalidationsLocked()
-	l.closed = true
 	journal := l.journal
 	l.mu.Unlock()
-	l.startingWG.Wait()
 	if journal == nil {
 		return flushErr
 	}
@@ -1621,9 +1628,13 @@ func cloneFailureObservationCounts(
 	return cloned
 }
 
+// errFailureLedgerClosed is a sentinel so callers can recognise a closed ledger
+// with errors.Is rather than by matching the message.
+var errFailureLedgerClosed = errors.New("failure ledger is closed")
+
 func (l *failureLedger) ensureOpen() error {
 	if l.closed {
-		return fmt.Errorf("failure ledger is closed")
+		return errFailureLedgerClosed
 	}
 	return nil
 }
