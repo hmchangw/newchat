@@ -20,6 +20,7 @@ type metrics struct {
 	userSeed    metric.Int64Counter
 	resolveMiss metric.Int64Counter
 	writes      metric.Int64Counter
+	softDelete  metric.Int64Counter
 }
 
 func newMetrics() (*metrics, error) {
@@ -64,9 +65,16 @@ func newMetrics() (*metrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("writes counter: %w", err)
 	}
+	softDelete, err := m.Int64Counter("oplog_collections_transformer_soft_delete_applied_total",
+		metric.WithDescription("source soft-delete (\"Del-\" rename) events propagated to the destination, by op"))
+	if err != nil {
+		return nil, fmt.Errorf("soft delete counter: %w", err)
+	}
+
 	return &metrics{
 		processed: processed, naks: naks, terms: terms, skipped: skipped,
 		exhausted: exhausted, userSeed: userSeed, resolveMiss: resolveMiss, writes: writes,
+		softDelete: softDelete,
 	}, nil
 }
 
@@ -129,6 +137,15 @@ func (m *metrics) onResolveMiss(ctx context.Context, kind string) {
 		return
 	}
 	m.resolveMiss.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
+}
+
+// onSoftDeleteApplied records a source soft-delete rename propagated to the destination (the room
+// doc takes the prefixed name and the read path hides it) — the cutover reconciliation counter.
+func (m *metrics) onSoftDeleteApplied(ctx context.Context, op string) {
+	if m == nil {
+		return
+	}
+	m.softDelete.Add(ctx, 1, metric.WithAttributes(attribute.String("op", op)))
 }
 
 // onWrite records a direct target write (room-member upsert/delete), labelled by collection and

@@ -32,7 +32,7 @@ The connector forwards raw change-stream events with **no `updateLookup`** and *
 |---|---|---|---|---|---|
 | **Rooms** |
 | 1 | Room create | `insert` — full doc | in payload | `t` ∈ `c,p,d,l,v`; `prid`⇒discussion; `teamId`/`teamMain`; `d` can have >2 users | ✅ map → `room_sync` (skip `l`,`v`,group-DM, already-soft-deleted) |
-| 2 | Room replace | `replace` — full doc | not needed | whole-doc rewrite; can cross type/exclusion boundary; **no delta** to tell which fields changed | ✅ re-classify → `room_renamed` + `room_restricted` + `room_sync` (skip already-soft-deleted; conservative — field events are idempotent + guarded; subs' denormalized name/visibility must not go stale) |
+| 2 | Room replace | `replace` — full doc | not needed | whole-doc rewrite; can cross type/exclusion boundary; **no delta** to tell which fields changed | ✅ re-classify → `room_renamed` + `room_restricted` + `room_sync` (a `Del-` doc is applied, not skipped — no delta to recognise the deletion by; conservative — field events are idempotent + guarded; subs' denormalized name/visibility must not go stale) |
 | 3 | Room change | `update` — changed fields only | full current doc | — | ✅ re-read doc → `room_renamed` / `room_restricted` / `room_sync`; a rename INTO `Del-` **is** the delete and is applied, other changes on a `Del-` room are skipped |
 | 4 | Room delete | `delete` — `_id` only | nothing — doc gone | app has no room-delete operation | ❌ skip (no app deletion; un-actionable) |
 | **Subscriptions** |
@@ -65,10 +65,24 @@ deletion **state**, handled differently per op:
 
 | Source event | Meaning | Handling |
 |---|---|---|
-| `insert` / `replace` of a `Del-` doc | born deleted — never existed downstream | ❌ skip (`room_soft_deleted`) |
-| `update` whose delta touches `name`/`fname`, doc now `Del-` | the deletion itself | ✅ apply → `room_renamed` + `room_sync`; the destination room takes the prefixed name and the `^Del-` filter hides it |
+| `insert` of a `Del-` doc | born deleted — never existed downstream | ❌ skip (`room_soft_deleted`) |
+| `update` whose delta touches `name`/`fname` (set **or** removed), doc now `Del-` | the deletion itself | ✅ apply → `room_renamed` + `room_sync` |
+| `replace` of a `Del-` doc | no delta, so the deletion cannot be recognised from the event | ✅ apply — a missed deletion leaves a room visible to its members, which is worse than the hidden room doc a spurious apply costs |
 | `update` touching anything else on a `Del-` doc | churn on a dead room | ❌ skip (`room_soft_deleted`) |
 | Any subscription op on a `Del-` sub | sub to a deleted room | ❌ skip (`subscription_soft_deleted`) |
+
+Every applied deletion increments `oplog_collections_transformer_soft_delete_applied_total{op}` —
+the cutover reconciliation counter to compare against the source's `Del-` room count. Skips are
+counted by `…_events_skipped_total{reason=room_soft_deleted|subscription_soft_deleted}`.
+
+**The applied name always carries the marker.** `user-service` hides a room by matching `^Del-` on
+the destination `rooms.name`, which maps from `fname` in preference to `name`. When the source
+renamed only the machine name, the mapped display name is re-prefixed on the way out
+(`rooms.destinationName()`) — otherwise the deletion would be applied and hide nothing.
+
+**Room-type exclusion is classified first.** A `Del-` livechat/voip/group-DM room still meters
+`livechat`/`voip`/`group_dm`, and a malformed `updateDescription` on one still skips rather than
+terming as poison.
 
 Only the exact prefix counts — `delta`, `del-general` and `team-Del-old` are live rooms.
 
@@ -80,13 +94,32 @@ subscription as an error so the event redelivers until `member_added` lands
 (`inbox-worker/main.go:118`), which never comes for a sub whose insert this guard skipped.
 
 **DMs (`t:"d"`) are exempt on both lanes.** There `name`/`fname` hold the peer's username and
-display name, not a room name, so the prefix would match a user rather than a deletion. A
-soft-deleted DM that slips through is still hidden downstream — the `^Del-` room filter is
-type-agnostic.
+display name, not a room name, so the prefix would match a user rather than a deletion. The trade
+is deliberate: dropping a live DM because its peer is named `Del-…` is unrecoverable, while a
+soft-deleted DM that slips through is not. Note the containment is partial — the `^Del-` room filter
+is type-agnostic, so such a DM is hidden **only if** the source prefixed `fname` (the field the
+destination name maps from); a `name`-only rename on a DM stays visible. Confirm with the source
+team whether DM docs are renamed at all before treating this as closed.
 
-**Residual:** `UpsertRoom` upserts (`inbox-worker/main.go:85`), so applying the deletion rename for
-a room whose `insert` was skipped *creates* a hidden `Del-` room doc rather than no-op'ing.
-Invisible to users; avoiding it would cost a room-existence read per event.
+**Residual — spurious apply.** `UpsertRoom` upserts (`inbox-worker/main.go:85`), so applying the
+deletion for a room whose `insert` was skipped *creates* a hidden `Del-` room doc rather than
+no-op'ing. Invisible to users; avoiding it would cost a room-existence read per event.
+
+**Residual — restore is not reconstructible from CDC.** If the source ever renames a room back out
+of `Del-`, the room re-appears (the rename passes the guard and syncs) but its subscriptions do not:
+their inserts were skipped while the room was dead, and the restore reaches the sub lane as a
+`name`/`fname` delta, which carries no membership. A restore is indistinguishable from an ordinary
+rename in the change stream (no `fullDocumentBeforeChange`, so the previous name is unknown), so
+rebuilding membership on every rename-shaped sub update would emit a `member_added` storm for every
+legitimate rename. **Repair is a targeted backfill, not a CDC behaviour:** the affected room ids are
+exactly those counted by `…_events_skipped_total{reason=room_soft_deleted}` — re-run the bulk
+subscription copy for them. The source is not known to support un-delete; confirm with the source
+team before relying on this.
+
+**Residual — name-less lanes are not filtered.** `company_room_members` and
+`company_thread_subscriptions` carry no denormalized room name, so members and thread subs of a
+soft-deleted room are still written. They are not user-visible through the filtered reads, so this
+is accepted rather than fixed.
 
 ## Direct-transfer collections (oplog-direct-transfer)
 

@@ -107,8 +107,8 @@ Example document (values rotated/sanitized):
 | `prid` | string (opt) | Parent room id — **present ⇒ discussion** (`t` is `p`) | ✅ |
 | `teamId` | string (opt) | Room belongs to a Team | ✅ |
 | `teamMain` | bool (opt) | True only on a team's **primary** room | ✅ |
-| `name` | string | Machine/handle name | ❓ |
-| `fname` | string | Friendly display name | ❓ |
+| `name` | string | Machine/handle name. **Soft delete renames it to `Del-`+name** — the app has no room-delete op and no delete flag. **Open:** is the prefix written to `name`, `fname`, or both? Is it ever un-done (restore)? Are DM (`t:d`) docs renamed too? | ❓ |
+| `fname` | string | Friendly display name (see `name` re: the `Del-` soft-delete rename) | ❓ |
 | `uids` / `usernames` | array | Members; for `t:d` length **can exceed 2** (group DM) | ✅ |
 | `u` | object | Creator (`u._id`, `u.username`) | ❓ |
 | `ts` / `_updatedAt` | date | Created / last-updated | ❓ |
@@ -140,7 +140,7 @@ One row per (user, room). ✅ Unique index `{ rid:1, 'u._id':1 }`.
 | `muteGroupMentions` | bool | `@all`/`@here` only (**not** our mute flag) | ✅ |
 | `f` | bool (opt) | Favorited (absent ⇒ false) | ✅ |
 | `favoritedAt` | date (opt) | Last favorite time. Exists at source (TKMS) but **unused by CDC** — per the agreed guard mapping below, all guards derive from `_updatedAt` | ✅ ⛔ |
-| `name` / `fname` | string | Machine name / friendly display name | ✅ |
+| `name` / `fname` | string | Machine name / friendly display name — carries the room's `Del-` soft-delete rename (denormalized copy) | ✅ ❓ |
 | `federation.origin` | string (opt) | Origin site (assumed consistent with room) | ✅ ❓ |
 
 Derived: "has mention" = `userMentions>0 || groupMentions>0`; "muted" = `disableNotifications`; **read timestamp (`lastSeenAt`) = `max(ls, lr)`** (resolved per design D1 — the furthest point consumed by either the scrolled cursor or the explicit mark-read).

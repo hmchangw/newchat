@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -359,8 +360,9 @@ func TestHandleRoom_NonDegradedInsertWithoutFullDocument_Poisons(t *testing.T) {
 	assert.ErrorIs(t, h.handleRoom(context.Background(), ev), migration.ErrPoison)
 }
 
-// TestHandleRoom_SoftDeletedSkipped: a room already carrying the "Del-" soft-delete rename is
-// never imported — the deletion transition itself is the one exception (see the test below).
+// TestHandleRoom_SoftDeletedSkipped: a room already carrying the "Del-" soft-delete rename is never
+// imported. The events that can be carrying the deletion itself — the rename update and any replace
+// — are the exception, applied by the two tests below.
 func TestHandleRoom_SoftDeletedSkipped(t *testing.T) {
 	tests := []struct {
 		name string
@@ -373,20 +375,22 @@ func TestHandleRoom_SoftDeletedSkipped(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, op := range []string{"insert", "replace"} {
+			t.Run("insert", func(t *testing.T) {
 				pub := &fakePublisher{}
 				h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
-				err := h.handleRoom(context.Background(), roomEv(op, tc.doc, ""))
-				assert.ErrorIs(t, err, migration.ErrSkipped, "op %s", op)
-				assert.Empty(t, pub.events, "op %s", op)
-			}
+				err := h.handleRoom(context.Background(), roomEv("insert", tc.doc, ""))
+				assert.ErrorIs(t, err, migration.ErrSkipped)
+				assert.Empty(t, pub.events)
+			})
 			// An update that leaves the name alone is churn on an already-dead room.
 			for _, delta := range []string{`{"updatedFields":{"restricted":true}}`, `{"updatedFields":{"description":"hi"}}`} {
-				pub := &fakePublisher{}
-				h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(tc.doc)})
-				err := h.handleRoom(context.Background(), roomEv("update", "", delta))
-				assert.ErrorIs(t, err, migration.ErrSkipped, "delta %s", delta)
-				assert.Empty(t, pub.events, "delta %s", delta)
+				t.Run("update "+delta, func(t *testing.T) {
+					pub := &fakePublisher{}
+					h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(tc.doc)})
+					err := h.handleRoom(context.Background(), roomEv("update", "", delta))
+					assert.ErrorIs(t, err, migration.ErrSkipped)
+					assert.Empty(t, pub.events)
+				})
 			}
 		})
 	}
@@ -439,11 +443,109 @@ func TestHandleRoom_NonDeletedNameKept(t *testing.T) {
 	}
 }
 
-// TestHandleRoom_MalformedUpdateDescriptionPoisons: the delta is decoded before the soft-delete
-// guard needs it, so an undecodable one Terms rather than reaching the mapper.
+// TestHandleRoom_MalformedUpdateDescriptionPoisons: the soft-delete guard needs the delta, so an
+// undecodable one on a migratable room poisons instead of being silently treated as "no rename".
 func TestHandleRoom_MalformedUpdateDescriptionPoisons(t *testing.T) {
-	full := `{"_id":"r1","t":"c","fname":"General","uids":["u1"]}`
+	full := `{"_id":"r1","t":"c","name":"Del-general","fname":"Del-General","uids":["u1"]}`
 	h := newTestHandler(&fakePublisher{}, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(full)})
 	err := h.handleRoom(context.Background(), roomEv("update", "", `{"updatedFields":`))
 	assert.ErrorIs(t, err, migration.ErrPoison)
+}
+
+// TestHandleRoom_DeletionAppliedCarriesPrefixedName: the destination hides a room by matching
+// ^Del- on the rooms doc name, and the mapped name prefers fname — so when the source renamed only
+// the machine name, the mapped name must still carry the marker or the deletion is a no-op.
+func TestHandleRoom_DeletionAppliedCarriesPrefixedName(t *testing.T) {
+	tests := []struct {
+		name     string
+		doc      string
+		delta    string
+		wantName string
+	}{
+		{
+			name:     "both fields prefixed",
+			doc:      `{"_id":"r1","t":"c","name":"Del-general","fname":"Del-General","uids":["u1"]}`,
+			delta:    `{"updatedFields":{"fname":"Del-General"}}`,
+			wantName: "Del-General",
+		},
+		{
+			name:     "only the machine name prefixed",
+			doc:      `{"_id":"r1","t":"c","name":"Del-general","fname":"General","uids":["u1"]}`,
+			delta:    `{"updatedFields":{"name":"Del-general"}}`,
+			wantName: "Del-General",
+		},
+		{
+			name:     "only the machine name prefixed, no fname at all",
+			doc:      `{"_id":"r1","t":"c","name":"Del-general","uids":["u1"]}`,
+			delta:    `{"updatedFields":{"name":"Del-general"}}`,
+			wantName: "Del-general",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &fakePublisher{}
+			h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(tc.doc)})
+			require.NoError(t, h.handleRoom(context.Background(), roomEv("update", "", tc.delta)))
+
+			byType := eventsByType(pub.events)
+			var room model.Room
+			require.NoError(t, json.Unmarshal(byType[model.InboxEventType("room_sync")].Payload, &room))
+			assert.Equal(t, tc.wantName, room.Name, "user-service filters ^Del- on the rooms doc name")
+			assert.True(t, strings.HasPrefix(room.Name, "Del-"), "a deleted room must be hidden downstream")
+
+			var renamed model.RoomRenamedInboxPayload
+			require.NoError(t, json.Unmarshal(byType[model.InboxRoomRenamed].Payload, &renamed))
+			assert.Equal(t, tc.wantName, renamed.NewName, "subs' denormalized name must match the room doc")
+		})
+	}
+}
+
+// TestHandleRoom_SoftDeletedReplaceApplied: a replace carries no delta, so the deletion can't be
+// recognised from the event — apply it rather than drop it. Leaving a deleted room visible is worse
+// than an extra hidden room doc, and this is what the pre-guard code already did.
+func TestHandleRoom_SoftDeletedReplaceApplied(t *testing.T) {
+	doc := `{"_id":"r1","t":"c","name":"Del-general","fname":"Del-General","uids":["u1"]}`
+	pub := &fakePublisher{}
+	h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
+	require.NoError(t, h.handleRoom(context.Background(), roomEv("replace", doc, "")))
+
+	byType := eventsByType(pub.events)
+	require.Contains(t, byType, model.InboxRoomRenamed)
+	var room model.Room
+	require.NoError(t, json.Unmarshal(byType[model.InboxEventType("room_sync")].Payload, &room))
+	assert.Equal(t, "Del-General", room.Name)
+}
+
+// TestHandleRoom_ExcludedTypeWinsOverSoftDelete: exclusion is classified before the soft-delete
+// guard, so a Del- livechat/voip room keeps metering its type reason and a malformed delta on one
+// still Skips rather than Terming.
+func TestHandleRoom_ExcludedTypeWinsOverSoftDelete(t *testing.T) {
+	t.Run("livechat insert", func(t *testing.T) {
+		h := newTestHandler(&fakePublisher{}, &fakeTarget{}, &fakeLookup{})
+		doc := `{"_id":"r1","t":"l","name":"Del-support","fname":"Del-Support"}`
+		assert.ErrorIs(t, h.handleRoom(context.Background(), roomEv("insert", doc, "")), migration.ErrSkipped)
+	})
+
+	t.Run("malformed delta on an excluded type skips, not poisons", func(t *testing.T) {
+		doc := `{"_id":"r1","t":"v","name":"Del-call"}`
+		h := newTestHandler(&fakePublisher{}, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(doc)})
+		err := h.handleRoom(context.Background(), roomEv("update", "", `{"updatedFields":`))
+		assert.ErrorIs(t, err, migration.ErrSkipped)
+		assert.NotErrorIs(t, err, migration.ErrPoison)
+	})
+}
+
+// TestHandleRoom_DeletionAppliedOnRemovedNameField: a delta can REMOVE a name field as well as set
+// it, and a removal changes the mapped name too — so it counts as the deletion carrier.
+func TestHandleRoom_DeletionAppliedOnRemovedNameField(t *testing.T) {
+	doc := `{"_id":"r1","t":"c","name":"Del-general","uids":["u1"]}`
+	pub := &fakePublisher{}
+	h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(doc)})
+	require.NoError(t, h.handleRoom(context.Background(), roomEv("update", "", `{"removedFields":["fname"]}`)))
+
+	byType := eventsByType(pub.events)
+	require.Contains(t, byType, model.InboxRoomRenamed)
+	var room model.Room
+	require.NoError(t, json.Unmarshal(byType[model.InboxEventType("room_sync")].Payload, &room))
+	assert.Equal(t, "Del-general", room.Name)
 }

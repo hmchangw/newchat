@@ -111,8 +111,8 @@ func (h *handler) handleSubscription(ctx context.Context, ev oplogEvent) error {
 		// with the room's. Skipped on every op: the deletion state rides the room lane (room_renamed
 		// rewrites the name on every sub that exists), and the field events here would Nak-retry to
 		// exhaustion against a subscription whose insert this same guard skipped.
-		slog.Debug("skip subscription to soft-deleted room",
-			"eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
+		slog.DebugContext(ctx, "skip subscription to soft-deleted room",
+			"op", ev.Op, "eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
 		h.metrics.onSkipped(ctx, "subscription_soft_deleted")
 		return migration.ErrSkipped
 	}
