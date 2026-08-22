@@ -45,6 +45,7 @@ export function ThreadEventsProvider({ children }) {
   const [state, dispatch] = useReducer(threadEventsReducer, initialState)
   const generationRef = useRef(0)
   const threadSubRef = useRef(null)
+  const closeThreadSubRef = useRef(null)
   const decryptRef = useRef(decrypt)
   decryptRef.current = decrypt
   const ensureKeyRef = useRef(ensureKey)
@@ -52,9 +53,14 @@ export function ThreadEventsProvider({ children }) {
   const stateRef = useRef(state)
   stateRef.current = state
 
-  // Reset on logout.
+  // Reset on logout. The provider stays mounted across a logout, so unmount
+  // cleanup never runs: drop the subscription and advance the generation here
+  // or the previous session's lane stays live and its queued work still lands.
   useEffect(() => {
-    if (!user) dispatch({ type: 'RESET' })
+    if (user) return
+    generationRef.current++
+    closeThreadSubRef.current?.()
+    dispatch({ type: 'RESET' })
   }, [user])
 
   // The three reducer actions are authored here once. Both the room-lane
@@ -101,6 +107,7 @@ export function ThreadEventsProvider({ children }) {
     threadSubRef.current?.unsubscribe()
     threadSubRef.current = null
   }, [])
+  closeThreadSubRef.current = closeThreadSub
 
   useEffect(() => closeThreadSub, [closeThreadSub])
 

@@ -18,11 +18,9 @@ const subscribe = vi.fn((subj, handler) => {
   }
   return { unsubscribe }
 })
+let currentUser = { account: 'alice', siteId: 's1' }
 vi.mock('../NatsContext/NatsContext', () => ({
-  useNats: () => ({
-    user: { account: 'alice', siteId: 's1' },
-    request, publish, subscribe,
-  }),
+  useNats: () => ({ user: currentUser, request, publish, subscribe }),
 }))
 vi.mock('@/lib/idgen', () => ({ generateMessageID: () => 'OPT-000000000000000000' }))
 vi.mock('uuid', () => ({ v4: () => 'req-uuid' }))
@@ -343,6 +341,7 @@ describe('ThreadEventsContext thread-view subscription', () => {
     callOrder.length = 0
     threadEventHandler = null
     threadHandlers.clear()
+    currentUser = { account: 'alice', siteId: 's1' }
     decrypt.mockReset().mockResolvedValue(null)
     ensureKey.mockReset().mockResolvedValue(false)
     request.mockImplementation(() => {
@@ -642,5 +641,59 @@ describe('ThreadEventsContext thread-lane robustness', () => {
     expect(screen.getByText('firstContent:not blocked')).toBeInTheDocument()
 
     await act(async () => { releaseStalled(); await stalled })
+  })
+})
+
+describe('ThreadEventsContext logout lifecycle', () => {
+  beforeEach(() => {
+    request.mockReset().mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    subscribe.mockClear()
+    unsubscribe.mockClear()
+    threadEventHandler = null
+    threadHandlers.clear()
+    currentUser = { account: 'alice', siteId: 's1' }
+    decrypt.mockReset().mockResolvedValue(null)
+    ensureKey.mockReset().mockResolvedValue(false)
+  })
+
+  // The provider stays mounted across a logout, so unmount cleanup never runs.
+  // Leaving the subscription open keeps a previous session's lane live.
+  it('closes the thread subscription on logout', async () => {
+    const { rerender } = setup()
+    await act(async () => { screen.getByText('open').click() })
+    expect(subscribe).toHaveBeenCalledTimes(1)
+
+    currentUser = null
+    await act(async () => {
+      rerender(<ThreadEventsProvider><Probe /></ThreadEventsProvider>)
+    })
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+
+  // Generation must advance too, or work already queued for the old session
+  // still lands after the reset.
+  it('invalidates in-flight work queued before logout', async () => {
+    let releaseDecrypt
+    const gate = new Promise((resolve) => { releaseDecrypt = resolve })
+    decrypt.mockImplementation(async () => { await gate; return JSON.stringify({ id: 'm9', content: 'stale session' }) })
+
+    const { rerender } = setup()
+    await act(async () => { screen.getByText('open').click() })
+    let inFlight
+    await act(async () => {
+      inFlight = threadEventHandler({
+        type: 'new_thread_message', roomId: 'r1',
+        encryptedMessage: { version: 3, nonce: 'bm9uY2U=', ciphertext: 'Y2lwaGVy' },
+      })
+      await Promise.resolve()
+    })
+
+    currentUser = null
+    await act(async () => {
+      rerender(<ThreadEventsProvider><Probe /></ThreadEventsProvider>)
+      releaseDecrypt()
+      await inFlight
+    })
+    expect(screen.getByText('count:0')).toBeInTheDocument()
   })
 })
