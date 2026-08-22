@@ -402,7 +402,7 @@ func TestBroadcastWorker_ThreadViewSubject_NonFollowerReceivesReply_Integration(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
 		&fakeRoomKeyProvider{}, stubParentFetcher{}, false, subject.RouteGlobal, withThreadViewSubject(true))
 
@@ -460,7 +460,7 @@ func TestBroadcastWorker_ThreadViewSubject_SameSiteRoomRoutesLocal_Integration(t
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Drain() })
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
 		&fakeRoomKeyProvider{}, stubParentFetcher{}, false, subject.RouteLocal, withThreadViewSubject(true))
 
@@ -517,7 +517,7 @@ func TestBroadcastWorker_ThreadViewSubject_EncryptedForRoomNamespace_Integration
 	require.NoError(t, err)
 	key := &roomkeystore.VersionedKeyPair{Version: 7, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: secret}}
 
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
 	h := NewHandler(store, userstore.NewMongoStore(db.Collection("users")), &natsConnPublisher{nc: nc},
 		&fakeRoomKeyProvider{pair: key}, stubParentFetcher{}, true, subject.RouteGlobal, withThreadViewSubject(true))
 
