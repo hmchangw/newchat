@@ -18,9 +18,6 @@ package jsretry
 import (
 	"context"
 	"log/slog"
-
-	// Retry jitter only, never security-sensitive; crypto/rand would add an error
-	// path to a pure timing helper.
 	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"time"
 
@@ -82,20 +79,16 @@ func SettleQuiet(ctx context.Context, msg Msg, backoff []time.Duration, err erro
 	settle(ctx, msg, backoff, err, false)
 }
 
-// Nak schedules msg for redelivery after this attempt's backoff delay, and logs
-// only if the Nak network call itself fails — the caller owns the business-error
-// log. Use it wherever a handler settles its own ack/nak rather than returning an
-// error to Settle.
-//
-// Never call msg.Nak() or msg.NakWithDelay(0) directly: both serialize as a bare
-// -NAK, which nats-server puts straight on the redeliver queue without consulting
-// the consumer's BackOff (server/consumer.go:3308-3311), so a sub-second
-// downstream blip burns MaxDeliver in milliseconds and the message is dropped.
-//
-// reason is a short label describing why the message is being redelivered — e.g.
-// "bulk index failure", "transient downstream error".
+// Nak schedules msg for redelivery after this attempt's jittered backoff delay.
+// Use it where a handler settles its own ack/nak instead of returning an error to
+// Settle; the caller keeps the business-error log, reason labels the redelivery.
 func Nak(ctx context.Context, msg Msg, backoff []time.Duration, reason string) {
-	delay := backoffFor(msg, backoff)
+	nak(ctx, msg, backoffFor(msg, backoff), reason)
+}
+
+// nak is the single NakWithDelay path; a failed nak network call is logged even
+// when the caller owns the business-error log.
+func nak(ctx context.Context, msg Msg, delay time.Duration, reason string) {
 	if err := msg.NakWithDelay(delay); err != nil {
 		slog.ErrorContext(ctx, "failed to nak message", "reason", reason,
 			"delay", delay.String(), "error", err, "request_id", natsutil.RequestIDFromContext(ctx))
@@ -122,9 +115,7 @@ func settle(ctx context.Context, msg Msg, backoff []time.Duration, err error, lo
 	if logBusiness {
 		slog.ErrorContext(ctx, "message failed — retrying", "error", err, "delay", delay.String(), "request_id", natsutil.RequestIDFromContext(ctx))
 	}
-	if nakErr := msg.NakWithDelay(delay); nakErr != nil {
-		slog.ErrorContext(ctx, "failed to nak message", "error", nakErr, "request_id", natsutil.RequestIDFromContext(ctx))
-	}
+	nak(ctx, msg, delay, "transient failure")
 }
 
 // backoffFor selects the delay for the next redelivery, indexed by how many
@@ -145,10 +136,8 @@ func backoffFor(msg Msg, backoff []time.Duration) time.Duration {
 }
 
 // jitter applies AWS "equal jitter": half the base delay plus a random amount up
-// to the other half. It guarantees at least 50% of the base while decorrelating a
-// fleet whose messages all parked during the same outage — without it every
-// backed-off message retries in lockstep the instant the dependency recovers.
-// The server-side consumer BackOff cannot do this; it is a literal duration list.
+// to the other half. Decorrelates a fleet that all parked during one outage —
+// the server-side BackOff cannot do this, it is a literal duration list.
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return d

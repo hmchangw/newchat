@@ -19,10 +19,9 @@ type ConsumerSettings struct {
 	MaxWaiting    int           `env:"MAX_WAITING"     envDefault:"512"`
 	MaxAckPending int           `env:"MAX_ACK_PENDING" envDefault:"1000"`
 
-	// BackOff schedule shape. Entry i is AckWait * Factor^i capped at Max, so
-	// entry 0 is AckWait by construction — nats-server overwrites AckWait with
-	// BackOff[0] (server/consumer.go:677-682) and the two must never disagree.
-	// Steps=0 disables the schedule entirely (flat AckWait retry).
+	// BackOff schedule shape: entry i is AckWait * Factor^i capped at Max. Entry 0
+	// is AckWait by construction — the server overwrites AckWait with BackOff[0]
+	// (consumer.go:677-682), so the two can never disagree. Steps=0 disables it.
 	BackOffSteps  int           `env:"BACKOFF_STEPS"  envDefault:"5"`
 	BackOffFactor float64       `env:"BACKOFF_FACTOR" envDefault:"2"`
 	BackOffMax    time.Duration `env:"BACKOFF_MAX"    envDefault:"8m"`
@@ -45,10 +44,9 @@ type ConsumerSettings struct {
 // existing durable via js.CreateOrUpdateConsumer does not reset its
 // cursor position.
 //
-// BackOff is derived from AckWait via the BackOff* knobs; see backOffSchedule.
-// It governs redelivery only for messages that go un-acked past AckWait — a
-// handler that Naks is spaced by pkg/jsretry instead, because a bare -NAK
-// bypasses BackOff entirely (server/consumer.go:3308-3311).
+// BackOff is derived from AckWait (see backOffSchedule) and governs redelivery
+// only for messages un-acked past AckWait; a handler that Naks is spaced by
+// pkg/jsretry instead.
 func DurableConsumerDefaults(s ConsumerSettings) jetstream.ConsumerConfig {
 	return jetstream.ConsumerConfig{
 		AckPolicy:     jetstream.AckExplicitPolicy,
@@ -61,24 +59,20 @@ func DurableConsumerDefaults(s ConsumerSettings) jetstream.ConsumerConfig {
 	}
 }
 
-// backOffSchedule builds the redelivery schedule: entry i is AckWait*Factor^i,
-// capped at BackOffMax. Returns nil when disabled, leaving flat AckWait retry.
-//
-// Steps are clamped to MaxDeliver because nats-server rejects a schedule longer
-// than MaxDeliver outright (server/consumer.go:807), and a clamp with a warning
-// beats a consumer that fails to create at startup.
+// backOffSchedule builds the redelivery schedule, nil when disabled (flat AckWait
+// retry). Steps are clamped to MaxDeliver because the server rejects a longer
+// schedule outright (consumer.go:807) — clamping beats failing at startup.
 func (s ConsumerSettings) backOffSchedule() []time.Duration {
 	steps := s.BackOffSteps
 	if steps <= 0 || s.AckWait <= 0 {
 		return nil
 	}
-	if s.MaxDeliver != -1 && steps > s.MaxDeliver {
+	// Clamp only against a real cap: the server normalizes MaxDeliver 0 and < -1
+	// to -1, meaning unlimited, before it checks the length (consumer.go:612-617).
+	if s.MaxDeliver > 0 && steps > s.MaxDeliver {
 		slog.Warn("consumer backoff steps exceed MaxDeliver — clamping",
 			"backoffSteps", steps, "maxDeliver", s.MaxDeliver)
 		steps = s.MaxDeliver
-	}
-	if steps <= 0 {
-		return nil
 	}
 	factor := s.BackOffFactor
 	if factor < 1 {

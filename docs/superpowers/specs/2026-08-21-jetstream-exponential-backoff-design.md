@@ -63,8 +63,9 @@ is shared and caps whichever path a message takes.
 Two server-side constraints bind the design:
 
 - `AckWait` is overwritten by `BackOff[0]` (`consumer.go:677-682`).
-- `len(BackOff) > MaxDeliver` is a hard error at consumer create **and** update, unless
-  `MaxDeliver == -1` (`consumer.go:807`, `consumer.go:2588`).
+- `len(BackOff) > MaxDeliver` is a hard error at consumer create **and** update
+  (`consumer.go:807`, `consumer.go:2588`), except when MaxDeliver means unlimited: the
+  server normalizes `0` and `< -1` to `-1` before that check (`consumer.go:612-617`).
 
 ## 3. Reference values
 
@@ -120,9 +121,11 @@ enforces:
 1. `BackOffSteps <= 0`, or `AckWait <= 0` → `cc.BackOff` stays `nil`, flat `AckWait`
    retry. **`CONSUMER_BACKOFF_STEPS=0` is the off-switch**, reverting any service to
    today's behavior with an env change and no code deploy.
-2. `BackOffSteps > MaxDeliver` and `MaxDeliver != -1` → clamp to `MaxDeliver` and
-   `slog.Warn`, since the server hard-rejects the excess. Clamp-and-warn follows the
-   precedent in `data-migration/oplog-transformer/config.go:42-45`.
+2. `BackOffSteps > MaxDeliver` and `MaxDeliver > 0` → clamp to `MaxDeliver` and
+   `slog.Warn`, since the server hard-rejects the excess. `MaxDeliver` of `0` or `< -1`
+   means unlimited (the server normalizes both to `-1`) and is not clamped.
+   Clamp-and-warn follows the precedent in
+   `data-migration/oplog-transformer/config.go:42-45`.
 3. `BackOffFactor < 1` → treated as `1` (flat schedule); a shrinking backoff is never
    intended.
 

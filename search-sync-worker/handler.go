@@ -252,11 +252,9 @@ func (h *Handler) startFlushSpan(ctx context.Context, pending []pendingMsg, acti
 	)
 }
 
-// nakAll naks every buffered source message for redelivery. Used on the
-// two defensive paths in Flush where the whole batch can't be processed
-// (bulk request failed, or the ES response item count didn't match the
-// request). The shared `reason` is logged against every message so an
-// operator grepping by cause sees all of them together.
+// nakAll naks every buffered source message for redelivery. Used on the two
+// defensive paths in Flush where the whole batch can't be processed (bulk
+// request failed, or the ES response item count didn't match the request).
 func nakAll(ctx context.Context, pending []pendingMsg, reason string) {
 	for _, p := range pending {
 		jsretry.Nak(ctx, p.jsMsg, jsretry.DefaultBackoff, reason)

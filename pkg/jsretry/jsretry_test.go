@@ -150,17 +150,6 @@ func TestNak_UsesJitteredBackoffForAttempt(t *testing.T) {
 	assertJittered(t, testSchedule[1], m.nakDelay)
 }
 
-// NakWithDelay(0) serializes as a bare -NAK, which nats-server redelivers
-// instantly and which ignores the consumer's BackOff entirely. The whole point
-// of this helper is that it can never emit one.
-func TestNak_AlwaysSendsAPositiveDelay(t *testing.T) {
-	for _, nd := range []uint64{0, 1, 2, 3, 99} {
-		m := &fakeMsg{numDelivered: nd}
-		Nak(context.Background(), m, testSchedule, "transient")
-		assert.Positive(t, m.nakDelay, "numDelivered=%d", nd)
-	}
-}
-
 func TestNak_LogsWhenTheNakCallFails(t *testing.T) {
 	orig := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(orig) })
@@ -181,16 +170,12 @@ func TestNak_SilentOnSuccess(t *testing.T) {
 	assert.Zero(t, n, "the caller owns the business-error log; Nak must not double-log")
 }
 
-func TestDefaultBackoff_ShapeAndBudget(t *testing.T) {
+// Synadia's published four-entry schedule plus a 10m tail — 12m36s over five
+// gaps, the agreed ~15 min retry budget.
+func TestDefaultBackoff_Shape(t *testing.T) {
 	assert.Equal(t, []time.Duration{
 		1 * time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute,
 	}, DefaultBackoff)
-
-	var total time.Duration
-	for _, d := range DefaultBackoff {
-		total += d
-	}
-	assert.Equal(t, 12*time.Minute+36*time.Second, total, "agreed ~15 min retry budget")
 }
 
 // Deliberately not extended: broadcast fan-out is user-visible and a

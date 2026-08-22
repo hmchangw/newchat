@@ -69,7 +69,7 @@ func main() {
 
 	consumeCtxs := make([]o11ynats.ConsumeContext, 0, len(cfg.SiteIDs))
 	for _, siteID := range cfg.SiteIDs {
-		cc, err := startSiteConsumer(ctx, otelJS, handler, siteID)
+		cc, err := startSiteConsumer(ctx, otelJS, handler, siteID, cfg.Consumer)
 		if err != nil {
 			slog.Error("start site consumer failed", "site", siteID, "error", err)
 			os.Exit(1)
@@ -107,17 +107,10 @@ func main() {
 // startSiteConsumer wires one durable, strictly-sequential consumer on the
 // site's HR stream. MaxAckPending=1 so a quit can never overtake the upsert
 // that precedes it (low volume — one publish burst per sync run).
-func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string) (o11ynats.ConsumeContext, error) {
+func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string, s stream.ConsumerSettings) (o11ynats.ConsumeContext, error) {
 	streamCfg := stream.OrgSyncStream(siteID)
-	consCfg := stream.DurableConsumerDefaults(stream.ConsumerSettings{
-		AckWait:    30 * time.Second,
-		MaxDeliver: -1, // never drop a feed batch; jsretry backoff spaces the retries
-		MaxWaiting: 512,
-		// MaxDeliver=-1 exempts this consumer from the len(BackOff)<=MaxDeliver rule.
-		BackOffSteps:  5,
-		BackOffFactor: 2,
-		BackOffMax:    8 * time.Minute,
-	})
+	s.MaxDeliver = -1 // never drop a feed batch; jsretry backoff spaces the retries
+	consCfg := stream.DurableConsumerDefaults(s)
 	consCfg.Durable = durableName
 	consCfg.MaxAckPending = 1
 	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consCfg)

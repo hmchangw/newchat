@@ -181,9 +181,8 @@ func run() error {
 	return nil
 }
 
-// buildConsumerConfig returns the durable consumer config. The BackOff schedule
-// comes from ConsumerSettings — never hardcode it, a literal BackOff[0] silently
-// becomes the server-side AckWait.
+// buildConsumerConfig adds the durable name and filter; everything else comes
+// from ConsumerSettings.
 func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "bot-message-worker"

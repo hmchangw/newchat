@@ -126,6 +126,14 @@ func TestDurableConsumerDefaults_BackOff(t *testing.T) {
 			want: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute},
 		},
 		{
+			name: "MaxDeliver 0 means unlimited, so no clamp",
+			s: stream.ConsumerSettings{
+				AckWait: 30 * time.Second, MaxDeliver: 0,
+				BackOffSteps: 5, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+			},
+			want: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute},
+		},
+		{
 			name: "MaxDeliver -1 exempts the clamp",
 			s: stream.ConsumerSettings{
 				AckWait: 30 * time.Second, MaxDeliver: -1,

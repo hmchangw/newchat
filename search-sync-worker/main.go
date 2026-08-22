@@ -510,9 +510,8 @@ type consumerSource interface {
 	FilterSubjects(siteID string) []string
 }
 
-// buildConsumerConfig returns the durable consumer config for one collection.
-// The BackOff schedule comes from ConsumerSettings — never hardcode it here, a
-// literal BackOff[0] silently becomes the server-side AckWait.
+// buildConsumerConfig adds the durable name and filters for one collection;
+// everything else comes from ConsumerSettings.
 func buildConsumerConfig(s stream.ConsumerSettings, coll consumerSource, siteID string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = coll.ConsumerName()

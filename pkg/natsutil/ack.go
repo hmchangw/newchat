@@ -20,10 +20,8 @@ type Acker interface {
 // the pattern gives us one place to add tracing spans, metrics counters, or
 // delivery-context fields later, and keeps log keys consistent across services.
 //
-// There is deliberately no Nak counterpart here: a bare msg.Nak() is an instant
-// redelivery that ignores the consumer's BackOff schedule
-// (nats-server/server/consumer.go:3308-3311), so a brief downstream blip burns
-// MaxDeliver in milliseconds. Use jsretry.Nak instead.
+// There is deliberately no Nak counterpart: a bare Nak() redelivers instantly,
+// ignoring the consumer's BackOff. Use jsretry.Nak.
 func Ack(msg Acker, reason string) {
 	if err := msg.Ack(); err != nil {
 		slog.Error("ack failed", "reason", reason, "error", err)

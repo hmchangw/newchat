@@ -358,8 +358,9 @@ Three server rules the code must respect (`nats-io/nats-server`, `server/consume
   either** — use `jsretry.Settle`, `jsretry.SettleQuiet`, or `jsretry.Nak`.
 - **`BackOff[0]` overwrites `AckWait`** (`:677-682`). Never hardcode a `cc.BackOff` in a
   service; let `stream.DurableConsumerDefaults` derive it so the two cannot disagree.
-- **`len(BackOff) > MaxDeliver` is a hard create/update error** unless `MaxDeliver == -1`
-  (`:807`, `:2588`). `DurableConsumerDefaults` clamps and warns.
+- **`len(BackOff) > MaxDeliver` is a hard create/update error** (`:807`, `:2588`), except
+  when MaxDeliver means unlimited — the server normalizes `0` and `< -1` to `-1` first
+  (`:612-617`). `DurableConsumerDefaults` clamps and warns.
 
 ### Graceful Shutdown
 - Use `pkg/shutdown.Wait` in every service's `main.go`
