@@ -296,11 +296,13 @@ func TestSupervise_ErrorDuringStartDoesNotLeaveTwoSubscriptions(t *testing.T) {
 	assert.Equal(t, 1, handle.stopCount(), "the doomed subscription must be released, not orphaned")
 
 	// A failed Supervise must not leave a restart goroutine retrying behind the
-	// caller's back — it has nothing to hand the retried subscription to.
-	time.Sleep(200 * time.Millisecond)
-	mu.Lock()
-	defer mu.Unlock()
-	assert.Equal(t, 1, calls, "a failed Supervise must not keep restarting")
+	// caller's back — it has nothing to hand the retried subscription to. The
+	// first backoff step is 100ms, so a retry would land inside this window.
+	assert.Never(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls > 1
+	}, time.Second, 20*time.Millisecond, "a failed Supervise must not keep restarting")
 }
 
 // An error still buffered on a superseded subscription's errs channel must not

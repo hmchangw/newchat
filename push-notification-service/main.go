@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -92,6 +93,11 @@ func run() error {
 		for {
 			mCtx, msg, err := iter.Next()
 			if err != nil {
+				// The pump only reports an error it could not recover from, so
+				// this is the end of consumption — never a passing hiccup.
+				if !errors.Is(err, jsiter.ErrStopped) {
+					slog.ErrorContext(ctx, "consumer loop stopped", "error", err)
+				}
 				return
 			}
 			sem <- struct{}{}

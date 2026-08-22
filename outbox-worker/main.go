@@ -153,7 +153,7 @@ func main() {
 		}
 		iters = append(iters, iter)
 		laneChecks = append(laneChecks, iter.HealthCheck())
-		drainPool(ctx, iter, sem, &wg, process)
+		drainPool(ctx, "outbox-concurrent-"+dest, iter, sem, &wg, process)
 
 		newConsume := func(ctx context.Context, onError func(error)) (jsiter.ConsumeContext, error) {
 			ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
@@ -231,7 +231,7 @@ type laneIterator interface {
 // also cover the pump, or a message received between Next() and the
 // per-message Add(1) could slip past the wait and race nc.Drain(). The pump
 // exits when the iterator is Stop()'d on shutdown.
-func drainPool(ctx context.Context, iter laneIterator, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
+func drainPool(ctx context.Context, lane string, iter laneIterator, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -242,7 +242,7 @@ func drainPool(ctx context.Context, iter laneIterator, sem chan struct{}, wg *sy
 				// (iter.Stop() on shutdown) is the only expected error here; any
 				// other means consumption died for good — surface it.
 				if !errors.Is(err, jsiter.ErrStopped) {
-					slog.ErrorContext(ctx, "outbox concurrent iterator stopped", "error", err)
+					slog.ErrorContext(ctx, "outbox concurrent iterator stopped", "lane", lane, "error", err)
 				}
 				return
 			}

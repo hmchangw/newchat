@@ -33,16 +33,40 @@ type scriptedIter struct {
 	i       int
 	stops   int
 	release chan struct{}
+	// parked closes the first time Next runs out of script and blocks, so a
+	// test can order Stop after Next is genuinely waiting.
+	parked chan struct{}
 }
 
 func newScriptedIter(steps ...step) *scriptedIter {
-	return &scriptedIter{steps: steps, release: make(chan struct{})}
+	return &scriptedIter{steps: steps, release: make(chan struct{}), parked: make(chan struct{})}
+}
+
+// waitParked blocks until Next has exhausted the script and is waiting.
+func (s *scriptedIter) waitParked(t *testing.T) {
+	t.Helper()
+	s.mu.Lock()
+	parked := s.parked
+	s.mu.Unlock()
+	if parked == nil {
+		return
+	}
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("iterator never parked")
+	}
 }
 
 func (s *scriptedIter) Next(...jetstream.NextOpt) (context.Context, jetstream.Msg, error) {
 	s.mu.Lock()
 	if s.i >= len(s.steps) {
+		parked := s.parked
+		s.parked = nil
 		s.mu.Unlock()
+		if parked != nil {
+			close(parked)
+		}
 		<-s.release
 		return nil, nil, jetstream.ErrMsgIteratorClosed
 	}
@@ -334,9 +358,16 @@ func TestPump_Stop_UnblocksRebuildBackoff(t *testing.T) {
 	p, err := New(context.Background(), "test", f.new)
 	require.NoError(t, err)
 
+	parked := make(chan struct{})
+	realSleep := p.sleepFn
+	p.sleepFn = func(ctx context.Context, d time.Duration) bool {
+		close(parked)
+		return realSleep(ctx, d)
+	}
+
 	go func() {
-		// Stop lands while Next is parked on the real rebuild backoff.
-		time.Sleep(20 * time.Millisecond)
+		// Stop lands only once Next is genuinely inside the rebuild backoff.
+		<-parked
 		p.Stop()
 	}()
 
@@ -380,7 +411,7 @@ func TestPump_Next_StopDuringNextReturnsErrStopped(t *testing.T) {
 		_, _, nextErr := p.Next()
 		done <- nextErr
 	}()
-	time.Sleep(20 * time.Millisecond)
+	iter.waitParked(t)
 	p.Stop()
 
 	select {

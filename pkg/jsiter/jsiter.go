@@ -214,7 +214,7 @@ func (p *Pump) Next(opts ...jetstream.NextOpt) (context.Context, jetstream.Msg, 
 			p.up.Store(false)
 			slog.ErrorContext(p.ctx, "jetstream iterator ended consumption",
 				"consumer", p.name, "error", err)
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("consume %s: %w", p.name, err)
 		}
 
 		slog.ErrorContext(p.ctx, "jetstream iterator stopped, rebuilding",
@@ -303,12 +303,18 @@ func backoffStep(attempt int) time.Duration {
 // sleep parks for a jittered d, returning false when Stop or context
 // cancellation cut the wait short.
 func (p *Pump) sleep(ctx context.Context, d time.Duration) bool {
+	return sleepUntil(ctx, p.done, d)
+}
+
+// sleepUntil is the one backoff wait in this package: jitter and cancellation
+// semantics stay identical for the pump and the supervisor.
+func sleepUntil(ctx context.Context, done <-chan struct{}, d time.Duration) bool {
 	timer := time.NewTimer(Jitter(d))
 	defer timer.Stop()
 	select {
 	case <-timer.C:
 		return true
-	case <-p.done:
+	case <-done:
 		return false
 	case <-ctx.Done():
 		return false

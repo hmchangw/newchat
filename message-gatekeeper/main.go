@@ -182,7 +182,7 @@ func main() {
 		}
 		iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 		if err != nil {
-			return nil, fmt.Errorf("open messages message iterator: %w", err)
+			return nil, fmt.Errorf("open messages iterator: %w", err)
 		}
 		return iter, nil
 	}

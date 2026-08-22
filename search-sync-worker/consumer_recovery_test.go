@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/jsiter"
+	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/searchengine"
 )
 
 // stubBatch is an empty batch that reports a fixed post-drain error — the only
@@ -377,14 +380,15 @@ func TestRunConsumer_ExitsWhenRecoveryGivesUp(t *testing.T) {
 
 func TestRunConsumer_HealthyBatchNeverRecovers(t *testing.T) {
 	stopCh := make(chan struct{})
-	src := &recordingSource{keepGoing: true}
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		close(stopCh)
-	}()
+	var once sync.Once
+	src := &recordingSource{
+		keepGoing: true,
+		onRecover: func() { once.Do(func() { close(stopCh) }) },
+	}
 
 	runLoop(t, src, stopCh)
 
+	require.NotEmpty(t, src.recoveries(), "the loop must reach Recover at least once")
 	for _, err := range src.recoveries() {
 		assert.NoError(t, err, "an empty batch with no error is a quiet stream, not a failure")
 	}
@@ -430,15 +434,53 @@ type flushCountingSource struct {
 	handler  *Handler
 	buffered []int
 	mu       sync.Mutex
+	// onError ends the loop on the first failing recovery, so the clean batch
+	// that precedes it cannot stop the test before the failure lands.
+	onError func()
 }
 
 func (s *flushCountingSource) Recover(ctx context.Context, err error) bool {
 	if err != nil {
 		s.mu.Lock()
 		s.buffered = append(s.buffered, s.handler.ActionCount())
+		stop := s.onError
 		s.mu.Unlock()
+		if stop != nil {
+			stop()
+		}
 	}
 	return s.recordingSource.Recover(ctx, err)
+}
+
+// newFlushCountingHandler returns a handler whose store counts the actions that
+// actually reached Elasticsearch.
+func newFlushCountingHandler(t *testing.T) (*Handler, func() int) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+
+	var mu sync.Mutex
+	var actions int
+	store.EXPECT().
+		Bulk(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, a []searchengine.BulkAction) ([]searchengine.BulkResult, error) {
+			mu.Lock()
+			actions += len(a)
+			mu.Unlock()
+			results := make([]searchengine.BulkResult, len(a))
+			for i := range results {
+				results[i] = searchengine.BulkResult{Status: 201}
+			}
+			return results, nil
+		}).
+		AnyTimes()
+
+	h := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 500)
+	return h, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return actions
+	}
 }
 
 func (s *flushCountingSource) bufferedAtRecover() []int {
@@ -447,35 +489,75 @@ func (s *flushCountingSource) bufferedAtRecover() []int {
 	return append([]int(nil), s.buffered...)
 }
 
+// deliveringBatch hands over real messages and then reports err after the drain,
+// so the buffer is non-empty when the loop reaches Recover.
+type deliveringBatch struct {
+	msgs []jetstream.Msg
+	err  error
+}
+
+func (b deliveringBatch) Messages() <-chan o11ynats.FetchedMessage {
+	ch := make(chan o11ynats.FetchedMessage, len(b.msgs))
+	for _, m := range b.msgs {
+		ch <- o11ynats.FetchedMessage{Ctx: context.Background(), Msg: m}
+	}
+	close(ch)
+	return ch
+}
+
+func (b deliveringBatch) Error() error { return b.err }
+
+// indexableMsgs builds messages the message collection turns into bulk actions.
+func indexableMsgs(t *testing.T, n int) []jetstream.Msg {
+	t.Helper()
+	msgs := make([]jetstream.Msg, 0, n)
+	for i := range n {
+		evt := model.MessageEvent{
+			Event: model.EventCreated,
+			Message: model.Message{
+				ID: fmt.Sprintf("m%d", i), RoomID: "r1", UserID: "u1", UserAccount: "alice",
+				Content: "hello", CreatedAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			},
+			SiteID: "site-a", Timestamp: 100,
+		}
+		msgs = append(msgs, makeStubMsg(t, &evt))
+	}
+	return msgs
+}
+
 // Recover can park for a whole outage while it rebuilds, so anything already
 // built must reach Elasticsearch first rather than wait out the outage.
+//
+// bulkFlushInterval is an hour and bulkBatchSize is far above the message count,
+// so neither the interval nor the size flush can fire: only a flush on the error
+// path can empty the buffer, and dropping it turns this test red.
 func TestRunConsumer_FlushesBufferedActionsBeforeRecovering(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		src  func(stop chan struct{}) *recordingSource
+		src  func(t *testing.T, stop chan struct{}) *recordingSource
 	}{
-		{"fetch error", func(stop chan struct{}) *recordingSource {
-			var once sync.Once
+		{"fetch error", func(t *testing.T, _ chan struct{}) *recordingSource {
 			return &recordingSource{
 				fetchErrs: []error{nil, errors.New("fetch failed")},
-				batches:   []msgBatch{stubBatch{}},
+				batches:   []msgBatch{deliveringBatch{msgs: indexableMsgs(t, 3)}},
 				keepGoing: true,
-				onRecover: func() { once.Do(func() { close(stop) }) },
 			}
 		}},
-		{"batch error", func(stop chan struct{}) *recordingSource {
-			var once sync.Once
+		{"batch error", func(t *testing.T, _ chan struct{}) *recordingSource {
 			return &recordingSource{
-				batches:   []msgBatch{stubBatch{err: jetstream.ErrConsumerDeleted}},
+				batches: []msgBatch{
+					deliveringBatch{msgs: indexableMsgs(t, 3), err: jetstream.ErrConsumerDeleted},
+				},
 				keepGoing: true,
-				onRecover: func() { once.Do(func() { close(stop) }) },
 			}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stopCh := make(chan struct{})
-			handler := newLoopHandler(t)
-			src := &flushCountingSource{recordingSource: tc.src(stopCh), handler: handler}
+			handler, flushed := newFlushCountingHandler(t)
+			var once sync.Once
+			src := &flushCountingSource{recordingSource: tc.src(t, stopCh), handler: handler}
+			src.onError = func() { once.Do(func() { close(stopCh) }) }
 
 			doneCh := make(chan struct{})
 			go runConsumer(context.Background(), src, handler, 10, 500, time.Hour, stopCh, doneCh)
@@ -485,10 +567,12 @@ func TestRunConsumer_FlushesBufferedActionsBeforeRecovering(t *testing.T) {
 				t.Fatal("runConsumer did not return")
 			}
 
+			require.NotEmpty(t, src.bufferedAtRecover(), "the loop must reach Recover")
 			for _, buffered := range src.bufferedAtRecover() {
 				assert.Zero(t, buffered,
 					"actions must be flushed before a recovery that can outlast the flush interval")
 			}
+			assert.Positive(t, flushed(), "the messages must actually have produced actions")
 		})
 	}
 }

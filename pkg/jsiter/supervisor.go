@@ -300,14 +300,5 @@ func (s *Supervisor) abandonRestart() {
 // sleep parks for a jittered d, returning false when Stop or context
 // cancellation cut the wait short.
 func (s *Supervisor) sleep(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(Jitter(d))
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-s.done:
-		return false
-	case <-ctx.Done():
-		return false
-	}
+	return sleepUntil(ctx, s.done, d)
 }
