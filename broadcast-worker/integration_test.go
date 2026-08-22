@@ -573,16 +573,14 @@ func TestBroadcastWorker_GetHistorySharedSince_Integration(t *testing.T) {
 	assert.Empty(t, empty)
 }
 
-// natsConnPublisher adapts a raw *nats.Conn so the test asserts on what a
-// subscribed client receives, not on what a fake recorded.
+// natsConnPublisher lets the test assert on what a client receives, not a fake.
 type natsConnPublisher struct{ nc *nats.Conn }
 
 func (p *natsConnPublisher) Publish(_ context.Context, subj string, data []byte) error {
 	return p.nc.Publish(subj, data)
 }
 
-// dave never replied, so replyAccounts omits him and the per-follower fan-out
-// skips him; with the panel open the thread subject must still reach him.
+// dave never replied, so the per-follower fan-out skips him; the panel must not.
 func TestBroadcastWorker_ThreadViewSubject_NonFollowerReceivesReply_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()

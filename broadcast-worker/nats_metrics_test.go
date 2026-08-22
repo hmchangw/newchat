@@ -145,8 +145,7 @@ func TestBroadcastMetrics_ThreadViewPublishFailed(t *testing.T) {
 
 	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated)
 	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated)
-	// An unclassified event must collapse onto the bounded "unknown" series
-	// rather than minting a new one.
+	// An unclassified event must collapse onto the bounded "unknown" series.
 	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventType("dynamic-event"))
 
 	var rm metricdata.ResourceMetrics
@@ -170,8 +169,7 @@ func TestBroadcastMetrics_ThreadViewPublishFailed(t *testing.T) {
 	assert.Equal(t, map[string]int64{"created": 2, "unknown": 1}, byEvent)
 }
 
-// A nil metrics value must be inert: the handler builds one by default, but a
-// zero-valued struct must not panic the publish path.
+// A nil metrics value must be inert, not panic the publish path.
 func TestBroadcastMetrics_ThreadViewPublishFailed_NilSafe(t *testing.T) {
 	var m *broadcastMetrics
 	assert.NotPanics(t, func() { m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated) })

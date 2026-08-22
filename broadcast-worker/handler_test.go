@@ -3437,8 +3437,7 @@ func threadReplyEventJSON(t *testing.T, event model.EventType, msgTime time.Time
 	return data
 }
 
-// A viewer who follows nothing still gets the reply: the subject is
-// published independently of the follower set.
+// The subject is published independently of the follower set.
 func TestHandleThreadCreated_PublishesThreadViewSubject(t *testing.T) {
 	crossSite, sameSite := true, false
 	tests := []struct {
@@ -3523,8 +3522,7 @@ func TestHandleThreadCreated_ThreadViewSubjectDisabled(t *testing.T) {
 	assert.NotEmpty(t, pub.records, "the per-follower lane is unaffected by the kill switch")
 }
 
-// A bot-only follower set is the unit-level stand-in for "nobody follows this
-// thread" — a lone viewer's case.
+// A bot-only follower set stands in for "nobody follows this thread".
 func TestHandleThreadCreated_EmptyFanOutStillPublishesThreadViewSubject(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store, us, pub := NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{}

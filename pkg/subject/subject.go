@@ -446,8 +446,8 @@ func RoomEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mo
 	return out
 }
 
-// RoomThreadEvent returns the thread-scoped event subject a client subscribes to
-// while a thread panel is open. Routes on the same namespaces as RoomEvent.
+// RoomThreadEvent returns the subject a client subscribes to while a thread
+// panel is open. Same namespaces as RoomEvent.
 func RoomThreadEvent(roomID, parentMessageID string, global bool) string {
 	return roomBase(roomID, global) + ".thread." + parentMessageID + ".event"
 }
