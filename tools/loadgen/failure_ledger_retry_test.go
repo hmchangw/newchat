@@ -137,3 +137,39 @@ func TestFailureLedger_AStartSettlesAnOwedVerdictToo(t *testing.T) {
 		[]string{invalidReasonReconcileCapacity, invalidReasonWAL},
 		journaledInvalidationReasons(journal))
 }
+
+// A WAL error branch used to answer a failed append by immediately attempting
+// another one — the invalidation recording the failure. On a journal that is
+// not coming back, every workload event then cost two doomed writes and two
+// error logs, adding pressure to the failing volume for as long as the run
+// lasted. The only moment worth attempting the write is after one has
+// succeeded, which is what the retry already does.
+func TestFailureLedger_AFailedAppendDoesNotImmediatelyRetryTheJournal(t *testing.T) {
+	now := time.Date(2026, 8, 22, 17, 0, 0, 0, time.UTC)
+	journal := &countingFailureJournal{fail: true}
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 4, Journal: journal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	require.Error(t, ledger.Start(testFailureOperation("m1", now)))
+
+	assert.Equal(t, 1, journal.attempts,
+		"the failed start append must not be answered with a second write")
+	assert.Equal(t, []string{invalidReasonWAL}, ledger.UnpersistedInvalidations(),
+		"the cause is owed until a write succeeds, not dropped")
+}
+
+type countingFailureJournal struct {
+	memoryFailureJournal
+	fail     bool
+	attempts int
+}
+
+func (j *countingFailureJournal) Append(event *failureLedgerEvent) error {
+	j.attempts++
+	if j.fail {
+		return errors.New("no space left on device")
+	}
+	return j.memoryFailureJournal.Append(event)
+}

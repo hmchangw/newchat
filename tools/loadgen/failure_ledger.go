@@ -633,7 +633,7 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 		l.startingWG.Done()
 	}()
 	if appendErr != nil {
-		l.invalidateLocked(invalidReasonWAL)
+		l.noteInvalidationLocked(invalidReasonWAL)
 		return fmt.Errorf("persist failure operation %q: %w", tracked.ID, appendErr)
 	}
 	if l.recorder != nil && l.journal != nil {
@@ -673,7 +673,7 @@ func (l *failureLedger) Activate(operationID string, at time.Time) error {
 		Type: failureLedgerEventActivated, OperationID: operationID, At: at.UTC(),
 	}
 	if err := l.appendLocked(&event); err != nil {
-		l.invalidateLocked(invalidReasonWAL)
+		l.noteInvalidationLocked(invalidReasonWAL)
 		return fmt.Errorf("persist activated failure operation %q: %w", operationID, err)
 	}
 	operation.LifecycleState = failureOperationActive
@@ -797,7 +797,7 @@ func (l *failureLedger) ObserveWithReason(
 				Observer: observer, Observation: observation, At: at.UTC(),
 			}
 			if err := l.appendLocked(&event); err != nil {
-				l.invalidateLocked(invalidReasonWAL)
+				l.noteInvalidationLocked(invalidReasonWAL)
 				return false, fmt.Errorf("persist accounting invariant for %q: %w", operationID, err)
 			}
 			l.invalidateLocked("accounting_invariant")
@@ -836,7 +836,7 @@ func (l *failureLedger) ObserveWithReason(
 		Observer: observer, Observation: observation, Reason: reason, At: at.UTC(),
 	}
 	if err := l.appendLocked(&event); err != nil {
-		l.invalidateLocked(invalidReasonWAL)
+		l.noteInvalidationLocked(invalidReasonWAL)
 		return false, fmt.Errorf("persist failure observation for %q: %w", operationID, err)
 	}
 	operation.Observations[observer] = observation
@@ -943,7 +943,7 @@ func (l *failureLedger) Expire(now time.Time) ([]string, error) {
 				At: now.UTC(),
 			}
 			if err := l.appendLocked(&event); err != nil {
-				l.invalidateLocked(invalidReasonWAL)
+				l.noteInvalidationLocked(invalidReasonWAL)
 				return finalized, fmt.Errorf(
 					"persist expired failure observation for %q: %w", operation.ID, err,
 				)
@@ -1257,7 +1257,7 @@ func (l *failureLedger) finalizeLocked(
 		Result: result, Reason: reason, At: at.UTC(),
 	}
 	if err := l.appendLocked(&event); err != nil {
-		l.invalidateLocked(invalidReasonWAL)
+		l.noteInvalidationLocked(invalidReasonWAL)
 		return fmt.Errorf("persist finalized failure operation %q: %w", operation.ID, err)
 	}
 	l.results[result]++
@@ -1280,7 +1280,7 @@ func (l *failureLedger) finalizeLocked(
 	if l.journal != nil && l.canCompactLocked() &&
 		(l.finalizedSinceCompact >= l.compactEvery || l.journalOverBudgetLocked()) {
 		if err := l.compactLocked(at); err != nil {
-			l.invalidateLocked(invalidReasonWAL)
+			l.noteInvalidationLocked(invalidReasonWAL)
 			return fmt.Errorf("compact failure ledger: %w", err)
 		}
 		l.finalizedSinceCompact = 0
@@ -1427,7 +1427,7 @@ func (l *failureLedger) MaybeCompact(at time.Time) error {
 		return nil
 	}
 	if err := l.compactLocked(at); err != nil {
-		l.invalidateLocked(invalidReasonWAL)
+		l.noteInvalidationLocked(invalidReasonWAL)
 		return fmt.Errorf("compact failure ledger: %w", err)
 	}
 	l.finalizedSinceCompact = 0
