@@ -2925,8 +2925,14 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 			wantErr: "unmarshal subscription_mention payload",
 		},
 		{
-			name:    "empty account list is a no-op",
+			name:    "empty account list is dropped",
 			payload: model.SubscriptionMentionEvent{RoomID: "room-1", MentionedAt: msgAt.UnixMilli()},
+		},
+		{
+			name: "blank room id is dropped rather than matching nothing",
+			payload: model.SubscriptionMentionEvent{
+				Accounts: []string{"alice"}, MentionedAt: msgAt.UnixMilli(),
+			},
 		},
 		{
 			name:     "store error propagates for redelivery",
