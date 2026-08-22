@@ -175,3 +175,27 @@ func TestFits(t *testing.T) {
 		})
 	}
 }
+
+// Resolve is the startup rule shared by every service: an explicit override
+// wins, otherwise the broker's advertised cap is used.
+func TestResolve(t *testing.T) {
+	tests := []struct {
+		name      string
+		override  int64
+		brokerMax int64
+		reserve   int
+		wantBytes int
+	}{
+		{"override wins", 50_000, 128 << 10, 0, 50_000},
+		{"falls back to the broker cap", 0, 10_000, 0, 10_000},
+		{"negative override falls back", -5, 10_000, 0, 10_000},
+		{"reserve applies to the broker cap", 0, 10_000, 1_000, 9_000},
+		{"reserve applies to the override", 20_000, 128 << 10, 1_000, 19_000},
+		{"neither known disables trimming", 0, 0, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantBytes, Resolve(tt.override, tt.brokerMax, tt.reserve).Bytes())
+		})
+	}
+}

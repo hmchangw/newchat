@@ -14,6 +14,10 @@ import (
 // running total.
 const oversizeRow = math.MaxInt32
 
+// DefaultReserve is the headroom services leave under the broker's max_payload
+// for reply headers (trace context, request id) that the budget cannot see.
+const DefaultReserve = 4 << 10
+
 // Budget is the byte ceiling one reply must fit under. The zero value is
 // disabled, which keeps every page whole.
 type Budget struct{ max int }
@@ -34,6 +38,16 @@ func NewBudget(brokerMaxPayload int64, reserve int) Budget {
 		return Budget{}
 	}
 	return Budget{max: max}
+}
+
+// Resolve picks the reply ceiling at startup: an explicit override (from
+// MAX_RESPONSE_BYTES) when positive, otherwise the broker's advertised
+// max_payload. Both are reduced by reserve.
+func Resolve(override, brokerMaxPayload int64, reserve int) Budget {
+	if override > 0 {
+		return NewBudget(override, reserve)
+	}
+	return NewBudget(brokerMaxPayload, reserve)
 }
 
 // Enabled reports whether this budget trims at all.

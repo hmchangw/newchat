@@ -26,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -199,6 +200,8 @@ func main() {
 	}
 
 	pub := publisher.New(js, publisher.WithMetrics(publishMetrics))
+	opts = append(opts, service.WithPageBudget(
+		pagefit.Resolve(cfg.MaxResponseBytes, nc.NatsConn().MaxPayload(), pagefit.DefaultReserve)))
 	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
 
 	// Bound in-flight handlers so a burst is shed at the door instead of piling
