@@ -7,7 +7,7 @@ import {
   useRegisterThreadMessageMutationHandler,
 } from '../RoomEventsContext/RoomEventsContext'
 import { generateMessageID } from '@/lib/idgen'
-import { fetchThreadMessages, sendMessage } from '@/api'
+import { fetchThreadMessages, sendMessage, subscribeToThreadEvents } from '@/api'
 import { threadEventsReducer, initialState } from './reducer'
 
 const ThreadEventsContext = createContext(null)
@@ -20,6 +20,7 @@ export function ThreadEventsProvider({ children }) {
   const registerThreadMessageMutationHandler = useRegisterThreadMessageMutationHandler()
   const [state, dispatch] = useReducer(threadEventsReducer, initialState)
   const generationRef = useRef(0)
+  const threadSubRef = useRef(null)
   const stateRef = useRef(state)
   stateRef.current = state
 
@@ -57,13 +58,44 @@ export function ThreadEventsProvider({ children }) {
     return unsubscribe
   }, [registerThreadMessageMutationHandler])
 
+  // Drops the open panel's thread subscription. NATS reaps the interest, which
+  // is what removes this client from the thread's delivery set.
+  const closeThreadSub = useCallback(() => {
+    threadSubRef.current?.unsubscribe()
+    threadSubRef.current = null
+  }, [])
+
+  useEffect(() => closeThreadSub, [closeThreadSub])
+
   const openThread = useCallback(
     (parent) => {
       // Short-circuit if it's already the same parent (mirrors reducer guard).
       if (stateRef.current.activeParent?.messageId === parent.messageId) return
       const myGen = ++generationRef.current
       dispatch({ type: 'OPEN_THREAD', parent })
+      closeThreadSub()
       if (!user) return
+      // Subscribe before fetching: a reply landing in the gap would be lost,
+      // and closing that gap is the whole point of the thread lane.
+      threadSubRef.current = subscribeToThreadEvents(
+        nats,
+        { roomId: parent.roomId, parentMessageId: parent.messageId, crossSite: parent.crossSite },
+        (evt) => {
+          if (myGen !== generationRef.current) return
+          if (evt?.type === 'new_thread_message') {
+            dispatch({ type: 'THREAD_REPLY_RECEIVED', parentId: parent.messageId, message: evt.message })
+          } else if (evt?.type === 'message_edited') {
+            dispatch({
+              type: 'REPLY_EDITED',
+              messageId: evt.messageId,
+              content: evt.newContent ?? '',
+              editedAt: evt.editedAt,
+            })
+          } else if (evt?.type === 'message_deleted') {
+            dispatch({ type: 'REPLY_DELETED', messageId: evt.messageId })
+          }
+        }
+      )
       fetchThreadMessages(nats, {
         roomId: parent.roomId,
         siteId: parent.siteId,
@@ -85,13 +117,14 @@ export function ThreadEventsProvider({ children }) {
           })
         })
     },
-    [user, nats]
+    [user, nats, closeThreadSub]
   )
 
   const closeThread = useCallback(() => {
     generationRef.current++
+    closeThreadSub()
     dispatch({ type: 'CLOSE_THREAD' })
-  }, [])
+  }, [closeThreadSub])
 
   // publishReply is synchronous — `publish` is sync void and throws if not
   // connected. Callers wrap in try/catch.

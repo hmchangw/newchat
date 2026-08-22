@@ -4,10 +4,20 @@ import { ThreadEventsProvider, useThreadEvents } from './ThreadEventsContext'
 
 const request = vi.fn()
 const publish = vi.fn()
+// Records the order of transport calls so a test can assert that the thread
+// subscription opens BEFORE history is fetched.
+const callOrder = []
+const unsubscribe = vi.fn()
+let threadEventHandler = null
+const subscribe = vi.fn((subj, handler) => {
+  callOrder.push(`subscribe:${subj}`)
+  if (subj.includes('.thread.')) threadEventHandler = handler
+  return { unsubscribe }
+})
 vi.mock('../NatsContext/NatsContext', () => ({
   useNats: () => ({
     user: { account: 'alice', siteId: 's1' },
-    request, publish,
+    request, publish, subscribe,
   }),
 }))
 vi.mock('@/lib/idgen', () => ({ generateMessageID: () => 'OPT-000000000000000000' }))
@@ -46,7 +56,9 @@ function Probe() {
       <span>loaded:{String(t.hasLoadedHistory)}</span>
       <span>loading:{String(t.historyLoading)}</span>
       <span>error:{t.historyError ?? 'none'}</span>
-      <button type="button" onClick={() => t.openThread({ roomId: 'r1', siteId: 's1', messageId: 'p1', createdAtMs: 1000 })}>open</button>
+      <button type="button" onClick={() => t.openThread({ roomId: 'r1', siteId: 's1', messageId: 'p1', createdAtMs: 1000, crossSite: true })}>open</button>
+      <button type="button" onClick={() => t.openThread({ roomId: 'r1', siteId: 's1', messageId: 'p2', createdAtMs: 2000, crossSite: true })}>open-p2</button>
+      <button type="button" onClick={() => t.openThread({ roomId: 'r2', siteId: 's1', messageId: 'p3', createdAtMs: 3000, crossSite: false })}>open-local</button>
       <button type="button" onClick={() => t.closeThread()}>close</button>
       <button type="button" onClick={() => t.sendReply('hi', {})}>send</button>
       <button type="button" onClick={() => t.sendReply('q-hi', { quotedParentMessageId: 'q-id' })}>send-quote</button>
@@ -65,6 +77,10 @@ describe('ThreadEventsContext', () => {
     publish.mockReset()
     registerThreadReplyHandler.mockClear()
     registeredThreadReplyHandler = null
+    subscribe.mockClear()
+    unsubscribe.mockClear()
+    callOrder.length = 0
+    threadEventHandler = null
   })
 
   it('openThread sets activeParent and fires msg.thread RPC; on success dispatches HISTORY_LOADED', async () => {
@@ -305,6 +321,110 @@ describe('ThreadEventsContext — live thread-message mutation bridge', () => {
     expect(screen.getByText('firstDeleted:false')).toBeInTheDocument()
     await act(async () => {
       registeredThreadMessageMutationHandler({ kind: 'deleted', messageId: 'r1' })
+    })
+    expect(screen.getByText('firstDeleted:true')).toBeInTheDocument()
+  })
+})
+
+describe('ThreadEventsContext thread-view subscription', () => {
+  beforeEach(() => {
+    request.mockReset()
+    subscribe.mockClear()
+    unsubscribe.mockClear()
+    callOrder.length = 0
+    threadEventHandler = null
+    request.mockImplementation(() => {
+      callOrder.push('request')
+      return Promise.resolve({ messages: [], hasNext: false, nextCursor: null })
+    })
+  })
+
+  it('subscribes to the thread subject while the panel is open', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    expect(subscribe).toHaveBeenCalledWith('chat.room.r1.thread.p1.event', expect.any(Function))
+  })
+
+  it('routes a same-site room to the local thread subject', async () => {
+    setup()
+    await act(async () => { screen.getByText('open-local').click() })
+    expect(subscribe).toHaveBeenCalledWith('chat.local.room.r2.thread.p3.event', expect.any(Function))
+  })
+
+  // A reply landing between the fetch and the subscribe would be lost, which is
+  // the very gap this feature closes.
+  it('subscribes before fetching history', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    expect(callOrder.indexOf('subscribe:chat.room.r1.thread.p1.event')).toBeLessThan(callOrder.indexOf('request'))
+  })
+
+  it('unsubscribes when the panel closes', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => { screen.getByText('close').click() })
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+
+  it('swaps the subscription when the panel switches parents', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => { screen.getByText('open-p2').click() })
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+    expect(subscribe).toHaveBeenLastCalledWith('chat.room.r1.thread.p2.event', expect.any(Function))
+  })
+
+  it('unsubscribes on unmount', async () => {
+    const { unmount } = setup()
+    await act(async () => { screen.getByText('open').click() })
+    unmount()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+
+  it('appends a reply arriving on the thread subject', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'from a viewer lane' } })
+    })
+    expect(screen.getByText('count:1')).toBeInTheDocument()
+    expect(screen.getByText('firstContent:from a viewer lane')).toBeInTheDocument()
+  })
+
+  // A follower with the panel open receives both lanes; the reducer's id guard
+  // must keep that to one rendered reply.
+  it('renders a reply delivered on both lanes once', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    const evt = { type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'dup' } }
+    await act(async () => {
+      registeredThreadReplyHandler({ parentMessageId: 'p1', message: evt.message })
+      threadEventHandler(evt)
+    })
+    expect(screen.getByText('count:1')).toBeInTheDocument()
+  })
+
+  it('applies an edit arriving on the thread subject', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'before' } })
+    })
+    await act(async () => {
+      threadEventHandler({ type: 'message_edited', messageId: 'm9', newContent: 'after', editedAt: '2026-08-22T10:00:00Z' })
+    })
+    expect(screen.getByText('firstContent:after')).toBeInTheDocument()
+    expect(screen.getByText('firstEditedAt:2026-08-22T10:00:00Z')).toBeInTheDocument()
+  })
+
+  it('applies a delete arriving on the thread subject', async () => {
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => {
+      threadEventHandler({ type: 'new_thread_message', roomId: 'r1', message: { id: 'm9', content: 'doomed' } })
+    })
+    await act(async () => {
+      threadEventHandler({ type: 'message_deleted', messageId: 'm9' })
     })
     expect(screen.getByText('firstDeleted:true')).toBeInTheDocument()
   })
