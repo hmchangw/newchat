@@ -48,6 +48,7 @@ var (
 		OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
 		OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
 		OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
+		OperationChannelHistory, OperationThreadOpen,
 		OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
 		OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
 		OperationMemberPublish, OperationOutboxPublish, OperationUnknown,
@@ -85,11 +86,11 @@ func TestLabelSpaceStaysWithinBudget(t *testing.T) {
 		"chat.nats.consumer.messages / .processing.duration: event_type x outcome")
 	assert.Equal(t, 105, len(allEventTypes)*len(allTerminalReasons),
 		"chat.nats.terminal.failures: event_type x reason")
-	assert.Equal(t, 1680, len(allDestinations)*len(allOperations)*len(allPublishOutcomes),
+	assert.Equal(t, 1848, len(allDestinations)*len(allOperations)*len(allPublishOutcomes),
 		"chat.nats.publish.failures: destination_kind x operation x outcome")
-	assert.Equal(t, 160, len(allOperations)*len(allRequestOutcomes),
+	assert.Equal(t, 176, len(allOperations)*len(allRequestOutcomes),
 		"rpc.client.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
-	assert.Equal(t, 180, len(allOperations)*len(allRequestResults),
+	assert.Equal(t, 198, len(allOperations)*len(allRequestResults),
 		"rpc.server.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
 }
 

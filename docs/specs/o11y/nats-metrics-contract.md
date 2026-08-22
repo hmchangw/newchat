@@ -551,7 +551,7 @@ instrument name** you grep for in source underneath where the two differ.
 | `chat_nats_terminal_failures_total`<br><sub>`chat.nats.terminal.failures`</sub> | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
 | `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | every service using the shared connect helper | on first failure | none — the broker has no record of a publish that never arrived | campaign |
 | `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
-| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4 / SLO-5** (`sli-slo.md` roadmap P1) — but see the `rpc.method` coverage note below |
+| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4** (`le="0.5"`, `rpc_method="channel_history"`) and **SLO-5** (`le="0.25"`, `rpc_method="thread_open"`) — both exact ratios; see the `rpc.method` coverage note below for the other seven services |
 
 These two are the only families here that do not carry the `chat_` prefix, and
 the exception is deliberate: they implement the OpenTelemetry RPC semantic
@@ -578,8 +578,35 @@ search-service, media-service, bot-message-handler, bot-room-service,
 translation-service, user-presence-service) record `rpc_method="unknown"` on
 every route — their latency and `error.type` are still real — so SLO-4/5 can
 slice by method for room-service and history-service and nowhere else. Extending
-the vocabulary is deliberately a separate change: it is a decision about how fine
-`rpc.method` should be and what that costs in cardinality, not a rename.
+the vocabulary to the other seven is deliberately a separate change: it is a
+decision about how fine `rpc.method` should be and what that costs in
+cardinality, not a rename.
+
+**Where the vocabulary is fine, it is fine for a reason.** Most operations are
+coarse categories, but `channel_history` and `thread_open` are single routes,
+because each is the entire numerator and denominator of an SLO:
+
+| `rpc.method` | Route | Reads |
+|---|---|---|
+| `channel_history` | `.msg.history` → `LoadHistory` | **SLO-4** — 95% within 500 ms |
+| `thread_open` | `.msg.thread` → `GetThreadMessages` | **SLO-5** — 95% within 250 ms |
+
+They were split out of `history_read` because sharing one label made both SLOs
+unmeasurable, in opposite directions: channel load walks `messages_by_room`
+buckets while thread open slices one partition, so the shared series dragged
+thread open's ratio down with walk latency and diluted channel load's violations
+with fast thread traffic — at a ratio that drifts with traffic mix, so not even a
+fixed correction was available.
+
+`history_read` keeps everything the SLOs do not describe: `.msg.next` (scroll),
+`.msg.surrounding` (jump), `.msg.get`, `.msg.get.ids`, `.msg.pinned.list`,
+`.msg.thread.parent`, and the server-to-server thread lanes. Two consequences
+worth stating: `.msg.thread.parent` is a second handler and not part of the
+verified "Enter thread" path, so it stays out of SLO-5; and `.msg.next` is
+user-triggered scrolling with a different cost model from an initial load, so it
+remains residual contamination in any channel-load view built from
+`history_read`. Splitting it out is the obvious next step if SLO-4 calibration
+comes back noisy.
 
 Until then the classifier is anchored on the subject's family token, so an
 unclassified subject stays honestly `unknown` instead of borrowing another

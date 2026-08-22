@@ -332,7 +332,8 @@ partition slice). Targets: §1.
   (v2). Labelled proxy until then.
 - 🔧 **Enter channel / thread** — the `natsrouter` metrics middleware (§8 P1):
   `rpc_server_call_duration_seconds{rpc_method, error_type}`; the `rpc_method`
-  label slices both workflows from one middleware. Eligibility per the §0.1
+  label slices both workflows from one middleware — `channel_history` for SLO-4,
+  `thread_open` for SLO-5. Eligibility per the §0.1
   errcode table. Names follow the OTel RPC semantic conventions rather than the
   spelling this document first proposed — `error_type` is absent on success, so
   the good/valid split is `…{error_type=""}` over the family total.
