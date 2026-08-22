@@ -11,11 +11,15 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/pagefit"
 )
 
 const (
 	defaultThreadListLimit = 20
 	maxThreadListLimit     = 100
+	// threadListEnvelope reserves bytes for the response's non-item fields
+	// (hasNext, nextCursor, unavailableSites) plus JSON punctuation.
+	threadListEnvelope = 256
 )
 
 // threadCursor is the composite, value-based pagination position on the global
@@ -109,6 +113,13 @@ func (s *UserService) ListUserThreads(c *natsrouter.Context, req model.ThreadLis
 	// Enrich only the returned page: DM rows gain the counterpart's HR record, and
 	// botDM rows swap their bot account for the app's display name.
 	s.enrichThreadPage(c, merged)
+
+	// Trim after enrichment — it adds bytes, so a page measured before it can
+	// still overflow. The cursor below then resumes at the last kept row.
+	if n := pagefit.Prefix(merged, s.pageBudget, threadListEnvelope); n < len(merged) {
+		merged = merged[:n]
+		hasNext = true
+	}
 
 	resp := &model.ThreadListResponse{Items: merged, HasNext: hasNext, UnavailableSites: unavailable}
 	if hasNext && len(merged) > 0 {
