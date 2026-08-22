@@ -203,7 +203,7 @@
       "id": 4,
       "type": "timeseries",
       "title": "Redelivery rate (chat_nats_consumer_redeliveries_total)",
-      "description": "rate() of the cumulative redelivery counter per consumer \u2014 the historical companion to the point-in-time jetstream num_redelivered gauge. Sustained non-zero = a failing/naking handler.",
+      "description": "rate() of the cumulative redelivery counter per consumer \u2014 the historical companion to the point-in-time jetstream num_redelivered gauge. Sustained non-zero = repeated delivery attempts \u2014 a handler sending NAKs, AckWait expiring on a slow/hung handler, or a consumer crash-looping on the same message.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
