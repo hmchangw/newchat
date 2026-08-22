@@ -1,5 +1,5 @@
 // Package outbox is the cross-site federation relay contract shared by the
-// producers (room-service, room-worker, message-worker) and the consumer
+// producers (room-service, room-worker, message-worker, broadcast-worker) and the consumer
 // (outbox-worker): which event types ride which OUTBOX consumer lane, and the
 // one way to publish a relay event onto the stream.
 package outbox

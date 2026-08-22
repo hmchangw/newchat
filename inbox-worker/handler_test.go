@@ -2904,7 +2904,7 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 	msgAt := time.UnixMilli(1755820800000).UTC()
 	valid := model.SubscriptionMentionEvent{
 		RoomID: "room-1", Accounts: []string{"alice", "bob"},
-		MessageCreatedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
+		MentionedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
 	}
 
 	tests := []struct {
@@ -2926,7 +2926,7 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 		},
 		{
 			name:    "empty account list is a no-op",
-			payload: model.SubscriptionMentionEvent{RoomID: "room-1", MessageCreatedAt: msgAt.UnixMilli()},
+			payload: model.SubscriptionMentionEvent{RoomID: "room-1", MentionedAt: msgAt.UnixMilli()},
 		},
 		{
 			name:     "store error propagates for redelivery",

@@ -992,8 +992,6 @@ func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
 
 			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
 			if tc.wantSetMentions != nil {
-				// The lookup only resolves mentionees to home sites for the cross-site relay.
-				us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.InAnyOrder(tc.wantSetMentions)).Return(nil, nil)
 				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.InAnyOrder(tc.wantSetMentions), edited).Return(nil)
 			}
 
@@ -3830,16 +3828,16 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			wantRecords: []outboxRecord{
 				{
 					subject: "chat.outbox.site-a.site-b.subscription_mention",
-					msgID:   "mention:room-1:msg-1:site-b",
+					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:site-b", msgTime.UnixMilli()),
 					event: model.SubscriptionMentionEvent{
-						RoomID: "room-1", Accounts: []string{"bob"}, MessageCreatedAt: msgTime.UnixMilli(),
+						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 				{
 					subject: "chat.outbox.site-a.site-c.subscription_mention",
-					msgID:   "mention:room-1:msg-1:site-c",
+					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:site-c", msgTime.UnixMilli()),
 					event: model.SubscriptionMentionEvent{
-						RoomID: "room-1", Accounts: []string{"carol"}, MessageCreatedAt: msgTime.UnixMilli(),
+						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 			},
@@ -3911,7 +3909,7 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 				assert.Equal(t, want.msgID, got[i].msgID)
 				assert.Equal(t, want.event.RoomID, got[i].event.RoomID)
 				assert.Equal(t, want.event.Accounts, got[i].event.Accounts)
-				assert.Equal(t, want.event.MessageCreatedAt, got[i].event.MessageCreatedAt)
+				assert.Equal(t, want.event.MentionedAt, got[i].event.MentionedAt)
 				assert.NotZero(t, got[i].event.Timestamp)
 			}
 		})
@@ -3952,9 +3950,9 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 	got := rec.sorted()
 	require.Len(t, got, 1)
 	assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
-	assert.Equal(t, fmt.Sprintf("mention-edit:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
+	assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
 	assert.Equal(t, []string{"bob"}, got[0].event.Accounts)
-	assert.Equal(t, editedAt.UnixMilli(), got[0].event.MessageCreatedAt)
+	assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
 }
 
 func TestHandler_HandleUpdated_NoMentionsSkipsLookup(t *testing.T) {

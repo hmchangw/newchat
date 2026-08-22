@@ -1762,10 +1762,10 @@ func TestInboxWorker_SubscriptionMention_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	payload, err := json.Marshal(model.SubscriptionMentionEvent{
-		RoomID:           "room-1",
-		Accounts:         []string{"unread", "stale", "caught", "absent"},
-		MessageCreatedAt: msgAt.UnixMilli(),
-		Timestamp:        msgAt.UnixMilli(),
+		RoomID:      "room-1",
+		Accounts:    []string{"unread", "stale", "caught", "absent"},
+		MentionedAt: msgAt.UnixMilli(),
+		Timestamp:   msgAt.UnixMilli(),
 	})
 	require.NoError(t, err)
 	data, err := json.Marshal(model.InboxEvent{

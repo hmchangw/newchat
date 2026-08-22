@@ -121,8 +121,8 @@ type InboxStore interface {
 	// out-of-order or duplicate move can't regress. A missing sub NAKs for retry.
 	UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error
 	// SetSubscriptionMentions flags accounts as mentioned in roomID, skipping any
-	// that already read past msgCreatedAt so a federated badge can't clobber a
-	// read-clear that landed first (#467). A non-subscriber matches nothing.
+	// that already read past msgCreatedAt (#467). Mirrors broadcast-worker's
+	// origin-side write; a non-subscriber matches nothing.
 	SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error
 }
 
@@ -572,8 +572,8 @@ func (h *Handler) handleThreadUnreadAdded(ctx context.Context, evt *model.InboxE
 }
 
 // handleSubscriptionMention replicates a room-level @-mention badge onto the
-// mentionees' home replicas. The store's already-read guard makes it idempotent
-// and order-safe against a concurrent subscription_read.
+// mentionees' home replicas. The store's read guard makes it idempotent and
+// order-safe against a concurrent subscription_read.
 func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.InboxEvent) error {
 	var e model.SubscriptionMentionEvent
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
@@ -582,7 +582,7 @@ func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.Inbo
 	if len(e.Accounts) == 0 {
 		return nil
 	}
-	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MessageCreatedAt).UTC()); err != nil {
+	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MentionedAt).UTC()); err != nil {
 		return fmt.Errorf("set subscription mentions in room %q: %w", e.RoomID, err)
 	}
 	return nil

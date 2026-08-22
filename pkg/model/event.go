@@ -225,10 +225,10 @@ type SubscriptionReadEvent struct {
 type SubscriptionMentionEvent struct {
 	RoomID   string   `json:"roomId"   bson:"roomId"`
 	Accounts []string `json:"accounts" bson:"accounts"`
-	// MessageCreatedAt is the message's createdAt (editedAt on the edit path) as
-	// UnixMilli UTC; it feeds the destination's already-read guard.
-	MessageCreatedAt int64 `json:"messageCreatedAt" bson:"messageCreatedAt"`
-	Timestamp        int64 `json:"timestamp"        bson:"timestamp"`
+	// MentionedAt is when the mention appeared — the message's createdAt, or its
+	// editedAt when an edit added it. Feeds the destination's already-read guard.
+	MentionedAt int64 `json:"mentionedAt" bson:"mentionedAt"`
+	Timestamp   int64 `json:"timestamp"   bson:"timestamp"`
 }
 
 // ThreadReadEvent is the InboxEvent.Payload for "thread_read": the destination
