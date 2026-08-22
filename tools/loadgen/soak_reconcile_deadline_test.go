@@ -176,6 +176,10 @@ type appendFailingFailureJournal struct {
 	attempts int
 }
 
+// Non-zero so the byte-budget compaction trigger can fire; the embedded memory
+// journal reports 0, which would make MaybeCompact a silent no-op.
+func (*appendFailingFailureJournal) Size() int64 { return 1024 }
+
 func (j *appendFailingFailureJournal) Append(event *failureLedgerEvent) error {
 	if event.Type == failureLedgerEventInvalidated {
 		j.attempts++

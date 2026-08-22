@@ -1314,6 +1314,11 @@ func (l *failureLedger) compactLocked(at time.Time) error {
 	if err := l.journal.Compact(events); err != nil {
 		return err
 	}
+	// The rewritten journal carries every invalidation above, so all of them are
+	// durable now — including any the original appends never landed. Without
+	// this, Close would keep retrying appends the file no longer needs, and
+	// report a lost verdict if one of those retries failed.
+	l.persistedInvalidReasons = slices.Clone(l.invalidReasons)
 	if l.recorder != nil {
 		l.recorder.JournalSize(l.journal.Size())
 	}

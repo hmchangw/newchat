@@ -237,3 +237,28 @@ func TestFailureLedger_AFailedInvalidationAppendRecordsTheWALCause(t *testing.T)
 	assert.Equal(t, 1, journal.attempts,
 		"recording the wal cause must not attempt an append of its own")
 }
+
+// Compaction rewrites the journal from live state, invalidations included, so
+// once it succeeds every reason is durable. Not recording that leaves Close
+// retrying appends the file no longer needs — and if one of those retries
+// fails, reporting a loss of durability that never happened.
+func TestFailureLedger_CompactionMarksTheInvalidationsItWrote(t *testing.T) {
+	journal := &appendFailingFailureJournal{failFor: failureLedgerEventInvalidated}
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 4, Journal: journal, MaxJournalBytes: 1,
+	})
+	require.NoError(t, err)
+
+	ledger.Invalidate(invalidReasonReconcileCapacity)
+	journal.failFor = ""
+	require.NoError(t, ledger.MaybeCompact(time.Unix(2000, 0).UTC()))
+
+	// The journal now refuses appends again. Close must not need one.
+	journal.failFor = failureLedgerEventInvalidated
+	attemptsAfterCompaction := journal.attempts
+
+	require.NoError(t, ledger.Close(),
+		"compaction already wrote every reason, so nothing is unpersisted")
+	assert.Equal(t, attemptsAfterCompaction, journal.attempts,
+		"and nothing needs appending again")
+}
