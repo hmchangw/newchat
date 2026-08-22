@@ -93,8 +93,15 @@ and is part of `make sast`, which is what CI enforces.
 
 That matters because the alternative was a guard nobody guards: a pattern edit
 could have disabled enforcement while this section went on claiming it, which is
-the same shape as the `_INBOX` suppression above. The fixtures are
-mutation-verified in both directions rather than merely passing.
+the same shape as the `_INBOX` suppression above.
+
+To be exact about what is and is not automated: CI runs `semgrep scan --test`
+against the current rules and fixtures, and nothing more. There is no mutation
+stage. When these rules were last changed, each branch was checked by hand —
+delete it from the rule, confirm the fixture goes red, restore it — which is how
+the coverage was established rather than assumed. Repeating that is a manual
+step, and worth doing whenever a pattern or the regex is edited, because a
+fixture only proves anything if it has been seen to fail.
 
 ## 3. Outcome Vocabularies
 
