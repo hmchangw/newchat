@@ -689,7 +689,9 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		// muted subscribed botDM (excluded — its room r-mutedbot is missing, dropped by the deleted-filter)
 		bson.M{"_id": "mu-bot", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "muted.bot", "roomId": "r-mutedbot",
 			"roomType": "botDM", "siteId": "site-a", "isSubscribed": true, "muted": true},
-		// active by type, but local room is soft-deleted (^Del-) — excluded by room filter
+		// active by type, local room carries a ^Del- name. The active set no longer
+		// filters on it, so this counts — the deployment guarantees such a room never
+		// exists; the row is kept in the fixture to pin that the filter is really gone.
 		bson.M{"_id": "del-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Gone", "roomId": "r-del",
 			"roomType": "channel", "siteId": "site-a"},
 		// active by type, local room is missing — now KEPT (deleted-filter is room.name-based; missing room has no name, passes $not-regex)
@@ -706,10 +708,25 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 			"roomType": "channel", "siteId": "site-a", "open": true},
 	)
 
-	t.Run("count excludes unsubscribed, muted, and Del- rooms; keeps missing-room and cross-site", func(t *testing.T) {
+	t.Run("count excludes unsubscribed and muted; keeps missing-room, cross-site and Del- rooms", func(t *testing.T) {
 		n, err := r.CountActiveSubscriptions(ctx, "alice")
 		require.NoError(t, err)
-		assert.Equal(t, 6, n) // a-dm, a-ch, a-bot, x-ch, gone-ch, open-ch (muted m-ch excluded; closed-ch excluded; gone-ch kept: missing room passes $not-regex deleted-filter)
+		// a-dm, a-ch, a-bot, x-ch, gone-ch, open-ch and del-ch. Excluded: muted m-ch,
+		// closed-ch, unsubscribed u-bot, muted mu-bot. del-ch counts because the active
+		// set no longer applies a deleted-room filter.
+		assert.Equal(t, 7, n)
+	})
+
+	t.Run("the count issues no rooms join", func(t *testing.T) {
+		// A subscription whose room doc does not exist at all still counts: with the
+		// $lookup gone there is nothing left that could drop a row for its room.
+		seed(t, db, "subscriptions",
+			bson.M{"_id": "no-room-ch", "u": bson.M{"_id": "u-carol", "account": "carol"}, "name": "Nowhere",
+				"roomId": "r-nonexistent", "roomType": "channel", "siteId": "site-a"})
+
+		n, err := r.CountActiveSubscriptions(ctx, "carol")
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
 	})
 
 	t.Run("closed rooms are excluded from both count and get, matching subscription.list", func(t *testing.T) {
@@ -735,20 +752,19 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		assert.True(t, got["a-ch"])
 		assert.True(t, got["a-bot"])
 		assert.True(t, got["x-ch"], "cross-site sub kept despite no local room")
-		assert.True(t, got["gone-ch"], "missing local room now kept (empty enrichment) — siteID filter removed, deleted-filter is room.name-based")
+		assert.True(t, got["gone-ch"], "missing local room kept (empty enrichment)")
 		assert.False(t, got["m-ch"], "muted channel excluded from the active/count set")
 		assert.False(t, got["u-bot"])
 		assert.False(t, got["mu-bot"], "muted botDM excluded by activeSubscriptionFilter before room lookup")
-		assert.False(t, got["del-ch"], "local sub to a ^Del- room must be filtered out")
+		assert.True(t, got["del-ch"], "the active set no longer filters ^Del- rooms")
 	})
 
-	t.Run("limit caps active set", func(t *testing.T) {
-		// The cap runs BEFORE the rooms join, so a capped page that happens to
-		// include a Del- room can come back short — assert ≤ limit, not == limit.
+	t.Run("limit caps active set exactly", func(t *testing.T) {
+		// The cap runs before the rooms join, and with the deleted-room filter gone
+		// nothing downstream drops a capped row — so the page is exactly the cap.
 		subs, err := r.GetActiveSubscriptions(ctx, "alice", 2)
 		require.NoError(t, err)
-		assert.NotEmpty(t, subs)
-		assert.LessOrEqual(t, len(subs), 2)
+		assert.Len(t, subs, 2)
 	})
 
 	t.Run("zero limit does not error (no $limit:0 stage)", func(t *testing.T) {
