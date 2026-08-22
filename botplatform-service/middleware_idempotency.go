@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 )
@@ -67,7 +68,7 @@ func botIdempotency(
 		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
 		opID := computeOpID(siteID, endpoint, resourceIDFrom(c), pr.UserID, body, tp.Now())
-		key := "idem:" + opID
+		key := cachekeys.BotIdempotency(opID)
 
 		acquired, err := client.SetNX(ctx, key, "processing", sentinelTTL)
 		if err != nil {

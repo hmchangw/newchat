@@ -1,0 +1,25 @@
+name: cache-metrics-worker
+
+services:
+  cache-metrics-worker:
+    build:
+      context: ../..
+      dockerfile: cache-metrics-worker/deploy/Dockerfile
+    environment:
+      - OTEL_SERVICE_NAME=cache-metrics-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - SITE_ID=${SITE_ID:-site-local}
+      - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
+      # Local dev scans often and measures every key: the dev keyspace is tiny,
+      # so exact numbers cost nothing and make the metric easier to eyeball.
+      - CACHE_SCAN_INTERVAL=${CACHE_SCAN_INTERVAL:-30s}
+      - CACHE_SCAN_TIMEOUT=${CACHE_SCAN_TIMEOUT:-2m}
+      - CACHE_SCAN_COUNT=${CACHE_SCAN_COUNT:-1000}
+      - CACHE_SCAN_SAMPLE_RATE=${CACHE_SCAN_SAMPLE_RATE:-1}
+      - CACHE_SCAN_MIN_SAMPLES=${CACHE_SCAN_MIN_SAMPLES:-50}
+    networks:
+      - chat-local
+
+networks:
+  chat-local:
+    external: true

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -101,18 +102,12 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 	return c
 }
 
-// cacheKeySchemaVersion namespaces cache keys by the Member wire shape.
-// Bump whenever a Member field is added/changed such that an old cached
-// entry would silently decode with a zero-valued new field forever (Valkey
-// has no schema check) — the version segment makes such entries miss so
-// they get repopulated from Mongo with the current shape. Bumped to v2 when
-// SiteID was added; bumped to v3 when SiteID (the room's home site — a bug)
-// was replaced by HomeSiteID (the member's home site, see Member.HomeSiteID)
-// so pre-fix entries miss instead of decoding with the wrong semantics.
-const cacheKeySchemaVersion = "v3"
-
+// cacheKey delegates to the registry. The Member-wire-shape schema version
+// that namespaces these keys lives with the builder in pkg/cachekeys, because
+// the version segment is part of the literal pattern the keyspace scanner
+// classifies on — see cachekeys.RoomSubs for the bump rule.
 func cacheKey(roomID string) string {
-	return "room:" + cacheKeySchemaVersion + ":" + roomID + ":subs"
+	return cachekeys.RoomSubs(roomID)
 }
 
 // Get returns the cached member list for roomID. On absence it returns

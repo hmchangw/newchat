@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -231,4 +232,16 @@ func TestConnectCluster_ErrorPath(t *testing.T) {
 	_, err := valkeyutil.ConnectCluster(context.Background(), []string{"127.0.0.1:1"}, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "valkey cluster connect")
+}
+
+func TestCluster_ReturnsUnderlyingClient(t *testing.T) {
+	raw := redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{"127.0.0.1:6379"}})
+	t.Cleanup(func() { _ = raw.Close() })
+
+	assert.Same(t, raw, valkeyutil.Cluster(valkeyutil.WrapClusterClient(raw)))
+}
+
+func TestCluster_ForeignImplementations(t *testing.T) {
+	assert.Nil(t, valkeyutil.Cluster(nil), "nil client has no underlying cluster")
+	assert.Nil(t, valkeyutil.Cluster(newFake()), "a non-cluster Client has no underlying cluster")
 }
