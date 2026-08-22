@@ -333,14 +333,39 @@ partition slice). Targets: §1.
 - 🔧 **Enter channel / thread** — the `natsrouter` metrics middleware (§8 P1):
   `rpc_server_call_duration_seconds{rpc_method, error_type}`; the `rpc_method`
   label slices both workflows from one middleware — `channel_history` for SLO-4,
-  `thread_open` for SLO-5. Eligibility per the §0.1
-  errcode table. Names follow the OTel RPC semantic conventions rather than the
-  spelling this document first proposed — `error_type` is absent on success, so
-  the good/valid split is `…{error_type=""}` over the family total.
+  `thread_open` for SLO-5. Names follow the OTel RPC semantic conventions rather
+  than the spelling this document first proposed.
+
+  **The denominator is not the family total.** `error_type` is absent on success,
+  so it is tempting to write good/valid as `{error_type=""}` over `_count` — but
+  `_count` includes the 4xx classes §0.1 removes from *valid events entirely*,
+  which would burn budget for user errors this SLO does not own. Valid is success
+  plus the eligible failures only:
+
+  ```promql
+  # good  — succeeded within the bound
+  sum(rate(rpc_server_call_duration_seconds_bucket{
+        rpc_method="thread_open", error_type="", le="0.25"}[28d]))
+  /
+  # valid — success + budget-burning failures, never the 4xx classes
+  sum(rate(rpc_server_call_duration_seconds_count{
+        rpc_method="thread_open",
+        error_type=~"|internal|unavailable|too_many_requests"}[28d]))
+  ```
+
+  The empty alternative in that regex is the success series. `requestResultFromError`
+  emits exactly nine `error_type` values: `bad_request`, `unauthenticated`,
+  `forbidden`, `not_found` and `conflict` are excluded here per §0.1;
+  `too_many_requests`, `unavailable` and `internal` are eligible; and a
+  server-side timeout carries no `errcode` so it falls to the default branch and
+  arrives as `internal`. SLO-4 is the same expression with
+  `rpc_method="channel_history"` and `le="0.5"`. Pin this label set in the
+  recording rule's test — adding a tenth `RequestResult` without revisiting the
+  regex silently moves it into or out of the denominator.
 
   **Both bounds sit exactly on a histogram bucket boundary, and that is why they
-  are the numbers they are.** The SLI is `rate(…_bucket{le="0.5"})` for SLO-4 and
-  `le="0.25"` for SLO-5, over the family's `_count` — an exact ratio, not an
+  are the numbers they are.** `le="0.5"` and `le="0.25"` above are real
+  boundaries, so the numerator is an exact bucket read rather than an
   interpolation. A bound between boundaries cannot be computed at all: the draft's
   earlier 300 ms fell between `0.25` and `0.5`, so it could only be read as 250 ms
   (understating the good share) or 500 ms (overstating it), and the gap between
