@@ -56,59 +56,50 @@ func (b Budget) Enabled() bool { return b.max > 0 }
 // Bytes is the ceiling in bytes; 0 when disabled.
 func (b Budget) Bytes() int { return b.max }
 
-// Prefix returns the largest n where items[:n] fits b, charging envelope for
-// the response's non-item bytes. A non-empty slice always yields at least 1:
-// a caller handed 0 rows with "more" set would have no position to page from.
-func Prefix[T any](items []T, b Budget, envelope int) int {
-	if !b.Enabled() || len(items) == 0 {
-		return len(items)
+// Fit trims items to the longest prefix that fits b, charging envelope for the
+// response's non-item bytes.
+//
+// dropped reports that rows were removed, so the caller can set its "more"
+// flag. oversize reports that the single kept row still exceeds the budget:
+// a non-empty slice always keeps at least one row, because a caller handed
+// zero rows with "more" set would have no position to page from.
+func Fit[T any](items []T, b Budget, envelope int) (kept []T, dropped, oversize bool) {
+	if fitsWhole(items, b, envelope) {
+		return items, false, false
 	}
-	total := envelope
+	total, n := envelope, 0
 	for i, w := range widths(items) {
 		if i > 0 {
 			w++ // separator
 		}
 		if total+w > b.max {
-			return max(i, 1)
+			break
 		}
 		total += w
+		n = i + 1
 	}
-	return len(items)
+	if n == 0 {
+		return items[:1], len(items) > 1, true
+	}
+	return items[:n], n < len(items), false
 }
 
-// Fits reports whether all of items fits b. Prefix returns 1 both when one row
-// fits and when the first row alone overflows; this is how a caller tells those
-// apart before degrading the row.
-func Fits[T any](items []T, b Budget, envelope int) bool {
-	if !b.Enabled() || len(items) == 0 {
-		return true
-	}
-	total := envelope + len(items) - 1 // separators
-	for _, w := range widths(items) {
-		total += w
-		if total > b.max {
-			return false
-		}
-	}
-	return true
-}
-
-// Window returns the [lo,hi) span around pivot that fits b, grown outward one
-// row at a time from each side so the span stays centred. pivot is always
-// included — it is the row the caller asked to centre on — and is clamped into
-// range.
-func Window[T any](items []T, pivot int, b Budget, envelope int) (int, int) {
+// FitWindow trims a centred window to the span [lo,hi) that fits b, grown
+// outward one row at a time from each side so it stays centred on pivot.
+// pivot is always kept — it is the row the caller centred on — and is clamped
+// into range. oversize reports that pivot alone exceeds the budget.
+func FitWindow[T any](items []T, pivot int, b Budget, envelope int) (lo, hi int, oversize bool) {
 	if len(items) == 0 {
-		return 0, 0
+		return 0, 0, false
 	}
 	pivot = min(max(pivot, 0), len(items)-1)
-	if !b.Enabled() {
-		return 0, len(items)
+	if fitsWhole(items, b, envelope) {
+		return 0, len(items), false
 	}
 
 	w := widths(items)
 	total := envelope + w[pivot]
-	lo, hi := pivot, pivot+1
+	lo, hi = pivot, pivot+1
 	for {
 		grew := false
 		if hi < len(items) && total+w[hi]+1 <= b.max {
@@ -122,13 +113,23 @@ func Window[T any](items []T, pivot int, b Budget, envelope int) (int, int) {
 			grew = true
 		}
 		if !grew {
-			return lo, hi
+			return lo, hi, hi-lo == 1 && envelope+w[pivot] > b.max
 		}
 	}
 }
 
-// widths marshals each item once so a caller that scans the slice repeatedly
-// pays for one encode per row, not one per comparison.
+// fitsWhole is the fast path both trims share: one streamed encode of the whole
+// slice answers the common "nothing needs trimming" case, so a page that fits
+// never pays the per-row marshal below.
+func fitsWhole[T any](items []T, b Budget, envelope int) bool {
+	if !b.Enabled() || len(items) == 0 {
+		return true
+	}
+	return envelope+encodedLen(items) <= b.max
+}
+
+// widths marshals each row once so the trim loops can scan encoded sizes
+// without re-encoding. Only reached when the whole slice already overflowed.
 func widths[T any](items []T) []int {
 	out := make([]int, len(items))
 	for i := range items {
@@ -140,4 +141,21 @@ func widths[T any](items []T) []int {
 		out[i] = len(data)
 	}
 	return out
+}
+
+// encodedLen measures JSON output without keeping it — the size is all we need,
+// so the bytes go to a counter rather than a buffer.
+func encodedLen(v any) int {
+	var c lenCounter
+	if err := json.NewEncoder(&c).Encode(v); err != nil {
+		return oversizeRow
+	}
+	return c.n - 1 // Encode appends a newline
+}
+
+type lenCounter struct{ n int }
+
+func (c *lenCounter) Write(p []byte) (int, error) {
+	c.n += len(p)
+	return len(p), nil
 }

@@ -116,13 +116,14 @@ type Option func(*HistoryService)
 
 // WithPreviewCache installs a room-preview cache used by RoomsGet. Without it,
 // previews resolve directly (uncached).
-// WithPageBudget caps paginated replies at b.
-func WithPageBudget(b pagefit.Budget) Option {
-	return func(s *HistoryService) { s.pageBudget = b }
-}
-
 func WithPreviewCache(pc PreviewCache) Option {
 	return func(s *HistoryService) { s.previewCache = pc }
+}
+
+// WithPageBudget caps paginated replies at b so an oversize page is trimmed
+// rather than refused by the broker.
+func WithPageBudget(b pagefit.Budget) Option {
+	return func(s *HistoryService) { s.pageBudget = b }
 }
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.

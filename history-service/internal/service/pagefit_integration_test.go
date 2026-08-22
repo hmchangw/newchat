@@ -3,6 +3,7 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func TestLoadHistory_TrimmedPagination_Integration(t *testing.T) {
 
 	want := make(map[string]bool, total)
 	for i := range total {
-		id := "m-" + strings.Repeat("0", 3-len(itoa(i))) + itoa(i)
+		id := fmt.Sprintf("m-%03d", i)
 		at := base.Add(time.Duration(i) * time.Minute)
 		require.NoError(t, session.Query(
 			`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, thread_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -85,16 +86,4 @@ func TestLoadHistory_TrimmedPagination_Integration(t *testing.T) {
 		assert.Equal(t, 1, seen[id], "message %s must appear exactly once across the walk", id)
 	}
 	assert.Len(t, seen, total, "the walk must return every seeded message and nothing else")
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b []byte
-	for i > 0 {
-		b = append([]byte{byte('0' + i%10)}, b...)
-		i /= 10
-	}
-	return string(b)
 }

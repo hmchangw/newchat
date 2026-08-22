@@ -116,8 +116,8 @@ func (s *UserService) ListUserThreads(c *natsrouter.Context, req model.ThreadLis
 
 	// Trim after enrichment — it adds bytes, so a page measured before it can
 	// still overflow. The cursor below then resumes at the last kept row.
-	if n := pagefit.Prefix(merged, s.pageBudget, threadListEnvelope); n < len(merged) {
-		merged = merged[:n]
+	if kept, dropped, _ := pagefit.Fit(merged, s.pageBudget, threadListEnvelope); dropped {
+		merged = kept
 		hasNext = true
 	}
 

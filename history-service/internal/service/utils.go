@@ -170,15 +170,10 @@ func canModify(msg *models.Message, account string) bool {
 	return msg.Sender.Account == account
 }
 
-// blankOversize strips the heavy fields from a row that alone exceeds the reply
-// budget, so the page can be sent and the client can page past it. Identifiers,
-// sender and timestamps stay for placeholder rendering.
-//
-// Type is deliberately kept, unlike redactUnavailablePins: that path clears it
-// so a pre-access system message cannot leak event details, but here the caller
-// is authorised to see this row and needs Type to pick a placeholder.
-func blankOversize(m *models.Message) {
-	m.Msg = ""
+// stripRichContent clears the heavy, variable-size fields shared by the two
+// placeholder paths (blankOversize and redactUnavailablePins), so "which
+// fields are heavy" lives in one place as the model grows.
+func stripRichContent(m *models.Message) {
 	m.Mentions = nil
 	m.Attachments = nil
 	m.DecodedAttachments = nil
@@ -187,6 +182,22 @@ func blankOversize(m *models.Message) {
 	m.QuotedParentMessage = nil
 	m.Reactions = nil
 	m.SysMsgData = nil
+}
+
+// blankOversize strips a row that alone exceeds the reply budget so the page
+// can be sent and the client can page past it. Identifiers, sender, timestamps
+// and Type stay for placeholder rendering.
+//
+// Type is deliberately kept, unlike redactUnavailablePins: that path clears it
+// so a pre-access system message cannot leak event details, but here the caller
+// is authorised to see this row and needs Type to pick a placeholder.
+func blankOversize(m *models.Message) {
+	stripRichContent(m)
+	m.Msg = ""
+	// The encrypted body is the payload in an E2E room — leaving it would
+	// defeat the strip for exactly the rooms most likely to overflow.
+	m.EncPayload = nil
+	m.EncMeta = nil
 	m.Truncated = true
 }
 
@@ -194,26 +205,18 @@ func blankOversize(m *models.Message) {
 // not fit. Reports whether anything was dropped so the caller can set its
 // "more" flag.
 func (s *HistoryService) fitPage(msgs []models.Message, envelope int) ([]models.Message, bool) {
-	if len(msgs) == 0 || pagefit.Fits(msgs, s.pageBudget, envelope) {
-		return msgs, false
-	}
-	kept := msgs[:pagefit.Prefix(msgs, s.pageBudget, envelope)]
-	// A lone row that still overflows is degraded rather than dropped, so the
-	// client can page past it instead of dead-ending on this position.
-	if len(kept) == 1 && !pagefit.Fits(kept, s.pageBudget, envelope) {
+	kept, dropped, oversize := pagefit.Fit(msgs, s.pageBudget, envelope)
+	if oversize {
 		blankOversize(&kept[0])
 	}
-	return kept, len(kept) < len(msgs)
+	return kept, dropped
 }
 
 // fitWindow trims a centred window to the reply budget, blanking the pivot row
 // when it alone will not fit so the caller still gets the row they asked for.
 func (s *HistoryService) fitWindow(msgs []models.Message, pivot, envelope int) (int, int) {
-	if len(msgs) == 0 || pagefit.Fits(msgs, s.pageBudget, envelope) {
-		return 0, len(msgs)
-	}
-	lo, hi := pagefit.Window(msgs, pivot, s.pageBudget, envelope)
-	if hi-lo == 1 && !pagefit.Fits(msgs[lo:hi], s.pageBudget, envelope) {
+	lo, hi, oversize := pagefit.FitWindow(msgs, pivot, s.pageBudget, envelope)
+	if oversize {
 		blankOversize(&msgs[lo])
 	}
 	return lo, hi

@@ -22,7 +22,6 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
-	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -43,8 +42,8 @@ func ptrTime(t time.Time) *time.Time { return &t }
 var defaultRoomLastMsgAt = joinTime.Add(24 * time.Hour)
 var defaultRoomCreatedAt = joinTime.Add(-30 * 24 * time.Hour)
 
-func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository) {
-	svc, msgs, subs, rooms, pub, threadRooms, _, _ := newServiceWithRoomMock(t)
+func newService(t *testing.T, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository) {
+	svc, msgs, subs, rooms, pub, threadRooms, _, _ := newServiceWithRoomMock(t, opts...)
 	// Permissive defaults: existing tests don't care about the room reads.
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	rooms.EXPECT().
@@ -58,7 +57,7 @@ func newService(t *testing.T) (*service.HistoryService, *mocks.MockMessageReposi
 
 // newServiceWithRoomMock additionally exposes the room mock, pre-stubbed with a permissive
 // GetRoomTimes default (override with Times(N) to assert resolver behaviour); no UserStore/AppStore pre-stubs.
-func newServiceWithRoomMock(t *testing.T) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockRoomRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository, *mocks.MockUserStore, *mocks.MockAppStore) {
+func newServiceWithRoomMock(t *testing.T, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockRoomRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository, *mocks.MockUserStore, *mocks.MockAppStore) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -82,7 +81,7 @@ func newServiceWithRoomMock(t *testing.T) (*service.HistoryService, *mocks.MockM
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
 	}
-	return service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg), msgs, subs, rooms, pub, threadRooms, users, apps
+	return service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, opts...), msgs, subs, rooms, pub, threadRooms, users, apps
 }
 
 // assertInternalErr verifies err collapses to the generic "internal error" envelope at the
@@ -2746,27 +2745,4 @@ func TestHistoryService_GetMessagesByIDs_QuoteRedaction(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Messages, 1)
 	assert.Equal(t, service.UnavailableQuoteMsg, result.Messages[0].QuotedParentMessage.Msg)
-}
-
-// newServiceWithBudget mirrors newService but caps replies at b, so the
-// page-trimming tests can drive the budget without a real broker.
-func newServiceWithBudget(t *testing.T, b pagefit.Budget) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockSubscriptionRepository, *mocks.MockEventPublisher, *mocks.MockThreadRoomRepository) {
-	t.Helper()
-	ctrl := gomock.NewController(t)
-	msgs := mocks.NewMockMessageRepository(ctrl)
-	subs := mocks.NewMockSubscriptionRepository(ctrl)
-	rooms := mocks.NewMockRoomRepository(ctrl)
-	pub := mocks.NewMockEventPublisher(ctrl)
-	threadRooms := mocks.NewMockThreadRoomRepository(ctrl)
-	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
-	users := mocks.NewMockUserStore(ctrl)
-	apps := mocks.NewMockAppStore(ctrl)
-	rooms.EXPECT().GetRoomTimes(gomock.Any(), gomock.Any()).
-		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).MinTimes(0)
-	rooms.EXPECT().GetRoomUserCount(gomock.Any(), gomock.Any()).Return(0, nil).AnyTimes()
-	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	threadRooms.EXPECT().GetMinThreadUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
-	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, service.WithPageBudget(b))
-	return svc, msgs, subs, pub, threadRooms
 }

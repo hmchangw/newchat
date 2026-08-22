@@ -12,6 +12,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/pagefit"
 )
 
@@ -46,7 +47,7 @@ func budgetFor(t *testing.T, msgs []models.Message, n int) pagefit.Budget {
 
 func TestLoadHistory_TrimsOversizePageAndSetsHasNext(t *testing.T) {
 	all := fatMessages(20, 512)
-	svc, msgs, subs, _, _ := newServiceWithBudget(t, budgetFor(t, all, 5))
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(budgetFor(t, all, 5)))
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
 	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
@@ -63,7 +64,7 @@ func TestLoadHistory_TrimsOversizePageAndSetsHasNext(t *testing.T) {
 
 func TestLoadHistory_PageThatFitsIsUntouched(t *testing.T) {
 	all := fatMessages(4, 64)
-	svc, msgs, subs, _, _ := newServiceWithBudget(t, pagefit.NewBudget(1<<20, 0))
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(1<<20, 0)))
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
 	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
@@ -80,7 +81,7 @@ func TestLoadHistory_PageThatFitsIsUntouched(t *testing.T) {
 // createdAt page 1 returned.
 func TestLoadHistory_TrimmedPaginationLosesNoRows(t *testing.T) {
 	all := fatMessages(20, 512)
-	svc, msgs, subs, _, _ := newServiceWithBudget(t, budgetFor(t, all, 5))
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(budgetFor(t, all, 5)))
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil).Times(2)
 	// The store answers with whatever is strictly older than the requested bound.
@@ -129,7 +130,7 @@ func TestLoadHistory_SingleOversizeRowIsBlankedNotDropped(t *testing.T) {
 		SysMsgData:          []byte(`{"a":1}`),
 		QuotedParentMessage: &models.QuotedParentMessage{MessageID: "m-parent"},
 	}
-	svc, msgs, subs, _, _ := newServiceWithBudget(t, pagefit.NewBudget(256, 0))
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(256, 0)))
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
 	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
@@ -163,7 +164,7 @@ func TestLoadSurrounding_TrimsBothEndsAndKeepsTheCentralMessage(t *testing.T) {
 	}
 	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
 
-	svc, msgs, subs, _, _ := newServiceWithBudget(t, pagefit.NewBudget(int64(encodedSize(t, before[:3])), 0))
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(int64(encodedSize(t, before[:3])), 0)))
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
@@ -191,7 +192,7 @@ func TestLoadSurrounding_TrimsBothEndsAndKeepsTheCentralMessage(t *testing.T) {
 func TestLoadSurrounding_WindowThatFitsIsUntouched(t *testing.T) {
 	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(2 * time.Minute)}
 	before := fatMessages(2, 32)
-	svc, msgs, subs, _, _ := newServiceWithBudget(t, pagefit.NewBudget(1<<20, 0))
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(1<<20, 0)))
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
@@ -217,7 +218,7 @@ func TestLoadSurrounding_TimestampModeTrimsAroundThePivot(t *testing.T) {
 	}
 	pivot := joinTime.Add(5 * time.Minute).UnixMilli()
 
-	svc, msgs, subs, _, _ := newServiceWithBudget(t, pagefit.NewBudget(int64(encodedSize(t, before[:3])), 0))
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(int64(encodedSize(t, before[:3])), 0)))
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
 	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).

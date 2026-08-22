@@ -12,26 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/pagefit"
-	"github.com/hmchangw/chat/user-service/config"
-	"github.com/hmchangw/chat/user-service/service/mocks"
 )
-
-// newThreadSvcWithBudget mirrors newThreadSvc but caps the reply at b.
-func newThreadSvcWithBudget(t *testing.T, b pagefit.Budget) (*UserService, *mocks.MockHistoryClient, *mocks.MockUserRepository, *mocks.MockAppRepository) {
-	t.Helper()
-	ctrl := gomock.NewController(t)
-	history := mocks.NewMockHistoryClient(ctrl)
-	users := mocks.NewMockUserRepository(ctrl)
-	apps := mocks.NewMockAppRepository(ctrl)
-	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, MaxAccountNames: 100}
-	svc := New(
-		mocks.NewMockSubscriptionRepository(ctrl), users, apps,
-		mocks.NewMockThreadSubscriptionRepository(ctrl), mocks.NewMockRoomClient(ctrl), history,
-		mocks.NewMockPresenceClient(ctrl), mocks.NewMockEventPublisher(ctrl), mocks.NewMockEventPublisher(ctrl),
-		&fakeBadgeCache{}, nil, nil, nil, cfg, WithPageBudget(b),
-	)
-	return svc, history, users, apps
-}
 
 // fatItems builds channel rows (no enrichment) whose size is dominated by the
 // forwarded parent message body, DESC by lastMsgAt.
@@ -54,7 +35,7 @@ func TestListUserThreads_TrimsOversizePageAndSetsHasNext(t *testing.T) {
 	encoded, err := json.Marshal(items[:5])
 	require.NoError(t, err)
 
-	svc, history, _, _ := newThreadSvcWithBudget(t, pagefit.NewBudget(int64(len(encoded)), 0))
+	svc, history, _, _ := newThreadSvc(t, WithPageBudget(pagefit.NewBudget(int64(len(encoded)), 0)))
 	expectThreadList(history, "site-a", items, false)
 	expectThreadList(history, "site-b", nil, false)
 
@@ -73,7 +54,7 @@ func TestListUserThreads_CursorIsDerivedFromTheLastKeptItem(t *testing.T) {
 	encoded, err := json.Marshal(items[:5])
 	require.NoError(t, err)
 
-	svc, history, _, _ := newThreadSvcWithBudget(t, pagefit.NewBudget(int64(len(encoded)), 0))
+	svc, history, _, _ := newThreadSvc(t, WithPageBudget(pagefit.NewBudget(int64(len(encoded)), 0)))
 	expectThreadList(history, "site-a", items, false)
 	expectThreadList(history, "site-b", nil, false)
 
@@ -90,7 +71,7 @@ func TestListUserThreads_CursorIsDerivedFromTheLastKeptItem(t *testing.T) {
 
 func TestListUserThreads_PageThatFitsIsUntouched(t *testing.T) {
 	items := fatItems("site-a", 3, 16)
-	svc, history, _, _ := newThreadSvcWithBudget(t, pagefit.NewBudget(1<<20, 0))
+	svc, history, _, _ := newThreadSvc(t, WithPageBudget(pagefit.NewBudget(1<<20, 0)))
 	expectThreadList(history, "site-a", items, false)
 	expectThreadList(history, "site-b", nil, false)
 
@@ -119,7 +100,7 @@ func TestListUserThreads_TrimRunsAfterEnrichment(t *testing.T) {
 
 	// A budget the bare rows clear comfortably; enrichment is what tips it over.
 	budget := pagefit.NewBudget(int64(len(bare)), 0)
-	svc, history, users, _ := newThreadSvcWithBudget(t, budget)
+	svc, history, users, _ := newThreadSvc(t, WithPageBudget(budget))
 	expectThreadList(history, "site-a", items, false)
 	expectThreadList(history, "site-b", nil, false)
 	users.EXPECT().GetHRInfoByAccounts(gomock.Any(), gomock.Any()).

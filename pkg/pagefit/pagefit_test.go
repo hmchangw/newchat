@@ -19,7 +19,7 @@ func rows(n, width int) []string {
 	return out
 }
 
-func encodedLen(t *testing.T, v any) int {
+func encodedSize(t *testing.T, v any) int {
 	t.Helper()
 	b, err := json.Marshal(v)
 	require.NoError(t, err)
@@ -51,7 +51,7 @@ func TestNewBudget(t *testing.T) {
 	}
 }
 
-func TestPrefix(t *testing.T) {
+func TestFit(t *testing.T) {
 	// Each row encodes to 12 bytes; n rows cost 12n + (n-1) separators.
 	const width = 10
 	const rowCost = width + 2
@@ -74,27 +74,54 @@ func TestPrefix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, Prefix(tt.items, tt.budget, tt.envelope))
+			kept, _, _ := Fit(tt.items, tt.budget, tt.envelope)
+			assert.Len(t, kept, tt.want)
 		})
 	}
 }
 
 // Forward progress is the whole point of the minimum: a caller that got 0 rows
 // back with "more" set would have no position to page from.
-func TestPrefix_NeverReturnsZeroForNonEmptyInput(t *testing.T) {
+func TestFit_NeverReturnsZeroRowsForNonEmptyInput(t *testing.T) {
 	for _, n := range []int{1, 2, 50} {
-		assert.GreaterOrEqual(t, Prefix(rows(n, 4096), NewBudget(8, 0), 0), 1)
+		kept, _, oversize := Fit(rows(n, 4096), NewBudget(8, 0), 0)
+		assert.Len(t, kept, 1)
+		assert.True(t, oversize, "the caller must be told the kept row still overflows")
 	}
 }
 
-func TestPrefix_ResultAlwaysFitsWhenAnyRowFits(t *testing.T) {
-	items := rows(20, 10)
-	b := NewBudget(100, 0)
-	n := Prefix(items, b, 0)
-	assert.LessOrEqual(t, encodedLen(t, items[:n]), b.Bytes()+2, "kept prefix must fit (array brackets aside)")
+// dropped drives the caller's "more" flag; oversize drives whether the kept row
+// needs degrading. Conflating them loses one of the two decisions.
+func TestFit_ReportsDroppedAndOversizeSeparately(t *testing.T) {
+	tests := []struct {
+		name         string
+		items        []string
+		budget       Budget
+		wantDropped  bool
+		wantOversize bool
+	}{
+		{"everything fits", rows(3, 10), NewBudget(1000, 0), false, false},
+		{"some rows dropped", rows(10, 10), NewBudget(40, 0), true, false},
+		{"lone row overflows", rows(1, 4096), NewBudget(16, 0), false, true},
+		{"lone row overflows with others behind it", rows(5, 4096), NewBudget(16, 0), true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, dropped, oversize := Fit(tt.items, tt.budget, 0)
+			assert.Equal(t, tt.wantDropped, dropped, "dropped")
+			assert.Equal(t, tt.wantOversize, oversize, "oversize")
+		})
+	}
 }
 
-func TestWindow(t *testing.T) {
+func TestFit_ResultAlwaysFitsWhenAnyRowFits(t *testing.T) {
+	items := rows(20, 10)
+	b := NewBudget(100, 0)
+	kept, _, _ := Fit(items, b, 0)
+	assert.LessOrEqual(t, encodedSize(t, kept), b.Bytes()+2, "kept prefix must fit (array brackets aside)")
+}
+
+func TestFitWindow(t *testing.T) {
 	const width = 10
 	const rowCost = width + 2
 
@@ -118,7 +145,7 @@ func TestWindow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lo, hi := Window(tt.items, tt.pivot, tt.budget, 0)
+			lo, hi, _ := FitWindow(tt.items, tt.pivot, tt.budget, 0)
 			assert.Equal(t, tt.wantLo, lo, "lo")
 			assert.Equal(t, tt.wantHi, hi, "hi")
 		})
@@ -126,31 +153,43 @@ func TestWindow(t *testing.T) {
 }
 
 // The pivot is the one row the caller cannot lose — it is the message they asked to centre on.
-func TestWindow_AlwaysIncludesPivotEvenWhenItAloneOverflows(t *testing.T) {
-	lo, hi := Window(rows(5, 4096), 3, NewBudget(8, 0), 0)
+func TestFitWindow_AlwaysIncludesPivotEvenWhenItAloneOverflows(t *testing.T) {
+	lo, hi, oversize := FitWindow(rows(5, 4096), 3, NewBudget(8, 0), 0)
 	assert.Equal(t, 3, lo)
 	assert.Equal(t, 4, hi)
+	assert.True(t, oversize, "the caller must be told the pivot alone overflows")
 }
 
-func BenchmarkPrefix_100Rows(bench *testing.B) {
+// The common case: a page that fits must not pay the per-row marshal.
+func BenchmarkFit_100RowsThatFit(bench *testing.B) {
 	items := rows(100, 512)
 	b := NewBudget(128<<10, 4096)
 	bench.ReportAllocs()
 	for bench.Loop() {
-		_ = Prefix(items, b, 256)
+		_, _, _ = Fit(items, b, 256)
+	}
+}
+
+func BenchmarkFit_100RowsTrimmed(bench *testing.B) {
+	items := rows(100, 512)
+	b := NewBudget(8<<10, 0)
+	bench.ReportAllocs()
+	for bench.Loop() {
+		_, _, _ = Fit(items, b, 256)
 	}
 }
 
 // A row that cannot be marshalled would break the response anyway; charge it
 // as maximal so it is never silently counted as free and waved past a budget.
-func TestPrefix_UnmarshalableRowIsChargedAsOversize(t *testing.T) {
+func TestFit_UnmarshalableRowIsChargedAsOversize(t *testing.T) {
 	items := []any{"ok", make(chan int), "ok"}
-	assert.Equal(t, 1, Prefix(items, NewBudget(1000, 0), 0))
+	kept, dropped, _ := Fit(items, NewBudget(1000, 0), 0)
+	assert.Len(t, kept, 1)
+	assert.True(t, dropped)
 }
 
-// Prefix returns 1 both when exactly one row fits and when the first row alone
-// overflows; Fits is how a caller tells those apart before degrading the row.
-func TestFits(t *testing.T) {
+// A page that fits must never be reported as dropped or oversize.
+func TestFit_WholePageFastPath(t *testing.T) {
 	const width = 10
 	const rowCost = width + 2
 
@@ -171,7 +210,14 @@ func TestFits(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, Fits(tt.items, tt.budget, tt.envelope))
+			kept, dropped, oversize := Fit(tt.items, tt.budget, tt.envelope)
+			if tt.want {
+				assert.Len(t, kept, len(tt.items))
+				assert.False(t, dropped)
+				assert.False(t, oversize)
+			} else {
+				assert.True(t, dropped || oversize, "an overflowing page must report why")
+			}
 		})
 	}
 }
