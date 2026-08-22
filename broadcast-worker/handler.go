@@ -364,7 +364,8 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	if err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg); err != nil {
+	mentioned, err := h.badgeNewlyMentionedAccounts(ctx, room.ID, &msg)
+	if err != nil {
 		return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
 	}
 
@@ -374,19 +375,37 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
 		}
 	}
-	return h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit)
+	if err := h.publishMutation(ctx, room, model.RoomEventMessageEdited, msg.ID, &edit); err != nil {
+		return err
+	}
+	// editedAt is in the dedup seed so a later edit adding a new mention isn't
+	// swallowed by stream-level dedup.
+	h.federateMentions(ctx, room.ID,
+		fmt.Sprintf("mention-edit:%s:%s:%d", room.ID, msg.ID, msg.EditedAt.UnixMilli()), mentioned, *msg.EditedAt)
+	return nil
 }
 
 // badgeNewlyMentionedAccounts badges the accounts an edit @-mentions, mirroring
 // handleCreated. Additive only: SetSubscriptionMentions' filter skips
 // non-subscribers and accounts that have already read past the edit, so a
 // removed mention is never cleared and an already-read one is never re-flagged.
-func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) error {
+// Returns the resolved mentionees for the caller to federate; a lookup failure
+// still badges locally, it only costs the cross-site relay.
+func (h *Handler) badgeNewlyMentionedAccounts(ctx context.Context, roomID string, msg *model.Message) ([]model.Participant, error) {
 	parsed := mention.Parse(msg.Content)
 	if len(parsed.Accounts) == 0 {
-		return nil
+		return nil, nil
 	}
-	return h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt)
+	users, err := h.userStore.FindUsersByAccounts(ctx, parsed.Accounts)
+	if err != nil {
+		slog.WarnContext(ctx, "user lookup failed for edited mentions, skipping federation",
+			"error", err, "room_id", roomID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+	}
+	if err := h.store.SetSubscriptionMentions(ctx, roomID, parsed.Accounts, *msg.EditedAt); err != nil {
+		return nil, err
+	}
+	return mention.ResolveFromParsed(parsed, usersByAccount(users)).Participants, nil
 }
 
 // federateMentions relays the mention badge to each mentionee's home site, one

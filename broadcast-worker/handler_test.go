@@ -992,6 +992,8 @@ func TestHandleUpdated_BadgesNewlyAddedMentions(t *testing.T) {
 
 			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
 			if tc.wantSetMentions != nil {
+				// The lookup only resolves mentionees to home sites for the cross-site relay.
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.InAnyOrder(tc.wantSetMentions)).Return(nil, nil)
 				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.InAnyOrder(tc.wantSetMentions), edited).Return(nil)
 			}
 
@@ -3914,4 +3916,75 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
+	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	editedAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	rec := &mentionOutboxRecorder{}
+
+	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+		Return([]model.User{{ID: "u2", Account: "bob", SiteID: "site-b"}}, nil)
+	store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", []string{"bob"}, editedAt).Return(nil)
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
+		withOutboxFederation("site-a", rec.publish))
+
+	data, err := json.Marshal(model.MessageEvent{
+		Event:  model.EventUpdated,
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Content: "hi @bob", CreatedAt: createdAt, EditedAt: &editedAt, UpdatedAt: &editedAt,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	got := rec.sorted()
+	require.Len(t, got, 1)
+	assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
+	assert.Equal(t, fmt.Sprintf("mention-edit:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
+	assert.Equal(t, []string{"bob"}, got[0].event.Accounts)
+	assert.Equal(t, editedAt.UnixMilli(), got[0].event.MessageCreatedAt)
+}
+
+func TestHandler_HandleUpdated_NoMentionsSkipsLookup(t *testing.T) {
+	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	editedAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	rec := &mentionOutboxRecorder{}
+
+	// No FindUsersByAccounts and no SetSubscriptionMentions expectations: gomock
+	// fails the test if the mention-free edit calls either.
+	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
+		withOutboxFederation("site-a", rec.publish))
+
+	data, err := json.Marshal(model.MessageEvent{
+		Event:  model.EventUpdated,
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Content: "no mentions here", CreatedAt: createdAt, EditedAt: &editedAt, UpdatedAt: &editedAt,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+	assert.Empty(t, rec.sorted())
 }
