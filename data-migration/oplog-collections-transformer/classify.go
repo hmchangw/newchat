@@ -7,13 +7,21 @@ import (
 )
 
 // deletedNamePrefix is the source app's soft-delete marker: "deleting" a room renames it (and the
-// denormalized name on every subscription to it) to "Del-"+name. The new stack has no such rename,
-// so soft-deleted rooms and their subscriptions are never imported.
+// denormalized name on every subscription to it) to "Del-"+name — there is no delete flag and no
+// row removal. The destination honors the same marker: user-service filters ^Del- rooms out of
+// every subscription read.
 const deletedNamePrefix = "Del-"
 
-// isSoftDeletedName reports whether any of the source name fields carries the soft-delete prefix.
-// Both name and fname are checked: either one is enough to mark the record deleted.
-func isSoftDeletedName(names ...string) bool {
+// dmSourceType is the source room type for a direct message.
+const dmSourceType = "d"
+
+// isSoftDeletedRecord reports whether a source room or subscription doc carries the soft-delete
+// marker on either name field. DMs are exempt: for t:"d" both fields hold the PEER's username and
+// display name (see memberAddedEvent), so there the prefix marks a user, not a deletion.
+func isSoftDeletedRecord(t string, names ...string) bool {
+	if t == dmSourceType {
+		return false
+	}
 	for _, n := range names {
 		if strings.HasPrefix(n, deletedNamePrefix) {
 			return true
@@ -41,7 +49,7 @@ func classifyRoom(t string, hasPrid, hasTeamID bool, hasBot bool, participantCou
 			return roomClass{Type: model.RoomTypeDiscussion}
 		}
 		return roomClass{Type: model.RoomTypeChannel}
-	case "d":
+	case dmSourceType:
 		if participantCount > 2 {
 			return roomClass{Excluded: true, Reason: "group_dm"}
 		}

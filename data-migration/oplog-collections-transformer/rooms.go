@@ -84,10 +84,15 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 		return fmt.Errorf("%w: decode source room: %v", migration.ErrPoison, uerr) //nolint:errorlint // intentional single-%w sentinel wrap; decode err is informational only
 	}
 
-	if isSoftDeletedName(sr.Name, sr.FName) {
-		// Soft-deleted at source ("Del-" rename) — never import it, on any op: an insert/replace
-		// would create a room the destination only ever hides, and a rename INTO the prefix is the
-		// deletion itself, which has no destination equivalent to apply.
+	desc, derr := roomUpdateDelta(&ev)
+	if derr != nil {
+		return derr
+	}
+
+	if isSoftDeletedRecord(sr.T, sr.Name, sr.FName) && !isDeletionRename(ev.Op, desc) {
+		// Already soft-deleted at source and this event isn't the deletion itself: an insert/replace
+		// would import a room the destination only ever hides, and a later field change is churn on
+		// a dead room. The rename INTO the prefix is the one event that must land (below).
 		slog.Debug("skip soft-deleted room",
 			"eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
 		h.metrics.onSkipped(ctx, "room_soft_deleted")
@@ -131,11 +136,7 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 		CreatedAt:      createdAt,
 	}
 
-	evts, err := h.roomEvents(ev, &room)
-	if err != nil {
-		return fmt.Errorf("build room events: %w", err)
-	}
-	for _, evt := range evts {
+	for _, evt := range h.roomEvents(ev, &room, desc) {
 		if err := h.pub.Publish(ctx, evt); err != nil {
 			return fmt.Errorf("publish room event %q: %w", evt.Type, err)
 		}
@@ -147,10 +148,10 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 // (name/fname changed) and/or room_restricted (restricted changed) — both when one update changes both.
 //
 //nolint:gocritic // ev passed by value to mirror handle's signature; off the hot path.
-func (h *handler) roomEvents(ev oplogEvent, room *model.Room) ([]model.InboxEvent, error) {
+func (h *handler) roomEvents(ev oplogEvent, room *model.Room, desc updateDescription) []model.InboxEvent {
 	if ev.Op == "insert" {
 		// A brand-new room has no subscriptions yet — nothing to rename/re-restrict, sync suffices.
-		return []model.InboxEvent{h.roomSyncEvent(room)}, nil
+		return []model.InboxEvent{h.roomSyncEvent(room)}
 	}
 	if ev.Op != "update" {
 		// replace: a whole-doc rewrite carries NO updateDescription delta, so there is no way to
@@ -162,13 +163,6 @@ func (h *handler) roomEvents(ev oplogEvent, room *model.Room) ([]model.InboxEven
 			h.roomRenamedEvent(room),
 			h.roomRestrictedEvent(room),
 			h.roomSyncEvent(room),
-		}, nil
-	}
-
-	var desc updateDescription
-	if len(ev.UpdateDescription) > 0 {
-		if err := bson.UnmarshalExtJSON(ev.UpdateDescription, false, &desc); err != nil {
-			return nil, fmt.Errorf("%w: decode room updateDescription: %v", migration.ErrPoison, err) //nolint:errorlint // intentional single-%w sentinel wrap; decode err is informational only
 		}
 	}
 
@@ -183,7 +177,27 @@ func (h *handler) roomEvents(ev oplogEvent, room *model.Room) ([]model.InboxEven
 	}
 	// room_sync always trails so the room doc itself converges alongside the subscription-side events.
 	evts = append(evts, h.roomSyncEvent(room))
-	return evts, nil
+	return evts
+}
+
+// roomUpdateDelta decodes an update event's field delta; other ops carry none.
+func roomUpdateDelta(ev *oplogEvent) (updateDescription, error) {
+	var desc updateDescription
+	if ev.Op != "update" || len(ev.UpdateDescription) == 0 {
+		return desc, nil
+	}
+	if err := bson.UnmarshalExtJSON(ev.UpdateDescription, false, &desc); err != nil {
+		return desc, fmt.Errorf("%w: decode room updateDescription: %v", migration.ErrPoison, err) //nolint:errorlint // intentional single-%w sentinel wrap; decode err is informational only
+	}
+	return desc, nil
+}
+
+// isDeletionRename reports whether this update is the soft-delete itself — a name/fname change on a
+// doc that now carries the prefix. That rename is the source's only delete signal, so it is applied
+// (the destination room takes the prefixed name, which user-service's ^Del- filter hides) rather
+// than skipped. A replace carries no delta and so can never qualify: the source deletes with $set.
+func isDeletionRename(op string, desc updateDescription) bool {
+	return op == "update" && (changed(desc, "name") || changed(desc, "fname"))
 }
 
 // changed reports whether the named field appears in the update delta (set or removed).

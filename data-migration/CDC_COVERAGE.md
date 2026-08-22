@@ -31,14 +31,14 @@ The connector forwards raw change-stream events with **no `updateLookup`** and *
 | # | Source event | Op + payload | Source lookup (by `_id`) | Current-system facts | Handling / impact |
 |---|---|---|---|---|---|
 | **Rooms** |
-| 1 | Room create | `insert` — full doc | in payload | `t` ∈ `c,p,d,l,v`; `prid`⇒discussion; `teamId`/`teamMain`; `d` can have >2 users | ✅ map → `room_sync` (skip `l`,`v`,group-DM, soft-deleted) |
-| 2 | Room replace | `replace` — full doc | not needed | whole-doc rewrite; can cross type/exclusion boundary; **no delta** to tell which fields changed | ✅ re-classify → `room_renamed` + `room_restricted` + `room_sync` (skip soft-deleted; conservative — field events are idempotent + guarded; subs' denormalized name/visibility must not go stale) |
-| 3 | Room change | `update` — changed fields only | full current doc | — | ✅ re-read doc → `room_renamed` / `room_restricted` / `room_sync` (skip soft-deleted) |
+| 1 | Room create | `insert` — full doc | in payload | `t` ∈ `c,p,d,l,v`; `prid`⇒discussion; `teamId`/`teamMain`; `d` can have >2 users | ✅ map → `room_sync` (skip `l`,`v`,group-DM, already-soft-deleted) |
+| 2 | Room replace | `replace` — full doc | not needed | whole-doc rewrite; can cross type/exclusion boundary; **no delta** to tell which fields changed | ✅ re-classify → `room_renamed` + `room_restricted` + `room_sync` (skip already-soft-deleted; conservative — field events are idempotent + guarded; subs' denormalized name/visibility must not go stale) |
+| 3 | Room change | `update` — changed fields only | full current doc | — | ✅ re-read doc → `room_renamed` / `room_restricted` / `room_sync`; a rename INTO `Del-` **is** the delete and is applied, other changes on a `Del-` room are skipped |
 | 4 | Room delete | `delete` — `_id` only | nothing — doc gone | app has no room-delete operation | ❌ skip (no app deletion; un-actionable) |
 | **Subscriptions** |
-| 5 | Sub create | `insert` — full doc | in payload | `u`, `rid`, `roles[]`, `open`, `f`, `disableNotifications`, `ls`/`lr`, `alert` | ✅ `member_added` + state events (skip soft-deleted) |
-| 6 | Sub replace | `replace` — full doc | not needed | whole-doc rewrite | ✅ re-classify → `member_added` + state (skip soft-deleted) |
-| 7 | Sub change (incl. leave/rejoin) | `update` — changed fields only | full current doc | leaving sets `open:false` (not a row delete) | ✅ re-read doc → `open`-toggle → `member_added`/`member_removed`; mute/fav/role/read → matching event (skip soft-deleted) |
+| 5 | Sub create | `insert` — full doc | in payload | `u`, `rid`, `roles[]`, `open`, `f`, `disableNotifications`, `ls`/`lr`, `alert` | ✅ `member_added` + state events (skip subs to soft-deleted rooms) |
+| 6 | Sub replace | `replace` — full doc | not needed | whole-doc rewrite | ✅ re-classify → `member_added` + state (skip subs to soft-deleted rooms) |
+| 7 | Sub change (incl. leave/rejoin) | `update` — changed fields only | full current doc | leaving sets `open:false` (not a row delete) | ✅ re-read doc → `open`-toggle → `member_added`/`member_removed`; mute/fav/role/read → matching event (skip subs to soft-deleted rooms) |
 | 8 | Sub delete (true row removal) | `delete` — `_id` only | nothing — doc gone | destination subs key by generated `UUIDv7`, not source `_id`; removal needs `(roomID, account)` | ❌ skip (un-actionable; rare — leave is `open:false`) |
 | **Thread subscriptions** |
 | 9 | Follow / first reply | `insert` — full doc | in payload | keyed `(u._id, parentMessage._id)`; carries `rid`, `lastSeenAt`, `unreadMention` | ✅ resolve thread-room+user → `thread_subscription_upserted` |
@@ -56,17 +56,37 @@ The connector forwards raw change-stream events with **no `updateLookup`** and *
 
 ### Soft-deleted rooms (`Del-` prefix)
 
-The source "deletes" a room by renaming it — and every subscription's denormalized name — to
-`Del-`+name; there is no delete flag and no row removal. Rooms and subscriptions whose `name` **or**
-`fname` carries that exact prefix are **never imported**, on any op (`insert`/`replace`/`update`),
-metered as `room_soft_deleted` / `subscription_soft_deleted`. Only the exact `Del-` prefix counts
-(`delta`, `del-general`, `team-Del-old` are live rooms) — the same marker `user-service` filters
-subscription reads on.
+The source has no room-delete operation and no delete flag: "deleting" a room renames it — and the
+denormalized name on every subscription to it — to `Del-`+name. The destination honors the same
+marker (`user-service/mongorepo/subscriptions.go:21` filters `^Del-` rooms out of
+`subscription.list` / `getChannels` / `count`), but nothing in the new stack ever *writes* it, so
+this migration is its only producer. That makes the rename both the deletion **event** and the
+deletion **state**, handled differently per op:
 
-**Consequence:** a room soft-deleted *after* the CDC checkpoint arrives as a rename-into-`Del-`
-update, which is skipped like any other soft-deleted record — the destination room (imported while
-it was live) stays as it was. The new stack has no room deletion to apply, so this is the same
-end-state as row 4 (`Room delete` → skip).
+| Source event | Meaning | Handling |
+|---|---|---|
+| `insert` / `replace` of a `Del-` doc | born deleted — never existed downstream | ❌ skip (`room_soft_deleted`) |
+| `update` whose delta touches `name`/`fname`, doc now `Del-` | the deletion itself | ✅ apply → `room_renamed` + `room_sync`; the destination room takes the prefixed name and the `^Del-` filter hides it |
+| `update` touching anything else on a `Del-` doc | churn on a dead room | ❌ skip (`room_soft_deleted`) |
+| Any subscription op on a `Del-` sub | sub to a deleted room | ❌ skip (`subscription_soft_deleted`) |
+
+Only the exact prefix counts — `delta`, `del-general` and `team-Del-old` are live rooms.
+
+**Subscriptions never carry the deletion.** It rides the room lane: `room_renamed` →
+`UpdateSubscriptionNamesForRoom` already rewrites the name on *every* sub in the room, so subs
+imported while the room was live stay consistent. Letting sub-lane field events through instead
+would be actively harmful — `UpdateSubscriptionRoles`/mute/favorite/open treat a missing
+subscription as an error so the event redelivers until `member_added` lands
+(`inbox-worker/main.go:118`), which never comes for a sub whose insert this guard skipped.
+
+**DMs (`t:"d"`) are exempt on both lanes.** There `name`/`fname` hold the peer's username and
+display name, not a room name, so the prefix would match a user rather than a deletion. A
+soft-deleted DM that slips through is still hidden downstream — the `^Del-` room filter is
+type-agnostic.
+
+**Residual:** `UpsertRoom` upserts (`inbox-worker/main.go:85`), so applying the deletion rename for
+a room whose `insert` was skipped *creates* a hidden `Del-` room doc rather than no-op'ing.
+Invisible to users; avoiding it would cost a room-existence read per event.
 
 ## Direct-transfer collections (oplog-direct-transfer)
 
