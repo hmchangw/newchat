@@ -1173,7 +1173,12 @@ func (l *failureLedger) invalidateReplayedLocked(reason string) error {
 // evidence this run had already disowned.
 func (l *failureLedger) flushInvalidationsLocked() error {
 	var unpersisted []string
-	for _, reason := range l.invalidReasons {
+	// Over a copy, because a failed attempt records the wal cause and appends to
+	// the slice being walked. Ranging the original would rely on Go fixing the
+	// length at loop entry — true, but too subtle to leave a reader deducing.
+	// A cause added by this loop needs no attempt of its own: whatever failed
+	// is already reported below, so Close errors either way.
+	for _, reason := range slices.Clone(l.invalidReasons) {
 		l.persistInvalidationLocked(reason)
 		if !slices.Contains(l.persistedInvalidReasons, reason) {
 			unpersisted = append(unpersisted, reason)
