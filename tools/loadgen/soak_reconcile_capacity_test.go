@@ -71,7 +71,7 @@ func TestWarnSoakReconcileCapacity_NamesTheDeficitAndTheRemedy(t *testing.T) {
 	cfg.ReconcileReadShare = 0.75
 
 	output := captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg, nil)
+	warnSoakReconcileCapacity(&cfg)
 
 	logged := output.String()
 	require.Contains(t, logged, `"level":"WARN"`)
@@ -83,36 +83,53 @@ func TestWarnSoakReconcileCapacity_NamesTheDeficitAndTheRemedy(t *testing.T) {
 
 // A warning in the log is not machine-readable, and below the floor every
 // message eventually expires unverified — the run produces evidence it cannot
-// stand behind. Marking it through the invalidation counter is what lets a
-// dashboard and an operator see, from the run's own output, that the window was
-// inconclusive from the first second rather than degraded partway through.
-func TestWarnSoakReconcileCapacity_MarksTheRunInvalidFromStartup(t *testing.T) {
+// stand behind. The startup check therefore has to hand the breach back to its
+// caller, because the ledger it must be recorded in does not exist yet when the
+// check runs.
+func TestWarnSoakReconcileConfig_ReportsTheFloorBreachToItsCaller(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.SearchObserverEnabled = true
 	cfg.SendRate = 55
 	cfg.ReadRate = 110
 	cfg.ReconcileReadShare = 0.75
-	metrics := NewMetrics()
 
 	captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg, metrics)
 
-	assert.Equal(t, float64(1), testutil.ToFloat64(
-		metrics.FailureInvalidations.WithLabelValues(invalidReasonReconcileCapacity)))
+	assert.True(t, warnSoakReconcileConfig(&cfg),
+		"a run below the floor must be reported, not only logged")
 }
 
-func TestWarnSoakReconcileCapacity_DoesNotInvalidateARunThatFits(t *testing.T) {
+func TestWarnSoakReconcileConfig_ReportsNoBreachForARunThatFits(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.SendRate = 55
 	cfg.ReadRate = 200
 	cfg.ReconcileReadShare = 0.75
-	metrics := NewMetrics()
 
 	captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg, metrics)
 
-	assert.Zero(t, testutil.ToFloat64(
-		metrics.FailureInvalidations.WithLabelValues(invalidReasonReconcileCapacity)))
+	assert.False(t, warnSoakReconcileConfig(&cfg))
+}
+
+// Counting the invalidation without invalidating the ledger leaves
+// Snapshot().InvalidReason empty: the dashboard says the window is
+// inconclusive while the run's own record says its evidence is sound, and
+// nothing about the breach survives into the journal. Routing it through the
+// ledger is what makes the two agree.
+func TestSoakReconcileFloorBreach_InvalidatesTheLedgerAndCountsOnce(t *testing.T) {
+	metrics := NewMetrics()
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 8, Recorder: newFailureLedgerPromRecorder(metrics),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, ledger.Close()) })
+
+	ledger.Invalidate(invalidReasonReconcileCapacity)
+
+	assert.Equal(t, invalidReasonReconcileCapacity, ledger.Snapshot().InvalidReason,
+		"the run's own record must say why its evidence is in question")
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureInvalidations.WithLabelValues(invalidReasonReconcileCapacity)),
+		"the ledger is the single path that both records and counts an invalidation")
 }
 
 // The reason has to be in the bounded registry, or a run recovering the same
@@ -130,7 +147,7 @@ func TestWarnSoakReconcileCapacity_SaysNothingWhenTheLaneCanServeTheFloor(t *tes
 	cfg.ReconcileReadShare = 0.75
 
 	output := captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg, nil)
+	warnSoakReconcileCapacity(&cfg)
 
 	assert.Empty(t, output.String())
 }
@@ -148,7 +165,7 @@ func TestWarnSoakReconcileCapacity_SaysNothingForAHistoryOnlyRunAtTheSameRates(t
 	cfg.ReconcileReadShare = 0.75
 
 	output := captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg, nil)
+	warnSoakReconcileCapacity(&cfg)
 
 	assert.Empty(t, output.String())
 }
@@ -163,7 +180,7 @@ func TestWarnSoakReconcileCapacity_SaysNothingWithoutASendRate(t *testing.T) {
 	cfg.ReconcileReadShare = 0.75
 
 	output := captureSoakLog(t)
-	warnSoakReconcileCapacity(&cfg, nil)
+	warnSoakReconcileCapacity(&cfg)
 
 	assert.Empty(t, output.String())
 }

@@ -69,7 +69,7 @@ func TestWarnSoakReconcileConfig_ReportsCapacityAndLagRangeTogether(t *testing.T
 	cfg.ReconcileDeadline = soakReconcileLagCeiling + time.Minute
 
 	output := captureSoakLog(t)
-	warnSoakReconcileConfig(&cfg, NewMetrics())
+	warnSoakReconcileConfig(&cfg)
 
 	logged := output.String()
 	assert.Contains(t, logged, "below the capacity its observers demand",
