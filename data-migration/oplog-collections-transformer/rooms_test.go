@@ -358,3 +358,89 @@ func TestHandleRoom_NonDegradedInsertWithoutFullDocument_Poisons(t *testing.T) {
 	ev := oplogEvent{Op: "insert", Collection: roomsColl, DocumentKey: json.RawMessage(`{"_id":"r1"}`)}
 	assert.ErrorIs(t, h.handleRoom(context.Background(), ev), migration.ErrPoison)
 }
+
+// TestHandleRoom_SoftDeletedSkipped: a room carrying the "Del-" soft-delete rename is never
+// imported, on any op. See invariant_test.go for the exhaustive statement of the rule.
+func TestHandleRoom_SoftDeletedSkipped(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{"fname carries the prefix", `{"_id":"r1","t":"c","name":"general","fname":"Del-General","uids":["u1"]}`},
+		{"name carries the prefix", `{"_id":"r1","t":"c","name":"Del-general","fname":"General","uids":["u1"]}`},
+		{"both carry the prefix", `{"_id":"r1","t":"c","name":"Del-general","fname":"Del-General","uids":["u1"]}`},
+		{"discussion", `{"_id":"r1","t":"p","prid":"p1","fname":"Del-Topic","uids":["u1"]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, op := range []string{"insert", "replace"} {
+				t.Run(op, func(t *testing.T) {
+					pub := &fakePublisher{}
+					h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
+					err := h.handleRoom(context.Background(), roomEv(op, tc.doc, ""))
+					assert.ErrorIs(t, err, migration.ErrSkipped)
+					assert.Empty(t, pub.events)
+				})
+			}
+			// An update that leaves the name alone is churn on an already-dead room.
+			for _, delta := range []string{`{"updatedFields":{"restricted":true}}`, `{"updatedFields":{"description":"hi"}}`} {
+				t.Run("update "+delta, func(t *testing.T) {
+					pub := &fakePublisher{}
+					h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(tc.doc)})
+					err := h.handleRoom(context.Background(), roomEv("update", "", delta))
+					assert.ErrorIs(t, err, migration.ErrSkipped)
+					assert.Empty(t, pub.events)
+				})
+			}
+		})
+	}
+}
+
+// TestHandleRoom_NonDeletedNameKept: only the exact "Del-" prefix marks a soft delete — a name that
+// merely starts with those letters is a live room.
+func TestHandleRoom_NonDeletedNameKept(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{"prefix without hyphen", `{"_id":"r1","t":"c","name":"delta","fname":"Delta","uids":["u1"]}`},
+		{"lowercase del-", `{"_id":"r1","t":"c","name":"del-general","fname":"del-General","uids":["u1"]}`},
+		{"prefix mid-name", `{"_id":"r1","t":"c","name":"team-Del-old","fname":"Team Del-old","uids":["u1"]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &fakePublisher{}
+			h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
+			require.NoError(t, h.handleRoom(context.Background(), roomEv("insert", tc.doc, "")))
+			assert.Len(t, pub.events, 1)
+		})
+	}
+}
+
+// TestHandleRoom_MalformedUpdateDescriptionPoisons: an undecodable delta on a migratable room
+// poisons rather than being silently treated as "no fields changed".
+func TestHandleRoom_MalformedUpdateDescriptionPoisons(t *testing.T) {
+	full := `{"_id":"r1","t":"c","name":"general","fname":"General","uids":["u1"]}`
+	h := newTestHandler(&fakePublisher{}, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(full)})
+	err := h.handleRoom(context.Background(), roomEv("update", "", `{"updatedFields":`))
+	assert.ErrorIs(t, err, migration.ErrPoison)
+}
+
+// TestHandleRoom_ExcludedTypeWinsOverSoftDelete: exclusion is classified before the soft-delete
+// guard, so a Del- livechat/voip room keeps metering its type reason and a malformed delta on one
+// still Skips rather than Terming.
+func TestHandleRoom_ExcludedTypeWinsOverSoftDelete(t *testing.T) {
+	t.Run("livechat insert", func(t *testing.T) {
+		h := newTestHandler(&fakePublisher{}, &fakeTarget{}, &fakeLookup{})
+		doc := `{"_id":"r1","t":"l","name":"Del-support","fname":"Del-Support"}`
+		assert.ErrorIs(t, h.handleRoom(context.Background(), roomEv("insert", doc, "")), migration.ErrSkipped)
+	})
+
+	t.Run("malformed delta on an excluded type skips, not poisons", func(t *testing.T) {
+		doc := `{"_id":"r1","t":"v","name":"Del-call"}`
+		h := newTestHandler(&fakePublisher{}, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(doc)})
+		err := h.handleRoom(context.Background(), roomEv("update", "", `{"updatedFields":`))
+		assert.ErrorIs(t, err, migration.ErrSkipped)
+		assert.NotErrorIs(t, err, migration.ErrPoison)
+	})
+}

@@ -106,6 +106,18 @@ func (h *handler) handleSubscription(ctx context.Context, ev oplogEvent) error {
 		return fmt.Errorf("%w: decode source subscription: %v", migration.ErrPoison, uerr) //nolint:errorlint // intentional single-%w sentinel wrap; decode err is informational only
 	}
 
+	if isSoftDeletedRecord(ss.Name, ss.FName) {
+		// A subscription to a soft-deleted room, whose denormalized name the source renamed along
+		// with the room's. Skipped on every op so no "Del-" name reaches Mongo: member_added would
+		// create the subscription carrying it. Skipping the field events too is required, not just
+		// tidy — inbox-worker treats a missing subscription as a redelivery signal, so they would
+		// Nak-retry to exhaustion against a subscription whose insert this same guard skipped.
+		slog.DebugContext(ctx, "skip subscription to soft-deleted room",
+			"op", ev.Op, "eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
+		h.metrics.onSkipped(ctx, "subscription_soft_deleted")
+		return migration.ErrSkipped
+	}
+
 	if ev.Op == "update" {
 		return h.handleSubscriptionUpdate(ctx, ev, &ss)
 	}
