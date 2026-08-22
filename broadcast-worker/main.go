@@ -67,11 +67,14 @@ type config struct {
 	Mode                 stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	RoomSubjectMode      string          `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
-	RoomLocalityGrace time.Duration           `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
-	Consumer          stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap         bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	Encryption        encryptionConfig        `envPrefix:"ENCRYPTION_"`
-	DebugLog          logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
+	// ThreadViewSubjectEnabled: kill switch for the thread-scoped view lane that
+	// serves open thread panels.
+	ThreadViewSubjectEnabled bool                    `env:"THREAD_VIEW_SUBJECT_ENABLED" envDefault:"true"`
+	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	Encryption               encryptionConfig        `envPrefix:"ENCRYPTION_"`
+	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
@@ -223,7 +226,8 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode, withBroadcastMetrics(domainMetrics))
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
+		withBroadcastMetrics(domainMetrics), withThreadViewSubject(cfg.ThreadViewSubjectEnabled))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
