@@ -44,6 +44,9 @@ func CORS() gin.HandlerFunc {
 		// makes those endpoints unreachable cross-origin.
 		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, "+
 			"ssoToken, "+botauth.HeaderUserID+", "+botauth.HeaderAuthToken+", traceparent, tracestate, baggage")
+		// Neither is CORS-safelisted, so without this a browser client cannot read
+		// the Retry-After it is told to honour on a 429, nor correlate X-Request-ID.
+		c.Header("Access-Control-Expose-Headers", "Retry-After, X-Request-ID")
 		c.Header("Access-Control-Max-Age", "300")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

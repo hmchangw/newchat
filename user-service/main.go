@@ -243,7 +243,7 @@ func main() {
 
 	svc.RegisterHandlers(router)
 
-	httpSrv, err := startHTTPServer(&cfg, httpSvc, sdk, tokenValidator)
+	httpSrv, cancelInFlight, err := startHTTPServer(&cfg, httpSvc, sdk, tokenValidator)
 	if err != nil {
 		slog.Error("http server failed to start", "error", err)
 		os.Exit(1)
@@ -265,10 +265,14 @@ func main() {
 
 	slog.Info("user-service running", "site", cfg.SiteID, "http_port", cfg.HTTP.Port, "health_addr", cfg.HealthAddr)
 
-	// Order matters. Readiness flips first so the load balancer drains us before
-	// the listener closes; HTTP then drains ahead of NATS and Mongo so in-flight
-	// requests can still reach them; the health server stops last, keeping
-	// liveness answerable throughout.
+	// Order matters. Readiness flips first, then HTTP drains ahead of NATS and
+	// Mongo so in-flight requests can still reach them, and the health server stops
+	// last so liveness stays answerable throughout.
+	//
+	// The readiness flip alone does not drain the load balancer — that takes a
+	// probe cycle plus endpoint propagation, which is why the deployment needs the
+	// preStop sleep documented in the design's operations section. Flipping here
+	// still helps when that sleep is missing or too short.
 	//
 	// The HTTP drain is bounded: shutdown.Wait shares one budget across every step
 	// and a handler may run for HTTP_HANDLER_TIMEOUT, so an unbounded drain would
@@ -276,9 +280,14 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		func(context.Context) error { draining.Store(true); return nil },
 		func(ctx context.Context) error {
-			ctx, cancel := context.WithTimeout(ctx, httpDrainTimeout)
+			drainCtx, cancel := context.WithTimeout(ctx, httpDrainTimeout)
 			defer cancel()
-			return httpSrv.Shutdown(ctx)
+			err := httpSrv.Shutdown(drainCtx)
+			// Shutdown gives up on the deadline without interrupting handlers, and a
+			// handler may run for HTTP_HANDLER_TIMEOUT — longer than the whole budget.
+			// Cancel them here so they unwind before NATS and Mongo close underneath.
+			cancelInFlight()
+			return err
 		},
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
@@ -313,12 +322,12 @@ const httpDrainTimeout = 10 * time.Second
 // startHTTPServer builds the Gin engine and serves it in the background. It
 // returns once the listener is bound, so a port clash fails startup rather than
 // surfacing later as a silently missing API.
-func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, sso ssoValidator) (*http.Server, error) {
+func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, sso ssoValidator) (*http.Server, context.CancelFunc, error) {
 	shedCounter, err := sdk.MeterProvider().Meter("user-service").Int64Counter(
 		"http_requests_shed_total",
 		metric.WithDescription("HTTP requests rejected with 429 because the in-flight cap was reached."))
 	if err != nil {
-		return nil, fmt.Errorf("create http_requests_shed_total counter: %w", err)
+		return nil, nil, fmt.Errorf("create http_requests_shed_total counter: %w", err)
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -347,9 +356,16 @@ func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, 
 	})
 
 	srv := newHTTPServer(net.JoinHostPort("", cfg.HTTP.Port), r, &cfg.HTTP)
+	// Every request derives from this, so the drain can cancel handlers that
+	// outlive it: Shutdown stops accepting and waits, but never interrupts a
+	// running handler.
+	baseCtx, cancelInFlight := context.WithCancel(context.Background())
+	srv.BaseContext = func(net.Listener) context.Context { return baseCtx }
+
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
-		return nil, fmt.Errorf("http listen on %q: %w", srv.Addr, err)
+		cancelInFlight()
+		return nil, nil, fmt.Errorf("http listen on %q: %w", srv.Addr, err)
 	}
 	go func() {
 		// Exiting, not just logging: readiness probes NATS, so a dead listener would
@@ -359,5 +375,5 @@ func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, 
 			os.Exit(1)
 		}
 	}()
-	return srv, nil
+	return srv, cancelInFlight, nil
 }

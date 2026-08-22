@@ -179,3 +179,21 @@ func TestCORS_PreflightAllowsCredentialHeaders(t *testing.T) {
 		assert.Contains(t, allowed, h, "credential header must survive preflight")
 	}
 }
+
+// Neither header is CORS-safelisted, so a browser client cannot read the
+// Retry-After it is told to honour, nor correlate X-Request-ID, without this.
+func TestCORS_ExposesRetryAfterAndRequestID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(CORS())
+	r.GET("/x", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "https://chat.example.com")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	exposed := w.Header().Get("Access-Control-Expose-Headers")
+	assert.Contains(t, exposed, "Retry-After")
+	assert.Contains(t, exposed, natsutil.RequestIDHeader)
+}
