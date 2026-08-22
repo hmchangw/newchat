@@ -81,7 +81,7 @@ Field notes:
 - **`timestamp`** is event publish time (UnixMilli); **`data.pushTime`** is the RFC3339 domain send time. They are distinct fields.
 - **`unreadCounts`** (optional) is per-recipient badge counts stamped at notify time — see § Badge counts below. Omitted entirely (not an empty object) when the badge phase is disabled or produced no counts for this batch.
 
-Operators: `notification_worker_mention_resolution_total{result="resolved|unresolved|failed"}` counts one point per looked-up token. `failed` is non-zero only when the users lookup itself errored or timed out, so alert on it; a rising `unresolved` ratio instead means senders are mentioning unknown accounts.
+Mention resolution emits no metric of its own. A lookup that errors or times out is reported by the `mention name lookup failed, body keeps raw mentions` warn line (trace-correlated, carries the requested and resolved counts); the message itself still records as `notification_worker_outcomes_total{result="sent"}` because the push is delivered with raw `@tokens`.
 
 ### Badge counts (`unreadCounts`)
 
