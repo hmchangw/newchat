@@ -10,6 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-22-subscription-mention-fanout-design.md`
 
+> **Note.** This plan was written before implementation. The review pass that
+> followed renamed the handler's publisher field, unified the two dedup-ID
+> formats into one `mention:{roomID}:{msgID}:{mentionedAtMillis}:{destSiteID}`,
+> made the per-site map lazily allocated, and gated the edit-path user lookup on
+> federation being enabled. The snippets below show the planned shape, not the
+> merged one — the spec and the code are authoritative.
+
 ## Global Constraints
 
 - Run `make` targets only — never raw `go` commands. `make lint`, `make test`, `make test SERVICE=<name>`, `make generate SERVICE=<name>`, `make test-integration SERVICE=<name>`, `make sast`.
@@ -36,7 +43,7 @@
 - Consumes: nothing.
 - Produces:
   - `model.InboxSubscriptionMention InboxEventType = "subscription_mention"`
-  - `model.SubscriptionMentionEvent{RoomID string; Accounts []string; MessageCreatedAt int64; Timestamp int64}`
+  - `model.SubscriptionMentionEvent{RoomID string; Accounts []string; MentionedAt int64; Timestamp int64}`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -57,7 +64,7 @@ func TestSubscriptionMentionEvent_RoundTrip(t *testing.T) {
 	src := &SubscriptionMentionEvent{
 		RoomID:           "room-1",
 		Accounts:         []string{"alice", "bob"},
-		MessageCreatedAt: 1755820800000,
+		MentionedAt: 1755820800000,
 		Timestamp:        1755820800123,
 	}
 	roundTrip(t, src, &SubscriptionMentionEvent{})
@@ -88,9 +95,9 @@ In `pkg/model/event.go`, next to the other inbox payload structs:
 type SubscriptionMentionEvent struct {
 	RoomID   string   `json:"roomId"   bson:"roomId"`
 	Accounts []string `json:"accounts" bson:"accounts"`
-	// MessageCreatedAt is the message's createdAt (editedAt on the edit path) in
-	// unix-millis; it feeds the destination's already-read guard.
-	MessageCreatedAt int64 `json:"messageCreatedAt" bson:"messageCreatedAt"`
+	// MentionedAt is when the mention appeared — createdAt, or editedAt when an
+	// edit added it — in unix-millis; it feeds the already-read guard.
+	MentionedAt int64 `json:"mentionedAt" bson:"mentionedAt"`
 	Timestamp        int64 `json:"timestamp"        bson:"timestamp"`
 }
 ```
@@ -150,7 +157,7 @@ func TestHandler_HandleSubscriptionMention(t *testing.T) {
 			name: "applies the badge to the destination accounts",
 			payload: model.SubscriptionMentionEvent{
 				RoomID: "room-1", Accounts: []string{"alice", "bob"},
-				MessageCreatedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
+				MentionedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
 			},
 			wantStore: true,
 		},
@@ -163,7 +170,7 @@ func TestHandler_HandleSubscriptionMention(t *testing.T) {
 			name: "store error propagates for redelivery",
 			payload: model.SubscriptionMentionEvent{
 				RoomID: "room-1", Accounts: []string{"alice"},
-				MessageCreatedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
+				MentionedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
 			},
 			storeErr:  errors.New("mongo down"),
 			wantStore: true,
@@ -244,7 +251,7 @@ func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.Inbo
 	if len(e.Accounts) == 0 {
 		return nil
 	}
-	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MessageCreatedAt).UTC()); err != nil {
+	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MentionedAt).UTC()); err != nil {
 		return fmt.Errorf("set subscription mentions in room %q: %w", e.RoomID, err)
 	}
 	return nil
@@ -430,14 +437,14 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 					subject: "chat.outbox.site-a.site-b.subscription_mention",
 					msgID:   "mention:room-1:msg-1:site-b",
 					event: model.SubscriptionMentionEvent{
-						RoomID: "room-1", Accounts: []string{"bob"}, MessageCreatedAt: msgTime.UnixMilli(),
+						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 				{
 					subject: "chat.outbox.site-a.site-c.subscription_mention",
 					msgID:   "mention:room-1:msg-1:site-c",
 					event: model.SubscriptionMentionEvent{
-						RoomID: "room-1", Accounts: []string{"carol"}, MessageCreatedAt: msgTime.UnixMilli(),
+						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 			},
@@ -509,7 +516,7 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 				assert.Equal(t, want.msgID, got[i].msgID)
 				assert.Equal(t, want.event.RoomID, got[i].event.RoomID)
 				assert.Equal(t, want.event.Accounts, got[i].event.Accounts)
-				assert.Equal(t, want.event.MessageCreatedAt, got[i].event.MessageCreatedAt)
+				assert.Equal(t, want.event.MentionedAt, got[i].event.MentionedAt)
 				assert.NotZero(t, got[i].event.Timestamp)
 			}
 		})
@@ -589,7 +596,7 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID, dedupPref
 		payload, err := sonic.Marshal(model.SubscriptionMentionEvent{
 			RoomID:           roomID,
 			Accounts:         accounts,
-			MessageCreatedAt: at.UnixMilli(),
+			MentionedAt: at.UnixMilli(),
 			Timestamp:        now,
 		})
 		if err != nil {
@@ -728,9 +735,9 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 	got := rec.sorted()
 	require.Len(t, got, 1)
 	assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
-	assert.Equal(t, fmt.Sprintf("mention-edit:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
+	assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
 	assert.Equal(t, []string{"bob"}, got[0].event.Accounts)
-	assert.Equal(t, editedAt.UnixMilli(), got[0].event.MessageCreatedAt)
+	assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
 }
 
 func TestHandler_HandleUpdated_NoMentionsSkipsLookup(t *testing.T) {
