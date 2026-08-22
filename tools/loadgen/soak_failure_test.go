@@ -728,18 +728,19 @@ func (v *fakeSoakFailureVerifier) Verify(
 }
 
 type stubSoakSearchIndexProbe struct {
-	result soakSearchIndexResult
-	err    error
-	settle time.Duration
-	calls  int
+	result  soakSearchIndexResult
+	err     error
+	queried bool
+	settle  time.Duration
+	calls   int
 }
 
 func (p *stubSoakSearchIndexProbe) Indexed(
 	context.Context,
 	*failureOperation,
-) (soakSearchIndexResult, error) {
+) (soakSearchIndexResult, bool, error) {
 	p.calls++
-	return p.result, p.err
+	return p.result, p.queried, p.err
 }
 
 func (p *stubSoakSearchIndexProbe) SettleBoundary(publishedAt time.Time) time.Time {

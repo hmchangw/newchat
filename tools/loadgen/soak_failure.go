@@ -651,7 +651,11 @@ type soakFailureRecipientFinalizer interface {
 // search index. Defined here rather than with the search reader so the
 // reconciler depends only on the question it asks.
 type soakFailureSearchIndexProbe interface {
-	Indexed(context.Context, *failureOperation) (soakSearchIndexResult, error)
+	// Indexed reports the verdict and whether it issued a query. Several paths
+	// answer from local state alone — before the settle window, or when the
+	// operation or catalogue cannot supply a term — and those spend no read
+	// slot, so the caller must not be told they did.
+	Indexed(context.Context, *failureOperation) (soakSearchIndexResult, bool, error)
 	// SettleBoundary is when a too-early operation can first produce a usable
 	// answer, so it is rescheduled there rather than polled meanwhile.
 	SettleBoundary(publishedAt time.Time) time.Time
@@ -831,10 +835,11 @@ func (r *soakFailureReconciler) observeSearchIndex(
 ) (bool, error) {
 	result := soakSearchIndexUnknown
 	var probeErr error
-	// Without a probe the claim reaches no service, so it spends no read slot.
-	probed := r.searchIndex != nil
-	if probed {
-		result, probeErr = r.searchIndex.Indexed(ctx, operation)
+	// Only a probe that issued a query reached a service, so only that one
+	// spends a read slot.
+	probed := false
+	if r.searchIndex != nil {
+		result, probed, probeErr = r.searchIndex.Indexed(ctx, operation)
 	}
 	if probeErr == nil && result == soakSearchIndexFound {
 		return probed, r.recordObserved(
