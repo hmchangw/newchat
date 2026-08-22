@@ -5,6 +5,7 @@
 bin/
 demo
 /seed-sample-data
+/del-name-audit
 /loadgen
 *.exe
 *.exe~

@@ -516,3 +516,13 @@ seed-reset:
 
 seed-dry-run:
 	go run ./tools/seed-sample-data --dry-run
+
+# --- Del- name audit ----------------------------------------------------------
+# Read-only probe: does every subscription of a soft-deleted ("Del-") room carry
+# the marker on its own denormalized name? Answers whether user-service can drop
+# the rooms $lookup from the subscription count/list paths. Exits 1 when the data
+# does not support the rewrite. Point MONGO_URI/MONGO_DB at the target deployment.
+audit-del-names:
+	go run ./tools/del-name-audit $(AUDIT_FLAGS)
+
+.PHONY: audit-del-names

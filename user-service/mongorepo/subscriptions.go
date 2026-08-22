@@ -73,10 +73,10 @@ func (r *SubscriptionRepo) EnsureIndexes(ctx context.Context) error {
 }
 
 // roomsEnrichStages builds the shared rooms-join + enrichment. When dropDeleted is true
-// it drops local soft-deleted (^Del-) rooms — the list, count, and active paths all
-// pass true. A missing/cross-site room has no room.name so it is kept either way. The
-// rooms-type activity window is applied separately by the caller on the room's
-// lastMsgAt (surfaced here).
+// it drops local soft-deleted (^Del-) rooms — only the list path passes true; the count
+// and active paths filter on the subscription's own name instead. A missing/cross-site
+// room has no room.name so it is kept either way. The rooms-type activity window is
+// applied separately by the caller on the room's lastMsgAt (surfaced here).
 func roomsEnrichStages(dropDeleted bool) bson.A {
 	stages := bson.A{
 		// Project only the room fields this enrichment surfaces (not the whole room doc) so
@@ -293,10 +293,20 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 // Filters on the subscription's own origin field (reliable cross-site — a remote room
 // has no local doc); enrichment no longer overwrites it, so this is position-independent.
 func (r *SubscriptionRepo) originFilterStage(account string) bson.A {
-	if r.showTeamsRoom || r.showTeamsAccounts[account] {
+	origin := r.originFilter(account)
+	if origin == nil {
 		return bson.A{}
 	}
-	return bson.A{bson.M{"$match": bson.M{"origin": bson.M{"$ne": model.OriginTeams}}}}
+	return bson.A{bson.M{"$match": bson.M{"origin": origin}}}
+}
+
+// originFilter is the origin predicate alone, for callers building a find filter
+// rather than a pipeline; nil means "no restriction".
+func (r *SubscriptionRepo) originFilter(account string) bson.M {
+	if r.showTeamsRoom || r.showTeamsAccounts[account] {
+		return nil
+	}
+	return bson.M{"$ne": model.OriginTeams}
 }
 
 // sortStages orders rows by room activity (lastMsgAt) desc then name asc. In the
@@ -436,38 +446,47 @@ func activeSubscriptionFilter(account string) bson.M {
 		// a client folding its badge from the list could never reconcile.
 		// Missing field (legacy docs) and open:true both pass, as in the list.
 		"open": bson.M{"$ne": false},
+		// Soft-deleted (^Del-) rooms, read from the subscription's OWN denormalized
+		// name rather than through a rooms $lookup. UpdateSubscriptionNamesForRoom
+		// keeps that copy in step (room-worker for in-stack renames, inbox-worker for
+		// oplog and federated ones), so the join bought nothing the sub doesn't already
+		// carry — see tools/del-name-audit for the data check behind this. A regex
+		// literal under $not also matches docs with no name at all, so a nameless sub
+		// still counts, as it did when the join left room.name null.
+		"name": bson.M{"$not": bson.Regex{Pattern: deletedRoomNameRegex}},
 		"$or": bson.A{
 			bson.M{"roomType": bson.M{"$in": bson.A{"dm", "channel"}}},
 			bson.M{"roomType": "botDM", "isSubscribed": true},
 		}}
 }
 
-// CountActiveSubscriptions counts the deleted-filtered active set via $count over the enriched pipeline (CountDocuments cannot see the join).
+// countActiveFilter is the complete find filter behind CountActiveSubscriptions:
+// the active set plus the Teams-origin exclusion, as one flat filter so the count
+// runs as CountDocuments instead of an aggregation. The returned map is freshly
+// built and safe for the caller to mutate.
+func (r *SubscriptionRepo) countActiveFilter(account string) bson.M {
+	filter := activeSubscriptionFilter(account)
+	if origin := r.originFilter(account); origin != nil {
+		filter["origin"] = origin
+	}
+	return filter
+}
+
+// CountActiveSubscriptions counts the deleted-filtered active set. Every predicate
+// now lives on the subscription itself, so this is a plain CountDocuments — no rooms
+// join, and no per-row enrichment materialized only to be discarded by $count.
 func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account string) (int, error) {
-	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
-	pipeline = append(pipeline, r.originFilterStage(account)...)
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
-	pipeline = append(pipeline, bson.M{"$count": "n"})
-	cur, err := r.subscriptionsSecondary.Raw().Aggregate(ctx, pipeline)
+	n, err := r.subscriptionsSecondary.Raw().CountDocuments(ctx, r.countActiveFilter(account))
 	if err != nil {
 		return 0, fmt.Errorf("count active subscriptions: %w", err)
 	}
-	var out []struct {
-		N int `bson:"n"`
-	}
-	if err := cur.All(ctx, &out); err != nil {
-		return 0, fmt.Errorf("decode active subscription count: %w", err)
-	}
-	if len(out) == 0 {
-		return 0, nil
-	}
-	return out[0].N, nil
+	return int(n), nil
 }
 
 // GetActiveSubscriptions returns the active set used by the unread count,
 // capped by limit. The cap runs before the rooms join so $lookup touches
-// ≤limit rows; the deleted-room filter runs after it, so a capped page can
-// come back slightly short — tolerable for the unread count, its only consumer.
+// ≤limit rows. The deleted-room filter now runs in the leading $match, ahead of
+// the cap, so a capped page is exact — it no longer comes back short.
 func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error) {
 	pipeline := bson.A{bson.M{"$match": activeSubscriptionFilter(account)}}
 	pipeline = append(pipeline, r.originFilterStage(account)...)
@@ -475,7 +494,10 @@ func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account s
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	// dropDeleted=false: activeSubscriptionFilter already excluded ^Del- rooms by
+	// the subscription's own name, so re-running the regex over the joined room
+	// would only re-derive the same answer.
+	pipeline = append(pipeline, roomsEnrichStages(false)...)
 	return r.enrichedSecondary.Aggregate(ctx, pipeline)
 }
 

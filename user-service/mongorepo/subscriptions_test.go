@@ -689,14 +689,21 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		// muted subscribed botDM (excluded — its room r-mutedbot is missing, dropped by the deleted-filter)
 		bson.M{"_id": "mu-bot", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "muted.bot", "roomId": "r-mutedbot",
 			"roomType": "botDM", "siteId": "site-a", "isSubscribed": true, "muted": true},
-		// active by type, but local room is soft-deleted (^Del-) — excluded by room filter
-		bson.M{"_id": "del-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Gone", "roomId": "r-del",
+		// active by type, but the room is soft-deleted (^Del-) — the rename fanned out
+		// onto the sub's own name, which is what the filter now reads.
+		bson.M{"_id": "del-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Del-Gone", "roomId": "r-del",
 			"roomType": "channel", "siteId": "site-a"},
-		// active by type, local room is missing — now KEPT (deleted-filter is room.name-based; missing room has no name, passes $not-regex)
+		// active by type, local room is missing — KEPT (a live sub name passes the filter
+		// whether or not a room doc exists)
 		bson.M{"_id": "gone-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Vanished", "roomId": "r-missing",
 			"roomType": "channel", "siteId": "site-a"},
-		// cross-site sub: no local room doc, kept by the room filter
+		// cross-site sub with a live name: no local room doc, kept
 		bson.M{"_id": "x-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Remote", "roomId": "rx",
+			"roomType": "channel", "siteId": "site-b"},
+		// cross-site sub whose room was soft-deleted at its home site: the rename
+		// federates onto the local sub name, so it is now excluded. The rooms $lookup
+		// could never see this — it had no local room doc to join.
+		bson.M{"_id": "x-del-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Del-Remote", "roomId": "rx-del",
 			"roomType": "channel", "siteId": "site-b"},
 		// closed by the user (open:false) — excluded, matching subscription.list
 		bson.M{"_id": "closed-ch", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Closed", "roomId": "r-closed",
@@ -706,10 +713,38 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 			"roomType": "channel", "siteId": "site-a", "open": true},
 	)
 
-	t.Run("count excludes unsubscribed, muted, and Del- rooms; keeps missing-room and cross-site", func(t *testing.T) {
+	t.Run("count excludes unsubscribed, muted, and Del- named subs; keeps missing-room and cross-site", func(t *testing.T) {
 		n, err := r.CountActiveSubscriptions(ctx, "alice")
 		require.NoError(t, err)
-		assert.Equal(t, 6, n) // a-dm, a-ch, a-bot, x-ch, gone-ch, open-ch (muted m-ch excluded; closed-ch excluded; gone-ch kept: missing room passes $not-regex deleted-filter)
+		// a-dm, a-ch, a-bot, x-ch, gone-ch, open-ch. Excluded: muted m-ch, closed-ch,
+		// unsubscribed u-bot, muted mu-bot, Del--named del-ch and x-del-ch. gone-ch is
+		// kept — a live name passes regardless of whether a room doc exists.
+		assert.Equal(t, 6, n)
+	})
+
+	t.Run("a subscription with no name at all still counts", func(t *testing.T) {
+		// $not with a regex literal also matches documents that do not contain the
+		// field. That is what preserves the old behavior: when the join found no room,
+		// room.name was null and the $not-regex kept the row. Defensive — a nameless
+		// sub should not exist — but the filter's semantics rest on it.
+		seed(t, db, "subscriptions",
+			bson.M{"_id": "nameless-ch", "u": bson.M{"_id": "u-dave", "account": "dave"},
+				"roomId": "r-nameless", "roomType": "channel", "siteId": "site-a"})
+
+		n, err := r.CountActiveSubscriptions(ctx, "dave")
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+	})
+
+	t.Run("count reads the sub's own name, so a cross-site Del- room is excluded too", func(t *testing.T) {
+		subs, err := r.GetActiveSubscriptions(ctx, "alice", 100)
+		require.NoError(t, err)
+		got := map[string]bool{}
+		for _, sub := range subs {
+			got[sub.ID] = true
+		}
+		assert.False(t, got["x-del-ch"], "a federated soft-delete must drop the cross-site sub")
+		assert.True(t, got["x-ch"], "a live cross-site sub is unaffected")
 	})
 
 	t.Run("closed rooms are excluded from both count and get, matching subscription.list", func(t *testing.T) {
@@ -735,20 +770,19 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		assert.True(t, got["a-ch"])
 		assert.True(t, got["a-bot"])
 		assert.True(t, got["x-ch"], "cross-site sub kept despite no local room")
-		assert.True(t, got["gone-ch"], "missing local room now kept (empty enrichment) — siteID filter removed, deleted-filter is room.name-based")
+		assert.True(t, got["gone-ch"], "missing local room kept (empty enrichment) — the deleted-filter reads the sub's own name")
 		assert.False(t, got["m-ch"], "muted channel excluded from the active/count set")
 		assert.False(t, got["u-bot"])
 		assert.False(t, got["mu-bot"], "muted botDM excluded by activeSubscriptionFilter before room lookup")
-		assert.False(t, got["del-ch"], "local sub to a ^Del- room must be filtered out")
+		assert.False(t, got["del-ch"], "a sub carrying the ^Del- name must be filtered out")
 	})
 
-	t.Run("limit caps active set", func(t *testing.T) {
-		// The cap runs BEFORE the rooms join, so a capped page that happens to
-		// include a Del- room can come back short — assert ≤ limit, not == limit.
+	t.Run("limit caps active set exactly", func(t *testing.T) {
+		// The deleted-room filter moved into the leading $match, ahead of the cap, so
+		// nothing downstream can drop a capped row — the page is exactly the cap.
 		subs, err := r.GetActiveSubscriptions(ctx, "alice", 2)
 		require.NoError(t, err)
-		assert.NotEmpty(t, subs)
-		assert.LessOrEqual(t, len(subs), 2)
+		assert.Len(t, subs, 2)
 	})
 
 	t.Run("zero limit does not error (no $limit:0 stage)", func(t *testing.T) {
