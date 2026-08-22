@@ -74,11 +74,22 @@ but it must not carry `run_id`.
 
 This list is enforced, not advisory: `.semgrep/metrics.yml`'s
 `metrics-no-unbounded-label` rule fails CI on an attribute key matching any of
-these prefixes, with or without an `Id`/`_id`/`UID` tail, plus anything ending
-in `Subject`. `run_info` is deliberately outside the pattern. A key the rule
-cannot recognise as bounded but which genuinely is takes a `nosemgrep` with a
-justification naming what enforces the boundedness — a claim with nothing behind
-it is how the `_INBOX` leak survived review once already.
+these prefixes, with or without an `Id`/`_id`/`UID` tail; anything ending in
+`Subject`; and raw error text or stack traces (`err`, `error`, `errorText`,
+`error_message`, `rawError`, `stackTrace`, and their variants). Bounded
+*classifications* of an error stay legal by construction — `error_type`,
+`errorType`, `error_class`, `reason`, `outcome`, `result` and `status` are all
+outside the pattern — as does `run_info`.
+
+A key the rule cannot recognise as bounded but which genuinely is takes a
+`nosemgrep` with a justification naming *what enforces* the boundedness. A claim
+with nothing behind it is how the `_INBOX` leak survived review once already.
+
+The rule has no fixture suite yet; it is verified by hand against a probe file
+when changed. Wiring `semgrep --test` and back-filling positive/negative
+fixtures for all six rule files in `.semgrep/` is worth doing and is deliberately
+not scoped here, since it needs a Makefile target and a CI step that would apply
+to every rule, not just this one.
 
 ## 3. Outcome Vocabularies
 
