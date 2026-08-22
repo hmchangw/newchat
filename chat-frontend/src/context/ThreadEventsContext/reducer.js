@@ -75,7 +75,17 @@ export function threadEventsReducer(state, action) {
       if (state.activeParent.messageId !== action.parentId) return state
       const msg = action.message
       if (!msg?.id) return state
-      if (state.messages.some((m) => m.id === msg.id)) return state
+      const idx = state.messages.findIndex((m) => m.id === msg.id)
+      if (idx >= 0) {
+        // Both lanes carry this reply, and the view lane's copy is a placeholder
+        // when the room key had not arrived. Plain id dedup would let whichever
+        // landed first win, so let a real body replace a placeholder — never the
+        // reverse, and never a plain duplicate.
+        if (!state.messages[idx].encrypted || msg.encrypted) return state
+        const messages = [...state.messages]
+        messages[idx] = msg
+        return { ...state, messages }
+      }
       return { ...state, messages: [...state.messages, msg] }
     }
     case 'REPLY_SEND_FAILED':

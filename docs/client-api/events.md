@@ -566,10 +566,16 @@ published here, rather than a plaintext body reaching the room namespace.
 **Client handling.** Subscribe *before* calling `msg.thread`, or a reply published in the gap is
 lost. Unsubscribe on panel close, on a switch to another parent, and on teardown.
 
-A follower with the panel open receives every event twice, and the copies are identical: suppress a
-`new_thread_message` whose ID is already rendered, but apply `message_edited` / `message_deleted`
-unconditionally — deduplicating those by message ID drops a later edit of an already-seen reply,
-and both are idempotent anyway.
+A follower with the panel open receives every event twice. The two are the same *logical* event,
+not the same payload — in an encrypted channel this lane carries `encryptedMessage` where the
+per-subscriber lane carries a plaintext `message` — so normalize to the decrypted body before
+comparing. Suppress a `new_thread_message` whose ID is already rendered, but apply
+`message_edited` / `message_deleted` unconditionally: deduplicating those by message ID drops a
+later edit of an already-seen reply, and both are idempotent anyway.
+
+If one lane's copy was rendered as a placeholder because the room key had not arrived, let the
+other lane's decrypted copy of the same ID replace it — never the reverse. Deduplicating on ID
+alone pins whichever arrived first, which can leave a placeholder standing over a readable body.
 
 Reject a `message_edited` whose `editedAt` is at or before the applied one — a redelivered older
 edit would otherwise overwrite a newer one. When an `encryptedMessage` cannot be opened because the

@@ -293,3 +293,35 @@ describe('threadEventsReducer duplicate-lane delivery', () => {
     expect(threadEventsReducer(once, del)).toBe(once)
   })
 })
+
+// The view lane may render a placeholder when the room key has not arrived while
+// the per-subscriber lane carries the real body under the same id. Deduping on
+// id alone lets whichever lands first win.
+describe('threadEventsReducer placeholder reconciliation', () => {
+  const opened = threadEventsReducer(initialState, {
+    type: 'OPEN_THREAD',
+    parent: { roomId: 'r1', siteId: 's1', messageId: 'p1', createdAtMs: 1000 },
+  })
+  const placeholder = { id: 'm1', content: '[encrypted message]', encrypted: true }
+  const real = { id: 'm1', content: 'the real body' }
+  const recv = (message) => ({ type: 'THREAD_REPLY_RECEIVED', parentId: 'p1', message })
+
+  it('replaces a placeholder with the real body', () => {
+    const withPlaceholder = threadEventsReducer(opened, recv(placeholder))
+    const resolved = threadEventsReducer(withPlaceholder, recv(real))
+    expect(resolved.messages).toHaveLength(1)
+    expect(resolved.messages[0].content).toBe('the real body')
+    expect(resolved.messages[0].encrypted).toBeUndefined()
+  })
+
+  it('does not let a placeholder overwrite a body already rendered', () => {
+    const withReal = threadEventsReducer(opened, recv(real))
+    const after = threadEventsReducer(withReal, recv(placeholder))
+    expect(after).toBe(withReal)
+  })
+
+  it('still drops a plain duplicate', () => {
+    const once = threadEventsReducer(opened, recv(real))
+    expect(threadEventsReducer(once, recv(real))).toBe(once)
+  })
+})
