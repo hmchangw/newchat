@@ -177,7 +177,15 @@ func (w *gzipResponseWriter) close() {
 	}
 }
 
+// Flush commits first when the body is still buffered: flushing straight through
+// would let gin write its default 200 and strand both the handler's real status
+// and the buffered prefix.
 func (w *gzipResponseWriter) Flush() {
+	if w.gz == nil && !w.plain && !w.closed {
+		if err := w.commit(); err != nil {
+			return
+		}
+	}
 	if w.gz != nil {
 		_ = w.gz.Flush()
 	}

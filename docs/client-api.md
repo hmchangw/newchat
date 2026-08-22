@@ -5319,6 +5319,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
 |-----------|--------|-------|
 | Unknown `type` value | `bad_request` | `{ "code": "bad_request", "error": "unknown subscription type" }` |
 | Negative `updatedWithinDays` | `bad_request` | `{ "code": "bad_request", "error": "updatedWithinDays must be non-negative" }` |
+| Server exceeded its own handler budget | `unavailable` | Enrichment did not finish in time. Retryable — the server fails rather than return a page whose rooms are indistinguishable from deleted ones. |
 | Internal failure | `internal` | — |
 
 ---
@@ -8624,6 +8625,7 @@ Same envelope as every other endpoint (see [§6](#6-error-envelope-reference)).
 | Expired SSO token | `401` | `unauthenticated` | `sso_token_expired` |
 | Credential type not configured on this deployment | `503` | `unavailable` | `upstream_unavailable` |
 | Pod at its in-flight capacity | `429` | `too_many_requests` | `overloaded` |
+| Server exceeded its own handler budget | `503` | `unavailable` | — |
 | Internal failure | `500` | `internal` | — |
 
 ##### 429 — server at capacity

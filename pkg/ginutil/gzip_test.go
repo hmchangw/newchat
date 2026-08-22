@@ -221,3 +221,36 @@ func TestGzip_PoolSurvivesPanicMidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 	assert.Equal(t, body, gunzip(t, w.Body.Bytes()), "a later request must get a clean writer")
 }
+
+// A Flush while the body is still buffered must not let gin commit its default
+// 200: the handler's real status and the buffered prefix both have to survive.
+func TestGzip_FlushBelowThresholdPreservesStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(Gzip(1024))
+	r.GET("/x", func(c *gin.Context) {
+		c.Status(http.StatusServiceUnavailable)
+		_, _ = c.Writer.WriteString("short")
+		c.Writer.Flush()
+	})
+	w := doGet(r, "gzip")
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "the handler's status must survive a mid-body flush")
+	assert.Contains(t, w.Body.String(), "short", "the buffered prefix must not be stranded")
+}
+
+func TestGzip_FlushAfterThresholdStreams(t *testing.T) {
+	body := strings.Repeat("a", 4096)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(Gzip(1024))
+	r.GET("/x", func(c *gin.Context) {
+		_, _ = c.Writer.WriteString(body)
+		c.Writer.Flush()
+		_, _ = c.Writer.WriteString(body)
+	})
+	w := doGet(r, "gzip")
+
+	assert.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
+	assert.Equal(t, body+body, gunzip(t, w.Body.Bytes()), "a flush must not truncate the stream")
+}

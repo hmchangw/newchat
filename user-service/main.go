@@ -256,9 +256,16 @@ func main() {
 
 	slog.Info("user-service running", "site", cfg.SiteID, "http_port", cfg.HTTP.Port, "health_addr", cfg.HealthAddr)
 
-	// HTTP drains first so in-flight requests can still reach NATS and Mongo.
+	// HTTP drains first so in-flight requests can still reach NATS and Mongo, but
+	// bounded: shutdown.Wait shares one budget across every step, and a handler may
+	// run for HTTP_HANDLER_TIMEOUT, so an unbounded drain would skip the NATS drain
+	// and the database disconnects entirely.
 	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return httpSrv.Shutdown(ctx) },
+		func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, httpDrainTimeout)
+			defer cancel()
+			return httpSrv.Shutdown(ctx)
+		},
 		healthStop,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
@@ -273,6 +280,10 @@ func main() {
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }
+
+// httpDrainTimeout caps the HTTP drain so the remaining shutdown steps keep most
+// of shutdown.Wait's shared 25s budget.
+const httpDrainTimeout = 10 * time.Second
 
 // startHTTPServer builds the Gin engine and serves it in the background. It
 // returns once the listener is bound, so a port clash fails startup rather than

@@ -1253,3 +1253,41 @@ func TestListSubscriptions_NATSHandlerUsesServiceBounds(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(40), got.Limit, "SUBSCRIPTION_DEFAULT_LIMIT")
 }
+
+// A deadline that fires during enrichment must fail the request rather than
+// return a page whose rooms are indistinguishable from deleted ones.
+func TestListSubscriptionsFor_DeadlineDuringEnrichmentFails(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{
+			Data: []model.EnrichedSubscription{
+				{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-b"}},
+			},
+		}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := svc.ListSubscriptionsFor(ctx, "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
+
+	requireCode(t, err, errcode.CodeUnavailable)
+}
+
+// The happy path must not be tripped by the deadline guard.
+func TestListSubscriptionsFor_LiveContextSucceeds(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{
+			Data: []model.EnrichedSubscription{
+				{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a"}},
+			},
+		}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	resp, err := svc.ListSubscriptionsFor(context.Background(), "alice",
+		models.SubscriptionListRequest{Type: "current"}, 40, 400)
+
+	require.NoError(t, err)
+	assert.Len(t, resp.Subscriptions, 1)
+}

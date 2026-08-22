@@ -54,6 +54,14 @@ func (s *UserService) ListSubscriptionsFor(ctx context.Context, account string, 
 	}
 	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
 	res.Data = s.enrichWithRoomInfoAndLastMsg(ctx, account, res.Data, true, withLastMsg)
+	// Enrichment degrades silently, which is right for a failed RPC but wrong for a
+	// deadline: the page would come back 200 with rooms indistinguishable from
+	// deleted ones. Fail instead, so the client retries rather than caches a
+	// half-empty sidebar.
+	if ctx.Err() != nil {
+		return nil, errcode.Unavailable("subscription list timed out, please retry",
+			errcode.WithCause(ctx.Err()))
+	}
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: s.buildListItems(ctx, account, res.Data),
 		HasMore:       res.HasMore,
