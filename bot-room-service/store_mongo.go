@@ -70,17 +70,18 @@ func (s *storeMongo) InsertRoom(ctx context.Context, room *Room) error {
 
 func (s *storeMongo) FindRoom(ctx context.Context, roomID string) (*Room, error) {
 	var doc struct {
-		ID           string    `bson:"_id"`
-		Type         string    `bson:"t"`
-		Name         string    `bson:"name"`
-		Topic        string    `bson:"topic"`
-		SiteID       string    `bson:"siteId"`
-		CreatedAt    time.Time `bson:"createdAt"`
-		CreatedByBot string    `bson:"createdByBot"`
+		ID           string     `bson:"_id"`
+		Type         string     `bson:"t"`
+		Name         string     `bson:"name"`
+		Topic        string     `bson:"topic"`
+		SiteID       string     `bson:"siteId"`
+		LastMsgAt    *time.Time `bson:"lastMsgAt"`
+		CreatedAt    time.Time  `bson:"createdAt"`
+		CreatedByBot string     `bson:"createdByBot"`
 	}
 	err := s.rooms.FindOne(ctx,
 		bson.M{"_id": roomID},
-		options.FindOne().SetProjection(bson.M{"_id": 1, "t": 1, "name": 1, "topic": 1, "siteId": 1, "createdAt": 1, "createdByBot": 1}),
+		options.FindOne().SetProjection(bson.M{"_id": 1, "t": 1, "name": 1, "topic": 1, "siteId": 1, "lastMsgAt": 1, "createdAt": 1, "createdByBot": 1}),
 	).Decode(&doc)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
@@ -90,7 +91,7 @@ func (s *storeMongo) FindRoom(ctx context.Context, roomID string) (*Room, error)
 	}
 	return &Room{
 		ID: doc.ID, Type: doc.Type, Name: doc.Name, Topic: doc.Topic,
-		SiteID: doc.SiteID, CreatedAt: doc.CreatedAt, CreatedByBot: doc.CreatedByBot,
+		SiteID: doc.SiteID, LastMsgAt: doc.LastMsgAt, CreatedAt: doc.CreatedAt, CreatedByBot: doc.CreatedByBot,
 	}, nil
 }
 

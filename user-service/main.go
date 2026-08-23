@@ -161,7 +161,7 @@ func main() {
 	readFromSecondary := mongorepo.WithReadPreference(readPref)
 
 	db := mongoClient.Database(cfg.Mongo.DB)
-	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID, readFromSecondary, mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts))
+	subRepo := mongorepo.NewSubscriptionRepo(db, readFromSecondary, mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts))
 	userRepo := mongorepo.NewUserRepo(db, readFromSecondary)
 	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
@@ -233,7 +233,7 @@ func main() {
 	// cannot be reached by a write path.
 	httpDB := httpMongoClient.Database(cfg.Mongo.DB)
 	httpSvc := service.New(
-		mongorepo.NewSubscriptionRepo(httpDB, cfg.SiteID, readFromSecondary,
+		mongorepo.NewSubscriptionRepo(httpDB, readFromSecondary,
 			mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts)),
 		mongorepo.NewUserRepo(httpDB, readFromSecondary), mongorepo.NewAppRepo(httpDB, readFromSecondary), threadSubRepo,
 		roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc),

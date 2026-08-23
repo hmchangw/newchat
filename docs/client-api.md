@@ -967,7 +967,7 @@ it is absent on every other action.
 | `name` | string | Display name per room type (see above). |
 | `roles` | string[] | The user's roles in the room (e.g. `["member"]`, `["owner"]`). |
 | `joinedAt` | RFC3339 timestamp | When the user joined. |
-| `hasMention` | boolean | Whether the user has an unread mention. Authoritative subscription state maintained by the write path (set when the user is @-mentioned, cleared on read); **not** modified by read enrichment. |
+| `hasMention` | boolean | Whether the user has an unread mention. Authoritative subscription state maintained by the write path (set when the user is @-mentioned, cleared on read); **not** modified by read enrichment. For a mentionee homed on another site, `broadcast-worker` also relays a cross-site `subscription_mention` event so the badge lands on the site that serves their `subscription.list`. |
 | `hasUnread` | boolean | Whether the room has unread messages — computed at read time by comparing the room's `lastMsgAt` to the subscription's `lastSeenAt` (not persisted). |
 | `hasGroupMention` | boolean | Whether the room has an unread @all/@channel mention — computed at read time by comparing the room's `lastMentionAllAt` to the subscription's `lastSeenAt` (not persisted). |
 | `alert` | boolean | Whether the room has an unread alert for the user. Authoritative subscription state maintained by the write path (set on new message, cleared on read receipt); **not** modified by read enrichment. |
@@ -1432,6 +1432,8 @@ For a **botDM**, the human member's event carries `appInfo` instead (the bot's o
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 
 The event carries no separate account list — member identities are in `members`. When new members actually join (or a new org is added), a `members_added` system message also flows through the message pipeline and arrives as a `new_message` room event; a pure org→individual upgrade posts no such message.
+
+The cross-site INBOX copy of this event additionally carries `accounts` and `lastMsgAt` (the room's activity position, epoch ms). Both are server-internal federation fields, stripped from the client-facing copy documented above — clients never receive them.
 
 > [!NOTE]
 > **No-op:** when the request changes nothing — every requested account already subscribed, no org member upgraded to an individual membership, and every requested org already present — the requester still gets an `AsyncJobResult` with `status: "ok"` but **no** `subscription.update` / `member_added` events follow. In particular, **re-adding an already-present org is a no-op**. An **org→individual upgrade** (an existing org member added individually) is **not** a no-op: `member_added` fires with that individual in `members`, but no `members_added` system message is posted (no one newly joined).
@@ -5199,11 +5201,9 @@ Results are **paginated** by `offset`/`limit` (offset-based): the server returns
 <a id="enrichment"></a>
 **Enrichment behavior** (shared by `subscription.list`, `subscription.getChannels`, `subscription.getDM`, `subscription.getByRoomID`):
 - Room-derived fields are returned under the nested `room` object ([SubscriptionRoom](#subscriptionroom)): **local** rows from the Mongo `$lookup` baseline (no RPC), **cross-site** rows from room-service's per-site `GetRoomsInfo` RPC. The subscription's own fields are never overwritten by room data.
-- `alert` and `hasMention` are **subscription** state, not room state: they are returned as stored on the subscription (maintained by the write path — `message-worker` sets `hasMention` when the user is @-mentioned, read receipts clear `alert`) and are **never** overwritten or recomputed by enrichment.
+- `alert` and `hasMention` are **subscription** state, not room state: they are returned as stored on the subscription (maintained by the write path — `broadcast-worker` sets `hasMention` when the user is @-mentioned, read receipts clear `alert`) and are **never** overwritten or recomputed by enrichment.
 - `room.privateKey` / `room.keyVersion` deliver the room's current E2E key to the member when the room has one (the initial key bootstrap on (re)connect; see §5). Both fields are omitted for rooms with no key.
-- Soft-deleted rooms (a `Del-` name prefix) are treated **identically whether the room is local or cross-site**, but differ by endpoint shape:
-  - **List paths** (`subscription.list`, `subscription.getChannels`) and `subscription.count`: the subscription is **dropped**. Local rooms are filtered in the Mongo query; cross-site rooms are dropped after the per-site `GetRoomsInfo` lookup reveals the `Del-` name — this happens post-pagination, so a page can be shorter than `limit` (`hasMore` is computed from the database page, before the cross-site drop).
-  - **Single-item lookups** (`subscription.getDM`, `subscription.getByRoomID`): the subscription is **kept with no `room` object** — the row is returned so the caller knows the subscription exists, but the deleted room is omitted.
+- **Room names carry no special meaning.** No endpoint filters, drops, or suppresses a subscription based on its room's name — the `Del-` prefix that legacy soft-deletes used is not interpreted anywhere, so a room named `Del-anything` is returned like any other. Enrichment only adds: every subscription a query matches is returned, so a `subscription.list` page is never shortened after pagination — it is short only when the query itself matched fewer rows than `limit`.
 - **Local** rows carry the full room object (metadata + E2E key) from the `$lookup` baseline. **Cross-site** rows are fetched per remote site in parallel; if a site's RPC fails or a room isn't found, those rows are returned with **no `room` object** (the field is omitted) — the subscription still carries its own top-level `siteId`. `alert` and `hasMention` are unaffected (they come from the subscription, not the RPC).
 - **Teams-migrated rooms** (`room.origin == "teams"`, server-side only — not sent on the wire): excluded from `subscription.list`/`subscription.count` when the server's `SHOW_TEAMS_ROOM` env is `false` (the default); included when `true`, **or** when the requesting account is listed in `SHOW_TEAMS_ROOM_ACCOUNTS` (a comma-separated per-account allowlist). Reversible read-time filter, no data change.
 
@@ -5538,7 +5538,7 @@ Same shape as `subscription.list` — a (here, at most one) list:
 
 Returns the count of active subscriptions, optionally filtered to unread rooms only.
 
-**Active set:** an active subscription is a non-muted DM or channel, **or** a botDM that is both non-muted **and** subscribed (`isSubscribed: true`). Unsubscribed botDMs and muted rooms of any type are excluded from the count. Rooms that have been soft-deleted (renamed with a `Del-` prefix) are also excluded.
+**Active set:** an active subscription is a non-muted, **open** DM or channel, **or** a botDM that is non-muted, open **and** subscribed (`isSubscribed: true`). Excluded from the count: unsubscribed botDMs, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. The count reads subscription state only — it consults no room document, and no room name is filtered.
 
 ##### Request body
 

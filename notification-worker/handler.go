@@ -433,8 +433,8 @@ func (h *Handler) resolveBody(ctx context.Context, content string, parsed mentio
 			}
 			resolved, err := h.deps.MentionNames.Resolve(ctx, lookup)
 			names = resolved
-			h.recordMentionResults(ctx, lookup, resolved, err)
 			if err != nil {
+				// Not counted in notificationMetrics: the warn line is the signal.
 				slog.WarnContext(ctx, "mention name lookup failed, body keeps raw mentions",
 					"error", err, "mentions", len(lookup), "resolved", len(resolved),
 					"request_id", natsutil.RequestIDFromContext(ctx))
@@ -442,26 +442,6 @@ func (h *Handler) resolveBody(ctx context.Context, content string, parsed mentio
 		}
 	}
 	return mention.ReplaceAccounts(content, names)
-}
-
-// recordMentionResults partitions the looked-up tokens across the three
-// mentionResult buckets. On a failed lookup the unresolved remainder is
-// attributed to `failed` rather than `unresolved`, so alerting on `failed`
-// separates an outage from users simply mentioning unknown accounts.
-func (h *Handler) recordMentionResults(ctx context.Context, lookup []string, resolved map[string]string, err error) {
-	hits := 0
-	for _, account := range lookup {
-		if resolved[account] != "" {
-			hits++
-		}
-	}
-	h.metrics.RecordMentions(ctx, mentionResolved, hits)
-	remainder := len(lookup) - hits
-	if err != nil {
-		h.metrics.RecordMentions(ctx, mentionFailed, remainder)
-		return
-	}
-	h.metrics.RecordMentions(ctx, mentionUnresolved, remainder)
 }
 
 // resolveTitle returns the room name when present, else the sender's account (legacy rule).

@@ -309,6 +309,20 @@ func InboxExternalAll(siteID string) string {
 	return fmt.Sprintf("chat.inbox.%s.external.>", siteID)
 }
 
+// RoomActivity is the CORE-NATS subject carrying a remote room's activity
+// position to a destination site: `chat.roomactivity.{destSiteID}`.
+//
+// Deliberately outside `chat.inbox.>` so it is never captured by the INBOX
+// JetStream stream. The payload is a decorative ordering hint — coalesced,
+// idempotent, and applied under a $max guard — so it needs neither persistence
+// nor ordering, and putting it on INBOX would make a high-rate signal compete
+// for retention and ack budget with membership events that do need both.
+// Interest-routed across the supercluster: a site with no subscriber simply
+// does not receive it.
+func RoomActivity(destSiteID string) string {
+	return fmt.Sprintf("chat.roomactivity.%s", destSiteID)
+}
+
 // InboxMemberEventSubjects returns the subject filters a search-sync consumer
 // should use to receive the room-index-affecting events on both the internal
 // (same-site) and external (cross-site) lanes for the given site:

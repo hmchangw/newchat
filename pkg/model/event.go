@@ -138,6 +138,18 @@ type InboxMemberEvent struct {
 	Origin string `json:"origin,omitempty"`
 }
 
+// RoomActivityEvent refreshes a remote room's chat-list ordering position on a
+// destination site, which holds no Room document for it. Published on the
+// core-NATS subject.RoomActivity lane, coalesced per room by the origin's
+// last-message flush, and applied under a $max guard — so it is safe to lose,
+// duplicate, or deliver out of order. LastMsgAt and Timestamp are epoch millis.
+type RoomActivityEvent struct {
+	RoomID    string `json:"roomId"    bson:"roomId"`
+	SiteID    string `json:"siteId"    bson:"siteId"`
+	LastMsgAt int64  `json:"lastMsgAt" bson:"lastMsgAt"`
+	Timestamp int64  `json:"timestamp" bson:"timestamp"`
+}
+
 // NotificationEvent is the per-user reaction notification on chat.user.{account}.notification;
 // distinct from PushNotificationEvent (batched mobile) — this is the legacy single-user envelope the FE listens on.
 type NotificationEvent struct {
@@ -172,6 +184,7 @@ const (
 	InboxUserPermissionsUpdated      InboxEventType = "user_permissions_updated"
 	InboxUserChatlistUpdated         InboxEventType = "user_chatlist_updated"
 	InboxSubscriptionSectionMoved    InboxEventType = "subscription_section_moved"
+	InboxSubscriptionMention         InboxEventType = "subscription_mention"
 )
 
 // UserSettingsUpdated is the cross-site inbox event user-service publishes on settings.set, applied
@@ -204,6 +217,18 @@ type SubscriptionReadEvent struct {
 	// reading a room clears the alert.
 	Alert     bool  `json:"alert"      bson:"alert"`
 	Timestamp int64 `json:"timestamp"  bson:"timestamp"`
+}
+
+// SubscriptionMentionEvent is InboxEvent.Payload for "subscription_mention":
+// sent room-home→user-home so a federated mentionee's badge lands on the site
+// they read from. Accounts holds only the accounts homed at the destination.
+type SubscriptionMentionEvent struct {
+	RoomID   string   `json:"roomId"   bson:"roomId"`
+	Accounts []string `json:"accounts" bson:"accounts"`
+	// MentionedAt is when the mention appeared — the message's createdAt, or its
+	// editedAt when an edit added it. Feeds the destination's already-read guard.
+	MentionedAt int64 `json:"mentionedAt" bson:"mentionedAt"`
+	Timestamp   int64 `json:"timestamp"   bson:"timestamp"`
 }
 
 // ThreadReadEvent is the InboxEvent.Payload for "thread_read": the destination
@@ -270,6 +295,11 @@ type MemberAddEvent struct {
 	RequesterAccount   string   `json:"requesterAccount,omitempty" bson:"requesterAccount,omitempty"`
 	JoinedAt           int64    `json:"joinedAt"           bson:"joinedAt"`
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
+	// LastMsgAt is the room's activity position (epoch millis), nil when the room
+	// has never had a message. Cross-site INBOX copies only — like Accounts, it is
+	// stripped from the room-scoped (frontend) copy. The destination holds no rooms
+	// doc for a remote room, so this is the only key it can order the room by.
+	LastMsgAt *int64 `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
 	// Members carries the member.list (enrich=true) display entries; org-expanded accounts ride Accounts only.
 	// Room-scoped event only — INBOX copies omit it (remote sites re-resolve display data).
 	Members []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`

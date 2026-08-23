@@ -28,6 +28,20 @@ type InboxStore interface {
 	// stored one is a silent no-op, so out-of-order federated delivery cannot
 	// regress room metadata.
 	UpsertRoom(ctx context.Context, room *model.Room) error
+	// UpsertRemoteRoomActivity records a remote room's ordering position under a
+	// $max guard, so a late or duplicate event is a no-op rather than a
+	// regression — what will let the activity-refresh publisher ride a lossy,
+	// unordered transport. Until it lands member_added is the only writer, so a
+	// dropped write is NOT self-healing.
+	UpsertRemoteRoomActivity(ctx context.Context, roomID, siteID string, lastMsgAt time.Time) error
+	// DeleteRemoteRoomActivity drops a remote room's ordering row once this site
+	// has no member left in it, so the collection does not accumulate rows for
+	// rooms nobody here can see.
+	DeleteRemoteRoomActivity(ctx context.Context, roomID string) error
+	// HasRoomSubscription reports whether this site holds any subscription for
+	// roomID. The activity refresh is broadcast to every peer, so this is what
+	// stops a site accumulating ordering rows for rooms none of its users are in.
+	HasRoomSubscription(ctx context.Context, roomID string) (bool, error)
 	// UpdateSubscriptionRoles applies roles guarded by rolesUpdatedAt (the source
 	// event's publish time): older/duplicate events are silent no-ops. A
 	// genuinely missing subscription still returns an error so the event is
@@ -106,6 +120,10 @@ type InboxStore interface {
 	// sectionID==nil) on (roomID, account), guarded by sectionUpdatedAt so an
 	// out-of-order or duplicate move can't regress. A missing sub NAKs for retry.
 	UpdateSubscriptionSection(ctx context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error
+	// SetSubscriptionMentions flags accounts as mentioned in roomID, skipping any
+	// that already read past msgCreatedAt (#467). Mirrors broadcast-worker's
+	// origin-side write; a non-subscriber matches nothing.
+	SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error
 }
 
 // badgeCache is the badge cache's Valkey accelerator (pkg/badgecache.Cache
@@ -122,11 +140,56 @@ type Handler struct {
 	// badge is the badge cache; nil (VALKEY_ADDRS unset) disables the
 	// invalidation hooks. Injected post-construction.
 	badge badgeCache
+	// roomSubs memoizes the "is this site a member of this room" check the
+	// activity refresh performs; nil disables it and every refresh reads through.
+	roomSubs *roomSubCache
+}
+
+// HandlerOption configures optional Handler behaviour.
+type HandlerOption func(*Handler)
+
+// WithRoomSubCache memoizes the room-membership check on the activity-refresh
+// lane. A non-positive size or ttl leaves it disabled.
+func WithRoomSubCache(size int, ttl time.Duration) HandlerOption {
+	return func(h *Handler) { h.roomSubs = newRoomSubCache(size, ttl) }
 }
 
 // NewHandler creates a Handler with the given store.
-func NewHandler(store InboxStore) *Handler {
-	return &Handler{store: store}
+func NewHandler(store InboxStore, opts ...HandlerOption) *Handler {
+	h := &Handler{store: store}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// HandleRoomActivity applies a core-NATS activity refresh for a room owned by
+// another site. Dropped when this site holds no subscription for the room: the
+// refresh is broadcast to every peer, and a row here would otherwise be an
+// orphan nothing deletes.
+//
+// Errors are returned for logging only — there is no ack on this lane, and the
+// $max guard makes the next refresh idempotent, so a loss self-heals on the
+// room's next message.
+func (h *Handler) HandleRoomActivity(ctx context.Context, data []byte) error {
+	var evt model.RoomActivityEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return fmt.Errorf("unmarshal room activity event: %w", err)
+	}
+	if evt.RoomID == "" || evt.LastMsgAt <= 0 {
+		return fmt.Errorf("room activity event missing roomId or lastMsgAt")
+	}
+	subscribed, err := h.hasRoomSubscription(ctx, evt.RoomID)
+	if err != nil {
+		return fmt.Errorf("check room subscription: %w", err)
+	}
+	if !subscribed {
+		return nil
+	}
+	if err := h.store.UpsertRemoteRoomActivity(ctx, evt.RoomID, evt.SiteID, time.UnixMilli(evt.LastMsgAt).UTC()); err != nil {
+		return fmt.Errorf("apply room activity: %w", err)
+	}
+	return nil
 }
 
 // HandleEvent processes a single JetStream message payload.
@@ -177,6 +240,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleUserChatlistUpdated(ctx, &evt)
 	case model.InboxSubscriptionSectionMoved:
 		return h.handleSubscriptionSectionMoved(ctx, &evt)
+	case model.InboxSubscriptionMention:
+		return h.handleSubscriptionMention(ctx, &evt)
 	default:
 		slog.Warn("unknown event type, skipping", "type", evt.Type)
 		return nil
@@ -254,6 +319,18 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 		return fmt.Errorf("member_added references unknown users %v in room %s", missing, event.RoomID)
 	}
 
+	// After the missing-user return, so a room that gained no subscriber leaves
+	// no orphan row (nothing deletes them). Best-effort — the subscriptions above
+	// must not be re-run because an ordering row failed — but not self-healing
+	// yet, so alert on this log line.
+	h.roomSubs.set(event.RoomID, true)
+	if event.LastMsgAt != nil {
+		if err := h.store.UpsertRemoteRoomActivity(ctx, event.RoomID, event.SiteID, time.UnixMilli(*event.LastMsgAt).UTC()); err != nil {
+			slog.WarnContext(ctx, "seed remote room activity failed",
+				"room_id", event.RoomID, "site", event.SiteID, "error", err)
+		}
+	}
+
 	// No SubscriptionUpdateEvent is published here — room-worker already publishes
 	// to the user's subject and the NATS supercluster routes it to the user's
 	// home site.
@@ -298,6 +375,20 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	}
 	if err := h.store.DeleteSubscriptionsByAccounts(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete subscriptions for room %s: %w", memberEvt.RoomID, err)
+	}
+	// Other members may remain, so re-resolve rather than caching a guess. When
+	// none do, the ordering row has no reader left here — drop it, or it becomes
+	// the orphan the seed path is careful not to create. Best-effort: a stale row
+	// only costs space, and re-adding a member re-seeds it.
+	h.roomSubs.invalidate(memberEvt.RoomID)
+	if stillMember, err := h.hasRoomSubscription(ctx, memberEvt.RoomID); err != nil {
+		slog.WarnContext(ctx, "check remaining members failed; leaving ordering row",
+			"room_id", memberEvt.RoomID, "error", err)
+	} else if !stillMember {
+		if err := h.store.DeleteRemoteRoomActivity(ctx, memberEvt.RoomID); err != nil {
+			slog.WarnContext(ctx, "delete remote room activity failed",
+				"room_id", memberEvt.RoomID, "error", err)
+		}
 	}
 	// Scrub the removed accounts' thread read-state on this site too (#308).
 	if err := h.store.DeleteThreadSubscriptions(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
@@ -476,6 +567,29 @@ func (h *Handler) handleThreadUnreadAdded(ctx context.Context, evt *model.InboxE
 	}
 	if err := h.store.AddThreadUnread(ctx, e.RoomID, e.ParentMessageID, e.Accounts); err != nil {
 		return fmt.Errorf("add thread unread %q in room %q: %w", e.ParentMessageID, e.RoomID, err)
+	}
+	return nil
+}
+
+// handleSubscriptionMention replicates a room-level @-mention badge onto the
+// mentionees' home replicas. The store's read guard makes it idempotent and
+// order-safe against a concurrent subscription_read.
+func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.SubscriptionMentionEvent
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_mention payload"))
+	}
+	// Poison payload: a blank room matches nothing, an empty account list has no
+	// destination, and a zero mentionedAt badges as 1970 — which makes the read
+	// guard skip everyone who has ever read the room.
+	if e.RoomID == "" || len(e.Accounts) == 0 || e.MentionedAt <= 0 {
+		slog.WarnContext(ctx, "subscription_mention missing roomId, accounts or mentionedAt",
+			"room_id", e.RoomID, "accounts", len(e.Accounts), "mentioned_at", e.MentionedAt,
+			"origin_site", evt.SiteID)
+		return errcode.Permanent(errcode.BadRequest("subscription_mention missing roomId, accounts or mentionedAt"))
+	}
+	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MentionedAt).UTC()); err != nil {
+		return fmt.Errorf("set subscription mentions in room %q: %w", e.RoomID, err)
 	}
 	return nil
 }

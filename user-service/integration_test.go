@@ -139,7 +139,7 @@ func newTestAPI(t *testing.T) (*gin.Engine, *stubRooms, *stubHistory) {
 	db := testutil.MongoDB(t, "usersvc-http")
 	seedSubscriptions(t, db, seededRooms)
 
-	subRepo := mongorepo.NewSubscriptionRepo(db, testSiteID)
+	subRepo := mongorepo.NewSubscriptionRepo(db)
 	require.NoError(t, subRepo.EnsureIndexes(context.Background()))
 
 	// Buffered well past the expected batch count so a stub never blocks the fan-out.

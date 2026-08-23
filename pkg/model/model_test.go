@@ -2179,6 +2179,16 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 	})
 }
 
+func TestRemoteRoom_RoundTrip(t *testing.T) {
+	rr := model.RemoteRoom{
+		ID:        "r1",
+		SiteID:    "site-a",
+		LastMsgAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	var got model.RemoteRoom
+	roundTrip(t, &rr, &got)
+}
+
 func TestRoom_CrossSiteRoundTrip(t *testing.T) {
 	r := model.Room{ID: "r1", SiteID: "site-a", CrossSite: boolPtr(true),
 		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
@@ -5460,4 +5470,14 @@ func TestMessageAppInfoJSON(t *testing.T) {
 	b, err = json.Marshal(model.MessageAppInfo{ID: "app-1", Name: "W", AssistantName: "w.bot", IsSubscribed: &unsubscribed})
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"isSubscribed":false`)
+}
+
+func TestSubscriptionMentionEvent_RoundTrip(t *testing.T) {
+	src := &model.SubscriptionMentionEvent{
+		RoomID:      "room-1",
+		Accounts:    []string{"alice", "bob"},
+		MentionedAt: 1755820800000,
+		Timestamp:   1755820800123,
+	}
+	roundTrip(t, src, &model.SubscriptionMentionEvent{})
 }

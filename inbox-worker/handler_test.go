@@ -93,6 +93,12 @@ type threadUnreadAdded struct {
 	accounts        []string
 }
 
+type mentionBadge struct {
+	roomID       string
+	accounts     []string
+	msgCreatedAt time.Time
+}
+
 type stubInboxStore struct {
 	mu                    sync.Mutex
 	subscriptions         []model.Subscription
@@ -121,12 +127,64 @@ type stubInboxStore struct {
 	chatlistUpdates       []userChatlistUpdate
 	sectionMoves          []sectionMove
 	permissionsApplies    []permissionsApply
+	remoteRoomActivity    []remoteRoomActivity
+	remoteRoomActivityErr error
+	roomSubscribed        map[string]bool
+	deletedRemoteRooms    []string
+	hasRoomSubErr         error
+	mentionBadges         []mentionBadge
+	mentionErr            error
 }
 
 type permissionsApply struct {
 	permission model.PermissionKey
 	accounts   []string
 	state      model.PermissionState
+}
+
+type remoteRoomActivity struct {
+	roomID    string
+	siteID    string
+	lastMsgAt time.Time
+}
+
+func (s *stubInboxStore) DeleteRemoteRoomActivity(_ context.Context, roomID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.roomSubscribed, roomID)
+	kept := s.remoteRoomActivity[:0]
+	for _, r := range s.remoteRoomActivity {
+		if r.roomID != roomID {
+			kept = append(kept, r)
+		}
+	}
+	s.remoteRoomActivity = kept
+	s.deletedRemoteRooms = append(s.deletedRemoteRooms, roomID)
+	return nil
+}
+
+func (s *stubInboxStore) HasRoomSubscription(_ context.Context, roomID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasRoomSubErr != nil {
+		return false, s.hasRoomSubErr
+	}
+	for i := range s.bulkSubscriptions {
+		if s.bulkSubscriptions[i].RoomID == roomID {
+			return true, nil
+		}
+	}
+	return s.roomSubscribed[roomID], nil
+}
+
+func (s *stubInboxStore) UpsertRemoteRoomActivity(_ context.Context, roomID, siteID string, lastMsgAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.remoteRoomActivityErr != nil {
+		return s.remoteRoomActivityErr
+	}
+	s.remoteRoomActivity = append(s.remoteRoomActivity, remoteRoomActivity{roomID: roomID, siteID: siteID, lastMsgAt: lastMsgAt})
+	return nil
 }
 
 type userChatlistUpdate struct {
@@ -411,6 +469,22 @@ func (s *stubInboxStore) AddThreadUnread(_ context.Context, roomID, parentMessag
 		roomID: roomID, parentMessageID: parentMessageID, accounts: accounts,
 	})
 	return nil
+}
+
+func (s *stubInboxStore) SetSubscriptionMentions(_ context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mentionErr != nil {
+		return s.mentionErr
+	}
+	s.mentionBadges = append(s.mentionBadges, mentionBadge{roomID: roomID, accounts: accounts, msgCreatedAt: msgCreatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) getMentionBadges() []mentionBadge {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]mentionBadge(nil), s.mentionBadges...)
 }
 
 func (s *stubInboxStore) UpsertThreadSubscription(_ context.Context, sub *model.ThreadSubscription) error {
@@ -1940,6 +2014,107 @@ func TestHandleMemberAdded_BulkCreate_NonDuplicateError_ReturnsError(t *testing.
 	assert.Contains(t, err.Error(), "bulk create subscriptions")
 }
 
+// memberAddedEventData builds the wire bytes for a cross-site member_added on
+// room r1, owned by site-A. lastMsgAt nil = a room that has never had a message.
+func memberAddedEventData(t *testing.T, lastMsgAt *int64) []byte {
+	t.Helper()
+	change := model.MemberAddEvent{
+		Type: "member_added", RoomID: "r1", RoomType: model.RoomTypeChannel,
+		Accounts: []string{"bob"}, SiteID: "site-A", JoinedAt: 1, Timestamp: 1,
+		LastMsgAt: lastMsgAt,
+	}
+	changeData, err := json.Marshal(change)
+	require.NoError(t, err)
+	evtData, err := json.Marshal(model.InboxEvent{Type: "member_added", SiteID: "site-A", DestSiteID: "site-B", Payload: changeData})
+	require.NoError(t, err)
+	return evtData
+}
+
+func TestHandleRoomActivity(t *testing.T) {
+	at := int64(1740000000000)
+	payload := func(roomID string, lastMsgAt int64) []byte {
+		b, err := json.Marshal(model.RoomActivityEvent{RoomID: roomID, SiteID: "site-A", LastMsgAt: lastMsgAt, Timestamp: at})
+		require.NoError(t, err)
+		return b
+	}
+
+	t.Run("applies when this site holds a subscription", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.NoError(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r1", at)))
+
+		require.Len(t, store.remoteRoomActivity, 1)
+		assert.Equal(t, "r1", store.remoteRoomActivity[0].roomID)
+		assert.Equal(t, "site-A", store.remoteRoomActivity[0].siteID)
+		assert.Equal(t, time.UnixMilli(at).UTC(), store.remoteRoomActivity[0].lastMsgAt)
+	})
+
+	t.Run("drops rooms this site has no member in", func(t *testing.T) {
+		// The refresh is broadcast to every peer, so without this guard each site
+		// would accrue a row for every cross-site room in the deployment.
+		store := &stubInboxStore{}
+		require.NoError(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r-elsewhere", at)))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+
+	t.Run("rejects a malformed payload", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.Error(t, NewHandler(store).HandleRoomActivity(context.Background(), []byte("{")))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+
+	t.Run("rejects an event with no position to apply", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.Error(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r1", 0)))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+}
+
+func TestHandleMemberAdded_SeedsRemoteRoomActivity(t *testing.T) {
+	at := int64(1740000000000)
+	bob := []model.User{{ID: "u_bob", Account: "bob", SiteID: "site-B"}}
+
+	tests := []struct {
+		name     string
+		users    []model.User
+		lastMsg  *int64
+		seedErr  error
+		wantErr  bool
+		wantRows int
+		wantSubs int
+	}{
+		{name: "seeds the ordering row", users: bob, lastMsg: &at, wantRows: 1, wantSubs: 1},
+		{name: "no activity yet, nothing to seed", users: bob, lastMsg: nil, wantRows: 0, wantSubs: 1},
+		// Seeding before the missing-user return would leave a row for a room
+		// this site has no subscriber for, and nothing ever deletes it.
+		{name: "unknown user leaves no orphan row", users: nil, lastMsg: &at, wantErr: true, wantRows: 0, wantSubs: 0},
+		// The subscription is the correctness-critical write, so a failed
+		// ordering row must not Nak the event and re-run subscription creation.
+		{name: "seed failure does not fail the event", users: bob, lastMsg: &at, seedErr: fmt.Errorf("connection refused"), wantRows: 0, wantSubs: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubInboxStore{users: tt.users, remoteRoomActivityErr: tt.seedErr}
+			h := NewHandler(store)
+
+			err := h.HandleEvent(context.Background(), memberAddedEventData(t, tt.lastMsg))
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Len(t, store.remoteRoomActivity, tt.wantRows)
+			assert.Len(t, store.bulkSubscriptions, tt.wantSubs)
+			if tt.wantRows > 0 {
+				assert.Equal(t, "r1", store.remoteRoomActivity[0].roomID)
+				assert.Equal(t, "site-A", store.remoteRoomActivity[0].siteID, "the room's home site, not the destination")
+				assert.Equal(t, time.UnixMilli(at).UTC(), store.remoteRoomActivity[0].lastMsgAt)
+			}
+		})
+	}
+}
+
 func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
 	store := &stubInboxStore{}
 	h := NewHandler(store)
@@ -2723,4 +2898,90 @@ func TestHandleEvent_MemberAdded_ChannelUnchanged(t *testing.T) {
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType)
 	assert.Equal(t, "deployments", subs[0].Name, "channel subscription name is the room name")
+}
+
+func TestHandleEvent_SubscriptionMention(t *testing.T) {
+	msgAt := time.UnixMilli(1755820800000).UTC()
+	valid := model.SubscriptionMentionEvent{
+		RoomID: "room-1", Accounts: []string{"alice", "bob"},
+		MentionedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
+	}
+
+	tests := []struct {
+		name          string
+		payload       any
+		storeErr      error
+		wantErr       string
+		wantPermanent bool
+		wantBadge     []mentionBadge
+	}{
+		{
+			name:      "applies the badge to the destination accounts",
+			payload:   valid,
+			wantBadge: []mentionBadge{{roomID: "room-1", accounts: []string{"alice", "bob"}, msgCreatedAt: msgAt}},
+		},
+		{
+			name:          "malformed payload is poison, not retried",
+			payload:       "not-an-object",
+			wantErr:       "unmarshal subscription_mention payload",
+			wantPermanent: true,
+		},
+		{
+			name:          "empty account list is poison — the producer can't emit one",
+			payload:       model.SubscriptionMentionEvent{RoomID: "room-1", MentionedAt: msgAt.UnixMilli()},
+			wantErr:       "missing roomId, accounts or mentionedAt",
+			wantPermanent: true,
+		},
+		{
+			name: "blank room id is poison rather than matching nothing",
+			payload: model.SubscriptionMentionEvent{
+				Accounts: []string{"alice"}, MentionedAt: msgAt.UnixMilli(),
+			},
+			wantErr:       "missing roomId, accounts or mentionedAt",
+			wantPermanent: true,
+		},
+		{
+			name: "omitted mentionedAt is poison rather than badging as 1970",
+			payload: model.SubscriptionMentionEvent{
+				RoomID: "room-1", Accounts: []string{"alice"},
+			},
+			wantErr:       "missing roomId, accounts or mentionedAt",
+			wantPermanent: true,
+		},
+		{
+			name:     "store error propagates for redelivery",
+			payload:  valid,
+			storeErr: errors.New("mongo down"),
+			wantErr:  "set subscription mentions",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &stubInboxStore{mentionErr: tc.storeErr}
+
+			payload, err := json.Marshal(tc.payload)
+			require.NoError(t, err)
+			data, err := json.Marshal(model.InboxEvent{
+				Type:       model.InboxSubscriptionMention,
+				SiteID:     "site-a",
+				DestSiteID: "site-b",
+				Payload:    payload,
+				Timestamp:  msgAt.UnixMilli(),
+			})
+			require.NoError(t, err)
+
+			err = NewHandler(store).HandleEvent(context.Background(), data)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				// Permanent tells the consume loop to Ack-drop instead of Nak-forever.
+				_, permanent := errcode.IsPermanent(err)
+				assert.Equal(t, tc.wantPermanent, permanent)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantBadge, store.getMentionBadges())
+		})
+	}
 }
