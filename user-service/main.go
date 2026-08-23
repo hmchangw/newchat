@@ -116,7 +116,7 @@ func main() {
 	readFromSecondary := mongorepo.WithReadPreference(readPref)
 
 	db := mongoClient.Database(cfg.Mongo.DB)
-	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SiteID, readFromSecondary, mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts))
+	subRepo := mongorepo.NewSubscriptionRepo(db, readFromSecondary, mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts))
 	userRepo := mongorepo.NewUserRepo(db, readFromSecondary)
 	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)

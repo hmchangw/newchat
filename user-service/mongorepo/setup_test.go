@@ -21,11 +21,11 @@ var (
 	_ service.SSOTokenRepository     = (*SSOTokenRepo)(nil)
 )
 
-// newTestSubscriptionRepo builds a SubscriptionRepo with siteID "site-a"; seed cross-site rows with a different siteId to exercise the deleted-filter.
+// newTestSubscriptionRepo builds a SubscriptionRepo with siteID "site-a"; seed cross-site rows with a different siteId to exercise the cross-site paths.
 func newTestSubscriptionRepo(t *testing.T) (*SubscriptionRepo, *mongo.Database) {
 	t.Helper()
 	db := testutil.MongoDB(t, "user-service")
-	r := NewSubscriptionRepo(db, "site-a")
+	r := NewSubscriptionRepo(db)
 	require.NoError(t, r.EnsureIndexes(context.Background()))
 	return r, db
 }

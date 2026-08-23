@@ -23,10 +23,11 @@ type SubscriptionRepository interface {
 	GetDMSubscription(ctx context.Context, account, target string) (*model.EnrichedDMSubscription, error)
 	GetSubscriptionByRoomID(ctx context.Context, account, roomID string) (*model.EnrichedSubscription, error)
 	CountActiveSubscriptions(ctx context.Context, account string) (int, error)
-	// GetActiveSubscriptions returns up to limit active subscriptions. The cap
-	// is applied before the deleted-room filter, so a page whose capped slice
-	// contains soft-deleted rooms comes back slightly short of limit — fine for
-	// the unread count (its only consumer), not a general pagination surface.
+	// GetActiveSubscriptions returns the active set, capped at limit when limit > 0
+	// and uncapped otherwise. A capped result is never shortened by later filtering —
+	// no stage after the cap drops a row — but it is still shorter than limit when the
+	// account has fewer active subscriptions. Its only consumer is the unread count;
+	// not a general pagination surface.
 	GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error)
 	GetAppSubscription(ctx context.Context, account, botName string) (*model.Subscription, error)
 	SetAppSubscribed(ctx context.Context, account, botName string, subscribed, muted bool) error
