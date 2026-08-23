@@ -436,6 +436,22 @@ func (r *SubscriptionRepo) activeFilter(account string) bson.M {
 	return filter
 }
 
+// activeSubscriptionProjection is the terminal $project for the badge path: the
+// exact fields models.ActiveSubscription decodes, and nothing else. Everything
+// roomsEnrichStages adds beyond lastMsgAt — the room's counts, its E2E key slot,
+// the sort key — is dropped here instead of being shipped and discarded.
+// TestActiveSubscriptionProjection_MatchesRowType pins it to the struct.
+func activeSubscriptionProjection() bson.M {
+	return bson.M{
+		"_id":          0,
+		"roomId":       1,
+		"siteId":       1,
+		"lastSeenAt":   1,
+		"threadUnread": 1,
+		"lastMsgAt":    1,
+	}
+}
+
 // CountActiveSubscriptions counts the active set with a plain CountDocuments —
 // subscription state only, no room lookup. Room names carry no meaning here: no
 // name excludes a subscription from the count.
