@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/user-service/models"
 )
 
 const subscriptionsCollection = "subscriptions"
@@ -28,6 +29,9 @@ type SubscriptionRepo struct {
 	// primary handle.
 	subscriptionsSecondary *mongoutil.Collection[model.Subscription]
 	enrichedSecondary      *mongoutil.Collection[model.EnrichedSubscription]
+	// activeSecondary decodes the badge path's narrow projection over the same
+	// subscriptions collection; routed to a secondary like the other read handles.
+	activeSecondary *mongoutil.Collection[models.ActiveSubscription]
 	// showTeamsRoom mirrors SHOW_TEAMS_ROOM: false (default) excludes
 	// Teams-migrated rooms (origin "teams") from list/count results.
 	showTeamsRoom bool
@@ -42,11 +46,13 @@ func NewSubscriptionRepo(db *mongo.Database, opts ...Option) *SubscriptionRepo {
 	col := db.Collection(subscriptionsCollection)
 	subscriptions := mongoutil.NewCollection[model.Subscription](col)
 	enriched := mongoutil.NewCollection[model.EnrichedSubscription](col)
+	active := mongoutil.NewCollection[models.ActiveSubscription](col)
 	return &SubscriptionRepo{
 		subscriptions:          subscriptions,
 		enriched:               enriched,
 		subscriptionsSecondary: subscriptions.WithReadPreference(s.readPref),
 		enrichedSecondary:      enriched.WithReadPreference(s.readPref),
+		activeSecondary:        active.WithReadPreference(s.readPref),
 		showTeamsRoom:          s.showTeamsRoom,
 		showTeamsAccounts:      s.showTeamsAccounts,
 	}
@@ -463,17 +469,32 @@ func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account
 	return int(n), nil
 }
 
-// GetActiveSubscriptions returns the active set used by the unread count, capped by
-// limit. The cap runs before the rooms join, so $lookup touches ≤limit rows and the
-// page is exactly limit — no stage after the cap can drop a row.
-func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error) {
+// activeSubscriptionPipeline builds the exact aggregation pipeline
+// GetActiveSubscriptions runs. It exists so the raw-BSON guard in
+// subscriptions_test.go (TestGetActiveSubscriptions_ProjectsBadgeFields_Integration)
+// can execute the identical pipeline instead of a hand-rebuilt copy: if the
+// terminal $project were ever dropped from production, that test's assertion
+// on the raw document's keys would fail immediately, because it would be
+// running production's own pipeline rather than a copy that could drift out
+// of sync with it.
+func (r *SubscriptionRepo) activeSubscriptionPipeline(account string, limit int) bson.A {
 	pipeline := bson.A{bson.M{"$match": r.activeFilter(account)}}
 	// MongoDB rejects $limit:0 — treat it as "no cap".
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
 	pipeline = append(pipeline, roomsEnrichStages()...)
-	return r.enrichedSecondary.Aggregate(ctx, pipeline)
+	pipeline = append(pipeline, bson.M{"$project": activeSubscriptionProjection()})
+	return pipeline
+}
+
+// GetActiveSubscriptions returns the active set used by the unread count, capped by
+// limit. The cap runs before the rooms join, so $lookup touches ≤limit rows and the
+// page is exactly limit — no stage after the cap can drop a row. The terminal
+// projection returns only the fields unreadRooms reads: the room baseline beyond
+// lastMsgAt (counts, key slot, sort key) is dropped rather than decoded and discarded.
+func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]models.ActiveSubscription, error) {
+	return r.activeSecondary.Aggregate(ctx, r.activeSubscriptionPipeline(account, limit))
 }
 
 // GetAppSubscription returns the requester's botDM subscription for botName, or (nil, nil).

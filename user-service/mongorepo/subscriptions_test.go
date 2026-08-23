@@ -14,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/user-service/models"
 )
 
 func TestAggregateSubscriptions_Integration(t *testing.T) {
@@ -381,10 +382,10 @@ func TestAggregateSubscriptions_HidesCrossSiteTeamsRoom_Integration(t *testing.T
 	require.NoError(t, err)
 	unreadIDs := map[string]bool{}
 	for _, s := range subs {
-		unreadIDs[s.ID] = true
+		unreadIDs[s.RoomID] = true
 	}
-	assert.False(t, unreadIDs["sub-xsite-teams"], "unread set must exclude the cross-site Teams room")
-	assert.True(t, unreadIDs["sub-xsite-native"], "unread set must include the native cross-site room")
+	assert.False(t, unreadIDs["r-xsite-teams"], "unread set must exclude the cross-site Teams room")
+	assert.True(t, unreadIDs["r-xsite-native"], "unread set must include the native cross-site room")
 }
 
 // TestFindChannelsByMembers_CrossSite_Integration exercises the SEPARATE roomMatchStages
@@ -740,11 +741,11 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		require.NoError(t, err)
 		got := map[string]bool{}
 		for _, sub := range subs {
-			got[sub.ID] = true
+			got[sub.RoomID] = true
 		}
-		assert.False(t, got["closed-ch"], "open:false must not count")
-		assert.True(t, got["open-ch"], "open:true must count")
-		assert.True(t, got["a-ch"], "a sub with no open field must count")
+		assert.False(t, got["r-closed"], "open:false must not count")
+		assert.True(t, got["r-open"], "open:true must count")
+		assert.True(t, got["r-ch"], "a sub with no open field must count")
 	})
 
 	t.Run("get active returns the same set", func(t *testing.T) {
@@ -752,17 +753,17 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		require.NoError(t, err)
 		got := map[string]bool{}
 		for _, sub := range subs {
-			got[sub.ID] = true
+			got[sub.RoomID] = true
 		}
-		assert.True(t, got["a-dm"])
-		assert.True(t, got["a-ch"])
-		assert.True(t, got["a-bot"])
-		assert.True(t, got["x-ch"], "cross-site sub kept despite no local room")
-		assert.True(t, got["gone-ch"], "missing local room kept (empty enrichment)")
-		assert.False(t, got["m-ch"], "muted channel excluded from the active/count set")
-		assert.False(t, got["u-bot"])
-		assert.False(t, got["mu-bot"], "muted botDM excluded by activeSubscriptionFilter before room lookup")
-		assert.True(t, got["del-ch"], "no room name is filtered from the active set")
+		assert.True(t, got["r-dm"])
+		assert.True(t, got["r-ch"])
+		assert.True(t, got["r-bot"])
+		assert.True(t, got["rx"], "cross-site sub kept despite no local room")
+		assert.True(t, got["r-missing"], "missing local room kept (empty enrichment)")
+		assert.False(t, got["r-noisy"], "muted channel excluded from the active/count set")
+		assert.False(t, got["r-offbot"])
+		assert.False(t, got["r-mutedbot"], "muted botDM excluded by activeSubscriptionFilter before room lookup")
+		assert.True(t, got["r-del"], "no room name is filtered from the active set")
 	})
 
 	t.Run("limit caps active set exactly", func(t *testing.T) {
@@ -825,4 +826,84 @@ func TestAppSubscriptionRoundTrip_Integration(t *testing.T) {
 		assert.True(t, sub.IsSubscribed)
 		assert.True(t, sub.Muted)
 	})
+}
+
+// The badge path must come back with exactly the five fields it reads, correctly
+// populated for a local room, a room with no messages, and a cross-site sub with
+// no local room document at all.
+func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	lastMsg := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	seen := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "p-room", "name": "Eng", "siteId": "site-a", "lastMsgAt": lastMsg,
+			"userCount": 9, "appCount": 1, "encKey": bson.M{"priv": make([]byte, 120), "ver": 3}},
+		bson.M{"_id": "p-quiet", "name": "Quiet", "siteId": "site-a"},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "p-sub", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Eng",
+			"roomId": "p-room", "roomType": "channel", "siteId": "site-a",
+			"lastSeenAt": seen, "threadUnread": []string{"pm-1", "pm-2"}},
+		bson.M{"_id": "p-sub-quiet", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Quiet",
+			"roomId": "p-quiet", "roomType": "channel", "siteId": "site-a"},
+		bson.M{"_id": "p-sub-remote", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Remote",
+			"roomId": "p-remote", "roomType": "channel", "siteId": "site-b", "lastSeenAt": seen},
+	)
+
+	subs, err := r.GetActiveSubscriptions(ctx, "alice", 100)
+	require.NoError(t, err)
+
+	byRoom := map[string]models.ActiveSubscription{}
+	for _, s := range subs {
+		byRoom[s.RoomID] = s
+	}
+	require.Len(t, byRoom, 3)
+
+	local := byRoom["p-room"]
+	assert.Equal(t, "site-a", local.SiteID)
+	require.NotNil(t, local.LastSeenAt)
+	assert.Equal(t, seen.UTC(), local.LastSeenAt.UTC())
+	require.NotNil(t, local.LastMsgAt, "the joined room's lastMsgAt must survive the projection")
+	assert.Equal(t, lastMsg.UTC(), local.LastMsgAt.UTC())
+	assert.Equal(t, []string{"pm-1", "pm-2"}, local.ThreadUnread)
+
+	quiet := byRoom["p-quiet"]
+	assert.Nil(t, quiet.LastMsgAt, "a room with no messages has no lastMsgAt")
+	assert.Nil(t, quiet.LastSeenAt, "an unread-from-birth sub has no lastSeenAt")
+
+	remote := byRoom["p-remote"]
+	assert.Equal(t, "site-b", remote.SiteID)
+	assert.Nil(t, remote.LastMsgAt, "a cross-site sub has no local room document")
+	require.NotNil(t, remote.LastSeenAt)
+
+	// The joined room carries an E2E key slot (encKey) that the projection must
+	// not leak — but decoding into models.ActiveSubscription (five fields, no
+	// inline/catch-all) would silently discard any extra field Mongo actually
+	// returned, so that decode step can't be where this is proven. Re-run the
+	// identical pipeline through a raw handle and decode the p-room row — the
+	// row where all five projected fields are populated — into bson.M: an
+	// unregressed $project returns a document keyed by exactly those five
+	// names, while a regression that let encKey (or any other enrichment
+	// field) through the $project stage surfaces here as an extra map key.
+	pipeline := r.activeSubscriptionPipeline("alice", 100)
+	cur, err := db.Collection(subscriptionsCollection).Aggregate(ctx, pipeline)
+	require.NoError(t, err)
+	var rawRows []bson.M
+	require.NoError(t, cur.All(ctx, &rawRows))
+	var rawRoom bson.M
+	for _, d := range rawRows {
+		if d["roomId"] == "p-room" {
+			rawRoom = d
+			break
+		}
+	}
+	require.NotNil(t, rawRoom, "expected the p-room row in the raw projection output")
+	keys := make([]string, 0, len(rawRoom))
+	for k := range rawRoom {
+		keys = append(keys, k)
+	}
+	assert.ElementsMatch(t, []string{"roomId", "siteId", "lastSeenAt", "threadUnread", "lastMsgAt"}, keys,
+		"the raw $project output for p-room must contain exactly the five projected fields — no encKey or other room baseline field")
 }
