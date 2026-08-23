@@ -98,7 +98,11 @@ type Handler struct {
 type handlerOption func(*handlerOptions)
 
 type handlerOptions struct {
-	metrics           *broadcastMetrics
+	metrics *broadcastMetrics
+	// metricsSet separates "caller passed nil to disable metrics" from "caller
+	// passed no option at all". Without it the two are the same value and the
+	// constructor rebuilds the instruments over an explicit disable.
+	metricsSet        bool
 	threadViewSubject bool
 	siteID            string
 	publish           PublishFunc
@@ -106,7 +110,7 @@ type handlerOptions struct {
 }
 
 func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
-	return func(opts *handlerOptions) { opts.metrics = metrics }
+	return func(opts *handlerOptions) { opts.metrics, opts.metricsSet = metrics, true }
 }
 
 func withThreadViewSubject(enabled bool) handlerOption {
@@ -132,13 +136,19 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 	for _, option := range options {
 		option(&opts)
 	}
-	if opts.metrics == nil {
+	if !opts.metricsSet {
 		opts.metrics = newBroadcastMetrics(otel.Meter("broadcast-worker"))
+	}
+	// Nil metrics means the toggle is off, so leave the publisher unwrapped.
+	// The recorder reads the context for its labels before Delivery's nil guard
+	// returns, and that read happens once per recipient publish.
+	if opts.metrics != nil {
+		pub = &broadcastMetricPublisher{next: pub, metrics: opts.metrics}
 	}
 	return &Handler{
 		store:             store,
 		userStore:         userStore,
-		pub:               &broadcastMetricPublisher{next: pub, metrics: opts.metrics},
+		pub:               pub,
 		keyStore:          keyStore,
 		parentFetcher:     parentFetcher,
 		encrypt:           encrypt,
