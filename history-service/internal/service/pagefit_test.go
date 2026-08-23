@@ -381,3 +381,30 @@ func TestLoadHistory_UnfittableTimestampRunKeepsEveryRow(t *testing.T) {
 		assert.True(t, m.Truncated)
 	}
 }
+
+// oversize and the timestamp cut are orthogonal, and a huge row can sit inside
+// a tie run. Returning only the blanked row would leave its tied sibling on the
+// far side of a strict `created_at < before` resume — skipped for good.
+func TestLoadHistory_OversizeRowStillShipsItsTiedSiblings(t *testing.T) {
+	shared := joinTime.Add(30 * time.Minute)
+	all := []models.Message{
+		{MessageID: "m0-huge", RoomID: "r1", CreatedAt: shared, Msg: strings.Repeat("x", 4096)},
+		{MessageID: "m1-tied", RoomID: "r1", CreatedAt: shared, Msg: "small"},
+		{MessageID: "m2-older", RoomID: "r1", CreatedAt: joinTime.Add(10 * time.Minute), Msg: "small"},
+	}
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(256, 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+
+	require.Len(t, resp.Messages, 2, "the tied sibling must ship with the oversize row, not after it")
+	assert.Equal(t, "m0-huge", resp.Messages[0].MessageID)
+	assert.Equal(t, "m1-tied", resp.Messages[1].MessageID)
+	assert.True(t, resp.Messages[0].Truncated)
+	assert.True(t, resp.Messages[1].Truncated, "the whole run ships blanked so it fits")
+	assert.True(t, resp.HasNext, "the older row is still pending")
+}

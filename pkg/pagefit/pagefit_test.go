@@ -289,3 +289,80 @@ func TestFit_NoErrorWhenEverythingEncodes(t *testing.T) {
 	_, _, err := Fit(rows(5, 10), NewBudget(1000, 0), 0)
 	assert.NoError(t, err)
 }
+
+// sizeRow is a row with the fields most likely to make a hand-rolled size
+// calculation disagree with the real encoder: HTML metacharacters, multi-byte
+// runes, pre-encoded JSON, and nested containers.
+type sizeRow struct {
+	Text   string          `json:"text"`
+	Raw    json.RawMessage `json:"raw,omitempty"`
+	List   []string        `json:"list,omitempty"`
+	Lookup map[string]int  `json:"lookup,omitempty"`
+}
+
+// rowSizes derives every width and the array total from one streaming encode
+// rather than marshalling the slice. That arithmetic is only safe while it
+// agrees byte-for-byte with what the router will actually marshal — this pins
+// the two together so an escaping or separator change cannot drift silently.
+func TestRowSizes_AgreesWithJSONMarshal(t *testing.T) {
+	wide := make([]sizeRow, 50)
+	for i := range wide {
+		wide[i] = sizeRow{Text: strings.Repeat("z", i)}
+	}
+	tests := map[string][]sizeRow{
+		"empty":            {},
+		"single":           {{Text: "x"}},
+		"pair":             {{Text: "x"}, {Text: "yy"}},
+		"html metachars":   {{Text: "<a href='x'>&</a>"}, {Text: "plain"}},
+		"multi-byte runes": {{Text: "日本語 — 🎉"}, {Text: strings.Repeat("é", 50)}},
+		"raw json":         {{Text: "x", Raw: json.RawMessage(`{"nested":[1,2,3]}`)}},
+		"containers":       {{Text: "x", List: []string{"p", "q"}, Lookup: map[string]int{"k": 1}}},
+		"fifty rows":       wide,
+	}
+
+	for name, items := range tests {
+		t.Run(name, func(t *testing.T) {
+			sizes, total, err := rowSizes(items)
+			require.NoError(t, err)
+
+			whole, err := json.Marshal(items)
+			require.NoError(t, err)
+			assert.Equal(t, len(whole), total, "array total must equal the encoded array")
+
+			for i, item := range items {
+				row, err := json.Marshal(item)
+				require.NoError(t, err)
+				assert.Equal(t, len(row), sizes[i], "row %d width", i)
+			}
+		})
+	}
+}
+
+// The trim loop reuses those widths to decide where to cut, so the kept slice
+// must both fit the budget and be the longest prefix that does.
+func TestFit_KeptPrefixIsWithinBudgetAndMaximal(t *testing.T) {
+	items := make([]sizeRow, 30)
+	for i := range items {
+		items[i] = sizeRow{Text: strings.Repeat("q", 10+i*7)}
+	}
+
+	for budget := 20; budget < 900; budget += 7 {
+		kept, oversize, err := Fit(items, NewBudget(int64(budget), 0), 0)
+		require.NoError(t, err)
+		if oversize {
+			require.Len(t, kept, 1, "budget %d: an oversize page keeps exactly one row", budget)
+			continue
+		}
+
+		encoded, err := json.Marshal(kept)
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(encoded), budget, "budget %d: kept %d rows over budget", budget, len(kept))
+
+		if len(kept) < len(items) {
+			next, err := json.Marshal(items[:len(kept)+1])
+			require.NoError(t, err)
+			assert.Greater(t, len(next), budget,
+				"budget %d: kept %d rows but one more would also have fit", budget, len(kept))
+		}
+	}
+}
