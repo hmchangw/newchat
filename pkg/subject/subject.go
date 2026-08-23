@@ -459,6 +459,27 @@ func RoomMemberEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Ti
 	return out
 }
 
+// ThreadEvent returns the per-thread live lane for a channel room's thread —
+// the subject a client subscribes to while a thread pane is open, so a viewer
+// who does not follow the thread still receives its replies.
+func ThreadEvent(roomID, parentMessageID string, global bool) string {
+	return roomBase(roomID, global) + ".thread." + parentMessageID + ".event"
+}
+
+// ThreadEventTargets returns the thread-lane subject(s) to publish a thread
+// create/edit/delete to. Routes identically to RoomEventTargets (shared
+// roomRouteGlobals) so the thread lane follows the room's own namespace: a
+// same-site room's thread events land on the local prefix once local mode is
+// enabled, and a flipped room dual-publishes during the grace window.
+func ThreadEventTargets(roomID, parentMessageID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
+	globals := roomRouteGlobals(crossSite, crossSiteAt, mode, now)
+	out := make([]string, len(globals))
+	for i, g := range globals {
+		out[i] = ThreadEvent(roomID, parentMessageID, g)
+	}
+	return out
+}
+
 func UserRoomEvent(account string) string {
 	return fmt.Sprintf("chat.user.%s.event.room", account)
 }

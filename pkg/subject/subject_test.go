@@ -1312,3 +1312,55 @@ func TestIsClientFacing(t *testing.T) {
 		})
 	}
 }
+
+func TestThreadEvent(t *testing.T) {
+	assert.Equal(t, "chat.room.r1.thread.p1.event", subject.ThreadEvent("r1", "p1", true))
+	assert.Equal(t, "chat.local.room.r1.thread.p1.event", subject.ThreadEvent("r1", "p1", false))
+}
+
+// TestThreadEventTargets verifies the thread lane routes on exactly the same
+// namespaces as RoomEventTargets — they share roomRouteGlobals, so a same-site
+// room's thread events land on the local namespace once local mode is enabled.
+func TestThreadEventTargets(t *testing.T) {
+	g := "chat.room.r1.thread.p1.event"
+	l := "chat.local.room.r1.thread.p1.event"
+	trueP, falseP := true, false
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	// cross-site rooms with no flip time (born cross-site) are ALWAYS global.
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", &trueP, nil, subject.RouteGlobal, now))
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", &trueP, nil, subject.RouteDual, now))
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", &trueP, nil, subject.RouteLocal, now))
+
+	// same-site rooms vary by mode.
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", &falseP, nil, subject.RouteGlobal, now))
+	assert.Equal(t, []string{l, g}, subject.ThreadEventTargets("r1", "p1", &falseP, nil, subject.RouteDual, now))
+	assert.Equal(t, []string{l}, subject.ThreadEventTargets("r1", "p1", &falseP, nil, subject.RouteLocal, now))
+
+	// nil locality is ALWAYS global — the fail-safe.
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", nil, nil, subject.RouteGlobal, now))
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", nil, nil, subject.RouteDual, now))
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", nil, nil, subject.RouteLocal, now))
+}
+
+// TestThreadEventTargets_TransitionGrace covers the post-flip grace window: a
+// room that just flipped same-site -> cross-site keeps a LOCAL copy for the
+// window in local/dual mode, so members still on the local subject don't go
+// dark on thread events until they re-subscribe.
+func TestThreadEventTargets_TransitionGrace(t *testing.T) {
+	g := "chat.room.r1.thread.p1.event"
+	l := "chat.local.room.r1.thread.p1.event"
+	trueP := true
+	flip := time.Unix(1_700_000_000, 0).UTC()
+	within := flip.Add(subject.DefaultRoomLocalityGrace - time.Minute)
+	after := flip.Add(subject.DefaultRoomLocalityGrace + time.Minute)
+
+	assert.Equal(t, []string{l, g}, subject.ThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteLocal, within))
+	assert.Equal(t, []string{l, g}, subject.ThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteDual, within))
+	// Within grace but global mode: no local audience -> global only.
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteGlobal, within))
+	// After grace: global only.
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteLocal, after))
+	// Exactly at the boundary is already expired (now.Before is strict).
+	assert.Equal(t, []string{g}, subject.ThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteLocal, flip.Add(subject.DefaultRoomLocalityGrace)))
+}
