@@ -121,24 +121,40 @@ func TestWatchSoakLedgerDurability(t *testing.T) {
 			watchSoakLedgerDurability(context.Background(), ledger, ticks, grace,
 				func([]string) { t.Error("no debt stood for a whole interval") })
 		}()
+		// A watcher that reports has already returned, so a plain send would
+		// block forever and the failure would read as a hung package rather
+		// than as this assertion.
+		send := func(at time.Time) {
+			t.Helper()
+			select {
+			case ticks <- at:
+			case <-watched:
+			}
+		}
 
-		ticks <- now
+		send(now)
 		// Well inside the grace, so this tick cannot fire whether it lands
 		// before or after the payment below.
-		ticks <- now.Add(time.Second)
+		send(now.Add(time.Second))
 		operation := testFailureOperation("m1", now)
 		operation.LifecycleState = failureOperationJournaled
 		require.NoError(t, ledger.Start(operation))
 		require.Empty(t, ledger.UnpersistedInvalidations())
 
 		// Past the grace with nothing owed: the clock must be cleared here.
-		ticks <- now.Add(2 * grace)
+		send(now.Add(2 * grace))
+		// A send returns when the watcher receives, not when it has acted, so
+		// the tick above is only known to have been processed once this one is
+		// taken. Without this the reset races the debt raised below, and the
+		// watcher can read a fresh debt against the original sighting.
+		send(now.Add(2*grace + time.Second))
+
 		// A fresh debt, first seen a long way past the original sighting. With
-		// the clock still running from it, this tick would fire.
+		// the clock still running from it, the next tick would fire.
 		journal.failures = 1
 		ledger.Invalidate("observer_queue")
 		require.NotEmpty(t, ledger.UnpersistedInvalidations())
-		ticks <- now.Add(3 * grace)
+		send(now.Add(3 * grace))
 
 		close(ticks)
 		<-watched
