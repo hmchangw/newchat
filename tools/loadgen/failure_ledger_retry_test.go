@@ -265,3 +265,45 @@ func TestFailureLedger_NoEvidenceIsWrittenWhileAVerdictIsOwed(t *testing.T) {
 		assert.Equal(t, failureLedgerEventActivated, journal.events[len(journal.events)-1].Type)
 	})
 }
+
+// Start appends off the mutex so concurrent starts share one fsync through the
+// group-commit barrier, which means a verdict raised while the record is being
+// written cannot be settled ahead of it. Settling on the far side of the append
+// is what stops that verdict from waiting for the next write instead — the
+// residual is a kill inside the append itself, which no in-process ordering
+// can cover while the barrier stands.
+func TestFailureLedger_AStartSettlesAVerdictRaisedWhileItWasWriting(t *testing.T) {
+	now := time.Date(2026, 8, 23, 7, 0, 0, 0, time.UTC)
+	journal := &startRacingFailureJournal{}
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 4, Journal: journal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	journal.ledger = ledger
+
+	require.NoError(t, ledger.Start(testFailureOperation("m1", now)))
+
+	assert.Empty(t, ledger.UnpersistedInvalidations(),
+		"the verdict raised mid-append is owed no longer than the append itself")
+	assert.Equal(t, []string{"observer_queue", invalidReasonWAL},
+		journaledMemoryInvalidationReasons(&journal.memoryFailureJournal))
+}
+
+// startRacingFailureJournal raises an invalidation from inside the start append
+// and refuses it, which is exactly the interleaving an observer goroutine can
+// produce while the append is off the mutex — without the timing.
+type startRacingFailureJournal struct {
+	memoryFailureJournal
+	ledger *failureLedger
+	raised bool
+}
+
+func (j *startRacingFailureJournal) Append(event *failureLedgerEvent) error {
+	if event.Type == failureLedgerEventStarted && !j.raised {
+		j.raised = true
+		j.refuseNext = true
+		j.ledger.Invalidate("observer_queue")
+		j.refuseNext = false
+	}
+	return j.memoryFailureJournal.Append(event)
+}

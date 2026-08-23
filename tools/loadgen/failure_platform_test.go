@@ -23,6 +23,8 @@ import (
 
 type memoryFailureJournal struct {
 	events []failureLedgerEvent
+	// refuseNext lets a test reject one append without a separate double.
+	refuseNext bool
 }
 
 type forwardingFailureJournal struct {
@@ -60,6 +62,9 @@ func (j *memoryFailureJournal) Replay() ([]failureLedgerEvent, error) {
 }
 
 func (j *memoryFailureJournal) Append(event *failureLedgerEvent) error {
+	if j.refuseNext {
+		return errors.New("no space left on device")
+	}
 	j.events = append(j.events, *event)
 	return nil
 }

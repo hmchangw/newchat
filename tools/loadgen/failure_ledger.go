@@ -613,8 +613,15 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 		l.mu.Unlock()
 		return fmt.Errorf("start failure operation %q: %w", tracked.ID, errFailureLedgerCapacity)
 	}
-	// Before the append below, which happens off the mutex: no evidence may
-	// reach the file while a verdict that disqualifies it does not.
+	// Before the append below, which happens off the mutex so concurrent starts
+	// can share one fsync through the group-commit barrier: no evidence may
+	// reach the file while a verdict that disqualifies it is already owed.
+	//
+	// The barrier is why this is a check and not a critical section. Holding
+	// the mutex across the append would serialise the starts the barrier exists
+	// to batch, so a verdict raised *during* the append still lands behind the
+	// record; it is settled on the far side instead, leaving a kill in that
+	// window as the residual.
 	if err := l.settleBeforeAppendLocked(); err != nil {
 		l.mu.Unlock()
 		return fmt.Errorf("start failure operation %q: %w", tracked.ID, err)
@@ -645,6 +652,12 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 	if l.recorder != nil && l.journal != nil {
 		l.recorder.JournalSize(l.journal.Size())
 	}
+	// Again, on the far side of an append that ran off the mutex: a verdict
+	// raised while this record was being written could not be settled before
+	// it, so it is settled the moment the lock is back. The record is already
+	// on disk by then, which is the residual this leaves — see the comment on
+	// the settle above the append.
+	l.retryPendingInvalidationsLocked()
 	l.active[tracked.ID] = tracked
 	l.enqueueLocked(tracked)
 	if l.recorder != nil {
