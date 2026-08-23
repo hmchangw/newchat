@@ -181,11 +181,14 @@ requires the payload-level lock.
    `handler.go:782`) — no encryption step, one payload serves both lanes.
 4. The per-account copy stays **plaintext**. Encrypting it would change the
    wire format for existing clients on a lane that does not need it.
-5. **Strip `Mentions` and `MentionAll` from the thread-lane copy.** These stay
-   plaintext on the encrypted channel lane today, so on the thread lane they
-   would reveal who was @-mentioned in a thread to any subscriber. Nothing is
-   lost: any account that needs mention information is in the fan-out set and
-   receives the per-account copy, which keeps both fields.
+5. **Keep `Mentions` and `MentionAll` on the thread-lane copy**, identical to
+   the per-account copy. The frontend renders mentions with dedicated styling
+   driven by this resolved `Participant` list (account -> display name), so
+   dropping it would make a viewer's thread pane render mentions differently
+   from a follower's — breaking the equivalence this design exists to provide.
+   These two fields are already plaintext on the encrypted channel lane for
+   every ordinary message, so carrying them on the thread lane extends an
+   accepted exposure rather than creating a new one.
 
 **Consequence: two encodings.** Both encryption helpers mutate their event in
 place and clear the plaintext field, so the implementation must marshal and
@@ -207,9 +210,9 @@ thread content is no longer better-protected than channel content.
 
 Fields that remain plaintext on the thread lane, matching the existing channel
 lane: `roomId`, `roomName`, `roomType`, `siteId`, `userCount`, `lastMsgAt`,
-`lastMsgId`, `timestamp`, `eventTimestamp`, and on edits/deletes the message id
-and actor account. No new field is exposed that the channel lane does not
-already expose.
+`lastMsgId`, `timestamp`, `eventTimestamp`, `mentions`, `mentionAll`, and on
+edits/deletes the message id and actor account. No new field is exposed that
+the channel lane does not already expose.
 
 ## 6. Client contract
 
@@ -275,8 +278,7 @@ global).
   nil (edits: `encryptedNewContent` set, `newContent` empty); per-account copy
   still plaintext
 - `encrypt=false`: thread-lane copy is plaintext
-- `Mentions` / `MentionAll` present on the per-account copy, absent on the
-  thread-lane copy
+- `Mentions` / `MentionAll` present and identical on both copies
 - DM and BotDM rooms publish **nothing** to the thread lane
 - a thread-lane publish error is logged and swallowed: the handler returns nil
   and the per-account fan-out still happened
@@ -290,8 +292,7 @@ Required in the same PR by CLAUDE.md §5:
 
 - `docs/client-api.md` — new subject in the subject-patterns table; delivery
   notes on `new_thread_message`, `message_edited`, `message_deleted`
-  describing the viewer lane and the subscribe-on-open lifecycle; a note that
-  the thread lane omits `mentions` / `mentionAll`.
+  describing the viewer lane and the subscribe-on-open lifecycle.
 - `docs/client-api/events.md` and `docs/client-api/request-reply.md` — the
   derived views, updated to match.
 
