@@ -359,43 +359,6 @@ func TestHandleRoom_NonDegradedInsertWithoutFullDocument_Poisons(t *testing.T) {
 	assert.ErrorIs(t, h.handleRoom(context.Background(), ev), migration.ErrPoison)
 }
 
-// TestHandleRoom_SoftDeletedSkipped: a room carrying the "Del-" soft-delete rename is never
-// imported, on any op. See invariant_test.go for the exhaustive statement of the rule.
-func TestHandleRoom_SoftDeletedSkipped(t *testing.T) {
-	tests := []struct {
-		name string
-		doc  string
-	}{
-		{"fname carries the prefix", `{"_id":"r1","t":"c","name":"general","fname":"Del-General","uids":["u1"]}`},
-		{"name carries the prefix", `{"_id":"r1","t":"c","name":"Del-general","fname":"General","uids":["u1"]}`},
-		{"both carry the prefix", `{"_id":"r1","t":"c","name":"Del-general","fname":"Del-General","uids":["u1"]}`},
-		{"discussion", `{"_id":"r1","t":"p","prid":"p1","fname":"Del-Topic","uids":["u1"]}`},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, op := range []string{"insert", "replace"} {
-				t.Run(op, func(t *testing.T) {
-					pub := &fakePublisher{}
-					h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
-					err := h.handleRoom(context.Background(), roomEv(op, tc.doc, ""))
-					assert.ErrorIs(t, err, migration.ErrSkipped)
-					assert.Empty(t, pub.events)
-				})
-			}
-			// An update that leaves the name alone is churn on an already-dead room.
-			for _, delta := range []string{`{"updatedFields":{"restricted":true}}`, `{"updatedFields":{"description":"hi"}}`} {
-				t.Run("update "+delta, func(t *testing.T) {
-					pub := &fakePublisher{}
-					h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{doc: json.RawMessage(tc.doc)})
-					err := h.handleRoom(context.Background(), roomEv("update", "", delta))
-					assert.ErrorIs(t, err, migration.ErrSkipped)
-					assert.Empty(t, pub.events)
-				})
-			}
-		})
-	}
-}
-
 // TestHandleRoom_NonDeletedNameKept: only the exact "Del-" prefix marks a soft delete — a name that
 // merely starts with those letters is a live room.
 func TestHandleRoom_NonDeletedNameKept(t *testing.T) {

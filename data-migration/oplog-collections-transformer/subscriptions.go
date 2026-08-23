@@ -107,11 +107,9 @@ func (h *handler) handleSubscription(ctx context.Context, ev oplogEvent) error {
 	}
 
 	if isSoftDeletedRecord(ss.Name, ss.FName) {
-		// A subscription to a soft-deleted room, whose denormalized name the source renamed along
-		// with the room's. Skipped on every op so no "Del-" name reaches Mongo: member_added would
-		// create the subscription carrying it. Skipping the field events too is required, not just
-		// tidy — inbox-worker treats a missing subscription as a redelivery signal, so they would
-		// Nak-retry to exhaustion against a subscription whose insert this same guard skipped.
+		// Sub to a soft-deleted room (the source renames the denormalized name too), so member_added
+		// would carry the marker. Field events must be skipped as well — inbox-worker would Nak-retry
+		// them to exhaustion against a subscription this guard never created.
 		slog.DebugContext(ctx, "skip subscription to soft-deleted room",
 			"roomId", ss.RID, "op", ev.Op,
 			"eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))

@@ -97,11 +97,8 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 	}
 
 	if isSoftDeletedRecord(sr.Name, sr.FName) {
-		// Soft-deleted at source: skipped on every op, and before the delta is even decoded. Nothing
-		// about this room may reach Mongo — not the doc, not a rename of it — because room_sync would
-		// write the "Del-" name onto rooms.name and room_renamed onto every subscription in the room.
-		// roomId is logged so a skipped record is traceable to a specific room; the skip counter
-		// carries no id (an unbounded label) and cannot drive the reconciliation on its own.
+		// Skipped on every op: room_sync would write the "Del-" name onto rooms.name and room_renamed
+		// onto every subscription in the room. roomId is logged because the counter carries no id.
 		slog.DebugContext(ctx, "skip soft-deleted room",
 			"roomId", sr.ID, "op", ev.Op, "t", sr.T,
 			"eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))

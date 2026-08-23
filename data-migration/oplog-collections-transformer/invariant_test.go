@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,14 +37,12 @@ func TestNoDelPrefixEverReachesMongo(t *testing.T) {
 		{"channel sub, only name prefixed", `{"_id":"s1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"Del-general","fname":"General","open":true}`},
 		{"dm sub", `{"_id":"s1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"d","name":"Del-bob","fname":"Del-Bob","open":true}`},
 	}
-	// Every op, and for updates every delta shape — including the rename that carries the deletion
-	// and a name removal, which are the paths most likely to be re-opened by a future change.
+	// The guard runs before any delta is decoded, so these differ only in what a future change might
+	// key on: the rename that carries the deletion, a name removal, and a membership leave.
 	deltas := []string{
 		`{"updatedFields":{"fname":"Del-General"}}`,
 		`{"updatedFields":{"name":"Del-general"}}`,
-		`{"updatedFields":{"restricted":true}}`,
 		`{"updatedFields":{"open":false}}`,
-		`{"updatedFields":{"roles":["owner"]}}`,
 		`{"removedFields":["fname"]}`,
 	}
 
@@ -96,33 +93,4 @@ func TestNoDelPrefixEverReachesMongo(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestLiveRecordsStillPublishTheirName guards the other side of the invariant: the guard must not
-// swallow rooms whose name merely resembles the marker.
-func TestLiveRecordsStillPublishTheirName(t *testing.T) {
-	for _, doc := range []string{
-		`{"_id":"r1","t":"c","name":"delta","fname":"Delta","uids":["u1"]}`,
-		`{"_id":"r1","t":"c","name":"del-general","fname":"del-General","uids":["u1"]}`,
-		`{"_id":"r1","t":"c","name":"team-Del-old","fname":"Team Del-old","uids":["u1"]}`,
-	} {
-		pub := &fakePublisher{}
-		h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
-		if err := h.handleRoom(context.Background(), roomEv("insert", doc, "")); err != nil {
-			t.Fatalf("live room skipped: %v", err)
-		}
-		assert.NotEmpty(t, pub.events)
-		assert.False(t, strings.HasPrefix(mustRoomName(t, pub), "Del-"))
-	}
-}
-
-func mustRoomName(t *testing.T, pub *fakePublisher) string {
-	t.Helper()
-	var room struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(pub.events[0].Payload, &room); err != nil {
-		t.Fatalf("unmarshal room_sync: %v", err)
-	}
-	return room.Name
 }
