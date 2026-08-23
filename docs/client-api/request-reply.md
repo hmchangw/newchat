@@ -1108,7 +1108,7 @@ Only the original sender may edit.
 `"only the sender can edit"` (`forbidden`), `"message not found"` (`not_found`),
 `"newMsg must not be empty"`, `"newMsg exceeds maximum size"`.
 
-**Emits:** [`message_edited`](events.md#message_edited-editroomevent) → [events.md](events.md)
+**Emits:** [`message_edited`](events.md#message_edited-editroomevent) — a channel thread-reply edit (`threadParentMessageId` set, `tshow` false) also publishes on the [per-thread viewer lane](../client-api.md#42-thread-viewer-lane), `encryptedNewContent` in place of `newContent` when room encryption is enabled → [events.md](events.md)
 
 ---
 
@@ -1136,7 +1136,7 @@ Soft-delete (row preserved for audit). Only the original sender may delete. Idem
 
 `"only the sender can delete"` (`forbidden`), `"message not found"` (`not_found`).
 
-**Emits:** [`message_deleted`](events.md#message_deleted-deleteroomevent), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
+**Emits:** [`message_deleted`](events.md#message_deleted-deleteroomevent) — a channel thread-reply delete (`threadParentMessageId` set, `tshow` false) also publishes on the [per-thread viewer lane](../client-api.md#42-thread-viewer-lane), unencrypted since the delete event carries no content, [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
 
 ---
 
@@ -2276,7 +2276,7 @@ error table. Key errors:
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
 
-**Emits:** [`new_message`](events.md#new_message-roomevent) `RoomEvent` (channel: `chat.room.{roomID}.event`; DM: `chat.user.{recipient}.event.room` per non-bot member), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
+**Emits:** [`new_message`](events.md#new_message-roomevent) `RoomEvent` (channel: `chat.room.{roomID}.event`; DM: `chat.user.{recipient}.event.room` per non-bot member) — a thread reply (`threadParentMessageId` set) carries `type: "new_thread_message"` instead, delivered per-subscriber on `chat.user.{account}.event.room`, and for a channel-room reply (`tshow` false) **also** on the [per-thread viewer lane](../client-api.md#42-thread-viewer-lane) (`chat.room.{roomID}.thread.{parentMessageId}.event`, encrypted when room encryption is enabled) — a follower with the pane open gets both copies and must dedupe by `message.id`; [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
 
 ---
 

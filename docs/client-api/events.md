@@ -50,6 +50,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above (per-user fan-out for DM/botDM rooms); **plus `new_thread_message`** — channel thread replies fan out per-subscriber on this subject, not the room subject |
+| `chat.room.{roomID}.thread.{parentMessageId}.event` (or `chat.local.room.…`, by `crossSite`) | new_thread_message, message_edited, message_deleted — **channel rooms only**; subscribe while a thread pane is open |
 | `chat.room.{roomID}.event.member` (or `chat.local.room.{roomID}.event.member` for same-site rooms, by `crossSite`) | member_added, member_left / member_removed |
 | `chat.user.{account}.notification` | NotificationEvent (reaction only) |
 | `chat.user.presence.state.{account}` | PresenceState |
@@ -486,11 +487,23 @@ is set. Thread edits/deletes still publish `message_edited` / `message_deleted`;
 create event gets the distinct type.
 
 **Delivery differs from `new_message`.** A channel thread reply is **not** published room-wide on
-`chat.room.{roomID}.event`; it fans out **per-subscriber** on `chat.user.{account}.event.room` to the
-reply sender, the parent-message author, thread followers (anyone who has replied in the thread), and
-history-gated @-mentioned accounts. DM/botDM thread replies fan out **per member** on the same
-`chat.user.{account}.event.room` subject — the bot account is skipped (`isBot`), same as an ordinary
-`new_message` in a botDM.
+`chat.room.{roomID}.event`. It travels two lanes:
+
+1. **Per-subscriber**, on `chat.user.{account}.event.room`, to the reply sender, the parent-message
+   author, thread followers (anyone who has replied in the thread), and history-gated @-mentioned
+   accounts. Plaintext.
+2. **Per-thread**, on `chat.room.{roomID}.thread.{parentMessageId}.event` (or
+   `chat.local.room.{roomID}.thread.{parentMessageId}.event`, by `crossSite`), for clients that
+   subscribe while the thread pane is open — including users who do not follow the thread.
+   Encrypted with the room key when room encryption is enabled, exactly like `new_message` on the
+   room lane. `mentions` / `mentionAll` are retained on this copy, identical to the per-subscriber
+   copy.
+
+A follower who has the thread open receives the event on **both** lanes. Deduplicate by
+`message.id` — required regardless, since delivery is at-least-once.
+
+DM/botDM thread replies fan out **per member** on `chat.user.{account}.event.room` and do **not**
+use the thread lane; every member already receives them. The bot account is skipped (`isBot`).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -537,6 +550,13 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 
 **Subjects:** channel rooms → `chat.room.{roomID}.event`; DM/botDM rooms →
 `chat.user.{recipient}.event.room` per non-bot member.
+
+**Thread-reply edits (channel rooms, `threadParentMessageId` set, `tshow` false) also publish on
+the per-thread lane** — `chat.room.{roomID}.thread.{parentMessageId}.event` (or
+`chat.local.room.…`, by `crossSite`) — for clients with the thread pane open, in addition to the
+subject above. The thread-lane copy carries `encryptedNewContent` instead of `newContent` when room
+encryption is enabled. A thread follower with the pane open receives both copies; deduplicate by
+`messageId`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -590,6 +610,13 @@ Flat event. Triggered by [Delete Message](request-reply.md#delete-message).
 
 Thread-reply deletes **additionally** emit a
 [`thread_metadata_updated`](#thread_metadata_updated-threadmetadataupdatedevent) event.
+
+**Thread-reply deletes (channel rooms, `threadParentMessageId` set, `tshow` false) also publish on
+the per-thread lane** — `chat.room.{roomID}.thread.{parentMessageId}.event` (or
+`chat.local.room.…`, by `crossSite`) — for clients with the thread pane open, in addition to the
+per-subscriber subject above. `DeleteRoomEvent` carries no message content, so this lane copy is
+**not encrypted** — the same payload serves both lanes. A thread follower with the pane open
+receives both copies; deduplicate by `messageId`.
 
 | Field | Type | Notes |
 |---|---|---|

@@ -3391,6 +3391,11 @@ An `EditRoomEvent` is fanned out by `broadcast-worker`. The subject depends on r
 - **Channel rooms — `chat.room.{roomID}.event`** — one publish to the room stream.
 - **DM/botDM rooms — `chat.user.{recipient}.event.room`** — published once per non-bot member.
 
+**Thread-reply edits (channel rooms, `threadParentMessageId` set, `tshow` false) also publish on
+the per-thread viewer lane** — see [§4.2 Thread Viewer Lane](#42-thread-viewer-lane) — in addition
+to the per-subscriber subject above. The thread-lane copy carries `encryptedNewContent` instead of
+`newContent` when room encryption is enabled.
+
 The payload is flat (no zero-valued room fields):
 
 | Field | Type | Notes |
@@ -3488,6 +3493,11 @@ A `DeleteRoomEvent` is fanned out by `broadcast-worker` (not published when the 
 - **Thread reply (TShow=false) in a channel** — `chat.user.{recipient}.event.room` — published once per thread subscriber (followers + @-mentioned accounts). Non-subscribers do not receive this event.
 - **Thread reply (TShow=true) in a channel** — `chat.room.{roomID}.event` — visible in the main channel, so the full room stream receives it.
 - **DM/botDM message — `chat.user.{recipient}.event.room`** — published once per non-bot member.
+
+**Thread reply (TShow=false) in a channel also publishes on the per-thread viewer lane** — see
+[§4.2 Thread Viewer Lane](#42-thread-viewer-lane) — in addition to the per-subscriber subject
+above. `DeleteRoomEvent` carries no message content, so this lane copy is **not encrypted** — the
+same payload serves both lanes.
 
 The payload is flat:
 
@@ -6359,7 +6369,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 
 #### Triggered events — success path
 
-After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
+After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). For a channel-room thread reply (`tshow` false), the same event is **also** published on the per-thread viewer lane described in [§4.2 Thread Viewer Lane](#42-thread-viewer-lane); a follower with the thread pane open receives both copies and must deduplicate by `message.id`. **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
 
 **1. For channel rooms — `chat.room.{roomID}.event`** (`publishChannelEvent`)
 
@@ -6554,6 +6564,59 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 #### Client handling
 
 Apply `newTcount` directly to the parent message's badge — do not compute a delta. Apply `newThreadLastMsgAt` to the parent message's thread-freshness timestamp (or clear it when absent). Events for the same parent may arrive out of order due to JetStream redelivery; when `eventTimestamp` is present, prefer the event with the larger `eventTimestamp`. Fall back to `timestamp` only for legacy events that omit `eventTimestamp`.
+
+---
+
+## 4.2 Thread Viewer Lane
+
+A dedicated per-thread NATS subject that lets any channel-room member see a thread's replies,
+edits, and deletes live while its pane is open — without becoming a thread follower. **Channel
+rooms only**; DM and botDM rooms already deliver every thread event to every member and do not use
+this lane.
+
+#### Subjects
+
+| Room type | Subject |
+|-----------|---------|
+| Channel | `chat.room.{roomID}.thread.{parentMessageId}.event` (or `chat.local.room.{roomID}.thread.{parentMessageId}.event` for same-site rooms, by `crossSite`) |
+| DM / botDM | Not used. |
+
+Choose the `chat.room.` / `chat.local.room.` prefix from the room's `crossSite` value exactly as
+for `chat.room.{roomID}.event`.
+
+#### Delivery model
+
+`new_thread_message`, `message_edited`, and `message_deleted` for a channel thread reply
+(`threadParentMessageId` set, `tshow` false) each publish on **two lanes**:
+
+1. **Per-subscriber**, on `chat.user.{account}.event.room` — the reply sender, the parent-message
+   author, thread followers, and history-gated @-mentioned accounts. Plaintext.
+2. **Per-thread**, on the subject above — any subscribed client, follower or not, while the pane is
+   open.
+
+| Event | Thread-lane encryption |
+|---|---|
+| `new_thread_message` | Goes through the same room-key encryption as `new_message` (`encryptedMessage` set, `message` nil) when room encryption is enabled. |
+| `message_edited` | Goes through the same encryption as a channel edit (`encryptedNewContent` set, `newContent` empty) when room encryption is enabled. |
+| `message_deleted` | Carries no message content, so the lane copy is **not encrypted** — the same payload serves both lanes. |
+
+The per-subscriber copy always stays plaintext regardless of encryption settings — only the
+thread-lane copy is encrypted. `mentions` and `mentionAll` are retained on the thread-lane copy of
+`new_thread_message`, identical to the per-subscriber copy — the frontend renders mentions from
+this resolved participant list, so a viewer's pane must match a follower's.
+
+**A follower who opens the thread receives each event on both lanes.** This is required regardless
+of the lane, since delivery is at-least-once: clients must deduplicate by `message.id` (create) or
+`messageId` (edit/delete), never append blindly.
+
+#### Subscribing to a thread
+
+Opening a thread pane: subscribe to `chat.room.{roomID}.thread.{parentMessageId}.event`, choosing
+the `chat.room.` or `chat.local.room.` prefix from the room's `crossSite` value exactly as for
+`chat.room.{roomID}.event`. Closing the pane: unsubscribe. There is no RPC and no server-side
+state — subscribing does **not** make you a thread follower, does not create a thread subscription,
+does not accrue unread, and does not place the thread in your thread list. Closing the pane ends
+delivery.
 
 ---
 
