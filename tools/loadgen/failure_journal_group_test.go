@@ -140,6 +140,24 @@ func TestFailureJournalGroupCommit_SyncFailureRejectsDurableIntentAndSticks(t *t
 	require.ErrorIs(t, err, assert.AnError)
 }
 
+func TestFailureLedger_InvalidationIsNotPersistedBeforeGroupCommitSync(t *testing.T) {
+	inner := newRecordingBufferedFailureJournal()
+	inner.syncErr = assert.AnError
+	journal := newFailureJournalGroupCommit(inner, time.Hour, 1)
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 1,
+		Journal:  journal,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.ErrorIs(t, ledger.Close(), assert.AnError) })
+
+	ledger.Invalidate("observer_queue")
+
+	assert.Equal(t, []string{"observer_queue", invalidReasonWAL},
+		ledger.UnpersistedInvalidations(),
+		"an invalidation is not durable until its group-commit sync succeeds")
+}
+
 func TestFailureLedger_DoesNotCompactAwayAConcurrentStartingIntent(t *testing.T) {
 	inner := newRecordingBufferedFailureJournal()
 	journal := newFailureJournalGroupCommit(inner, 100*time.Millisecond, 256)
