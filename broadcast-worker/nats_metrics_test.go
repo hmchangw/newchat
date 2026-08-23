@@ -137,3 +137,23 @@ func TestBroadcastMetrics_Record_NilReceiverIsSafe(t *testing.T) {
 	metrics.Fanout(context.Background(), roomChannel, natsmetrics.EventCreated, 1)
 	metrics.Delivery(context.Background(), roomChannel, natsmetrics.EventCreated, nil)
 }
+
+// TestNormalizeRoomKind_ThreadLane guards the closed-enum contract: a room kind
+// missing from normalizeRoomKind's whitelist silently collapses to "unknown",
+// which would send every thread-lane delivery to the wrong series.
+func TestNormalizeRoomKind_ThreadLane(t *testing.T) {
+	assert.Equal(t, roomThreadLane, normalizeRoomKind(roomThreadLane))
+	assert.Contains(t, allRoomKinds, roomThreadLane,
+		"thread_lane must be in allRoomKinds or its measurement options are never pre-built")
+	assert.Equal(t, roomKindLabel("thread_lane"), roomThreadLane)
+}
+
+// TestThreadLaneLabelsSurviveContext verifies the label round-trips through the
+// context the publisher decorator reads, so Delivery is recorded under
+// thread_lane rather than unknown.
+func TestThreadLaneLabelsSurviveContext(t *testing.T) {
+	ctx := withBroadcastMetricLabels(context.Background(), roomThreadLane, natsmetrics.EventCreated)
+	labels := broadcastLabels(ctx)
+	assert.Equal(t, roomThreadLane, labels.roomKind)
+	assert.Equal(t, natsmetrics.EventCreated, labels.eventType)
+}

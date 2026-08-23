@@ -15,14 +15,15 @@ import (
 type roomKindLabel string
 
 const (
-	roomChannel roomKindLabel = "channel"
-	roomDM      roomKindLabel = "dm"
-	roomBotDM   roomKindLabel = "bot_dm"
-	roomThread  roomKindLabel = "thread"
-	roomUnknown roomKindLabel = "unknown"
+	roomChannel    roomKindLabel = "channel"
+	roomDM         roomKindLabel = "dm"
+	roomBotDM      roomKindLabel = "bot_dm"
+	roomThread     roomKindLabel = "thread"
+	roomThreadLane roomKindLabel = "thread_lane"
+	roomUnknown    roomKindLabel = "unknown"
 )
 
-var allRoomKinds = []roomKindLabel{roomChannel, roomDM, roomBotDM, roomThread, roomUnknown}
+var allRoomKinds = []roomKindLabel{roomChannel, roomDM, roomBotDM, roomThread, roomThreadLane, roomUnknown}
 
 type deliveryResult string
 
@@ -52,6 +53,9 @@ type deliveryKey struct {
 // records one attempt. Per-recipient delivery evidence for channels comes from
 // the loadgen recipient observer, not from these counters. For DM, bot-DM, and
 // thread fan-out the two are directly comparable — one publish per recipient.
+// thread_lane is one publish to a subject whose subscribers the publisher
+// cannot enumerate, so it records deliveries only — like the channel
+// room-stream case, its two families are NOT a ratio.
 type broadcastMetrics struct {
 	fanout       metric.Int64Histogram
 	deliveries   metric.Int64Counter
@@ -103,7 +107,7 @@ var allBroadcastEvents = []natsmetrics.EventType{
 
 func normalizeRoomKind(value roomKindLabel) roomKindLabel {
 	switch value {
-	case roomChannel, roomDM, roomBotDM, roomThread:
+	case roomChannel, roomDM, roomBotDM, roomThread, roomThreadLane:
 		return value
 	default:
 		return roomUnknown
