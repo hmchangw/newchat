@@ -59,6 +59,7 @@ func TestLoadHistory_TrimsOversizePageAndSetsHasNext(t *testing.T) {
 	assert.Less(t, len(resp.Messages), len(all), "an oversize page must be trimmed")
 	assert.NotEmpty(t, resp.Messages)
 	assert.True(t, resp.HasNext, "dropped rows must be advertised as more")
+	assert.True(t, resp.SizeLimited, "the client is told the cut was for bytes")
 	assert.Equal(t, all[0].MessageID, resp.Messages[0].MessageID, "the newest row is kept")
 }
 
@@ -74,6 +75,7 @@ func TestLoadHistory_PageThatFitsIsUntouched(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, resp.Messages, 4)
 	assert.False(t, resp.HasNext)
+	assert.False(t, resp.SizeLimited)
 }
 
 // The whole point of the trim: walking the pages must yield every row exactly
@@ -179,6 +181,7 @@ func TestLoadSurrounding_TrimsBothEndsAndKeepsTheCentralMessage(t *testing.T) {
 	assert.Less(t, len(resp.Messages), len(before)+len(after)+1, "an oversize window must be trimmed")
 	assert.True(t, resp.MoreBefore, "rows dropped from the front are advertised as moreBefore")
 	assert.True(t, resp.MoreAfter, "rows dropped from the back are advertised as moreAfter")
+	assert.True(t, resp.SizeLimited, "the client is told the cut was for bytes")
 
 	var found bool
 	for _, m := range resp.Messages {
@@ -206,6 +209,7 @@ func TestLoadSurrounding_WindowThatFitsIsUntouched(t *testing.T) {
 	assert.Len(t, resp.Messages, 3)
 	assert.False(t, resp.MoreBefore)
 	assert.False(t, resp.MoreAfter)
+	assert.False(t, resp.SizeLimited)
 }
 
 // Timestamp mode has no central row; the pivot is the boundary between the
@@ -407,4 +411,66 @@ func TestLoadHistory_OversizeRowStillShipsItsTiedSiblings(t *testing.T) {
 	assert.True(t, resp.Messages[0].Truncated)
 	assert.True(t, resp.Messages[1].Truncated, "the whole run ships blanked so it fits")
 	assert.True(t, resp.HasNext, "the older row is still pending")
+}
+
+// Blanking is not a reason to shrink the page: one row is the problem, so a
+// smaller limit cannot help. truncated covers that case, sizeLimited must not.
+func TestLoadHistory_SizeLimitedFalseWhenRowsAreOnlyBlanked(t *testing.T) {
+	shared := joinTime.Add(30 * time.Minute)
+	all := []models.Message{
+		{MessageID: "m0-huge", RoomID: "r1", CreatedAt: shared, Msg: strings.Repeat("x", 4096)},
+		{MessageID: "m1-tied", RoomID: "r1", CreatedAt: shared, Msg: "small"},
+	}
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(256, 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 2, "nothing was dropped")
+	assert.True(t, resp.Messages[0].Truncated)
+	assert.False(t, resp.SizeLimited, "blanking is not a reason to ask for fewer rows")
+}
+
+// The disabled budget is what the PAGE_TRIMMING_ENABLED toggle produces.
+func TestLoadHistory_TrimmingDisabledReturnsTheWholePage(t *testing.T) {
+	all := fatMessages(20, 512)
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.Budget{}))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	assert.Len(t, resp.Messages, len(all), "an over-budget page ships whole when trimming is off")
+	assert.False(t, resp.SizeLimited)
+	assert.False(t, resp.HasNext)
+	for _, m := range resp.Messages {
+		assert.False(t, m.Truncated, "nothing is blanked when trimming is off")
+	}
+}
+
+// Surrounding reaches the blank-only case through timestampBounds, not the
+// timestampRun that history uses — a distinct path, so it gets its own test.
+func TestLoadSurrounding_SizeLimitedFalseWhenTheWindowIsOnlyBlanked(t *testing.T) {
+	shared := joinTime.Add(2 * time.Minute)
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: shared, Msg: strings.Repeat("x", 4096)}
+	before := []models.Message{{MessageID: "b0", RoomID: "r1", CreatedAt: shared, Msg: "small"}}
+	after := []models.Message{{MessageID: "a0", RoomID: "r1", CreatedAt: shared, Msg: "small"}}
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(256, 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).
+		Return(makePage(before, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).
+		Return(makePage(after, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(testContext(), models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 3, "the tied window ships whole")
+	assert.False(t, resp.SizeLimited, "blanking is not a reason to ask for fewer rows")
 }

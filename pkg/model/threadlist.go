@@ -79,4 +79,7 @@ type ThreadListResponse struct {
 	NextCursor       string           `json:"nextCursor,omitempty"`
 	HasNext          bool             `json:"hasNext"`
 	UnavailableSites []string         `json:"unavailableSites,omitempty"`
+	// SizeLimited: rows were dropped to fit the payload budget — never set for
+	// a merely blanked row. A short page alone does not imply it.
+	SizeLimited bool `json:"sizeLimited,omitempty"`
 }

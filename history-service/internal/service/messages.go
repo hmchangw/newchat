@@ -109,6 +109,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 		Messages:          kept,
 		HasNext:           (page.HasNext || trimmed) && len(kept) > 0,
 		MinUserLastSeenAt: minMs,
+		SizeLimited:       trimmed,
 	}, nil
 }
 
@@ -389,7 +390,7 @@ func (s *HistoryService) assembleSurrounding(
 	setDecodedAttachments(c, messages)
 	// Trim outward from the pivot so the caller keeps the row they centred on;
 	// each end that loses rows sets its own "more" flag.
-	lo, hi, err := s.fitWindow(c, messages, len(beforePage.Data), pageEnvelope)
+	lo, hi, narrowed, err := s.fitWindow(c, messages, len(beforePage.Data), pageEnvelope)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +399,7 @@ func (s *HistoryService) assembleSurrounding(
 		MoreBefore:        beforePage.HasNext || lo > 0,
 		MoreAfter:         afterPage.HasNext || hi < len(messages),
 		MinUserLastSeenAt: minMs,
+		SizeLimited:       narrowed,
 	}, nil
 }
 

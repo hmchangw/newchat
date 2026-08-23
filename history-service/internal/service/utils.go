@@ -200,9 +200,13 @@ func blankOversize(m *models.Message) {
 }
 
 // fitPage trims msgs to the budget and reports whether rows were dropped, for
-// the caller's "more" flag. The cut lands on a timestamp boundary: the client
-// resumes with a strict created_at < before, so ending mid-millisecond would
-// skip every tied row for good.
+// the caller's "more" and sizeLimited flags. The cut lands on a timestamp
+// boundary: the client resumes with a strict created_at < before, so ending
+// mid-millisecond would skip every tied row for good.
+//
+// "Dropped" means rows left the page, never that a row was blanked. A blanked
+// row is truncated, never sizeLimited — one oversize row is still oversize at
+// half the limit, so telling the client to shrink would loop it to limit=1.
 func (s *HistoryService) fitPage(ctx context.Context, msgs []models.Message, envelope int) ([]models.Message, bool, error) {
 	kept, oversize, err := pagefit.Fit(msgs, s.pageBudget, envelope)
 	if err != nil {
@@ -230,10 +234,12 @@ func (s *HistoryService) fitPage(ctx context.Context, msgs []models.Message, env
 // fitWindow trims a centred window to the budget, blanking the pivot when it
 // alone will not fit. Both edges come off a shared timestamp for the same
 // reason fitPage cuts on boundaries — the client pages outward by time.
-func (s *HistoryService) fitWindow(ctx context.Context, msgs []models.Message, pivot, envelope int) (int, int, error) {
+// narrowed reports the same "rows were dropped" as fitPage, measured after the
+// edge adjustment below, and carries fitPage's blanking caveat unchanged.
+func (s *HistoryService) fitWindow(ctx context.Context, msgs []models.Message, pivot, envelope int) (lo, hi int, narrowed bool, err error) {
 	lo, hi, oversize, err := pagefit.FitWindow(msgs, pivot, s.pageBudget, envelope)
 	if err != nil {
-		return 0, 0, fmt.Errorf("fit surrounding window: %w", err)
+		return 0, 0, false, fmt.Errorf("fit surrounding window: %w", err)
 	}
 	if oversize {
 		blankOversize(&msgs[lo])
@@ -244,7 +250,7 @@ func (s *HistoryService) fitWindow(ctx context.Context, msgs []models.Message, p
 	if expanded {
 		s.warnIfStillOversize(ctx, msgs[lo:hi], envelope)
 	}
-	return lo, hi, nil
+	return lo, hi, lo > 0 || hi < len(msgs), nil
 }
 
 // warnIfStillOversize reports a page that outgrew the budget after being kept

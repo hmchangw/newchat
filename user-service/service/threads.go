@@ -121,7 +121,12 @@ func (s *UserService) ListUserThreads(c *natsrouter.Context, req model.ThreadLis
 	if err != nil {
 		return nil, fmt.Errorf("fit thread list page: %w", err)
 	}
-	hasNext = hasNext || len(kept) < len(merged)
+	// Dropped rows only: a blanked row is truncated, never sizeLimited, since
+	// it is still oversize at half the limit. That holds here because a lone
+	// oversize row leaves len(kept) == len(merged) — do not weaken the test to
+	// something the blanking path can also satisfy.
+	sizeLimited := len(kept) < len(merged)
+	hasNext = hasNext || sizeLimited
 	merged = kept
 	// A lone row too large to send is shrunk rather than passed through: the
 	// router would refuse the reply, and halving limit cannot help when one row
@@ -130,7 +135,9 @@ func (s *UserService) ListUserThreads(c *natsrouter.Context, req model.ThreadLis
 		blankOversizeThread(&merged[0])
 	}
 
-	resp := &model.ThreadListResponse{Items: merged, HasNext: hasNext, UnavailableSites: unavailable}
+	resp := &model.ThreadListResponse{
+		Items: merged, HasNext: hasNext, UnavailableSites: unavailable, SizeLimited: sizeLimited,
+	}
 	if hasNext && len(merged) > 0 {
 		last := merged[len(merged)-1]
 		resp.NextCursor = encodeThreadCursor(threadCursor{LastMsgAt: last.LastMsgAt, ThreadRoomID: last.ThreadRoomID})

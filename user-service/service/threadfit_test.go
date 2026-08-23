@@ -30,12 +30,18 @@ func fatItems(site string, n, width int) []model.ThreadListItem {
 	return out
 }
 
+// budgetFor returns a budget that admits about n of the given items, mirroring
+// the helper of the same name in history-service's trim tests.
+func budgetFor(t *testing.T, items []model.ThreadListItem, n int) pagefit.Budget {
+	t.Helper()
+	encoded, err := json.Marshal(items[:n])
+	require.NoError(t, err)
+	return pagefit.NewBudget(int64(len(encoded)), 0)
+}
+
 func TestListUserThreads_TrimsOversizePageAndSetsHasNext(t *testing.T) {
 	items := fatItems("site-a", 20, 512)
-	encoded, err := json.Marshal(items[:5])
-	require.NoError(t, err)
-
-	svc, history, _, _ := newThreadSvc(t, WithPageBudget(pagefit.NewBudget(int64(len(encoded)), 0)))
+	svc, history, _, _ := newThreadSvc(t, WithPageBudget(budgetFor(t, items, 5)))
 	expectThreadList(history, "site-a", items, false)
 	expectThreadList(history, "site-b", nil, false)
 
@@ -45,16 +51,14 @@ func TestListUserThreads_TrimsOversizePageAndSetsHasNext(t *testing.T) {
 	assert.Less(t, len(resp.Items), len(items), "an oversize page must be trimmed")
 	assert.NotEmpty(t, resp.Items)
 	assert.True(t, resp.HasNext, "dropped rows must be advertised as more")
+	assert.True(t, resp.SizeLimited, "the client is told the cut was for bytes")
 }
 
 // The cursor is the position the client resumes from. Deriving it from the
 // pre-trim last item would skip every row the trim dropped.
 func TestListUserThreads_CursorIsDerivedFromTheLastKeptItem(t *testing.T) {
 	items := fatItems("site-a", 20, 512)
-	encoded, err := json.Marshal(items[:5])
-	require.NoError(t, err)
-
-	svc, history, _, _ := newThreadSvc(t, WithPageBudget(pagefit.NewBudget(int64(len(encoded)), 0)))
+	svc, history, _, _ := newThreadSvc(t, WithPageBudget(budgetFor(t, items, 5)))
 	expectThreadList(history, "site-a", items, false)
 	expectThreadList(history, "site-b", nil, false)
 
@@ -79,6 +83,7 @@ func TestListUserThreads_PageThatFitsIsUntouched(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, resp.Items, 3)
 	assert.False(t, resp.HasNext)
+	assert.False(t, resp.SizeLimited)
 }
 
 // enrichThreadPage adds bytes after the count-trim, so a page measured before
@@ -142,6 +147,8 @@ func TestListUserThreads_LoneOversizeItemIsBlankedNotPassedThrough(t *testing.T)
 	encoded, err := json.Marshal(resp.Items)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(encoded), 512, "the blanked page must actually fit")
+	assert.True(t, got.Truncated)
+	assert.False(t, resp.SizeLimited, "blanking is not a reason to ask for fewer rows")
 }
 
 // An encoding failure is a server fault, not a too-large row: it must surface
@@ -155,4 +162,21 @@ func TestListUserThreads_SizingFailureSurfacesAsAnError(t *testing.T) {
 
 	_, err := svc.ListUserThreads(ctx("alice", "site-a"), model.ThreadListRequest{Limit: 100})
 	require.Error(t, err)
+}
+
+// The disabled budget is what the PAGE_TRIMMING_ENABLED toggle produces.
+func TestListUserThreads_TrimmingDisabledReturnsTheWholePage(t *testing.T) {
+	items := fatItems("site-a", 20, 512)
+	svc, history, _, _ := newThreadSvc(t, WithPageBudget(pagefit.Budget{}))
+	expectThreadList(history, "site-a", items, false)
+	expectThreadList(history, "site-b", nil, false)
+
+	resp, err := svc.ListUserThreads(ctx("alice", "site-a"), model.ThreadListRequest{Limit: 100})
+	require.NoError(t, err)
+	assert.Len(t, resp.Items, len(items), "an over-budget page ships whole when trimming is off")
+	assert.False(t, resp.SizeLimited)
+	assert.False(t, resp.HasNext)
+	for _, it := range resp.Items {
+		assert.False(t, it.Truncated, "nothing is blanked when trimming is off")
+	}
 }

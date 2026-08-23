@@ -3043,6 +3043,7 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
 | `messages` | array<Message> | Most-recent first. See [Message schema](#message-schema). |
 | `hasNext` | boolean | `true` if older messages may exist beyond this page — fetch the next page with `before` = the oldest returned message's `createdAt`. `false` once the caller's history boundary (room start, history floor, or access window) is reached. Conservative: occasionally `true` when nothing older remains; the following fetch then returns an empty page with `hasNext=false`. An empty page always has `hasNext=false`. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
+| `sizeLimited` | boolean | Optional. `true` when rows were dropped to keep the reply inside the transport's `max_payload`. A short page alone does not mean this — the history walk returns one too — so branch on this flag, never on `len(messages) < limit`. Absent when nothing was dropped, including when a row was merely blanked (`truncated`). See **A page may be shorter than `limit`** for how to pick the next `limit`. |
 
 ```json
 {
@@ -3196,6 +3197,7 @@ last-read position". The pivot is **exactly one of** `messageId` or `timestamp`.
 | `moreBefore` | boolean | `true` if more messages exist before the window. |
 | `moreAfter` | boolean | `true` if more messages exist after the window. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
+| `sizeLimited` | boolean | Optional. `true` when the window was narrowed to keep the reply inside the transport's `max_payload`. Branch on this, never on the window being shorter than `limit`. Absent when nothing was dropped, including when a row was merely blanked (`truncated`). See **A page may be shorter than `limit`** for how to pick the next `limit`. |
 
 ```json
 {
@@ -5751,6 +5753,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `nextCursor` | string | Optional. Opaque cursor for the next page; absent on the last page. |
 | `hasNext` | boolean | `true` if more threads exist beyond this page. |
 | `unavailableSites` | string[] | Optional. Sites that failed to respond for this page; their threads may appear on a later page once they recover. |
+| `sizeLimited` | boolean | Optional. `true` when rows were dropped to keep the reply inside the transport's `max_payload`. A short page alone does not mean this — a per-site limit or an unavailable peer also produces one — so branch on this flag, never on `len(items) < limit`. Absent when nothing was dropped, including when a row was merely blanked (`truncated`). See **A page may be shorter than `limit`** for how to pick the next `limit`. |
 
 ###### ThreadListItem
 
@@ -6726,6 +6729,10 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 
 > [!IMPORTANT]
 > **A page may be shorter than `limit`.** `limit` is a maximum, never a guarantee. Load History, Load Surrounding and Thread List size each page against the transport's `max_payload` and return fewer rows when the full page would not fit. The "more" flag is authoritative — `hasNext` for Load History and Thread List, `moreBefore` / `moreAfter` for Load Surrounding. Page until the flag clears; never treat a short page as the end of the collection, and never assume `len(items) < limit` means there is nothing more.
+>
+> **`sizeLimited` says a page was cut for bytes**, which a short page alone cannot: the history walk and per-site limits return short pages too. Branch on the flag, and set the next request's `limit` to the row count you just received — the server already sized that page to fit, so it converges in one round trip where halving takes several, and it stops the server re-reading the rows it dropped.
+>
+> Trimming is server-side and can be switched off per service (`PAGE_TRIMMING_ENABLED=false`). With it off these RPCs behave like the ones below: the page ships whole, an oversize one returns `internal` / `response_too_large`, and `sizeLimited` is never set.
 >
 > A single row too large to ship inside a page is returned blanked with `truncated: true` rather than dropped, so pagination always advances past it. A Thread List row too large to send has its `parentMessage` and `lastMessage` bodies dropped and is marked `truncated: true`; its identifiers and `lastMsgAt` are kept, so the cursor still advances.
 >

@@ -959,6 +959,11 @@ would not fit; the more-flag (`hasNext`, or `moreBefore`/`moreAfter`) is authori
 page until it clears rather than treating a short page as the end. A row too large to ship
 inside a page comes back blanked with `truncated: true` instead of being dropped.
 
+`sizeLimited: true` on the response says the page was cut for bytes — a short page alone does not,
+since the history walk returns short pages too. Branch on the flag, and set the next request's
+`limit` to the row count you just received rather than halving. Trimming can be switched off per
+service (`PAGE_TRIMMING_ENABLED=false`), after which these RPCs behave like the ones below.
+
 Load History and Load Surrounding can still return `internal`/`response_too_large` in one case: rows
 sharing a single `createdAt` millisecond are never split, since the resume bound is exclusive and a cut
 inside the millisecond would skip the rest of that group for good. Such a group is returned whole even
@@ -994,6 +999,7 @@ Message schema: see [../client-api.md § Message schema](../client-api.md#messag
 | `messages` | Message[] | Most-recent first. |
 | `hasNext` | boolean | `true` if older messages may exist; next page via `before` = oldest returned `createdAt`. Always `false` on an empty page. |
 | `minUserLastSeenAt` | number | Optional. UTC ms. The room's strict read floor — present only when every member has read. |
+| `sizeLimited` | boolean | Optional. `true` when rows were dropped to fit the transport's max payload. Branch on this, not on a short page; set the next `limit` to the row count received. |
 
 **Emits:** None — reply only.
 
@@ -1048,6 +1054,7 @@ Pivot on **exactly one** of `messageId` or `timestamp`.
 | `messages` | Message[] | Window oldest-first. Centered on `messageId`, or the at-or-before + after groups in `timestamp` mode. |
 | `moreBefore` | boolean | `true` if more messages exist before the window. |
 | `moreAfter` | boolean | `true` if more messages exist after the window. |
+| `sizeLimited` | boolean | Optional. `true` when the window was narrowed to fit the transport's max payload. |
 
 **Emits:** None — reply only.
 
@@ -2043,7 +2050,7 @@ first) — `user-service` fans the query out per-site and merges the results.
 
 #### Success response
 
-`{ "items": ThreadListItem[], "nextCursor"?: string, "hasNext": boolean, "unavailableSites"?: string[] }`
+`{ "items": ThreadListItem[], "nextCursor"?: string, "hasNext": boolean, "unavailableSites"?: string[], "sizeLimited"?: boolean }`
 — see `ThreadListItem` schema in
 [../client-api.md §3.4](../client-api.md#list-user-threads). Sites that fail to respond
 are listed in `unavailableSites` rather than failing the request.

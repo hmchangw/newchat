@@ -172,8 +172,15 @@ func main() {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
+	// A zero Budget disables trimming, so the toggle needs no handler branch.
+	pageBudget := pagefit.Budget{}
+	if cfg.PageTrimming {
+		pageBudget = pagefit.Resolve(cfg.MaxResponseBytes, nc.NatsConn().MaxPayload(), pagefit.DefaultReserve)
+	} else {
+		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
+	}
 	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg,
-		service.WithPageBudget(pagefit.Resolve(cfg.MaxResponseBytes, nc.NatsConn().MaxPayload(), pagefit.DefaultReserve)))
+		service.WithPageBudget(pageBudget))
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
