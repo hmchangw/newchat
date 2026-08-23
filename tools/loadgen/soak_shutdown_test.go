@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,6 +38,54 @@ func TestSoakShutdownExitCode(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, soakShutdownExitCode(tc.current, tc.closeErr))
+		})
+	}
+}
+
+// A run the durability watch stopped leaves through the same cancellation an
+// operator's SIGTERM uses, and cancellation is a normal stop. So a run
+// truncated because the ledger could not record the verdict disqualifying its
+// evidence reported success — and if the journal recovered before shutdown,
+// Close succeeded too and nothing anywhere said the window was cut short.
+// Kubernetes reads the exit code, not the log.
+func TestSoakRunExitCode(t *testing.T) {
+	stopped := fmt.Errorf("%w: %s", errSoakLedgerNotDurable, "reconcile_capacity, wal")
+
+	tests := []struct {
+		name   string
+		runErr error
+		cause  error
+		want   int
+	}{
+		{name: "a completed run succeeds", runErr: nil, cause: nil, want: 0},
+		{
+			name:   "an operator stopping the run is still a normal stop",
+			runErr: context.Canceled,
+			cause:  context.Canceled,
+			want:   0,
+		},
+		{
+			name:   "a run the durability watch stopped fails",
+			runErr: context.Canceled,
+			cause:  stopped,
+			want:   2,
+		},
+		{
+			name:   "a workload failure fails",
+			runErr: errors.New("send lane collapsed"),
+			cause:  nil,
+			want:   1,
+		},
+		{
+			name:   "lost durability outranks the workload error it caused",
+			runErr: errors.New("send lane collapsed"),
+			cause:  stopped,
+			want:   2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, soakRunExitCode(tc.runErr, tc.cause))
 		})
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -398,6 +399,27 @@ func runSoakSeed(
 // will not be recognised as disowned when it is replayed, which is a failed run
 // however well the traffic went. An earlier failure keeps its own code: it is
 // closer to the cause.
+// errSoakLedgerNotDurable is the cancellation cause the durability watch uses.
+// A run it stopped leaves through the same cancellation an operator's SIGTERM
+// uses, so without a cause the two are indistinguishable and a truncated run
+// reports success.
+var errSoakLedgerNotDurable = errors.New(
+	"failure ledger cannot record the verdict disqualifying its evidence")
+
+// soakRunExitCode decides the run's verdict from how the workload ended and why
+// its context was cancelled. Lost durability outranks a workload error: it is
+// the reason the run stopped, and 2 is the code this command already uses for
+// the evidence machinery failing rather than the system under test.
+func soakRunExitCode(runErr, cause error) int {
+	if errors.Is(cause, errSoakLedgerNotDurable) {
+		return 2
+	}
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		return 1
+	}
+	return 0
+}
+
 func soakShutdownExitCode(current int, closeErr error) int {
 	if closeErr == nil || current != 0 {
 		return current
@@ -558,8 +580,8 @@ func runSoakWorkload(
 	// The workload gets its own cancel so the run can be stopped from inside:
 	// a ledger that can no longer record its own verdict has nothing to gain
 	// from the hours it would otherwise keep running.
-	workloadCtx, stopWorkload := context.WithCancel(ctx)
-	defer stopWorkload()
+	workloadCtx, stopWorkload := context.WithCancelCause(ctx)
+	defer stopWorkload(nil)
 	durabilityTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
 	go func() {
 		defer durabilityTicker.Stop()
@@ -572,7 +594,8 @@ func runSoakWorkload(
 					"consequence", "stopping the run rather than accepting messages "+
 						"whose evidence a restart would replay as trustworthy",
 				)
-				stopWorkload()
+				stopWorkload(fmt.Errorf(
+					"%w: %s", errSoakLedgerNotDurable, strings.Join(reasons, ", ")))
 			},
 		)
 	}()
@@ -1148,15 +1171,22 @@ func runSoakWorkload(
 	if err := PrintSoakReport(os.Stdout, &report); err != nil {
 		slog.Error("print Cassandra soak report", "error", err)
 	}
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+	exit := soakRunExitCode(runErr, context.Cause(workloadCtx))
+	switch exit {
+	case 2:
+		slog.Error(
+			"stop Cassandra soak workload early",
+			"completion", result.Completion,
+			"error", context.Cause(workloadCtx),
+		)
+	case 1:
 		slog.Error(
 			"run Cassandra soak workload",
 			"completion", result.Completion,
 			"error", runErr,
 		)
-		return 1
 	}
-	return 0
+	return exit
 }
 
 type soakConsumerSamplerTarget struct {
