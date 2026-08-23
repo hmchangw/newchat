@@ -216,12 +216,16 @@ func (s *HistoryService) ListPinnedMessages(c *natsrouter.Context, req models.Li
 	}, nil
 }
 
-// pinInaccessible: thread replies also gate on parent's createdAt (nil → redact conservatively).
+// pinInaccessible: thread-only replies also gate on parent's createdAt (nil →
+// redact conservatively). TShow replies skip that gate — they carry a
+// messages_by_room row, so load-history already serves the body to any caller
+// whose accessSince predates the reply; redacting the pin would only make the
+// pinned bar stricter than the timeline showing the same message.
 func pinInaccessible(m *models.Message, accessSince time.Time) bool {
 	if m.CreatedAt.Before(accessSince) {
 		return true
 	}
-	if m.ThreadParentID != "" {
+	if m.ThreadParentID != "" && !m.TShow {
 		if m.ThreadParentCreatedAt == nil || m.ThreadParentCreatedAt.Before(accessSince) {
 			return true
 		}

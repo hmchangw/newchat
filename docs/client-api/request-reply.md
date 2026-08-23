@@ -1231,7 +1231,9 @@ messages that don't exist or belong to a different room.
 
 Most-recently-pinned first. Kill-switch and large-room override do **not** apply to
 listing. Caller with a `historySharedSince` lower bound receives redacted stubs for pins
-whose underlying message predates their access window.
+whose underlying message predates their access window, and for thread-only (`tshow=false`)
+replies whose thread parent predates it; `tshow=true` replies are judged on their own
+`createdAt` alone.
 
 #### Request body
 
