@@ -90,8 +90,11 @@ dead room — so the destination keeps the room under its **original, unprefixed
 holds (no `Del-` doc exists), but that room stays visible to its members. Applying the rename would
 hide it via user-service's `^Del-` filter, at the cost of writing exactly the doc this invariant
 forbids. **Removing such rooms is an ops backfill, not a CDC behaviour** — the destination has no
-room-delete path, and the affected ids are exactly those counted by
-`…_events_skipped_total{reason=room_soft_deleted}`.
+room-delete path. Identify the affected rooms by querying the **source** for docs whose `name` or
+`fname` carries the prefix, then reconcile against the destination `rooms` collection by `_id`. The
+`…_events_skipped_total{reason=room_soft_deleted}` counter reports skipped **event volume** only: it
+counts every event on a dead room, not unique rooms, and carries no room id (an unbounded metric
+label). The per-skip log line carries `roomId` for tracing an individual record.
 
 **DMs are not exempt.** For `t:"d"` the name fields hold the peer's username and display name rather
 than a room name, so a user literally named `Del-…` costs their DM. That is the deliberate price of

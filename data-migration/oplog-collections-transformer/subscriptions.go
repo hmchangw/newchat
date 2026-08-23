@@ -113,7 +113,8 @@ func (h *handler) handleSubscription(ctx context.Context, ev oplogEvent) error {
 		// tidy — inbox-worker treats a missing subscription as a redelivery signal, so they would
 		// Nak-retry to exhaustion against a subscription whose insert this same guard skipped.
 		slog.DebugContext(ctx, "skip subscription to soft-deleted room",
-			"op", ev.Op, "eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
+			"roomId", ss.RID, "op", ev.Op,
+			"eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
 		h.metrics.onSkipped(ctx, "subscription_soft_deleted")
 		return migration.ErrSkipped
 	}
