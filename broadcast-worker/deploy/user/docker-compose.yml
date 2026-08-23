@@ -11,6 +11,7 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
+      - ALL_SITE_IDS=${ALL_SITE_IDS:-${SITE_ID:-site-local}}
       # Same-site rooms (crossSite:false) are subscribed by the client on
       # chat.local.room.>; publishing global-only would never reach it.
       - ROOM_SUBJECT_MODE=${ROOM_SUBJECT_MODE:-dual}

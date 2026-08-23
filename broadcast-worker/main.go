@@ -41,31 +41,41 @@ type config struct {
 	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
-	MongoURI      string `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB       string `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
+	// AllSiteIDs is every site in the supercluster, this one included. Peers are
+	// the destinations for the cross-site room-activity refresh; empty (the
+	// single-site default) disables it.
+	AllSiteIDs    []string `env:"ALL_SITE_IDS" envSeparator:","`
+	MongoURI      string   `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
+	MongoDB       string   `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername string   `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword string   `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: reads only; writes always hit the primary. secondaryPreferred
 	// offloads reads (a just-joined member is recovered via history).
-	MongoReadPreference  string          `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
-	MaxWorkers           int             `env:"MAX_WORKERS"               envDefault:"100"`
-	LastMsgFlushInterval time.Duration   `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
-	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL         time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	RoomMetaCacheSize    int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL     time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomKeyGracePeriod   time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	RoomKeyCacheTTL      time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
-	RoomKeyCacheSize     int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
-	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
-	ValkeyAddrs          []string        `env:"VALKEY_ADDRS"              envSeparator:","`
-	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
-	ValkeyKeyGracePeriod time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
-	HealthAddr           string          `env:"HEALTH_ADDR"              envDefault:":8081"`
-	PProfEnabled         bool            `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr          string          `env:"METRICS_ADDR"             envDefault:":9090"`
-	Mode                 stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
-	RoomSubjectMode      string          `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
+	MongoReadPreference  string        `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	MaxWorkers           int           `env:"MAX_WORKERS"               envDefault:"100"`
+	LastMsgFlushInterval time.Duration `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
+	// RoomActivityRefreshInterval caps how often one room's position is announced
+	// cross-site, independently of the Mongo flush above. Generous by design: the
+	// subscription list serves ordering from a cache with a far longer TTL, so a
+	// position a few seconds behind is indistinguishable from a fresh one.
+	// Non-positive announces on every flush.
+	RoomActivityRefreshInterval time.Duration   `env:"ROOM_ACTIVITY_REFRESH_INTERVAL" envDefault:"5s"`
+	UserCacheSize               int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL                time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	RoomMetaCacheSize           int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL            time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomKeyGracePeriod          time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	RoomKeyCacheTTL             time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
+	RoomKeyCacheSize            int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	RoomMetaL2TTL               time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	ValkeyAddrs                 []string        `env:"VALKEY_ADDRS"              envSeparator:","`
+	ValkeyPassword              string          `env:"VALKEY_PASSWORD"           envDefault:""`
+	ValkeyKeyGracePeriod        time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
+	HealthAddr                  string          `env:"HEALTH_ADDR"              envDefault:":8081"`
+	PProfEnabled                bool            `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr                 string          `env:"METRICS_ADDR"             envDefault:":9090"`
+	Mode                        stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	RoomSubjectMode             string          `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
 	// ThreadViewSubjectEnabled: kill switch for the thread-scoped view lane.
@@ -203,6 +213,20 @@ func main() {
 	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
 	// UpdateRoomLastMessage; the coalescing wrapper buffers it and drains via flushCtx/Run.
 	coalescer := newCoalescingStore(cachedStore, store)
+	if peers := remotePeers(cfg.SiteID, cfg.AllSiteIDs); len(peers) > 0 {
+		coalescer.crossSite = crossSiteChecker(cachedStore)
+		coalescer.publishActivity = roomActivityPublisher(publisher, cfg.SiteID, peers)
+		coalescer.refreshInterval = cfg.RoomActivityRefreshInterval
+		coalescer.lastRefreshed = make(map[string]time.Time)
+		slog.Info("cross-site room-activity refresh enabled",
+			"peers", peers, "refresh_interval", cfg.RoomActivityRefreshInterval)
+	} else {
+		// Correct for a single-site deployment, but in a federated one it means
+		// remote chat lists cannot order this site's rooms — say so rather than
+		// leaving a missing ALL_SITE_IDS to look like everything is fine.
+		slog.Warn("cross-site room-activity refresh disabled: no remote peers configured",
+			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
+	}
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	go coalescer.Run(flushCtx, cfg.LastMsgFlushInterval, 5*time.Second)
 	slog.Info("last-msg coalescer enabled", "flush_interval", cfg.LastMsgFlushInterval)

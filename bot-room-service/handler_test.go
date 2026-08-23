@@ -32,6 +32,9 @@ type fakeStore struct {
 
 func (f *fakeStore) InsertRoom(ctx context.Context, r *Room) error { return f.InsertRoomFn(ctx, r) }
 func (f *fakeStore) FindRoom(ctx context.Context, id string) (*Room, error) {
+	if f.FindRoomFn == nil {
+		return nil, ErrNotFound
+	}
 	return f.FindRoomFn(ctx, id)
 }
 func (f *fakeStore) UpsertSubscription(ctx context.Context, s *Subscription) (bool, error) {
@@ -141,6 +144,59 @@ func TestHandleAdd_LocalMemberNoFederation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"bob-id"}, resp.Added.UserIDs)
 	assert.Empty(t, cap.calls, "local member does NOT federate")
+}
+
+func TestHandleDMEnsure_ExistingDMCarriesItsActivityPosition(t *testing.T) {
+	// The DM id is deterministic, so ensure can land on a room that already has
+	// history; federating nil there would leave the target unable to order it.
+	lastMsgAt := time.UnixMilli(1735689500000).UTC()
+	store := &fakeStore{
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "carol", SiteID: "site-b"}, nil
+		},
+		InsertRoomFn: func(_ context.Context, _ *Room) error { return ErrDuplicate },
+		FindRoomFn: func(_ context.Context, id string) (*Room, error) {
+			return &Room{ID: id, Type: roomTypeDM, SiteID: "site-a", LastMsgAt: &lastMsgAt}, nil
+		},
+		UpsertSubscriptionFn: func(_ context.Context, _ *Subscription) (bool, error) { return true, nil },
+	}
+	cap := &captureOutboxPayload{}
+	h := newHandler(store, "site-a", []string{"site-b"}, cap.publish, testKeyStore, testKeySender)
+
+	_, err := h.handleDMEnsure(withIdentity(t, "", ident()), BotDMEnsureRequest{TargetUserID: "carol-id"})
+	require.NoError(t, err)
+
+	require.Len(t, cap.payloads, 1)
+	var evt model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(cap.payloads[0], &evt))
+	require.NotNil(t, evt.LastMsgAt, "an existing DM's position must ride the federated event")
+	assert.Equal(t, lastMsgAt.UnixMilli(), *evt.LastMsgAt)
+}
+
+func TestHandleAdd_RemoteMemberCarriesActivityPosition(t *testing.T) {
+	// A bot-owned channel can already have history, unlike the creation paths.
+	lastMsgAt := time.UnixMilli(1735689500000).UTC()
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", Name: "deployments", CreatedByBot: "bot-1", LastMsgAt: &lastMsgAt}, nil
+		},
+		UpsertSubscriptionFn: func(_ context.Context, _ *Subscription) (bool, error) { return true, nil },
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "carol", SiteID: "site-b"}, nil
+		},
+	}
+	cap := &captureOutboxPayload{}
+	h := newHandler(store, "site-a", []string{"site-b"}, cap.publish, testKeyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"carol-id"}})
+	require.NoError(t, err)
+
+	require.Len(t, cap.payloads, 1, "remote member triggers one member_added federation")
+	var evt model.MemberAddEvent
+	require.NoError(t, json.Unmarshal(cap.payloads[0], &evt))
+	require.NotNil(t, evt.LastMsgAt, "cross-site member_added carries the room's activity position")
+	assert.Equal(t, lastMsgAt.UnixMilli(), *evt.LastMsgAt)
 }
 
 func TestHandleAdd_DuplicateIsNoop(t *testing.T) {

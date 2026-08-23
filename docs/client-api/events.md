@@ -979,6 +979,10 @@ The event carries no separate account list — member identities are in `members
 actually join (or a new org is added), a `members_added` system message also flows through the
 message pipeline as a `new_message` room event; a pure org→individual upgrade posts no such message.
 
+The cross-site INBOX copy additionally carries `accounts` and `lastMsgAt` (the room's activity
+position, epoch ms). Both are server-internal federation fields, stripped from the client-facing
+copy documented above — clients never receive them.
+
 > **No-op:** when the request changes nothing — every requested account already subscribed, no org
 > member upgraded to an individual membership, and every requested org already present — no
 > `member_added` event fires. In particular, re-adding an already-present org is a no-op. An

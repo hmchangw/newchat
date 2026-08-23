@@ -11,6 +11,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	o11yredis "github.com/flywindy/o11y/redis"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -31,18 +32,23 @@ import (
 )
 
 type config struct {
-	NatsURL       string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID        string                  `env:"SITE_ID"         envDefault:"default"`
-	MongoURI      string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB       string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword string                  `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers    int                     `env:"MAX_WORKERS"     envDefault:"100"`
-	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	NatsURL       string `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string `env:"SITE_ID"         envDefault:"default"`
+	MongoURI      string `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
+	MaxWorkers    int    `env:"MAX_WORKERS"     envDefault:"100"`
+	// RoomSubCache memoizes the room-membership check on the activity-refresh
+	// lane, which would otherwise cost a Mongo read per broadcast message.
+	// Either value non-positive disables it.
+	RoomSubCacheSize int                     `env:"ROOM_SUB_CACHE_SIZE" envDefault:"50000"`
+	RoomSubCacheTTL  time.Duration           `env:"ROOM_SUB_CACHE_TTL"  envDefault:"5m"`
+	Consumer         stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap        bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr       string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled     bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
@@ -56,10 +62,67 @@ type config struct {
 
 // mongoInboxStore implements InboxStore using MongoDB.
 type mongoInboxStore struct {
-	subCol       *mongo.Collection
-	roomCol      *mongo.Collection
-	userCol      *mongo.Collection
-	threadSubCol *mongo.Collection
+	subCol        *mongo.Collection
+	roomCol       *mongo.Collection
+	userCol       *mongo.Collection
+	threadSubCol  *mongo.Collection
+	remoteRoomCol *mongo.Collection
+}
+
+// remoteRoomsCollection stores model.RemoteRoom. Deliberately NOT rooms: that
+// one is room-service's and its readers assume complete documents (members,
+// encKey, counts), which a federated peer cannot supply. Migration's room_sync
+// does replicate whole rooms here, so a migrated room can hold both and a
+// reader spanning the two must prefer rooms.
+const remoteRoomsCollection = "remote_rooms"
+
+// HasRoomSubscription reports whether any subscription for roomID exists here.
+// Served by the (roomId, u.account) unique index as a prefix scan; projected to
+// _id and capped at one doc since only existence matters.
+func (s *mongoInboxStore) HasRoomSubscription(ctx context.Context, roomID string) (bool, error) {
+	err := s.subCol.FindOne(ctx, bson.M{"roomId": roomID},
+		options.FindOne().SetProjection(bson.M{"_id": 1})).Err()
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, mongo.ErrNoDocuments):
+		return false, nil
+	default:
+		return false, fmt.Errorf("check room subscription %q: %w", roomID, err)
+	}
+}
+
+// DeleteRemoteRoomActivity drops a remote room's ordering row. Absent row is
+// not an error — the room may never have had one.
+func (s *mongoInboxStore) DeleteRemoteRoomActivity(ctx context.Context, roomID string) error {
+	if _, err := s.remoteRoomCol.DeleteOne(ctx, bson.M{"_id": roomID}); err != nil {
+		return fmt.Errorf("delete remote room activity %q: %w", roomID, err)
+	}
+	return nil
+}
+
+// UpsertRemoteRoomActivity advances a remote room's position under $max, so
+// out-of-order delivery can never regress it. $setOnInsert carries the
+// immutable identity so a first touch creates the row complete.
+func (s *mongoInboxStore) UpsertRemoteRoomActivity(ctx context.Context, roomID, siteID string, lastMsgAt time.Time) error {
+	filter := bson.M{"_id": roomID}
+	update := bson.M{
+		"$max":         bson.M{"lastMsgAt": lastMsgAt},
+		"$setOnInsert": bson.M{"siteId": siteID},
+	}
+	opts := options.UpdateOne().SetUpsert(true)
+	if _, err := s.remoteRoomCol.UpdateOne(ctx, filter, update, opts); err != nil {
+		if !mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("upsert remote room activity %q: %w", roomID, err)
+		}
+		// Two concurrent first-touches. Unlike UpsertRoom, whose guard lives in
+		// the filter, this one filters on _id alone — so a duplicate says
+		// nothing about which value is newer. Retry; the row exists now.
+		if _, err := s.remoteRoomCol.UpdateOne(ctx, filter, update, opts); err != nil {
+			return fmt.Errorf("upsert remote room activity %q (retry after duplicate key): %w", roomID, err)
+		}
+	}
+	return nil
 }
 
 func (s *mongoInboxStore) CreateSubscription(ctx context.Context, sub *model.Subscription) error {
@@ -681,10 +744,11 @@ func main() {
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
+		subCol:        db.Collection("subscriptions"),
+		roomCol:       db.Collection("rooms"),
+		userCol:       db.Collection("users"),
+		threadSubCol:  db.Collection("thread_subscriptions"),
+		remoteRoomCol: db.Collection(remoteRoomsCollection),
 	}
 	store.ensureIndexes(ctx)
 
@@ -742,8 +806,26 @@ func main() {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
-	handler := NewHandler(store)
+	handler := NewHandler(store, WithRoomSubCache(cfg.RoomSubCacheSize, cfg.RoomSubCacheTTL))
 	handler.badge = badge
+	slog.Info("room-sub cache configured", "size", cfg.RoomSubCacheSize, "ttl", cfg.RoomSubCacheTTL)
+
+	// Core-NATS queue subscriber for the cross-site room-activity refresh. Not on
+	// INBOX by design: the signal is coalesced, idempotent and $max-guarded, so it
+	// needs no persistence or ordering, and keeping it off the stream stops a
+	// high-rate hint competing for retention with membership events that do need
+	// both. Fire-and-forget — a failure self-heals on the room's next message.
+	activitySub, err := nc.QueueSubscribe(ctx, subject.RoomActivity(cfg.SiteID), "inbox-worker",
+		func(msgCtx context.Context, msg *nats.Msg) {
+			actCtx, _ := natsutil.StampRequestID(msgCtx, msg.Header, msg.Subject)
+			if err := handler.HandleRoomActivity(actCtx, msg.Data); err != nil {
+				slog.WarnContext(actCtx, "apply room activity refresh failed", "error", err)
+			}
+		})
+	if err != nil {
+		slog.Error("subscribe room-activity failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Two-lane pull pattern over the single INBOX external consumer:
 	//
@@ -842,6 +924,8 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
+		// Unsubscribe before the drain so no refresh arrives after the store closes.
+		func(_ context.Context) error { return activitySub.Unsubscribe() },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error {

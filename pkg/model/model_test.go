@@ -2179,6 +2179,16 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 	})
 }
 
+func TestRemoteRoom_RoundTrip(t *testing.T) {
+	rr := model.RemoteRoom{
+		ID:        "r1",
+		SiteID:    "site-a",
+		LastMsgAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	var got model.RemoteRoom
+	roundTrip(t, &rr, &got)
+}
+
 func TestRoom_CrossSiteRoundTrip(t *testing.T) {
 	r := model.Room{ID: "r1", SiteID: "site-a", CrossSite: boolPtr(true),
 		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
