@@ -69,9 +69,14 @@ rules:
           #      The tail is optional because attribute.String("room", roomID) is
           #      the same one-series-per-room growth as ("roomId", roomID), and
           #      the bare key slipped past the earlier form of this rule.
-          #   2. Anything ending in Subject or _subject — the contract forbids
-          #      both "inbox subject" and "arbitrary destination subject", and
-          #      the key is usually qualified (inboxSubject, destSubject).
+          #   2. Anything ending in Subject or subject, however it is qualified.
+          #      The contract forbids both "inbox subject" and "arbitrary
+          #      destination subject", and the key is nearly always qualified —
+          #      inboxSubject, dest_subject, destinationInboxSubject,
+          #      messaging.destination.subject. An earlier form of this branch
+          #      allowed only one all-lowercase qualifier, so the multiword and
+          #      multi-segment spellings walked past it. Nothing bounded ends in
+          #      subject, so the leading .* costs no false positives.
           #   3. index, which is an Elasticsearch index name.
           #
           #   4. Raw error text and stack traces, the last two entries on that
@@ -89,4 +94,4 @@ rules:
           # form is the one most likely to be reached for. Widening the
           # separator does not widen what matches: the tails are still a closed
           # set, so error.type, user.agent and org.name stay outside it.
-          regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)(?:[._]?[uU]?[iI][dD])?|[a-z]*[._]?[sS]ubject|index|(?:[rR]aw)?[._]?[eE]rr(?:or)?(?:[._]?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?[._]?)?[sS]tack(?:[._]?[tT]race)?)$
+          regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)(?:[._]?[uU]?[iI][dD])?|.*[sS]ubject|index|(?:[rR]aw)?[._]?[eE]rr(?:or)?(?:[._]?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?[._]?)?[sS]tack(?:[._]?[tT]race)?)$

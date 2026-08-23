@@ -134,6 +134,13 @@ func subjectAndIndexKeys(ctx context.Context, c metric.Int64Counter, v string) {
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("dest_subject", v)))
 	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("index", v)))
+	// Qualified forms. The earlier branch was [a-z]*[._]?[sS]ubject, which
+	// could only see a single all-lowercase qualifier, so both of these —
+	// the shapes a real destination key actually takes — walked past it.
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("destinationInboxSubject", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging.destination.subject", v)))
 }
 
 // Raw error text: the bare roots and each message-ish tail.
