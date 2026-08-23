@@ -206,6 +206,70 @@ func TestBadgeCountBatch_CacheFullyDown_CappedUnionFallback(t *testing.T) {
 	assert.Equal(t, 3, resp.Counts["alice"], "r1 (trigger) + r2 + r3, cache down entirely")
 }
 
+// Once the shared request budget (HANDLER_TIMEOUT) is spent mid-batch, the loop
+// must STOP issuing further per-account unread computations rather than fire
+// aggregates against an already-dead context (which return instantly at
+// connection checkout with a misleading pool error). The accounts it never
+// reaches degrade to absence, as any other per-account failure would.
+func TestBadgeCountBatch_BudgetSpentMidBatch_StopsAndRemainingAbsent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	cctx, cancel := context.WithCancel(context.Background())
+	c := ctx("", "site-a")
+	c.SetContext(cctx)
+	// Account "a" computes, then the shared budget expires (simulating the 15s
+	// handler deadline elapsing part-way through the batch).
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "a", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ int) ([]model.EnrichedSubscription, error) {
+			cancel()
+			return []model.EnrichedSubscription{localUnreadSub("a", "ra", "site-a")}, nil
+		})
+	// "b" and "c" must NEVER reach the repo once the context is done.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "b", gomock.Any()).Times(0)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "c", gomock.Any()).Times(0)
+	badge := &fakeBadgeCache{
+		seed: func(account string, roomIDs []string, trigger string) (int, bool) { return 1, true },
+	}
+	svc := newBadgeService(t, subs, badge)
+	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"a", "b", "c"}})
+	require.NoError(t, err, "a spent budget degrades the rest — it must not fail the whole batch")
+	assert.Contains(t, resp.Counts, "a", "the account computed before the budget was spent still answers")
+	assert.NotContains(t, resp.Counts, "b", "an account past the spent budget degrades to absence")
+	assert.NotContains(t, resp.Counts, "c", "an account past the spent budget degrades to absence")
+}
+
+// A spent budget must only skip the EXPENSIVE recompute path. Cache hits are
+// already in memory (BumpBatch computed them up front), so an account that hit
+// the cache must still be served even when it sits after the account that spent
+// the budget — dropping a ready answer would needlessly absent a correct count.
+func TestBadgeCountBatch_BudgetSpentMidBatch_LaterCacheHitStillServed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	cctx, cancel := context.WithCancel(context.Background())
+	c := ctx("", "site-a")
+	c.SetContext(cctx)
+	// "a" misses and recomputes, spending the budget; "c" is a cache hit; "b" misses.
+	badge := &fakeBadgeCache{
+		bumpBatch: func(accounts []string, roomID string) map[string]int {
+			return map[string]int{"c": 7} // only c hits the cache
+		},
+		seed: func(account string, roomIDs []string, trigger string) (int, bool) { return 1, true },
+	}
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "a", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ int) ([]model.EnrichedSubscription, error) {
+			cancel()
+			return []model.EnrichedSubscription{localUnreadSub("a", "ra", "site-a")}, nil
+		})
+	// "b" misses and sits past the spent budget — its expensive recompute must be skipped.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "b", gomock.Any()).Times(0)
+	svc := newBadgeService(t, subs, badge)
+	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"a", "b", "c"}})
+	require.NoError(t, err)
+	assert.Contains(t, resp.Counts, "a", "the account computed before the budget was spent still answers")
+	assert.NotContains(t, resp.Counts, "b", "a MISS past the spent budget is skipped")
+	assert.Equal(t, 7, resp.Counts["c"], "a cache HIT past the spent budget must still be served from memory")
+}
+
 // A failing cross-site RPC still answers from the best-effort ids ∪ trigger,
 // but must not Seed the cache — that would stamp the freshness marker on a
 // knowingly-incomplete set.
