@@ -3980,3 +3980,100 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 		})
 	}
 }
+
+// blockingMentionPublisher records the ctx each publish sees and blocks until
+// that ctx is done, standing in for a stalled OUTBOX.
+type blockingMentionPublisher struct {
+	mu        sync.Mutex
+	deadlines []time.Time
+	hadDeadln []bool
+}
+
+func (p *blockingMentionPublisher) publish(ctx context.Context, _ string, _ []byte, _ string) error {
+	deadline, ok := ctx.Deadline()
+	p.mu.Lock()
+	p.hadDeadln = append(p.hadDeadln, ok)
+	p.deadlines = append(p.deadlines, deadline)
+	p.mu.Unlock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (p *blockingMentionPublisher) calls() ([]bool, []time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]bool(nil), p.hadDeadln...), append([]time.Time(nil), p.deadlines...)
+}
+
+func remoteParticipants(n int) []model.Participant {
+	out := make([]model.Participant, n)
+	for i := range out {
+		out[i] = model.Participant{Account: fmt.Sprintf("acct-%d", i), SiteID: fmt.Sprintf("site-%d", i)}
+	}
+	return out
+}
+
+// A stalled OUTBOX must not hold the canonical message: the fan-out caps itself
+// even when the caller's context has no deadline of its own.
+func TestHandler_FederateMentions_AppliesOwnDeadline(t *testing.T) {
+	var mu sync.Mutex
+	var seen []time.Time
+	h := &Handler{siteID: "site-a", publish: func(ctx context.Context, _ string, _ []byte, _ string) error {
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok, "publish must inherit the fan-out deadline")
+		mu.Lock()
+		seen = append(seen, deadline)
+		mu.Unlock()
+		return nil
+	}}
+
+	ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
+	_, hasDeadline := ctx.Deadline()
+	require.False(t, hasDeadline, "the caller must not already carry a deadline for this to prove anything")
+
+	before := time.Now()
+	h.federateMentions(ctx, "room-1", "msg-1", remoteParticipants(1), before)
+	after := time.Now()
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, seen, 1)
+	// The budget starts inside the call, so the deadline lands within
+	// [before, after] + mentionFanoutTimeout.
+	assert.False(t, seen[0].Before(before.Add(mentionFanoutTimeout)))
+	assert.False(t, seen[0].After(after.Add(mentionFanoutTimeout)))
+}
+
+// An earlier caller deadline wins, so the fan-out never outlives the work that
+// spawned it.
+func TestHandler_FederateMentions_ParentDeadlineWins(t *testing.T) {
+	pub := &blockingMentionPublisher{}
+	h := &Handler{siteID: "site-a", publish: pub.publish}
+
+	ctx, cancel := context.WithTimeout(natsutil.WithRequestID(context.Background(), testMentionRequestID), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	h.federateMentions(ctx, "room-1", "msg-1", remoteParticipants(1), start)
+
+	assert.Less(t, time.Since(start), mentionFanoutTimeout, "the parent's earlier deadline must cut the fan-out short")
+}
+
+// Latency must not scale with the number of stalled batches: 3x maxSiteFanout
+// destinations still finish within one budget, because every batch shares the
+// single fan-out deadline rather than starting a fresh one.
+func TestHandler_FederateMentions_LatencyDoesNotScaleWithBatches(t *testing.T) {
+	pub := &blockingMentionPublisher{}
+	h := &Handler{siteID: "site-a", publish: pub.publish}
+
+	ctx, cancel := context.WithTimeout(natsutil.WithRequestID(context.Background(), testMentionRequestID), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	h.federateMentions(ctx, "room-1", "msg-1", remoteParticipants(3*maxSiteFanout), start)
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, mentionFanoutTimeout, "3 batches must not cost 3 budgets")
+	hadDeadline, _ := pub.calls()
+	assert.LessOrEqual(t, len(hadDeadline), 3*maxSiteFanout)
+}

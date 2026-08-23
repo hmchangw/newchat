@@ -117,6 +117,18 @@ own request ID, so it can neither collide with the original send nor with anothe
 edit in the same millisecond. `seed` (`{roomID}:{msgID}:{mentionedAtMillis}`) is
 the helper's fallback for a request-ID-less context.
 
+### Fan-out budget
+
+The publishes run concurrently under `maxSiteFanout = 8`, and the whole fan-out
+shares one `mentionFanoutTimeout = 5s` deadline derived from the caller's
+context — not one deadline per destination. With more sites than slots the
+publishes run in batches, so a per-batch wait would let handler latency grow as
+`ceil(D/8)` publish timeouts and could push the canonical message past the 30s
+`AckWait`, redelivering it and re-broadcasting to every client in the room.
+Slot acquisition selects on the same deadline, so once the budget is spent the
+remaining destinations are dropped with a count logged rather than parking on a
+slot. A dropped badge is the accepted cost; a duplicated message is not.
+
 ### Edits
 
 `badgeNewlyMentionedAccounts` only parses; it has no site information. It gains

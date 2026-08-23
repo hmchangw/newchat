@@ -35,6 +35,13 @@ import (
 // budget user-service and search-service use for their own per-site fan-outs.
 const maxSiteFanout = 8
 
+// mentionFanoutTimeout caps the whole per-destination fan-out. The handler waits
+// for it before acking, so it must stay well under the 30s AckWait default: a
+// stalled OUTBOX would otherwise hold the canonical message past redelivery and
+// re-broadcast it to every client in the room. A badge is best-effort; the
+// message is not.
+const mentionFanoutTimeout = 5 * time.Second
+
 // errNoCurrentKey is returned when a room has no encryption key in its room document.
 var errNoCurrentKey = errors.New("no current key")
 
@@ -431,9 +438,15 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 		return
 	}
 	now := time.Now().UTC().UnixMilli()
+	// One budget for the whole fan-out, not one per destination: with more sites
+	// than slots the publishes run in batches, and an unbounded wait per batch
+	// would let latency scale with the site count.
+	fanoutCtx, cancel := context.WithTimeout(ctx, mentionFanoutTimeout)
+	defer cancel()
 	// Acquire before spawning so the live goroutine count, not just concurrency,
 	// stays within the budget.
 	var wg sync.WaitGroup
+	var dropped int
 	sem := make(chan struct{}, maxSiteFanout)
 	for destSiteID, accounts := range accountsBySite {
 		payload, err := sonic.Marshal(model.SubscriptionMentionEvent{
@@ -452,12 +465,20 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 		// carrying its own request ID, so two same-ms edits can't collide.
 		seed := fmt.Sprintf("%s:%s:%d", roomID, msgID, at.UnixMilli())
 		dedupID := natsutil.InboxDedupID(ctx, destSiteID, seed)
+		select {
+		case sem <- struct{}{}:
+		case <-fanoutCtx.Done():
+			// Budget spent, so every remaining publish would fail on arrival.
+			// Drop them here instead, and don't park on a slot that a publish
+			// ignoring cancellation may never free.
+			dropped++
+			continue
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, destSiteID,
+			if err := outbox.Publish(fanoutCtx, h.publish, h.siteID, roomID, destSiteID,
 				model.InboxSubscriptionMention, payload, dedupID, now); err != nil {
 				slog.ErrorContext(ctx, "federate subscription_mention failed",
 					"error", err, "room_id", roomID, "dest_site", destSiteID, "accounts", len(accounts),
@@ -466,6 +487,11 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 		}()
 	}
 	wg.Wait()
+	if dropped > 0 {
+		slog.ErrorContext(ctx, "subscription_mention fan-out budget exhausted, destinations dropped",
+			"room_id", roomID, "dropped_sites", dropped, "timeout", mentionFanoutTimeout,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+	}
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
