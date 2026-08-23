@@ -86,11 +86,23 @@ func (h *handler) handleRoom(ctx context.Context, ev oplogEvent) error {
 
 	// hasBot is unresolvable here without a user lookup (botDM detection deferred — see §4.2 /
 	// the design's botDM note); pass false so a 2-party bot DM classifies as a plain dm for now.
+	// Classification runs before the soft-delete guard so a never-migratable type keeps metering its
+	// own exclusion reason rather than being counted as a soft delete.
 	class := classifyRoom(sr.T, sr.Prid != "", sr.TeamID != "", false, sr.participantCount())
 	if class.Excluded {
 		slog.Debug("skip excluded room type",
 			"t", sr.T, "reason", class.Reason, "eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
 		h.metrics.onSkipped(ctx, class.Reason)
+		return migration.ErrSkipped
+	}
+
+	if isSoftDeletedRecord(sr.Name, sr.FName) {
+		// Skipped on every op: room_sync would write the "Del-" name onto rooms.name and room_renamed
+		// onto every subscription in the room. roomId is logged because the counter carries no id.
+		slog.DebugContext(ctx, "skip soft-deleted room",
+			"roomId", sr.ID, "op", ev.Op, "t", sr.T,
+			"eventId", ev.EventID, "request_id", natsutil.RequestIDFromContext(ctx))
+		h.metrics.onSkipped(ctx, "room_soft_deleted")
 		return migration.ErrSkipped
 	}
 

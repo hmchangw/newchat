@@ -417,3 +417,23 @@ func TestHandleSubscription_RolesCleared_EmitsRoleUpdated(t *testing.T) {
 	assert.Equal(t, []model.Role{model.RoleMember}, su.Subscription.Roles,
 		"a demotion (cleared roles) must map to the [member] floor so it survives inbox-worker")
 }
+
+// TestHandleSubscription_NonDeletedNameKept: only the exact "Del-" prefix marks a soft delete.
+func TestHandleSubscription_NonDeletedNameKept(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{"prefix without hyphen", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"delta","fname":"Delta","open":true}`},
+		{"lowercase del-", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"del-general","fname":"del-General","open":true}`},
+		{"prefix mid-name", `{"_id":"sub1","u":{"_id":"u1","username":"alice"},"rid":"r1","t":"c","name":"team-Del-old","fname":"Team Del-old","open":true}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &fakePublisher{}
+			h := newTestHandler(pub, &fakeTarget{}, &fakeLookup{})
+			require.NoError(t, h.handleSubscription(context.Background(), subEv("insert", tc.doc, "")))
+			assert.NotEmpty(t, pub.events)
+		})
+	}
+}
