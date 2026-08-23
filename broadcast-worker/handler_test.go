@@ -2489,6 +2489,14 @@ func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testin
 	// No other followers → sender still receives their own echo (multi-device
 	// parity), plus the thread lane copy.
 	require.Len(t, pub.records, 2)
+	// Deterministic order: publishToThreadAccounts (records[0], alice's
+	// per-account plaintext publish) blocks on wg.Wait() before returning, and
+	// the thread-lane publish (records[1], encrypted copy) only happens after
+	// that call returns. This ordering is what keeps encryptRoomEvent's
+	// in-place Message = nil from ever reaching the per-account (follower)
+	// copy — pin it explicitly, not just via membership.
+	assert.Equal(t, subject.UserRoomEvent("alice"), pub.records[0].subject)
+	assert.Equal(t, "chat.room.room-1.thread.parent-1.event", pub.records[1].subject)
 	subjects := map[string]bool{}
 	for _, r := range pub.records {
 		subjects[r.subject] = true
@@ -3616,7 +3624,7 @@ func TestHandleThreadCreated_ThreadLaneKeepsMentions(t *testing.T) {
 		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
 		Message: model.Message{
 			ID: "reply-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
-			Content: "hey @bob", CreatedAt: msgTime,
+			Content: "hey @all @bob", CreatedAt: msgTime,
 			ThreadParentMessageID: "parent-1", TShow: false,
 		},
 	}
@@ -3636,6 +3644,7 @@ func TestHandleThreadCreated_ThreadLaneKeepsMentions(t *testing.T) {
 	var laneEvt model.RoomEvent
 	require.NoError(t, json.Unmarshal(lane.data, &laneEvt))
 	assert.NotEmpty(t, laneEvt.Mentions, "mentions drive frontend styling and must reach viewers")
+	assert.True(t, laneEvt.MentionAll, "MentionAll must survive on the lane copy alongside Mentions")
 }
 
 // TestHandleThreadCreated_DMRoom_NoThreadLane verifies DM rooms publish nothing
@@ -3708,6 +3717,47 @@ func TestHandleThreadCreated_ThreadLaneFailure_Swallowed(t *testing.T) {
 	}
 	assert.True(t, subjects[subject.UserRoomEvent("alice")], "per-account fan-out must still happen")
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+}
+
+// TestHandleThreadCreated_ThreadLaneEncryptFailure_Swallowed verifies an
+// encryption failure on the lane copy neither fails the handler nor blocks
+// the per-account fan-out, and — critically — never falls through to
+// publishing the plaintext copy on the lane subject. encryptRoomEvent's
+// failure must be a hard stop, not a silent downgrade to plaintext.
+func TestHandleThreadCreated_ThreadLaneEncryptFailure_Swallowed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, errors.New("key store down")).AnyTimes()
+
+	evt := model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "secret thread reply", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data), "encrypt failure must not fail the handler")
+
+	subjects := map[string]bool{}
+	for _, r := range pub.records {
+		subjects[r.subject] = true
+	}
+	assert.True(t, subjects[subject.UserRoomEvent("alice")], "per-account fan-out must still happen")
+	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+	assert.False(t, subjects["chat.room.room-1.thread.parent-1.event"],
+		"an encrypt failure must never fall through to publishing plaintext on the lane")
 }
 
 // TestHandleThreadCreated_EmptyFanOut_StillPublishesThreadLane covers a
