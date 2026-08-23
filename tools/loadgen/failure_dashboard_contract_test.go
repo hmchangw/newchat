@@ -59,6 +59,15 @@ func TestFailureDashboardContract_BundledDashboardUsesCurrentMetricContract(t *t
 		"loadgen_failure_wal_flush_batch_size_sum",
 		"loadgen_failure_wal_appends_total",
 		"loadgen_failure_evidence_flush_duration_seconds_bucket",
+		// The reconcile lane's validity gate. Without a panel these are metrics
+		// nobody reads, and a saturated fault window would look the same as a
+		// healthy one on the board an operator actually opens.
+		"loadgen_failure_reconcile_claims_total",
+		"loadgen_failure_reconcile_lag_seconds_bucket",
+		// Both startup reasons, not just the capacity floor. A panel pinned to
+		// one reason goes blank for the other, which is the same "a metric
+		// nobody surfaces closes nothing" the panel was added to fix.
+		`loadgen_failure_invalidations_total{reason=~\"reconcile_capacity|reconcile_lag_range\"}`,
 	} {
 		assert.Contains(t, dashboard, query)
 	}

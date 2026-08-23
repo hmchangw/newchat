@@ -52,7 +52,21 @@ ledger:
   # The run ID owns the seeded topology; the epoch owns the evidence journal.
   # Bump the epoch whenever a loadgen image changes the ledger contract, so a
   # fresh journal starts without re-seeding the room set.
-  epoch: v1
+  #
+  # v2 adds the `invalidated` journal record. A v1 journal written by this image
+  # cannot be replayed by an image that predates it — the older reader rejects
+  # the unknown record and loses the evidence — so rolling this image back means
+  # rolling the epoch back with it.
+  #
+  # An epoch change starts a new evidence window rather than upgrading the old
+  # one: operations still in flight under the previous epoch receive a verdict
+  # from neither side, and the same applies in reverse on a rollback. Stop
+  # admission and drain until `loadgen_failure_inflight` is zero with no ledger
+  # debt before switching. Switching without draining is allowed, but the two
+  # sides are then explicitly non-continuous evidence and must not be read as
+  # one window. `loadgen_failure_abandoned_journals` stays non-zero for as long
+  # as a journal from an earlier epoch is retained, which is that signal.
+  epoch: v2
   existingClaim: ""
   storageClassName: ""
   accessMode: ReadWriteOnce

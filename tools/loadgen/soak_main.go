@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -393,11 +394,44 @@ func runSoakSeed(
 	return 0
 }
 
+// soakShutdownExitCode folds a ledger close failure into the run's result. A
+// close that could not make an invalidation durable means this run's evidence
+// will not be recognised as disowned when it is replayed, which is a failed run
+// however well the traffic went. An earlier failure keeps its own code: it is
+// closer to the cause.
+// errSoakLedgerNotDurable is the cancellation cause the durability watch uses.
+// A run it stopped leaves through the same cancellation an operator's SIGTERM
+// uses, so without a cause the two are indistinguishable and a truncated run
+// reports success.
+var errSoakLedgerNotDurable = errors.New(
+	"failure ledger cannot record the verdict disqualifying its evidence")
+
+// soakRunExitCode decides the run's verdict from how the workload ended and why
+// its context was cancelled. Lost durability outranks a workload error: it is
+// the reason the run stopped, and 2 is the code this command already uses for
+// the evidence machinery failing rather than the system under test.
+func soakRunExitCode(runErr, cause error) int {
+	if errors.Is(cause, errSoakLedgerNotDurable) {
+		return 2
+	}
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		return 1
+	}
+	return 0
+}
+
+func soakShutdownExitCode(current int, closeErr error) int {
+	if closeErr == nil || current != 0 {
+		return current
+	}
+	return 2
+}
+
 func runSoakWorkload(
 	ctx context.Context,
 	cfg *config,
 	opts soakOptions,
-) int {
+) (exitCode int) {
 	seed := opts.Seed
 	client, err := mongoutil.Connect(
 		ctx,
@@ -424,6 +458,7 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
+	reconcileBreaches := warnSoakReconcileConfig(&cfg.Soak)
 	setSoakRunInfo(metrics, cfg.Soak.Environment)
 	defer metrics.stopNATSHealth()
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
@@ -513,13 +548,22 @@ func runSoakWorkload(
 	if degradedLedger {
 		slog.Error("durable failure ledger unavailable; continuing with invalid in-memory observation")
 	}
+	if err := recordSoakStartupInvalidations(ledger, reconcileBreaches); err != nil {
+		slog.Error("record Cassandra soak startup invalidation", "error", err)
+		if closeErr := ledger.Close(); closeErr != nil {
+			slog.Error("close Cassandra soak failure ledger", "error", closeErr)
+		}
+		return 2
+	}
 	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
 		metrics.FailureDropped.Add(float64(dropped))
 	}
 	defer func() {
-		if err := ledger.Close(); err != nil {
+		err := ledger.Close()
+		if err != nil {
 			slog.Error("close Cassandra soak failure ledger", "error", err)
 		}
+		exitCode = soakShutdownExitCode(exitCode, err)
 	}()
 	observationRuntime := newSoakFailureObservationRuntime(
 		cfg.Soak.RecipientObserverEnabled,
@@ -533,6 +577,29 @@ func runSoakWorkload(
 	// Collected at scrape time so a stalled expiry sweep cannot freeze the one
 	// number that would reveal the stall.
 	metrics.SetRecipientExpectationSource(observationRuntime.Evidence().Len)
+	// The workload gets its own cancel so the run can be stopped from inside:
+	// a ledger that can no longer record its own verdict has nothing to gain
+	// from the hours it would otherwise keep running.
+	workloadCtx, stopWorkload := context.WithCancelCause(ctx)
+	defer stopWorkload(nil)
+	durabilityTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
+	go func() {
+		defer durabilityTicker.Stop()
+		watchSoakLedgerDurability(
+			workloadCtx, ledger, durabilityTicker.C,
+			soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline),
+			func(reasons []string) {
+				slog.Error(
+					"failure ledger cannot record the verdict disqualifying its evidence",
+					"reasons", reasons,
+					"consequence", "stopping the run rather than accepting messages "+
+						"whose evidence a restart would replay as trustworthy",
+				)
+				stopWorkload(fmt.Errorf(
+					"%w: %s", errSoakLedgerNotDurable, strings.Join(reasons, ", ")))
+			},
+		)
+	}()
 	expiryCtx, stopExpiry := context.WithCancel(ctx)
 	expiryTicker := time.NewTicker(soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline))
 	expiryDone := make(chan struct{})
@@ -759,7 +826,8 @@ func runSoakWorkload(
 		slog.Error("build Cassandra soak search reader", "error", searchReaderErr)
 		return 1
 	}
-	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 2)
+	reconcilerOptions := make([]soakFailureReconcilerOption, 0, 3)
+	reconcilerOptions = append(reconcilerOptions, withSoakFailureReconcileMetrics(metrics))
 	if cfg.Soak.SearchObserverEnabled {
 		reconcilerOptions = append(reconcilerOptions, withSoakFailureSearchIndexProbe(
 			newSoakSearchIndexProbe(searchReader, catalog),
@@ -970,14 +1038,8 @@ func runSoakWorkload(
 			// Reconciliation borrows read slots so verification adds no read RPS,
 			// but it may only take its configured share: a large unresolved
 			// backlog must not stop the production-like read mix mid-fault.
-			if reconcileGate.Allow() {
-				reconciled, err := failureReconciler.Try(actionCtx)
-				if err != nil {
-					slog.Error("reconcile Cassandra soak operation", "error", err)
-				}
-				if reconciled {
-					return nil
-				}
+			if reconcileReadAction(actionCtx, failureReconciler, reconcileGate) {
+				return nil
 			}
 			_, _ = reader.ReadMixed(actionCtx, selector.nextRoom())
 			return nil
@@ -1098,7 +1160,7 @@ func runSoakWorkload(
 		nil,
 		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
 	)
-	result, runErr := workload.Run(ctx)
+	result, runErr := workload.Run(workloadCtx)
 	shutdownExpiry()
 	shutdownConsumerSamplers()
 	if err := observationRuntime.Close(); err != nil {
@@ -1110,15 +1172,22 @@ func runSoakWorkload(
 	if err := PrintSoakReport(os.Stdout, &report); err != nil {
 		slog.Error("print Cassandra soak report", "error", err)
 	}
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+	exit := soakRunExitCode(runErr, context.Cause(workloadCtx))
+	switch exit {
+	case 2:
+		slog.Error(
+			"stop Cassandra soak workload early",
+			"completion", result.Completion,
+			"error", context.Cause(workloadCtx),
+		)
+	case 1:
 		slog.Error(
 			"run Cassandra soak workload",
 			"completion", result.Completion,
 			"error", runErr,
 		)
-		return 1
 	}
-	return 0
+	return exit
 }
 
 type soakConsumerSamplerTarget struct {
