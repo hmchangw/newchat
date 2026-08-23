@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -215,4 +216,36 @@ func TestObserveRequest_RegisteredKindKeepsItsLabels(t *testing.T) {
 	}
 	require.Equal(t, metricKindMessages, got["kind"])
 	require.Equal(t, "ok", got["status"])
+}
+
+// The fallback that keeps an unregistered kind from panicking built its
+// MeasurementOptions inline, once per request — the allocation this package
+// precomputes buildRequestOpts to avoid, reintroduced by the fix for the panic.
+// It escaped the semgrep rule only because the option is assigned to a variable
+// before it reaches Record/Add, not because it is cheap.
+//
+// Both fallback sets are closed: statusLabel returns members of
+// allowedStatusLabels and nothing else, and the duration fallback carries no
+// labels at all, so there is exactly one option per status plus one unlabelled.
+func TestObserveRequest_UnregisteredKindDoesNotAllocateOptions(t *testing.T) {
+	newTestMetrics(t)
+
+	var handlerErr error
+	ctx := context.Background()
+	// One warm-up outside the measurement: the first call through the SDK
+	// allocates its own per-series state, which is not what this asserts.
+	observeRequest(ctx, "a-kind-nobody-registered", &handlerErr)()
+
+	opts := allocsForFallbackOptions(t, "a-kind-nobody-registered")
+	assert.Zero(t, opts, "the unknown-kind fallback must look its options up, not build them")
+}
+
+// allocsForFallbackOptions measures only the option selection, not the SDK
+// recording underneath it, so the assertion stays about this package's choice.
+func allocsForFallbackOptions(t *testing.T, kind string) float64 {
+	t.Helper()
+	return testing.AllocsPerRun(100, func() {
+		_ = appMetrics.durationOptFor(kind)
+		_ = appMetrics.countOptFor(kind, "ok")
+	})
 }

@@ -33,6 +33,38 @@ type metrics struct {
 	// every combination is built once here rather than per request.
 	kindOpts   map[string]metric.MeasurementOption
 	statusOpts map[requestLabels]metric.MeasurementOption
+
+	// Fallback sets for a kind outside allMetricKinds. These are closed too —
+	// the duration fallback carries no labels, and statusLabel returns nothing
+	// but a member of allowedStatusLabels — so the degraded path is a lookup
+	// like the normal one, not a reason to start allocating per request.
+	unlabelledOpt      metric.MeasurementOption
+	fallbackStatusOpts map[string]metric.MeasurementOption
+}
+
+// durationOptFor returns the duration attribute set for kind, falling back to
+// the unlabelled set. Indexing blind would yield a nil MeasurementOption that
+// the SDK dereferences — a runtime panic on a telemetry path, which must never
+// be able to take a request down. Dropping the kind label loses a dimension; it
+// does not lose the request, and it does not mint an unbounded label from an
+// unvetted value. The sibling recorder in search-sync-worker guards the same way.
+func (m *metrics) durationOptFor(kind string) metric.MeasurementOption {
+	if opt, ok := m.kindOpts[kind]; ok {
+		return opt
+	}
+	return m.unlabelledOpt
+}
+
+// countOptFor degrades one dimension at a time: an unknown kind keeps status,
+// and a status somehow outside allowedStatusLabels still records unlabelled.
+func (m *metrics) countOptFor(kind, status string) metric.MeasurementOption {
+	if opt, ok := m.statusOpts[requestLabels{kind, status}]; ok {
+		return opt
+	}
+	if opt, ok := m.fallbackStatusOpts[status]; ok {
+		return opt
+	}
+	return m.unlabelledOpt
 }
 
 // requestLabels keys the precomputed request attribute sets.
@@ -61,6 +93,16 @@ func buildRequestOpts() (map[string]metric.MeasurementOption, map[requestLabels]
 		}
 	}
 	return kindOpts, statusOpts
+}
+
+// buildFallbackOpts precomputes the sets the unknown-kind path uses: one
+// unlabelled option and one status-only option per allowed status.
+func buildFallbackOpts() (metric.MeasurementOption, map[string]metric.MeasurementOption) {
+	statusOnly := make(map[string]metric.MeasurementOption, len(allowedStatusLabels))
+	for status := range allowedStatusLabels {
+		statusOnly[status] = metric.WithAttributeSet(attribute.NewSet(attribute.String("status", status)))
+	}
+	return metric.WithAttributeSet(*attribute.EmptySet()), statusOnly
 }
 
 // appMetrics is set once by initMetrics after obs.Init has installed the global
@@ -97,12 +139,15 @@ func newMetrics(meter metric.Meter) (*metrics, error) {
 		return nil, fmt.Errorf("create es-duration histogram: %w", err)
 	}
 	kindOpts, statusOpts := buildRequestOpts()
+	unlabelledOpt, fallbackStatusOpts := buildFallbackOpts()
 	return &metrics{
-		requests:        requests,
-		requestDuration: requestDuration,
-		esDuration:      esDuration,
-		kindOpts:        kindOpts,
-		statusOpts:      statusOpts,
+		requests:           requests,
+		requestDuration:    requestDuration,
+		esDuration:         esDuration,
+		kindOpts:           kindOpts,
+		statusOpts:         statusOpts,
+		unlabelledOpt:      unlabelledOpt,
+		fallbackStatusOpts: fallbackStatusOpts,
 	}, nil
 }
 
@@ -143,24 +188,8 @@ func observeRequest(ctx context.Context, kind string, errPtr *error) func() {
 	start := time.Now()
 	return func() {
 		status := statusLabel(*errPtr)
-		// Look the precomputed sets up rather than indexing blind. A kind
-		// outside allMetricKinds yields a nil MeasurementOption, and the SDK
-		// dereferences it — a runtime panic on a telemetry path, which must
-		// never be able to take a request down. Recording without the kind
-		// label loses a dimension; it does not lose the request, and it does
-		// not mint an unbounded label from an unvetted value. The sibling
-		// recorder in search-sync-worker guards the same way.
-		durationOpt, ok := appMetrics.kindOpts[kind]
-		if !ok {
-			durationOpt = metric.WithAttributes()
-		}
-		appMetrics.requestDuration.Record(ctx, time.Since(start).Seconds(), durationOpt)
-
-		countOpt, ok := appMetrics.statusOpts[requestLabels{kind, status}]
-		if !ok {
-			countOpt = metric.WithAttributes(attribute.String("status", status))
-		}
-		appMetrics.requests.Add(ctx, 1, countOpt)
+		appMetrics.requestDuration.Record(ctx, time.Since(start).Seconds(), appMetrics.durationOptFor(kind))
+		appMetrics.requests.Add(ctx, 1, appMetrics.countOptFor(kind, status))
 	}
 }
 
