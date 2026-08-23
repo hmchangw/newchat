@@ -79,7 +79,9 @@ type config struct {
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
 	// ThreadViewSubjectEnabled: kill switch for the thread-scoped view lane.
-	ThreadViewSubjectEnabled bool                    `env:"THREAD_VIEW_SUBJECT_ENABLED" envDefault:"true"`
+	ThreadViewSubjectEnabled bool `env:"THREAD_VIEW_SUBJECT_ENABLED" envDefault:"true"`
+	// MentionFederationEnabled: gates cross-site mention badges. Off until every destination site's inbox-worker knows subscription_mention — an older one Acks it as unknown and drops it.
+	MentionFederationEnabled bool                    `env:"MENTION_FEDERATION_ENABLED" envDefault:"false"`
 	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Encryption               encryptionConfig        `envPrefix:"ENCRYPTION_"`
@@ -261,9 +263,15 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
-		withBroadcastMetrics(domainMetrics), withThreadViewSubject(cfg.ThreadViewSubjectEnabled),
-		withOutboxFederation(cfg.SiteID, outboxPublish))
+	opts := []handlerOption{
+		withBroadcastMetrics(domainMetrics),
+		withThreadViewSubject(cfg.ThreadViewSubjectEnabled),
+	}
+	if cfg.MentionFederationEnabled {
+		opts = append(opts, withOutboxFederation(cfg.SiteID, outboxPublish))
+		slog.Info("cross-site mention federation enabled")
+	}
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode, opts...)
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.

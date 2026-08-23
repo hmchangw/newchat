@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +33,10 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
+
+// maxSiteFanout bounds concurrent per-destination OUTBOX publishes, matching the
+// budget user-service and search-service use for their own per-site fan-outs.
+const maxSiteFanout = 8
 
 // errNoCurrentKey is returned when a room has no encryption key in its room document.
 var errNoCurrentKey = errors.New("no current key")
@@ -427,6 +434,10 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 		return
 	}
 	now := time.Now().UTC().UnixMilli()
+	// Acquire before spawning so the live goroutine count, not just concurrency,
+	// stays within the budget.
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxSiteFanout)
 	for destSiteID, accounts := range accountsBySite {
 		payload, err := sonic.Marshal(model.SubscriptionMentionEvent{
 			RoomID:      roomID,
@@ -440,15 +451,38 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 				"request_id", natsutil.RequestIDFromContext(ctx))
 			continue
 		}
-		// at keeps a later edit's badge from being deduped against the original send.
-		dedupID := fmt.Sprintf("mention:%s:%s:%d:%s", roomID, msgID, at.UnixMilli(), destSiteID)
-		if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, destSiteID,
-			model.InboxSubscriptionMention, payload, dedupID, now); err != nil {
-			slog.ErrorContext(ctx, "federate subscription_mention failed",
-				"error", err, "room_id", roomID, "dest_site", destSiteID, "accounts", len(accounts),
-				"request_id", natsutil.RequestIDFromContext(ctx))
-		}
+		// Payload-derived, so it is redelivery-stable even though this consume path
+		// mints a request ID when the header is absent (StampRequestID, not Require).
+		// at separates an edit from the send; the digest separates same-ms edits.
+		dedupID := fmt.Sprintf("mention:%s:%s:%d:%s:%s", roomID, msgID, at.UnixMilli(), accountsDigest(accounts), destSiteID)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, destSiteID,
+				model.InboxSubscriptionMention, payload, dedupID, now); err != nil {
+				slog.ErrorContext(ctx, "federate subscription_mention failed",
+					"error", err, "room_id", roomID, "dest_site", destSiteID, "accounts", len(accounts),
+					"request_id", natsutil.RequestIDFromContext(ctx))
+			}
+		}()
 	}
+	wg.Wait()
+}
+
+// accountsDigest is a stable fingerprint of a destination's account set, sorted so
+// the same set always yields the same digest regardless of mention order.
+func accountsDigest(accounts []string) string {
+	sorted := slices.Clone(accounts)
+	slices.Sort(sorted)
+	h := fnv.New64a()
+	for _, a := range sorted {
+		// hash.Hash.Write never returns an error.
+		_, _ = h.Write([]byte(a))
+		_, _ = h.Write([]byte{0}) // separator: ("ab","c") must not equal ("a","bc")
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {

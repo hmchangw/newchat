@@ -845,7 +845,7 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 
 	relay, envelope, payload := unwrapOutbox(t, got[0].Data)
 	assert.Equal(t, "r-fed", relay.RoomID)
-	assert.Equal(t, fmt.Sprintf("mention:r-fed:m-fed:%d:site-b", msgTime.UnixMilli()), relay.DedupID)
+	assert.Equal(t, fmt.Sprintf("mention:r-fed:m-fed:%d:%s:site-b", msgTime.UnixMilli(), accountsDigest([]string{"carol"})), relay.DedupID)
 	assert.Equal(t, model.InboxSubscriptionMention, envelope.Type)
 	assert.Equal(t, "site-a", envelope.SiteID)
 	assert.Equal(t, "site-b", envelope.DestSiteID)

@@ -35,6 +35,8 @@ services:
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - INPUT_STREAM=MESSAGES-CANONICAL-site1
       - INPUT_SUBJECT_FILTER=chat.msg.canonical.site1.*
+      # Two-site stack: the only place the cross-site mention relay can be driven.
+      - MENTION_FEDERATION_ENABLED=${MENTION_FEDERATION_ENABLED:-true}
     depends_on:
       - nats_site1
       - mongodb

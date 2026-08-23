@@ -3823,14 +3823,14 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			wantRecords: []outboxRecord{
 				{
 					subject: "chat.outbox.site-a.site-b.subscription_mention",
-					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:site-b", msgTime.UnixMilli()),
+					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-b", msgTime.UnixMilli(), accountsDigest([]string{"bob"})),
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 				{
 					subject: "chat.outbox.site-a.site-c.subscription_mention",
-					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:site-c", msgTime.UnixMilli()),
+					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-c", msgTime.UnixMilli(), accountsDigest([]string{"carol"})),
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
 					},
@@ -3971,9 +3971,23 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 			require.Len(t, got, 1)
 			assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
 			// editedAt in the dedup ID keeps the edit distinct from the original send.
-			assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
+			assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-b", editedAt.UnixMilli(), accountsDigest(tc.wantAccounts)), got[0].msgID)
 			assert.Equal(t, tc.wantAccounts, got[0].event.Accounts)
 			assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
 		})
 	}
+}
+
+func TestAccountsDigest(t *testing.T) {
+	// Order-independent: the same set must always yield the same dedup component,
+	// or a redelivery would publish under a new Nats-Msg-Id and double-badge.
+	assert.Equal(t, accountsDigest([]string{"alice", "bob"}), accountsDigest([]string{"bob", "alice"}))
+	// Set-sensitive: this is the whole point — two edits in the same millisecond
+	// with different mentionees must not collide on one Nats-Msg-Id.
+	assert.NotEqual(t, accountsDigest([]string{"alice"}), accountsDigest([]string{"alice", "dave"}))
+	assert.NotEqual(t, accountsDigest([]string{"alice"}), accountsDigest([]string{"bob"}))
+	// Clone, don't sort in place: the caller's slice feeds the published payload.
+	accounts := []string{"bob", "alice"}
+	accountsDigest(accounts)
+	assert.Equal(t, []string{"bob", "alice"}, accounts)
 }
