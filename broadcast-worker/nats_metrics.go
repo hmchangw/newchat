@@ -95,12 +95,17 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 		deliveryOpts:       make(map[deliveryKey]metric.MeasurementOption),
 		threadViewOpts:     make(map[natsmetrics.EventType]metric.MeasurementOption),
 	}
+	// threadViewOpts is keyed by event alone, so it gets its own loop. Filling it
+	// inside the room loop below wrote the same eight entries once per room kind
+	// and threw away thirty-two of the forty.
+	for _, event := range allBroadcastEvents {
+		m.threadViewOpts[event] = metric.WithAttributes(attribute.String("event_type", string(event)))
+	}
 	for _, room := range allRoomKinds {
 		roomAttr := attribute.String("room_kind", string(room))
 		for _, event := range allBroadcastEvents {
 			eventAttr := attribute.String("event_type", string(event))
 			m.fanoutOpts[fanoutKey{room, event}] = metric.WithAttributes(roomAttr, eventAttr)
-			m.threadViewOpts[event] = metric.WithAttributes(eventAttr)
 			for _, result := range allDeliveryResults {
 				m.deliveryOpts[deliveryKey{room, event, result}] = metric.WithAttributes(
 					roomAttr, eventAttr, attribute.String("result", string(result)))
