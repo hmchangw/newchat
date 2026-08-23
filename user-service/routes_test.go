@@ -28,6 +28,7 @@ func routedEngine(t *testing.T, lister subscriptionLister, d httpDeps) *gin.Engi
 	return r
 }
 
+// authedGet issues a request carrying a valid credential.
 func authedGet(r *gin.Engine, query, acceptEncoding string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/subscriptions?"+query, nil)
 	req.Header.Set(ssoTokenHeader, "tok-good")
@@ -39,10 +40,12 @@ func authedGet(r *gin.Engine, query, acceptEncoding string) *httptest.ResponseRe
 	return w
 }
 
+// defaultDeps wires the middleware stack as registerRoutes does.
 func defaultDeps() httpDeps {
 	return httpDeps{maxConcurrency: 256, gzipMinBytes: 1024, handlerTimeout: 30 * time.Second}
 }
 
+// The route is unreachable without a credential.
 func TestRoutes_RequiresAuthentication(t *testing.T) {
 	lister := NewMocksubscriptionLister(gomock.NewController(t))
 	r := routedEngine(t, lister, defaultDeps())
@@ -53,6 +56,7 @@ func TestRoutes_RequiresAuthentication(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
+// The whole stack composes: auth, limiter, gzip, timeout, handler.
 func TestRoutes_ServesAuthenticatedRequest(t *testing.T) {
 	lister := NewMocksubscriptionLister(gomock.NewController(t))
 	lister.EXPECT().ListSubscriptionsFor(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).
@@ -97,6 +101,7 @@ func TestRoutes_ShedsBeforeAuthenticating(t *testing.T) {
 	assert.Equal(t, int64(1), shed.Load())
 }
 
+// gzip is wired in front of the handler, not merely available.
 func TestRoutes_CompressesLargeResponses(t *testing.T) {
 	lister := NewMocksubscriptionLister(gomock.NewController(t))
 	lister.EXPECT().ListSubscriptionsFor(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
@@ -109,6 +114,7 @@ func TestRoutes_CompressesLargeResponses(t *testing.T) {
 	assert.Contains(t, gunzipBody(t, w), `"hasMore":false`)
 }
 
+// The configured budget reaches the request, not just the server struct.
 func TestRoutes_AppliesHandlerTimeout(t *testing.T) {
 	lister := NewMocksubscriptionLister(gomock.NewController(t))
 	lister.EXPECT().ListSubscriptionsFor(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).

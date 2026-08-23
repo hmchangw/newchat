@@ -137,6 +137,8 @@ func TestCORS_PreflightOptions_Returns204WithoutHandler(t *testing.T) {
 	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
 }
 
+// Without the credential headers on the preflight allow-list the endpoint is
+// unreachable cross-origin, which is how this was missed the first time.
 func TestCORS_PreflightOptions_AllowsTracePropagationHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

@@ -122,4 +122,6 @@ func BenchmarkPageMarshalGzip(b *testing.B) {
 
 type countingWriter struct{ n int }
 
+// Write counts bytes without retaining them, so the benchmark measures
+// encoding rather than allocation of the sink.
 func (w *countingWriter) Write(p []byte) (int, error) { w.n += len(p); return len(p), nil }

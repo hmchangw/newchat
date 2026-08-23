@@ -9,6 +9,12 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
+// maxPreviewBodyBytes is the message-body ceiling, the only thing bounding one
+// preview's size. Mirrored rather than shared because services are package main:
+// message-gatekeeper/handler.go enforces it, history-service and pkg/model carry
+// their own copies. Raising it there without raising it here understates the peak.
+const maxPreviewBodyBytes = 20 * 1024
+
 // MongoConfig holds MongoDB connection settings (env prefix: MONGO_).
 type MongoConfig struct {
 	URI      string `env:"URI,notEmpty"`
@@ -31,11 +37,9 @@ type HTTPConfig struct {
 	// the NATS path — but the NATS connection and the room/history services behind
 	// it are still shared. 0 disables.
 	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
-	// MaxConns bounds accepted TCP connections. MaxConcurrency only applies once a
-	// full request reaches Gin, so without this a client trickling headers, or
-	// holding idle keep-alives, grows goroutines and buffers independently of it.
-	// Must exceed MaxConcurrency: keep-alive connections outnumber in-flight
-	// requests. 0 disables.
+	// MaxConns bounds accepted TCP connections; see ginutil.LimitListener for why.
+	// Must exceed MaxConcurrency, since keep-alives outnumber in-flight requests.
+	// 0 disables.
 	MaxConns       int           `env:"MAX_CONNS" envDefault:"2048"`
 	HandlerTimeout time.Duration `env:"HANDLER_TIMEOUT" envDefault:"30s"`
 	// WriteTimeout must exceed HandlerTimeout: net/http starts its clock when the
@@ -43,7 +47,10 @@ type HTTPConfig struct {
 	WriteTimeout     time.Duration `env:"WRITE_TIMEOUT"      envDefault:"35s"`
 	GzipMinBytes     int           `env:"GZIP_MIN_BYTES"     envDefault:"1024"`
 	MongoMaxPoolSize uint64        `env:"MONGO_MAX_POOL_SIZE" envDefault:"128"`
-	MongoMinPoolSize uint64        `env:"MONGO_MIN_POOL_SIZE" envDefault:"16"`
+	// 0 by default: a warm floor is per replica-set member, a standing cost the
+	// cluster carries idle. The price is that a burst after a lull pays connect and
+	// auth, throttled by the driver's maxConnecting of 2.
+	MongoMinPoolSize uint64 `env:"MONGO_MIN_POOL_SIZE" envDefault:"0"`
 	// Pool sizes are per replica-set member, and the driver never reaps idle
 	// connections by default, so a burst's peak would be held for the process life.
 	MongoMaxIdleTime time.Duration `env:"MONGO_MAX_IDLE_TIME" envDefault:"5m"`
@@ -77,6 +84,13 @@ type Config struct {
 	// transports. 2 MB is ~25x a typical 400-row page and only bites on bodies near
 	// the gatekeeper's 20 KB ceiling. 0 disables it.
 	PreviewByteBudget int64 `env:"PREVIEW_BYTE_BUDGET" envDefault:"2097152"`
+	// PreviewPeakBytes caps what ONE page holds at once, as opposed to retains:
+	// chunks are fetched concurrently and each is materialized before the byte
+	// budget charges it. Startup checks MaxSiteFanout x RoomBatchChunk x the 20 KB
+	// body ceiling against it. Process peak is this x HTTP_MAX_CONCURRENCY, so the
+	// 16 MB default admits ~4 GB across 256 handlers -- size both together against
+	// the pod limit. 0 disables the check.
+	PreviewPeakBytes int64 `env:"PREVIEW_PEAK_BYTES" envDefault:"16777216"`
 	// MaxSiteFanout bounds concurrent enrichment RPCs per request. Chunking makes a
 	// large page issue several per site, so this is the knob that throttles the
 	// resulting downstream load without a rebuild.
@@ -216,6 +230,11 @@ func Load() (Config, error) {
 	}
 	if cfg.RoomBatchChunk < 1 || cfg.RoomBatchChunk > 100 {
 		return Config{}, fmt.Errorf("ROOM_BATCH_CHUNK must be in [1,100], got %d", cfg.RoomBatchChunk)
+	}
+	// Ordered after the two knobs it reads, so their own errors surface first.
+	if peak := int64(cfg.MaxSiteFanout) * int64(cfg.RoomBatchChunk) * maxPreviewBodyBytes; cfg.PreviewPeakBytes > 0 && peak > cfg.PreviewPeakBytes {
+		return Config{}, fmt.Errorf("per-page peak MAX_SITE_FANOUT (%d) x ROOM_BATCH_CHUNK (%d) x 20 KB = %d exceeds PREVIEW_PEAK_BYTES (%d)",
+			cfg.MaxSiteFanout, cfg.RoomBatchChunk, peak, cfg.PreviewPeakBytes)
 	}
 	if cfg.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)

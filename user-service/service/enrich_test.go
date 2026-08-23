@@ -50,6 +50,7 @@ func key32(b byte) []byte {
 	return k
 }
 
+// Local and remote rows take different paths to the same shape.
 func TestEnrichWithRoomInfo_LocalAndCrossSite(t *testing.T) {
 	svc, _, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
@@ -295,6 +296,7 @@ func TestEnrichWithRoomInfo_CrossSiteRPCFailDegradesSiteKeepsOthers(t *testing.T
 	assert.Equal(t, "Ops", subs[2].Room.Name) // site-c still enriched
 }
 
+// No rows means no RPC, not an empty one.
 func TestEnrichWithRoomInfo_Empty(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
 	// No GetRoomsInfo / GetMany expectations: empty input must short-circuit before any call.
@@ -542,6 +544,7 @@ func TestEnrichLastMessage_ChunksBeyondBatchCap(t *testing.T) {
 	}
 }
 
+// Chunking exists to make degradation finer than per-site.
 func TestEnrichLastMessage_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 	svc, _, history := newSvcRawHistory(t)
 	subs, idxBySite := enrichFixture(250, "site-a")
@@ -569,6 +572,7 @@ func TestEnrichLastMessage_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 	assert.Equal(t, 200, withPreview, "a failed chunk must cost only its own 50 rooms, not the whole site")
 }
 
+// The cross-site fan-out has the same 100-id cap as the local one.
 func TestEnrichCrossSite_ChunksBeyondBatchCap(t *testing.T) {
 	svc, _, _, _, rooms, _, _ := newSvc(t)
 	subs, idxBySite := enrichFixture(250, "site-b")
@@ -602,6 +606,7 @@ func TestEnrichCrossSite_ChunksBeyondBatchCap(t *testing.T) {
 	}
 }
 
+// Same per-chunk degradation guarantee on the cross-site path.
 func TestEnrichCrossSite_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 	svc, _, _, _, rooms, _, _ := newSvc(t)
 	subs, idxBySite := enrichFixture(250, "site-b")
@@ -721,6 +726,8 @@ func TestFanout_NormalisesNonPositive(t *testing.T) {
 	assert.Equal(t, 3, (&UserService{maxFanout: 3}).fanout())
 }
 
+// A zero fan-out would build an unbuffered semaphore and park forever, which
+// fixtures constructing UserService directly can otherwise hit.
 func TestEnrichLastMessage_UnsetFanoutDoesNotDeadlock(t *testing.T) {
 	_, _, history := newSvcRawHistory(t)
 	// maxFanout deliberately left at zero, as the badge/thread fixtures build it.

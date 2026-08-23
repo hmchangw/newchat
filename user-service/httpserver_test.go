@@ -13,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/user-service/config"
 )
 
+// WriteTimeout's clock starts at header read, so it must exceed the handler budget.
 func TestNewHTTPServer_Tuning(t *testing.T) {
 	cfg := &config.HTTPConfig{Port: "8080", HandlerTimeout: 30 * time.Second, WriteTimeout: 35 * time.Second}
 	srv := newHTTPServer(":8080", http.NotFoundHandler(), cfg)

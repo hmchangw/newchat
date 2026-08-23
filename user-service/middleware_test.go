@@ -33,6 +33,7 @@ func (f fakeSSO) Validate(_ context.Context, token string) (pkgoidc.Claims, erro
 
 type fakeBot struct{ account string }
 
+// Validate accepts one canned session token and rejects the rest.
 func (f fakeBot) Validate(_ context.Context, token string) (principal.Principal, error) {
 	if token != "tok-session" {
 		// Typed, as real botplatform replies: a raw error would mean "could not
@@ -43,6 +44,7 @@ func (f fakeBot) Validate(_ context.Context, token string) (principal.Principal,
 	return principal.Principal{Account: f.account, UserID: "u1", SiteID: "site-a"}, nil
 }
 
+// authEngine builds a router with only the auth middleware in front of h.
 func authEngine(t *testing.T, d authDeps) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -54,6 +56,7 @@ func authEngine(t *testing.T, d authDeps) *gin.Engine {
 	return r
 }
 
+// fullDeps wires both credential validators, the production arrangement.
 func fullDeps() authDeps {
 	return authDeps{
 		sso: fakeSSO{claims: map[string]pkgoidc.Claims{
@@ -64,6 +67,8 @@ func fullDeps() authDeps {
 	}
 }
 
+// The account must come from the verified credential and never the request,
+// which is the guarantee NATS subject scoping gave for free.
 func TestAuthMiddleware(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -177,6 +182,7 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 }
 
+// A handler reached without the middleware must read empty, not panic.
 func TestAccountFromContext_EmptyWithoutMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())

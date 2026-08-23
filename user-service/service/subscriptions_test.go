@@ -1183,6 +1183,7 @@ func TestApplyRoomInfo_CrossSite_Nil(t *testing.T) {
 	assert.Nil(t, sub.Room.CrossSite)
 }
 
+// Page bounds are parameters because HTTP and NATS have different ceilings.
 func TestListSubscriptionsFor_AppliesSuppliedPageBounds(t *testing.T) {
 	tests := []struct {
 		name                   string
@@ -1218,6 +1219,7 @@ func TestListSubscriptionsFor_AppliesSuppliedPageBounds(t *testing.T) {
 	}
 }
 
+// Validation lives in the shared core, so both transports inherit it.
 func TestListSubscriptionsFor_ValidatesRequest(t *testing.T) {
 	negative := -1
 	tests := []struct {

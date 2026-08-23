@@ -19,6 +19,7 @@ func noSet(t *testing.T) func(int64) int64 {
 	}
 }
 
+// cgroupFile writes a fake cgroup limit file and returns its path.
 func cgroupFile(t *testing.T, name, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), name)
@@ -26,11 +27,13 @@ func cgroupFile(t *testing.T, name, content string) string {
 	return p
 }
 
+// absent returns a path that does not exist, standing in for the other layout.
 func absent(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "absent")
 }
 
+// v2 is the layout on any current runtime, so it is tried first.
 func TestSetFromFiles_CgroupV2(t *testing.T) {
 	var got int64
 	limit, err := setFromFiles(
@@ -43,6 +46,7 @@ func TestSetFromFiles_CgroupV2(t *testing.T) {
 	assert.Equal(t, limit, got, "the reported limit must be the one applied")
 }
 
+// "max" means no quota; deriving a limit from it would be meaningless.
 func TestSetFromFiles_CgroupV2Unlimited(t *testing.T) {
 	limit, err := setFromFiles(
 		cgroupFile(t, "memory.max", "max\n"), absent(t), 0.8, "", noSet(t))
@@ -51,6 +55,7 @@ func TestSetFromFiles_CgroupV2Unlimited(t *testing.T) {
 	assert.Zero(t, limit)
 }
 
+// Older hosts only have v1, and its file lives elsewhere.
 func TestSetFromFiles_FallsBackToCgroupV1(t *testing.T) {
 	limit, err := setFromFiles(
 		absent(t), cgroupFile(t, "memory.limit_in_bytes", "2147483648\n"), 0.5, "",
@@ -61,6 +66,7 @@ func TestSetFromFiles_FallsBackToCgroupV1(t *testing.T) {
 	assert.Equal(t, int64(1073741824), limit, "50% of 2 GiB")
 }
 
+// v1 spells unlimited as a near-int64-max sentinel, not a word.
 func TestSetFromFiles_V1SentinelIsUnlimited(t *testing.T) {
 	limit, err := setFromFiles(
 		absent(t), cgroupFile(t, "memory.limit_in_bytes", "9223372036854771712\n"), 0.8, "", noSet(t))
@@ -69,6 +75,7 @@ func TestSetFromFiles_V1SentinelIsUnlimited(t *testing.T) {
 	assert.Zero(t, limit)
 }
 
+// An operator-set GOMEMLIMIT is deliberate; never second-guess it.
 func TestSetFromFiles_ExplicitEnvWins(t *testing.T) {
 	limit, err := setFromFiles(
 		cgroupFile(t, "memory.max", "1073741824\n"), "", 0.8, "500MiB", noSet(t))
@@ -77,6 +84,7 @@ func TestSetFromFiles_ExplicitEnvWins(t *testing.T) {
 	assert.Zero(t, limit, "an operator-set GOMEMLIMIT must never be overridden")
 }
 
+// Running outside a container is normal, not a failure.
 func TestSetFromFiles_NoCgroupFilesIsNotAnError(t *testing.T) {
 	limit, err := setFromFiles(absent(t), absent(t), 0.8, "", noSet(t))
 
@@ -84,6 +92,7 @@ func TestSetFromFiles_NoCgroupFilesIsNotAnError(t *testing.T) {
 	assert.Zero(t, limit)
 }
 
+// A fraction outside (0,1] is a config bug worth failing startup for.
 func TestSetFromFiles_RejectsBadFraction(t *testing.T) {
 	for _, f := range []float64{0, -1, 1.5, math.NaN()} {
 		limit, err := setFromFiles("", "", f, "", noSet(t))
@@ -92,6 +101,7 @@ func TestSetFromFiles_RejectsBadFraction(t *testing.T) {
 	}
 }
 
+// A quota file we cannot read is worth surfacing, unlike a missing one.
 func TestSetFromFiles_RejectsUnparseableQuota(t *testing.T) {
 	limit, err := setFromFiles(cgroupFile(t, "memory.max", "banana\n"), "", 0.8, "", noSet(t))
 
@@ -99,6 +109,7 @@ func TestSetFromFiles_RejectsUnparseableQuota(t *testing.T) {
 	assert.Zero(t, limit)
 }
 
+// A quota that rounds to zero must be skipped, not applied as zero.
 func TestSetFromFiles_QuotaTooSmallToSplit(t *testing.T) {
 	// A quota so small that fraction rounds it to zero must be skipped, not applied.
 	limit, err := setFromFiles(cgroupFile(t, "memory.max", "1\n"), "", 0.1, "", noSet(t))

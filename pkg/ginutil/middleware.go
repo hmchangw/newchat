@@ -1,4 +1,6 @@
-// Package ginutil holds the Gin middleware shared by the HTTP services: request-ID, access log, CORS.
+// Package ginutil holds the serving-layer toolkit shared by the HTTP services:
+// request-ID, access log and CORS middleware, gzip, request timeouts,
+// concurrency shedding, and a connection-limiting listener.
 package ginutil
 
 import (

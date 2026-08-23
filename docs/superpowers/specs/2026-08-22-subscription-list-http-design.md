@@ -433,12 +433,13 @@ existing `MONGO_` / `NATS_` blocks:
 | `HTTP_WRITE_TIMEOUT` | `35s` | Must exceed the handler timeout |
 | `HTTP_GZIP_MIN_BYTES` | `1024` | Compression threshold |
 | `HTTP_MONGO_MAX_POOL_SIZE` | `128` | HTTP-only Mongo pool (§13) |
-| `HTTP_MONGO_MIN_POOL_SIZE` | `16` | Warm floor for burst arrivals |
+| `HTTP_MONGO_MIN_POOL_SIZE` | `0` | Warm floor; per member, so non-zero is a standing cost |
 | `HTTP_MONGO_MAX_IDLE_TIME` | `5m` | Reap idle pooled connections; 0 = never |
 | `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` | `40` | Page size when `limit` omitted |
 | `HTTP_SUBSCRIPTION_MAX_LIMIT` | `400` | Hard page ceiling |
 | `ROOM_BATCH_CHUNK` | `100` | Enrichment fan-out chunk size |
-| `PREVIEW_BYTE_BUDGET` | `2097152` | Preview bytes one page may assemble; 0 = unbounded |
+| `PREVIEW_BYTE_BUDGET` | `2097152` | Preview bytes one page may *retain*; 0 = unbounded |
+| `PREVIEW_PEAK_BYTES` | `16777216` | Ceiling on what a page *holds at once*; 0 = unchecked |
 | `MAX_SITE_FANOUT` | `8` | Concurrent enrichment calls in flight |
 | `MONGO_MAX_POOL_SIZE` | `100` | NATS-path pool, now explicit |
 | `HEALTH_ADDR` | `:8081` | Probe listener |
@@ -453,6 +454,7 @@ silently dropping the budget), `HTTP_WRITE_TIMEOUT > HTTP_HANDLER_TIMEOUT`,
 `HTTP_MAX_CONNS ≥ 0` with `0` disabling the limiter and any positive value
 required to exceed `HTTP_MAX_CONCURRENCY` (keep-alive connections outnumber
 in-flight requests), `HTTP_MONGO_MAX_IDLE_TIME ≥ 0`, `PREVIEW_BYTE_BUDGET ≥ 0`,
+`MAX_SITE_FANOUT × ROOM_BATCH_CHUNK × 20 KB ≤ PREVIEW_PEAK_BYTES`,
 `GOMEMLIMIT_FRACTION` in `(0, 1]` — fail fast at startup, matching the existing
 validation style.
 
@@ -464,7 +466,7 @@ the pool the NATS RPC handlers depend on:
 ```go
 httpMongo, err := mongoutil.ConnectRead(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
     mongoutil.WithMaxPoolSize(cfg.HTTP.MongoMaxPoolSize),   // 128
-    mongoutil.WithMinPoolSize(cfg.HTTP.MongoMinPoolSize),   // 16
+    mongoutil.WithMinPoolSize(cfg.HTTP.MongoMinPoolSize),   // 0, see the footprint note
     mongoutil.WithMaxIdleTime(cfg.HTTP.MongoMaxIdleTime),   // 5m, see the reaping note below
     mongoutil.WithObservability(sdk),
 )
@@ -495,10 +497,13 @@ client, so the ceiling is the pool limits times the number of replica-set member
 a client talks to — with a three-member set that is up to (100 + 128) × 3 ≈ **684
 connections per pod**, ~6,840 across ten pods, not the 228/2,280 an earlier draft
 of this document claimed. `MinPoolSize` is likewise per server, so the HTTP
-minimum of 16 can be held on each active member. Size these against the replica
-set's connection budget rather than against the per-pod intuition, and consider
-dropping the HTTP minimum to 0 if warm-connection latency is not a concern —
-failover shifts pool creation between members and briefly multiplies the count.
+minimum is therefore held on each active member, which is why it now defaults to
+**0**: a warm floor is a connection the cluster carries whether or not traffic
+arrives, and cold-checkout latency is the cheaper price. Sustained HTTP cost is
+`MinPoolSize × members × pods` = **0** at the defaults; peak is
+`MaxPoolSize × members × pods` = 3,840. Size these against the replica set's
+budget rather than the per-pod intuition — failover shifts pool creation between
+members and briefly multiplies the count.
 
 That ceiling used to be *sticky*: the driver reaps idle connections only when
 `maxIdleTimeMS` is set, and 0 (its default) means never

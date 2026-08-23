@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// gzipEngine builds a router with only the gzip middleware in front of h.
 func gzipEngine(t *testing.T, minSize int, h gin.HandlerFunc) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -23,6 +24,7 @@ func gzipEngine(t *testing.T, minSize int, h gin.HandlerFunc) *gin.Engine {
 	return r
 }
 
+// writeBody serves body as JSON, so the sniffer sees a compressible type.
 func writeBody(body string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Content-Type", "application/json")
@@ -30,6 +32,7 @@ func writeBody(body string) gin.HandlerFunc {
 	}
 }
 
+// doGet issues a GET with the given Accept-Encoding and records the response.
 func doGet(r *gin.Engine, acceptEncoding string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	if acceptEncoding != "" {
@@ -40,6 +43,7 @@ func doGet(r *gin.Engine, acceptEncoding string) *httptest.ResponseRecorder {
 	return w
 }
 
+// gunzip decompresses a recorded body, failing the test on malformed output.
 func gunzip(t *testing.T, b []byte) string {
 	t.Helper()
 	zr, err := gzip.NewReader(bytes.NewReader(b))
@@ -49,6 +53,7 @@ func gunzip(t *testing.T, b []byte) string {
 	return string(out)
 }
 
+// The point of the middleware: a body past minSize goes out encoded.
 func TestGzip_CompressesAboveThreshold(t *testing.T) {
 	body := strings.Repeat("a", 4096)
 	w := doGet(gzipEngine(t, 1024, writeBody(body)), "gzip")
@@ -61,6 +66,7 @@ func TestGzip_CompressesAboveThreshold(t *testing.T) {
 	assert.Equal(t, body, gunzip(t, w.Body.Bytes()), "round-trip must be lossless")
 }
 
+// Small bodies cost more in framing than they save, so they stay plain.
 func TestGzip_PassesThroughBelowThreshold(t *testing.T) {
 	body := strings.Repeat("a", 100)
 	w := doGet(gzipEngine(t, 1024, writeBody(body)), "gzip")
@@ -69,6 +75,7 @@ func TestGzip_PassesThroughBelowThreshold(t *testing.T) {
 	assert.Equal(t, body, w.Body.String())
 }
 
+// A client that never offered gzip must not receive it.
 func TestGzip_PassesThroughWithoutAcceptEncoding(t *testing.T) {
 	body := strings.Repeat("a", 4096)
 	w := doGet(gzipEngine(t, 1024, writeBody(body)), "")
@@ -78,6 +85,7 @@ func TestGzip_PassesThroughWithoutAcceptEncoding(t *testing.T) {
 	assert.Equal(t, body, w.Body.String())
 }
 
+// Accept-Encoding is a list with parameters, not a string match.
 func TestGzip_AcceptEncodingParsing(t *testing.T) {
 	body := strings.Repeat("a", 4096)
 	tests := []struct {
@@ -105,8 +113,8 @@ func TestGzip_AcceptEncodingParsing(t *testing.T) {
 	}
 }
 
+// Exactly minSize must compress: the check is >=, not >.
 func TestGzip_ExactThresholdBoundary(t *testing.T) {
-	// Exactly minSize must compress: the check is >=, not >.
 	w := doGet(gzipEngine(t, 1024, writeBody(strings.Repeat("a", 1024))), "gzip")
 	assert.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
 
@@ -114,6 +122,7 @@ func TestGzip_ExactThresholdBoundary(t *testing.T) {
 	assert.Empty(t, w.Header().Get("Content-Encoding"))
 }
 
+// The decision is on total bytes, not per-write size.
 func TestGzip_ManySmallWritesAccumulateToThreshold(t *testing.T) {
 	want := strings.Repeat("b", 16*200)
 	r := gzipEngine(t, 1024, func(c *gin.Context) {
@@ -127,6 +136,7 @@ func TestGzip_ManySmallWritesAccumulateToThreshold(t *testing.T) {
 	assert.Equal(t, want, gunzip(t, w.Body.Bytes()))
 }
 
+// The status is buffered until the encoding settles; it must survive that.
 func TestGzip_PreservesStatusCode(t *testing.T) {
 	body := strings.Repeat("c", 4096)
 	r := gzipEngine(t, 1024, func(c *gin.Context) { c.String(http.StatusTeapot, body) })
@@ -137,6 +147,7 @@ func TestGzip_PreservesStatusCode(t *testing.T) {
 	assert.Equal(t, body, gunzip(t, w.Body.Bytes()))
 }
 
+// Same guarantee on the plain path, where no commit ever happens.
 func TestGzip_PreservesStatusCodeBelowThreshold(t *testing.T) {
 	r := gzipEngine(t, 1024, func(c *gin.Context) { c.String(http.StatusNotFound, "nope") })
 	w := doGet(r, "gzip")
@@ -145,6 +156,7 @@ func TestGzip_PreservesStatusCodeBelowThreshold(t *testing.T) {
 	assert.Equal(t, "nope", w.Body.String())
 }
 
+// A handler that writes nothing must not leave a half-built encoder.
 func TestGzip_EmptyBodyIsSafe(t *testing.T) {
 	r := gzipEngine(t, 1024, func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	w := doGet(r, "gzip")
@@ -154,6 +166,7 @@ func TestGzip_EmptyBodyIsSafe(t *testing.T) {
 	assert.Empty(t, w.Header().Get("Content-Encoding"))
 }
 
+// gin marshals JSON in one Write, the shape this endpoint actually produces.
 func TestGzip_JSONRenderRoundTrips(t *testing.T) {
 	payload := map[string]string{"k": strings.Repeat("v", 4096)}
 	r := gzipEngine(t, 1024, func(c *gin.Context) { c.JSON(http.StatusOK, payload) })
@@ -165,6 +178,7 @@ func TestGzip_JSONRenderRoundTrips(t *testing.T) {
 	assert.JSONEq(t, `{"k":"`+strings.Repeat("v", 4096)+`"}`, gunzip(t, w.Body.Bytes()))
 }
 
+// A handler that already encoded its body owns the Content-Encoding.
 func TestGzip_DoesNotDoubleEncode(t *testing.T) {
 	body := strings.Repeat("a", 4096)
 	r := gzipEngine(t, 1024, func(c *gin.Context) {
@@ -177,6 +191,7 @@ func TestGzip_DoesNotDoubleEncode(t *testing.T) {
 	assert.Equal(t, body, w.Body.String())
 }
 
+// Pooled writers must be reset between requests or bodies bleed together.
 func TestGzip_ReusesPooledWritersAcrossRequests(t *testing.T) {
 	body := strings.Repeat("a", 4096)
 	r := gzipEngine(t, 1024, writeBody(body))
@@ -239,6 +254,7 @@ func TestGzip_FlushBelowThresholdPreservesStatus(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "short", "the buffered prefix must not be stranded")
 }
 
+// Flush has to reach the gzip writer, not just the underlying one.
 func TestGzip_FlushAfterThresholdStreams(t *testing.T) {
 	body := strings.Repeat("a", 4096)
 	gin.SetMode(gin.TestMode)
@@ -295,6 +311,7 @@ func TestGzip_FlushBeforeAnyWriteStaysUncompressed(t *testing.T) {
 	assert.Equal(t, body, w.Body.String())
 }
 
+// gzip;q=0 is an explicit refusal, not an offer.
 func TestGzip_HonoursQZeroRefusal(t *testing.T) {
 	body := strings.Repeat("a", 4096)
 	tests := []struct {

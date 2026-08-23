@@ -38,6 +38,7 @@ func handlerEngine(t *testing.T, lister subscriptionLister, account string) *gin
 	return r
 }
 
+// getSubs issues a subscription request with the given query.
 func getSubs(t *testing.T, r *gin.Engine, query string) *httptest.ResponseRecorder {
 	t.Helper()
 	w := httptest.NewRecorder()
@@ -45,8 +46,11 @@ func getSubs(t *testing.T, r *gin.Engine, query string) *httptest.ResponseRecord
 	return w
 }
 
+// boolPtr is for the optional-bool query fields.
 func boolPtr(b bool) *bool { return &b }
-func intPtr(i int) *int    { return &i }
+
+// intPtr is for the optional-int query fields.
+func intPtr(i int) *int { return &i }
 
 // TestHandler_BindsQueryToRequest is the contract between the query string and
 // the service request: omitted must stay distinguishable from a zero value.
@@ -79,6 +83,7 @@ func TestHandler_BindsQueryToRequest(t *testing.T) {
 	}
 }
 
+// A caller must not be able to read another account by naming it.
 func TestHandler_UsesAuthenticatedAccountNotQuery(t *testing.T) {
 	lister := NewMocksubscriptionLister(gomock.NewController(t))
 	lister.EXPECT().
@@ -90,6 +95,7 @@ func TestHandler_UsesAuthenticatedAccountNotQuery(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+// The HTTP body stays byte-identical to the NATS reply.
 func TestHandler_SerializesResponse(t *testing.T) {
 	lister := NewMocksubscriptionLister(gomock.NewController(t))
 	lister.EXPECT().ListSubscriptionsFor(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).
@@ -138,6 +144,7 @@ func TestHandler_MarksResponsePrivate(t *testing.T) {
 	assert.Equal(t, "private, no-store", w.Header().Get("Cache-Control"))
 }
 
+// Binding failures are client errors, not 500s.
 func TestHandler_RejectsMalformedQuery(t *testing.T) {
 	for _, query := range []string{
 		"type=current&limit=abc",
@@ -156,6 +163,7 @@ func TestHandler_RejectsMalformedQuery(t *testing.T) {
 	}
 }
 
+// The service's typed error decides the status, not the transport.
 func TestHandler_PropagatesServiceErrorCodes(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -182,6 +190,7 @@ func TestHandler_PropagatesServiceErrorCodes(t *testing.T) {
 	}
 }
 
+// The handler's deadline and cancellation must reach the service.
 func TestHandler_PassesRequestContext(t *testing.T) {
 	type ctxKey string
 	const key ctxKey = "marker"

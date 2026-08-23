@@ -59,6 +59,8 @@ func fillAndShed(t *testing.T, r *gin.Engine, admitted <-chan struct{}, n int) *
 	return w
 }
 
+// Overflow is shed at the door rather than queued behind work whose client
+// has already given up.
 func TestMaxConcurrency_ShedsBeyondCap(t *testing.T) {
 	r, admitted, release := blockingEngine(t, 1, nil)
 	defer close(release)
@@ -72,6 +74,7 @@ func TestMaxConcurrency_ShedsBeyondCap(t *testing.T) {
 		w.Body.String())
 }
 
+// A slot returns on the normal path, or the cap ratchets down to zero.
 func TestMaxConcurrency_ReleasesSlotAfterCompletion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -85,6 +88,7 @@ func TestMaxConcurrency_ReleasesSlotAfterCompletion(t *testing.T) {
 	}
 }
 
+// Release is deferred, so a panicking handler cannot leak its slot.
 func TestMaxConcurrency_ReleasesSlotOnPanic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -101,6 +105,7 @@ func TestMaxConcurrency_ReleasesSlotOnPanic(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, "a panicking handler must not leak its slot")
 }
 
+// 0 disables the limiter, the documented escape hatch.
 func TestMaxConcurrency_NonPositiveDisablesLimiting(t *testing.T) {
 	for _, n := range []int{0, -1} {
 		gin.SetMode(gin.TestMode)
@@ -122,6 +127,7 @@ func TestMaxConcurrency_NonPositiveDisablesLimiting(t *testing.T) {
 	}
 }
 
+// Shedding is invisible without the counter; it must fire per rejection.
 func TestMaxConcurrency_OnShedObserverFires(t *testing.T) {
 	var shed atomic.Int64
 	r, admitted, release := blockingEngine(t, 1, func() { shed.Add(1) })
@@ -131,6 +137,7 @@ func TestMaxConcurrency_OnShedObserverFires(t *testing.T) {
 	assert.Equal(t, int64(1), shed.Load())
 }
 
+// The cap is a floor on admitted work, not just a ceiling on rejections.
 func TestMaxConcurrency_AdmitsUpToCapConcurrently(t *testing.T) {
 	const capacity = 4
 	r, admitted, release := blockingEngine(t, capacity, nil)

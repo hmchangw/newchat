@@ -16,6 +16,7 @@ type handler struct {
 	maxLimit     int
 }
 
+// newHandler injects page bounds: HTTP and NATS carry different ceilings.
 func newHandler(subs subscriptionLister, defaultLimit, maxLimit int) *handler {
 	return &handler{subs: subs, defaultLimit: defaultLimit, maxLimit: maxLimit}
 }

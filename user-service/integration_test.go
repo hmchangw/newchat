@@ -28,6 +28,7 @@ import (
 	"github.com/hmchangw/chat/user-service/service"
 )
 
+// TestMain drives shared-container cleanup for the package.
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
 const (
@@ -41,6 +42,7 @@ const (
 // history-service and room-service actually enforce.
 type stubRooms struct{ batches chan int }
 
+// GetRoomsInfo serves the canned rooms the list path joins against.
 func (s *stubRooms) GetRoomsInfo(_ context.Context, _ string, roomIDs []string) ([]model.RoomInfo, error) {
 	s.batches <- len(roomIDs)
 	out := make([]model.RoomInfo, 0, len(roomIDs))
@@ -50,6 +52,7 @@ func (s *stubRooms) GetRoomsInfo(_ context.Context, _ string, roomIDs []string) 
 	return out, nil
 }
 
+// GetRoomsMeta serves canned room metadata for the count path.
 func (s *stubRooms) GetRoomsMeta(ctx context.Context, site string, roomIDs []string) ([]model.RoomInfo, error) {
 	return s.GetRoomsInfo(ctx, site, roomIDs)
 }
@@ -78,6 +81,8 @@ var fixedPreviewTime = time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
 
 const historyBatchCap = 100
 
+// RoomsGet enforces the same 100-id and 100-hint caps the real service does,
+// so an unchunked page fails rather than quietly returning empty rows.
 func (s *stubHistory) RoomsGet(_ context.Context, _ string, roomIDs []string, hints map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
 	s.batches <- len(roomIDs)
 	if len(roomIDs) > historyBatchCap {
@@ -161,6 +166,7 @@ func newTestAPI(t *testing.T) (*gin.Engine, *stubRooms, *stubHistory) {
 	return r, rooms, history
 }
 
+// apiGet issues an authenticated request against the running server.
 func apiGet(t *testing.T, r *gin.Engine, query, acceptEncoding string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/subscriptions?"+query, nil)
@@ -183,6 +189,7 @@ type listResponse struct {
 	HasMore bool `json:"hasMore"`
 }
 
+// drain empties ch without blocking, so a test can assert on what was sent.
 func drain(ch chan int) []int {
 	var out []int
 	for {
@@ -219,6 +226,7 @@ func TestHTTPList_LargePageKeepsEveryPreview(t *testing.T) {
 	}
 }
 
+// hasMore and offset agree across a full traversal.
 func TestHTTPList_PagesToTheEnd(t *testing.T) {
 	r, _, _ := newTestAPI(t)
 
@@ -238,6 +246,8 @@ func TestHTTPList_PagesToTheEnd(t *testing.T) {
 	assert.Len(t, seen, seededRooms, "paging must cover every subscription exactly once")
 }
 
+// An oversized limit clamps rather than erroring, so a client cannot force
+// an unbounded page.
 func TestHTTPList_LimitClampsToMax(t *testing.T) {
 	r, _, _ := newTestAPI(t)
 
@@ -249,6 +259,7 @@ func TestHTTPList_LimitClampsToMax(t *testing.T) {
 	assert.Len(t, got.Subscriptions, seededRooms, "clamped to 400, so all 250 rows fit")
 }
 
+// An omitted limit behaves identically on both transports.
 func TestHTTPList_DefaultLimitMatchesNATS(t *testing.T) {
 	r, _, _ := newTestAPI(t)
 
@@ -260,6 +271,7 @@ func TestHTTPList_DefaultLimitMatchesNATS(t *testing.T) {
 	assert.Len(t, got.Subscriptions, 40, "an omitted limit must behave as it does over NATS")
 }
 
+// Compression must be transparent: same bytes after decoding.
 func TestHTTPList_GzipMatchesPlainBody(t *testing.T) {
 	r, _, _ := newTestAPI(t)
 
@@ -282,6 +294,7 @@ func TestHTTPList_GzipMatchesPlainBody(t *testing.T) {
 		plain.Body.Len(), zipped.Body.Len(), float64(plain.Body.Len())/float64(zipped.Body.Len()))
 }
 
+// The endpoint is closed by default, end to end.
 func TestHTTPList_RejectsUnauthenticated(t *testing.T) {
 	r, _, _ := newTestAPI(t)
 
@@ -291,6 +304,7 @@ func TestHTTPList_RejectsUnauthenticated(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
+// includeLastMessage=false must skip the RPC, not fetch and discard.
 func TestHTTPList_SkippingPreviewsAvoidsHistoryEntirely(t *testing.T) {
 	r, _, history := newTestAPI(t)
 

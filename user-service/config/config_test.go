@@ -340,6 +340,7 @@ func TestLoad_BadgeMarkerTTLDefault(t *testing.T) {
 	assert.Equal(t, 10*time.Minute, cfg.BadgeMarkerTTL)
 }
 
+// The marker must not outlive its set, or a stale zero reads as a fresh one.
 func TestLoad_BadgeMarkerTTLValidation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -381,6 +382,7 @@ func requiredEnv(t *testing.T) {
 	t.Setenv("SITE_ID", "site-a")
 }
 
+// The shipped defaults are the contract operators inherit by doing nothing.
 func TestLoad_HTTPDefaults(t *testing.T) {
 	requiredEnv(t)
 	cfg, err := Load()
@@ -392,7 +394,7 @@ func TestLoad_HTTPDefaults(t *testing.T) {
 	assert.Equal(t, 35*time.Second, cfg.HTTP.WriteTimeout)
 	assert.Equal(t, 1024, cfg.HTTP.GzipMinBytes)
 	assert.Equal(t, uint64(128), cfg.HTTP.MongoMaxPoolSize)
-	assert.Equal(t, uint64(16), cfg.HTTP.MongoMinPoolSize)
+	assert.Equal(t, uint64(0), cfg.HTTP.MongoMinPoolSize, "no warm floor: a per-member minimum is a standing cluster cost")
 	assert.Equal(t, 40, cfg.HTTP.DefaultLimit, "matches the NATS default so an omitted limit behaves the same")
 	assert.Equal(t, 400, cfg.HTTP.MaxLimit)
 	assert.Equal(t, uint64(100), cfg.Mongo.MaxPoolSize, "the NATS-path pool is now explicit, not the driver default")
@@ -402,6 +404,7 @@ func TestLoad_HTTPDefaults(t *testing.T) {
 	assert.Empty(t, cfg.BotplatformURL)
 }
 
+// Every cross-field rule fails fast at startup rather than at first request.
 func TestLoad_RejectsInvalidConfig(t *testing.T) {
 	tests := []struct {
 		name, env, val, wantMsg string
@@ -431,6 +434,7 @@ func TestLoad_RejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+// Each knob is reachable from its documented env var.
 func TestLoad_HTTPOverrides(t *testing.T) {
 	requiredEnv(t)
 	t.Setenv("HTTP_PORT", "9090")
@@ -457,6 +461,7 @@ func TestLoad_ZeroConcurrencyIsAllowed(t *testing.T) {
 	assert.Equal(t, 0, cfg.HTTP.MaxConcurrency)
 }
 
+// A default is required here: the driver's own default of 0 means never reap.
 func TestLoad_HTTPMongoMaxIdleTimeDefault(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
@@ -469,6 +474,7 @@ func TestLoad_HTTPMongoMaxIdleTimeDefault(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, cfg.HTTP.MongoMaxIdleTime)
 }
 
+// Operators tune reaping without a rebuild.
 func TestLoad_HTTPMongoMaxIdleTimeOverride(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
@@ -481,6 +487,7 @@ func TestLoad_HTTPMongoMaxIdleTimeOverride(t *testing.T) {
 	assert.Equal(t, 90*time.Second, cfg.HTTP.MongoMaxIdleTime)
 }
 
+// A negative duration is a typo, not a request to disable reaping.
 func TestLoad_RejectsNegativeHTTPMongoMaxIdleTime(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
@@ -493,9 +500,9 @@ func TestLoad_RejectsNegativeHTTPMongoMaxIdleTime(t *testing.T) {
 	assert.Contains(t, err.Error(), "HTTP_MONGO_MAX_IDLE_TIME")
 }
 
+// ginutil.Timeout disables itself at <= 0, so a zero or negative value would
+// silently drop the request budget instead of failing loudly at startup.
 func TestLoad_RejectsNonPositiveHandlerTimeout(t *testing.T) {
-	// ginutil.Timeout disables itself at <= 0, so a zero or negative value would
-	// silently drop the request budget instead of failing loudly at startup.
 	for _, v := range []string{"0s", "-1s"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv("MONGO_URI", "mongodb://x")
@@ -507,6 +514,50 @@ func TestLoad_RejectsNonPositiveHandlerTimeout(t *testing.T) {
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "HTTP_HANDLER_TIMEOUT")
+		})
+	}
+}
+
+// The shipped default must admit the shipped fan-out x chunk, or the defaults
+// reject themselves at startup.
+func TestLoad_PreviewPeakBytesDefault(t *testing.T) {
+	requiredEnv(t)
+	unsetEnv(t, "PREVIEW_PEAK_BYTES")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.EqualValues(t, 16<<20, cfg.PreviewPeakBytes)
+}
+
+// fanout x chunk x 20 KB is implicit in three knobs; startup makes it explicit.
+func TestLoad_PreviewPeakBytesBoundsFanoutTimesChunk(t *testing.T) {
+	tests := []struct {
+		name          string
+		fanout, chunk string
+		peak          string
+		wantErr       bool
+	}{
+		{name: "16 x 100 x 20 KB = 32 MB over a 16 MB ceiling", fanout: "16", chunk: "100", peak: "16777216", wantErr: true},
+		{name: "halving the chunk lands exactly on the ceiling", fanout: "16", chunk: "50", peak: "16777216"},
+		{name: "zero ceiling disables the check", fanout: "64", chunk: "100", peak: "0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requiredEnv(t)
+			t.Setenv("MAX_SITE_FANOUT", tt.fanout)
+			t.Setenv("ROOM_BATCH_CHUNK", tt.chunk)
+			t.Setenv("PREVIEW_PEAK_BYTES", tt.peak)
+
+			_, err := Load()
+
+			if !tt.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "PREVIEW_PEAK_BYTES")
+			assert.Contains(t, err.Error(), "MAX_SITE_FANOUT")
 		})
 	}
 }

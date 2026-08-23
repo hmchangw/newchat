@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// timeoutEngine builds a router with only the timeout middleware in front of h.
 func timeoutEngine(t *testing.T, d time.Duration, h gin.HandlerFunc) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -21,6 +22,8 @@ func timeoutEngine(t *testing.T, d time.Duration, h gin.HandlerFunc) *gin.Engine
 	return r
 }
 
+// Handlers derive their budget from the request context, so the deadline has
+// to be on it rather than tracked alongside.
 func TestTimeout_SetsDeadline(t *testing.T) {
 	var deadline time.Time
 	var ok bool
@@ -34,6 +37,7 @@ func TestTimeout_SetsDeadline(t *testing.T) {
 	assert.WithinDuration(t, time.Now().Add(5*time.Second), deadline, time.Second)
 }
 
+// An overrun must cancel, not merely elapse.
 func TestTimeout_CancelsExpiredRequest(t *testing.T) {
 	var err error
 	r := timeoutEngine(t, time.Millisecond, func(c *gin.Context) {
@@ -46,6 +50,7 @@ func TestTimeout_CancelsExpiredRequest(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+// 0 disables the deadline; config rejects it so this stays a library concern.
 func TestTimeout_NonPositiveDisables(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
 		var ok bool

@@ -95,6 +95,8 @@ func (w *gzipResponseWriter) WriteHeader(status int) { w.status = status }
 // WriteHeaderNow is a no-op for the same reason; close flushes the real header.
 func (w *gzipResponseWriter) WriteHeaderNow() {}
 
+// Status reports the buffered code before commit, so middleware reading it
+// mid-flight sees what the handler set rather than the zero value.
 func (w *gzipResponseWriter) Status() int {
 	if w.status != 0 {
 		return w.status
@@ -104,6 +106,7 @@ func (w *gzipResponseWriter) Status() int {
 
 func (w *gzipResponseWriter) Write(p []byte) (int, error) { return w.write(p) }
 
+// WriteString mirrors Write; gin's renderers reach for whichever is present.
 func (w *gzipResponseWriter) WriteString(s string) (int, error) { return w.write([]byte(s)) }
 
 // write is the shared sniff-then-commit path behind Write and WriteString. The
@@ -180,6 +183,7 @@ func sniffProbe(buf, pending []byte) []byte {
 	return append(probe, pending[:min(len(pending), sniffLen-len(probe))]...)
 }
 
+// flushStatus defers the status until we know whether the body compresses.
 func (w *gzipResponseWriter) flushStatus() {
 	if w.status == 0 {
 		w.status = http.StatusOK

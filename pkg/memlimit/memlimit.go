@@ -28,6 +28,8 @@ func SetFromCgroup(fraction float64) (int64, error) {
 	return setFromFiles(cgroupV2Path, cgroupV1Path, fraction, os.Getenv("GOMEMLIMIT"), debug.SetMemoryLimit)
 }
 
+// setFromFiles injects the paths and setter, so the quota branches are testable
+// without a real cgroup.
 func setFromFiles(v2Path, v1Path string, fraction float64, envLimit string, set func(int64) int64) (int64, error) {
 	if math.IsNaN(fraction) || fraction <= 0 || fraction > 1 {
 		return 0, fmt.Errorf("memory limit fraction must be in (0,1], got %v", fraction)
@@ -59,6 +61,8 @@ func readQuota(v2Path, v1Path string) (int64, error) {
 	return readLimitFile(v1Path)
 }
 
+// readLimitFile reads one cgroup limit file. A missing file is not an error --
+// v1 and v2 layouts are mutually exclusive, so the caller tries both.
 func readLimitFile(path string) (int64, error) {
 	// An empty path yields ENOENT, handled as "absent" below like any missing file.
 	b, err := os.ReadFile(path) // #nosec G304 -- paths are package constants, never caller input

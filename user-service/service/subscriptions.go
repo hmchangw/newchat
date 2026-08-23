@@ -430,6 +430,8 @@ func payloadCapped(ctx context.Context) context.Context {
 	return context.WithValue(ctx, payloadCappedKey{}, true)
 }
 
+// isPayloadCapped reports whether the caller's transport shares history's size
+// ceiling, in which case recovering an oversized reply cannot help.
 func isPayloadCapped(ctx context.Context) bool {
 	v, _ := ctx.Value(payloadCappedKey{}).(bool)
 	return v
@@ -688,6 +690,7 @@ func unread(lastSeen *time.Time, ms *int64) bool {
 	return lastSeen.UTC().UnixMilli() < *ms
 }
 
+// GetChannels lists channel subscriptions; DMs come back from GetDM instead.
 func (s *UserService) GetChannels(c *natsrouter.Context, req models.GetChannelsRequest) (*models.PagedSubscriptionListResponse, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
@@ -716,6 +719,7 @@ func (s *UserService) GetChannels(c *natsrouter.Context, req models.GetChannelsR
 	}, nil
 }
 
+// GetDM resolves one DM room, whose id is derived from the two accounts.
 func (s *UserService) GetDM(c *natsrouter.Context, req models.GetDMRequest) (*models.DMResponse, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account, "target", req.AccountName)

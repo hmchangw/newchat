@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/user-service/service/mocks"
 )
 
+// newSvc builds a UserService with every collaborator mocked.
 func newSvc(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockUserRepository, *mocks.MockAppRepository, *mocks.MockRoomClient, *mocks.MockHistoryClient, *mocks.MockEventPublisher) {
 	t.Helper()
 	ctrl := gomock.NewController(t)

@@ -59,6 +59,8 @@ func authMiddleware(d authDeps) gin.HandlerFunc {
 	}
 }
 
+// resolve returns the account for exactly one supplied credential. Both or
+// neither is a client error, never a silent preference between them.
 func (d authDeps) resolve(ctx context.Context, ssoToken, botUserID, botToken string) (string, error) {
 	if ssoToken != "" && botToken != "" {
 		return "", errcode.BadRequest("set exactly one of ssoToken / x-auth-token",
@@ -76,6 +78,7 @@ func (d authDeps) resolve(ctx context.Context, ssoToken, botUserID, botToken str
 	return d.ssoAccount(ctx, ssoToken)
 }
 
+// ssoAccount verifies locally, unlike sessionAccount's upstream call.
 func (d authDeps) ssoAccount(ctx context.Context, token string) (string, error) {
 	if d.sso == nil {
 		return "", errcode.Unavailable("sso auth not configured",
@@ -101,6 +104,7 @@ func (d authDeps) ssoAccount(ctx context.Context, token string) (string, error) 
 	return account, nil
 }
 
+// sessionAccount validates a botplatform session pair upstream.
 func (d authDeps) sessionAccount(ctx context.Context, userID, token string) (string, error) {
 	if d.bot == nil {
 		return "", errcode.Unavailable("session-token auth not configured",

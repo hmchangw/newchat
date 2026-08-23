@@ -35,6 +35,8 @@ func TestApplyTuning_UnsetLeavesOptionsUntouched(t *testing.T) {
 	assert.Nil(t, clientOpts.MinPoolSize, "unset WithMinPoolSize must not write MinPoolSize")
 }
 
+// Without this the driver never reaps, so a burst's peak is held for the
+// life of the process.
 func TestApplyTuning_SetsMaxIdleTime(t *testing.T) {
 	clientOpts := options.Client()
 	newConnectConfig(WithMaxIdleTime(5 * time.Minute)).applyTuning(clientOpts)
@@ -43,8 +45,8 @@ func TestApplyTuning_SetsMaxIdleTime(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, *clientOpts.MaxConnIdleTime)
 }
 
+// The driver reads 0 as "never reap", so an unset option must not write it.
 func TestApplyTuning_UnsetMaxIdleTimeLeavesDriverDefault(t *testing.T) {
-	// The driver treats 0 as "never reap", so an unset option must not write it.
 	clientOpts := options.Client()
 	newConnectConfig().applyTuning(clientOpts)
 
