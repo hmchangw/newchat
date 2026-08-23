@@ -33,6 +33,9 @@ services:
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
       - ROOM_META_L2_TTL=${ROOM_META_L2_TTL:-15m}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # Off by default: channel and thread message content (including the thread
+      # viewer lane) goes plaintext on chat.room.> subjects, which any authenticated
+      # user's JWT can subscribe to.
       - ENCRYPTION_ENABLED=${ENCRYPTION_ENABLED:-false}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).

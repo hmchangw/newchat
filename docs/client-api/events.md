@@ -50,7 +50,7 @@ For connection, auth, and error details see [../client-api.md](../client-api.md)
 | `chat.user.{account}.event.room.key` | RoomKeyEvent |
 | `chat.room.{roomID}.event` | new_message, message_edited, message_deleted, message_pinned/unpinned, message_reacted, thread_metadata_updated, message_read, thread_message_read, room_renamed, room_restricted |
 | `chat.user.{account}.event.room` | same event types as above (per-user fan-out for DM/botDM rooms); **plus `new_thread_message`** — channel thread replies fan out per-subscriber on this subject, not the room subject |
-| `chat.room.{roomID}.thread.{parentMessageId}.event` (or `chat.local.room.…`, by `crossSite`) | new_thread_message, message_edited, message_deleted — **channel rooms only**; subscribe while a thread pane is open |
+| `chat.room.{roomID}.thread.{parentMessageId}.event` (or `chat.local.room.…`, by `crossSite`) | new_thread_message, message_edited, message_deleted for `tshow: false` replies only — **channel rooms only**; subscribe while a thread pane is open. `tshow: true` replies (and their edits/deletes) never reach this lane — they arrive as ordinary new_message/message_edited/message_deleted on `chat.room.{roomID}.event`, which the pane must also merge from. |
 | `chat.room.{roomID}.event.member` (or `chat.local.room.{roomID}.event.member` for same-site rooms, by `crossSite`) | member_added, member_left / member_removed |
 | `chat.user.{account}.notification` | NotificationEvent (reaction only) |
 | `chat.user.presence.state.{account}` | PresenceState |

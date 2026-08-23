@@ -298,8 +298,10 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread created event for parent %s: %w", parentMsgID, err)
 		}
-		if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
-			return fmt.Errorf("publish thread created event for parent %s: %w", parentMsgID, err)
+		if len(fanOut) > 0 {
+			if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
+				return fmt.Errorf("publish thread created event for parent %s: %w", parentMsgID, err)
+			}
 		}
 		// Thread lane: same event, encrypted, for viewers who do not follow the
 		// thread. Encrypt a copy AFTER the plaintext publish above —
@@ -422,8 +424,10 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread edit event for parent %s: %w", parentMsgID, err)
 		}
-		if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
-			return fmt.Errorf("publish thread edit event for parent %s: %w", parentMsgID, err)
+		if len(fanOut) > 0 {
+			if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
+				return fmt.Errorf("publish thread edit event for parent %s: %w", parentMsgID, err)
+			}
 		}
 		h.publishThreadLaneEdit(ctx, room, parentMsgID, edit)
 		return nil
@@ -995,7 +999,7 @@ func (h *Handler) publishThreadLaneEvent(ctx context.Context, roomID, parentMsgI
 	// and an invented number is worse than none.
 	slog.Log(ctx, logctx.LevelFlow, "broadcast fan-out", "phase", "fanout",
 		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID,
-		"parent_message_id", parentMsgID, "delivery", "thread-lane")
+		"parentMessageID", parentMsgID, "delivery", "thread-lane")
 	return pubErr
 }
 

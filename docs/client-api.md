@@ -175,6 +175,7 @@ Permissions and connection limits come from the auth-service account's scoped si
 
 - `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, subscription updates, and settings updates.
 - the room-event subject for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel. Pick the subject by the room's `crossSite` flag (from `subscription.list`): `chat.room.{roomID}.event` when `crossSite: true`, `chat.local.room.{roomID}.event` when `crossSite: false`. **Absent/unknown `crossSite` defaults to the global `chat.room.{roomID}.event`** (fail-safe — a global room misrouted to the local subject would silently miss cross-site delivery).
+- `chat.room.{roomID}.thread.{parentMessageId}.event` (or `chat.local.room.…`, by `crossSite`) — subscribe only while a thread pane is open, for a channel room's per-thread viewer lane; see [§4.2 Thread Viewer Lane](#42-thread-viewer-lane).
 
 The exact event subjects a client may receive as a result of an RPC are listed under each method's "Triggered events" sections in §2.2, §3, and §4.
 
@@ -6369,7 +6370,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 
 #### Triggered events — success path
 
-After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). For a channel-room thread reply (`tshow` false), the same event is **also** published on the per-thread viewer lane described in [§4.2 Thread Viewer Lane](#42-thread-viewer-lane); a follower with the thread pane open receives both copies and must deduplicate by `message.id`. **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
+After a successful send, `broadcast-worker` fans out a `RoomEvent`. The subject depends on room type. A `tshow: false` thread reply (`threadParentMessageId` set) publishes `type: "new_thread_message"` instead of `"new_message"` — same `RoomEvent` shape but a **different delivery path** (per-subscriber on `chat.user.{account}.event.room`, not the room subject), see [events.md#new_thread_message-roomevent](client-api/events.md#new_thread_message-roomevent). A `tshow: true` thread reply instead goes through the same `publishChannelEvent` path as an ordinary message and publishes `type: "new_message"` on the room subject. For a channel-room `tshow: false` thread reply, the `new_thread_message` event is **also** published on the per-thread viewer lane described in [§4.2 Thread Viewer Lane](#42-thread-viewer-lane); a follower with the thread pane open receives both copies and must deduplicate by `message.id`. **A `botDM` fans out to its human participant, not the bot:** `broadcast-worker` handles `botDM` via the same DM path (`publishDMEvents`) — it publishes the `RoomEvent` to each **non-bot** member on `chat.user.{account}.event.room` and skips the bot account (`isBot`). This applies to both an ordinary `new_message` and a thread reply's `new_thread_message`. (The bot side consumes messages through a separate backend path.)
 
 **1. For channel rooms — `chat.room.{roomID}.event`** (`publishChannelEvent`)
 
@@ -6617,6 +6618,12 @@ the `chat.room.` or `chat.local.room.` prefix from the room's `crossSite` value 
 state — subscribing does **not** make you a thread follower, does not create a thread subscription,
 does not accrue unread, and does not place the thread in your thread list. Closing the pane ends
 delivery.
+
+**The lane carries only `tshow: false` thread replies.** A `tshow: true` reply — plus its edits and
+deletes — never publishes here: it goes through `publishChannelEvent` and arrives on the room
+subject `chat.room.{roomID}.event` as an ordinary `new_message`/`message_edited`/`message_deleted`
+event instead. A client rendering the pane from the lane alone will silently drop `tshow: true`
+replies in a mixed thread — it must also merge matching events from the room subject.
 
 ---
 

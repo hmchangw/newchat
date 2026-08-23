@@ -2883,9 +2883,6 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	subjects := map[string]bool{}
 	for _, r := range pub.records {
 		subjects[r.subject] = true
-		if r.subject == "chat.room.r1.thread.parent-1.event" {
-			continue
-		}
 		var roomEvt model.EditRoomEvent
 		require.NoError(t, json.Unmarshal(r.data, &roomEvt))
 		assert.Equal(t, model.RoomEventMessageEdited, roomEvt.Type)
@@ -3134,6 +3131,86 @@ func TestHandleThreadUpdated_ThreadLaneEncrypted(t *testing.T) {
 	assert.Equal(t, "secret edit", acctEvt.NewContent, "per-account copy stays plaintext")
 }
 
+// TestHandleThreadUpdated_ThreadLaneFailure_Swallowed verifies a lane publish
+// failure on the edit path neither fails the handler nor blocks the
+// per-account fan-out, mirroring TestHandleThreadCreated_ThreadLaneFailure_Swallowed.
+// Failing here would NAK the canonical message and re-fan-out the per-account
+// lane, turning one viewer's cosmetic miss into duplicate delivery for everyone.
+func TestHandleThreadUpdated_ThreadLaneFailure_Swallowed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{failOn: map[string]error{
+		"chat.room.r1.thread.parent-1.event": errors.New("nats down"),
+	}}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventUpdated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "r1", UserAccount: "alice", Content: "edited reply",
+			CreatedAt: msgTime, EditedAt: &msgTime, UpdatedAt: &msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data), "lane failure must not fail the handler")
+
+	subjects := map[string]bool{}
+	for _, r := range pub.records {
+		subjects[r.subject] = true
+	}
+	assert.True(t, subjects[subject.UserRoomEvent("alice")], "per-account fan-out must still happen")
+	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+}
+
+// TestHandleThreadUpdated_ThreadLaneEncryptFailure_Swallowed verifies an
+// encryption failure on the edit lane copy neither fails the handler nor
+// blocks the per-account fan-out, and never falls through to publishing the
+// plaintext edit on the lane subject.
+func TestHandleThreadUpdated_ThreadLaneEncryptFailure_Swallowed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, errors.New("key store down")).AnyTimes()
+
+	evt := model.MessageEvent{
+		Event: model.EventUpdated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "r1", UserAccount: "alice", Content: "secret edit",
+			CreatedAt: msgTime, EditedAt: &msgTime, UpdatedAt: &msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data), "encrypt failure must not fail the handler")
+
+	subjects := map[string]bool{}
+	for _, r := range pub.records {
+		subjects[r.subject] = true
+	}
+	assert.True(t, subjects[subject.UserRoomEvent("alice")], "per-account fan-out must still happen")
+	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+	assert.False(t, subjects["chat.room.r1.thread.parent-1.event"],
+		"an encrypt failure must never fall through to publishing plaintext on the lane")
+}
+
 // TestHandleThreadUpdated_DMRoom_NoThreadLane verifies DM edits skip the lane.
 func TestHandleThreadUpdated_DMRoom_NoThreadLane(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -3338,6 +3415,60 @@ func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
 	assert.True(t, deleteSubjects[subject.UserRoomEvent("alice")], "delete event must be published to sender for multi-device parity")
 	assert.True(t, deleteSubjects["chat.room.r1.thread.parent-1.event"], "delete event must reach the thread lane")
 	assert.True(t, sawBadge, "badge update must be published to room channel")
+}
+
+// TestHandleThreadDeleted_ThreadLaneFailure_Swallowed verifies a lane publish
+// failure on the delete path neither fails the handler nor blocks the
+// per-account fan-out or the separate thread_metadata_updated badge publish.
+// Failing here would NAK the canonical message and re-fan-out the per-account
+// lane, turning one viewer's cosmetic miss into duplicate delivery for everyone.
+func TestHandleThreadDeleted_ThreadLaneFailure_Swallowed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{failOn: map[string]error{
+		"chat.room.r1.thread.parent-1.event": errors.New("nats down"),
+	}}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	deletedAt := msgTime.Add(time.Minute)
+	tcount := 4
+	survivingTlm := msgTime.Add(-time.Hour)
+
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+
+	evt := model.MessageEvent{
+		Event:              model.EventDeleted,
+		SiteID:             "site-a",
+		Timestamp:          deletedAt.UnixMilli(),
+		NewTCount:          &tcount,
+		NewThreadLastMsgAt: &survivingTlm,
+		Message: model.Message{
+			ID:                    "reply-1",
+			RoomID:                "r1",
+			UserAccount:           "alice",
+			CreatedAt:             msgTime,
+			UpdatedAt:             &deletedAt,
+			ThreadParentMessageID: "parent-1",
+			TShow:                 false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data), "lane failure must not fail the handler")
+
+	subjects := map[string]bool{}
+	for _, r := range pub.records {
+		subjects[r.subject] = true
+	}
+	assert.True(t, subjects[subject.UserRoomEvent("alice")], "per-account fan-out must still happen")
+	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+	assert.True(t, subjects[subject.RoomEvent("r1", true)],
+		"the separate thread_metadata_updated badge publish must still happen")
 }
 
 func TestHandleThreadDeleted_DMRoom_FansOutToAllMembers(t *testing.T) {
