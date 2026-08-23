@@ -176,6 +176,23 @@ Permissions and connection limits come from the auth-service account's scoped si
 - `chat.user.{account}.>` — captures every personal event including async replies, per-user room events (DM messages, edits, deletes), room-key events, subscription updates, and settings updates.
 - the room-event subject for each channel room in the user's sidebar — receives new messages plus edit/delete events for that channel. Pick the subject by the room's `crossSite` flag (from `subscription.list`): `chat.room.{roomID}.event` when `crossSite: true`, `chat.local.room.{roomID}.event` when `crossSite: false`. **Absent/unknown `crossSite` defaults to the global `chat.room.{roomID}.event`** (fail-safe — a global room misrouted to the local subject would silently miss cross-site delivery).
 
+**Join grace window.** For a short period after a client joins a **channel** (server-configured;
+disabled by default), that channel's `new_message` events are delivered **twice**: once on the
+room-event subject above, and once on `chat.user.{account}.event.room`. A member who has just
+learned about a room cannot yet be relied on to hold `chat.room.{roomID}.event` — NATS gives no
+signal for when a subscription is live across the cluster — so the copy on the user subject,
+which the client has held since connect, is what makes the first messages in a new room reliable.
+
+Two consequences for clients:
+
+- **Deduplicate by `message.id`.** During the window the same message can arrive on both subjects.
+- **Accept a room event for a room you do not know yet.** The copy can arrive before the
+  `subscription.update` that introduces the room; render it from the event payload rather than
+  discarding it.
+
+Both are worth doing regardless of whether the window is enabled — neither subject is ordered
+against the other.
+
 The exact event subjects a client may receive as a result of an RPC are listed under each method's "Triggered events" sections in §2.2, §3, and §4.
 
 ### 2.2 HTTP — POST /api/v1/auth

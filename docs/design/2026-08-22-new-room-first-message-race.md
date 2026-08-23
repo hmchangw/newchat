@@ -14,9 +14,18 @@
 | | Where the message is lost | Fixable with today's architecture? |
 |---|---|---|
 | **Problem 1 — DM** | NATS delivers it to client B; **B's client discards it** because the room isn't in local state yet | **Yes, client-only.** No backend change. |
-| **Problem 2 — channel** | Two independent losses: NATS drops the live event (nobody is subscribed to `chat.room.{id}.event` yet), **and** `msg.history` cannot see the just-sent message | **Yes, client-only** — but backfill alone is *not* enough: the history call must carry the documented `meta.lastMsgAt` hint. Verified end-to-end. |
+| **Problem 2 — channel** | Two independent losses: NATS drops the live event (nobody is subscribed to `chat.room.{id}.event` yet), **and** `msg.history` cannot see the just-sent message | **Not fully.** The client fix (subscribe → flush → hinted read → merge) narrows it but loses everything when the write path lags. Closing it needs the server-side join grace window. |
 
 The measured, decisive fact:
+
+**The client cannot close Problem 2 on its own.** Subscribe → flush → hinted read → merge
+narrows the window but does not close it: with `message-worker` stalled and a 12 ms client
+delay, **67% of messages were lost from both paths** — missed live because the client was late,
+missed in history because they were not written yet. The client cannot even detect this (no
+per-room sequence number). The fix that measures 0% at every client delay, and 0% even with the
+write path stalled, is the **join grace window** (§4, Fix B): deliver on the per-user subject
+the client has held since login, which no join can race. It is now implemented behind
+`JOIN_GRACE` (default off). See `tools/roomrace/RESULTS-e2e.md`.
 
 **A second, separate defect surfaced once the full stack was run** (see "What the end-to-end run added" below): `msg.history`
 ceilings its Cassandra scan at the room document's `lastMsgAt`, which is advanced
@@ -232,7 +241,7 @@ gap detection on `lastMsgId` (already on every `RoomEvent` and on `SubscriptionR
 the id doesn't chain onto what the client holds, re-fetch. Without it, a backfill can come
 back one message short and stay short.
 
-### Fix B — server join grace window (small change, delivers live)
+### Fix B — server join grace window (implemented behind `JOIN_GRACE`; the only race-free path)
 
 Have `broadcast-worker` **also** publish a channel's room event to
 `chat.user.{X}.event.room` for members whose `joinedAt` is inside a grace window (say 30 s).
@@ -306,13 +315,19 @@ For reference, neither Slack nor Zulip built a compound endpoint: both made DM c
 | 1b | Subscribe to the room subject on the client's **own** `subscription.update`, not on the create job result or on room-open | client | the creator missing her own room's system messages | E2E: subscribed at 24 ms vs system messages at 29 ms; the job result lands at 529 ms |
 | 2 | On channel join: subscribe → flush → `msg.history` **with `meta.lastMsgAt`** → merge by message id | client | **Problem 2**, recovered | `channel / … + backfill`: 0% at every delay; E2E: 3 of 3 on the first try |
 | 3 | Gap detection on `lastMsgId` + reconcile on reconnect | client | the `message-worker`/`broadcast-worker` write race, and every event lost to a disconnect | see §4 caveat |
-| 4 | Join grace window: dual-publish to the per-user subject for members joined < N s ago, gated on `Meta.LastJoinAt` | server | **Problem 2**, delivered live | `channel / server join grace window`: 0% at every delay |
+| 4 | Join grace window: dual-publish to the per-user subject for members joined < N s ago (`JOIN_GRACE`, default off) | server | **Problem 2**, delivered live — and the only fix that survives a lagging `message-worker` | 0% live loss at client delays 0 ms–1 s; 0% lost with `message-worker` stalled |
 | 4b | `msg.history` newest-page ceiling at `max(lastMsgAt, now)` | server | removes the stale-ceiling edge for every client, hint or not | E2E: cache disabled → 3 of 3 |
 | 5 | *(optional)* combined DM create+send as a thin orchestrator | server | latency/UX only | §5 |
 
-Steps 1–3 need no backend change at all. Step 4 is one cache field plus a gated lookup, and
-is worth doing because it turns Problem 2 from "recovered a beat later" into "never
-happened" — but it is strictly dependent on step 1.
+Steps 1–3 need no backend change at all, and they are still worth doing — they cover DMs,
+reconnects, and everything outside the join window. But step 4 is the one that makes Problem 2
+go away rather than shrink, and it remains strictly dependent on step 1: a client that discards
+a room event for an unknown room discards the grace copy too (measured: 100% still lost).
+
+The shipped prototype does the roster lookup on every channel message while `JOIN_GRACE > 0`.
+Before enabling it on a busy site, gate the lookup on a cached `LastJoinAt` in
+`roommetacache.Meta` (which already carries `CrossSiteAt` for an analogous grace window) so a
+room with no recent join pays only a nil check.
 
 Do **not** start with step 4 alone: measured, it fixes nothing.
 

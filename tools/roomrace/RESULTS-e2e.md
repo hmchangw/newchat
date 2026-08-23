@@ -68,3 +68,79 @@ three on the first try, with the cache still enabled — and skips the Mongo loo
 
 **4. The two fixes are independent and both are needed.** `-early-sub` fixes the
 live path for the creator; `-hint` fixes the read path for everyone.
+
+---
+
+# Residual race and the fix (2026-08-23)
+
+The client-side algorithm is *subscribe → flush → hinted read → merge*. The question this
+round answers: the client cannot subscribe instantly, so can a message be missed by **both**
+paths — delivered before the subscription was live, and not yet readable when history was read?
+
+`-client-delay` models the time a client spends between receiving `subscription.update` and
+having a live subscription; the client then reads history immediately, as the recommended
+algorithm says. 12 rooms per delay, `-early-sub -hint`.
+
+## Without the grace window
+
+| client delay | missing from live | missing from read | **missing from both** |
+|---|---|---|---|
+| 0 ms | 0% | 58–64% | **0%** |
+| 2 ms | 0–6% | 33–36% | **0%** |
+| 5 ms | 53% | 33% | **0%** |
+| 8 ms | 56% | 33% | **0%** |
+| 12 ms | 67% | 33% | **0%** |
+| 20 ms | 67% | 33% | **0%** |
+| 40 ms | 67% | 33% | **0%** |
+
+The live path degrades exactly as expected — past ~5 ms both system messages are gone — and
+the read covers it. Across 84 rooms nothing was lost. But that is a property of an idle
+machine: `send → readable in history` measured **avg 51 ms, max 74 ms**, so the hole exists,
+it just never opened here.
+
+## Forcing the hole: a lagging `message-worker`
+
+`message-worker` and `broadcast-worker` are independent consumers of MESSAGES-CANONICAL, so a
+backlog on the writer does not stop the fan-out. SIGSTOP on `message-worker`, `-client-delay 12ms`:
+
+| | missing from live | missing from read | **missing from both** |
+|---|---|---|---|
+| alice | 67% | 100% | **67%** |
+| bob | 67% | 100% | **67%** |
+
+Both system messages lost outright — missed live because the client was 12 ms late, missed in
+history because they were not written yet. **Subscribe-then-read is not sufficient.** And the
+client cannot even detect it: there is no per-room sequence number, so a client has no way to
+know two messages are missing from the middle of what it holds.
+
+## With the grace window (`JOIN_GRACE=30s`)
+
+`broadcast-worker` also publishes a channel's events to the user subject of every member who
+joined within the window — a subject the client has held since login, so there is no
+subscription to race.
+
+| client delay | missing from live | **missing from both** |
+|---|---|---|
+| 0 ms | **0%** | **0%** |
+| 5 ms | **0%** | **0%** |
+| 12 ms | **0%** | **0%** |
+| 30 ms | **0%** | **0%** |
+| 100 ms | **0%** | **0%** |
+| 1 s | **0%** | **0%** |
+
+And the case that defeated the client-side fix:
+
+| `message-worker` STALLED, delay 12 ms | missing from live | missing from read | **missing from both** |
+|---|---|---|---|
+| alice | **0%** | 100% | **0%** |
+| bob | **0%** | 100% | **0%** |
+
+The read still returns nothing — nothing has been persisted — and nothing is lost, because
+delivery no longer depends on either the room subject or the read.
+
+## Conclusion
+
+The live path can only be made race-free by delivering on a subject the client subscribed to
+**before the room existed**. Everything else — subscribing faster, flushing, reading history —
+narrows the window without closing it, because the client's subscribe causally follows the
+event that tells it the room exists.

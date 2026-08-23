@@ -36,11 +36,13 @@ type client struct {
 	rec     *recorder
 
 	subscribeOnUpdate bool
+	renderDelay       time.Duration
 
 	mu           sync.Mutex
 	liveMessages []string
 	roomSubs     []*nats.Subscription
 	roomOpen     map[string]bool
+	joinHist     map[string][]histMsg
 }
 
 func newClient(account string, nc *nats.Conn, rec *recorder) *client {
@@ -49,6 +51,7 @@ func newClient(account string, nc *nats.Conn, rec *recorder) *client {
 		nc:       nc,
 		rec:      rec,
 		roomOpen: map[string]bool{},
+		joinHist: map[string][]histMsg{},
 	}
 }
 
@@ -74,14 +77,20 @@ func (c *client) onUserEvent(m *nats.Msg) {
 			return
 		}
 		if c.subscribeOnUpdate {
+			time.Sleep(c.renderDelay)
 			c.openRoom(evt.Subscription.RoomID)
+			// subscribe -> flush -> read, immediately, the way the recommended
+			// client does it. Reading here is what exposes the double-miss.
+			msgs, _ := c.loadHistory(evt.Subscription.RoomID, false, "")
+			c.mu.Lock()
+			c.joinHist[evt.Subscription.RoomID] = msgs
+			c.mu.Unlock()
+			c.rec.add(c.account, "history", fmt.Sprintf("join-time msg.history returned %d", len(msgs)), "", "")
 		}
 	case strings.HasSuffix(m.Subject, ".event.room"):
-		var evt model.RoomEvent
-		if err := json.Unmarshal(m.Data, &evt); err != nil {
-			return
-		}
-		c.rec.add(c.account, "user-subject", string(evt.Type), evt.LastMsgID, "")
+		// DM fan-out and the join-grace copy both land here, on a subject held
+		// since login. Counted as a live delivery, deduped with the room subject.
+		c.record(m, "user-subject")
 	}
 }
 
@@ -123,7 +132,47 @@ func (c *client) waitRoomOpen(roomID string, d time.Duration) {
 	}
 }
 
-func (c *client) onRoomEvent(m *nats.Msg) {
+// joinHistory returns what the join-time history read saw, if one happened.
+func (c *client) joinHistory(roomID string) ([]histMsg, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	msgs, ok := c.joinHist[roomID]
+	return msgs, ok
+}
+
+// liveSet returns the message ids this client received on the live path.
+func (c *client) liveSet() map[string]bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]bool, len(c.liveMessages))
+	for _, id := range c.liveMessages {
+		out[id] = true
+	}
+	return out
+}
+
+// measureWriteLag polls hinted history until msgID is readable, so the gap
+// between "the send was accepted" and "the read can see it" is a measured
+// number rather than an assumption.
+func (c *client) measureWriteLag(roomID, msgID string) (time.Duration, int) {
+	start := time.Now()
+	for probes := 1; ; probes++ {
+		msgs, _ := c.loadHistoryHinted(roomID, true)
+		for _, m := range msgs {
+			if m.MessageID == msgID {
+				return time.Since(start), probes
+			}
+		}
+		if time.Since(start) > 5*time.Second {
+			return time.Since(start), probes
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (c *client) onRoomEvent(m *nats.Msg) { c.record(m, "room-subject") }
+
+func (c *client) record(m *nats.Msg, source string) {
 	var evt model.RoomEvent
 	if err := json.Unmarshal(m.Data, &evt); err != nil {
 		return
@@ -152,7 +201,7 @@ func (c *client) onRoomEvent(m *nats.Msg) {
 	if dup {
 		return
 	}
-	c.rec.add(c.account, "room-subject", string(evt.Type), id, body)
+	c.rec.add(c.account, source, string(evt.Type), id, body)
 }
 
 // createChannel runs the two-phase create: the sync accept, then the async job
@@ -237,14 +286,22 @@ func (c *client) send(roomID, msgID, content string) error {
 
 // loadHistory issues the msg.history RPC. When retry is set it keeps asking
 // until wantMsgID shows up, which is what a gap-detecting client would do.
+func (c *client) loadHistoryHinted(roomID string, forceHint bool) ([]histMsg, int) {
+	return c.history(roomID, false, "", forceHint)
+}
+
 func (c *client) loadHistory(roomID string, retry bool, wantMsgID string) ([]histMsg, int) {
+	return c.history(roomID, retry, wantMsgID, false)
+}
+
+func (c *client) history(roomID string, retry bool, wantMsgID string, forceHint bool) ([]histMsg, int) {
 	deadline := time.Now().Add(3 * time.Second)
 	tries := 0
 	var last []histMsg
 	for {
 		tries++
 		req := map[string]any{"limit": 50}
-		if *hint {
+		if *hint || forceHint {
 			// A hint the client already holds: the room is at least as fresh as
 			// the event it just received. Without it the scan ceiling is the room
 			// doc's lastMsgAt, which the just-sent message has not reached yet.

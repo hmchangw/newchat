@@ -66,6 +66,11 @@ type config struct {
 	MetricsAddr          string          `env:"METRICS_ADDR"             envDefault:":9090"`
 	Mode                 stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	RoomSubjectMode      string          `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
+	// JoinGrace: how long after joining a channel a member also receives that
+	// room's events on their own user subject, which they have held since login.
+	// Covers the window where they cannot yet be relied on to hold
+	// chat.room.{id}.event. 0 disables it.
+	JoinGrace time.Duration `env:"JOIN_GRACE" envDefault:"0"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration           `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
 	Consumer          stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -223,7 +228,7 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode, withBroadcastMetrics(domainMetrics))
+	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode, withBroadcastMetrics(domainMetrics), withJoinGrace(cfg.JoinGrace))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.

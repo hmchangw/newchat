@@ -356,10 +356,20 @@ Retain past versions for history scrolling (server grace window: at least 24h).
 | Room type | Subject |
 |---|---|
 | Channel | `chat.room.{roomID}.event` |
+| Channel, within the join grace window | **also** `chat.user.{account}.event.room`, per non-bot member who joined recently |
 | DM / botDM | `chat.user.{account}.event.room` — published per non-bot member |
 
 The `type` field discriminates the event. All payloads carry `type`, `roomId`,
 `siteId`, and `timestamp`.
+
+**Join grace window.** For a server-configured period after a member joins a channel
+(disabled by default), that channel's `new_message` events are also published to the member's
+own user subject. A client that has just learned about a room cannot yet be relied on to hold
+`chat.room.{roomID}.event`, and NATS gives no signal for when a subscription is live across the
+cluster; the user subject has been held since connect, so it cannot race. Clients must
+**deduplicate by `message.id`** and must **accept a room event for a room they do not know yet**
+— the copy can arrive before the `subscription.update` that introduces the room. See
+[../client-api.md §2.1](../client-api.md#21-nats-connection).
 
 ---
 

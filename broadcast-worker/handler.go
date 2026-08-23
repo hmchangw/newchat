@@ -71,16 +71,30 @@ type Handler struct {
 	encoder       *roomcrypto.Encoder
 	routeMode     subject.RoomRouteMode
 	metrics       *broadcastMetrics
+	joinGrace     time.Duration
+	now           func() time.Time
 }
 
 type handlerOption func(*handlerOptions)
 
 type handlerOptions struct {
 	metrics *broadcastMetrics
+	// joinGrace: how long after joining a channel a member also receives the
+	// room's events on their own user subject. 0 disables it.
+	joinGrace time.Duration
+	now       func() time.Time
 }
 
 func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
 	return func(opts *handlerOptions) { opts.metrics = metrics }
+}
+
+func withJoinGrace(d time.Duration) handlerOption {
+	return func(opts *handlerOptions) { opts.joinGrace = d }
+}
+
+func withClock(now func() time.Time) handlerOption {
+	return func(opts *handlerOptions) { opts.now = now }
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
@@ -90,6 +104,9 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 	}
 	if opts.metrics == nil {
 		opts.metrics = newBroadcastMetrics(otel.Meter("broadcast-worker"))
+	}
+	if opts.now == nil {
+		opts.now = func() time.Time { return time.Now().UTC() }
 	}
 	return &Handler{
 		store:         store,
@@ -101,6 +118,8 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		encoder:       roomcrypto.NewEncoder(),
 		routeMode:     routeMode,
 		metrics:       opts.metrics,
+		joinGrace:     opts.joinGrace,
+		now:           opts.now,
 	}
 }
 
@@ -876,7 +895,49 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.M
 		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", meta.ID,
 		"type", string(meta.Type), "delivery", "room-stream", "audience", meta.UserCount)
 	h.metrics.Fanout(ctx, roomChannel, broadcastLabels(ctx).eventType, meta.UserCount)
-	return h.publishRoomEvent(ctx, meta.ID, meta.CrossSite, meta.CrossSiteAt, payload, "channel event")
+	err = h.publishRoomEvent(ctx, meta.ID, meta.CrossSite, meta.CrossSiteAt, payload, "channel event")
+	h.fanOutToFreshMembers(ctx, meta.ID, payload)
+	return err
+}
+
+// fanOutToFreshMembers also delivers a channel event on the user subject of every
+// member who joined within the grace window. Those members cannot yet be relied on
+// to hold chat.room.{id}.event — they only learned about the room moments ago, and
+// NATS exposes no signal for when a subscription is live cluster-wide — but they
+// have held their own user subject since login, so this delivery cannot race.
+// Clients dedupe by message id.
+//
+// Best-effort: the room-subject publish has already happened, so returning an error
+// here would only produce a duplicate on JetStream redelivery.
+func (h *Handler) fanOutToFreshMembers(ctx context.Context, roomID string, payload []byte) {
+	if h.joinGrace <= 0 {
+		return
+	}
+	subs, err := h.store.ListSubscriptions(ctx, roomID)
+	if err != nil {
+		slog.WarnContext(ctx, "join-grace roster lookup failed",
+			"error", err, "room_id", roomID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+		return
+	}
+	cutoff := h.now().Add(-h.joinGrace)
+	fresh := 0
+	for i := range subs {
+		account := subs[i].User.Account
+		if subs[i].User.IsBot || isBot(account) || subs[i].JoinedAt.Before(cutoff) {
+			continue
+		}
+		fresh++
+		if err := h.pub.Publish(ctx, subject.UserRoomEvent(account), payload); err != nil {
+			slog.WarnContext(ctx, "join-grace delivery failed",
+				"error", err, "account", account, "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(ctx))
+		}
+	}
+	if fresh > 0 {
+		slog.Log(ctx, logctx.LevelFlow, "broadcast join-grace fan-out", "phase", "fanout",
+			"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID, "recipients", fresh)
+	}
 }
 
 // publishRoomEvent fans a channel room's .event out via subject.RoomEventTargets — the
