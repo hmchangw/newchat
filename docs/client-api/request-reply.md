@@ -959,6 +959,13 @@ would not fit; the more-flag (`hasNext`, or `moreBefore`/`moreAfter`) is authori
 page until it clears rather than treating a short page as the end. A row too large to ship
 inside a page comes back blanked with `truncated: true` instead of being dropped.
 
+Load History and Load Surrounding can still return `internal`/`response_too_large` in one case: rows
+sharing a single `createdAt` millisecond are never split, since the resume bound is exclusive and a cut
+inside the millisecond would skip the rest of that group for good. Such a group is returned whole even
+when it exceeds the budget blanked — a visible error in preference to a silent gap. It needs a full page
+of rows in one millisecond against a `max_payload` far below any deployed value; a smaller `limit` makes
+the reply deliverable but drops the rest of the group, so treat it as a misconfiguration.
+
 Load Next, List Pinned and Get Thread Messages are not sized this way — their cursors are
 opaque and cannot be re-derived after trimming — so a reply that would exceed the transport's
 max payload returns `internal`/`response_too_large` instead of the success body (most likely
