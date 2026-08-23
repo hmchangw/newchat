@@ -666,3 +666,56 @@ func TestProcessTeamsRoomCreate_JoinedAtIsChatCreatedDateTime(t *testing.T) {
 	}
 	require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
 }
+
+// TestProcessTeamsRoomCreate_SkipExisting covers TEAMS_SKIP_EXISTING: CreateRoom makes
+// the atomic existing-room decision — on inserted=false the replay skips member
+// reconciliation, and creates normally when the room is absent.
+func TestProcessTeamsRoomCreate_SkipExisting(t *testing.T) {
+	chat := model.TeamsRoomCreateChat{
+		ID:      "chat1",
+		Name:    "Project Sync",
+		Members: []model.TeamsRoomCreateMember{{ID: "aad1", Account: "alice"}},
+	}
+
+	t.Run("flag on + room exists and migration done → skip member reconcile", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockSubscriptionStore(ctrl)
+		h, _ := newTeamsTestHandler(t, store)
+		h.teamsSkipExisting = true
+		// inserted=false (room existed) AND a prior pass marked it done → skip.
+		store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+		store.EXPECT().TeamsMigrationDone(gomock.Any(), gomock.Any()).Return(true, nil)
+		require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+	})
+
+	t.Run("flag on + room exists but NOT done → reconcile completes it (no strand)", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockSubscriptionStore(ctrl)
+		h, _ := newTeamsTestHandler(t, store)
+		h.teamsSkipExisting = true
+		// The prior pass created the room but failed mid-reconcile (not marked done).
+		// The redelivery must re-run the idempotent reconcile and mark it done.
+		store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+		store.EXPECT().TeamsMigrationDone(gomock.Any(), gomock.Any()).Return(false, nil)
+		store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
+		store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
+		store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().MarkTeamsMigrationDone(gomock.Any(), gomock.Any()).Return(nil)
+		require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+	})
+
+	t.Run("flag on + room newly created → full reconcile + mark done", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		store := NewMockSubscriptionStore(ctrl)
+		h, _ := newTeamsTestHandler(t, store)
+		h.teamsSkipExisting = true
+		store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+		store.EXPECT().ListByRoom(gomock.Any(), gomock.Any()).Return(nil, nil)
+		store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{ID: "u1", Account: "alice", SiteID: "site-a"}, nil)
+		store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().MarkTeamsMigrationDone(gomock.Any(), gomock.Any()).Return(nil)
+		require.NoError(t, h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat)))
+	})
+}

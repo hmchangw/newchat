@@ -34,6 +34,7 @@ type config struct {
 	// .created feed off MESSAGES-CANONICAL; "teams" runs the Teams-migration batch
 	// feed off MESSAGES-TEAMS. Two deploys of the same binary, gated by env only.
 	Mode               string                  `env:"MODE"                 envDefault:"default"`
+	TeamsSkipExisting  bool                    `env:"TEAMS_SKIP_EXISTING"  envDefault:"false"`
 	NatsURL            string                  `env:"NATS_URL,required"`
 	NatsCredsFile      string                  `env:"NATS_CREDS_FILE"      envDefault:""`
 	SiteID             string                  `env:"SITE_ID,required"`
@@ -224,6 +225,7 @@ func main() {
 			}
 			return nil
 		}, domainMetrics)
+	teamsMigration.teamsSkipExisting = cfg.TeamsSkipExisting
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
 
 	wg.Add(1)

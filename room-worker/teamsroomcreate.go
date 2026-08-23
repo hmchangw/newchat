@@ -73,9 +73,27 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	if err != nil {
 		return fmt.Errorf("generate room key: %w", err)
 	}
+	// CreateRoom is an atomic $setOnInsert upsert: it never overwrites an existing
+	// room and reports whether this call created it. With TEAMS_SKIP_EXISTING we
+	// skip only a room a prior pass fully migrated (marked below); one that exists
+	// but failed mid-reconcile re-runs the idempotent reconcile instead of being
+	// stranded, then gets marked done.
 	inserted, err := h.store.CreateRoom(ctx, room, newPair)
 	if err != nil {
 		return fmt.Errorf("create room: %w", err)
+	}
+	if h.teamsSkipExisting && !inserted {
+		// Skip only a room a prior pass fully migrated. One that exists but failed
+		// mid-reconcile is not done → fall through and complete it, not strand it.
+		done, err := h.store.TeamsMigrationDone(ctx, room.ID)
+		if err != nil {
+			return err
+		}
+		if done {
+			slog.InfoContext(ctx, "TEAMS_SKIP_EXISTING: room already migrated, skipping",
+				"room_id", room.ID, "chat_id", chat.ID)
+			return nil
+		}
 	}
 	pair := &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: *newPair}
 	if !inserted {
@@ -182,9 +200,12 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	for _, s := range newSubs {
 		added = append(added, s.User.Account)
 	}
-	if len(added) == 0 && len(removed) == 0 {
-		return nil // fully converged already — idempotent no-op, skip counts/federation
+	if len(added) == 0 && len(removed) == 0 && !h.teamsSkipExisting {
+		return nil // fully converged — idempotent no-op, skip counts/federation
 	}
+	// Under TEAMS_SKIP_EXISTING a converged pass still falls through: it re-runs the
+	// idempotent count reconcile and marks the room done, so a prior pass that failed
+	// at the counts step is completed on redelivery rather than left stranded.
 
 	if err := h.store.ReconcileMemberCounts(ctx, room.ID); err != nil {
 		return fmt.Errorf("reconcile member counts: %w", err)
@@ -204,6 +225,11 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	}
 	if err := h.federateTeamsMembership(ctx, room, removed, model.InboxMemberRemoved, memberSite, acceptedAt); err != nil {
 		return fmt.Errorf("federate departed members: %w", err)
+	}
+	if h.teamsSkipExisting {
+		if err := h.store.MarkTeamsMigrationDone(ctx, room.ID); err != nil {
+			return fmt.Errorf("mark teams migration done: %w", err)
+		}
 	}
 	return nil
 }
