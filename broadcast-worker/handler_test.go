@@ -24,6 +24,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -3823,14 +3824,14 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			wantRecords: []outboxRecord{
 				{
 					subject: "chat.outbox.site-a.site-b.subscription_mention",
-					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-b", msgTime.UnixMilli(), accountsDigest([]string{"bob"})),
+					msgID:   testMentionRequestID + ":site-b",
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 				{
 					subject: "chat.outbox.site-a.site-c.subscription_mention",
-					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-c", msgTime.UnixMilli(), accountsDigest([]string{"carol"})),
+					msgID:   testMentionRequestID + ":site-c",
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
 					},
@@ -3884,7 +3885,8 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			}
 			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal, opts...)
 
-			require.NoError(t, h.HandleMessage(context.Background(), makeMessageEvent("room-1", tc.content, msgTime)))
+			ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
+			require.NoError(t, h.HandleMessage(ctx, makeMessageEvent("room-1", tc.content, msgTime)))
 			assert.Len(t, pub.records, 1, "the client fan-out must still happen")
 
 			got := rec.sorted(t)
@@ -3961,7 +3963,8 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			require.NoError(t, h.HandleMessage(context.Background(), data))
+			ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
+			require.NoError(t, h.HandleMessage(ctx, data))
 
 			got := rec.sorted(t)
 			if tc.wantAccounts == nil {
@@ -3970,24 +3973,10 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 			}
 			require.Len(t, got, 1)
 			assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
-			// editedAt in the dedup ID keeps the edit distinct from the original send.
-			assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-b", editedAt.UnixMilli(), accountsDigest(tc.wantAccounts)), got[0].msgID)
+			// An edit is its own canonical event, so it carries its own request ID.
+			assert.Equal(t, testMentionRequestID+":site-b", got[0].msgID)
 			assert.Equal(t, tc.wantAccounts, got[0].event.Accounts)
 			assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
 		})
 	}
-}
-
-func TestAccountsDigest(t *testing.T) {
-	// Order-independent: the same set must always yield the same dedup component,
-	// or a redelivery would publish under a new Nats-Msg-Id and double-badge.
-	assert.Equal(t, accountsDigest([]string{"alice", "bob"}), accountsDigest([]string{"bob", "alice"}))
-	// Set-sensitive: this is the whole point — two edits in the same millisecond
-	// with different mentionees must not collide on one Nats-Msg-Id.
-	assert.NotEqual(t, accountsDigest([]string{"alice"}), accountsDigest([]string{"alice", "dave"}))
-	assert.NotEqual(t, accountsDigest([]string{"alice"}), accountsDigest([]string{"bob"}))
-	// Clone, don't sort in place: the caller's slice feeds the published payload.
-	accounts := []string{"bob", "alice"}
-	accountsDigest(accounts)
-	assert.Equal(t, []string{"bob", "alice"}, accounts)
 }

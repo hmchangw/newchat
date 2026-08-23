@@ -811,7 +811,9 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.HandleMessage(ctx, data))
+	// The canonical event always carries an X-Request-ID (message-gatekeeper
+	// rejects a submission without one), which is what the dedup ID keys on.
+	require.NoError(t, handler.HandleMessage(natsutil.WithRequestID(ctx, testMentionRequestID), data))
 
 	// Both mentionees are badged locally; only the remote one is federated.
 	for _, account := range []string{"bob", "carol"} {
@@ -845,7 +847,7 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 
 	relay, envelope, payload := unwrapOutbox(t, got[0].Data)
 	assert.Equal(t, "r-fed", relay.RoomID)
-	assert.Equal(t, fmt.Sprintf("mention:r-fed:m-fed:%d:%s:site-b", msgTime.UnixMilli(), accountsDigest([]string{"carol"})), relay.DedupID)
+	assert.Equal(t, testMentionRequestID+":site-b", relay.DedupID)
 	assert.Equal(t, model.InboxSubscriptionMention, envelope.Type)
 	assert.Equal(t, "site-a", envelope.SiteID)
 	assert.Equal(t, "site-b", envelope.DestSiteID)

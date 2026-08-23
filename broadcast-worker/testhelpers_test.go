@@ -71,6 +71,10 @@ func decryptEditedContent(t *testing.T, raw json.RawMessage, key *roomkeystore.V
 	return plaintext
 }
 
+// testMentionRequestID stands in for the X-Request-ID that message-gatekeeper
+// stamps on every canonical event, which is what the mention dedup ID is keyed on.
+const testMentionRequestID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+
 // unwrapOutbox peels an OUTBOX publish back to the federated payload:
 // OutboxEvent.Envelope -> InboxEvent.Payload -> the typed inner event.
 func unwrapOutbox(t *testing.T, data []byte) (model.OutboxEvent, model.InboxEvent, model.SubscriptionMentionEvent) {

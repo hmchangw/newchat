@@ -10,12 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-22-subscription-mention-fanout-design.md`
 
-> **Note.** This plan was written before implementation. The review pass that
-> followed renamed the handler's publisher field, unified the two dedup-ID
-> formats into one `mention:{roomID}:{msgID}:{mentionedAtMillis}:{accountsDigest}:{destSiteID}`,
-> made the per-site map lazily allocated, and gated the edit-path user lookup on
-> federation being enabled. The snippets below show the planned shape, not the
-> merged one — the spec and the code are authoritative.
+> **Note.** This plan was written before implementation. The review passes that
+> followed renamed the handler's publisher field, replaced the two hand-rolled
+> dedup-ID formats with `natsutil.InboxDedupID` (`{requestID}:{destSiteID}`),
+> made the per-site map lazily allocated, and moved the edit-path user lookup off
+> the user-visible latency path. The snippets below show the planned shape, not
+> the merged one — the spec and the code are authoritative.
 
 ## Global Constraints
 
@@ -435,14 +435,14 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			wantRecords: []outboxRecord{
 				{
 					subject: "chat.outbox.site-a.site-b.subscription_mention",
-					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-b", msgTime.UnixMilli(), accountsDigest(...)),
+					msgID:   testMentionRequestID + ":site-b",
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 				{
 					subject: "chat.outbox.site-a.site-c.subscription_mention",
-					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-c", msgTime.UnixMilli(), accountsDigest(...)),
+					msgID:   testMentionRequestID + ":site-c",
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
 					},
@@ -735,7 +735,7 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 	got := rec.sorted()
 	require.Len(t, got, 1)
 	assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
-	assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-b", editedAt.UnixMilli(), accountsDigest(...)), got[0].msgID)
+	assert.Equal(t, testMentionRequestID+":site-b", got[0].msgID)
 	assert.Equal(t, []string{"bob"}, got[0].event.Accounts)
 	assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
 }

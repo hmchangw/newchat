@@ -108,11 +108,14 @@ blank and local entries, and publish one `outbox.Publish` per remote site.
 Site IDs already ride the existing `FindUsersByAccounts` result
 (`pkg/mention/mention.go:115`), so the hot path takes no extra round-trip.
 
-Dedup ID: `mention:{roomID}:{msgID}:{mentionedAtMillis}:{accountsDigest}:{destSiteID}`
-— stable across MESSAGES-CANONICAL redeliveries, distinct per destination. The
-digest is an fnv-1a hash of the destination's sorted account set, so two edits
-landing in the same millisecond with different mentionees cannot collide on one
-Nats-Msg-Id and have the second silently dropped.
+Dedup ID: `natsutil.InboxDedupID(ctx, destSiteID, seed)` — `{requestID}:{destSiteID}`,
+the same helper every room-worker federation site uses. `message-gatekeeper`
+rejects a submission whose `requestId` is not a UUID and publishes canonical via
+`natsutil.NewMsg`, so the request ID rides the canonical event as `X-Request-ID`
+and is identical on every redelivery. An edit is its own canonical event with its
+own request ID, so it can neither collide with the original send nor with another
+edit in the same millisecond. `seed` (`{roomID}:{msgID}:{mentionedAtMillis}`) is
+the helper's fallback for a request-ID-less context.
 
 ### Edits
 

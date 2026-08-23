@@ -7,10 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
-	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -451,10 +448,10 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 				"request_id", natsutil.RequestIDFromContext(ctx))
 			continue
 		}
-		// Payload-derived, so it is redelivery-stable even though this consume path
-		// mints a request ID when the header is absent (StampRequestID, not Require).
-		// at separates an edit from the send; the digest separates same-ms edits.
-		dedupID := fmt.Sprintf("mention:%s:%s:%d:%s:%s", roomID, msgID, at.UnixMilli(), accountsDigest(accounts), destSiteID)
+		// at separates an edit from the send; an edit is its own canonical event
+		// carrying its own request ID, so two same-ms edits can't collide.
+		seed := fmt.Sprintf("%s:%s:%d", roomID, msgID, at.UnixMilli())
+		dedupID := natsutil.InboxDedupID(ctx, destSiteID, seed)
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -469,20 +466,6 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 		}()
 	}
 	wg.Wait()
-}
-
-// accountsDigest is a stable fingerprint of a destination's account set, sorted so
-// the same set always yields the same digest regardless of mention order.
-func accountsDigest(accounts []string) string {
-	sorted := slices.Clone(accounts)
-	slices.Sort(sorted)
-	h := fnv.New64a()
-	for _, a := range sorted {
-		// hash.Hash.Write never returns an error.
-		_, _ = h.Write([]byte(a))
-		_, _ = h.Write([]byte{0}) // separator: ("ab","c") must not equal ("a","bc")
-	}
-	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {

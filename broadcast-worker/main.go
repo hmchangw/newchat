@@ -252,9 +252,9 @@ func main() {
 	// core NATS (publisher above).
 	outboxPublish := func(ctx context.Context, subj string, data []byte, msgID string) error {
 		_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
-		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-		publishMetrics.Attempt(ctx, destination, operation, err)
 		if err != nil {
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Attempt(ctx, destination, operation, err)
 			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
 		}
 		return nil
