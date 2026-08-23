@@ -587,6 +587,7 @@ func runSoakWorkload(
 		defer durabilityTicker.Stop()
 		watchSoakLedgerDurability(
 			workloadCtx, ledger, durabilityTicker.C,
+			soakFailureExpiryInterval(cfg.Soak.ReconcileDeadline),
 			func(reasons []string) {
 				slog.Error(
 					"failure ledger cannot record the verdict disqualifying its evidence",

@@ -17,6 +17,7 @@ import (
 // nothing to gain by continuing.
 func TestWatchSoakLedgerDurability(t *testing.T) {
 	now := time.Date(2026, 8, 22, 16, 0, 0, 0, time.UTC)
+	const grace = 30 * time.Second
 
 	newLedger := func(t *testing.T, journal failureJournal) *failureLedger {
 		t.Helper()
@@ -33,10 +34,11 @@ func TestWatchSoakLedgerDurability(t *testing.T) {
 		})
 		ledger.Invalidate(invalidReasonReconcileCapacity)
 
-		ticks := make(chan time.Time, 1)
+		ticks := make(chan time.Time, 2)
 		ticks <- now
+		ticks <- now.Add(grace)
 		var reported []string
-		watchSoakLedgerDurability(context.Background(), ledger, ticks,
+		watchSoakLedgerDurability(context.Background(), ledger, ticks, grace,
 			func(reasons []string) { reported = reasons })
 
 		assert.Equal(t,
@@ -60,7 +62,7 @@ func TestWatchSoakLedgerDurability(t *testing.T) {
 		var reported []string
 		go func() {
 			defer close(stopped)
-			watchSoakLedgerDurability(ctx, ledger, ticks,
+			watchSoakLedgerDurability(ctx, ledger, ticks, grace,
 				func(reasons []string) { reported = reasons })
 		}()
 		ticks <- now
@@ -78,7 +80,45 @@ func TestWatchSoakLedgerDurability(t *testing.T) {
 		ticks := make(chan time.Time)
 		close(ticks)
 
-		watchSoakLedgerDurability(context.Background(), ledger, ticks,
+		watchSoakLedgerDurability(context.Background(), ledger, ticks, grace,
 			func([]string) { t.Fatal("nothing was owed") })
+	})
+
+	// The retry pays a transient debt on the next write, so a debt seen once is
+	// not yet evidence that the journal is gone. Stopping on the first sighting
+	// gives an append that failed a moment before the tick no grace at all,
+	// which is not what a run should be ended on.
+	t.Run("a debt seen once is given the grace to be paid", func(t *testing.T) {
+		ledger := newLedger(t, &appendFailingFailureJournal{
+			failFor: failureLedgerEventInvalidated,
+		})
+		ledger.Invalidate(invalidReasonReconcileCapacity)
+
+		ticks := make(chan time.Time, 1)
+		ticks <- now
+		close(ticks)
+		watchSoakLedgerDurability(context.Background(), ledger, ticks, grace,
+			func([]string) { t.Fatal("one sighting is not a whole interval") })
+	})
+
+	// A debt that clears within the grace leaves nothing to report, and the
+	// next one starts its own interval rather than inheriting this one.
+	t.Run("a debt paid inside the grace resets the clock", func(t *testing.T) {
+		journal := &flakyInvalidationJournal{failures: 1}
+		ledger := newLedger(t, journal)
+		ledger.Invalidate(invalidReasonReconcileCapacity)
+
+		ticks := make(chan time.Time, 3)
+		ticks <- now
+		// Between the ticks the journal recovers and a write settles the debt.
+		operation := testFailureOperation("m1", now)
+		operation.LifecycleState = failureOperationJournaled
+		require.NoError(t, ledger.Start(operation))
+		ticks <- now.Add(grace)
+		ticks <- now.Add(2 * grace)
+		close(ticks)
+
+		watchSoakLedgerDurability(context.Background(), ledger, ticks, grace,
+			func([]string) { t.Fatal("the debt was paid") })
 	})
 }
