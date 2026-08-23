@@ -2927,15 +2927,17 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 			wantPermanent: true,
 		},
 		{
-			name:    "empty account list is a benign no-op",
-			payload: model.SubscriptionMentionEvent{RoomID: "room-1", MentionedAt: msgAt.UnixMilli()},
+			name:          "empty account list is poison — the producer can't emit one",
+			payload:       model.SubscriptionMentionEvent{RoomID: "room-1", MentionedAt: msgAt.UnixMilli()},
+			wantErr:       "missing roomId, accounts or mentionedAt",
+			wantPermanent: true,
 		},
 		{
 			name: "blank room id is poison rather than matching nothing",
 			payload: model.SubscriptionMentionEvent{
 				Accounts: []string{"alice"}, MentionedAt: msgAt.UnixMilli(),
 			},
-			wantErr:       "missing roomId or mentionedAt",
+			wantErr:       "missing roomId, accounts or mentionedAt",
 			wantPermanent: true,
 		},
 		{
@@ -2943,7 +2945,7 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 			payload: model.SubscriptionMentionEvent{
 				RoomID: "room-1", Accounts: []string{"alice"},
 			},
-			wantErr:       "missing roomId or mentionedAt",
+			wantErr:       "missing roomId, accounts or mentionedAt",
 			wantPermanent: true,
 		},
 		{

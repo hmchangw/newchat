@@ -579,15 +579,14 @@ func (h *Handler) handleSubscriptionMention(ctx context.Context, evt *model.Inbo
 	if err := json.Unmarshal(evt.Payload, &e); err != nil {
 		return errcode.Permanent(errcode.BadRequest("unmarshal subscription_mention payload"))
 	}
-	if len(e.Accounts) == 0 {
-		return nil
-	}
-	// Poison payload: a blank room matches nothing and a zero mentionedAt badges
-	// as 1970, so the read guard skips everyone who has ever read the room.
-	if e.RoomID == "" || e.MentionedAt <= 0 {
-		slog.WarnContext(ctx, "subscription_mention missing roomId or mentionedAt",
-			"room_id", e.RoomID, "mentioned_at", e.MentionedAt, "origin_site", evt.SiteID)
-		return errcode.Permanent(errcode.BadRequest("subscription_mention missing roomId or mentionedAt"))
+	// Poison payload: a blank room matches nothing, an empty account list has no
+	// destination, and a zero mentionedAt badges as 1970 — which makes the read
+	// guard skip everyone who has ever read the room.
+	if e.RoomID == "" || len(e.Accounts) == 0 || e.MentionedAt <= 0 {
+		slog.WarnContext(ctx, "subscription_mention missing roomId, accounts or mentionedAt",
+			"room_id", e.RoomID, "accounts", len(e.Accounts), "mentioned_at", e.MentionedAt,
+			"origin_site", evt.SiteID)
+		return errcode.Permanent(errcode.BadRequest("subscription_mention missing roomId, accounts or mentionedAt"))
 	}
 	if err := h.store.SetSubscriptionMentions(ctx, e.RoomID, e.Accounts, time.UnixMilli(e.MentionedAt).UTC()); err != nil {
 		return fmt.Errorf("set subscription mentions in room %q: %w", e.RoomID, err)

@@ -12,7 +12,7 @@
 
 > **Note.** This plan was written before implementation. The review pass that
 > followed renamed the handler's publisher field, unified the two dedup-ID
-> formats into one `mention:{roomID}:{msgID}:{mentionedAtMillis}:{destSiteID}`,
+> formats into one `mention:{roomID}:{msgID}:{mentionedAtMillis}:{accountsDigest}:{destSiteID}`,
 > made the per-site map lazily allocated, and gated the edit-path user lookup on
 > federation being enabled. The snippets below show the planned shape, not the
 > merged one — the spec and the code are authoritative.
@@ -435,14 +435,14 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			wantRecords: []outboxRecord{
 				{
 					subject: "chat.outbox.site-a.site-b.subscription_mention",
-					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:site-b", msgTime.UnixMilli()),
+					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-b", msgTime.UnixMilli(), accountsDigest(...)),
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
 					},
 				},
 				{
 					subject: "chat.outbox.site-a.site-c.subscription_mention",
-					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:site-c", msgTime.UnixMilli()),
+					msgID:   fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-c", msgTime.UnixMilli(), accountsDigest(...)),
 					event: model.SubscriptionMentionEvent{
 						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
 					},
@@ -735,7 +735,7 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 	got := rec.sorted()
 	require.Len(t, got, 1)
 	assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
-	assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:site-b", editedAt.UnixMilli()), got[0].msgID)
+	assert.Equal(t, fmt.Sprintf("mention:room-1:msg-1:%d:%s:site-b", editedAt.UnixMilli(), accountsDigest(...)), got[0].msgID)
 	assert.Equal(t, []string{"bob"}, got[0].event.Accounts)
 	assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
 }

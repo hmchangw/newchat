@@ -87,8 +87,11 @@ blank and local entries, and publish one `outbox.Publish` per remote site.
 Site IDs already ride the existing `FindUsersByAccounts` result
 (`pkg/mention/mention.go:115`), so the hot path takes no extra round-trip.
 
-Dedup ID: `mention:{roomID}:{msgID}:{mentionedAtMillis}:{destSiteID}` — stable
-across MESSAGES-CANONICAL redeliveries, distinct per destination.
+Dedup ID: `mention:{roomID}:{msgID}:{mentionedAtMillis}:{accountsDigest}:{destSiteID}`
+— stable across MESSAGES-CANONICAL redeliveries, distinct per destination. The
+digest is an fnv-1a hash of the destination's sorted account set, so two edits
+landing in the same millisecond with different mentionees cannot collide on one
+Nats-Msg-Id and have the second silently dropped.
 
 ### Edits
 
