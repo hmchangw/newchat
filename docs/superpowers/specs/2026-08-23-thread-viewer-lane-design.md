@@ -136,12 +136,38 @@ func (h *Handler) publishThreadLaneEvent(ctx context.Context, roomID, parentMsgI
 ```
 
 It loops `subject.ThreadEventTargets(...)` and publishes each target, with the
-same error aggregation and flow-logging shape as `publishRoomEvent`. The
+same sequential loop and last-error-wins aggregation as `publishRoomEvent`. The
 signature mirrors `publishRoomEvent`'s deliberately: `handleThreadCreated`
 holds a `roommetacache.Meta` (from `GetRoomMeta`) while `handleThreadUpdated`
 and `handleThreadDeleted` hold a `*model.Room` (from `GetRoom`). Taking the
 `crossSite` / `crossSiteAt` pair as parameters lets all three call it without
 converting between the two types.
+
+**Not `publishToThreadAccounts`'s shape.** That helper
+(`handler.go:1021`) fans out to N accounts with one goroutine per account, a
+`WaitGroup`, and an all-N-failed error rule. The thread lane is a single
+subject (two only during `RouteDual`), so goroutines would be overhead and
+"all publishes failed" would be meaningless. Three specifics follow from that:
+
+- **Metrics label: a new `thread_lane` room kind, not `thread`.** The
+  `roomKindLabel` enum (`broadcast-worker/nats_metrics.go:15`) is closed, and
+  its doc comment states an invariant for `thread`: fan-out recipients and
+  delivery attempts are directly comparable because there is one publish per
+  recipient. The thread lane is one publish to an audience the publisher cannot
+  observe — the same shape as the channel room-stream case the comment
+  explicitly excludes from that ratio. Reusing `thread` would corrupt a series
+  that is documented as comparable. Add `roomThreadLane roomKindLabel =
+  "thread_lane"` to the enum and to `allRoomKinds`. Record **deliveries only**;
+  do not record a fan-out recipient count, because there is no honest number to
+  record.
+- **Never call `natsmetrics.MarkTerminalFromContext`.** `publishToThreadAccounts`
+  marks `TerminalPublishExhausted` on partial failure. That is a terminal
+  disposition on the underlying canonical JetStream message. The thread lane is
+  best-effort and must not influence how that message's redelivery is accounted.
+- **Flow log carries no audience count.** The channel path logs
+  `"audience", meta.UserCount` at its call site. The thread lane has no such
+  number (see below). Log `delivery="thread-lane"` with the room and parent
+  message ids and no recipient figure — an invented count is worse than none.
 
 **Failure isolation.** A thread-lane publish failure MUST NOT fail the handler
 or block the per-account fan-out — it is logged and swallowed, the way
@@ -150,6 +176,47 @@ publishes. The per-account lane remains the delivery guarantee for followers;
 the thread lane is a convenience for viewers whose pane is open right now. A
 NAK-and-redeliver on a thread-lane failure would re-fan-out the per-account
 copy too, turning a cosmetic miss into duplicate delivery for everyone.
+
+### Cost when nobody is subscribed
+
+Core NATS is interest-based: with no subscriber registered for the subject, the
+server discards the message on arrival. The publisher is unaffected in every
+way that would matter operationally — `Publish` is fire-and-forget
+(at-most-once), so there is **no error, no blocking, no queue growth, and no
+back-pressure**. A thread nobody has open cannot break or slow the worker.
+
+The cost that *is* paid on every channel thread reply, watched or not:
+
+1. `sonic.Marshal` of the `ClientMessage`
+2. the AES encode inside `encryptRoomEvent`
+3. `sonic.Marshal` of the encrypted envelope
+4. the write into the connection buffer and its syscall
+
+So each thread reply carries roughly two extra marshals and one encryption
+whether or not a single person is watching — and most threads are unwatched
+most of the time. For scale: the same handler already performs N per-account
+publishes (N = fan-out size) plus one or two badge publishes, so this is one
+more publish on a path that already does several. It is a real cost on the
+message hot path, not a rounding error, but it is proportionate.
+
+**There is no cheap way to avoid it.** Core NATS gives a publisher no API to
+ask whether a subject currently has subscribers, so "check before publishing"
+is not available. The only designs that avoid the wasted work are a config flag
+to disable the lane per deployment, or the viewer-registry approach rejected in
+§2 — publishing only to known-live viewers is precisely that approach's one
+advantage, bought with server state and heartbeats.
+
+**Recommendation: accept the cost, but make it observable.** The `thread_lane`
+delivery counter above is what makes a later decision data-driven rather than
+speculative. Revisit only if it shows the lane is a material share of
+broadcast-worker's publish volume.
+
+**Cross-site.** For a `crossSite=true` room the subject is the global
+`chat.room.>` namespace. NATS gateways propagate on interest, so a thread with
+no subscriber anywhere should not generate sustained cross-gateway traffic.
+Confirm this with the platform team before rollout rather than treating it as
+established — it depends on the supercluster's gateway configuration, which is
+outside this repo.
 
 **Extend `.semgrep/room-subject.yml`.** The `room-subject-publish-must-route`
 rule (`.semgrep/room-subject.yml:2`) exists to stop anyone passing an inline
@@ -282,6 +349,10 @@ global).
 - DM and BotDM rooms publish **nothing** to the thread lane
 - a thread-lane publish error is logged and swallowed: the handler returns nil
   and the per-account fan-out still happened
+- a thread-lane publish error does **not** mark the canonical message terminal
+  (no `MarkTerminalFromContext`), so redelivery accounting is unaffected
+- thread-lane deliveries are recorded under the `thread_lane` room kind, and no
+  fan-out recipient count is recorded for it
 
 Every existing thread test must pass untouched. That is the regression proof
 that this change is purely additive.
