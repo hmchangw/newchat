@@ -126,6 +126,8 @@ func main() {
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
 		mongoutil.WithObservability(sdk),
 		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
+		mongoutil.WithMinPoolSize(cfg.Mongo.MinPoolSize),
+		mongoutil.WithMaxIdleTime(cfg.Mongo.MaxIdleTime),
 	)
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)

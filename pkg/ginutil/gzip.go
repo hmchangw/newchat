@@ -1,6 +1,8 @@
 package ginutil
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,9 +16,25 @@ import (
 // These endpoints exist to survive bursts, where CPU is the scarce resource.
 var gzipPool = sync.Pool{
 	New: func() any {
-		w, _ := gzip.NewWriterLevel(nil, gzip.BestSpeed)
-		return w
+		gz, err := gzip.NewWriterLevel(nil, gzip.BestSpeed)
+		if err != nil {
+			return nil
+		}
+		return gz
 	},
+}
+
+// acquireGzip returns a pooled encoder writing to w, or nil if the pool has none
+// to give. Nil is unreachable while the level is a valid constant, but it is
+// reported rather than asserted away so an encoder problem costs the compression
+// instead of the response.
+func acquireGzip(w io.Writer) *gzip.Writer {
+	gz, _ := gzipPool.Get().(*gzip.Writer)
+	if gz == nil {
+		return nil
+	}
+	gz.Reset(w)
+	return gz
 }
 
 // Gzip compresses responses of at least minSize bytes for clients that accept it;
@@ -134,20 +152,24 @@ func (w *gzipResponseWriter) write(p []byte) (int, error) {
 // commit decides the encoding once the threshold is reached and drains whatever
 // sub-threshold prefix was buffered. pending is the write that triggered the
 // commit — not written here, only sniffed, since a large first write never lands
-// in buf. A handler that set its own Content-Encoding is left alone.
+// in buf. The response goes out uncompressed when the handler set its own
+// Content-Encoding, or when no encoder is available: nothing is on the wire yet,
+// so losing the compression costs bytes rather than the response.
 func (w *gzipResponseWriter) commit(pending []byte) error {
 	h := w.Header()
 	buf := w.buf
 	w.buf = nil
 
-	if h.Get("Content-Encoding") != "" {
-		w.plain = true
-		w.flushStatus()
-		if len(buf) == 0 {
-			return nil
+	var gz *gzip.Writer
+	if h.Get("Content-Encoding") == "" {
+		if gz = acquireGzip(w.ResponseWriter); gz == nil {
+			// Logged rather than silent: the response still succeeds, so nothing
+			// else would show that compression stopped happening.
+			slog.Error("gzip encoder unavailable, serving the response uncompressed")
 		}
-		_, err := w.ResponseWriter.Write(buf)
-		return err
+	}
+	if gz == nil {
+		return w.commitPlain(buf)
 	}
 
 	// net/http sniffs the type from the first bytes written, which are about to be
@@ -162,12 +184,22 @@ func (w *gzipResponseWriter) commit(pending []byte) error {
 	h.Del("Content-Length")
 	w.flushStatus()
 
-	w.gz = gzipPool.Get().(*gzip.Writer)
-	w.gz.Reset(w.ResponseWriter)
+	w.gz = gz
 	if len(buf) == 0 {
 		return nil
 	}
 	_, err := w.gz.Write(buf)
+	return err
+}
+
+// commitPlain commits the response uncompressed, flushing the buffered prefix.
+func (w *gzipResponseWriter) commitPlain(buf []byte) error {
+	w.plain = true
+	w.flushStatus()
+	if len(buf) == 0 {
+		return nil
+	}
+	_, err := w.ResponseWriter.Write(buf)
 	return err
 }
 
@@ -191,16 +223,32 @@ func (w *gzipResponseWriter) flushStatus() {
 	w.ResponseWriter.WriteHeader(w.status)
 }
 
-// finish ends the response. When the handler did not complete — it panicked —
-// a still-buffered body is dropped instead of flushed, so gin.Recovery can write
-// its 500 rather than find the response already committed. An encoder that has
-// already written to the wire is still closed, so its pooled writer comes back.
+// finish ends the response, or abandons it when the handler did not complete —
+// it panicked. Abandoning drops the buffered body so gin.Recovery owns the
+// response, and releases a committed encoder without its trailer: a trailer would
+// make a truncated body decode as a whole one.
 func (w *gzipResponseWriter) finish(completed bool) {
-	if !completed && w.gz == nil && !w.plain {
-		w.buf, w.status, w.closed = nil, 0, true
-		return
+	if !completed {
+		w.buf, w.status = nil, 0
+		w.releaseGzip(false)
 	}
 	w.close()
+}
+
+// releaseGzip returns the encoder to the pool, writing its trailer only if the
+// stream is complete. Reset re-initializes the writer either way, so an
+// unfinished one is still safe to reuse.
+func (w *gzipResponseWriter) releaseGzip(complete bool) {
+	if w.gz == nil {
+		return
+	}
+	if complete {
+		// A failed flush means the connection is already gone; nothing to recover.
+		_ = w.gz.Close()
+	}
+	w.gz.Reset(nil)
+	gzipPool.Put(w.gz)
+	w.gz = nil
 }
 
 // close finalizes the response: flush the encoder, or emit the buffered body
@@ -212,11 +260,7 @@ func (w *gzipResponseWriter) close() {
 	w.closed = true
 
 	if w.gz != nil {
-		// A failed flush means the connection is already gone; nothing to recover.
-		_ = w.gz.Close()
-		w.gz.Reset(nil)
-		gzipPool.Put(w.gz)
-		w.gz = nil
+		w.releaseGzip(true)
 		return
 	}
 	if w.plain {
@@ -237,12 +281,9 @@ func (w *gzipResponseWriter) close() {
 // would let gin write its default 200 and strand the handler's real status.
 func (w *gzipResponseWriter) Flush() {
 	if w.gz == nil && !w.plain && !w.closed {
-		w.plain = true
-		w.flushStatus()
-		if len(w.buf) > 0 {
-			_, _ = w.ResponseWriter.Write(w.buf)
-			w.buf = nil
-		}
+		buf := w.buf
+		w.buf = nil
+		_ = w.commitPlain(buf)
 	}
 	if w.gz != nil {
 		_ = w.gz.Flush()

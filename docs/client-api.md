@@ -1012,7 +1012,7 @@ document (`previewMessage` always omitted there). All fields are optional
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
 | `privateKey` | string | Base64-encoded room E2E private key — initial key bootstrap for room members (see [§5](#5-room-encryption)). Present only for encrypted (channel) rooms whose key the caller's site holds; omitted otherwise. |
 | `keyVersion` | number | Version of `privateKey`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, resolved server-side at read time. Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, resolved server-side at read time; its `content` is truncated to a short preview (see [PreviewMessage](#previewmessage)). Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
 
 ##### PreviewMessage
 
@@ -1025,7 +1025,7 @@ an earlier survivor; a room with only ineligible messages omits `previewMessage`
 |---|---|---|
 | `messageId` | string | |
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
-| `content` | string | The full message body; the client truncates for display. |
+| `content` | string | The message body. On `subscription.list` (both transports) it is truncated server-side to a short preview — 50 characters by default, whole characters only, no ellipsis appended. Everywhere else it is the full body. |
 | `createdAt` | string | RFC 3339 timestamp. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |
@@ -3410,7 +3410,7 @@ The payload is flat (no zero-valued room fields):
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — its presence lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message, or on a read error. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`, but `content` is the full body — list rows truncate it). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message, or on a read error. |
 
 ```json
 {
@@ -3506,7 +3506,7 @@ The payload is flat:
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — its presence lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`, but `content` is the full body — list rows truncate it). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
 
 ```json
 {

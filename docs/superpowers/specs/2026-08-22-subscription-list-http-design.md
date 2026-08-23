@@ -11,9 +11,11 @@ request/reply RPC
 (`chat.user.{account}.request.user.{siteID}.subscription.list`, served by
 `user-service/service/subscriptions.go:30`). A typical user holds **200–300
 subscriptions**, each row carrying the nested `room` object and a
-`previewMessage` whose `content` is the **full message body** — history-service
-returns it untruncated by design (`history-service/internal/service/rooms_test.go:308`:
-"Content is returned in full — the client truncates for display").
+`previewMessage` whose `content` history-service returns as the **full message
+body** by design (`history-service/internal/service/rooms_test.go:308`: "Content
+is returned in full — the client truncates for display"). user-service now
+truncates it to `PREVIEW_CONTENT_CHARS` runes (default 50) on both transports, so
+a 400-row page carries ~20 KB of preview text rather than up to 8 MB.
 
 The NATS max payload is **128 KB**. A full sidebar does not fit, so the client
 must page at ~40 rows and issue 5–8 round trips at startup. `MAX_SUBSCRIPTION_LIMIT`
@@ -290,7 +292,7 @@ existing backpressure is accidental: the Mongo driver's default `maxPoolSize` of
 **non-blocking** acquire; on failure it writes the 429 above and aborts. No
 queueing — a queued request is a request whose client has already given up.
 
-**`HTTP_MAX_CONCURRENCY` default 256.** Derivation:
+**`HTTP_MAX_CONCURRENCY` default 512.** Derivation:
 
 *Throughput* (Little's law, `N = arrival_rate × latency`): at a healthy ~150 ms
 per 200-row request, 256 in flight serves ~1,700 req/s per pod, ~17,000 across
@@ -301,8 +303,19 @@ the same arrival rate needs ~165 in flight, and at 1 s it needs ~330.
 
 *Memory*: ~1.2 MB live per in-flight 200-row request (decoded
 `[]EnrichedSubscription` ≈ 500 KB, BSON cursor batch ≈ 300 KB, marshalled JSON
-≈ 150 KB, gzip window ≈ 64 KB, plus slack). At 256 that is ~310 MB live, ~620 MB
-heap target at `GOGC=100`.
+≈ 150 KB, plus slack). At 512 that is ~620 MB live.
+
+**Plus the gzip encoders, which the first draft of this table under-counted.**
+A `klauspost` `BestSpeed` writer is **814 KB** once its compressor is
+materialized (measured: `gzip.NewWriterLevel` + one `Write` + `Close` allocates
+813,863 B in 14 allocations — the level-1 hash table, history buffer, window and
+token array; the writer itself is only 160 B until first use). An encoder is held
+only for the response *write* phase, not the whole request, and `gzipPool`
+recycles it, so the standing cost is roughly `peak concurrent writes × 814 KB`
+rather than `HTTP_MAX_CONCURRENCY × 814 KB` — but `sync.Pool` only drops entries
+at a GC, so a burst's peak is retained for up to two cycles. Budget ~100 MB of
+encoders at 512 under normal write overlap, and treat `GOMEMLIMIT` as the thing
+that makes a worse overlap degrade instead of OOMKill.
 
 **Measured** (`BenchmarkPageMarshal`, `BenchmarkPageMarshalGzip`, rows carrying a
 full `previewMessage`):
@@ -324,10 +337,12 @@ conservative 5× puts a 200-row page under 30 KB on the wire.
 | 2 GiB | 512 |
 | 4 GiB | 1024 |
 
-Formula for ops: `N ≈ (0.35 × pod_memory_bytes) / 1.2MB`.
+Formula for ops: `N ≈ (0.35 × pod_memory_bytes) / 1.2MB`. The **512 default
+therefore assumes a 2 GiB pod** — drop it to 256 on a 1 GiB one.
 
-256 also matches the NATS router's existing `MAX_CONCURRENCY=256`, so both doors
-into the pod are sized alike.
+The HTTP door is deliberately wider than the NATS router's `MAX_CONCURRENCY=256`:
+the browser reconnect storm this endpoint exists to absorb arrives here, and an
+HTTP page is bounded read work, whereas the NATS door also fronts writes.
 
 ### Placement
 
@@ -399,7 +414,7 @@ full buffering and are unaffected.
 
 Genuine streaming would mean hand-writing `{"subscriptions":[` → `Encode` per row
 → `],"hasMore":…}`, capping the encode buffer at one row and saving ~150 KB per
-in-flight request (~38 MB at N=256). It is a discrete, revertable step in the
+in-flight request (~77 MB at N=512). It is a discrete, revertable step in the
 implementation plan, gated on a test asserting byte-equality against
 `json.Marshal` of the same struct.
 
@@ -427,7 +442,7 @@ existing `MONGO_` / `NATS_` blocks:
 | Env var | Default | Purpose |
 |---|---|---|
 | `HTTP_PORT` | `8080` | Gin listener |
-| `HTTP_MAX_CONCURRENCY` | `256` | In-flight cap; 0 disables |
+| `HTTP_MAX_CONCURRENCY` | `512` | In-flight cap; 0 disables |
 | `HTTP_MAX_CONNS` | `2048` | Accepted-connection cap; 0 disables |
 | `HTTP_HANDLER_TIMEOUT` | `30s` | Per-request context budget |
 | `HTTP_WRITE_TIMEOUT` | `35s` | Must exceed the handler timeout |
@@ -438,10 +453,11 @@ existing `MONGO_` / `NATS_` blocks:
 | `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` | `40` | Page size when `limit` omitted |
 | `HTTP_SUBSCRIPTION_MAX_LIMIT` | `400` | Hard page ceiling |
 | `ROOM_BATCH_CHUNK` | `100` | Enrichment fan-out chunk size |
-| `PREVIEW_BYTE_BUDGET` | `2097152` | Preview bytes one page may *retain*; 0 = unbounded |
-| `PREVIEW_PEAK_BYTES` | `16777216` | Ceiling on what a page *holds at once*; 0 = unchecked |
+| `PREVIEW_CONTENT_CHARS` | `50` | Truncate `previewMessage.content` to N runes; 0 disables |
 | `MAX_SITE_FANOUT` | `8` | Concurrent enrichment calls in flight |
 | `MONGO_MAX_POOL_SIZE` | `100` | NATS-path pool, now explicit |
+| `MONGO_MIN_POOL_SIZE` | `0` | NATS-path warm floor; per member, so non-zero is a standing cost |
+| `MONGO_MAX_IDLE_TIME` | `5m` | Reap idle NATS-path connections; 0 = never |
 | `HEALTH_ADDR` | `:8081` | Probe listener |
 | `BOTPLATFORM_URL` | *(unset)* | Session-token auth; unset ⇒ SSO only |
 | `GOMEMLIMIT_FRACTION` | `0.8` | Soft memory limit as a fraction of the cgroup limit |
@@ -453,8 +469,8 @@ silently dropping the budget), `HTTP_WRITE_TIMEOUT > HTTP_HANDLER_TIMEOUT`,
 `ROOM_BATCH_CHUNK` in `[1, 100]`, `HTTP_MAX_CONCURRENCY ≥ 0`,
 `HTTP_MAX_CONNS ≥ 0` with `0` disabling the limiter and any positive value
 required to exceed `HTTP_MAX_CONCURRENCY` (keep-alive connections outnumber
-in-flight requests), `HTTP_MONGO_MAX_IDLE_TIME ≥ 0`, `PREVIEW_BYTE_BUDGET ≥ 0`,
-`MAX_SITE_FANOUT × ROOM_BATCH_CHUNK × 20 KB ≤ PREVIEW_PEAK_BYTES`,
+in-flight requests), `HTTP_MONGO_MAX_IDLE_TIME ≥ 0`, `MONGO_MAX_IDLE_TIME ≥ 0`,
+`MONGO_MIN_POOL_SIZE ≤ MONGO_MAX_POOL_SIZE`, `PREVIEW_CONTENT_CHARS ≥ 0`,
 `GOMEMLIMIT_FRACTION` in `(0, 1]` — fail fast at startup, matching the existing
 validation style.
 
@@ -488,9 +504,10 @@ already effectively 100 by driver default; making it explicit means the number i
 chosen rather than inherited.
 
 Pool sizing rationale: a request holds a Mongo connection for roughly 40% of its
-wall time (aggregate ≈ 60 ms, HR + app lookups ≈ 20 ms, of ~200 ms total), so 256
-in-flight requests imply ~100 concurrent checkouts. 128 leaves headroom without
-overshooting.
+wall time (aggregate ≈ 60 ms, HR + app lookups ≈ 20 ms, of ~200 ms total), so 512
+in-flight requests imply ~200 concurrent checkouts. 128 sits below that on
+purpose: the pool is the second door, and queueing for a connection is cheaper
+than melting the replica set.
 
 **Cost, flagged for the DBA.** `MaxPoolSize` is enforced **per server**, not per
 client, so the ceiling is the pool limits times the number of replica-set members
@@ -510,10 +527,10 @@ That ceiling used to be *sticky*: the driver reaps idle connections only when
 (`x/mongo/driver/topology/server_options.go:145`, `pool.go:195`). A burst that
 grew the pool held those sockets for the life of the process, and failover
 re-growing them on a new member added to the total rather than replacing it. The
-HTTP client now sets `HTTP_MONGO_MAX_IDLE_TIME` (5m), so 684 is a transient peak
-that drains back toward `MinPoolSize × members` once the burst passes. The NATS
-client is deliberately left on the old behaviour — changing it is a pre-existing
-path this change does not own.
+two clients now set a reaping interval — `HTTP_MONGO_MAX_IDLE_TIME` and
+`MONGO_MAX_IDLE_TIME`, 5m each — so 684 is a transient peak that drains back
+toward `MinPoolSize × members` once the burst passes. `MONGO_MIN_POOL_SIZE`
+mirrors the HTTP knob and defaults to 0 for the same per-member reason.
 
 ## 14. Deployment and operations
 
@@ -545,7 +562,7 @@ Requirements for whoever owns the manifests:
 
 - `o11ygin.Middleware` gives per-route traces and RED metrics, matching auth-service.
 - **Shed counter** and **in-flight gauge** from `ginutil.MaxConcurrency`, via the
-  meter already built by `obs.Init`. Without them, "is 256 the right number" is
+  meter already built by `obs.Init`. Without them, "is 512 the right number" is
   unanswerable in production. Alert on any sustained shed rate: it is the signal
   to resize *before* users notice.
 - Chunk-level degradation logs one `slog.Warn` per failed chunk with `site`,
@@ -594,6 +611,8 @@ chunking logic.
 | Risk | Mitigation |
 |---|---|
 | Per-request memory estimate (~1.2 MB) is wrong | `GOMEMLIMIT` at 0.8 turns a mis-estimate into GC pressure rather than OOMKill; the benchmark in §16 replaces the estimate with a measurement before rollout |
+| Transient enrichment peak is unbounded per process | Chunks decode concurrently and are truncated only once decoded, so one request touches up to `MAX_SITE_FANOUT × ROOM_BATCH_CHUNK × 20 KB` = 16 MB before truncation, and `HTTP_MAX_CONCURRENCY=512` multiplies that. It is short-lived garbage — unreachable the moment `truncatePreviews` clones — so `GOMEMLIMIT` applies backpressure to it, unlike retained page data. The root fix is a length cap on history-service's `rooms.get` reply, tracked separately; until then `MAX_SITE_FANOUT` and `ROOM_BATCH_CHUNK` are the env-tunable levers |
+| Server truncation at 50 runes is shorter than the client's own 140-char preview cap (`chat-frontend/src/lib/previewText.js`) | Deliberate — the sidebar renders one line and the byte saving is the point. `PREVIEW_CONTENT_CHARS` raises it without a rebuild if the shorter snippet reads badly; note the cut is on the raw body, so a row opening with markdown can flatten to less than 50 rendered characters |
 | 2,280 replica-set connections across 10 pods | Flagged for the DBA; pool sizes are env-tunable without a redeploy of code |
 | Service-layer refactor touches helpers shared by three other endpoints | Purely mechanical; existing tests for `getChannels` / `getDM` / `getByRoomID` are the safety net and must stay green unmodified |
 | Session-token auth adds a botplatform dependency to a hot path | SSO is the documented and recommended credential; the branch degrades to 503 when `BOTPLATFORM_URL` is unset |

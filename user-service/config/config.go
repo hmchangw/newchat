@@ -9,12 +9,6 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
-// maxPreviewBodyBytes is the message-body ceiling, the only thing bounding one
-// preview's size. Mirrored rather than shared because services are package main:
-// message-gatekeeper/handler.go enforces it, history-service and pkg/model carry
-// their own copies. Raising it there without raising it here understates the peak.
-const maxPreviewBodyBytes = 20 * 1024
-
 // MongoConfig holds MongoDB connection settings (env prefix: MONGO_).
 type MongoConfig struct {
 	URI      string `env:"URI,notEmpty"`
@@ -27,6 +21,10 @@ type MongoConfig struct {
 	// MaxPoolSize is the NATS-path pool. Explicit rather than inherited: it is the
 	// backpressure point the RPC handlers actually queue on.
 	MaxPoolSize uint64 `env:"MAX_POOL_SIZE" envDefault:"100"`
+	// MinPoolSize and MaxIdleTime mirror the HTTP client's; see HTTPConfig for why
+	// the floor is 0 and why the reap interval has to be set at all.
+	MinPoolSize uint64        `env:"MIN_POOL_SIZE" envDefault:"0"`
+	MaxIdleTime time.Duration `env:"MAX_IDLE_TIME" envDefault:"5m"`
 }
 
 // HTTPConfig configures the client-facing HTTP listener (env prefix: HTTP_).
@@ -35,8 +33,9 @@ type HTTPConfig struct {
 	// MaxConcurrency caps in-flight HTTP handlers, shedding the overflow with 429.
 	// Its own budget, so a burst cannot take handler slots or Mongo connections from
 	// the NATS path — but the NATS connection and the room/history services behind
-	// it are still shared. 0 disables.
-	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+	// it are still shared. The default assumes a 2 GiB pod (~1.2 MB live per
+	// in-flight page); halve it on a 1 GiB one. 0 disables.
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"512"`
 	// MaxConns bounds accepted TCP connections; see ginutil.LimitListener for why.
 	// Must exceed MaxConcurrency, since keep-alives outnumber in-flight requests.
 	// 0 disables.
@@ -80,17 +79,10 @@ type Config struct {
 	// RoomBatchChunk caps room ids per enrichment RPC. 100 is history-service's hard
 	// batch cap and keeps each reply well under the 128 KB NATS payload.
 	RoomBatchChunk int `env:"ROOM_BATCH_CHUNK" envDefault:"100"`
-	// PreviewByteBudget caps the preview bytes one page assembles, across both
-	// transports. 2 MB is ~25x a typical 400-row page and only bites on bodies near
-	// the gatekeeper's 20 KB ceiling. 0 disables it.
-	PreviewByteBudget int64 `env:"PREVIEW_BYTE_BUDGET" envDefault:"2097152"`
-	// PreviewPeakBytes caps what ONE page holds at once, as opposed to retains:
-	// chunks are fetched concurrently and each is materialized before the byte
-	// budget charges it. Startup checks MaxSiteFanout x RoomBatchChunk x the 20 KB
-	// body ceiling against it. Process peak is this x HTTP_MAX_CONCURRENCY, so the
-	// 16 MB default admits ~4 GB across 256 handlers -- size both together against
-	// the pod limit. 0 disables the check.
-	PreviewPeakBytes int64 `env:"PREVIEW_PEAK_BYTES" envDefault:"16777216"`
+	// PreviewContentChars truncates previewMessage.content at read time; the stored
+	// message is untouched. It is what bounds a page's preview memory, since a body
+	// may reach the gatekeeper's 20 KB ceiling. 0 disables truncation.
+	PreviewContentChars int `env:"PREVIEW_CONTENT_CHARS" envDefault:"50"`
 	// MaxSiteFanout bounds concurrent enrichment RPCs per request. Chunking makes a
 	// large page issue several per site, so this is the knob that throttles the
 	// resulting downstream load without a rebuild.
@@ -157,6 +149,21 @@ type Config struct {
 	HTTP               HTTPConfig `envPrefix:"HTTP_"`
 }
 
+// validateMongoPool checks the sizing trio both Mongo clients carry; prefix names
+// the client's env vars so the error says which pool is misconfigured.
+func validateMongoPool(prefix string, maxPool, minPool uint64, idle time.Duration) error {
+	if maxPool < 1 {
+		return fmt.Errorf("%sMAX_POOL_SIZE must be >= 1, got %d", prefix, maxPool)
+	}
+	if minPool > maxPool {
+		return fmt.Errorf("%[1]sMIN_POOL_SIZE (%[2]d) must be <= %[1]sMAX_POOL_SIZE (%[3]d)", prefix, minPool, maxPool)
+	}
+	if idle < 0 {
+		return fmt.Errorf("%sMAX_IDLE_TIME must be >= 0, got %s", prefix, idle)
+	}
+	return nil
+}
+
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.
 func Load() (Config, error) {
 	cfg, err := env.ParseAs[Config]()
@@ -193,9 +200,6 @@ func Load() (Config, error) {
 	if cfg.HTTP.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("HTTP_MAX_CONCURRENCY must be >= 0, got %d", cfg.HTTP.MaxConcurrency)
 	}
-	if cfg.PreviewByteBudget < 0 {
-		return Config{}, fmt.Errorf("PREVIEW_BYTE_BUDGET must be >= 0, got %d", cfg.PreviewByteBudget)
-	}
 	if cfg.HTTP.MaxConns < 0 {
 		return Config{}, fmt.Errorf("HTTP_MAX_CONNS must be >= 0, got %d", cfg.HTTP.MaxConns)
 	}
@@ -210,17 +214,11 @@ func Load() (Config, error) {
 	if cfg.HTTP.WriteTimeout <= cfg.HTTP.HandlerTimeout {
 		return Config{}, fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must exceed HTTP_HANDLER_TIMEOUT (%s)", cfg.HTTP.WriteTimeout, cfg.HTTP.HandlerTimeout)
 	}
-	if cfg.HTTP.MongoMaxPoolSize < 1 {
-		return Config{}, fmt.Errorf("HTTP_MONGO_MAX_POOL_SIZE must be >= 1, got %d", cfg.HTTP.MongoMaxPoolSize)
+	if err := validateMongoPool("HTTP_MONGO_", cfg.HTTP.MongoMaxPoolSize, cfg.HTTP.MongoMinPoolSize, cfg.HTTP.MongoMaxIdleTime); err != nil {
+		return Config{}, err
 	}
-	if cfg.HTTP.MongoMaxIdleTime < 0 {
-		return Config{}, fmt.Errorf("HTTP_MONGO_MAX_IDLE_TIME must be >= 0, got %s", cfg.HTTP.MongoMaxIdleTime)
-	}
-	if cfg.HTTP.MongoMinPoolSize > cfg.HTTP.MongoMaxPoolSize {
-		return Config{}, fmt.Errorf("HTTP_MONGO_MIN_POOL_SIZE (%d) must be <= HTTP_MONGO_MAX_POOL_SIZE (%d)", cfg.HTTP.MongoMinPoolSize, cfg.HTTP.MongoMaxPoolSize)
-	}
-	if cfg.Mongo.MaxPoolSize < 1 {
-		return Config{}, fmt.Errorf("MONGO_MAX_POOL_SIZE must be >= 1, got %d", cfg.Mongo.MaxPoolSize)
+	if err := validateMongoPool("MONGO_", cfg.Mongo.MaxPoolSize, cfg.Mongo.MinPoolSize, cfg.Mongo.MaxIdleTime); err != nil {
+		return Config{}, err
 	}
 	if cfg.GoMemLimitFraction <= 0 || cfg.GoMemLimitFraction > 1 {
 		return Config{}, fmt.Errorf("GOMEMLIMIT_FRACTION must be in (0,1], got %v", cfg.GoMemLimitFraction)
@@ -231,10 +229,8 @@ func Load() (Config, error) {
 	if cfg.RoomBatchChunk < 1 || cfg.RoomBatchChunk > 100 {
 		return Config{}, fmt.Errorf("ROOM_BATCH_CHUNK must be in [1,100], got %d", cfg.RoomBatchChunk)
 	}
-	// Ordered after the two knobs it reads, so their own errors surface first.
-	if peak := int64(cfg.MaxSiteFanout) * int64(cfg.RoomBatchChunk) * maxPreviewBodyBytes; cfg.PreviewPeakBytes > 0 && peak > cfg.PreviewPeakBytes {
-		return Config{}, fmt.Errorf("per-page peak MAX_SITE_FANOUT (%d) x ROOM_BATCH_CHUNK (%d) x 20 KB = %d exceeds PREVIEW_PEAK_BYTES (%d)",
-			cfg.MaxSiteFanout, cfg.RoomBatchChunk, peak, cfg.PreviewPeakBytes)
+	if cfg.PreviewContentChars < 0 {
+		return Config{}, fmt.Errorf("PREVIEW_CONTENT_CHARS must be >= 0, got %d", cfg.PreviewContentChars)
 	}
 	if cfg.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)

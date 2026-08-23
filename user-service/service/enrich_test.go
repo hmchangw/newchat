@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -749,36 +749,58 @@ func TestEnrichLastMessage_UnsetFanoutDoesNotDeadlock(t *testing.T) {
 	}
 }
 
-// A page whose previews would blow the byte budget degrades the overflow instead
-// of assembling it: message bodies are capped at 20 KB each, but 400 of them are
-// not, and the budget is the only thing standing between a max-size page and the
-// pod's memory.
-func TestEnrichLastMessage_StopsAtPreviewByteBudget(t *testing.T) {
-	svc, _, history := newSvcRawHistory(t)
-	svc.previewBudget = 40 * 1024 // fits two 20 KB previews, not four
-	subs, idxBySite := enrichFixture(4, "site-a")
-	svc.roomBatchChunk = 1 // one room per RPC, so the budget bites between chunks
-
-	big := strings.Repeat("x", 20*1024)
-	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
-			out := make(map[string]model.PreviewMessage, len(ids))
-			for _, id := range ids {
-				out[id] = model.PreviewMessage{MessageID: id + "-msg", Content: big}
-			}
-			return out, nil
-		}).AnyTimes()
-
-	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
-
-	var attached int
-	for i := range subs {
-		if subs[i].Room.PreviewMessage != nil {
-			attached++
-		}
+// The gatekeeper caps a body at 20 KB but not a page at 400 of them, so
+// truncation is what keeps a max-size page off the pod's memory. Runes, not
+// bytes: a byte cut would split a multi-byte character.
+func TestEnrichLastMessage_TruncatesPreviewContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		chars   int
+		content string
+		want    string
+	}{
+		{name: "long ascii body", chars: 50, content: strings.Repeat("x", 20*1024), want: strings.Repeat("x", 50)},
+		{name: "short body untouched", chars: 50, content: "hi", want: "hi"},
+		{name: "exactly at the limit", chars: 4, content: "abcd", want: "abcd"},
+		{name: "multi-byte runes are not split", chars: 3, content: "你好世界", want: "你好世"},
+		{name: "zero disables truncation", chars: 0, content: strings.Repeat("x", 4096), want: strings.Repeat("x", 4096)},
 	}
-	assert.Greater(t, attached, 0, "the budget must not degrade the whole page")
-	assert.Less(t, attached, 4, "previews past the budget must be dropped")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _, history := newSvcRawHistory(t)
+			svc.previewChars = tt.chars
+			subs, idxBySite := enrichFixture(1, "site-a")
+
+			history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+				DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+					out := make(map[string]model.PreviewMessage, len(ids))
+					for _, id := range ids {
+						out[id] = model.PreviewMessage{MessageID: id + "-msg", Content: tt.content}
+					}
+					return out, nil
+				})
+
+			svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+			require.NotNil(t, subs[0].Room.PreviewMessage)
+			assert.Equal(t, tt.want, subs[0].Room.PreviewMessage.Content)
+		})
+	}
+}
+
+// A truncated preview must not alias its original: a slice keeps the whole
+// backing array alive, so aliasing would pin the 20 KB body the truncation
+// exists to release.
+func TestTruncatePreviews_DetachesFromTheOriginalBody(t *testing.T) {
+	body := strings.Repeat("x", 20*1024)
+	m := map[string]model.PreviewMessage{"r1": {Content: body}}
+
+	(&UserService{previewChars: 50}).truncatePreviews(m)
+
+	got := m["r1"].Content
+	require.Len(t, got, 50)
+	assert.NotSame(t, unsafe.StringData(body), unsafe.StringData(got),
+		"the preview must own its bytes, or the original body is never freed")
 }
 
 // On a payload-capped transport the page's own reply shares the ceiling history
@@ -819,16 +841,4 @@ func TestEnrichLastMessage_BoundsSplitDepth(t *testing.T) {
 	for i := range subs {
 		assert.Nil(t, subs[i].Room.PreviewMessage, "row %d degrades once the cap is hit", i)
 	}
-}
-
-// A rejected chunk must not consume budget: charging it would let one oversized
-// chunk lock out later chunks that still fit the remainder.
-func TestOverBudget_RejectedChunkDoesNotConsumeBudget(t *testing.T) {
-	svc := &UserService{previewBudget: 1000}
-	var spent atomic.Int64
-
-	assert.False(t, svc.overBudget(&spent, 600), "600 fits")
-	assert.True(t, svc.overBudget(&spent, 600), "a second 600 does not fit")
-	assert.False(t, svc.overBudget(&spent, 400), "400 still fits the remaining budget")
-	assert.EqualValues(t, 1000, spent.Load(), "only accepted chunks are charged")
 }

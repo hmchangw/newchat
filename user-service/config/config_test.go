@@ -389,7 +389,7 @@ func TestLoad_HTTPDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "8080", cfg.HTTP.Port)
-	assert.Equal(t, 256, cfg.HTTP.MaxConcurrency)
+	assert.Equal(t, 512, cfg.HTTP.MaxConcurrency)
 	assert.Equal(t, 30*time.Second, cfg.HTTP.HandlerTimeout)
 	assert.Equal(t, 35*time.Second, cfg.HTTP.WriteTimeout)
 	assert.Equal(t, 1024, cfg.HTTP.GzipMinBytes)
@@ -398,6 +398,8 @@ func TestLoad_HTTPDefaults(t *testing.T) {
 	assert.Equal(t, 40, cfg.HTTP.DefaultLimit, "matches the NATS default so an omitted limit behaves the same")
 	assert.Equal(t, 400, cfg.HTTP.MaxLimit)
 	assert.Equal(t, uint64(100), cfg.Mongo.MaxPoolSize, "the NATS-path pool is now explicit, not the driver default")
+	assert.Equal(t, uint64(0), cfg.Mongo.MinPoolSize, "no warm floor: a per-member minimum is a standing cluster cost")
+	assert.Equal(t, 5*time.Minute, cfg.Mongo.MaxIdleTime, "the driver's own default of 0 never reaps")
 	assert.Equal(t, ":8081", cfg.HealthAddr)
 	assert.InDelta(t, 0.8, cfg.GoMemLimitFraction, 1e-9)
 	assert.Equal(t, 100, cfg.RoomBatchChunk)
@@ -438,7 +440,7 @@ func TestLoad_RejectsInvalidConfig(t *testing.T) {
 func TestLoad_HTTPOverrides(t *testing.T) {
 	requiredEnv(t)
 	t.Setenv("HTTP_PORT", "9090")
-	t.Setenv("HTTP_MAX_CONCURRENCY", "512")
+	t.Setenv("HTTP_MAX_CONCURRENCY", "1024")
 	t.Setenv("HTTP_SUBSCRIPTION_DEFAULT_LIMIT", "200")
 	t.Setenv("HTTP_SUBSCRIPTION_MAX_LIMIT", "500")
 	t.Setenv("BOTPLATFORM_URL", "http://botplatform:8080")
@@ -446,7 +448,7 @@ func TestLoad_HTTPOverrides(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.Equal(t, "9090", cfg.HTTP.Port)
-	assert.Equal(t, 512, cfg.HTTP.MaxConcurrency)
+	assert.Equal(t, 1024, cfg.HTTP.MaxConcurrency)
 	assert.Equal(t, 200, cfg.HTTP.DefaultLimit)
 	assert.Equal(t, 500, cfg.HTTP.MaxLimit)
 	assert.Equal(t, "http://botplatform:8080", cfg.BotplatformURL)
@@ -518,46 +520,90 @@ func TestLoad_RejectsNonPositiveHandlerTimeout(t *testing.T) {
 	}
 }
 
-// The shipped default must admit the shipped fan-out x chunk, or the defaults
-// reject themselves at startup.
-func TestLoad_PreviewPeakBytesDefault(t *testing.T) {
+// A sidebar renders one line, so the shipped default is what bounds a page's
+// preview memory rather than the gatekeeper's 20 KB body ceiling.
+func TestLoad_PreviewContentCharsDefault(t *testing.T) {
 	requiredEnv(t)
-	unsetEnv(t, "PREVIEW_PEAK_BYTES")
+	unsetEnv(t, "PREVIEW_CONTENT_CHARS")
 
 	cfg, err := Load()
 
 	require.NoError(t, err)
-	assert.EqualValues(t, 16<<20, cfg.PreviewPeakBytes)
+	assert.Equal(t, 50, cfg.PreviewContentChars)
 }
 
-// fanout x chunk x 20 KB is implicit in three knobs; startup makes it explicit.
-func TestLoad_PreviewPeakBytesBoundsFanoutTimesChunk(t *testing.T) {
+// Both the tuned value and the 0 escape hatch have to survive Load.
+func TestLoad_PreviewContentCharsOverride(t *testing.T) {
 	tests := []struct {
-		name          string
-		fanout, chunk string
-		peak          string
-		wantErr       bool
+		name string
+		set  string
+		want int
 	}{
-		{name: "16 x 100 x 20 KB = 32 MB over a 16 MB ceiling", fanout: "16", chunk: "100", peak: "16777216", wantErr: true},
-		{name: "halving the chunk lands exactly on the ceiling", fanout: "16", chunk: "50", peak: "16777216"},
-		{name: "zero ceiling disables the check", fanout: "64", chunk: "100", peak: "0"},
+		{name: "tuned longer", set: "120", want: 120},
+		{name: "zero disables truncation", set: "0", want: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			requiredEnv(t)
-			t.Setenv("MAX_SITE_FANOUT", tt.fanout)
-			t.Setenv("ROOM_BATCH_CHUNK", tt.chunk)
-			t.Setenv("PREVIEW_PEAK_BYTES", tt.peak)
+			t.Setenv("PREVIEW_CONTENT_CHARS", tt.set)
+
+			cfg, err := Load()
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.PreviewContentChars)
+		})
+	}
+}
+
+// A negative length is a typo, not a request to disable truncation.
+func TestLoad_RejectsNegativePreviewContentChars(t *testing.T) {
+	requiredEnv(t)
+	t.Setenv("PREVIEW_CONTENT_CHARS", "-1")
+
+	_, err := Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PREVIEW_CONTENT_CHARS")
+}
+
+// The NATS pool gets the same reaping and warm-floor knobs as the HTTP one.
+func TestLoad_NATSMongoPoolKnobs(t *testing.T) {
+	requiredEnv(t)
+	t.Setenv("MONGO_MIN_POOL_SIZE", "10")
+	t.Setenv("MONGO_MAX_IDLE_TIME", "90s")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10), cfg.Mongo.MinPoolSize)
+	assert.Equal(t, 90*time.Second, cfg.Mongo.MaxIdleTime)
+}
+
+// A floor above the ceiling is rejected rather than silently clamped. Asserted on
+// the whole message: the HTTP pool's errors differ only by their prefix, so a
+// substring match would not prove which pool was rejected.
+func TestLoad_RejectsMongoPoolMisconfiguration(t *testing.T) {
+	tests := []struct {
+		name, env, value, want string
+	}{
+		{name: "nats min above max", env: "MONGO_MIN_POOL_SIZE", value: "200",
+			want: "MONGO_MIN_POOL_SIZE (200) must be <= MONGO_MAX_POOL_SIZE (100)"},
+		{name: "nats negative idle time", env: "MONGO_MAX_IDLE_TIME", value: "-1s",
+			want: "MONGO_MAX_IDLE_TIME must be >= 0, got -1s"},
+		{name: "http min above max", env: "HTTP_MONGO_MIN_POOL_SIZE", value: "200",
+			want: "HTTP_MONGO_MIN_POOL_SIZE (200) must be <= HTTP_MONGO_MAX_POOL_SIZE (128)"},
+		{name: "http zero max", env: "HTTP_MONGO_MAX_POOL_SIZE", value: "0",
+			want: "HTTP_MONGO_MAX_POOL_SIZE must be >= 1, got 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requiredEnv(t)
+			t.Setenv(tt.env, tt.value)
 
 			_, err := Load()
 
-			if !tt.wantErr {
-				require.NoError(t, err)
-				return
-			}
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "PREVIEW_PEAK_BYTES")
-			assert.Contains(t, err.Error(), "MAX_SITE_FANOUT")
+			assert.Equal(t, tt.want, err.Error())
 		})
 	}
 }

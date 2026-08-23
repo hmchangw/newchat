@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -381,6 +380,9 @@ func planChunks(subs []model.EnrichedSubscription, sites []string, idxBySite map
 // successful page. A half that still fails degrades alone.
 func (s *UserService) roomsGetSplitting(ctx context.Context, site string, subs []model.EnrichedSubscription, rows []int, roomIDs []string, depth int) (map[string]model.PreviewMessage, error) {
 	m, err := s.history.RoomsGet(ctx, site, roomIDs, chunkHints(subs, rows))
+	// Truncated at the leaf, so each reply's full-size bodies are collectable the
+	// moment its call returns and the merge below holds only short ones.
+	s.truncatePreviews(m)
 	if err == nil || len(roomIDs) < 2 || !isResponseTooLarge(err) {
 		return m, err
 	}
@@ -444,43 +446,45 @@ func isResponseTooLarge(err error) bool {
 	return errors.As(err, &e) && e.Reason == errcode.ResponseTooLarge
 }
 
-// errBudgetSpent degrades a chunk that would push the page past previewBudget.
-// Not client-facing: enrichment failures never fail the list.
-var errBudgetSpent = errors.New("preview byte budget exhausted")
-
-// overBudget charges n against the page's preview budget, reporting true and
-// charging nothing when it would not fit. Check-and-add, not Add: charging a
-// rejected chunk would lock out later chunks that still fit the remainder.
-// A budget of 0 disables the check.
-func (s *UserService) overBudget(spent *atomic.Int64, n int64) bool {
-	if s.previewBudget <= 0 {
-		return false
+// truncatePreviews caps each preview body at previewChars runes, in place.
+func (s *UserService) truncatePreviews(m map[string]model.PreviewMessage) {
+	n := s.previewChars
+	if n <= 0 {
+		return
 	}
-	for {
-		cur := spent.Load()
-		if cur+n > s.previewBudget {
-			return true
-		}
-		if spent.CompareAndSwap(cur, cur+n) {
-			return false
-		}
-	}
-}
-
-// budgetSpent reports an exhausted budget, so a chunk can skip its RPC entirely.
-// Separate from overBudget, which no longer overshoots and so cannot report it.
-func (s *UserService) budgetSpent(spent *atomic.Int64) bool {
-	return s.previewBudget > 0 && spent.Load() >= s.previewBudget
-}
-
-// previewBytes approximates a chunk's retained size by its message bodies, which
-// dominate: everything else in a PreviewMessage is ids and timestamps.
-func previewBytes(m map[string]model.PreviewMessage) int64 {
-	var n int64
+	// Indexed rather than ranged over values: a PreviewMessage is 200+ bytes, and a
+	// body already inside the limit needs no copy at all.
 	for k := range m {
-		n += int64(len(m[k].Content))
+		content := m[k].Content
+		cut := truncateRunes(content, n)
+		if len(cut) == len(content) {
+			continue
+		}
+		pm := m[k]
+		// Clone, because a slice of a string keeps the whole backing array alive:
+		// without it every 50-rune preview would pin its original 20 KB body and
+		// the truncation would free nothing.
+		pm.Content = strings.Clone(cut)
+		m[k] = pm
 	}
-	return n
+}
+
+// truncateRunes cuts str to at most n runes. Runes, not bytes: a byte cut would
+// split a multi-byte character and put invalid UTF-8 on the wire. The result
+// aliases str — callers that retain it must clone.
+func truncateRunes(str string, n int) string {
+	// A string of n bytes holds at most n runes, so this is the ASCII fast path.
+	if len(str) <= n {
+		return str
+	}
+	count := 0
+	for i := range str {
+		if count == n {
+			return str[:i]
+		}
+		count++
+	}
+	return str
 }
 
 // chunkHints returns the walk bounds for this chunk's rows, letting
@@ -561,27 +565,13 @@ func (s *UserService) enrichLastMessage(ctx context.Context, account string, sub
 	for site := range idxBySite {
 		sites = append(sites, site)
 	}
-	// Charged across the whole page, not per chunk: chunks are concurrent, so only a
-	// shared counter bounds what they collectively hold.
-	var spent atomic.Int64
 	lastMsgBySite := fanOutChunks(ctx, planChunks(subs, sites, idxBySite, s.roomBatchChunk), len(sites), s.fanout(),
 		func(ctx context.Context, job chunkJob) (map[string]model.PreviewMessage, error) {
-			if s.budgetSpent(&spent) {
-				return nil, errBudgetSpent
-			}
 			m, err := s.roomsGetSplitting(ctx, job.site, subs, job.rows, job.roomIDs, 0)
 			if err != nil {
 				slog.WarnContext(ctx, "last-message enrichment degraded", "account", account, "site", job.site,
 					"chunk_size", len(job.roomIDs), "request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 				return nil, err
-			}
-			// Dropped whole rather than partially: a half-kept chunk would make which
-			// previews survive depend on map iteration order.
-			if s.overBudget(&spent, previewBytes(m)) {
-				slog.WarnContext(ctx, "last-message enrichment over byte budget", "account", account,
-					"site", job.site, "budget", s.previewBudget, "chunk_size", len(job.roomIDs),
-					"request_id", natsutil.RequestIDFromContext(ctx))
-				return nil, errBudgetSpent
 			}
 			return m, nil
 		})

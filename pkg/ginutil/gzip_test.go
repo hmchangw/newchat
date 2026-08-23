@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,21 @@ func gzipEngine(t *testing.T, minSize int, h gin.HandlerFunc) *gin.Engine {
 	return r
 }
 
+// panicEngine serves /boom, which writes body and then panics, and /x, which
+// serves body normally — the pair every panic test needs.
+func panicEngine(t *testing.T, body string) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(gin.Recovery(), Gzip(1024))
+	r.GET("/boom", func(c *gin.Context) {
+		writeBody(body)(c)
+		panic("boom")
+	})
+	r.GET("/x", writeBody(body))
+	return r
+}
+
 // writeBody serves body as JSON, so the sniffer sees a compressible type.
 func writeBody(body string) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -32,9 +48,14 @@ func writeBody(body string) gin.HandlerFunc {
 	}
 }
 
-// doGet issues a GET with the given Accept-Encoding and records the response.
+// doGet issues a GET to /x with the given Accept-Encoding and records the response.
 func doGet(r *gin.Engine, acceptEncoding string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	return doPath(r, "/x", acceptEncoding)
+}
+
+// doPath is doGet against an explicit route.
+func doPath(r *gin.Engine, path, acceptEncoding string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	if acceptEncoding != "" {
 		req.Header.Set("Accept-Encoding", acceptEncoding)
 	}
@@ -218,22 +239,12 @@ func TestGzip_PanicIsRecoverable(t *testing.T) {
 // The writer must be usable again after a panic left one mid-flight, or a pooled
 // writer could carry a half-finished stream into the next request.
 func TestGzip_PoolSurvivesPanicMidBody(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	body := strings.Repeat("a", 4096)
-	r := gin.New()
-	r.Use(gin.Recovery(), Gzip(1024))
-	r.GET("/boom", func(c *gin.Context) {
-		_, _ = c.Writer.WriteString(body)
-		panic("boom")
-	})
-	r.GET("/x", writeBody(body))
+	r := panicEngine(t, body)
 
-	doGet(r, "gzip")
+	doPath(r, "/boom", "gzip")
 
-	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	req.Header.Set("Accept-Encoding", "gzip")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
+	w := doGet(r, "gzip")
 	assert.Equal(t, body, gunzip(t, w.Body.Bytes()), "a later request must get a clean writer")
 }
 
@@ -354,4 +365,51 @@ func TestGzip_PanicDiscardsBufferedBody(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code, "Recovery must still own the response")
 	assert.NotContains(t, w.Body.String(), "partial", "a buffered body must not survive a panic")
+}
+
+// withGzipPool swaps the shared encoder pool for the duration of a test.
+func withGzipPool(t *testing.T, newFn func() any) {
+	t.Helper()
+	saved := gzipPool.New
+	gzipPool = sync.Pool{New: newFn}
+	t.Cleanup(func() { gzipPool = sync.Pool{New: saved} })
+}
+
+// An encoder the pool cannot supply must cost the compression, not the response.
+func TestGzip_FallsBackToPlainWhenEncoderUnavailable(t *testing.T) {
+	withGzipPool(t, func() any { return nil })
+
+	body := strings.Repeat("a", 4096)
+	w := doGet(gzipEngine(t, 1024, writeBody(body)), "gzip")
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("Content-Encoding"), "an unusable encoder must not be advertised")
+	assert.Equal(t, body, w.Body.String(), "the body must go out uncompressed rather than fail")
+}
+
+// The buffered prefix must survive the fallback too, not just the write that
+// crossed the threshold.
+func TestGzip_FallbackKeepsTheBufferedPrefix(t *testing.T) {
+	withGzipPool(t, func() any { return nil })
+
+	head, tail := "prefix-", strings.Repeat("a", 4096)
+	w := doGet(gzipEngine(t, 1024, func(c *gin.Context) {
+		c.Header("Content-Type", "application/json")
+		_, _ = c.Writer.WriteString(head)
+		_, _ = c.Writer.WriteString(tail)
+	}), "gzip")
+
+	assert.Equal(t, head+tail, w.Body.String())
+}
+
+// A panic after the encoder committed must leave a broken stream. Closing it
+// would stamp a valid trailer, and the client would decode a truncated body as
+// a complete 200.
+func TestGzip_PanicMidBodyLeavesNoValidTrailer(t *testing.T) {
+	w := doPath(panicEngine(t, strings.Repeat("a", 4096)), "/boom", "gzip")
+
+	zr, err := gzip.NewReader(bytes.NewReader(w.Body.Bytes()))
+	require.NoError(t, err, "the header did reach the wire")
+	_, err = io.ReadAll(zr)
+	assert.Error(t, err, "a truncated body must not decode as a complete response")
 }
