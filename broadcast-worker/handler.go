@@ -412,16 +412,21 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 			return fmt.Errorf("channel thread fan-out for thread update of parent %s: %w", parentMsgID, err)
 		}
 		if len(fanOut) == 0 {
+			// No per-account recipients, but the thread lane below still serves
+			// viewers with the pane open.
 			slog.DebugContext(ctx, "no thread subscribers to notify for thread update",
 				"parentMessageID", parentMsgID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
-			return nil
 		}
 		payload, err := sonic.Marshal(&edit)
 		if err != nil {
 			return fmt.Errorf("marshal thread edit event for parent %s: %w", parentMsgID, err)
 		}
-		return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
+		if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
+			return fmt.Errorf("publish thread edit event for parent %s: %w", parentMsgID, err)
+		}
+		h.publishThreadLaneEdit(ctx, room, parentMsgID, edit)
+		return nil
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies are visible to every member, so edits fan out to
 		// all members (consistent with handleThreadCreated), not just thread
@@ -433,6 +438,35 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 			"room_id", room.ID,
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		return nil
+	}
+}
+
+// publishThreadLaneEdit sends the encrypted twin of a thread-reply edit on the
+// per-thread lane. Best-effort, like publishThreadLaneCreated.
+//
+// encryptEditedContent does not check h.encrypt itself (unlike
+// encryptRoomEvent), so the guard is explicit here — matching handleUpdated.
+func (h *Handler) publishThreadLaneEdit(ctx context.Context, room *model.Room, parentMsgID string, plain model.EditRoomEvent) { //nolint:gocritic // hugeParam: plain is taken by value so encryptEditedContent's in-place mutation doesn't touch the caller's edit
+	laneEdit := plain
+	if h.encrypt {
+		if err := h.encryptEditedContent(ctx, room.ID, &laneEdit); err != nil {
+			slog.ErrorContext(ctx, "encrypt thread lane edit failed",
+				"error", err, "room_id", room.ID, "parentMessageID", parentMsgID,
+				"request_id", natsutil.RequestIDFromContext(ctx))
+			return
+		}
+	}
+	lanePayload, err := sonic.Marshal(&laneEdit)
+	if err != nil {
+		slog.ErrorContext(ctx, "marshal thread lane edit failed",
+			"error", err, "room_id", room.ID, "parentMessageID", parentMsgID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+		return
+	}
+	if err := h.publishThreadLaneEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, lanePayload, "thread edit"); err != nil {
+		slog.ErrorContext(ctx, "publish thread lane edit failed",
+			"error", err, "room_id", room.ID, "parentMessageID", parentMsgID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
 	}
 }
 

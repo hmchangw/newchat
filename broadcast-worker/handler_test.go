@@ -2877,11 +2877,15 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
-	// bob and carol (followers) + alice (sender) included for multi-device parity
-	require.Len(t, pub.records, 3)
+	// bob and carol (followers) + alice (sender) included for multi-device parity,
+	// plus the thread lane for viewers with the pane open.
+	require.Len(t, pub.records, 4)
 	subjects := map[string]bool{}
 	for _, r := range pub.records {
 		subjects[r.subject] = true
+		if r.subject == "chat.room.r1.thread.parent-1.event" {
+			continue
+		}
 		var roomEvt model.EditRoomEvent
 		require.NoError(t, json.Unmarshal(r.data, &roomEvt))
 		assert.Equal(t, model.RoomEventMessageEdited, roomEvt.Type)
@@ -2895,6 +2899,7 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
 	assert.True(t, subjects[subject.UserRoomEvent("carol")])
+	assert.True(t, subjects["chat.room.r1.thread.parent-1.event"])
 }
 
 func TestHandleThreadUpdated_ChannelExcludesRestrictedAndNonMemberMentions(t *testing.T) {
@@ -3033,6 +3038,130 @@ func TestHandleThreadUpdated_ChannelRoom_GetThreadFollowersError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "thread fan-out")
 	assert.Empty(t, pub.records)
+}
+
+// TestHandleThreadUpdated_ChannelRoom_PublishesThreadLane verifies an edit
+// reaches viewers, so a viewer never sits on stale content a follower has seen
+// corrected.
+func TestHandleThreadUpdated_ChannelRoom_PublishesThreadLane(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventUpdated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "r1", UserAccount: "alice", Content: "edited reply",
+			CreatedAt: msgTime, EditedAt: &msgTime, UpdatedAt: &msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	var lane *publishRecord
+	for i := range pub.records {
+		if pub.records[i].subject == "chat.room.r1.thread.parent-1.event" {
+			lane = &pub.records[i]
+		}
+	}
+	require.NotNil(t, lane, "thread lane must receive the edit")
+
+	var laneEvt model.EditRoomEvent
+	require.NoError(t, json.Unmarshal(lane.data, &laneEvt))
+	assert.Equal(t, model.RoomEventMessageEdited, laneEvt.Type)
+	assert.Equal(t, "reply-1", laneEvt.MessageID)
+	assert.Equal(t, "edited reply", laneEvt.NewContent, "encryption off: plaintext")
+}
+
+// TestHandleThreadUpdated_ThreadLaneEncrypted verifies the edit's new content is
+// encrypted on the lane and cleared from the plaintext field, while the
+// per-account copy keeps plaintext.
+func TestHandleThreadUpdated_ThreadLaneEncrypted(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(testRoomKey(t), nil).AnyTimes()
+
+	evt := model.MessageEvent{
+		Event: model.EventUpdated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "r1", UserAccount: "alice", Content: "secret edit",
+			CreatedAt: msgTime, EditedAt: &msgTime, UpdatedAt: &msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	var lane, perAccount *publishRecord
+	for i := range pub.records {
+		switch pub.records[i].subject {
+		case "chat.room.r1.thread.parent-1.event":
+			lane = &pub.records[i]
+		case subject.UserRoomEvent("bob"):
+			perAccount = &pub.records[i]
+		}
+	}
+	require.NotNil(t, lane)
+	require.NotNil(t, perAccount)
+
+	assert.NotContains(t, string(lane.data), "secret edit")
+
+	var laneEvt, acctEvt model.EditRoomEvent
+	require.NoError(t, json.Unmarshal(lane.data, &laneEvt))
+	require.NoError(t, json.Unmarshal(perAccount.data, &acctEvt))
+	assert.Empty(t, laneEvt.NewContent, "lane copy must clear plaintext newContent")
+	assert.NotEmpty(t, laneEvt.EncryptedNewContent)
+	assert.Equal(t, "secret edit", acctEvt.NewContent, "per-account copy stays plaintext")
+}
+
+// TestHandleThreadUpdated_DMRoom_NoThreadLane verifies DM edits skip the lane.
+func TestHandleThreadUpdated_DMRoom_NoThreadLane(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	room := &model.Room{ID: "dm1", Type: model.RoomTypeDM, SiteID: "site-a", Accounts: []string{"alice", "bob"}}
+	store.EXPECT().GetRoom(gomock.Any(), "dm1").Return(room, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventUpdated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "dm1", UserAccount: "alice", Content: "edited",
+			CreatedAt: msgTime, EditedAt: &msgTime, UpdatedAt: &msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	for _, r := range pub.records {
+		assert.NotContains(t, r.subject, ".thread.")
+	}
 }
 
 func TestHandleThreadUpdated_DMRoom_FansOutToAllMembers(t *testing.T) {
