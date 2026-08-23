@@ -2437,8 +2437,8 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
-	// bob and carol (followers) + alice (sender) included for multi-device parity
-	require.Len(t, pub.records, 3)
+	// bob and carol (followers) + alice (sender) + the thread lane copy.
+	require.Len(t, pub.records, 4)
 	subjects := map[string]bool{}
 	for _, r := range pub.records {
 		subjects[r.subject] = true
@@ -2451,6 +2451,7 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
 	assert.True(t, subjects[subject.UserRoomEvent("carol")])
+	assert.True(t, subjects["chat.room.room-1.thread.parent-1.event"])
 }
 
 func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testing.T) {
@@ -2485,9 +2486,15 @@ func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testin
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
-	// No other followers → sender still receives their own echo (multi-device parity).
-	require.Len(t, pub.records, 1)
-	assert.Equal(t, subject.UserRoomEvent("alice"), pub.records[0].subject)
+	// No other followers → sender still receives their own echo (multi-device
+	// parity), plus the thread lane copy.
+	require.Len(t, pub.records, 2)
+	subjects := map[string]bool{}
+	for _, r := range pub.records {
+		subjects[r.subject] = true
+	}
+	assert.True(t, subjects[subject.UserRoomEvent("alice")])
+	assert.True(t, subjects["chat.room.room-1.thread.parent-1.event"])
 }
 
 // Race regression guard: on the first reply thread_rooms may not exist yet, so
@@ -2535,9 +2542,10 @@ func TestHandleThreadCreated_ChannelRoom_ParentAuthorFannedOutBeforeThreadRoomEx
 	for _, r := range pub.records {
 		got[r.subject] = true
 	}
-	require.Len(t, pub.records, 2)
+	require.Len(t, pub.records, 3)
 	assert.True(t, got[subject.UserRoomEvent("alice")], "reply sender receives their own echo")
 	assert.True(t, got[subject.UserRoomEvent("carol")], "parent author receives the reply despite empty replyAccounts")
+	assert.True(t, got["chat.room.room-1.thread.parent-1.event"])
 }
 
 func TestHandleThreadCreated_DMRoom_FansOutToAllMembers(t *testing.T) {
@@ -3484,4 +3492,256 @@ func TestPublishThreadLaneEvent_LabelsAsThreadLane(t *testing.T) {
 
 	require.Len(t, pub.seen, 1)
 	assert.Equal(t, roomThreadLane, pub.seen[0])
+}
+
+// TestHandleThreadCreated_ChannelRoom_PublishesThreadLane verifies a viewer
+// subscribed to the per-thread subject receives the reply, alongside the
+// unchanged per-account fan-out to followers.
+func TestHandleThreadCreated_ChannelRoom_PublishesThreadLane(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    "site-a",
+		Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "a thread reply", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	var lane *publishRecord
+	for i := range pub.records {
+		if pub.records[i].subject == "chat.room.room-1.thread.parent-1.event" {
+			lane = &pub.records[i]
+		}
+	}
+	require.NotNil(t, lane, "thread lane must receive the reply")
+
+	var laneEvt model.RoomEvent
+	require.NoError(t, json.Unmarshal(lane.data, &laneEvt))
+	assert.Equal(t, model.RoomEventNewThreadMessage, laneEvt.Type)
+	assert.Equal(t, "room-1", laneEvt.RoomID)
+	require.NotNil(t, laneEvt.Message, "encryption off: content stays plaintext")
+	assert.Equal(t, "reply-1", laneEvt.Message.ID)
+}
+
+// TestHandleThreadCreated_ThreadLaneEncrypted verifies the lane copy is
+// encrypted while the per-account copy stays plaintext, and that the two
+// otherwise agree. The lane rides chat.room.>, which any authenticated user
+// may subscribe to, so plaintext there would be readable by non-members.
+func TestHandleThreadCreated_ThreadLaneEncrypted(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil).AnyTimes()
+
+	evt := model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "secret thread reply", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	var lane, perAccount *publishRecord
+	for i := range pub.records {
+		switch pub.records[i].subject {
+		case "chat.room.room-1.thread.parent-1.event":
+			lane = &pub.records[i]
+		case subject.UserRoomEvent("alice"):
+			perAccount = &pub.records[i]
+		}
+	}
+	require.NotNil(t, lane)
+	require.NotNil(t, perAccount)
+
+	assert.NotContains(t, string(lane.data), "secret thread reply",
+		"thread-lane payload must not carry plaintext content")
+
+	var laneEvt, acctEvt model.RoomEvent
+	require.NoError(t, json.Unmarshal(lane.data, &laneEvt))
+	require.NoError(t, json.Unmarshal(perAccount.data, &acctEvt))
+	assert.Nil(t, laneEvt.Message, "lane copy carries encryptedMessage, not message")
+	assert.NotEmpty(t, laneEvt.EncryptedMessage)
+	require.NotNil(t, acctEvt.Message, "per-account copy must stay plaintext")
+	assert.Equal(t, "secret thread reply", acctEvt.Message.Content)
+}
+
+// TestHandleThreadCreated_ThreadLaneKeepsMentions verifies mentions survive on
+// the lane copy: the frontend renders them with dedicated styling from this
+// resolved Participant list, so a viewer must see what a follower sees.
+func TestHandleThreadCreated_ThreadLaneKeepsMentions(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetHistorySharedSince(gomock.Any(), "room-1", []string{"bob"}).
+		Return(map[string]*time.Time{"bob": nil}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).
+		Return([]model.User{testUsers[0], testUsers[1]}, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "hey @bob", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	var lane *publishRecord
+	for i := range pub.records {
+		if pub.records[i].subject == "chat.room.room-1.thread.parent-1.event" {
+			lane = &pub.records[i]
+		}
+	}
+	require.NotNil(t, lane)
+
+	var laneEvt model.RoomEvent
+	require.NoError(t, json.Unmarshal(lane.data, &laneEvt))
+	assert.NotEmpty(t, laneEvt.Mentions, "mentions drive frontend styling and must reach viewers")
+}
+
+// TestHandleThreadCreated_DMRoom_NoThreadLane verifies DM rooms publish nothing
+// to the lane: DM thread replies already reach every member, so a lane publish
+// would be pure duplication.
+func TestHandleThreadCreated_DMRoom_NoThreadLane(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{testUsers[0]}, nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "dm-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "dm thread reply", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	for _, r := range pub.records {
+		assert.NotContains(t, r.subject, ".thread.", "DM rooms must not use the thread lane")
+	}
+}
+
+// TestHandleThreadCreated_ThreadLaneFailure_Swallowed verifies a lane publish
+// failure neither fails the handler nor blocks the per-account fan-out. Failing
+// here would NAK the canonical message and re-fan-out the per-account lane,
+// turning one viewer's cosmetic miss into duplicate delivery for everyone.
+func TestHandleThreadCreated_ThreadLaneFailure_Swallowed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{failOn: map[string]error{
+		"chat.room.room-1.thread.parent-1.event": errors.New("nats down"),
+	}}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "a thread reply", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data), "lane failure must not fail the handler")
+
+	subjects := map[string]bool{}
+	for _, r := range pub.records {
+		subjects[r.subject] = true
+	}
+	assert.True(t, subjects[subject.UserRoomEvent("alice")], "per-account fan-out must still happen")
+	assert.True(t, subjects[subject.UserRoomEvent("bob")])
+}
+
+// TestHandleThreadCreated_EmptyFanOut_StillPublishesThreadLane covers a
+// bot-authored reply: threadFanOutAccounts drops bots, so the per-account set
+// is empty, but a viewer with the pane open must still receive the reply.
+func TestHandleThreadCreated_EmptyFanOut_StillPublishesThreadLane(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	evt := model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "room-1", UserAccount: "helper.bot", Content: "bot reply",
+			CreatedAt: msgTime, ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	var found bool
+	for _, r := range pub.records {
+		if r.subject == "chat.room.room-1.thread.parent-1.event" {
+			found = true
+		}
+	}
+	assert.True(t, found, "an empty per-account fan-out must not suppress the thread lane")
 }

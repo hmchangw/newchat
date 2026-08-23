@@ -261,10 +261,11 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 			return fmt.Errorf("channel thread fan-out for parent %s: %w", parentMsgID, err)
 		}
 		if len(fanOut) == 0 {
+			// No per-account recipients (e.g. a bot-authored reply), but the
+			// thread lane below still serves viewers with the pane open.
 			slog.DebugContext(ctx, "no thread subscribers to notify for thread reply",
 				"parentMessageID", parentMsgID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
-			return nil
 		}
 	}
 
@@ -297,7 +298,14 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("marshal thread created event for parent %s: %w", parentMsgID, err)
 		}
-		return h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID)
+		if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
+			return fmt.Errorf("publish thread created event for parent %s: %w", parentMsgID, err)
+		}
+		// Thread lane: same event, encrypted, for viewers who do not follow the
+		// thread. Encrypt a copy AFTER the plaintext publish above —
+		// encryptRoomEvent nils Message in place.
+		h.publishThreadLaneCreated(ctx, &meta, clientMsg, parentMsgID, roomEvt)
+		return nil
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies fan out to all members. The thread-sub mention badge is
 		// owned by message-worker (markThreadMentions), so broadcast-worker doesn't
@@ -310,6 +318,32 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 			"room_id", meta.ID,
 			"request_id", natsutil.RequestIDFromContext(ctx))
 		return nil
+	}
+}
+
+// publishThreadLaneCreated sends the encrypted twin of a thread reply on the
+// per-thread lane. Best-effort: errors are logged, never returned, because the
+// per-account lane above is the delivery guarantee and failing the handler
+// would re-fan-out that lane on redelivery.
+func (h *Handler) publishThreadLaneCreated(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, parentMsgID string, plain model.RoomEvent) { //nolint:gocritic // hugeParam: plain is taken by value so encryptRoomEvent's in-place mutation doesn't touch the caller's roomEvt
+	laneEvt := plain
+	if err := h.encryptRoomEvent(ctx, meta.ID, clientMsg, &laneEvt); err != nil {
+		slog.ErrorContext(ctx, "encrypt thread lane event failed",
+			"error", err, "room_id", meta.ID, "parentMessageID", parentMsgID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+		return
+	}
+	lanePayload, err := sonic.Marshal(laneEvt)
+	if err != nil {
+		slog.ErrorContext(ctx, "marshal thread lane event failed",
+			"error", err, "room_id", meta.ID, "parentMessageID", parentMsgID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+		return
+	}
+	if err := h.publishThreadLaneEvent(ctx, meta.ID, parentMsgID, meta.CrossSite, meta.CrossSiteAt, lanePayload, "thread create"); err != nil {
+		slog.ErrorContext(ctx, "publish thread lane event failed",
+			"error", err, "room_id", meta.ID, "parentMessageID", parentMsgID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
 	}
 }
 
