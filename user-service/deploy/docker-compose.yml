@@ -28,7 +28,7 @@ services:
       # Pinned, not overridable: docker-local/traefik/dynamic.yml forwards to
       # user-service:8080 and its file provider does no env substitution.
       - HTTP_PORT=8080
-      - HTTP_MAX_CONCURRENCY=${HTTP_MAX_CONCURRENCY:-256}
+      - HTTP_MAX_CONCURRENCY=${HTTP_MAX_CONCURRENCY:-512}
       - HTTP_MAX_CONNS=${HTTP_MAX_CONNS:-2048}
       - HTTP_HANDLER_TIMEOUT=${HTTP_HANDLER_TIMEOUT:-30s}
       - HTTP_WRITE_TIMEOUT=${HTTP_WRITE_TIMEOUT:-35s}
