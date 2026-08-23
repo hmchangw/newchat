@@ -22,9 +22,9 @@ type SubscriptionRepository interface {
 	GetDMSubscription(ctx context.Context, account, target string) (*model.EnrichedDMSubscription, error)
 	GetSubscriptionByRoomID(ctx context.Context, account, roomID string) (*model.EnrichedSubscription, error)
 	CountActiveSubscriptions(ctx context.Context, account string) (int, error)
-	// GetActiveSubscriptions returns up to limit active subscriptions. Nothing
-	// downstream of the cap can drop a row, so the page is exactly limit. Its
-	// only consumer is the unread count; not a general pagination surface.
+	// GetActiveSubscriptions returns up to limit active subscriptions — exactly
+	// limit, since no stage after the cap can drop a row. Its only consumer is the
+	// unread count; not a general pagination surface.
 	GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error)
 	GetAppSubscription(ctx context.Context, account, botName string) (*model.Subscription, error)
 	SetAppSubscribed(ctx context.Context, account, botName string, subscribed, muted bool) error

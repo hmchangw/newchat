@@ -9,84 +9,59 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// The count no longer excludes soft-deleted (^Del-) rooms: the deployment
-// guarantees no Del- rename ever reaches the database, so the rooms $lookup that
-// existed only to read room.name is gone. This test pins that as a deliberate
-// choice — if a Del- filter is ever reintroduced it must come back as a
-// subscription-local predicate, never as a join.
-func TestActiveSubscriptionFilter_DoesNotFilterRoomNames(t *testing.T) {
-	f := activeSubscriptionFilter("alice")
+// activeFilter is the whole predicate behind both subscription counts, so the tests
+// assert the map in full: equality proves the active-set predicates are present AND
+// that nothing filters on a room name — no endpoint interprets one any more.
+func TestActiveFilter(t *testing.T) {
+	base := func() bson.M {
+		return bson.M{
+			"u.account": "alice",
+			"muted":     bson.M{"$ne": true},
+			"open":      bson.M{"$ne": false},
+			"$or": bson.A{
+				bson.M{"roomType": bson.M{"$in": bson.A{"dm", "channel"}}},
+				bson.M{"roomType": "botDM", "isSubscribed": true},
+			},
+		}
+	}
+	withOrigin := func() bson.M {
+		f := base()
+		f["origin"] = bson.M{"$ne": model.OriginTeams}
+		return f
+	}
 
-	assert.NotContains(t, f, "name")
-	assert.NotContains(t, f, "roomName")
-}
-
-func TestActiveSubscriptionFilter_KeepsTheActiveSetPredicates(t *testing.T) {
-	f := activeSubscriptionFilter("alice")
-
-	assert.Equal(t, "alice", f["u.account"])
-	assert.Equal(t, bson.M{"$ne": true}, f["muted"])
-	assert.Equal(t, bson.M{"$ne": false}, f["open"])
-	assert.Contains(t, f, "$or")
-}
-
-func TestCountActiveFilter_Composition(t *testing.T) {
 	tests := []struct {
-		name          string
-		repo          *SubscriptionRepo
-		account       string
-		wantOriginKey bool
+		name string
+		repo *SubscriptionRepo
+		want bson.M
 	}{
-		{"default hides Teams rooms", &SubscriptionRepo{}, "alice", true},
-		{"showTeamsRoom drops the origin predicate", &SubscriptionRepo{showTeamsRoom: true}, "alice", false},
+		{"default hides Teams rooms", &SubscriptionRepo{}, withOrigin()},
+		{"showTeamsRoom drops the origin predicate", &SubscriptionRepo{showTeamsRoom: true}, base()},
 		{
 			"allowlisted account drops the origin predicate",
-			&SubscriptionRepo{showTeamsAccounts: map[string]bool{"alice": true}}, "alice", false,
+			&SubscriptionRepo{showTeamsAccounts: map[string]bool{"alice": true}}, base(),
 		},
 		{
 			"non-allowlisted account keeps the origin predicate",
-			&SubscriptionRepo{showTeamsAccounts: map[string]bool{"bob": true}}, "alice", true,
+			&SubscriptionRepo{showTeamsAccounts: map[string]bool{"bob": true}}, withOrigin(),
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := tc.repo.countActiveFilter(tc.account)
-
-			assert.Equal(t, tc.account, f["u.account"])
-			assert.Equal(t, bson.M{"$ne": true}, f["muted"])
-			assert.Equal(t, bson.M{"$ne": false}, f["open"])
-			assert.Contains(t, f, "$or", "roomType/isSubscribed selection must survive the merge")
-
-			if tc.wantOriginKey {
-				assert.Equal(t, bson.M{"$ne": model.OriginTeams}, f["origin"])
-			} else {
-				assert.NotContains(t, f, "origin")
-			}
+			assert.Equal(t, tc.want, tc.repo.activeFilter("alice"))
 		})
 	}
 }
 
-// The filter must be a plain find filter — no aggregation stages — so the count
-// runs as CountDocuments rather than a pipeline with a rooms join.
-func TestCountActiveFilter_IsAPlainFindFilter(t *testing.T) {
-	f := (&SubscriptionRepo{}).countActiveFilter("alice")
-
-	for key := range f {
-		assert.NotContains(t, key, "$lookup")
-		assert.NotContains(t, key, "$match")
-		assert.NotContains(t, key, "$unwind")
-	}
-}
-
-// countActiveFilter must not alias the shared activeSubscriptionFilter map:
-// mutating one call's result would otherwise corrupt the next.
-func TestCountActiveFilter_DoesNotMutateSharedFilter(t *testing.T) {
+// activeFilter must not alias the shared activeSubscriptionFilter map: mutating one
+// call's result would otherwise corrupt the next.
+func TestActiveFilter_DoesNotMutateSharedFilter(t *testing.T) {
 	repo := &SubscriptionRepo{}
 
-	first := repo.countActiveFilter("alice")
+	first := repo.activeFilter("alice")
 	first["injected"] = true
 
-	second := repo.countActiveFilter("alice")
+	second := repo.activeFilter("alice")
 	assert.NotContains(t, second, "injected")
 	assert.NotContains(t, activeSubscriptionFilter("alice"), "injected")
 }

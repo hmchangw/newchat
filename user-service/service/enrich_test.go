@@ -239,15 +239,15 @@ func TestEnrichWithRoomInfo_NeverDropsARow(t *testing.T) {
 			{RoomID: "r3", Found: true, Name: "Ops"},
 		}, nil)
 
-	got := svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, false)
 
-	require.Len(t, got, 3, "enrichment drops nothing")
-	assert.Equal(t, []string{"loc", "del", "ok"}, []string{got[0].ID, got[1].ID, got[2].ID},
+	require.Len(t, subs, 3, "enrichment drops nothing")
+	assert.Equal(t, []string{"loc", "del", "ok"}, []string{subs[0].ID, subs[1].ID, subs[2].ID},
 		"order preserved")
-	require.NotNil(t, got[1].Room)
-	assert.Equal(t, "Del-Ops", got[1].Room.Name, "the name is passed through verbatim")
-	require.NotNil(t, got[2].Room)
-	assert.Equal(t, "Ops", got[2].Room.Name)
+	require.NotNil(t, subs[1].Room)
+	assert.Equal(t, "Del-Ops", subs[1].Room.Name, "the name is passed through verbatim")
+	require.NotNil(t, subs[2].Room)
+	assert.Equal(t, "Ops", subs[2].Room.Name)
 }
 
 // A not-found cross-site room is still kept WITHOUT a room object — that path is
@@ -258,10 +258,10 @@ func TestEnrichWithRoomInfo_NotFoundCrossSiteKeptRoomless(t *testing.T) {
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
 		Return([]model.RoomInfo{{RoomID: "r2", Found: false}}, nil)
 
-	got := svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, false)
 
-	require.Len(t, got, 1)
-	assert.Nil(t, got[0].Room, "not-found ⇒ no room object, but the sub is kept")
+	require.Len(t, subs, 1)
+	assert.Nil(t, subs[0].Room, "not-found ⇒ no room object, but the sub is kept")
 }
 
 // TestEnrichWithRoomInfo_CrossSiteRPCFailDegradesSiteKeepsOthers pins per-site
@@ -476,7 +476,8 @@ func TestEnrichWithRoomInfo_BotRequester_KeepsKeyMaterial(t *testing.T) {
 
 	for _, requester := range []string{"p_hook", "weather.bot", "alice"} {
 		t.Run(requester+" keeps the key", func(t *testing.T) {
-			got := svc.enrichWithRoomInfoAndLastMsg(ctx(requester, "site-a"), mkSubs(), false)
+			got := mkSubs()
+			svc.enrichWithRoomInfoAndLastMsg(ctx(requester, "site-a"), got, false)
 			require.Len(t, got, 1)
 			require.NotNil(t, got[0].Room)
 			require.NotNil(t, got[0].Room.PrivateKey, "key material is no longer stripped for bots")

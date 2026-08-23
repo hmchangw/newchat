@@ -25,7 +25,7 @@ var (
 func newTestSubscriptionRepo(t *testing.T) (*SubscriptionRepo, *mongo.Database) {
 	t.Helper()
 	db := testutil.MongoDB(t, "user-service")
-	r := NewSubscriptionRepo(db, "site-a")
+	r := NewSubscriptionRepo(db)
 	require.NoError(t, r.EnsureIndexes(context.Background()))
 	return r, db
 }

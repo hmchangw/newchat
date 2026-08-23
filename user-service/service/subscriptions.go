@@ -41,7 +41,7 @@ func (s *UserService) ListSubscriptions(c *natsrouter.Context, req models.Subscr
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 	withLastMsg := req.IncludeLastMessage == nil || *req.IncludeLastMessage
-	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, withLastMsg)
+	s.enrichWithRoomInfoAndLastMsg(c, res.Data, withLastMsg)
 	items := s.buildListItems(c, res.Data)
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: items,
@@ -167,15 +167,13 @@ func distinctListNames(subs []model.EnrichedSubscription) (bots, dmCounterparts 
 // withLastMsg, a single grouping also drives one rooms.get per site (all sites incl.
 // local) to attach each room's last message.
 //
-// Enrichment is purely additive: every input row is returned, in order. A room the
-// RPC cannot resolve (not found, or a degraded site) leaves its sub without a room
-// object rather than removing it. Callers MAY use the returned slice or the input —
-// they are the same slice.
+// Enrichment is additive and in place: no row is ever removed. A room the RPC cannot
+// resolve (not found, or a degraded site) leaves its sub without a room object.
 //
 // alert/hasMention are stored subscription state and are never touched here.
-func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs []model.EnrichedSubscription, withLastMsg bool) []model.EnrichedSubscription {
+func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs []model.EnrichedSubscription, withLastMsg bool) {
 	if len(subs) == 0 {
-		return subs
+		return
 	}
 
 	// Group by site once — both fan-outs read this grouping. Room info comes from the
@@ -196,7 +194,6 @@ func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs [
 	if withLastMsg {
 		s.enrichLastMessage(c, subs, idxBySite, roomIDsBySite)
 	}
-	return subs
 }
 
 // enrichLocal builds sub.Room for LOCAL subs entirely from the $lookup baseline —
@@ -204,12 +201,12 @@ func (s *UserService) enrichWithRoomInfoAndLastMsg(c *natsrouter.Context, subs [
 // so it needs no separate key store read.
 func (s *UserService) enrichLocal(subs []model.EnrichedSubscription, localIdx []int) {
 	for _, j := range localIdx {
-		subs[j].Room = buildLocalRoom(&subs[j])
+		room := buildLocalRoom(&subs[j])
+		subs[j].Room = room
 		// hasUnread / hasGroupMention are computed at read time: room activity (resp.
-		// an @all mention) newer than lastSeenAt. No room object (deleted/absent) ⇒
-		// nothing to be unread/mentioned about.
-		subs[j].HasUnread = subs[j].Room != nil && unread(subs[j].LastSeenAt, timeutil.TimeToMillis(subs[j].Room.LastMsgAt))
-		subs[j].HasGroupMention = subs[j].Room != nil && unread(subs[j].LastSeenAt, timeutil.TimeToMillis(subs[j].Room.LastMentionAllAt))
+		// an @all mention) newer than lastSeenAt.
+		subs[j].HasUnread = unread(subs[j].LastSeenAt, timeutil.TimeToMillis(room.LastMsgAt))
+		subs[j].HasGroupMention = unread(subs[j].LastSeenAt, timeutil.TimeToMillis(room.LastMentionAllAt))
 	}
 }
 
@@ -436,7 +433,7 @@ func (s *UserService) GetChannels(c *natsrouter.Context, req models.GetChannelsR
 	if err != nil {
 		return nil, fmt.Errorf("get channels: %w", err)
 	}
-	res.Data = s.enrichWithRoomInfoAndLastMsg(c, res.Data, false)
+	s.enrichWithRoomInfoAndLastMsg(c, res.Data, false)
 	items := s.buildListItems(c, res.Data)
 	return &models.PagedSubscriptionListResponse{
 		Subscriptions: items,
@@ -460,11 +457,10 @@ func (s *UserService) GetDM(c *natsrouter.Context, req models.GetDMRequest) (*mo
 	if dm == nil {
 		return nil, errcode.NotFound("dm not found", errcode.WithReason(errcode.UserSubscriptionNotFound))
 	}
-	// Enrichment never drops a row, so the sub always survives; a room the remote
-	// site cannot resolve simply arrives without a room object. The wire
-	// DMSubscription points at the boxed stored sub plus HRInfo.
+	// The wire DMSubscription points at the boxed stored sub plus HRInfo; a room the
+	// remote site cannot resolve simply arrives without a room object.
 	one := []model.EnrichedSubscription{dm.EnrichedSubscription}
-	one = s.enrichWithRoomInfoAndLastMsg(c, one, false)
+	s.enrichWithRoomInfoAndLastMsg(c, one, false)
 	return &models.DMResponse{Subscription: model.DMSubscription{
 		Subscription: &one[0].Subscription,
 		HRInfo:       dm.HRInfo,
@@ -487,7 +483,7 @@ func (s *UserService) GetByRoomID(c *natsrouter.Context, req models.GetByRoomIDR
 		return &models.SubscriptionListResponse{Subscriptions: []model.SubscriptionItem{}, Total: 0}, nil
 	}
 	one := []model.EnrichedSubscription{*sub}
-	one = s.enrichWithRoomInfoAndLastMsg(c, one, false)
+	s.enrichWithRoomInfoAndLastMsg(c, one, false)
 	items := s.buildListItems(c, one)
 	return &models.SubscriptionListResponse{Subscriptions: items, Total: len(items)}, nil
 }

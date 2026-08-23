@@ -722,9 +722,10 @@ func TestCountAndGetActiveSubscriptions_Integration(t *testing.T) {
 		assert.Equal(t, 7, n)
 	})
 
-	t.Run("the count issues no rooms join", func(t *testing.T) {
-		// A subscription whose room doc does not exist at all still counts: with the
-		// $lookup gone there is nothing left that could drop a row for its room.
+	t.Run("a subscription whose room doc does not exist still counts", func(t *testing.T) {
+		// Nothing left in the count can drop a row on account of its room — the
+		// $lookup that used to is gone. Seeded on its own account so the assertion
+		// is exact rather than a delta on the shared fixture.
 		seed(t, db, "subscriptions",
 			bson.M{"_id": "no-room-ch", "u": bson.M{"_id": "u-carol", "account": "carol"}, "name": "Nowhere",
 				"roomId": "r-nonexistent", "roomType": "channel", "siteId": "site-a"})
