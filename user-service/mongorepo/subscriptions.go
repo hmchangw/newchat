@@ -133,6 +133,37 @@ func roomsEnrichStages(dropDeleted bool) bson.A {
 	)
 }
 
+// unreadEnrichStages is the lean rooms-join used only by the unread count
+// (GetActiveSubscriptions). Unlike roomsEnrichStages it carries nothing but what
+// unreadRooms reads — room.lastMsgAt, surfaced to the top level — plus the ^Del-
+// soft-delete drop (via room.name). It deliberately does NOT project the room
+// metadata, counts, or the E2E key blob (encKey.priv): the unread path reads none
+// of them, and moving that per active subscription (up to MAX_SUBSCRIPTION_LIMIT
+// rows) wastes transport/decode and needlessly pulls key material into the process.
+// Row selection is identical to roomsEnrichStages(true): a missing/cross-site room
+// has no room.name and is kept either way.
+func unreadEnrichStages() bson.A {
+	return bson.A{
+		bson.M{"$lookup": bson.M{
+			"from": roomsCollection,
+			"let":  bson.M{"rid": "$roomId"},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$_id", "$$rid"}}}},
+				// name: for the ^Del- drop below; lastMsgAt: the only field surfaced.
+				bson.M{"$project": bson.M{"name": 1, "lastMsgAt": 1}},
+			},
+			"as": "room",
+		}},
+		bson.M{"$unwind": bson.M{"path": "$room", "preserveNullAndEmptyArrays": true}},
+		// A local Del- room.name matches the regex → inverted by $not → dropped.
+		bson.M{"$match": bson.M{"room.name": bson.M{"$not": bson.M{"$regex": deletedRoomNameRegex}}}},
+		// Surface lastMsgAt for unreadRooms' local unread check (null for
+		// missing/cross-site rooms, whose read state the caller resolves via RPC).
+		bson.M{"$addFields": bson.M{"lastMsgAt": "$room.lastMsgAt"}},
+		bson.M{"$project": bson.M{"room": 0}},
+	}
+}
+
 // matchedRoomField is the scratch array the member-match pipeline joins the local
 // room into; stripped by subscriptionProjection before the result decodes.
 const matchedRoomField = "__matchedRoom"
@@ -475,7 +506,9 @@ func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account s
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
-	pipeline = append(pipeline, roomsEnrichStages(true)...)
+	// Lean enrichment: only room.lastMsgAt is read downstream (unreadRooms), so
+	// this avoids moving room metadata + the E2E key blob for every active row.
+	pipeline = append(pipeline, unreadEnrichStages()...)
 	return r.enrichedSecondary.Aggregate(ctx, pipeline)
 }
 
