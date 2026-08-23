@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hmchangw/chat/pkg/cachekeys"
 )
 
 // DefaultMaxCount caps every count BumpBatch/Seed return (the UI renders the
@@ -75,14 +77,14 @@ func New(rdb redis.UniversalClient, ttl time.Duration, maxCount int) *Cache {
 // {account} hash tag keeps every multi-key/scripted op for one account on a
 // single cluster slot.
 func Key(account string) string {
-	return "badge:{" + account + "}"
+	return cachekeys.BadgeSet(account)
 }
 
 // MarkerKey returns the freshness-marker key: marker present ⇒ the set is
 // accurate (missing/empty set = zero unread). Same {account} hash tag as Key
 // so scripts and multi-key DELs stay on one slot.
 func MarkerKey(account string) string {
-	return "badge:fresh:{" + account + "}"
+	return cachekeys.BadgeFresh(account)
 }
 
 // scriptKeys is the KEYS array every badge script takes: the set and its

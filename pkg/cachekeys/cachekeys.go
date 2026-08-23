@@ -124,6 +124,23 @@ var (
 		Name: "searchrestrictedrooms", Prefix: "searchservice:restrictedrooms:", Variable: true,
 		Sample: "searchservice:restrictedrooms:alice",
 	}
+
+	// badgeSet and badgeFresh are reported separately rather than under one
+	// label: the marker is a fixed-size sentinel per account while the set
+	// grows with unread rooms, so folding them together would hide which of
+	// the two actually drives the badge cache's memory.
+	//
+	// The marker nests under the set's own "badge:" prefix, but the patterns
+	// still cannot overlap — the set's prefix ends in "{", which the marker's
+	// literal "fresh:" segment never matches; the collision test pins that.
+	badgeSet = Keyspace{
+		Name: "badge", Prefix: "badge:{", Suffix: "}", Variable: true,
+		Sample: "badge:{alice}",
+	}
+	badgeFresh = Keyspace{
+		Name: "badge.fresh", Prefix: "badge:fresh:{", Suffix: "}", Variable: true,
+		Sample: "badge:fresh:{alice}",
+	}
 )
 
 // registry is the classification order. Fixed keyspaces precede variable ones
@@ -142,6 +159,8 @@ var registry = []Keyspace{
 	botRateLimitCaller,
 	botIdempotency,
 	searchRestrictedRooms,
+	badgeFresh,
+	badgeSet,
 }
 
 // Keyspaces returns every registered keyspace. The returned slice is a copy,
@@ -201,3 +220,13 @@ func BotIdempotency(opID string) string { return botIdempotency.build(opID) }
 
 // SearchRestrictedRooms is the key for an account's cached restricted-rooms map.
 func SearchRestrictedRooms(account string) string { return searchRestrictedRooms.build(account) }
+
+// BadgeSet is the key for an account's unread-room set (pkg/badgecache). The
+// {account} hash tag keeps every multi-key and scripted op for one account on
+// a single cluster slot, alongside BadgeFresh.
+func BadgeSet(account string) string { return badgeSet.build(account) }
+
+// BadgeFresh is the key for an account's badge freshness marker: present means
+// the BadgeSet contents are accurate. Same {account} hash tag as BadgeSet so
+// the scripts addressing both stay on one slot.
+func BadgeFresh(account string) string { return badgeFresh.build(account) }

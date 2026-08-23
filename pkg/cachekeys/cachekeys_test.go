@@ -29,6 +29,8 @@ func TestBuilders_ExactStrings(t *testing.T) {
 		{"bot rate limit", BotRateLimitCaller("u1"), "botrl:caller:u1"},
 		{"bot idempotency", BotIdempotency("op1"), "idem:op1"},
 		{"search restricted rooms", SearchRestrictedRooms("alice"), "searchservice:restrictedrooms:alice"},
+		{"badge set", BadgeSet("alice"), "badge:{alice}"},
+		{"badge fresh marker", BadgeFresh("alice"), "badge:fresh:{alice}"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,6 +66,9 @@ func TestClassify(t *testing.T) {
 		{"bot rate limit", BotRateLimitCaller("u1"), "botratelimit"},
 		{"bot idempotency", BotIdempotency("op1"), "botidempotency"},
 		{"search restricted", SearchRestrictedRooms("alice"), "searchrestrictedrooms"},
+		{"badge set", BadgeSet("alice"), "badge"},
+		{"badge fresh marker", BadgeFresh("alice"), "badge.fresh"},
+		{"badge-like but unknown suffix", "badge:{alice}:nope", Unclassified},
 		{"unknown prefix", "somethingnew:abc", Unclassified},
 		{"empty key", "", Unclassified},
 		{"room-like but unknown suffix", "room:r1:members", Unclassified},
@@ -84,6 +89,15 @@ func TestClassify_HashTaggedAndUntaggedRoomKeysDoNotCollide(t *testing.T) {
 	assert.Equal(t, "roommeta", Classify("room:{r1}:meta"))
 	assert.Equal(t, "roomsubs", Classify("room:v3:r1:subs"))
 	assert.NotEqual(t, Classify(RoomMeta("r1")), Classify(RoomSubs("r1")))
+}
+
+// TestClassify_BadgeSetAndMarkerDoNotCollide guards the second real ambiguity
+// in the keyspace: the badge freshness marker nests under the badge set's own
+// "badge:" prefix, so a marker key must not be attributed to the set.
+func TestClassify_BadgeSetAndMarkerDoNotCollide(t *testing.T) {
+	assert.Equal(t, "badge", Classify("badge:{alice}"))
+	assert.Equal(t, "badge.fresh", Classify("badge:fresh:{alice}"))
+	assert.NotEqual(t, Classify(BadgeSet("alice")), Classify(BadgeFresh("alice")))
 }
 
 // TestKeyspaces_SampleMatchesExactlyOne is the invariant that keeps Classify
