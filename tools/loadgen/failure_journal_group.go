@@ -237,7 +237,11 @@ func (g *failureJournalGroupCommit) run() {
 				dirty = true
 				batchSize++
 				armTimer()
-				if request.event.Type == failureLedgerEventStarted {
+				// Started records gate publication, and invalidations gate whether
+				// replay may trust those records. Neither is accepted until the
+				// batch has crossed the durability barrier.
+				if request.event.Type == failureLedgerEventStarted ||
+					request.event.Type == failureLedgerEventInvalidated {
 					barriers = append(barriers, request.response)
 				} else {
 					request.response <- nil

@@ -81,3 +81,16 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 		})
 	}
 }
+
+func TestConfig_ThreadViewSubjectEnabled(t *testing.T) {
+	t.Setenv("MODE", "user")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.True(t, cfg.ThreadViewSubjectEnabled, "the view lane ships on; the env var is a kill switch")
+
+	t.Setenv("THREAD_VIEW_SUBJECT_ENABLED", "false")
+	cfg, err = env.ParseAs[config]()
+	require.NoError(t, err)
+	require.False(t, cfg.ThreadViewSubjectEnabled)
+}

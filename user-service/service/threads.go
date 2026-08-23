@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -11,11 +12,15 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/pagefit"
 )
 
 const (
 	defaultThreadListLimit = 20
 	maxThreadListLimit     = 100
+	// threadListEnvelope reserves bytes for hasNext/nextCursor/unavailableSites
+	// plus JSON punctuation.
+	threadListEnvelope = 256
 )
 
 // threadCursor is the composite, value-based pagination position on the global
@@ -110,7 +115,29 @@ func (s *UserService) ListUserThreads(c *natsrouter.Context, req model.ThreadLis
 	// botDM rows swap their bot account for the app's display name.
 	s.enrichThreadPage(c, merged)
 
-	resp := &model.ThreadListResponse{Items: merged, HasNext: hasNext, UnavailableSites: unavailable}
+	// Trim after enrichment — it adds bytes, so a page measured before it can
+	// still overflow. The cursor below then resumes at the last kept row.
+	kept, oversize, err := pagefit.Fit(merged, s.pageBudget, threadListEnvelope)
+	if err != nil {
+		return nil, fmt.Errorf("fit thread list page: %w", err)
+	}
+	// Dropped rows only: a blanked row is truncated, never sizeLimited, since
+	// it is still oversize at half the limit. That holds here because a lone
+	// oversize row leaves len(kept) == len(merged) — do not weaken the test to
+	// something the blanking path can also satisfy.
+	sizeLimited := len(kept) < len(merged)
+	hasNext = hasNext || sizeLimited
+	merged = kept
+	// A lone row too large to send is shrunk rather than passed through: the
+	// router would refuse the reply, and halving limit cannot help when one row
+	// is the problem.
+	if oversize {
+		blankOversizeThread(&merged[0])
+	}
+
+	resp := &model.ThreadListResponse{
+		Items: merged, HasNext: hasNext, UnavailableSites: unavailable, SizeLimited: sizeLimited,
+	}
 	if hasNext && len(merged) > 0 {
 		last := merged[len(merged)-1]
 		resp.NextCursor = encodeThreadCursor(threadCursor{LastMsgAt: last.LastMsgAt, ThreadRoomID: last.ThreadRoomID})
@@ -304,4 +331,13 @@ func distinctDMAndBotNames(items []model.ThreadListItem) (dmAccounts, botAccount
 		}
 	}
 	return dmAccounts, botAccounts
+}
+
+// blankOversizeThread drops the heavy forwarded body from a thread row that
+// alone exceeds the reply budget, keeping the identifiers and the sort key the
+// cursor is derived from.
+func blankOversizeThread(item *model.ThreadListItem) {
+	item.ParentMessage = nil
+	item.LastMessage = nil
+	item.Truncated = true
 }

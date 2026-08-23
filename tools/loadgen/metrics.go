@@ -81,6 +81,8 @@ type Metrics struct {
 	FailureInvalidations         *prometheus.CounterVec
 	FailureJournalBytes          prometheus.Gauge
 	FailureUntracked             *prometheus.CounterVec
+	FailureReconcileClaims       *prometheus.CounterVec
+	FailureReconcileLag          prometheus.Histogram
 	FailureDropped               prometheus.Counter
 	FailureNotSent               *prometheus.CounterVec
 	FailureWALAppendDuration     prometheus.Histogram
@@ -420,6 +422,29 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"reason"},
 	)
+	m.FailureReconcileClaims = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_failure_reconcile_claims_total",
+			Help: "Reconcile claims by what the claim achieved; retried is the poll cost the capacity rule cannot model, idle is the lane's remaining slack.",
+		},
+		[]string{"outcome"},
+	)
+	// Published at zero before anything happens. The documented saturation rule
+	// reads rate(...{outcome="idle"}[5m]) == 0, and a counter child exists only
+	// once something increments it — so a lane saturated from the first second
+	// would emit no idle series at all, and the rule that detects saturation
+	// cannot be evaluated against a series that is absent. Without this the
+	// board shows the same nothing for "saturated" and "not instrumented".
+	for _, outcome := range soakReconcileClaimOutcomes() {
+		m.FailureReconcileClaims.WithLabelValues(outcome)
+	}
+	m.FailureReconcileLag = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_failure_reconcile_lag_seconds",
+			Help:    "Seconds past its scheduled probe an operation was when the reconciler claimed it; the capacity floor cannot model fault-time retries, so lag is what shows the lane falling behind, and lag near SOAK_RECONCILE_DEADLINE means operations expire unverified for want of a probe.",
+			Buckets: soakReconcileLagBuckets(),
+		},
+	)
 	m.FailureDropped = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_dropped_total",
@@ -557,7 +582,8 @@ func NewMetrics() *Metrics {
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecipientExpectations,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
-		m.FailureUntracked, m.FailureDropped, m.FailureNotSent,
+		m.FailureUntracked, m.FailureReconcileClaims, m.FailureReconcileLag,
+		m.FailureDropped, m.FailureNotSent,
 		m.FailureWALAppendDuration, m.FailureWALAppends,
 		m.FailureWALFlushDuration, m.FailureWALFlushBatchSize,
 		m.FailureEvidenceFlushDuration, m.FailureEvidenceRecords,

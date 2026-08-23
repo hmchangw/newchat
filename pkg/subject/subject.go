@@ -446,6 +446,23 @@ func RoomEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mo
 	return out
 }
 
+// RoomThreadEvent returns the subject a client subscribes to while a thread
+// panel is open. Same namespaces as RoomEvent.
+func RoomThreadEvent(roomID, parentMessageID string, global bool) string {
+	return roomBase(roomID, global) + ".thread." + parentMessageID + ".event"
+}
+
+// RoomThreadEventTargets returns the thread-scoped subject(s) to publish to.
+// Shares roomRouteGlobals with RoomEventTargets, so locality routing matches.
+func RoomThreadEventTargets(roomID, parentMessageID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
+	globals := roomRouteGlobals(crossSite, crossSiteAt, mode, now)
+	out := make([]string, len(globals))
+	for i, g := range globals {
+		out[i] = RoomThreadEvent(roomID, parentMessageID, g)
+	}
+	return out
+}
+
 // RoomMemberEventTargets returns the .event.member subject(s) to publish a member
 // add/remove event to. Routes identically to RoomEventTargets so a same-site room's
 // roster events land on the local namespace and a flipped room dual-publishes during

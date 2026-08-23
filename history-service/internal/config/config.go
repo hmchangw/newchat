@@ -75,6 +75,14 @@ type Config struct {
 	// is cancelled and its pooled connection returned instead of held. 0
 	// disables the per-request deadline.
 	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
+	// MaxResponseBytes caps a paginated reply so it is trimmed to fit rather
+	// than refused by the broker. 0 derives the cap from the broker's
+	// advertised max_payload.
+	MaxResponseBytes int64 `env:"MAX_RESPONSE_BYTES" envDefault:"0"`
+	// PageTrimming trims a paginated reply to the budget. Off returns the page
+	// whole and lets the broker refuse it, so the client falls back to its
+	// response_too_large retry — an escape hatch, not a tuning knob.
+	PageTrimming bool `env:"PAGE_TRIMMING_ENABLED" envDefault:"true"`
 
 	// Subscription access-check cache. Only positive subscriptions are cached,
 	// so the TTL bounds how long revoked access can stay readable. Set size or

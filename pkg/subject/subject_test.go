@@ -1312,3 +1312,43 @@ func TestIsClientFacing(t *testing.T) {
 		})
 	}
 }
+
+func TestRoomThreadEvent(t *testing.T) {
+	assert.Equal(t, "chat.room.r1.thread.p1.event", subject.RoomThreadEvent("r1", "p1", true))
+	assert.Equal(t, "chat.local.room.r1.thread.p1.event", subject.RoomThreadEvent("r1", "p1", false))
+}
+
+// The 4-token room-event wildcard must not catch the thread subject.
+func TestRoomThreadEvent_DoesNotMatchRoomEventWildcard(t *testing.T) {
+	assert.Len(t, strings.Split(subject.RoomThreadEvent("r1", "p1", true), "."), 6)
+	assert.Len(t, strings.Split(subject.RoomEvent("r1", true), "."), 4)
+}
+
+func TestRoomThreadEventTargets(t *testing.T) {
+	g := "chat.room.r1.thread.p1.event"
+	l := "chat.local.room.r1.thread.p1.event"
+	trueP, falseP := true, false
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	assert.Equal(t, []string{g}, subject.RoomThreadEventTargets("r1", "p1", &trueP, nil, subject.RouteGlobal, now))
+	assert.Equal(t, []string{g}, subject.RoomThreadEventTargets("r1", "p1", &trueP, nil, subject.RouteLocal, now))
+	assert.Equal(t, []string{g}, subject.RoomThreadEventTargets("r1", "p1", &falseP, nil, subject.RouteGlobal, now))
+	assert.Equal(t, []string{l, g}, subject.RoomThreadEventTargets("r1", "p1", &falseP, nil, subject.RouteDual, now))
+	assert.Equal(t, []string{l}, subject.RoomThreadEventTargets("r1", "p1", &falseP, nil, subject.RouteLocal, now))
+	// nil locality is the global fail-safe in every mode.
+	assert.Equal(t, []string{g}, subject.RoomThreadEventTargets("r1", "p1", nil, nil, subject.RouteLocal, now))
+}
+
+// A flipped room dual-publishes, so a viewer on the local lane keeps receiving.
+func TestRoomThreadEventTargets_TransitionGrace(t *testing.T) {
+	g := "chat.room.r1.thread.p1.event"
+	l := "chat.local.room.r1.thread.p1.event"
+	trueP := true
+	flip := time.Unix(1_700_000_000, 0).UTC()
+
+	within := flip.Add(subject.DefaultRoomLocalityGrace - time.Minute)
+	assert.Equal(t, []string{l, g}, subject.RoomThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteLocal, within))
+
+	after := flip.Add(subject.DefaultRoomLocalityGrace + time.Minute)
+	assert.Equal(t, []string{g}, subject.RoomThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteLocal, after))
+}

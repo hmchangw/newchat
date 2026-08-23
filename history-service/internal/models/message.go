@@ -31,6 +31,9 @@ type LoadHistoryResponse struct {
 	Messages          []Message `json:"messages"`
 	HasNext           bool      `json:"hasNext"`
 	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
+	// SizeLimited: rows were dropped to fit the payload budget — never set for
+	// a merely blanked row. A short page alone does not imply it.
+	SizeLimited bool `json:"sizeLimited,omitempty"`
 }
 
 type LoadNextMessagesRequest struct {
@@ -63,6 +66,9 @@ type LoadSurroundingMessagesResponse struct {
 	MoreBefore        bool      `json:"moreBefore"`
 	MoreAfter         bool      `json:"moreAfter"`
 	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"` // UTC millis
+	// SizeLimited: rows were dropped to fit the payload budget — never set for
+	// a merely blanked row. A short window alone does not imply it.
+	SizeLimited bool `json:"sizeLimited,omitempty"`
 }
 
 type GetMessageByIDRequest struct {

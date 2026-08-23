@@ -60,3 +60,13 @@ func decryptClientMessage(t *testing.T, data []byte, key *roomkeystore.Versioned
 	require.NoError(t, json.Unmarshal([]byte(plaintext), &msg))
 	return evt, &msg
 }
+
+func decryptEditedContent(t *testing.T, raw json.RawMessage, key *roomkeystore.VersionedKeyPair) string {
+	t.Helper()
+	var env roomcrypto.EncryptedMessage
+	require.NoError(t, json.Unmarshal(raw, &env))
+	require.Equal(t, key.Version, env.Version)
+	plaintext, err := decryptForTest(&env, key.KeyPair.PrivateKey)
+	require.NoError(t, err)
+	return plaintext
+}

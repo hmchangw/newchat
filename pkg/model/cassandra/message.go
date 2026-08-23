@@ -105,4 +105,7 @@ type Message struct {
 	ThreadRoomID string       `json:"threadRoomId,omitempty"          cql:"thread_room_id"`
 	PinnedAt     *time.Time   `json:"pinnedAt,omitempty"              cql:"pinned_at"`
 	PinnedBy     *Participant `json:"pinnedBy,omitempty"              cql:"pinned_by"`
+	// Truncated marks a row the server blanked because it alone exceeded the
+	// reply budget. Computed per read, never a column — hence cql:"-".
+	Truncated bool `json:"truncated,omitempty"             cql:"-"`
 }

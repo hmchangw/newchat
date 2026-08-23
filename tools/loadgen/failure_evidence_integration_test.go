@@ -126,10 +126,10 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 		func() time.Time { return now },
 		withSoakFailureRecipientFinalizer(recoveredRecipient),
 	)
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
-	ran, err = reconciler.Try(context.Background())
+	ran, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultUnverified])

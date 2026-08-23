@@ -1,6 +1,20 @@
 package main
 
-import "github.com/hmchangw/chat/pkg/model"
+import (
+	"strings"
+
+	"github.com/hmchangw/chat/pkg/model"
+)
+
+// deletedNamePrefix is the source app's soft-delete marker: "deleting" a room renames it (and the
+// denormalized name on every subscription to it) to "Del-"+name — there is no delete flag.
+const deletedNamePrefix = "Del-"
+
+// isSoftDeletedRecord reports whether a source room/subscription doc carries the marker on either
+// name field. Type-agnostic on purpose: a Del- named DM peer costs that DM, keeping the invariant total.
+func isSoftDeletedRecord(name, fname string) bool {
+	return strings.HasPrefix(name, deletedNamePrefix) || strings.HasPrefix(fname, deletedNamePrefix)
+}
 
 // roomClass is the result of classifying a source room.
 type roomClass struct {

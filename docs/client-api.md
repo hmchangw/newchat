@@ -67,6 +67,8 @@ paths.
    - [3.6 translation-service](#36-translation-service)
      - [Translate Text](#translate-text)
 4. [Message Send](#4-message-send)
+   - [4.1 Thread Metadata Event](#41-thread-metadata-event)
+   - [4.2 Thread View Subject](#42-thread-view-subject)
 5. [Room Encryption](#5-room-encryption)
 6. [Error envelope reference](#6-error-envelope-reference)
 7. [Media Service](#7-media-service)
@@ -2891,6 +2893,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `threadRoomId` | string | Optional. The thread room ID when this is a thread message. |
 | `pinnedAt` | string | Optional. RFC 3339. With the `messages_by_room` `pinned_at` mirror, room-timeline history loads now return this on pinned rows too (previously only `pin.list` and point lookups carried it). |
 | `pinnedBy` | [MessageParticipant](#messageparticipant) | Optional. |
+| `truncated` | boolean | Optional. `true` when the server blanked this row to make the page fit — either because the row alone exceeded the transport's `max_payload`, or because it shares a `createdAt` millisecond with such a row and the whole group had to be returned together. `msg`, `mentions`, `attachments`, `card`, `cardAction`, `quotedParentMessage`, `reactions`, `sysMsgData`, `encPayload` and `encMeta` are cleared; identifiers, `sender`, `createdAt` and `type` are retained so a placeholder can be rendered. Absent on every ordinary row. |
 
 ##### System-message `sysMsgData` payloads
 
@@ -3044,6 +3047,7 @@ Live reaction events (`MessageReactedPayload`) carry a single-actor delta (`{sho
 | `messages` | array<Message> | Most-recent first. See [Message schema](#message-schema). |
 | `hasNext` | boolean | `true` if older messages may exist beyond this page — fetch the next page with `before` = the oldest returned message's `createdAt`. `false` once the caller's history boundary (room start, history floor, or access window) is reached. Conservative: occasionally `true` when nothing older remains; the following fetch then returns an empty page with `hasNext=false`. An empty page always has `hasNext=false`. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
+| `sizeLimited` | boolean | Optional. `true` when rows were dropped to keep the reply inside the transport's `max_payload`. A short page alone does not mean this — the history walk returns one too — so branch on this flag, never on `len(messages) < limit`. Absent when nothing was dropped, including when a row was merely blanked (`truncated`). See **A page may be shorter than `limit`** for how to pick the next `limit`. |
 
 ```json
 {
@@ -3197,6 +3201,7 @@ last-read position". The pivot is **exactly one of** `messageId` or `timestamp`.
 | `moreBefore` | boolean | `true` if more messages exist before the window. |
 | `moreAfter` | boolean | `true` if more messages exist after the window. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The room's **strict read floor** — `MIN(lastSeenAt)` across all subscribers, present **only when every member has read** the room. Omitted (the key is absent, never `null`) when any member has not read yet (so botDM rooms, where the bot never reads, never set it), when the most recent read is already past `room.lastMsgAt` (recompute is skipped), or when the value cannot be retrieved (best-effort; messages still load). See the Message Read RPC for how this floor is recomputed. |
+| `sizeLimited` | boolean | Optional. `true` when the window was narrowed to keep the reply inside the transport's `max_payload`. Branch on this, never on the window being shorter than `limit`. Absent when nothing was dropped, including when a row was merely blanked (`truncated`). See **A page may be shorter than `limit`** for how to pick the next `limit`. |
 
 ```json
 {
@@ -3487,7 +3492,7 @@ See [Error envelope](#6-error-envelope-reference). Errors:
 A `DeleteRoomEvent` is fanned out by `broadcast-worker` (not published when the request hits an already-deleted message or loses a concurrent-delete CAS). The subject and recipients depend on message type:
 
 - **Top-level channel message — `chat.room.{roomID}.event`** — one publish to the room stream; all room subscribers receive it.
-- **Thread reply (TShow=false) in a channel** — `chat.user.{recipient}.event.room` — published once per thread subscriber (followers + @-mentioned accounts). Non-subscribers do not receive this event.
+- **Thread reply (TShow=false) in a channel** — `chat.user.{recipient}.event.room` — published once per thread subscriber (followers + @-mentioned accounts). Non-subscribers do not receive this event. Also published on `chat.room.{roomID}.thread.{parentMessageID}.event` for clients with the thread panel open — see [§4.2 Thread View Subject](#42-thread-view-subject).
 - **Thread reply (TShow=true) in a channel** — `chat.room.{roomID}.event` — visible in the main channel, so the full room stream receives it.
 - **DM/botDM message — `chat.user.{recipient}.event.room`** — published once per non-bot member.
 
@@ -5761,6 +5766,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `nextCursor` | string | Optional. Opaque cursor for the next page; absent on the last page. |
 | `hasNext` | boolean | `true` if more threads exist beyond this page. |
 | `unavailableSites` | string[] | Optional. Sites that failed to respond for this page; their threads may appear on a later page once they recover. |
+| `sizeLimited` | boolean | Optional. `true` when rows were dropped to keep the reply inside the transport's `max_payload`. A short page alone does not mean this — a per-site limit or an unavailable peer also produces one — so branch on this flag, never on `len(items) < limit`. Absent when nothing was dropped, including when a row was merely blanked (`truncated`). See **A page may be shorter than `limit`** for how to pick the next `limit`. |
 
 ###### ThreadListItem
 
@@ -5779,6 +5785,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `tcount` | number | Exact non-deleted reply count. Always present; `0` also covers threads whose count was never written — migrated threads, and briefly a just-created thread whose first reply has not yet been counted. During a mixed-version rollout, rows from a not-yet-upgraded site read `0` (their leaf omits the field), and the key is absent entirely behind a not-yet-upgraded aggregator. |
 | `parentMessage` | [Message](#message-schema) | Optional. The hydrated parent message. |
 | `lastMessage` | [Message](#message-schema) | Optional. The hydrated last reply. |
+| `truncated` | boolean | Optional. `true` when the row's `parentMessage` and `lastMessage` were dropped because the row alone exceeded the transport's `max_payload`. Identifiers and `lastMsgAt` are kept so pagination still advances. |
 | `hrInfo` | [SubscriptionHRInfo](#subscriptionhrinfo) | Optional. Present **only on `dm` rows** — the counterpart's HR record, resolved from `roomName`. Omitted when the directory lookup degrades. |
 
 ```json
@@ -6422,6 +6429,7 @@ The canonical broadcast message (distinct from the history [Message schema](#mes
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Optional. |
 | `pinnedAt` | string | Optional. RFC 3339. |
 | `pinnedBy` | [Participant](#participant) | Optional. |
+| `truncated` | boolean | Optional. `true` when the server blanked this row to make the page fit — either because the row alone exceeded the transport's `max_payload`, or because it shares a `createdAt` millisecond with such a row and the whole group had to be returned together. `msg`, `mentions`, `attachments`, `card`, `cardAction`, `quotedParentMessage`, `reactions`, `sysMsgData`, `encPayload` and `encMeta` are cleared; identifiers, `sender`, `createdAt` and `type` are retained so a placeholder can be rendered. Absent on every ordinary row. |
 
 ```json
 {
@@ -6478,6 +6486,8 @@ A `RoomEvent` (same struct as above) published once per DM participant. Recipien
 ```
 
 **Thread replies additionally emit a `ThreadMetadataUpdatedEvent`** (see [§4.1 Thread Metadata Event](#41-thread-metadata-event)) to update the parent message's reply-count badge. This event is published to all room members (not only thread subscribers) so every client can show the correct badge without subscribing to the thread.
+
+**Channel thread replies are additionally published on the thread-scoped subject** (see [§4.2 Thread View Subject](#42-thread-view-subject)), so a client with the thread panel open receives the reply even when it does not follow the thread.
 
 #### Triggered events — error path
 
@@ -6565,6 +6575,46 @@ Pushed by `broadcast-worker` whenever a thread reply is **created** (`action: "r
 #### Client handling
 
 Apply `newTcount` directly to the parent message's badge — do not compute a delta. Apply `newThreadLastMsgAt` to the parent message's thread-freshness timestamp (or clear it when absent). Events for the same parent may arrive out of order due to JetStream redelivery; when `eventTimestamp` is present, prefer the event with the larger `eventTimestamp`. Fall back to `timestamp` only for legacy events that omit `eventTimestamp`.
+
+---
+
+## 4.2 Thread View Subject
+
+A **channel** thread reply fans out per-subscriber (see [`new_thread_message`](#send-message)), so a client that opens a thread panel without following the thread receives nothing until it refetches. `broadcast-worker` therefore publishes the same events a second time on a thread-scoped subject that a client subscribes to for exactly as long as the panel is open.
+
+### Subjects
+
+| Room `crossSite` | Subject |
+|---|---|
+| `true` / absent | `chat.room.{roomID}.thread.{parentMessageID}.event` |
+| `false` | `chat.local.room.{roomID}.thread.{parentMessageID}.event` |
+
+Resolve `crossSite` exactly as for the room's own `chat.room.{roomID}.event` subject: only an explicit `false` selects the local namespace. A room that has just flipped local→global publishes to both for the transition grace window.
+
+Channel rooms only. DM and botDM thread replies already reach every member, so no thread subject is published for them.
+
+### Events carried
+
+| Type | Payload |
+|---|---|
+| `new_thread_message` | The `RoomEvent` of [Send Message](#send-message) |
+| `message_edited` | The `EditRoomEvent` of [Edit Message](#edit-message) |
+| `message_deleted` | The `DeleteRoomEvent` of [Delete Message](#delete-message) |
+
+**The body is encrypted on this subject, unlike the per-subscriber copy.** In an encrypted channel the per-subscriber copy on `chat.user.{account}.event.room` carries a plaintext `message` / `newContent`, because that subject is scoped to one account. The thread subject sits in the room namespace, so its copy carries `encryptedMessage` / `encryptedNewContent` instead — decrypt with the room key exactly as for `chat.room.{roomID}.event`, see [§5 Room Encryption](#5-room-encryption). In an unencrypted channel both copies are identical and plaintext. `message_deleted` carries no body and is never encrypted.
+
+If the body cannot be sealed, nothing is published on this subject — the lane fails closed rather than emitting a plaintext body into the room namespace.
+
+### Client handling
+
+- **Subscribe before fetching.** Open the subscription, then call [Get Thread Messages](#get-thread-messages), then merge. Fetching first leaves a window in which a reply is published before the subscription exists and is lost.
+- **Unsubscribe when the panel closes**, when it switches to another parent, and on teardown. The subscription is the only thing that makes the server deliver here, so a leaked one keeps consuming events.
+- **Deduplicate replies by message ID, and apply edits and deletes unconditionally.** A thread follower with the panel open receives every event twice — once per-subscriber, once here. The two are the **same logical event, not the same payload**: in an encrypted channel this lane carries `encryptedMessage` while the per-subscriber lane carries a plaintext `message`, so normalize to the decrypted body before comparing. Suppress a `new_thread_message` whose ID is already rendered; do **not** suppress `message_edited` / `message_deleted` on that basis, or a later edit of an already-seen reply is dropped. Both mutations are idempotent, so applying a duplicate is a no-op.
+- **Let a decrypted body replace a placeholder, never the reverse.** If you rendered a placeholder for one lane's copy because the key had not arrived, the other lane's copy of the same ID may still be readable. Deduplicating on ID alone leaves whichever arrived first in place, which can pin a placeholder over a body you could have shown.
+- **Reject an edit no newer than the one already applied.** Arrival order is not causal order: a redelivered older `message_edited` would otherwise overwrite a newer one. Compare `editedAt`, the domain edit time, and ignore an edit at or before the applied one.
+- **Render a placeholder when the room key has not arrived.** An `encryptedMessage` you cannot open still carries `lastMsgId` and `lastMsgAt`; show a placeholder from those rather than dropping the event, or the panel is silently missing a reply.
+- **Process events for one thread in arrival order.** In an encrypted room a plaintext `message_deleted` resolves faster than a preceding `new_thread_message` that must be decrypted first. A client that handles events concurrently can apply the delete to a reply it has not inserted yet, drop it, and then render the reply as live. Serialize the handler per thread — per thread, not globally, or a decrypt stalled on a key fetch for one thread delays the thread the user opens next.
+- **Delivery is best-effort.** A publish failure on this subject is not retried; the panel's next open refetches. Followers' per-subscriber delivery is unaffected.
 
 ---
 
@@ -6729,7 +6779,21 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 > **Malformed request bodies.** Any room request/reply RPC whose payload is not valid JSON for its schema is rejected uniformly with `code: bad_request` and the message `"invalid request payload"` — the transport layer rejects it before the handler runs. Treat this as a generic encoding error; do not pattern-match the message text.
 
 > [!IMPORTANT]
-> **Oversize replies.** If a reply would exceed the transport's maximum payload size, it is returned as `code: internal` with `reason: response_too_large` instead. This covers both a success body that is too large and an error envelope that is too large; either way the caller gets an answer rather than a timeout. This is most likely on large history reads (e.g. Load History / Load Next / Load Surrounding / Get Thread Messages with a high `limit`); the client should retry with a smaller `limit`. Branch on `reason` (`response_too_large`), not the message text.
+> **Oversize replies.** If a reply would exceed the transport's maximum payload size, it is returned as `code: internal` with `reason: response_too_large` instead. This covers both a success body that is too large and an error envelope that is too large; either way the caller gets an answer rather than a timeout. This is most likely on large history reads (e.g. Load History / Load Next / Load Surrounding / Get Thread Messages with a high `limit`); the client should retry with a smaller `limit`. Branch on `reason` (`response_too_large`), not the message text. Which RPCs can raise it, and where the smaller-`limit` retry is the wrong move, is set out under **A page may be shorter than `limit`** below.
+
+
+> [!IMPORTANT]
+> **A page may be shorter than `limit`.** `limit` is a maximum, never a guarantee. Load History, Load Surrounding and Thread List size each page against the transport's `max_payload` and return fewer rows when the full page would not fit. The "more" flag is authoritative — `hasNext` for Load History and Thread List, `moreBefore` / `moreAfter` for Load Surrounding. Page until the flag clears; never treat a short page as the end of the collection, and never assume `len(items) < limit` means there is nothing more.
+>
+> **`sizeLimited` says a page was cut for bytes**, which a short page alone cannot: the history walk and per-site limits return short pages too. Branch on the flag, and set the next request's `limit` to the row count you just received — the server already sized that page to fit, so it converges in one round trip where halving takes several, and it stops the server re-reading the rows it dropped.
+>
+> Trimming is server-side and can be switched off per service (`PAGE_TRIMMING_ENABLED=false`). With it off these RPCs behave like the ones below: the page ships whole, an oversize one returns `internal` / `response_too_large`, and `sizeLimited` is never set.
+>
+> A single row too large to ship inside a page is returned blanked with `truncated: true` rather than dropped, so pagination always advances past it. A Thread List row too large to send has its `parentMessage` and `lastMessage` bodies dropped and is marked `truncated: true`; its identifiers and `lastMsgAt` are kept, so the cursor still advances.
+>
+> Load History and Load Surrounding can still return `internal` / `response_too_large` in one case: rows sharing a single `createdAt` millisecond are never split, because the resume bound is exclusive and a cut inside the millisecond would skip the rest of that group for good. If such a group exceeds the budget even with every row blanked, it is returned whole and the transport rejects the reply — a visible error in preference to a silent gap. Reaching this needs a full page of rows in one millisecond in one room against a `max_payload` far below any deployed value. Retrying with a smaller `limit` makes the reply deliverable but drops the rest of the group, so treat it as a server-side misconfiguration, not a client-recoverable error.
+>
+> Load Next, List Pinned and Get Thread Messages are **not** sized this way — their cursors are opaque and cannot be re-derived after trimming — so they still return `internal` / `response_too_large` on an oversize page. Retry those with a smaller `limit`.
 
 ### `reason` catalog (present today)
 

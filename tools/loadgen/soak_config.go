@@ -80,7 +80,7 @@ type soakConfig struct {
 	RecentPerRoom               int           `env:"RECENT_PER_ROOM"                  envDefault:"128"`
 	RecentTotal                 int           `env:"RECENT_TOTAL"                     envDefault:"200000"`
 	LedgerDir                   string        `env:"LEDGER_DIR"                       envDefault:""`
-	LedgerEpoch                 string        `env:"LEDGER_EPOCH"                     envDefault:"v1"`
+	LedgerEpoch                 string        `env:"LEDGER_EPOCH"                     envDefault:"v2"`
 	LedgerCapacity              int           `env:"LEDGER_CAPACITY"                  envDefault:"200000"`
 	// LedgerCompactEvery and LedgerMaxBytes both bound the journal. The finalize
 	// count alone is not enough: a run whose operations all outlive their
@@ -559,9 +559,6 @@ func validateSoakSearchConfig(cfg *soakConfig) error {
 	if err := validateSoakSearchSettle(cfg); err != nil {
 		return err
 	}
-	if err := validateSoakSearchReconcileCapacity(cfg); err != nil {
-		return err
-	}
 	// The probe locates a message by full-text search, so the payload has to
 	// contain something that identifies one message. Today every soak body is a
 	// run of the same character differing only in length, which analyzes to a
@@ -591,21 +588,126 @@ func validateSoakSearchSettle(cfg *soakConfig) error {
 	return nil
 }
 
-// validateSoakSearchReconcileCapacity is kept separate so the capacity rule
-// stays testable while the observer itself is refused above.
-func validateSoakSearchReconcileCapacity(cfg *soakConfig) error {
-	// One step for the history observer, one for the search observer.
-	const reconcileStepsPerMessage = 2
-	capacity := cfg.ReadRate * cfg.ReconcileReadShare
-	required := cfg.SendRate * reconcileStepsPerMessage
-	if cfg.SendRate > 0 && capacity < required {
-		return fmt.Errorf(
-			"SOAK_SEARCH_OBSERVER_ENABLED needs %.3f reconcile operations/s at "+
-				"SOAK_SEND_RATE %.3f, but SOAK_READ_RATE %.3f at "+
-				"SOAK_RECONCILE_READ_SHARE %.3f supplies only %.3f; "+
-				"raise SOAK_READ_RATE or lower SOAK_SEND_RATE",
-			required, cfg.SendRate, cfg.ReadRate, cfg.ReconcileReadShare, capacity,
-		)
+// soakReconcileStepsPerMessage counts the claims a message costs the read lane.
+//
+// soakFailureReconciler.Try advances one observer per claim, but only a
+// query-mode observer reaches a service: the recipient observer is event mode,
+// so finalizing it reads evidence already in memory and its allowance is
+// refunded rather than spent. Counting it here would demand read capacity for
+// work that never leaves the process.
+//
+// This holds only because reconcileReadAction drains the free claims inside one
+// admission. A read action is the only way to take a claim, so without that
+// drain an event-mode claim would still cost a callback and the real demand
+// would be every observer, not every querying observer.
+func soakReconcileStepsPerMessage(cfg *soakConfig) int {
+	steps := 1
+	if cfg.SearchObserverEnabled {
+		steps++
 	}
-	return nil
+	return steps
+}
+
+// soakReconcileCapacity is the read-lane arithmetic behind the reconciliation
+// floor: what the observers in play demand against what the share supplies.
+//
+// It is a floor, not a budget. It covers one claim per observer and nothing for
+// the history poll's retries, which depend on how many messages are slow to
+// persist and cannot be derived from configuration.
+type soakReconcileCapacity struct {
+	Steps    int
+	Required float64
+	Supplied float64
+}
+
+// Sufficient reports whether the lane can serve one claim per observer for
+// every message sent.
+func (c soakReconcileCapacity) Sufficient() bool { return c.Supplied >= c.Required }
+
+func soakReconcileCapacityFor(cfg *soakConfig) soakReconcileCapacity {
+	steps := soakReconcileStepsPerMessage(cfg)
+	return soakReconcileCapacity{
+		Steps:    steps,
+		Required: cfg.SendRate * float64(steps),
+		Supplied: cfg.ReadRate * cfg.ReconcileReadShare,
+	}
+}
+
+// warnSoakReconcileConfig reports every reconcile-configuration problem the
+// startup path can see, and returns whether the run began below the
+// reconciliation floor. It exists so a new check has one place to be reached
+// from: both checks warn rather than refuse, so an unreached one is silent
+// instead of loud, and nothing else would catch it.
+//
+// The breaches are returned rather than recorded because they are known before
+// the ledger that must carry them is open. The caller invalidates the ledger
+// once it has one, in the order given: the capacity floor comes first because
+// it is the breach that makes every verdict unverified, where the lag range
+// only makes the window unreadable.
+func warnSoakReconcileConfig(cfg *soakConfig) []string {
+	var reasons []string
+	if warnSoakReconcileCapacity(cfg) {
+		reasons = append(reasons, invalidReasonReconcileCapacity)
+	}
+	if warnSoakReconcileLagRange(cfg) {
+		reasons = append(reasons, invalidReasonReconcileLagRange)
+	}
+	return reasons
+}
+
+// warnSoakReconcileCapacity reports an under-provisioned reconcile lane without
+// refusing the run. Below the floor the unresolved backlog grows and every
+// message eventually expires unverified — a run that reports a storage problem
+// it created itself, and reports it identically to a real one.
+//
+// It warns rather than exits because refusing at startup spends a whole deploy
+// on a configuration mistake the message already states, and only the operator
+// knows whether a degraded lane is worth the window.
+// loadgen_failure_reconcile_claims_total shows at runtime whether it bit, and
+// the returned breach marks the run itself as one whose evidence was already in
+// question when it started.
+//
+// It reports the breach rather than recording it: a log line is not
+// machine-readable, but the record belongs in the ledger, whose invalidation
+// both sets Snapshot().InvalidReason and raises
+// loadgen_failure_invalidations_total. Raising the counter here instead would
+// leave the run's own record claiming evidence it cannot stand behind.
+func warnSoakReconcileCapacity(cfg *soakConfig) bool {
+	capacity := soakReconcileCapacityFor(cfg)
+	if cfg.SendRate <= 0 || capacity.Sufficient() {
+		return false
+	}
+	slog.Warn("soak reconcile lane is below the capacity its observers demand",
+		"observerSteps", capacity.Steps,
+		"requiredOperationsPerSecond", capacity.Required,
+		"suppliedOperationsPerSecond", capacity.Supplied,
+		"soakSendRate", cfg.SendRate,
+		"soakReadRate", cfg.ReadRate,
+		"soakReconcileReadShare", cfg.ReconcileReadShare,
+		"remedy", "raise SOAK_READ_RATE or lower SOAK_SEND_RATE",
+	)
+	return true
+}
+
+// recordSoakStartupInvalidations puts a configuration breach into the run's own
+// evidence rather than only into a log line: the ledger journals it, replay
+// restores it, and Snapshot reports it, so the run cannot later be read as
+// though it had never been disowned.
+//
+// A breach only warns and the run proceeds — but that bargain depends on the
+// verdict outliving the process. If the journal refuses the record, a crash
+// before Close would replay this run without its disqualifier and present the
+// evidence as trustworthy, so the caller is told to stop instead.
+func recordSoakStartupInvalidations(ledger *failureLedger, reasons []string) error {
+	for _, reason := range reasons {
+		ledger.Invalidate(reason)
+	}
+	unpersisted := ledger.UnpersistedInvalidations()
+	if len(unpersisted) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"failure ledger could not persist startup invalidation %s",
+		strings.Join(unpersisted, ", "),
+	)
 }

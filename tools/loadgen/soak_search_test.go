@@ -104,7 +104,7 @@ func TestSoakSearchReader_IndexProbeWaitsOutTheSettleWindow(t *testing.T) {
 	transport := &soakRoomOpsTransport{reply: []byte(`{"messages":[]}`)}
 	reader, recorder := newSoakSearchFixture(t, transport, 2, func() time.Time { return now })
 
-	result, err := reader.IndexedAt(
+	result, _, err := reader.IndexedAt(
 		context.Background(), "user-a", "room-1", "m1", "hello soak", publishedAt,
 	)
 
@@ -146,7 +146,7 @@ func TestSoakSearchReader_IndexProbeClassifiesTheAnswer(t *testing.T) {
 				t, transport, 3, func() time.Time { return now },
 			)
 
-			result, err := reader.IndexedAt(
+			result, _, err := reader.IndexedAt(
 				context.Background(), "user-a", "room-1", "m1", "hello soak", publishedAt,
 			)
 
@@ -165,7 +165,7 @@ func TestSoakSearchReader_IndexProbeIsUnknownWhenSearchIsDown(t *testing.T) {
 	transport := &soakRoomOpsTransport{err: assert.AnError}
 	reader, _ := newSoakSearchFixture(t, transport, 4, func() time.Time { return now })
 
-	result, err := reader.IndexedAt(
+	result, _, err := reader.IndexedAt(
 		context.Background(), "user-a", "room-1", "m1", "hello soak", publishedAt,
 	)
 
@@ -176,11 +176,11 @@ func TestSoakSearchReader_IndexProbeIsUnknownWhenSearchIsDown(t *testing.T) {
 func TestSoakSearchReader_IndexProbeRejectsIncompleteTargets(t *testing.T) {
 	reader, _ := newSoakSearchFixture(t, &soakRoomOpsTransport{}, 5, nil)
 
-	_, err := reader.IndexedAt(context.Background(), "", "room-1", "m1", "x", time.Time{})
+	_, _, err := reader.IndexedAt(context.Background(), "", "room-1", "m1", "x", time.Time{})
 	require.Error(t, err)
-	_, err = reader.IndexedAt(context.Background(), "user-a", "", "m1", "x", time.Time{})
+	_, _, err = reader.IndexedAt(context.Background(), "user-a", "", "m1", "x", time.Time{})
 	require.Error(t, err)
-	_, err = reader.IndexedAt(context.Background(), "user-a", "room-1", "", "x", time.Time{})
+	_, _, err = reader.IndexedAt(context.Background(), "user-a", "room-1", "", "x", time.Time{})
 	require.Error(t, err)
 }
 
@@ -203,7 +203,7 @@ func TestSoakSearchIndexProbe_UnknownWithoutACatalogEntry(t *testing.T) {
 	reader, _ := newSoakSearchFixture(t, transport, 6, nil)
 	probe := newSoakSearchIndexProbe(reader, newSoakCatalog(8, 8, 0, nil))
 
-	result, err := probe.Indexed(context.Background(), &failureOperation{
+	result, _, err := probe.Indexed(context.Background(), &failureOperation{
 		ID:         "m1",
 		Targets:    map[string]string{"roomId": "room-1", "messageId": "m1"},
 		Attributes: map[string]string{soakFailureAttributeAccount: "user-a"},
@@ -227,7 +227,7 @@ func TestSoakSearchIndexProbe_UnknownWithoutCompleteTargets(t *testing.T) {
 			Targets: map[string]string{"roomId": "room-1", "messageId": "m1"},
 		},
 	} {
-		result, err := probe.Indexed(context.Background(), operation)
+		result, _, err := probe.Indexed(context.Background(), operation)
 		require.NoError(t, err)
 		assert.Equal(t, soakSearchIndexUnknown, result)
 	}
@@ -276,11 +276,44 @@ func TestSoakSearchReader_IndexProbeReportsTooEarlyDistinctly(t *testing.T) {
 	transport := &soakRoomOpsTransport{reply: []byte(`{"messages":[]}`)}
 	reader, _ := newSoakSearchFixture(t, transport, 8, func() time.Time { return now })
 
-	result, err := reader.IndexedAt(
+	result, _, err := reader.IndexedAt(
 		context.Background(), "user-a", "room-1", "m1", "hello soak", publishedAt,
 	)
 
 	require.NoError(t, err)
 	assert.Equal(t, soakSearchIndexTooEarly, result)
 	assert.Empty(t, transport.subjects)
+}
+
+// The probe reports whether it actually queried, because the reconciler refunds
+// the read allowance for a claim that reached no service. Deriving that from
+// configuration would charge the read lane for the several paths that answer
+// from local state alone.
+func TestSoakSearchIndexProbe_ReportsWhetherItQueried(t *testing.T) {
+	t.Run("no catalogue entry issues no query", func(t *testing.T) {
+		transport := &soakRoomOpsTransport{reply: []byte(`{"messages":[]}`)}
+		reader, _ := newSoakSearchFixture(t, transport, 6, nil)
+		probe := newSoakSearchIndexProbe(reader, newSoakCatalog(8, 8, 0, nil))
+
+		result, queried, err := probe.Indexed(context.Background(), &failureOperation{
+			ID:         "m1",
+			Targets:    map[string]string{"roomId": "room-1", "messageId": "m1"},
+			Attributes: map[string]string{soakFailureAttributeAccount: "user-a"},
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, soakSearchIndexUnknown, result)
+		assert.False(t, queried)
+		assert.Empty(t, transport.subjects)
+	})
+
+	t.Run("an unconfigured probe issues no query", func(t *testing.T) {
+		var probe *soakSearchIndexProbe
+
+		result, queried, err := probe.Indexed(context.Background(), &failureOperation{ID: "m1"})
+
+		require.NoError(t, err)
+		assert.Equal(t, soakSearchIndexUnknown, result)
+		assert.False(t, queried)
+	})
 }

@@ -33,6 +33,11 @@ type ThreadListItem struct {
 	ParentMessage json.RawMessage `json:"parentMessage,omitempty" bson:"parentMessage,omitempty"`
 	LastMessage   json.RawMessage `json:"lastMessage,omitempty"   bson:"lastMessage,omitempty"`
 
+	// Truncated marks a row whose bodies were dropped because it alone exceeded
+	// the reply budget — distinct from a body legitimately absent outside the
+	// thread access window.
+	Truncated bool `json:"truncated,omitempty" bson:"truncated,omitempty"`
+
 	// HRInfo carries the DM counterpart's HR-directory record (native + English
 	// name). The user-service aggregator resolves it from RoomName (which holds the
 	// counterpart account for DM rooms); present on DM rows only.
@@ -74,4 +79,7 @@ type ThreadListResponse struct {
 	NextCursor       string           `json:"nextCursor,omitempty"`
 	HasNext          bool             `json:"hasNext"`
 	UnavailableSites []string         `json:"unavailableSites,omitempty"`
+	// SizeLimited: rows were dropped to fit the payload budget — never set for
+	// a merely blanked row. A short page alone does not imply it.
+	SizeLimited bool `json:"sizeLimited,omitempty"`
 }

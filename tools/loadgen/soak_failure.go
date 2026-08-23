@@ -53,6 +53,52 @@ func soakFailureExpiryInterval(deadline time.Duration) time.Duration {
 	return min(30*time.Second, max(time.Second, deadline/10))
 }
 
+// watchSoakLedgerDurability stops a run whose ledger can no longer record the
+// verdict that disqualifies its own evidence. A refused invalidation is settled
+// by the next write, so a transient failure clears on its own; the grace is
+// measured from the tick that first saw the debt, because an append that failed
+// a moment before a tick would otherwise be given no time at all to be paid. A
+// debt still standing a full grace later is a journal that is not coming back.
+// It reports once and returns — the caller stops the workload, and the ordinary
+// shutdown path decides the exit code.
+func watchSoakLedgerDurability(
+	ctx context.Context,
+	ledger *failureLedger,
+	ticks <-chan time.Time,
+	grace time.Duration,
+	onUnrecordedVerdict func([]string),
+) {
+	if ledger == nil || ticks == nil || onUnrecordedVerdict == nil {
+		return
+	}
+	var owedSince time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case at, ok := <-ticks:
+			if !ok {
+				return
+			}
+			owed := ledger.UnpersistedInvalidations()
+			if len(owed) == 0 {
+				// Paid. The next debt starts its own interval rather than
+				// inheriting the time this one spent.
+				owedSince = time.Time{}
+				continue
+			}
+			if owedSince.IsZero() {
+				owedSince = at
+				continue
+			}
+			if at.Sub(owedSince) >= grace {
+				onUnrecordedVerdict(owed)
+				return
+			}
+		}
+	}
+}
+
 func runSoakFailureExpiry(
 	ctx context.Context,
 	ledger *failureLedger,
@@ -582,6 +628,124 @@ type soakFailureReconciler struct {
 	now           func() time.Time
 	recipient     soakFailureRecipientFinalizer
 	searchIndex   soakFailureSearchIndexProbe
+	metrics       *Metrics
+}
+
+// What a reconcile claim achieved. The split exists because the startup
+// capacity rule can only model one claim per observer: the poll's retries scale
+// with how many messages are slow to persist, which no configuration knows, and
+// idle claims are the only evidence that the lane still has slack.
+const (
+	soakReconcileClaimAdvanced    = "advanced"
+	soakReconcileClaimRetried     = "retried"
+	soakReconcileClaimIdle        = "idle"
+	soakReconcileClaimFailed      = "failed"
+	soakReconcileClaimUnavailable = "unavailable"
+	// deferred is a claim that issued no query on purpose: the settle window
+	// has not elapsed, so there was nothing to ask yet. It is separate from
+	// retried because retried is the poll cost of an effect that has not
+	// landed, and counting a scheduled wait there manufactures a retry
+	// baseline in a healthy run.
+	soakReconcileClaimDeferred = "deferred"
+)
+
+// soakReconcileClaimOutcomes is the closed label set, listed so the metric can
+// publish every outcome at zero rather than only the ones that have happened.
+func soakReconcileClaimOutcomes() []string {
+	return []string{
+		soakReconcileClaimAdvanced,
+		soakReconcileClaimRetried,
+		soakReconcileClaimIdle,
+		soakReconcileClaimFailed,
+		soakReconcileClaimUnavailable,
+		soakReconcileClaimDeferred,
+	}
+}
+
+// reconcileProbeOutcome names a claim that reached a probe but not a verdict.
+// A probe that could not be answered proves nothing about the message, so it
+// must not share a label with one that answered and found nothing — that is how
+// a dependency outage reads as a persistence backlog.
+func reconcileProbeOutcome(probeErr error) string {
+	if probeErr != nil {
+		return soakReconcileClaimUnavailable
+	}
+	return soakReconcileClaimRetried
+}
+
+// searchProbeOutcome separates a probe that answered from one that never ran.
+// Indexed reports unknown without an error when it had no query to issue — an
+// unconfigured probe, an operation missing its targets, or a catalog entry
+// evicted before the probe was due — and "retried" is defined as a probe that
+// answered and found the effect absent. Counting an unissued query as retried
+// would show the dashboard persistence lag where there was no query at all.
+// too_early is unqueried on purpose — the settle window has not elapsed — and
+// is neither of those: it is a scheduled wait, so it gets its own outcome
+// rather than inflating the retry baseline of a healthy run.
+func searchProbeOutcome(
+	result soakSearchIndexResult,
+	probed bool,
+	probeErr error,
+) string {
+	if probeErr != nil {
+		return soakReconcileClaimUnavailable
+	}
+	if result == soakSearchIndexTooEarly {
+		return soakReconcileClaimDeferred
+	}
+	if !probed {
+		return soakReconcileClaimUnavailable
+	}
+	return soakReconcileClaimRetried
+}
+
+func withSoakFailureReconcileMetrics(metrics *Metrics) soakFailureReconcilerOption {
+	return func(reconciler *soakFailureReconciler) { reconciler.metrics = metrics }
+}
+
+// recordObserved classifies a claim by whether the observation it tried to
+// persist actually landed. Recording before the call counts a failed write as
+// progress, which is the opposite of what the split is for.
+func (r *soakFailureReconciler) recordObserved(err error) error {
+	return r.recordObservedProbe(err, true)
+}
+
+// recordObservedProbe is the terminal form: the observation always lands, but
+// what the claim bought depends on whether anything answered. An unreachable
+// dependency at the deadline resolves the observer as unverified, and calling
+// that advanced hides the outage in the one window where the board is being
+// read to tell an outage from a persistence backlog. It is the same rule the
+// pre-deadline branches already follow.
+func (r *soakFailureReconciler) recordObservedProbe(err error, answered bool) error {
+	if err != nil {
+		r.recordClaim(soakReconcileClaimFailed)
+		return err
+	}
+	if !answered {
+		r.recordClaim(soakReconcileClaimUnavailable)
+		return nil
+	}
+	r.recordClaim(soakReconcileClaimAdvanced)
+	return nil
+}
+
+// recordClaimLag reports how far past its scheduled probe an operation was when
+// the lane finally reached it. A claim taken early is not negative progress, so
+// it floors at zero.
+func (r *soakFailureReconciler) recordClaimLag(now, scheduled time.Time) {
+	if r == nil || r.metrics == nil || scheduled.IsZero() {
+		return
+	}
+	r.metrics.FailureReconcileLag.Observe(max(0, now.Sub(scheduled).Seconds()))
+}
+
+// recordClaim is nil-safe so the tests that only assert reconciliation do not
+// have to build a registry.
+func (r *soakFailureReconciler) recordClaim(outcome string) {
+	if r == nil || r.metrics == nil {
+		return
+	}
+	r.metrics.FailureReconcileClaims.WithLabelValues(outcome).Inc()
 }
 
 type soakFailureRecipientFinalizer interface {
@@ -592,7 +756,11 @@ type soakFailureRecipientFinalizer interface {
 // search index. Defined here rather than with the search reader so the
 // reconciler depends only on the question it asks.
 type soakFailureSearchIndexProbe interface {
-	Indexed(context.Context, *failureOperation) (soakSearchIndexResult, error)
+	// Indexed reports the verdict and whether it issued a query. Several paths
+	// answer from local state alone — before the settle window, or when the
+	// operation or catalogue cannot supply a term — and those spend no read
+	// slot, so the caller must not be told they did.
+	Indexed(context.Context, *failureOperation) (soakSearchIndexResult, bool, error)
 	// SettleBoundary is when a too-early operation can first produce a usable
 	// answer, so it is rescheduled there rather than polled meanwhile.
 	SettleBoundary(publishedAt time.Time) time.Time
@@ -633,9 +801,13 @@ func newSoakFailureReconciler(
 // Try consumes at most one due reconciliation operation. Callers use this in
 // the existing read lane so 100% send verification does not add unbudgeted
 // read traffic.
-func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
+// Try takes at most one claim. It reports whether it handled anything and
+// whether that claim spent a read slot: an event-mode observer finalizes from
+// evidence already in memory, so its claim reaches no service under test and
+// the caller can give the allowance back and take its scheduled read.
+func (r *soakFailureReconciler) Try(ctx context.Context) (bool, bool, error) {
 	if r == nil || r.ledger == nil || r.verifier == nil {
-		return false, fmt.Errorf("soak failure reconciler is not configured")
+		return false, false, fmt.Errorf("soak failure reconciler is not configured")
 	}
 	now := r.now().UTC()
 	// Scoped to the message lane. This reconciler only understands history,
@@ -645,8 +817,10 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	// declared, while its own room_state observer never resolves.
 	operation, ok := r.ledger.ClaimDueLanes(now, []string{soakFailureLaneMessageSend})
 	if !ok {
-		return false, nil
+		r.recordClaim(soakReconcileClaimIdle)
+		return false, false, nil
 	}
+	r.recordClaimLag(now, operation.nextVerifyAt)
 	if _, historyObserved := operation.Observations[failureObserverHistory]; historyObserved {
 		if _, recipientObserved := operation.Observations[failureObserverRecipient]; !recipientObserved &&
 			slices.Contains(operation.Expected, failureObserverRecipient) {
@@ -681,13 +855,16 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 				now,
 			); err != nil {
 				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
-				return true, fmt.Errorf("record soak recipient observation: %w", err)
+				r.recordClaim(soakReconcileClaimFailed)
+				return true, false, fmt.Errorf("record soak recipient observation: %w", err)
 			}
-			return true, nil
+			r.recordClaim(soakReconcileClaimAdvanced)
+			return true, false, nil
 		}
 		if _, searchObserved := operation.Observations[failureObserverSearchIndex]; !searchObserved &&
 			slices.Contains(operation.Expected, failureObserverSearchIndex) {
-			return true, r.observeSearchIndex(ctx, &operation, now)
+			probed, err := r.observeSearchIndex(ctx, &operation, now)
+			return true, probed, err
 		}
 		for _, observer := range operation.Expected {
 			if _, observed := operation.Observations[observer]; observed {
@@ -700,27 +877,43 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 				now,
 			); err != nil {
 				_ = r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval))
-				return true, fmt.Errorf("record unresolved soak observation: %w", err)
+				r.recordClaim(soakReconcileClaimFailed)
+				return true, false, fmt.Errorf("record unresolved soak observation: %w", err)
 			}
-			return true, nil
+			r.recordClaim(soakReconcileClaimAdvanced)
+			return true, false, nil
 		}
+		r.recordClaim(soakReconcileClaimFailed)
 		if err := r.ledger.ReleaseClaim(operation.ID, now.Add(r.retryInterval)); err != nil {
-			return true, fmt.Errorf("release malformed failure operation %q: %w", operation.ID, err)
+			return true, false, fmt.Errorf("release malformed failure operation %q: %w", operation.ID, err)
 		}
-		return true, fmt.Errorf("failure operation %q was queued without an unresolved observer", operation.ID)
+		return true, false, fmt.Errorf("failure operation %q was queued without an unresolved observer", operation.ID)
 	}
 	result, verifyErr := r.verifier.Verify(ctx, &operation)
 	if verifyErr == nil && result == soakFailureHistoryFound {
-		return true, r.observe(operation.ID, failureObservationGood, now)
+		return true, true, r.recordObserved(r.observe(operation.ID, failureObservationGood, now))
 	}
 	if now.Before(operation.Deadline) {
-		if err := r.ledger.ReleaseClaim(
-			operation.ID,
-			now.Add(r.retryInterval),
-		); err != nil {
-			return true, err
+		// Two different retries share this branch. A probe that answered and
+		// found nothing is a pending effect, and it repeats for the whole
+		// deadline, so it is the one that has to back off. A probe that could
+		// not be answered established nothing about the message: backing it off
+		// would let one timeout push the next look minutes away, and the
+		// operation could reach its deadline unverified because of the retry
+		// policy rather than because of storage. A failed call keeps the flat
+		// interval, which is what the claim outcome recorded below already says.
+		retryAt := now.Add(r.retryInterval)
+		if verifyErr == nil {
+			retryAt = nextReconcileProbe(
+				now, operation.VerifyAfter, operation.Deadline, r.retryInterval)
 		}
-		return true, nil
+		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
+			r.recordClaim(soakReconcileClaimFailed)
+			return true, true, fmt.Errorf(
+				"reschedule pending soak history probe for %q: %w", operation.ID, err)
+		}
+		r.recordClaim(reconcileProbeOutcome(verifyErr))
+		return true, true, nil
 	}
 
 	// Past the deadline the result depends on what the verifier could actually
@@ -734,7 +927,8 @@ func (r *soakFailureReconciler) Try(ctx context.Context) (bool, error) {
 	case result == soakFailureHistoryMismatch:
 		observation = failureObservationBad
 	}
-	return true, r.observe(operation.ID, observation, now)
+	return true, true, r.recordObservedProbe(
+		r.observe(operation.ID, observation, now), verifyErr == nil)
 }
 
 // observeSearchIndex asks the query side whether the message reached the index.
@@ -750,14 +944,18 @@ func (r *soakFailureReconciler) observeSearchIndex(
 	ctx context.Context,
 	operation *failureOperation,
 	now time.Time,
-) error {
+) (bool, error) {
 	result := soakSearchIndexUnknown
 	var probeErr error
+	// Only a probe that issued a query reached a service, so only that one
+	// spends a read slot.
+	probed := false
 	if r.searchIndex != nil {
-		result, probeErr = r.searchIndex.Indexed(ctx, operation)
+		result, probed, probeErr = r.searchIndex.Indexed(ctx, operation)
 	}
 	if probeErr == nil && result == soakSearchIndexFound {
-		return r.observeAs(operation.ID, failureObserverSearchIndex, failureObservationGood, now)
+		return probed, r.recordObserved(
+			r.observeAs(operation.ID, failureObserverSearchIndex, failureObservationGood, now))
 	}
 	if now.Before(operation.Deadline) {
 		// A too-early operation is rescheduled to the settle boundary, not the
@@ -765,17 +963,30 @@ func (r *soakFailureReconciler) observeSearchIndex(
 		// times the whole reconciliation budget on queries that cannot succeed,
 		// starving the lanes that share it.
 		retryAt := now.Add(r.retryInterval)
-		if result == soakSearchIndexTooEarly && r.searchIndex != nil {
+		switch {
+		case result == soakSearchIndexTooEarly && r.searchIndex != nil:
 			if boundary := r.searchIndex.SettleBoundary(operation.StartedAt); boundary.After(retryAt) {
 				retryAt = boundary
 			}
+		case probeErr == nil && result == soakSearchIndexMissing:
+			// The same amplification the history poll was backed off for: one
+			// message delayed in the index would otherwise cost a full-text
+			// search every retry interval until its deadline, and during an
+			// indexing backlog those probes saturate the reconcile share while
+			// newer messages expire for want of a look. A probe that could not
+			// answer keeps the flat interval — that retries a call, not a
+			// pending effect.
+			retryAt = nextReconcileProbe(
+				now, r.searchProbeAnchor(operation), operation.Deadline, r.retryInterval)
 		}
 		if err := r.ledger.ReleaseClaim(operation.ID, retryAt); err != nil {
-			return fmt.Errorf(
+			r.recordClaim(soakReconcileClaimFailed)
+			return probed, fmt.Errorf(
 				"reschedule soak search index probe for %q: %w", operation.ID, err,
 			)
 		}
-		return nil
+		r.recordClaim(searchProbeOutcome(result, probed, probeErr))
+		return probed, nil
 	}
 	observation := failureObservationMissingAfterDeadline
 	if probeErr != nil || result != soakSearchIndexMissing {
@@ -784,7 +995,23 @@ func (r *soakFailureReconciler) observeSearchIndex(
 		// which is a configuration problem, not evidence.
 		observation = failureObservationUnverified
 	}
-	return r.observeAs(operation.ID, failureObserverSearchIndex, observation, now)
+	return probed, r.recordObservedProbe(
+		r.observeAs(operation.ID, failureObserverSearchIndex, observation, now),
+		probed && probeErr == nil)
+}
+
+// searchProbeAnchor is where the backoff measures elapsed wait from. No probe
+// before the settle boundary can find the message, so anchoring at VerifyAfter
+// would open the sequence already a settle window wide and put the first two
+// probes minutes apart.
+func (r *soakFailureReconciler) searchProbeAnchor(operation *failureOperation) time.Time {
+	if r.searchIndex == nil {
+		return operation.VerifyAfter
+	}
+	if boundary := r.searchIndex.SettleBoundary(operation.StartedAt); boundary.After(operation.VerifyAfter) {
+		return boundary
+	}
+	return operation.VerifyAfter
 }
 
 func (r *soakFailureReconciler) observeAs(
@@ -819,6 +1046,87 @@ func (r *soakFailureReconciler) observe(
 	return nil
 }
 
+// soakReconcileLagCeiling is the largest reconcile deadline the lag histogram
+// resolves. Lag is read against SOAK_RECONCILE_DEADLINE, so a deadline beyond
+// this leaves the region the validity rule actually reads in the +Inf bucket,
+// where no quantile can place it.
+const soakReconcileLagCeiling = time.Hour
+
+// soakReconcileLagBuckets spans a claim taken on schedule through a lane a full
+// hour behind. The top bucket is deliberately past soakReconcileLagCeiling so a
+// deadline at the ceiling still falls inside a finite bucket rather than on its
+// edge.
+func soakReconcileLagBuckets() []float64 {
+	return []float64{
+		0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600, 5400,
+	}
+}
+
+// warnSoakReconcileLagRange reports a deadline the lag histogram cannot resolve
+// and returns whether it found one. It warns rather than refuses for the same
+// reason the capacity floor does: the run is the operator's to judge. But lag
+// is the signal that says whether a window counted, so a deadline that outruns
+// it leaves that question unanswerable, and the returned breach is what marks
+// the run rather than leaving a log line to close it.
+func warnSoakReconcileLagRange(cfg *soakConfig) bool {
+	if cfg == nil || cfg.ReconcileDeadline <= soakReconcileLagCeiling {
+		return false
+	}
+	slog.Warn("soak reconcile deadline outruns the lag histogram",
+		"soakReconcileDeadline", cfg.ReconcileDeadline.String(),
+		"resolvableCeiling", soakReconcileLagCeiling.String(),
+		"consequence", "loadgen_failure_reconcile_lag_seconds cannot place a quantile near the deadline",
+		"remedy", "lower SOAK_RECONCILE_DEADLINE or widen the lag buckets",
+	)
+	return true
+}
+
+// soakReadLaneReconciler is the reconciler seen from the read lane: one claim
+// per call, reporting whether that claim queried the system under test.
+type soakReadLaneReconciler interface {
+	Try(context.Context) (bool, bool, error)
+}
+
+// soakReconcileFreeClaimBurst bounds how many claims one read action may drain,
+// so a backlog cannot monopolise a single action.
+const soakReconcileFreeClaimBurst = 8
+
+// reconcileReadAction spends one read-lane action on reconciliation and reports
+// whether the action queried the system under test, in which case the caller
+// skips the read it was scheduled for.
+//
+// Try advances one observer per claim and a read action is the only way to take
+// one, so a claim that costs no read still costs a callback. With the recipient
+// observer on that is a second callback for every message — at the configured
+// rates, the whole read lane, leaving nothing for the history poll's retries.
+// Draining the free claims inside one admission is what keeps the callback
+// budget matched to the claims that actually query, which is what the startup
+// floor models.
+func reconcileReadAction(
+	ctx context.Context,
+	reconciler soakReadLaneReconciler,
+	gate *soakShareGate,
+) bool {
+	if !gate.Allow() {
+		return false
+	}
+	for range soakReconcileFreeClaimBurst {
+		handled, spentRead, err := reconciler.Try(ctx)
+		if err != nil {
+			slog.Error("reconcile Cassandra soak operation", "error", err)
+		}
+		if spentRead {
+			return true
+		}
+		// Nothing was due, so there is no free claim left to drain either.
+		if !handled {
+			break
+		}
+	}
+	gate.Refund()
+	return false
+}
+
 // soakShareGate admits a fixed fraction of calls. Reconciliation runs inside the
 // read lane, so without a cap a large unresolved backlog would consume every
 // read slot and stop the production-like read mix during the fault window.
@@ -830,6 +1138,25 @@ type soakShareGate struct {
 
 func newSoakShareGate(share float64) *soakShareGate {
 	return &soakShareGate{share: min(max(share, 0), 1)}
+}
+
+// Refund returns an allowance taken by a claim that issued no request to the
+// system under test. The gate exists to protect the production-like read mix,
+// so a claim that read nothing must not be charged against it.
+//
+// The credit is capped at one whole allowance. Allow bounds its own credit
+// below one, so an uncapped refund would be the only way the gate could bank
+// it — and a lane that sat idle would then admit a long run of consecutive
+// reconciliation reads the moment a backlog arrived, which is the fault window
+// the cap exists to protect. One allowance is what the refunded claim was
+// entitled to and no more.
+func (g *soakShareGate) Refund() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.credit = min(g.credit+1, 1)
 }
 
 func (g *soakShareGate) Allow() bool {
