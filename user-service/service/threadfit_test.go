@@ -120,3 +120,39 @@ func TestListUserThreads_TrimRunsAfterEnrichment(t *testing.T) {
 	assert.LessOrEqual(t, len(encoded), budget.Bytes()+2,
 		"the enriched page must fit — trimming before enrichment would overflow again")
 }
+
+// A lone item too large to send must be shrunk, not passed through: the router
+// would reject the reply, and halving `limit` cannot help when one row is the
+// problem — the client would retry the same fan-out forever.
+func TestListUserThreads_LoneOversizeItemIsBlankedNotPassedThrough(t *testing.T) {
+	items := fatItems("site-a", 1, 8192)
+	svc, history, _, _ := newThreadSvc(t, WithPageBudget(pagefit.NewBudget(512, 0)))
+	expectThreadList(history, "site-a", items, false)
+	expectThreadList(history, "site-b", nil, false)
+
+	resp, err := svc.ListUserThreads(ctx("alice", "site-a"), model.ThreadListRequest{Limit: 100})
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1, "the row must survive so pagination can advance")
+
+	got := resp.Items[0]
+	assert.Empty(t, got.ParentMessage, "the heavy forwarded body is what must go")
+	assert.Equal(t, items[0].ThreadRoomID, got.ThreadRoomID, "identifiers stay so the client can open the thread")
+	assert.Equal(t, items[0].LastMsgAt, got.LastMsgAt, "the sort key stays — the cursor is derived from it")
+
+	encoded, err := json.Marshal(resp.Items)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(encoded), 512, "the blanked page must actually fit")
+}
+
+// An encoding failure is a server fault, not a too-large row: it must surface
+// rather than be silently reported as a trimmed page.
+func TestListUserThreads_SizingFailureSurfacesAsAnError(t *testing.T) {
+	items := fatItems("site-a", 3, 64)
+	items[1].ParentMessage = json.RawMessage(`{"broken":`)
+	svc, history, _, _ := newThreadSvc(t, WithPageBudget(pagefit.NewBudget(64, 0)))
+	expectThreadList(history, "site-a", items, false)
+	expectThreadList(history, "site-b", nil, false)
+
+	_, err := svc.ListUserThreads(ctx("alice", "site-a"), model.ThreadListRequest{Limit: 100})
+	require.Error(t, err)
+}

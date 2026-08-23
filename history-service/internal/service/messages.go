@@ -98,7 +98,10 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 	setDecodedAttachments(c, page.Data)
 	// Trim last: both passes above change encoded size. Rows are DESC, so
 	// dropping the tail leaves the client's next before = oldest kept createdAt.
-	kept, trimmed := s.fitPage(page.Data, pageEnvelope)
+	kept, trimmed, err := s.fitPage(c, page.Data, pageEnvelope)
+	if err != nil {
+		return nil, err
+	}
 	// An empty page must never claim hasNext: this RPC pages by before = oldest
 	// returned createdAt, so an empty resumable page (budget-exhausted walk over
 	// a long silent gap) would leave the client no way to advance.
@@ -386,8 +389,10 @@ func (s *HistoryService) assembleSurrounding(
 	setDecodedAttachments(c, messages)
 	// Trim outward from the pivot so the caller keeps the row they centred on;
 	// each end that loses rows sets its own "more" flag.
-	pivotIdx := len(beforePage.Data)
-	lo, hi := s.fitWindow(messages, pivotIdx, pageEnvelope)
+	lo, hi, err := s.fitWindow(c, messages, len(beforePage.Data), pageEnvelope)
+	if err != nil {
+		return nil, err
+	}
 	return &models.LoadSurroundingMessagesResponse{
 		Messages:          messages[lo:hi],
 		MoreBefore:        beforePage.HasNext || lo > 0,

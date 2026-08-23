@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -116,16 +117,17 @@ func (s *UserService) ListUserThreads(c *natsrouter.Context, req model.ThreadLis
 
 	// Trim after enrichment — it adds bytes, so a page measured before it can
 	// still overflow. The cursor below then resumes at the last kept row.
-	//
-	// The oversize return is ignored: a lone row too large to send has no
-	// blanked form here (unlike a message, a thread item carries no truncated
-	// flag), and one cannot occur in practice — its parent body inherits the
-	// 20 KB content cap. Such a row falls through to the router's
-	// response_too_large reply rather than being silently degraded.
-	kept, dropped, _ := pagefit.Fit(merged, s.pageBudget, threadListEnvelope)
-	if dropped {
-		merged = kept
-		hasNext = true
+	kept, oversize, err := pagefit.Fit(merged, s.pageBudget, threadListEnvelope)
+	if err != nil {
+		return nil, fmt.Errorf("fit thread list page: %w", err)
+	}
+	hasNext = hasNext || len(kept) < len(merged)
+	merged = kept
+	// A lone row too large to send is shrunk rather than passed through: the
+	// router would refuse the reply, and halving limit cannot help when one row
+	// is the problem.
+	if oversize {
+		blankOversizeThread(&merged[0])
 	}
 
 	resp := &model.ThreadListResponse{Items: merged, HasNext: hasNext, UnavailableSites: unavailable}
@@ -322,4 +324,13 @@ func distinctDMAndBotNames(items []model.ThreadListItem) (dmAccounts, botAccount
 		}
 	}
 	return dmAccounts, botAccounts
+}
+
+// blankOversizeThread drops the heavy forwarded body from a thread row that
+// alone exceeds the reply budget, keeping the identifiers and the sort key the
+// cursor is derived from.
+func blankOversizeThread(item *model.ThreadListItem) {
+	item.ParentMessage = nil
+	item.LastMessage = nil
+	item.Truncated = true
 }

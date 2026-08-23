@@ -2,7 +2,6 @@ package pagefit
 
 import (
 	"encoding/json"
-	"math"
 	"strings"
 	"testing"
 
@@ -53,9 +52,10 @@ func TestNewBudget(t *testing.T) {
 }
 
 func TestFit(t *testing.T) {
-	// Each row encodes to 12 bytes; n rows cost 12n + (n-1) separators.
 	const width = 10
-	const rowCost = width + 2
+	// Budgets are derived from real encoded sizes, so the table states intent
+	// rather than re-deriving the package's own separator/bracket arithmetic.
+	exactly := func(n int) Budget { return NewBudget(int64(encodedSize(t, rows(n, width))), 0) }
 
 	tests := []struct {
 		name     string
@@ -67,11 +67,11 @@ func TestFit(t *testing.T) {
 		{"disabled budget keeps everything", rows(5, width), Budget{}, 0, 5},
 		{"empty slice", nil, NewBudget(1000, 0), 0, 0},
 		{"all fit", rows(3, width), NewBudget(1000, 0), 0, 3},
-		{"exact fit", rows(3, width), NewBudget(int64(3*rowCost+2), 0), 0, 3},
-		{"one byte short drops the last", rows(3, width), NewBudget(int64(3*rowCost+1), 0), 0, 2},
-		{"envelope consumes the budget", rows(3, width), NewBudget(int64(3*rowCost+2), 0), 10, 2},
+		{"exact fit", rows(3, width), exactly(3), 0, 3},
+		{"one byte short drops the last", rows(3, width), NewBudget(int64(encodedSize(t, rows(3, width))-1), 0), 0, 2},
+		{"envelope consumes the budget", rows(3, width), exactly(3), 10, 2},
 		{"single row alone overflows still returns one", rows(4, width), NewBudget(1, 0), 0, 1},
-		{"only the first row fits", rows(4, width), NewBudget(int64(rowCost), 0), 0, 1},
+		{"only the first row fits", rows(4, width), exactly(1), 0, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,7 +85,7 @@ func TestFit(t *testing.T) {
 // back with "more" set would have no position to page from.
 func TestFit_NeverReturnsZeroRowsForNonEmptyInput(t *testing.T) {
 	for _, n := range []int{1, 2, 50} {
-		kept, _, oversize := Fit(rows(n, 4096), NewBudget(8, 0), 0)
+		kept, oversize, _ := Fit(rows(n, 4096), NewBudget(8, 0), 0)
 		assert.Len(t, kept, 1)
 		assert.True(t, oversize, "the caller must be told the kept row still overflows")
 	}
@@ -108,8 +108,8 @@ func TestFit_ReportsDroppedAndOversizeSeparately(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, dropped, oversize := Fit(tt.items, tt.budget, 0)
-			assert.Equal(t, tt.wantDropped, dropped, "dropped")
+			kept, oversize, _ := Fit(tt.items, tt.budget, 0)
+			assert.Equal(t, tt.wantDropped, len(kept) < len(tt.items), "dropped")
 			assert.Equal(t, tt.wantOversize, oversize, "oversize")
 		})
 	}
@@ -124,7 +124,7 @@ func TestFit_ResultAlwaysFitsWhenAnyRowFits(t *testing.T) {
 
 func TestFitWindow(t *testing.T) {
 	const width = 10
-	const rowCost = width + 2
+	exactly := func(n int) Budget { return NewBudget(int64(encodedSize(t, rows(n, width))), 0) }
 
 	tests := []struct {
 		name   string
@@ -137,16 +137,16 @@ func TestFitWindow(t *testing.T) {
 		{"disabled budget keeps everything", rows(5, width), 2, Budget{}, 0, 5},
 		{"empty slice", nil, 0, NewBudget(1000, 0), 0, 0},
 		{"all fit", rows(5, width), 2, NewBudget(1000, 0), 0, 5},
-		{"pivot only", rows(5, width), 2, NewBudget(int64(rowCost), 0), 2, 3},
-		{"grows symmetrically around the pivot", rows(5, width), 2, NewBudget(int64(3*rowCost+2), 0), 1, 4},
-		{"pivot at the start grows forward only", rows(5, width), 0, NewBudget(int64(2*rowCost+1), 0), 0, 2},
-		{"pivot at the end grows backward only", rows(5, width), 4, NewBudget(int64(2*rowCost+1), 0), 3, 5},
-		{"pivot below range is clamped", rows(3, width), -5, NewBudget(int64(rowCost), 0), 0, 1},
-		{"pivot above range is clamped", rows(3, width), 99, NewBudget(int64(rowCost), 0), 2, 3},
+		{"pivot only", rows(5, width), 2, exactly(1), 2, 3},
+		{"grows symmetrically around the pivot", rows(5, width), 2, exactly(3), 1, 4},
+		{"pivot at the start grows forward only", rows(5, width), 0, exactly(2), 0, 2},
+		{"pivot at the end grows backward only", rows(5, width), 4, exactly(2), 3, 5},
+		{"pivot below range is clamped", rows(3, width), -5, exactly(1), 0, 1},
+		{"pivot above range is clamped", rows(3, width), 99, exactly(1), 2, 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lo, hi, _ := FitWindow(tt.items, tt.pivot, tt.budget, 0)
+			lo, hi, _, _ := FitWindow(tt.items, tt.pivot, tt.budget, 0)
 			assert.Equal(t, tt.wantLo, lo, "lo")
 			assert.Equal(t, tt.wantHi, hi, "hi")
 		})
@@ -155,7 +155,7 @@ func TestFitWindow(t *testing.T) {
 
 // The pivot is the one row the caller cannot lose — it is the message they asked to centre on.
 func TestFitWindow_AlwaysIncludesPivotEvenWhenItAloneOverflows(t *testing.T) {
-	lo, hi, oversize := FitWindow(rows(5, 4096), 3, NewBudget(8, 0), 0)
+	lo, hi, oversize, _ := FitWindow(rows(5, 4096), 3, NewBudget(8, 0), 0)
 	assert.Equal(t, 3, lo)
 	assert.Equal(t, 4, hi)
 	assert.True(t, oversize, "the caller must be told the pivot alone overflows")
@@ -180,19 +180,10 @@ func BenchmarkFit_100RowsTrimmed(bench *testing.B) {
 	}
 }
 
-// A row that cannot be marshalled would break the response anyway; charge it
-// as maximal so it is never silently counted as free and waved past a budget.
-func TestFit_UnmarshalableRowIsChargedAsOversize(t *testing.T) {
-	items := []any{"ok", make(chan int), "ok"}
-	kept, dropped, _ := Fit(items, NewBudget(1000, 0), 0)
-	assert.Len(t, kept, 1)
-	assert.True(t, dropped)
-}
-
 // A page that fits must never be reported as dropped or oversize.
 func TestFit_WholePageFastPath(t *testing.T) {
 	const width = 10
-	const rowCost = width + 2
+	exactly := func(n int) Budget { return NewBudget(int64(encodedSize(t, rows(n, width))), 0) }
 
 	tests := []struct {
 		name     string
@@ -203,21 +194,20 @@ func TestFit_WholePageFastPath(t *testing.T) {
 	}{
 		{"disabled budget always fits", rows(3, width), Budget{}, 0, true},
 		{"empty always fits", nil, NewBudget(1, 0), 0, true},
-		{"exact fit", rows(1, width), NewBudget(int64(rowCost), 0), 0, true},
-		{"one byte over", rows(1, width), NewBudget(int64(rowCost-1), 0), 0, false},
-		{"envelope tips it over", rows(1, width), NewBudget(int64(rowCost), 0), 1, false},
+		{"exact fit", rows(1, width), exactly(1), 0, true},
+		{"one byte over", rows(1, width), NewBudget(int64(encodedSize(t, rows(1, width))-1), 0), 0, false},
+		{"envelope tips it over", rows(1, width), exactly(1), 1, false},
 		{"multiple rows fit", rows(3, width), NewBudget(1000, 0), 0, true},
-		{"multiple rows do not fit", rows(3, width), NewBudget(int64(rowCost), 0), 0, false},
+		{"multiple rows do not fit", rows(3, width), exactly(1), 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			kept, dropped, oversize := Fit(tt.items, tt.budget, tt.envelope)
+			kept, oversize, _ := Fit(tt.items, tt.budget, tt.envelope)
 			if tt.want {
 				assert.Len(t, kept, len(tt.items))
-				assert.False(t, dropped)
 				assert.False(t, oversize)
 			} else {
-				assert.True(t, dropped || oversize, "an overflowing page must report why")
+				assert.True(t, len(kept) < len(tt.items) || oversize, "an overflowing page must report why")
 			}
 		})
 	}
@@ -247,39 +237,55 @@ func TestResolve(t *testing.T) {
 	}
 }
 
-// An unmarshalable row is charged MaxInt32. Summing that into the running total
-// overflows int on a 32-bit build and flips the comparison, so the row would
-// read as fitting. These pin the subtraction-based comparisons that avoid it.
-func TestFit_OversizeChargeNeverWrapsAround(t *testing.T) {
-	bad := make(chan int)
-
-	t.Run("unmarshalable first row is still charged", func(t *testing.T) {
-		kept, _, oversize := Fit([]any{bad, "ok"}, NewBudget(math.MaxInt32, 0), 0)
-		assert.Len(t, kept, 1)
-		assert.True(t, oversize, "an unmarshalable row must never be counted as fitting")
-	})
-
-	t.Run("unmarshalable row stops the prefix", func(t *testing.T) {
-		kept, dropped, _ := Fit([]any{"ok", bad, "ok"}, NewBudget(math.MaxInt32, 0), 0)
-		assert.Len(t, kept, 1, "the scan must stop at the row it cannot size")
-		assert.True(t, dropped)
-	})
-
-	t.Run("unmarshalable pivot is reported oversize", func(t *testing.T) {
-		lo, hi, oversize := FitWindow([]any{"ok", bad, "ok"}, 1, NewBudget(math.MaxInt32, 0), 0)
-		assert.Equal(t, 1, lo)
-		assert.Equal(t, 2, hi)
-		assert.True(t, oversize)
-	})
-}
-
 // assembleSurrounding derives the pivot as len(beforePage) — which is one past
 // the end when there is no central row and nothing after it. Callers rely on
 // the clamp rather than guarding, so pin it.
 func TestFitWindow_PivotOnePastTheEndIsClamped(t *testing.T) {
 	items := rows(3, 10)
-	lo, hi, oversize := FitWindow(items, len(items), NewBudget(1<<20, 0), 0)
+	lo, hi, oversize, _ := FitWindow(items, len(items), NewBudget(1<<20, 0), 0)
 	assert.Equal(t, 0, lo)
 	assert.Equal(t, 3, hi)
 	assert.False(t, oversize)
+}
+
+// An override must never raise the ceiling above what the broker will accept —
+// a reply sized to it would be refused on the wire.
+func TestResolve_OverrideNeverExceedsTheBrokerCap(t *testing.T) {
+	tests := []struct {
+		name      string
+		override  int64
+		brokerMax int64
+		wantBytes int
+	}{
+		{"override below broker wins", 50_000, 128 << 10, 50_000},
+		{"override above broker is clamped to broker", 10 << 20, 128 << 10, 128 << 10},
+		{"override equal to broker", 1000, 1000, 1000},
+		{"no broker cap known, override honoured", 50_000, 0, 50_000},
+		{"no override falls back to broker", 0, 10_000, 10_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantBytes, Resolve(tt.override, tt.brokerMax, 0).Bytes())
+		})
+	}
+}
+
+// A row that will not encode is a server fault, not a too-large row. Reporting
+// it as oversize would blank it, mark it truncated, and return success — hiding
+// the failure and skipping the row for good.
+func TestFit_MarshalFailureIsAnErrorNotAnOversizeRow(t *testing.T) {
+	_, oversize, err := Fit([]any{"ok", make(chan int)}, NewBudget(8, 0), 0)
+	require.Error(t, err)
+	assert.False(t, oversize, "an encoding failure must not masquerade as truncation")
+}
+
+func TestFitWindow_MarshalFailureIsAnErrorNotAnOversizeRow(t *testing.T) {
+	_, _, oversize, err := FitWindow([]any{"ok", make(chan int), "ok"}, 1, NewBudget(8, 0), 0)
+	require.Error(t, err)
+	assert.False(t, oversize)
+}
+
+func TestFit_NoErrorWhenEverythingEncodes(t *testing.T) {
+	_, _, err := Fit(rows(5, 10), NewBudget(1000, 0), 0)
+	assert.NoError(t, err)
 }

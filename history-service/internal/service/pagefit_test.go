@@ -232,3 +232,152 @@ func TestLoadSurrounding_TimestampModeTrimsAroundThePivot(t *testing.T) {
 	assert.Less(t, len(resp.Messages), 16)
 	assert.True(t, resp.MoreBefore || resp.MoreAfter)
 }
+
+// Cassandra timestamps are millisecond-precision and the resume bound is a
+// strict `created_at < before`, so a trim that ends mid-millisecond drops every
+// tied row for good. The cut must land on a timestamp boundary.
+func TestLoadHistory_TrimNeverSplitsATimestampGroup(t *testing.T) {
+	// Rows 4..7 share one millisecond; a budget near five rows would otherwise
+	// cut inside that group.
+	all := fatMessages(12, 512)
+	shared := joinTime.Add(30 * time.Minute)
+	for i := 4; i < 8; i++ {
+		all[i].CreatedAt = shared
+	}
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(budgetFor(t, all, 6)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.Messages)
+	require.True(t, resp.HasNext)
+
+	last := resp.Messages[len(resp.Messages)-1]
+	firstDropped := all[len(resp.Messages)]
+	assert.False(t, last.CreatedAt.Equal(firstDropped.CreatedAt),
+		"the page must not end on the same millisecond it resumes from — the tied rows would be skipped")
+}
+
+// A whole page inside one millisecond cannot be cut at all. Skipping rows would
+// lose them silently, so the group is kept whole and shrunk to fit instead.
+func TestLoadHistory_UnsplittableTimestampGroupIsKeptWholeAndBlanked(t *testing.T) {
+	shared := joinTime.Add(30 * time.Minute)
+	all := fatMessages(5, 2048)
+	for i := range all {
+		all[i].CreatedAt = shared
+	}
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(1024, 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+
+	assert.Len(t, resp.Messages, 5, "no row sharing the millisecond may be dropped")
+	for _, m := range resp.Messages {
+		assert.True(t, m.Truncated, "an unsplittable group is shrunk rather than split")
+		assert.Empty(t, m.Msg)
+	}
+}
+
+// The window pages outward by timestamp at both ends, so both edges need the
+// same boundary rule.
+func TestLoadSurrounding_TrimNeverSplitsATimestampGroupAtEitherEdge(t *testing.T) {
+	before := fatMessages(8, 512)
+	after := fatMessages(8, 512)
+	shared := joinTime.Add(90 * time.Minute)
+	for i := range after {
+		after[i].MessageID = fmt.Sprintf("a%02d", i)
+		if i < 3 {
+			after[i].CreatedAt = shared
+		}
+	}
+	for i := range before {
+		if i < 3 {
+			before[i].CreatedAt = joinTime.Add(2 * time.Minute)
+		}
+	}
+	central := models.Message{MessageID: "mC", RoomID: "r1", CreatedAt: joinTime.Add(60 * time.Minute)}
+
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(int64(encodedSize(t, before[:4])), 0)))
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "mC").Return(&central, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, central.CreatedAt, gomock.Any()).
+		Return(makePage(before, false), nil)
+	msgs.EXPECT().GetMessagesAfter(gomock.Any(), "r1", central.CreatedAt, gomock.Any(), gomock.Any()).
+		Return(makePage(after, false), nil)
+
+	resp, err := svc.LoadSurroundingMessages(testContext(), models.LoadSurroundingMessagesRequest{MessageID: "mC", Limit: 30})
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.Messages)
+
+	// Rebuild the pre-trim assembly to locate the kept span's neighbours.
+	assembled := make([]models.Message, 0, len(before)+1+len(after))
+	for i := len(before) - 1; i >= 0; i-- {
+		assembled = append(assembled, before[i])
+	}
+	assembled = append(assembled, central)
+	assembled = append(assembled, after...)
+
+	first, last := resp.Messages[0], resp.Messages[len(resp.Messages)-1]
+	for i, m := range assembled {
+		if m.MessageID == first.MessageID && i > 0 {
+			assert.False(t, assembled[i-1].CreatedAt.Equal(m.CreatedAt), "older edge must not split a millisecond")
+		}
+		if m.MessageID == last.MessageID && i < len(assembled)-1 {
+			assert.False(t, assembled[i+1].CreatedAt.Equal(m.CreatedAt), "newer edge must not split a millisecond")
+		}
+	}
+}
+
+// Keeping an unsplittable millisecond run whole grows the page past the length
+// pagefit approved, so the blanked result must be measured again.
+func TestLoadHistory_BlankedTimestampRunFitsTheBudget(t *testing.T) {
+	shared := joinTime.Add(30 * time.Minute)
+	all := fatMessages(20, 4096)
+	for i := range all {
+		all[i].CreatedAt = shared
+	}
+	budget := pagefit.NewBudget(8192, 0)
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(budget))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+
+	assert.Len(t, resp.Messages, 20, "no row sharing the millisecond may be dropped")
+	assert.LessOrEqual(t, encodedSize(t, resp.Messages), budget.Bytes(),
+		"blanking must bring the run back under the budget")
+}
+
+// When even the blanked run will not fit, the rows are still all returned:
+// trimming would split the millisecond and lose them for good, so an explicit
+// transport error beats a silent skip.
+func TestLoadHistory_UnfittableTimestampRunKeepsEveryRow(t *testing.T) {
+	shared := joinTime.Add(30 * time.Minute)
+	all := fatMessages(100, 4096)
+	for i := range all {
+		all[i].CreatedAt = shared
+	}
+	svc, msgs, subs, _, _ := newService(t, service.WithPageBudget(pagefit.NewBudget(2048, 0)))
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+	msgs.EXPECT().GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(all, false), nil)
+
+	resp, err := svc.LoadHistory(testContext(), models.LoadHistoryRequest{})
+	require.NoError(t, err)
+
+	assert.Len(t, resp.Messages, 100, "every tied row must survive — skipping one loses it permanently")
+	for _, m := range resp.Messages {
+		assert.True(t, m.Truncated)
+	}
+}
