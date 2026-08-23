@@ -1,5 +1,5 @@
 // Package outbox is the cross-site federation relay contract shared by the
-// producers (room-service, room-worker, message-worker) and the consumer
+// producers (room-service, room-worker, message-worker, broadcast-worker) and the consumer
 // (outbox-worker): which event types ride which OUTBOX consumer lane, and the
 // one way to publish a relay event onto the stream.
 package outbox
@@ -40,6 +40,9 @@ var ConcurrentEventTypes = []model.InboxEventType{
 	// Idempotent + commutes with add/remove (a delete just makes it a no-op), so
 	// it rides the concurrent lane.
 	model.InboxMemberJoinedAtRefreshed,
+	// broadcast-worker: room-level mention badge. The destination write is a
+	// guarded idempotent $set, so duplicates and out-of-order applies converge.
+	model.InboxSubscriptionMention,
 }
 
 // OrderedEventTypes are the OUTBOX event types forwarded by outbox-worker's

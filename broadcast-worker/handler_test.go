@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -3754,4 +3756,324 @@ func TestHandleThreadCreated_ThreadViewSubjectSkippedWhenEncryptionFails(t *test
 
 	assert.Empty(t, pub.threadViewSubjects(), "no plaintext fallback on the room namespace")
 	assert.NotEmpty(t, pub.payloadFor(t, subject.UserRoomEvent("bob")), "the per-follower lane still delivers")
+}
+
+// mentionOutboxRecorder captures OUTBOX publishes so tests can assert the
+// per-destination fan-out without a real JetStream connection.
+type mentionOutboxRecorder struct {
+	mu      sync.Mutex
+	records []outboxRecord
+	err     error
+}
+
+type outboxRecord struct {
+	subject string
+	msgID   string
+	data    []byte
+	event   model.SubscriptionMentionEvent
+}
+
+func (r *mentionOutboxRecorder) publish(_ context.Context, subj string, data []byte, msgID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	r.records = append(r.records, outboxRecord{subject: subj, msgID: msgID, data: data})
+	return nil
+}
+
+// sorted returns the captured publishes by subject, payloads decoded.
+func (r *mentionOutboxRecorder) sorted(t *testing.T) []outboxRecord {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := append([]outboxRecord(nil), r.records...)
+	sort.Slice(out, func(i, j int) bool { return out[i].subject < out[j].subject })
+	for i := range out {
+		_, _, out[i].event = unwrapOutbox(t, out[i].data)
+	}
+	return out
+}
+
+func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
+	msgTime := time.Now().UTC().Truncate(time.Millisecond)
+
+	tests := []struct {
+		name           string
+		content        string
+		users          []model.User
+		publishErr     error
+		noFederate     bool
+		wantMentionAll bool
+		wantRecords    []outboxRecord
+	}{
+		{
+			name:    "all mentionees are local",
+			content: "hi @alice",
+			users:   []model.User{{ID: "u1", Account: "alice", SiteID: "site-a"}},
+		},
+		{
+			name:    "one event per remote site carrying only that site's accounts",
+			content: "hi @alice @bob @carol",
+			users: []model.User{
+				{ID: "u1", Account: "alice", SiteID: "site-a"},
+				{ID: "u2", Account: "bob", SiteID: "site-b"},
+				{ID: "u3", Account: "carol", SiteID: "site-c"},
+			},
+			wantRecords: []outboxRecord{
+				{
+					subject: "chat.outbox.site-a.site-b.subscription_mention",
+					msgID:   testMentionRequestID + ":site-b",
+					event: model.SubscriptionMentionEvent{
+						RoomID: "room-1", Accounts: []string{"bob"}, MentionedAt: msgTime.UnixMilli(),
+					},
+				},
+				{
+					subject: "chat.outbox.site-a.site-c.subscription_mention",
+					msgID:   testMentionRequestID + ":site-c",
+					event: model.SubscriptionMentionEvent{
+						RoomID: "room-1", Accounts: []string{"carol"}, MentionedAt: msgTime.UnixMilli(),
+					},
+				},
+			},
+		},
+		{
+			name:    "unresolved mentionee has no home site to route to",
+			content: "hi @ghost",
+			users:   nil,
+		},
+		{
+			name:           "mention-all alone federates nothing",
+			content:        "hi @all",
+			users:          nil,
+			wantMentionAll: true,
+		},
+		{
+			name:       "publish error is swallowed",
+			content:    "hi @bob",
+			users:      []model.User{{ID: "u2", Account: "bob", SiteID: "site-b"}},
+			publishErr: errors.New("jetstream down"),
+		},
+		{
+			name:       "federation disabled",
+			content:    "hi @bob",
+			users:      []model.User{{ID: "u2", Account: "bob", SiteID: "site-b"}},
+			noFederate: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+			rec := &mentionOutboxRecorder{err: tc.publishErr}
+
+			store.EXPECT().UpdateRoomLastMessage(gomock.Any(), "room-1", "msg-1", msgTime, tc.wantMentionAll).Return(nil)
+			store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
+			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+			us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(tc.users, nil)
+			store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", gomock.Any(), msgTime).Return(nil).AnyTimes()
+			keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+
+			var opts []handlerOption
+			if !tc.noFederate {
+				opts = append(opts, withOutboxFederation("site-a", rec.publish))
+			}
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal, opts...)
+
+			ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
+			require.NoError(t, h.HandleMessage(ctx, makeMessageEvent("room-1", tc.content, msgTime)))
+			assert.Len(t, pub.records, 1, "the client fan-out must still happen")
+
+			got := rec.sorted(t)
+			require.Len(t, got, len(tc.wantRecords))
+			for i, want := range tc.wantRecords {
+				assert.Equal(t, want.subject, got[i].subject)
+				assert.Equal(t, want.msgID, got[i].msgID)
+				assert.Equal(t, want.event.RoomID, got[i].event.RoomID)
+				assert.Equal(t, want.event.Accounts, got[i].event.Accounts)
+				assert.Equal(t, want.event.MentionedAt, got[i].event.MentionedAt)
+				assert.NotZero(t, got[i].event.Timestamp)
+			}
+		})
+	}
+}
+
+func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
+	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	editedAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	tests := []struct {
+		name         string
+		content      string
+		users        []model.User
+		lookupErr    error
+		wantBadged   []string // nil = SetSubscriptionMentions must not be called
+		wantAccounts []string // nil = nothing federated
+	}{
+		{
+			name:         "edit adding a remote mention federates it",
+			content:      "hi @bob",
+			users:        []model.User{{ID: "u2", Account: "bob", SiteID: "site-b"}},
+			wantBadged:   []string{"bob"},
+			wantAccounts: []string{"bob"},
+		},
+		{
+			name:    "edit without mentions skips both the badge and the lookup",
+			content: "no mentions here",
+		},
+		{
+			name:       "lookup failure still badges locally",
+			content:    "hi @bob",
+			lookupErr:  errors.New("mongo down"),
+			wantBadged: []string{"bob"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+			rec := &mentionOutboxRecorder{}
+
+			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
+			keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+			// No expectations when wantBadged is nil: gomock fails if either is called.
+			if tc.wantBadged != nil {
+				store.EXPECT().SetSubscriptionMentions(gomock.Any(), "room-1", tc.wantBadged, editedAt).Return(nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), tc.wantBadged).Return(tc.users, tc.lookupErr)
+			}
+
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
+				withOutboxFederation("site-a", rec.publish))
+
+			data, err := json.Marshal(model.MessageEvent{
+				Event:  model.EventUpdated,
+				SiteID: "site-a",
+				Message: model.Message{
+					ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+					Content: tc.content, CreatedAt: createdAt, EditedAt: &editedAt, UpdatedAt: &editedAt,
+				},
+			})
+			require.NoError(t, err)
+			ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
+			require.NoError(t, h.HandleMessage(ctx, data))
+
+			got := rec.sorted(t)
+			if tc.wantAccounts == nil {
+				assert.Empty(t, got)
+				return
+			}
+			require.Len(t, got, 1)
+			assert.Equal(t, "chat.outbox.site-a.site-b.subscription_mention", got[0].subject)
+			// An edit is its own canonical event, so it carries its own request ID.
+			assert.Equal(t, testMentionRequestID+":site-b", got[0].msgID)
+			assert.Equal(t, tc.wantAccounts, got[0].event.Accounts)
+			assert.Equal(t, editedAt.UnixMilli(), got[0].event.MentionedAt)
+		})
+	}
+}
+
+// blockingMentionPublisher records the ctx each publish sees and blocks until
+// that ctx is done, standing in for a stalled OUTBOX.
+type blockingMentionPublisher struct {
+	mu        sync.Mutex
+	deadlines []time.Time
+	hadDeadln []bool
+}
+
+func (p *blockingMentionPublisher) publish(ctx context.Context, _ string, _ []byte, _ string) error {
+	deadline, ok := ctx.Deadline()
+	p.mu.Lock()
+	p.hadDeadln = append(p.hadDeadln, ok)
+	p.deadlines = append(p.deadlines, deadline)
+	p.mu.Unlock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (p *blockingMentionPublisher) calls() ([]bool, []time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]bool(nil), p.hadDeadln...), append([]time.Time(nil), p.deadlines...)
+}
+
+func remoteParticipants(n int) []model.Participant {
+	out := make([]model.Participant, n)
+	for i := range out {
+		out[i] = model.Participant{Account: fmt.Sprintf("acct-%d", i), SiteID: fmt.Sprintf("site-%d", i)}
+	}
+	return out
+}
+
+// A stalled OUTBOX must not hold the canonical message: the fan-out caps itself
+// even when the caller's context has no deadline of its own.
+func TestHandler_FederateMentions_AppliesOwnDeadline(t *testing.T) {
+	var mu sync.Mutex
+	var seen []time.Time
+	h := &Handler{siteID: "site-a", publish: func(ctx context.Context, _ string, _ []byte, _ string) error {
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok, "publish must inherit the fan-out deadline")
+		mu.Lock()
+		seen = append(seen, deadline)
+		mu.Unlock()
+		return nil
+	}}
+
+	ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
+	_, hasDeadline := ctx.Deadline()
+	require.False(t, hasDeadline, "the caller must not already carry a deadline for this to prove anything")
+
+	before := time.Now()
+	h.federateMentions(ctx, "room-1", "msg-1", remoteParticipants(1), before)
+	after := time.Now()
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, seen, 1)
+	// The budget starts inside the call, so the deadline lands within
+	// [before, after] + mentionFanoutTimeout.
+	assert.False(t, seen[0].Before(before.Add(mentionFanoutTimeout)))
+	assert.False(t, seen[0].After(after.Add(mentionFanoutTimeout)))
+}
+
+// An earlier caller deadline wins, so the fan-out never outlives the work that
+// spawned it.
+func TestHandler_FederateMentions_ParentDeadlineWins(t *testing.T) {
+	pub := &blockingMentionPublisher{}
+	h := &Handler{siteID: "site-a", publish: pub.publish}
+
+	ctx, cancel := context.WithTimeout(natsutil.WithRequestID(context.Background(), testMentionRequestID), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	h.federateMentions(ctx, "room-1", "msg-1", remoteParticipants(1), start)
+
+	assert.Less(t, time.Since(start), mentionFanoutTimeout, "the parent's earlier deadline must cut the fan-out short")
+}
+
+// Latency must not scale with the number of stalled batches: 3x maxSiteFanout
+// destinations still finish within one budget, because every batch shares the
+// single fan-out deadline rather than starting a fresh one.
+func TestHandler_FederateMentions_LatencyDoesNotScaleWithBatches(t *testing.T) {
+	pub := &blockingMentionPublisher{}
+	h := &Handler{siteID: "site-a", publish: pub.publish}
+
+	ctx, cancel := context.WithTimeout(natsutil.WithRequestID(context.Background(), testMentionRequestID), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	h.federateMentions(ctx, "room-1", "msg-1", remoteParticipants(3*maxSiteFanout), start)
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, mentionFanoutTimeout, "3 batches must not cost 3 budgets")
+	hadDeadline, _ := pub.calls()
+	assert.LessOrEqual(t, len(hadDeadline), 3*maxSiteFanout)
 }

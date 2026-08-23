@@ -1744,3 +1744,49 @@ func TestInboxWorker_ApplyUserPermissions_Integration(t *testing.T) {
 		assert.NotNil(t, raw.Permissions["externalImageView"])
 	})
 }
+
+func TestInboxWorker_SubscriptionMention_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+	msgAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	// unread: never read (no lastSeenAt) — badged. stale: read before — badged.
+	// caught: read past the message — untouched. other: different room — untouched.
+	_, err := store.subCol.InsertMany(ctx, []any{
+		bson.M{"_id": "s1", "roomId": "room-1", "u": bson.M{"account": "unread"}},
+		bson.M{"_id": "s2", "roomId": "room-1", "u": bson.M{"account": "stale"}, "lastSeenAt": msgAt.Add(-time.Minute)},
+		bson.M{"_id": "s3", "roomId": "room-1", "u": bson.M{"account": "caught"}, "lastSeenAt": msgAt.Add(time.Minute)},
+		bson.M{"_id": "s4", "roomId": "room-2", "u": bson.M{"account": "unread"}},
+	})
+	require.NoError(t, err)
+
+	payload, err := json.Marshal(model.SubscriptionMentionEvent{
+		RoomID:      "room-1",
+		Accounts:    []string{"unread", "stale", "caught", "absent"},
+		MentionedAt: msgAt.UnixMilli(),
+		Timestamp:   msgAt.UnixMilli(),
+	})
+	require.NoError(t, err)
+	data, err := json.Marshal(model.InboxEvent{
+		Type:       model.InboxSubscriptionMention,
+		SiteID:     "site-a",
+		DestSiteID: "site-b",
+		Payload:    payload,
+		Timestamp:  msgAt.UnixMilli(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, NewHandler(store).HandleEvent(ctx, data))
+
+	for _, tc := range []struct {
+		id   string
+		want bool
+	}{{"s1", true}, {"s2", true}, {"s3", false}, {"s4", false}} {
+		var got struct {
+			HasMention bool `bson:"hasMention"`
+		}
+		require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": tc.id}).Decode(&got))
+		assert.Equal(t, tc.want, got.HasMention, "subscription %s", tc.id)
+	}
+}

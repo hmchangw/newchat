@@ -5471,3 +5471,13 @@ func TestMessageAppInfoJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"isSubscribed":false`)
 }
+
+func TestSubscriptionMentionEvent_RoundTrip(t *testing.T) {
+	src := &model.SubscriptionMentionEvent{
+		RoomID:      "room-1",
+		Accounts:    []string{"alice", "bob"},
+		MentionedAt: 1755820800000,
+		Timestamp:   1755820800123,
+	}
+	roundTrip(t, src, &model.SubscriptionMentionEvent{})
+}
