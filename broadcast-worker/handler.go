@@ -894,6 +894,36 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 	return pubErr
 }
 
+// publishThreadLaneEvent fans a channel thread's create/edit/delete out on the
+// per-thread lane, which viewers subscribe to while a thread pane is open.
+//
+// Mirrors publishRoomEvent, not publishToThreadAccounts: this is one subject
+// (two in dual mode), not a per-recipient fan-out, so there is nothing to
+// parallelize and no "all recipients failed" rule to apply. Deliveries are
+// attributed to roomThreadLane because the lane's audience is unobservable —
+// unlike the per-account thread fan-out, whose recipient count is exact.
+//
+// Callers MUST treat a returned error as best-effort: the per-account lane is
+// the delivery guarantee, and failing the handler here would re-fan-out that
+// lane on redelivery.
+func (h *Handler) publishThreadLaneEvent(ctx context.Context, roomID, parentMsgID string, crossSite *bool, crossSiteAt *time.Time, payload []byte, op string) error {
+	labels := broadcastLabels(ctx)
+	ctx = withBroadcastMetricLabels(ctx, roomThreadLane, labels.eventType)
+	now := time.Now().UTC()
+	var pubErr error
+	for _, subj := range subject.ThreadEventTargets(roomID, parentMsgID, crossSite, crossSiteAt, h.routeMode, now) {
+		if err := h.pub.Publish(ctx, subj, payload); err != nil {
+			pubErr = fmt.Errorf("publish %s for thread %s in room %s to %s: %w", op, parentMsgID, roomID, subj, err)
+		}
+	}
+	// No audience figure: the lane's subscriber count is unobservable from here,
+	// and an invented number is worse than none.
+	slog.Log(ctx, logctx.LevelFlow, "broadcast fan-out", "phase", "fanout",
+		"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID,
+		"parent_message_id", parentMsgID, "delivery", "thread-lane")
+	return pubErr
+}
+
 // debugFlowFanout emits the flow-rung outcome of a per-recipient fan-out:
 // recipients = individual deliveries attempted in this hop, failed = how many of
 // those errored (delivered = recipients - failed). Metadata only. The room-stream

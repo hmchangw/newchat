@@ -51,6 +51,20 @@ func (m *mockPublisher) Publish(_ context.Context, subj string, data []byte) err
 	return m.failOn[subj]
 }
 
+// labelCapturingPublisher records the room-kind label each Publish call carries
+// on its context, so tests can assert metric attribution without a real meter.
+type labelCapturingPublisher struct {
+	mu   sync.Mutex
+	seen []roomKindLabel
+}
+
+func (p *labelCapturingPublisher) Publish(ctx context.Context, _ string, _ []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seen = append(p.seen, broadcastLabels(ctx).roomKind)
+	return nil
+}
+
 // stubParentFetcher is a ParentFetcher test double: FetchParent returns a fixed
 // parent (or error) regardless of arguments. The zero value returns an empty
 // ParentMessageInfo — fine for tests that exercise only the follower/sender
@@ -3394,4 +3408,80 @@ func terminalCountFor(t *testing.T, reason string, fn func(context.Context)) int
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 	return sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": reason})
+}
+
+// TestPublishThreadLaneEvent_GlobalRoom verifies the helper publishes to the
+// global thread subject for a cross-site room.
+func TestPublishThreadLaneEvent_GlobalRoom(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+
+	crossSite := true
+	err := h.publishThreadLaneEvent(context.Background(), "r1", "p1", &crossSite, nil, []byte(`{"type":"new_thread_message"}`), "thread create")
+
+	require.NoError(t, err)
+	require.Len(t, pub.records, 1)
+	assert.Equal(t, "chat.room.r1.thread.p1.event", pub.records[0].subject)
+}
+
+// TestPublishThreadLaneEvent_DualMode verifies both namespaces receive the
+// event for a same-site room in dual mode, matching publishRoomEvent.
+func TestPublishThreadLaneEvent_DualMode(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteDual)
+
+	sameSite := false
+	err := h.publishThreadLaneEvent(context.Background(), "r1", "p1", &sameSite, nil, []byte(`{}`), "thread create")
+
+	require.NoError(t, err)
+	require.Len(t, pub.records, 2)
+	assert.Equal(t, "chat.local.room.r1.thread.p1.event", pub.records[0].subject)
+	assert.Equal(t, "chat.room.r1.thread.p1.event", pub.records[1].subject)
+}
+
+// TestPublishThreadLaneEvent_PublishError_ReturnsError verifies a failed target
+// surfaces as an error to the caller, which is responsible for swallowing it.
+func TestPublishThreadLaneEvent_PublishError_ReturnsError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{failOn: map[string]error{
+		"chat.room.r1.thread.p1.event": errors.New("nats down"),
+	}}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+
+	crossSite := true
+	err := h.publishThreadLaneEvent(context.Background(), "r1", "p1", &crossSite, nil, []byte(`{}`), "thread create")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chat.room.r1.thread.p1.event")
+	assert.Len(t, pub.records, 1, "the attempt is still recorded")
+}
+
+// TestPublishThreadLaneEvent_LabelsAsThreadLane verifies deliveries are
+// attributed to the thread_lane kind, not channel (publishRoomEvent's label)
+// and not thread (the per-account fan-out's label, whose fanout/deliveries
+// pair is documented as directly comparable).
+func TestPublishThreadLaneEvent_LabelsAsThreadLane(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &labelCapturingPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+
+	crossSite := true
+	require.NoError(t, h.publishThreadLaneEvent(context.Background(), "r1", "p1", &crossSite, nil, []byte(`{}`), "thread create"))
+
+	require.Len(t, pub.seen, 1)
+	assert.Equal(t, roomThreadLane, pub.seen[0])
 }
