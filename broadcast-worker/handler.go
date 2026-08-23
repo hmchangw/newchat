@@ -498,14 +498,21 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 		if err != nil {
 			return fmt.Errorf("channel thread fan-out for thread delete of parent %s: %w", parentMsgID, err)
 		}
+		payload, err := sonic.Marshal(&del)
+		if err != nil {
+			return fmt.Errorf("marshal thread delete event for parent %s: %w", parentMsgID, err)
+		}
 		if len(fanOut) > 0 {
-			payload, err := sonic.Marshal(&del)
-			if err != nil {
-				return fmt.Errorf("marshal thread delete event for parent %s: %w", parentMsgID, err)
-			}
 			if err := h.publishToThreadAccounts(ctx, fanOut, payload, parentMsgID); err != nil {
 				return fmt.Errorf("publish thread delete event for parent %s: %w", parentMsgID, err)
 			}
+		}
+		// Thread lane: DeleteRoomEvent carries no message content, so the same
+		// payload serves both lanes — no encryption, no second marshal.
+		if err := h.publishThreadLaneEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload, "thread delete"); err != nil {
+			slog.ErrorContext(ctx, "publish thread lane delete failed",
+				"error", err, "room_id", room.ID, "parentMessageID", parentMsgID,
+				"request_id", natsutil.RequestIDFromContext(ctx))
 		}
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		// DM thread replies are visible to every member, so deletes fan out to

@@ -3255,8 +3255,9 @@ func TestHandleThreadDeleted_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
-	// bob and carol (followers) + alice (sender) included for multi-device parity
-	require.Len(t, pub.records, 3)
+	// bob and carol (followers) + alice (sender) included for multi-device parity,
+	// plus the thread lane copy.
+	require.Len(t, pub.records, 4)
 	subjects := map[string]bool{}
 	for _, r := range pub.records {
 		subjects[r.subject] = true
@@ -3270,6 +3271,7 @@ func TestHandleThreadDeleted_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	assert.True(t, subjects[subject.UserRoomEvent("alice")])
 	assert.True(t, subjects[subject.UserRoomEvent("bob")])
 	assert.True(t, subjects[subject.UserRoomEvent("carol")])
+	assert.True(t, subjects["chat.room.r1.thread.parent-1.event"])
 }
 
 func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
@@ -3311,8 +3313,9 @@ func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
 	require.NoError(t, h.HandleMessage(context.Background(), data))
 
-	// delete events to bob (follower) + alice (sender, multi-device parity) + 1 badge update (to room channel)
-	require.Len(t, pub.records, 3)
+	// delete events to bob (follower) + alice (sender, multi-device parity) + the
+	// thread lane copy + 1 badge update (to room channel)
+	require.Len(t, pub.records, 4)
 	var sawBadge bool
 	deleteSubjects := map[string]bool{}
 	for _, r := range pub.records {
@@ -3333,6 +3336,7 @@ func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
 	}
 	assert.True(t, deleteSubjects[subject.UserRoomEvent("bob")], "delete event must be published to follower")
 	assert.True(t, deleteSubjects[subject.UserRoomEvent("alice")], "delete event must be published to sender for multi-device parity")
+	assert.True(t, deleteSubjects["chat.room.r1.thread.parent-1.event"], "delete event must reach the thread lane")
 	assert.True(t, sawBadge, "badge update must be published to room channel")
 }
 
@@ -3923,4 +3927,119 @@ func TestHandleThreadCreated_EmptyFanOut_StillPublishesThreadLane(t *testing.T) 
 		}
 	}
 	assert.True(t, found, "an empty per-account fan-out must not suppress the thread lane")
+}
+
+// TestHandleThreadDeleted_ChannelRoom_PublishesThreadLane verifies a delete
+// reaches viewers, so a viewer does not keep rendering a removed reply.
+func TestHandleThreadDeleted_ChannelRoom_PublishesThreadLane(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventDeleted, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "r1", UserAccount: "alice",
+			CreatedAt: msgTime, UpdatedAt: &msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	var lane *publishRecord
+	for i := range pub.records {
+		if pub.records[i].subject == "chat.room.r1.thread.parent-1.event" {
+			lane = &pub.records[i]
+		}
+	}
+	require.NotNil(t, lane, "thread lane must receive the delete")
+
+	var laneEvt model.DeleteRoomEvent
+	require.NoError(t, json.Unmarshal(lane.data, &laneEvt))
+	assert.Equal(t, model.RoomEventMessageDeleted, laneEvt.Type)
+	assert.Equal(t, "reply-1", laneEvt.MessageID)
+	assert.Equal(t, "parent-1", laneEvt.ThreadParentMessageID)
+}
+
+// TestHandleThreadDeleted_ThreadLaneNotEncrypted verifies the delete payload is
+// identical on both lanes: it carries no message content, so there is nothing
+// to encrypt and no reason to build a second payload.
+func TestHandleThreadDeleted_ThreadLaneNotEncrypted(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventDeleted, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "r1", UserAccount: "alice",
+			CreatedAt: msgTime, UpdatedAt: &msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	var lane, perAccount *publishRecord
+	for i := range pub.records {
+		switch pub.records[i].subject {
+		case "chat.room.r1.thread.parent-1.event":
+			lane = &pub.records[i]
+		case subject.UserRoomEvent("bob"):
+			perAccount = &pub.records[i]
+		}
+	}
+	require.NotNil(t, lane)
+	require.NotNil(t, perAccount)
+	assert.JSONEq(t, string(perAccount.data), string(lane.data),
+		"delete carries no content, so both lanes send the same payload")
+}
+
+// TestHandleThreadDeleted_DMRoom_NoThreadLane verifies DM deletes skip the lane.
+func TestHandleThreadDeleted_DMRoom_NoThreadLane(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	room := &model.Room{ID: "dm1", Type: model.RoomTypeDM, SiteID: "site-a", Accounts: []string{"alice", "bob"}}
+	store.EXPECT().GetRoom(gomock.Any(), "dm1").Return(room, nil)
+
+	evt := model.MessageEvent{
+		Event: model.EventDeleted, SiteID: "site-a", Timestamp: msgTime.UnixMilli(),
+		Message: model.Message{
+			ID: "reply-1", RoomID: "dm1", UserAccount: "alice",
+			CreatedAt: msgTime, UpdatedAt: &msgTime,
+			ThreadParentMessageID: "parent-1", TShow: false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	for _, r := range pub.records {
+		assert.NotContains(t, r.subject, ".thread.")
+	}
 }
