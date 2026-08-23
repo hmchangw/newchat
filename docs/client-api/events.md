@@ -422,6 +422,7 @@ Cassandra projection).
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Optional. |
 | `pinnedAt` | string | Optional. RFC 3339. |
 | `pinnedBy` | [Participant](../client-api.md#participant) | Optional. |
+| `truncated` | boolean | Optional. `true` when the server blanked this row to make the page fit — either the row alone exceeded the transport's `max_payload`, or it shares a `createdAt` millisecond with such a row. `msg`, `mentions`, `attachments`, `card`, `cardAction`, `quotedParentMessage`, `reactions`, `sysMsgData`, `encPayload` and `encMeta` are cleared; identifiers, `sender`, `createdAt` and `type` are retained for placeholder rendering. Absent on every ordinary row. |
 
 Channel example (encrypted):
 

@@ -238,18 +238,11 @@ func redactUnavailablePins(pinned []models.Message, accessSince *time.Time) {
 		if !pinInaccessible(&pinned[i], *accessSince) {
 			continue
 		}
+		stripRichContent(&pinned[i])
 		pinned[i].Msg = UnavailableQuoteMsg
-		pinned[i].Mentions = nil
-		pinned[i].Attachments = nil
-		pinned[i].DecodedAttachments = nil
-		pinned[i].Card = nil
-		pinned[i].CardAction = nil
-		pinned[i].QuotedParentMessage = nil
-		pinned[i].Reactions = nil
-		// System messages carry event metadata in Type/SysMsgData (e.g.
-		// "user_joined" with a payload); scrub both so pre-access system
-		// pins don't leak event details past the placeholder.
+		// System messages carry event metadata in Type (e.g. "user_joined");
+		// scrub it too so pre-access system pins don't leak event details past
+		// the placeholder. blankOversize deliberately keeps Type.
 		pinned[i].Type = ""
-		pinned[i].SysMsgData = nil
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -199,6 +200,14 @@ func main() {
 	}
 
 	pub := publisher.New(js, publisher.WithMetrics(publishMetrics))
+	// A zero Budget disables trimming, so the toggle needs no handler branch.
+	pageBudget := pagefit.Budget{}
+	if cfg.PageTrimming {
+		pageBudget = pagefit.Resolve(cfg.MaxResponseBytes, nc.NatsConn().MaxPayload(), pagefit.DefaultReserve)
+	} else {
+		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
+	}
+	opts = append(opts, service.WithPageBudget(pageBudget))
 	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
 
 	// Bound in-flight handlers so a burst is shed at the door instead of piling

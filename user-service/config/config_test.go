@@ -372,3 +372,40 @@ func TestLoad_BadgeMarkerTTLValidation(t *testing.T) {
 		})
 	}
 }
+
+// Trimming is on unless an operator turns it off. Flipping this default would
+// silently switch every deployment that does not set the var back to the
+// pre-pagefit behaviour of letting the broker refuse the reply.
+func TestLoad_PageTrimming(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{name: "defaults to enabled", env: "", want: true},
+		{name: "disabled by the operator", env: "false", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			if tc.env == "" {
+				unsetEnv(t, "PAGE_TRIMMING_ENABLED")
+			} else {
+				t.Setenv("PAGE_TRIMMING_ENABLED", tc.env)
+			}
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.PageTrimming)
+		})
+	}
+}
+
+// setRequiredEnv fills the vars Load rejects when empty, so a test can vary the
+// one knob it cares about.
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+}

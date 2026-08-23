@@ -41,6 +41,14 @@ type Config struct {
 	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
 	// disables the cap (unbounded spawn).
 	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+	// MaxResponseBytes caps a paginated reply so it is trimmed to fit rather
+	// than refused by the broker. 0 derives the cap from the broker's
+	// advertised max_payload.
+	MaxResponseBytes int64 `env:"MAX_RESPONSE_BYTES" envDefault:"0"`
+	// PageTrimming trims a paginated reply to the budget. Off returns the page
+	// whole and lets the broker refuse it, so the client falls back to its
+	// response_too_large retry — an escape hatch, not a tuning knob.
+	PageTrimming bool `env:"PAGE_TRIMMING_ENABLED" envDefault:"true"`
 	// OIDC settings for the SSO token vault — optional as a unit: unset OIDC_ISSUER_URL disables the endpoints; the rest is validated in Load.
 	OIDCIssuerURL string `env:"OIDC_ISSUER_URL" envDefault:""`
 	// OIDCAudiences must include the access-token `aud` — refresh re-verifies the minted
