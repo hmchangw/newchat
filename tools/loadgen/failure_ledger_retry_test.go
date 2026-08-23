@@ -192,10 +192,12 @@ func TestFailureLedger_ARetryNeverLetsALaterCauseOvertakeTheFirst(t *testing.T) 
 		[]string{invalidReasonReconcileCapacity, invalidReasonWAL},
 		ledger.UnpersistedInvalidations())
 
-	// A successful append drives the retry, where the second cause would land.
+	// A write drives the retry. The write itself is refused while the debt
+	// stands, and the settle attempt it makes must not let the second cause
+	// land while the first is still owed.
 	operation := testFailureOperation("m1", now)
 	operation.LifecycleState = failureOperationJournaled
-	require.NoError(t, ledger.Start(operation))
+	require.Error(t, ledger.Start(operation))
 
 	assert.Empty(t, journaledMemoryInvalidationReasons(&journal.memoryFailureJournal),
 		"no cause may be journaled ahead of the one that came first")
@@ -211,4 +213,55 @@ func (j *reasonFailingFailureJournal) Append(event *failureLedgerEvent) error {
 		return errors.New("no space left on device")
 	}
 	return j.memoryFailureJournal.Append(event)
+}
+
+// The order is the whole finding. A record written first and the owed verdict
+// settled after leaves a kill in between with durable evidence and an
+// in-memory disqualifier — the replay this ledger exists to prevent. Settling
+// first also makes refusal honest: nothing was written, so the caller's error
+// is true, which is why refusing after the write was the wrong shape.
+func TestFailureLedger_NoEvidenceIsWrittenWhileAVerdictIsOwed(t *testing.T) {
+	now := time.Date(2026, 8, 23, 5, 0, 0, 0, time.UTC)
+	journal := &reasonFailingFailureJournal{refuse: invalidReasonReconcileCapacity}
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 4, Journal: journal, Now: func() time.Time { return now },
+	})
+	require.NoError(t, err)
+	operation := testFailureOperation("m1", now)
+	operation.LifecycleState = failureOperationJournaled
+	require.NoError(t, ledger.Start(operation))
+
+	ledger.Invalidate(invalidReasonReconcileCapacity)
+	require.NotEmpty(t, ledger.UnpersistedInvalidations())
+	before := len(journal.events)
+
+	t.Run("an ordinary record is refused", func(t *testing.T) {
+		err := ledger.Activate("m1", now)
+
+		require.Error(t, err)
+		assert.Len(t, journal.events, before,
+			"nothing may be journaled while the file will not take the verdict")
+	})
+
+	t.Run("a start is refused too", func(t *testing.T) {
+		next := testFailureOperation("m2", now)
+		next.LifecycleState = failureOperationJournaled
+
+		err := ledger.Start(next)
+
+		require.Error(t, err)
+		assert.Len(t, journal.events, before)
+	})
+
+	t.Run("a recovered journal settles the debt and accepts the record", func(t *testing.T) {
+		journal.refuse = ""
+
+		require.NoError(t, ledger.Activate("m1", now))
+
+		assert.Empty(t, ledger.UnpersistedInvalidations())
+		// The verdict is on file ahead of the record it disqualifies.
+		reasons := journaledMemoryInvalidationReasons(&journal.memoryFailureJournal)
+		assert.Equal(t, []string{invalidReasonReconcileCapacity, invalidReasonWAL}, reasons)
+		assert.Equal(t, failureLedgerEventActivated, journal.events[len(journal.events)-1].Type)
+	})
 }

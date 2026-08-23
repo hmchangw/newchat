@@ -613,6 +613,12 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 		l.mu.Unlock()
 		return fmt.Errorf("start failure operation %q: %w", tracked.ID, errFailureLedgerCapacity)
 	}
+	// Before the append below, which happens off the mutex: no evidence may
+	// reach the file while a verdict that disqualifies it does not.
+	if err := l.settleBeforeAppendLocked(); err != nil {
+		l.mu.Unlock()
+		return fmt.Errorf("start failure operation %q: %w", tracked.ID, err)
+	}
 	l.starting[tracked.ID] = struct{}{}
 	l.startingWG.Add(1)
 	l.mu.Unlock()
@@ -639,9 +645,6 @@ func (l *failureLedger) Start(operation *failureOperation) error {
 	if l.recorder != nil && l.journal != nil {
 		l.recorder.JournalSize(l.journal.Size())
 	}
-	// This append bypasses appendLocked to stay off the mutex, so it settles
-	// owed verdicts itself rather than leaving that to the next write.
-	l.retryPendingInvalidationsLocked()
 	l.active[tracked.ID] = tracked
 	l.enqueueLocked(tracked)
 	if l.recorder != nil {
@@ -1360,14 +1363,37 @@ func (l *failureLedger) appendLocked(event *failureLedgerEvent) error {
 	if l.journal == nil {
 		return nil
 	}
+	if err := l.settleBeforeAppendLocked(); err != nil {
+		return err
+	}
 	if err := l.journal.Append(event); err != nil {
 		return err
 	}
 	if l.recorder != nil {
 		l.recorder.JournalSize(l.journal.Size())
 	}
-	l.retryPendingInvalidationsLocked()
 	return nil
+}
+
+// settleBeforeAppendLocked pays verdicts the journal refused earlier, before
+// new evidence is written rather than after. The order is the point: a record
+// written first and the verdict settled after leaves a kill in between with
+// durable evidence and an in-memory disqualifier, which is the replay this
+// ledger exists to prevent.
+//
+// A debt that cannot be paid refuses the record. Refusing before the write is
+// what makes the error true — nothing was journaled — where refusing after it
+// would tell the caller a record failed that the file actually holds.
+func (l *failureLedger) settleBeforeAppendLocked() error {
+	l.retryPendingInvalidationsLocked()
+	owed := l.unpersistedInvalidationsLocked()
+	if len(owed) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"failure ledger owes the journal invalidation %s",
+		strings.Join(owed, ", "),
+	)
 }
 
 // retryPendingInvalidationsLocked lands verdicts the journal refused earlier.
