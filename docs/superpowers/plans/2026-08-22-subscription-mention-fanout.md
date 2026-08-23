@@ -506,7 +506,8 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			require.NoError(t, h.HandleMessage(context.Background(), data))
+			ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
+			require.NoError(t, h.HandleMessage(ctx, data))
 			assert.Len(t, pub.records, 1, "the client fan-out must still happen")
 
 			got := rec.sorted()
@@ -730,7 +731,8 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, h.HandleMessage(context.Background(), data))
+	ctx := natsutil.WithRequestID(context.Background(), testMentionRequestID)
+	require.NoError(t, h.HandleMessage(ctx, data))
 
 	got := rec.sorted()
 	require.Len(t, got, 1)
