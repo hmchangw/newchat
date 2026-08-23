@@ -14,6 +14,7 @@ services:
       # Same-site rooms (crossSite:false) are subscribed by the client on
       # chat.local.room.>; publishing global-only would never reach it.
       - ROOM_SUBJECT_MODE=${ROOM_SUBJECT_MODE:-dual}
+      - THREAD_VIEW_SUBJECT_ENABLED=${THREAD_VIEW_SUBJECT_ENABLED:-true}
       - MODE=bot
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.

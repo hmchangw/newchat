@@ -12,6 +12,7 @@ import {
   subscribeToSubscriptionUpdates,
   subscribeToUserRoomEvents,
 } from '@/api'
+import { decryptRoomEvent } from '@/lib/decryptRoomEvent'
 
 /** Trailing-debounce window for the active-room mark-read RPC. 500ms
  *  collapses a burst of "10 msg/sec" room chatter into ONE RPC at the
@@ -364,74 +365,13 @@ export function useRoomSubscriptions(
     // resolves true, decrypt is retried. On persistent null the event falls
     // through unchanged and the reducer's placeholder branch handles it.
     const decryptAndDispatch = async (evt, finalize) => {
-      let decoded = evt
-      try {
-        // Handle encrypted full-message events.
-        if (decoded.encryptedMessage && !decoded.message) {
-          const enc = decoded.encryptedMessage
-          if (typeof enc.version === 'number' && enc.nonce && enc.ciphertext) {
-            let plaintext = await decryptRef.current({
-              roomId: decoded.roomId,
-              version: enc.version,
-              nonceB64: enc.nonce,
-              ciphertextB64: enc.ciphertext,
-            })
-            if (plaintext == null && decoded.roomId) {
-              const siteId = decoded.siteId ?? natsRef.current.user?.siteId
-              if (siteId) {
-                const ok = await ensureKeyRef.current(decoded.roomId, enc.version, siteId)
-                if (ok) {
-                  plaintext = await decryptRef.current({
-                    roomId: decoded.roomId,
-                    version: enc.version,
-                    nonceB64: enc.nonce,
-                    ciphertextB64: enc.ciphertext,
-                  })
-                }
-              }
-            }
-            if (plaintext != null) {
-              const msg = JSON.parse(plaintext)
-              decoded = { ...decoded, message: msg, encryptedMessage: undefined }
-            }
-          }
-        }
-        // Handle encrypted message edits (flattened edit event).
-        if (decoded.type === 'message_edited' && decoded.encryptedNewContent && !decoded.newContent) {
-          const enc = decoded.encryptedNewContent
-          if (typeof enc.version === 'number' && enc.nonce && enc.ciphertext) {
-            let plaintext = await decryptRef.current({
-              roomId: decoded.roomId,
-              version: enc.version,
-              nonceB64: enc.nonce,
-              ciphertextB64: enc.ciphertext,
-            })
-            if (plaintext == null && decoded.roomId) {
-              const siteId = decoded.siteId ?? natsRef.current.user?.siteId
-              if (siteId) {
-                const ok = await ensureKeyRef.current(decoded.roomId, enc.version, siteId)
-                if (ok) {
-                  plaintext = await decryptRef.current({
-                    roomId: decoded.roomId,
-                    version: enc.version,
-                    nonceB64: enc.nonce,
-                    ciphertextB64: enc.ciphertext,
-                  })
-                }
-              }
-            }
-            if (plaintext != null) {
-              decoded = { ...decoded, newContent: plaintext, encryptedNewContent: undefined }
-            }
-          }
-        }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn('decryptAndDispatch failed; forwarding original event', err)
-      }
-      // The await(s) above span the effect-teardown window: if a logout→login
-      // cycled the effect while decryption was in flight, drop the whole
-      // continuation (dispatch + thread fan-out + mark-read) so a prior
+      const decoded = await decryptRoomEvent(evt, {
+        decrypt: decryptRef.current,
+        ensureKey: ensureKeyRef.current,
+        fallbackSiteId: natsRef.current.user?.siteId,
+      })
+      // The await above spans the effect-teardown window: if a logout->login
+      // cycled the effect mid-decrypt, drop the whole continuation so a prior
       // session's message can't surface in the new one.
       if (!isCurrent()) return
       finalize(decoded)

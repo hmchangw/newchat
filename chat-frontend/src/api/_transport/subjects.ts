@@ -25,13 +25,23 @@ export function msgDelete(account: string, roomId: string, siteId: string): stri
   return `chat.user.${account}.request.room.${roomId}.${siteId}.msg.delete`
 }
 
-// roomEvent builds the per-room channel-event subject. Cross-site rooms
-// stay on the global namespace (unchanged); same-site rooms route to the
-// local namespace so a down remote peer can't affect same-site delivery.
-// Fail-safe: only an explicit `false` routes to the site-local (leaf-filtered)
-// namespace; true/undefined/missing → global, matching the server-side default.
+// roomBase is the per-room subject root, mirroring Go's subject.roomBase.
+// Cross-site rooms stay on the global namespace; same-site rooms route to the
+// local one so a down remote peer can't affect same-site delivery. Fail-safe:
+// only an explicit `false` routes to the site-local (leaf-filtered) namespace;
+// true/undefined/missing → global, matching the server-side default.
+function roomBase(roomId: string, crossSite: boolean): string {
+  return crossSite === false ? `chat.local.room.${roomId}` : `chat.room.${roomId}`
+}
+
 export function roomEvent(roomId: string, crossSite: boolean): string {
-  return crossSite === false ? `chat.local.room.${roomId}.event` : `chat.room.${roomId}.event`
+  return `${roomBase(roomId, crossSite)}.event`
+}
+
+// roomThreadEvent is the thread-scoped lane a client subscribes to while a
+// thread panel is open, so a viewer who follows nothing still sees replies.
+export function roomThreadEvent(roomId: string, parentMessageId: string, crossSite: boolean): string {
+  return `${roomBase(roomId, crossSite)}.thread.${parentMessageId}.event`
 }
 
 // roomCreate is the room-service create subject. The site segment is the
