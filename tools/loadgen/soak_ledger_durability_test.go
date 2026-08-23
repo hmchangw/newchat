@@ -101,24 +101,46 @@ func TestWatchSoakLedgerDurability(t *testing.T) {
 			func([]string) { t.Fatal("one sighting is not a whole interval") })
 	})
 
-	// A debt that clears within the grace leaves nothing to report, and the
-	// next one starts its own interval rather than inheriting this one.
+	// A debt paid inside the grace must reset the clock, not merely go quiet:
+	// the next debt has to earn its own full interval. The tick a debt is
+	// first seen at is what the grace is measured from, so a stale owedSince
+	// would make the following debt fire on sight — which is the bug this
+	// pins. The ticks are unbuffered, so each send returns only once the
+	// watcher has taken the previous one, which is what puts the payment
+	// between two ticks rather than before the watch starts.
 	t.Run("a debt paid inside the grace resets the clock", func(t *testing.T) {
 		journal := &flakyInvalidationJournal{failures: 1}
 		ledger := newLedger(t, journal)
 		ledger.Invalidate(invalidReasonReconcileCapacity)
+		require.NotEmpty(t, ledger.UnpersistedInvalidations())
 
-		ticks := make(chan time.Time, 3)
+		ticks := make(chan time.Time)
+		watched := make(chan struct{})
+		go func() {
+			defer close(watched)
+			watchSoakLedgerDurability(context.Background(), ledger, ticks, grace,
+				func([]string) { t.Error("no debt stood for a whole interval") })
+		}()
+
 		ticks <- now
-		// Between the ticks the journal recovers and a write settles the debt.
+		// Well inside the grace, so this tick cannot fire whether it lands
+		// before or after the payment below.
+		ticks <- now.Add(time.Second)
 		operation := testFailureOperation("m1", now)
 		operation.LifecycleState = failureOperationJournaled
 		require.NoError(t, ledger.Start(operation))
-		ticks <- now.Add(grace)
-		ticks <- now.Add(2 * grace)
-		close(ticks)
+		require.Empty(t, ledger.UnpersistedInvalidations())
 
-		watchSoakLedgerDurability(context.Background(), ledger, ticks, grace,
-			func([]string) { t.Fatal("the debt was paid") })
+		// Past the grace with nothing owed: the clock must be cleared here.
+		ticks <- now.Add(2 * grace)
+		// A fresh debt, first seen a long way past the original sighting. With
+		// the clock still running from it, this tick would fire.
+		journal.failures = 1
+		ledger.Invalidate("observer_queue")
+		require.NotEmpty(t, ledger.UnpersistedInvalidations())
+		ticks <- now.Add(3 * grace)
+
+		close(ticks)
+		<-watched
 	})
 }

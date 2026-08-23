@@ -350,13 +350,10 @@ func TestMetrics_ReconcileClaimOutcomesArePublishedBeforeTheyHappen(t *testing.T
 	assert.Equal(t, 6, testutil.CollectAndCount(metrics.FailureReconcileClaims),
 		"every documented outcome must be a series from the first scrape")
 
-	for _, outcome := range []string{
-		soakReconcileClaimAdvanced,
-		soakReconcileClaimRetried,
-		soakReconcileClaimIdle,
-		soakReconcileClaimFailed,
-		soakReconcileClaimUnavailable,
-	} {
+	// Over the declared set, so an outcome added later cannot be left out of
+	// this check the way deferred was. The literal count above is what catches
+	// the set growing without this test being looked at.
+	for _, outcome := range soakReconcileClaimOutcomes() {
 		assert.Equal(t, float64(0), testutil.ToFloat64(
 			metrics.FailureReconcileClaims.WithLabelValues(outcome)),
 			"outcome %q must start at zero", outcome)
