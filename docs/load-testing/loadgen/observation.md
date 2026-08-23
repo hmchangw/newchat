@@ -72,9 +72,15 @@ backpressure; overload is reported as lane/global saturation. Reconciliation
 borrows at most `SOAK_RECONCILE_READ_SHARE` from the existing read lane and does
 not add an unbudgeted reader.
 
-Ledger capacity, WAL, observer, and queue failures degrade evidence but do not
-stop safe traffic. The single-replica `Deployment` uses `Recreate` with a
-retained `ReadWriteOnce` PVC, so unresolved operations resume after replacement.
+Ledger capacity, observer, and queue failures degrade evidence but do not stop
+safe traffic. A WAL failure is the exception, and only once it persists: a
+verdict the journal refuses is retried on the next write, and a debt still owed
+a full sweep later ends the run with exit code 2, because past that point the
+ledger cannot disown the evidence it is still accepting. A WAL-failure window,
+and any unclean restart, is invalid evidence rather than degraded evidence.
+
+The single-replica `Deployment` uses `Recreate` with a retained
+`ReadWriteOnce` PVC, so unresolved operations resume after replacement.
 
 WAL and sidecar performance are directly observable through
 `loadgen_failure_wal_append_duration_seconds`,
@@ -102,7 +108,7 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_RECIPIENT_OBSERVER_ENABLED` | `false` | Opt in to exact recipient observation |
 | `SOAK_RECIPIENT_OBSERVER_QUEUE` | `8192` | Bounded recipient callback queue |
 | `SOAK_RECIPIENT_OBSERVER_CONNECTIONS` | `32` | Bounded account-attributed NATS connection pool |
-| `SOAK_LEDGER_EPOCH` | `v2` | Evidence-journal identity, separate from the run ID. `v2` adds the `invalidated` record; an image that predates it rejects that record and cannot replay a `v2` journal, so rolling the image back means rolling the epoch back with it |
+| `SOAK_LEDGER_EPOCH` | `v2` | Evidence-journal identity, separate from the run ID. `v2` adds the `invalidated` record; an image that predates it rejects that record and cannot replay a `v2` journal, so rolling the image back means rolling the epoch back with it. An epoch change starts a new evidence window rather than upgrading the old one: stop admission and drain until `loadgen_failure_inflight` is zero with no ledger debt before switching, or the two sides are explicitly non-continuous evidence. `loadgen_failure_abandoned_journals` stays non-zero for as long as an earlier epoch's journal is retained |
 | `SOAK_MEMBER_MUTATION_RATE` | `2` | Member add/remove cycles per second |
 | `SOAK_ROOM_MUTATION_RATE` | `1` | Rename and mute toggles per second, alternating |
 | `SOAK_ROOM_READ_RATE` | `20` | Room reads per second; also funds reconciliation |
