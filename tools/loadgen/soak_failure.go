@@ -641,6 +641,12 @@ const (
 	soakReconcileClaimIdle        = "idle"
 	soakReconcileClaimFailed      = "failed"
 	soakReconcileClaimUnavailable = "unavailable"
+	// deferred is a claim that issued no query on purpose: the settle window
+	// has not elapsed, so there was nothing to ask yet. It is separate from
+	// retried because retried is the poll cost of an effect that has not
+	// landed, and counting a scheduled wait there manufactures a retry
+	// baseline in a healthy run.
+	soakReconcileClaimDeferred = "deferred"
 )
 
 // soakReconcileClaimOutcomes is the closed label set, listed so the metric can
@@ -652,6 +658,7 @@ func soakReconcileClaimOutcomes() []string {
 		soakReconcileClaimIdle,
 		soakReconcileClaimFailed,
 		soakReconcileClaimUnavailable,
+		soakReconcileClaimDeferred,
 	}
 }
 
@@ -672,8 +679,9 @@ func reconcileProbeOutcome(probeErr error) string {
 // evicted before the probe was due — and "retried" is defined as a probe that
 // answered and found the effect absent. Counting an unissued query as retried
 // would show the dashboard persistence lag where there was no query at all.
-// too_early is the one unqueried result that is intentional: the settle window
-// has not elapsed, so nothing is unavailable.
+// too_early is unqueried on purpose — the settle window has not elapsed — and
+// is neither of those: it is a scheduled wait, so it gets its own outcome
+// rather than inflating the retry baseline of a healthy run.
 func searchProbeOutcome(
 	result soakSearchIndexResult,
 	probed bool,
@@ -682,7 +690,10 @@ func searchProbeOutcome(
 	if probeErr != nil {
 		return soakReconcileClaimUnavailable
 	}
-	if !probed && result != soakSearchIndexTooEarly {
+	if result == soakSearchIndexTooEarly {
+		return soakReconcileClaimDeferred
+	}
+	if !probed {
 		return soakReconcileClaimUnavailable
 	}
 	return soakReconcileClaimRetried

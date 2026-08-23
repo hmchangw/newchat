@@ -16,8 +16,10 @@ import (
 // absent. Counting an unqueried result as retried makes catalog eviction or a
 // probe that was never configured read as persistence lag on the dashboard,
 // which is the one thing the separate unavailable outcome exists to prevent.
-// too_early is the exception: it is unqueried on purpose, because the settle
-// window has not elapsed, so there is nothing unavailable about it.
+// too_early is neither: it is unqueried on purpose, because the settle window
+// has not elapsed. Counting it as retried manufactures a retry baseline in a
+// perfectly healthy run — one per message — which is exactly the number a
+// search backlog would be read from, so it gets its own outcome.
 func TestSoakFailureReconciler_ClassifiesUnqueriedSearchProbesAsUnavailable(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -45,9 +47,9 @@ func TestSoakFailureReconciler_ClassifiesUnqueriedSearchProbesAsUnavailable(t *t
 			outcome: soakReconcileClaimRetried,
 		},
 		{
-			name:    "an intentionally unqueried too-early probe is retried",
+			name:    "an intentionally unqueried too-early probe is deferred",
 			result:  soakSearchIndexTooEarly,
-			outcome: soakReconcileClaimRetried,
+			outcome: soakReconcileClaimDeferred,
 		},
 	}
 

@@ -101,8 +101,9 @@ func TestSoakFailureReconciler_CountsAClaimWithNothingDueAsIdle(t *testing.T) {
 
 // observeSearchIndex returns nil both when it persisted an observation and when
 // it merely rescheduled the probe, so classifying the claim before the call
-// counts every search retry as progress — which is the one thing the split
-// exists to tell apart.
+// counts every search reschedule as progress — which is the one thing the split
+// exists to tell apart. A too-early probe waits by design, so it is deferred
+// rather than retried, but either way it advanced nothing.
 func TestSoakFailureReconciler_ARescheduledSearchProbeIsRetriedNotAdvanced(t *testing.T) {
 	startedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	now := startedAt.Add(12 * time.Second)
@@ -126,8 +127,11 @@ func TestSoakFailureReconciler_ARescheduledSearchProbeIsRetriedNotAdvanced(t *te
 	require.True(t, handled)
 
 	require.Equal(t, float64(1), testutil.ToFloat64(
-		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimRetried)),
+		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimDeferred)),
 		"a rescheduled search probe advanced nothing")
+	require.Zero(t, testutil.ToFloat64(
+		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimRetried)),
+		"and it asked nothing, so it is not a retry either")
 	require.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.FailureReconcileClaims.WithLabelValues(soakReconcileClaimAdvanced)),
 		"only the history observation advanced")
@@ -343,7 +347,7 @@ func TestMetrics_ReconcileClaimOutcomesArePublishedBeforeTheyHappen(t *testing.T
 
 	// Counted before anything touches a child, because WithLabelValues creates
 	// one: asking for the series first would manufacture the thing under test.
-	assert.Equal(t, 5, testutil.CollectAndCount(metrics.FailureReconcileClaims),
+	assert.Equal(t, 6, testutil.CollectAndCount(metrics.FailureReconcileClaims),
 		"every documented outcome must be a series from the first scrape")
 
 	for _, outcome := range []string{
