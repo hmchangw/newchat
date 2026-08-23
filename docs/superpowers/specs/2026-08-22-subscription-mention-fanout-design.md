@@ -63,9 +63,30 @@ badges as 1970 and loses the guard) and no redelivery can repair it.
 `InboxSubscriptionMention` joins `outbox.ConcurrentEventTypes`. The destination
 write is `$set hasMention:true` under the same "has not already read past
 `MentionedAt`" guard the origin applies, which is idempotent and commutes
-with `subscription_read` replays. It needs no FIFO ordering against
-`member_added`/`member_removed`: a mention arriving before its `member_added`
-matches no subscription and is a silent no-op, and the next mention re-badges.
+with `subscription_read` replays.
+
+### Accepted limitation: mention can overtake `member_added`
+
+The concurrent lane and the ordered membership lane are separate consumers, so
+a `subscription_mention` can reach the destination before the `member_added`
+that creates the subscription it targets — even when `member_added` has the
+earlier OUTBOX sequence. The `UpdateMany` then matches nothing, returns no
+error, and the event is Acked; the later membership insert creates an unbadged
+subscription. That mention's badge is lost. The user still receives the message
+itself, and any subsequent mention badges normally.
+
+This is **accepted deliberately**, not overlooked. The alternatives both cost
+more than the defect:
+
+- Moving the type into `OrderedEventTypes` would put high-volume mention badges
+  behind the per-destination `MaxAckPending=1` FIFO shared with membership
+  events, where one unreachable peer parks the lane.
+- NAKing on a zero-match (via `subscriptionExists`, as
+  `UpdateSubscriptionMute`/`Favorite`/`Open`/`Roles` do) would fix the race but
+  make every mention of a non-member — a typo'd `@name`, a user removed between
+  send and delivery — burn the full `MaxDeliver` chain before dead-lettering.
+
+Revisit if the lost-badge case shows up in practice.
 
 ## Producer — `broadcast-worker`
 

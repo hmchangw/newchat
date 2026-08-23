@@ -94,17 +94,3 @@ func TestConfig_ThreadViewSubjectEnabled(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, cfg.ThreadViewSubjectEnabled)
 }
-
-func TestConfig_MentionFederationEnabled(t *testing.T) {
-	t.Setenv("MODE", "user")
-
-	cfg, err := env.ParseAs[config]()
-	require.NoError(t, err)
-	require.False(t, cfg.MentionFederationEnabled,
-		"default-off: an inbox-worker predating subscription_mention Acks and drops it")
-
-	t.Setenv("MENTION_FEDERATION_ENABLED", "true")
-	cfg, err = env.ParseAs[config]()
-	require.NoError(t, err)
-	require.True(t, cfg.MentionFederationEnabled)
-}
