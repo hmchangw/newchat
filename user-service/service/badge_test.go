@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/user-service/models"
 	"github.com/hmchangw/chat/user-service/service/mocks"
 )
 
@@ -122,7 +123,7 @@ func TestBadgeCountBatch_MixedHitMiss_SingleBatchedBump(t *testing.T) {
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
 	// Only the missed account (bob) reaches the repo.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "bob", gomock.Any()).
-		Return([]model.EnrichedSubscription{}, nil)
+		Return([]models.ActiveSubscription{}, nil)
 	badge := &fakeBadgeCache{
 		bumpBatch: func(accounts []string, roomID string) map[string]int {
 			return map[string]int{"alice": 3} // bob misses
@@ -146,8 +147,8 @@ func TestBadgeCountBatch_Miss_SeedsWithTrigger(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-a"}, LastMsgAt: ptrTime(100)},
+		Return([]models.ActiveSubscription{
+			{RoomID: "r2", SiteID: "site-a", LastMsgAt: ptrTime(100)},
 		}, nil).Times(1)
 	var gotIDs []string
 	var gotTrigger string
@@ -175,7 +176,7 @@ func TestBadgeCountBatch_UnreadRoomsError_AccountAbsent(t *testing.T) {
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
 		Return(nil, errors.New("db down"))
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "bob", gomock.Any()).
-		Return([]model.EnrichedSubscription{}, nil)
+		Return([]models.ActiveSubscription{}, nil)
 	badge := &fakeBadgeCache{
 		seed: func(account string, roomIDs []string, trigger string) (int, bool) {
 			return 1, true
@@ -195,9 +196,9 @@ func TestBadgeCountBatch_CacheFullyDown_CappedUnionFallback(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-a"}, LastMsgAt: ptrTime(100)},
-			{Subscription: model.Subscription{RoomID: "r3", SiteID: "site-a"}, LastMsgAt: ptrTime(100)},
+		Return([]models.ActiveSubscription{
+			{RoomID: "r2", SiteID: "site-a", LastMsgAt: ptrTime(100)},
+			{RoomID: "r3", SiteID: "site-a", LastMsgAt: ptrTime(100)},
 		}, nil)
 	badge := &fakeBadgeCache{} // Bump and Seed both default to (0, false)
 	svc := newBadgeService(t, subs, badge)
@@ -219,7 +220,7 @@ func TestBadgeCountBatch_Degraded_NoSeed(t *testing.T) {
 	failingRoomClient(rooms, "site-b")
 
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return(
-		[]model.EnrichedSubscription{crossSiteSub("r-remote", "site-b")}, nil)
+		[]models.ActiveSubscription{crossSiteSub("r-remote", "site-b")}, nil)
 
 	resp, err := svc.BadgeCountBatch(ctx("alice", "site-a"),
 		model.BadgeCountBatchRequest{RoomID: "r-trigger", Accounts: []string{"alice"}})

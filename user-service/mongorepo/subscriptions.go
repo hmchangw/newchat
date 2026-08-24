@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/user-service/models"
 )
 
 const subscriptionsCollection = "subscriptions"
@@ -28,6 +29,9 @@ type SubscriptionRepo struct {
 	// primary handle.
 	subscriptionsSecondary *mongoutil.Collection[model.Subscription]
 	enrichedSecondary      *mongoutil.Collection[model.EnrichedSubscription]
+	// activeSecondary decodes the badge path's narrow projection over the same
+	// subscriptions collection; routed to a secondary like the other read handles.
+	activeSecondary *mongoutil.Collection[models.ActiveSubscription]
 	// showTeamsRoom mirrors SHOW_TEAMS_ROOM: false (default) excludes
 	// Teams-migrated rooms (origin "teams") from list/count results.
 	showTeamsRoom bool
@@ -42,11 +46,13 @@ func NewSubscriptionRepo(db *mongo.Database, opts ...Option) *SubscriptionRepo {
 	col := db.Collection(subscriptionsCollection)
 	subscriptions := mongoutil.NewCollection[model.Subscription](col)
 	enriched := mongoutil.NewCollection[model.EnrichedSubscription](col)
+	active := mongoutil.NewCollection[models.ActiveSubscription](col)
 	return &SubscriptionRepo{
 		subscriptions:          subscriptions,
 		enriched:               enriched,
 		subscriptionsSecondary: subscriptions.WithReadPreference(s.readPref),
 		enrichedSecondary:      enriched.WithReadPreference(s.readPref),
+		activeSecondary:        active.WithReadPreference(s.readPref),
 		showTeamsRoom:          s.showTeamsRoom,
 		showTeamsAccounts:      s.showTeamsAccounts,
 	}
@@ -436,6 +442,18 @@ func (r *SubscriptionRepo) activeFilter(account string) bson.M {
 	return filter
 }
 
+// activeSubscriptionProjection is the terminal $project: exactly the fields models.ActiveSubscription decodes.
+func activeSubscriptionProjection() bson.M {
+	return bson.M{
+		"_id":          0,
+		"roomId":       1,
+		"siteId":       1,
+		"lastSeenAt":   1,
+		"threadUnread": 1,
+		"lastMsgAt":    1,
+	}
+}
+
 // CountActiveSubscriptions counts the active set with a plain CountDocuments —
 // subscription state only, no room lookup. Room names carry no meaning here: no
 // name excludes a subscription from the count.
@@ -447,17 +465,22 @@ func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account
 	return int(n), nil
 }
 
-// GetActiveSubscriptions returns the active set used by the unread count, capped by
-// limit. The cap runs before the rooms join, so $lookup touches ≤limit rows and the
-// page is exactly limit — no stage after the cap can drop a row.
-func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error) {
+// activeSubscriptionPipeline builds the pipeline GetActiveSubscriptions runs. The
+// raw-BSON guard runs this same builder, so a dropped $project fails a test.
+func (r *SubscriptionRepo) activeSubscriptionPipeline(account string, limit int) bson.A {
 	pipeline := bson.A{bson.M{"$match": r.activeFilter(account)}}
 	// MongoDB rejects $limit:0 — treat it as "no cap".
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
 	pipeline = append(pipeline, roomsEnrichStages()...)
-	return r.enrichedSecondary.Aggregate(ctx, pipeline)
+	pipeline = append(pipeline, bson.M{"$project": activeSubscriptionProjection()})
+	return pipeline
+}
+
+// GetActiveSubscriptions returns the active set for the unread count, capped before the join.
+func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]models.ActiveSubscription, error) {
+	return r.activeSecondary.Aggregate(ctx, r.activeSubscriptionPipeline(account, limit))
 }
 
 // GetAppSubscription returns the requester's botDM subscription for botName, or (nil, nil).
