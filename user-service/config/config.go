@@ -18,13 +18,6 @@ type MongoConfig struct {
 	// ReadPreference routes staleness-tolerant reads to secondaries per read site;
 	// the client stays on primary for dedup/read-after-write.
 	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
-	// MaxPoolSize is the NATS-path pool. Explicit rather than inherited: it is the
-	// backpressure point the RPC handlers actually queue on.
-	MaxPoolSize uint64 `env:"MAX_POOL_SIZE" envDefault:"100"`
-	// MinPoolSize and MaxIdleTime mirror the HTTP client's; see HTTPConfig for why
-	// the floor is 0 and why the reap interval has to be set at all.
-	MinPoolSize uint64        `env:"MIN_POOL_SIZE" envDefault:"0"`
-	MaxIdleTime time.Duration `env:"MAX_IDLE_TIME" envDefault:"5m"`
 }
 
 // HTTPConfig configures the client-facing HTTP listener (env prefix: HTTP_).
@@ -69,13 +62,14 @@ type NATSConfig struct {
 // Config is the top-level configuration for user-service.
 type Config struct {
 	// SiteID is required: baked into subscription subjects and inbox routing; missing it would silently federate under a wrong ID.
-	SiteID                   string   `env:"SITE_ID,notEmpty"`
-	AllSiteIDs               []string `env:"ALL_SITE_IDS"           envDefault:"" envSeparator:","`
-	MaxSubscriptionLimit     int      `env:"MAX_SUBSCRIPTION_LIMIT" envDefault:"1000"`
-	DefaultSubscriptionLimit int      `env:"SUBSCRIPTION_DEFAULT_LIMIT" envDefault:"40"`
-	MaxAppsLimit             int      `env:"APPS_MAX_LIMIT" envDefault:"100"`
-	DefaultAppsLimit         int      `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
-	MaxAccountNames          int      `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
+	SiteID                   string        `env:"SITE_ID,notEmpty"`
+	AllSiteIDs               []string      `env:"ALL_SITE_IDS"           envDefault:"" envSeparator:","`
+	MaxSubscriptionLimit     int           `env:"MAX_SUBSCRIPTION_LIMIT" envDefault:"1000"`
+	DefaultSubscriptionLimit int           `env:"SUBSCRIPTION_DEFAULT_LIMIT" envDefault:"40"`
+	MaxAppsLimit             int           `env:"APPS_MAX_LIMIT" envDefault:"100"`
+	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
+	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
+	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
 	// RoomBatchChunk caps room ids per enrichment RPC. 100 is history-service's hard
 	// batch cap and keeps each reply well under the 128 KB NATS payload.
 	RoomBatchChunk int `env:"ROOM_BATCH_CHUNK" envDefault:"100"`
@@ -87,8 +81,11 @@ type Config struct {
 	// large page issue several per site, so this is the knob that throttles the
 	// resulting downstream load without a rebuild.
 	MaxSiteFanout int `env:"MAX_SITE_FANOUT" envDefault:"8"`
-
-	HandlerTimeout time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
+	// Room sort-key cache for subscription.list (see
+	// mongorepo.NewSubscriptionRepo). An entry is at most TTL old and staleness
+	// only affects ordering; zero or less for either knob turns the cache off.
+	SortKeyCacheSize int           `env:"SUBS_SORTKEY_CACHE_SIZE" envDefault:"100000"`
+	SortKeyCacheTTL  time.Duration `env:"SUBS_SORTKEY_CACHE_TTL"  envDefault:"15s"`
 	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
 	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
 	// disables the cap (unbounded spawn).
@@ -140,6 +137,10 @@ type Config struct {
 	BadgeCountCacheFirst bool        `env:"BADGE_COUNT_CACHE_FIRST" envDefault:"false"`
 	Mongo                MongoConfig `envPrefix:"MONGO_"`
 	NATS                 NATSConfig  `envPrefix:"NATS_"`
+	// Pool caps the NATS-path Mongo connection pool (MONGO_MAX_POOL_SIZE /
+	// MONGO_MIN_POOL_SIZE / MONGO_MAX_IDLE_TIME). The HTTP path has its own,
+	// HTTP_MONGO_-prefixed, so a large page cannot starve the RPC handlers.
+	Pool mongoutil.PoolConfig
 	// ShowTeamsRoom controls whether Teams-migrated rooms (origin "teams")
 	// appear in the subscription list/count; false hides them (reversible
 	// read-time filter — see pkg/model.OriginTeams).
@@ -157,8 +158,9 @@ type Config struct {
 	HTTP               HTTPConfig `envPrefix:"HTTP_"`
 }
 
-// validateMongoPool checks the sizing trio both Mongo clients carry; prefix names
-// the client's env vars so the error says which pool is misconfigured.
+// validateMongoPool checks the HTTP client's pool trio. The NATS client uses
+// mongoutil.PoolConfig.Validate; this exists because PoolConfig's env tags are
+// fixed to the MONGO_ prefix and cannot be reused under HTTP_MONGO_.
 func validateMongoPool(prefix string, maxPool, minPool uint64, idle time.Duration) error {
 	if maxPool < 1 {
 		return fmt.Errorf("%sMAX_POOL_SIZE must be >= 1, got %d", prefix, maxPool)
@@ -225,9 +227,6 @@ func Load() (Config, error) {
 	if err := validateMongoPool("HTTP_MONGO_", cfg.HTTP.MongoMaxPoolSize, cfg.HTTP.MongoMinPoolSize, cfg.HTTP.MongoMaxIdleTime); err != nil {
 		return Config{}, err
 	}
-	if err := validateMongoPool("MONGO_", cfg.Mongo.MaxPoolSize, cfg.Mongo.MinPoolSize, cfg.Mongo.MaxIdleTime); err != nil {
-		return Config{}, err
-	}
 	if cfg.GoMemLimitFraction <= 0 || cfg.GoMemLimitFraction > 1 {
 		return Config{}, fmt.Errorf("GOMEMLIMIT_FRACTION must be in (0,1], got %v", cfg.GoMemLimitFraction)
 	}
@@ -268,6 +267,9 @@ func Load() (Config, error) {
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return Config{}, fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }

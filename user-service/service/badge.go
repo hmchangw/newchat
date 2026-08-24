@@ -26,6 +26,18 @@ func (s *UserService) BadgeCountBatch(c *natsrouter.Context, req model.BadgeCoun
 			resp.Counts[account] = n
 			continue
 		}
+		// Once the shared request budget is spent, skip the EXPENSIVE unread
+		// recompute for this account: run against a dead context it would only hit
+		// the heavy aggregate, fail at connection checkout with a misleading pool
+		// error, and degrade to absence anyway. Skipping (not returning) keeps the
+		// loop going so any remaining cache hits — already in memory from BumpBatch
+		// — are still served; only the misses past the deadline degrade to absence,
+		// as any per-account failure does (the badge push must never block).
+		select {
+		case <-c.Done():
+			continue
+		default:
+		}
 		ids, degraded, err := s.unreadRooms(c, account)
 		if err != nil {
 			slog.WarnContext(c, "badge seed degraded", "account", account, "room_id", req.RoomID, "request_id", natsutil.RequestIDFromContext(c), "error", err)

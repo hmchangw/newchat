@@ -11,16 +11,16 @@
 //
 // # Lifecycle
 //
-// A room key is a field of its room, so it cannot exist without the room. Set and
-// SetWithVersion return ErrRoomNotFound when no room document exists; the room
-// must be created first (room-worker provisions the key immediately after
-// inserting the room document). Delete unsets the encKey sub-document.
+// A room key is a field of its room, so Set returns ErrRoomNotFound when the room
+// does not exist yet. Delete unsets the encKey sub-document.
 //
 // # Concurrency
 //
 // Rotate runs as a single aggregation-pipeline update against one document, so
 // the current-to-previous transition and version bump are atomic; no concurrent
-// reader observes a partially-rotated key. Set and Get are not otherwise
+// reader observes a partially-rotated key. SetIfAbsent is likewise a single
+// conditional update whose post-image lets racing callers converge on one v0 key,
+// which plain Set (last-write-wins) cannot do. Set and Get are not otherwise
 // coordinated; readers see Set's write atomically once the update completes.
 //
 // # Federation

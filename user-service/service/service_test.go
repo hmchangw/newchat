@@ -10,9 +10,9 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/user-service/config"
+	"github.com/hmchangw/chat/user-service/models"
 	"github.com/hmchangw/chat/user-service/service/mocks"
 )
 
@@ -46,30 +46,25 @@ func ctx(account, siteID string) *natsrouter.Context {
 	return natsrouter.NewContext(map[string]string{"account": account, "siteID": siteID})
 }
 
-// localUnreadSub returns an EnrichedSubscription for a room on siteID with an
+// localUnreadSub returns an ActiveSubscription for a room on siteID with an
 // unread baseline: LastMsgAt is newer than LastSeenAt and already populated by
 // the $lookup, so the caller's own-site rows count with no cross-site RPC.
 // account is accepted for call-site readability (it mirrors the account the
 // surrounding GetActiveSubscriptions mock is scoped to) though the fixture
 // itself carries no per-account field.
-func localUnreadSub(account, roomID, siteID string) model.EnrichedSubscription {
+func localUnreadSub(account, roomID, siteID string) models.ActiveSubscription {
 	_ = account
 	seen := time.UnixMilli(100).UTC()
 	newer := time.UnixMilli(200).UTC()
-	return model.EnrichedSubscription{
-		Subscription: model.Subscription{RoomID: roomID, SiteID: siteID, LastSeenAt: &seen},
-		LastMsgAt:    &newer,
-	}
+	return models.ActiveSubscription{RoomID: roomID, SiteID: siteID, LastSeenAt: &seen, LastMsgAt: &newer}
 }
 
-// crossSiteSub returns an EnrichedSubscription for a room on a remote siteID
+// crossSiteSub returns an ActiveSubscription for a room on a remote siteID
 // with no LastMsgAt baseline — unlike localUnreadSub, read state is unknown
 // until unreadRooms RPCs that site's RoomClient.GetRoomsMeta.
-func crossSiteSub(roomID, siteID string) model.EnrichedSubscription {
+func crossSiteSub(roomID, siteID string) models.ActiveSubscription {
 	seen := time.UnixMilli(100).UTC()
-	return model.EnrichedSubscription{
-		Subscription: model.Subscription{RoomID: roomID, SiteID: siteID, LastSeenAt: &seen},
-	}
+	return models.ActiveSubscription{RoomID: roomID, SiteID: siteID, LastSeenAt: &seen}
 }
 
 // failingRoomClient stubs rooms.GetRoomsMeta for siteID to return an error,

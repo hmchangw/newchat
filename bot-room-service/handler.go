@@ -457,8 +457,7 @@ func (h *handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 	}
 }
 
-// rotateAndFanOut fans the new key to survivors BEFORE committing via Rotate, so they hold
-// v+1 before broadcast-worker encrypts under it; no-current-key rooms just Set a fresh v1.
+// rotateAndFanOut commits before fan-out; a predicted current+1 mislabels keys when removals race.
 func (h *handler) rotateAndFanOut(ctx context.Context, roomID string) error {
 	survivors, err := h.store.ListRoomMemberAccounts(ctx, roomID)
 	if err != nil {
@@ -475,29 +474,14 @@ func (h *handler) rotateAndFanOut(ctx context.Context, roomID string) error {
 		return fmt.Errorf("generate new key: %w", err)
 	}
 
-	if currentPair == nil {
-		slog.WarnContext(ctx, "no current key on remove-member; skip fan-out", "roomID", roomID)
-		if _, err := h.keyStore.Set(ctx, roomID, *newPair); err != nil {
-			return fmt.Errorf("store new key (no prior): %w", err)
-		}
-		return nil
+	committed, err := roomkeystore.CommitRotation(ctx, h.keyStore, roomID, currentPair, newPair)
+	if err != nil {
+		return err
 	}
 
-	predictedVersion := currentPair.Version + 1
 	h.fanOutKey(ctx, roomID, survivors,
-		model.RoomKeyEvent{RoomID: roomID, Version: predictedVersion, PrivateKey: newPair.PrivateKey},
+		model.RoomKeyEvent{RoomID: roomID, Version: committed.Version, PrivateKey: committed.KeyPair.PrivateKey},
 		"fan out rotated key failed")
-
-	if _, err := h.keyStore.Rotate(ctx, roomID, *newPair); err != nil {
-		if errors.Is(err, roomkeystore.ErrNoCurrentKey) {
-			// Fan-out already committed survivors to predictedVersion; persist at the same version so broadcast-worker reads under the key clients hold.
-			if setErr := h.keyStore.SetWithVersion(ctx, roomID, *newPair, predictedVersion); setErr != nil {
-				return fmt.Errorf("store new key (fallback): %w", setErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("rotate key: %w", err)
-	}
 	return nil
 }
 

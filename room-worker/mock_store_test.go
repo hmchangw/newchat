@@ -568,16 +568,17 @@ func (mr *MockRoomKeyStoreMockRecorder) Set(ctx, roomID, pair any) *gomock.Call 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockRoomKeyStore)(nil).Set), ctx, roomID, pair)
 }
 
-// SetWithVersion mocks base method.
-func (m *MockRoomKeyStore) SetWithVersion(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair, version int) error {
+// SetIfAbsent mocks base method.
+func (m *MockRoomKeyStore) SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetWithVersion", ctx, roomID, pair, version)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "SetIfAbsent", ctx, roomID, pair)
+	ret0, _ := ret[0].(*roomkeystore.VersionedKeyPair)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
-// SetWithVersion indicates an expected call of SetWithVersion.
-func (mr *MockRoomKeyStoreMockRecorder) SetWithVersion(ctx, roomID, pair, version any) *gomock.Call {
+// SetIfAbsent indicates an expected call of SetIfAbsent.
+func (mr *MockRoomKeyStoreMockRecorder) SetIfAbsent(ctx, roomID, pair any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetWithVersion", reflect.TypeOf((*MockRoomKeyStore)(nil).SetWithVersion), ctx, roomID, pair, version)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetIfAbsent", reflect.TypeOf((*MockRoomKeyStore)(nil).SetIfAbsent), ctx, roomID, pair)
 }

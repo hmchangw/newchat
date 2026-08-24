@@ -125,11 +125,7 @@ func main() {
 	}
 
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
-		mongoutil.WithObservability(sdk),
-		mongoutil.WithMaxPoolSize(cfg.Mongo.MaxPoolSize),
-		mongoutil.WithMinPoolSize(cfg.Mongo.MinPoolSize),
-		mongoutil.WithMaxIdleTime(cfg.Mongo.MaxIdleTime),
-	)
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -161,7 +157,10 @@ func main() {
 	readFromSecondary := mongorepo.WithReadPreference(readPref)
 
 	db := mongoClient.Database(cfg.Mongo.DB)
-	subRepo := mongorepo.NewSubscriptionRepo(db, readFromSecondary, mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts))
+	subRepo := mongorepo.NewSubscriptionRepo(db, cfg.SortKeyCacheSize, cfg.SortKeyCacheTTL,
+		readFromSecondary,
+		mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom),
+		mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts))
 	userRepo := mongorepo.NewUserRepo(db, readFromSecondary)
 	appRepo := mongorepo.NewAppRepo(db, readFromSecondary)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
@@ -233,7 +232,7 @@ func main() {
 	// cannot be reached by a write path.
 	httpDB := httpMongoClient.Database(cfg.Mongo.DB)
 	httpSvc := service.New(
-		mongorepo.NewSubscriptionRepo(httpDB, readFromSecondary,
+		mongorepo.NewSubscriptionRepo(httpDB, cfg.SortKeyCacheSize, cfg.SortKeyCacheTTL, readFromSecondary,
 			mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts)),
 		mongorepo.NewUserRepo(httpDB, readFromSecondary), mongorepo.NewAppRepo(httpDB, readFromSecondary), threadSubRepo,
 		roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc),
@@ -252,7 +251,9 @@ func main() {
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Logging())
 	// After Logging so the timeout wraps the handler chain; bounds the Mongo
-	// aggregations from hanging past the configured deadline.
+	// aggregations from hanging past the configured deadline. user-service uses
+	// its own HANDLER_TIMEOUT (not REQUEST_TIMEOUT) as the single per-request
+	// deadline.
 	router.Use(natsrouter.HandlerTimeout(cfg.HandlerTimeout))
 
 	svc.RegisterHandlers(router)

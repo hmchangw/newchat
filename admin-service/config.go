@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // httpWriteTimeout bounds a response write measured from the request, so in-handler
@@ -44,6 +46,14 @@ type Config struct {
 	// AllSiteIDs lists every site in the federation (including this one); empty means
 	// no cross-site fanout — correct for single-site dev.
 	AllSiteIDs []string `env:"ALL_SITE_IDS" envSeparator:"," envDefault:""`
+
+	// Pool caps the Mongo connection pool. NOTE: admin-service deliberately takes
+	// NO shared HTTP request-timeout (ginutil.TimeoutConfig): its permission
+	// handlers pin their own budget via withRequestBudget (requestBudget, just
+	// under httpWriteTimeout) and the cross-site fanout self-limits to
+	// min(FanoutTimeout, request deadline). A blanket router timeout shorter than
+	// FanoutTimeout would silently shrink the fanout — see applyBaseMiddleware.
+	Pool mongoutil.PoolConfig
 }
 
 func loadConfig() (Config, error) {
@@ -55,6 +65,9 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 	if err := checkHandlerTimeout("FANOUT_TIMEOUT", c.FanoutTimeout); err != nil {
+		return Config{}, err
+	}
+	if err := c.Pool.Validate(); err != nil {
 		return Config{}, err
 	}
 	return c, nil

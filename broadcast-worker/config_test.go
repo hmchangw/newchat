@@ -94,3 +94,17 @@ func TestConfig_ThreadViewSubjectEnabled(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, cfg.ThreadViewSubjectEnabled)
 }
+
+func TestConfig_PoolValidate(t *testing.T) {
+	t.Setenv("MODE", "user")
+
+	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Error(t, cfg.Pool.Validate()) // zero max is unbounded to the driver — must be rejected
+
+	require.NoError(t, os.Unsetenv("MONGO_MAX_POOL_SIZE"))
+	cfg, err = env.ParseAs[config]()
+	require.NoError(t, err)
+	require.NoError(t, cfg.Pool.Validate()) // envDefault applies
+}

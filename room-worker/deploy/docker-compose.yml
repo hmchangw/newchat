@@ -23,6 +23,7 @@ services:
       # Room keys live in the MongoDB rooms collection; this grace window keeps a
       # rotated-out previous key valid for decrypt.
       - ROOM_KEY_GRACE_PERIOD=${ROOM_KEY_GRACE_PERIOD:-24h}
+      - ROOM_KEY_RETIRED_TTL=${ROOM_KEY_RETIRED_TTL:-20m}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}

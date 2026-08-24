@@ -213,6 +213,34 @@ func TestLoad_AppsDefaultExceedsAppsMax(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestLoad_SortKeyCacheDefaults(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 100000, cfg.SortKeyCacheSize)
+	require.Equal(t, 15*time.Second, cfg.SortKeyCacheTTL)
+}
+
+func TestLoad_SortKeyCacheOverrideAndDisable(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("SUBS_SORTKEY_CACHE_SIZE", "500")
+	t.Setenv("SUBS_SORTKEY_CACHE_TTL", "30s")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 500, cfg.SortKeyCacheSize)
+	require.Equal(t, 30*time.Second, cfg.SortKeyCacheTTL)
+
+	// Zero disables the cache (ops escape hatch) — must load, not error.
+	t.Setenv("SUBS_SORTKEY_CACHE_TTL", "0s")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.Equal(t, time.Duration(0), cfg.SortKeyCacheTTL)
+}
+
 func TestLoad_SSODisabledByDefault(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
@@ -315,6 +343,27 @@ func TestLoad_BadgeCountCacheFirst(t *testing.T) {
 	require.True(t, cfg.BadgeCountCacheFirst)
 }
 
+// Load delegates pool checks to mongoutil.PoolConfig.Validate — exhaustive
+// cases live in that package; this just proves the wiring.
+func TestLoad_DelegatesPoolValidation(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
+	_, err := Load()
+	require.ErrorContains(t, err, "MONGO_MAX_POOL_SIZE")
+}
+
+// Load rejects a negative MAX_CONCURRENCY (user-service's bespoke concurrency knob).
+func TestLoad_RejectsNegativeMaxConcurrency(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MAX_CONCURRENCY", "-1")
+	_, err := Load()
+	require.ErrorContains(t, err, "MAX_CONCURRENCY")
+}
+
 func TestLoad_SSORefreshWindowMustBePositive(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
@@ -397,9 +446,9 @@ func TestLoad_HTTPDefaults(t *testing.T) {
 	assert.Equal(t, uint64(0), cfg.HTTP.MongoMinPoolSize, "no warm floor: a per-member minimum is a standing cluster cost")
 	assert.Equal(t, 40, cfg.HTTP.DefaultLimit, "matches the NATS default so an omitted limit behaves the same")
 	assert.Equal(t, 400, cfg.HTTP.MaxLimit)
-	assert.Equal(t, uint64(100), cfg.Mongo.MaxPoolSize, "the NATS-path pool is now explicit, not the driver default")
-	assert.Equal(t, uint64(0), cfg.Mongo.MinPoolSize, "no warm floor: a per-member minimum is a standing cluster cost")
-	assert.Equal(t, 5*time.Minute, cfg.Mongo.MaxIdleTime, "the driver's own default of 0 never reaps")
+	assert.Equal(t, uint64(150), cfg.Pool.MaxPoolSize, "the NATS-path pool takes the fleet-wide default")
+	assert.Equal(t, uint64(0), cfg.Pool.MinPoolSize, "no warm floor: a per-member minimum is a standing cluster cost")
+	assert.Equal(t, 5*time.Minute, cfg.Pool.MaxIdleTime, "the driver's own default of 0 never reaps")
 	assert.Equal(t, ":8081", cfg.HealthAddr)
 	assert.InDelta(t, 0.8, cfg.GoMemLimitFraction, 1e-9)
 	assert.Equal(t, 100, cfg.RoomBatchChunk)
@@ -575,8 +624,8 @@ func TestLoad_NATSMongoPoolKnobs(t *testing.T) {
 	cfg, err := Load()
 
 	require.NoError(t, err)
-	assert.Equal(t, uint64(10), cfg.Mongo.MinPoolSize)
-	assert.Equal(t, 90*time.Second, cfg.Mongo.MaxIdleTime)
+	assert.Equal(t, uint64(10), cfg.Pool.MinPoolSize)
+	assert.Equal(t, 90*time.Second, cfg.Pool.MaxIdleTime)
 }
 
 // A floor above the ceiling is rejected rather than silently clamped. Asserted on
@@ -587,7 +636,7 @@ func TestLoad_RejectsMongoPoolMisconfiguration(t *testing.T) {
 		name, env, value, want string
 	}{
 		{name: "nats min above max", env: "MONGO_MIN_POOL_SIZE", value: "200",
-			want: "MONGO_MIN_POOL_SIZE (200) must be <= MONGO_MAX_POOL_SIZE (100)"},
+			want: "MONGO_MIN_POOL_SIZE (200) must be <= MONGO_MAX_POOL_SIZE (150)"},
 		{name: "nats negative idle time", env: "MONGO_MAX_IDLE_TIME", value: "-1s",
 			want: "MONGO_MAX_IDLE_TIME must be >= 0, got -1s"},
 		{name: "http min above max", env: "HTTP_MONGO_MIN_POOL_SIZE", value: "200",

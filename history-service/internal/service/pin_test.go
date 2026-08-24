@@ -380,9 +380,10 @@ func TestListPinnedMessages_StubsSystemMessageMetadata(t *testing.T) {
 	assert.Empty(t, stub.SysMsgData, "system-message payload must be scrubbed")
 }
 
-func TestListPinnedMessages_StubsThreadReplyWithPreAccessParent(t *testing.T) {
-	// Post-access reply with pre-access parent → stubbed. Unlike quoteInaccessible,
-	// pinInaccessible doesn't gate on TShow (TestListPinnedMessages_StubsThreadOnlyReply... covers TShow=false).
+func TestListPinnedMessages_ShowsTShowReplyWithPreAccessParent(t *testing.T) {
+	// TShow reply is broadcast into the channel timeline, so a post-access
+	// caller already reads its body via load-history. Gating the pin on the
+	// parent would make the pinned bar stricter than the timeline for no gain.
 	svc, msgs, subs, _, _, _, _, _ := newServiceWithRoomMock(t)
 	accessSince := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&accessSince, true, nil)
@@ -393,7 +394,7 @@ func TestListPinnedMessages_StubsThreadReplyWithPreAccessParent(t *testing.T) {
 		RoomID:                "r1",
 		CreatedAt:             time.Date(2026, 5, 12, 9, 0, 0, 0, time.UTC), // post-accessSince
 		Sender:                models.Participant{ID: "u2", Account: "bob"},
-		Msg:                   "reply content that would leak parent context",
+		Msg:                   "visible tshow reply",
 		TShow:                 true,
 		ThreadParentID:        "parent-msg",
 		ThreadParentCreatedAt: &parentCreated,
@@ -404,13 +405,99 @@ func TestListPinnedMessages_StubsThreadReplyWithPreAccessParent(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, resp.Messages, 1)
-	assert.Equal(t, "This message is unavailable", resp.Messages[0].Msg, "reply must be stubbed because its parent is inaccessible")
-	assert.Equal(t, "reply", resp.Messages[0].MessageID, "identifier stays visible for the placeholder")
+	assert.Equal(t, "visible tshow reply", resp.Messages[0].Msg, "tshow reply stays readable when the reply itself is post-access")
+}
+
+func TestListPinnedMessages_ShowsTShowReplyWithMissingParentTime(t *testing.T) {
+	// Legacy row with no captured parent time: TShow alone proves the reply
+	// reached the channel timeline, so the conservative fallback must not fire.
+	svc, msgs, subs, _, _, _, _, _ := newServiceWithRoomMock(t)
+	accessSince := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&accessSince, true, nil)
+
+	reply := models.Message{
+		MessageID:      "legacy-tshow-reply",
+		RoomID:         "r1",
+		CreatedAt:      time.Date(2026, 5, 12, 9, 0, 0, 0, time.UTC),
+		Sender:         models.Participant{ID: "u2", Account: "bob"},
+		Msg:            "visible legacy tshow reply",
+		TShow:          true,
+		ThreadParentID: "parent-msg",
+		// ThreadParentCreatedAt intentionally nil
+	}
+	msgs.EXPECT().GetPinnedMessages(gomock.Any(), "r1", gomock.Any()).Return(pinnedPage([]models.Message{reply}), nil)
+
+	resp, err := svc.ListPinnedMessages(testContext(), models.ListPinnedMessagesRequest{})
+
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	assert.Equal(t, "visible legacy tshow reply", resp.Messages[0].Msg)
+}
+
+func TestListPinnedMessages_StubsPreAccessTShowReply(t *testing.T) {
+	// TShow does not bypass the reply's own createdAt gate: a reply posted
+	// before the caller joined stays redacted.
+	svc, msgs, subs, _, _, _, _, _ := newServiceWithRoomMock(t)
+	accessSince := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&accessSince, true, nil)
+
+	parentCreated := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	reply := models.Message{
+		MessageID:             "old-tshow-reply",
+		RoomID:                "r1",
+		CreatedAt:             time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC), // pre-accessSince
+		Sender:                models.Participant{ID: "u2", Account: "bob"},
+		Msg:                   "secret from before user joined",
+		TShow:                 true,
+		ThreadParentID:        "parent-msg",
+		ThreadParentCreatedAt: &parentCreated,
+	}
+	msgs.EXPECT().GetPinnedMessages(gomock.Any(), "r1", gomock.Any()).Return(pinnedPage([]models.Message{reply}), nil)
+
+	resp, err := svc.ListPinnedMessages(testContext(), models.ListPinnedMessagesRequest{})
+
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	assert.Equal(t, "This message is unavailable", resp.Messages[0].Msg)
+}
+
+func TestListPinnedMessages_ShowsTShowReplyButRedactsItsPreAccessQuote(t *testing.T) {
+	// The reply body surfaces while its quoted parent bubble is still redacted
+	// by redactUnavailableQuotes — same split the channel timeline renders.
+	svc, msgs, subs, _, _, _, _, _ := newServiceWithRoomMock(t)
+	accessSince := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&accessSince, true, nil)
+
+	parentCreated := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC) // pre-accessSince
+	reply := models.Message{
+		MessageID:             "reply",
+		RoomID:                "r1",
+		CreatedAt:             time.Date(2026, 5, 12, 9, 0, 0, 0, time.UTC),
+		Sender:                models.Participant{ID: "u2", Account: "bob"},
+		Msg:                   "visible tshow reply",
+		TShow:                 true,
+		ThreadParentID:        "parent-msg",
+		ThreadParentCreatedAt: &parentCreated,
+		QuotedParentMessage: &models.QuotedParentMessage{
+			MessageID: "parent-msg",
+			Msg:       "secret parent body",
+			CreatedAt: parentCreated,
+		},
+	}
+	msgs.EXPECT().GetPinnedMessages(gomock.Any(), "r1", gomock.Any()).Return(pinnedPage([]models.Message{reply}), nil)
+
+	resp, err := svc.ListPinnedMessages(testContext(), models.ListPinnedMessagesRequest{})
+
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	assert.Equal(t, "visible tshow reply", resp.Messages[0].Msg)
+	require.NotNil(t, resp.Messages[0].QuotedParentMessage)
+	assert.Equal(t, "This message is unavailable", resp.Messages[0].QuotedParentMessage.Msg, "pre-access parent body must stay hidden")
 }
 
 func TestListPinnedMessages_StubsThreadReplyWithMissingParentTime(t *testing.T) {
-	// nil ThreadParentCreatedAt → redact conservatively. TShow=false locks in
-	// that the fallback fires for ALL thread replies, not just TShow=true ones.
+	// Thread-only reply with nil ThreadParentCreatedAt → redact conservatively:
+	// without a parent time there is nothing to prove the reply is reachable.
 	svc, msgs, subs, _, _, _, _, _ := newServiceWithRoomMock(t)
 	accessSince := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&accessSince, true, nil)
@@ -458,7 +545,7 @@ func TestListPinnedMessages_StubsThreadOnlyReplyWithPreAccessParent(t *testing.T
 
 	require.NoError(t, err)
 	require.Len(t, resp.Messages, 1)
-	assert.Equal(t, "This message is unavailable", resp.Messages[0].Msg, "TShow=false reply must redact like TShow=true when parent is inaccessible")
+	assert.Equal(t, "This message is unavailable", resp.Messages[0].Msg, "thread-only reply must stay redacted when its parent is inaccessible")
 }
 
 func TestListPinnedMessages_ShowsThreadReplyWithPostAccessParent(t *testing.T) {

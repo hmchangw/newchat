@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/user-service/models"
 	"github.com/hmchangw/chat/user-service/service/mocks"
 )
 
@@ -122,7 +123,7 @@ func TestBadgeCountBatch_MixedHitMiss_SingleBatchedBump(t *testing.T) {
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
 	// Only the missed account (bob) reaches the repo.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "bob", gomock.Any()).
-		Return([]model.EnrichedSubscription{}, nil)
+		Return([]models.ActiveSubscription{}, nil)
 	badge := &fakeBadgeCache{
 		bumpBatch: func(accounts []string, roomID string) map[string]int {
 			return map[string]int{"alice": 3} // bob misses
@@ -146,8 +147,8 @@ func TestBadgeCountBatch_Miss_SeedsWithTrigger(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-a"}, LastMsgAt: ptrTime(100)},
+		Return([]models.ActiveSubscription{
+			{RoomID: "r2", SiteID: "site-a", LastMsgAt: ptrTime(100)},
 		}, nil).Times(1)
 	var gotIDs []string
 	var gotTrigger string
@@ -175,7 +176,7 @@ func TestBadgeCountBatch_UnreadRoomsError_AccountAbsent(t *testing.T) {
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
 		Return(nil, errors.New("db down"))
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "bob", gomock.Any()).
-		Return([]model.EnrichedSubscription{}, nil)
+		Return([]models.ActiveSubscription{}, nil)
 	badge := &fakeBadgeCache{
 		seed: func(account string, roomIDs []string, trigger string) (int, bool) {
 			return 1, true
@@ -195,15 +196,79 @@ func TestBadgeCountBatch_CacheFullyDown_CappedUnionFallback(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-a"}, LastMsgAt: ptrTime(100)},
-			{Subscription: model.Subscription{RoomID: "r3", SiteID: "site-a"}, LastMsgAt: ptrTime(100)},
+		Return([]models.ActiveSubscription{
+			{RoomID: "r2", SiteID: "site-a", LastMsgAt: ptrTime(100)},
+			{RoomID: "r3", SiteID: "site-a", LastMsgAt: ptrTime(100)},
 		}, nil)
 	badge := &fakeBadgeCache{} // Bump and Seed both default to (0, false)
 	svc := newBadgeService(t, subs, badge)
 	resp, err := svc.BadgeCountBatch(ctx("alice", "site-a"), model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"alice"}})
 	require.NoError(t, err)
 	assert.Equal(t, 3, resp.Counts["alice"], "r1 (trigger) + r2 + r3, cache down entirely")
+}
+
+// Once the shared request budget (HANDLER_TIMEOUT) is spent mid-batch, the loop
+// must STOP issuing further per-account unread computations rather than fire
+// aggregates against an already-dead context (which return instantly at
+// connection checkout with a misleading pool error). The accounts it never
+// reaches degrade to absence, as any other per-account failure would.
+func TestBadgeCountBatch_BudgetSpentMidBatch_StopsAndRemainingAbsent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	cctx, cancel := context.WithCancel(context.Background())
+	c := ctx("", "site-a")
+	c.SetContext(cctx)
+	// Account "a" computes, then the shared budget expires (simulating the 15s
+	// handler deadline elapsing part-way through the batch).
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "a", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ int) ([]models.ActiveSubscription, error) {
+			cancel()
+			return []models.ActiveSubscription{localUnreadSub("a", "ra", "site-a")}, nil
+		})
+	// "b" and "c" must NEVER reach the repo once the context is done.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "b", gomock.Any()).Times(0)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "c", gomock.Any()).Times(0)
+	badge := &fakeBadgeCache{
+		seed: func(account string, roomIDs []string, trigger string) (int, bool) { return 1, true },
+	}
+	svc := newBadgeService(t, subs, badge)
+	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"a", "b", "c"}})
+	require.NoError(t, err, "a spent budget degrades the rest — it must not fail the whole batch")
+	assert.Contains(t, resp.Counts, "a", "the account computed before the budget was spent still answers")
+	assert.NotContains(t, resp.Counts, "b", "an account past the spent budget degrades to absence")
+	assert.NotContains(t, resp.Counts, "c", "an account past the spent budget degrades to absence")
+}
+
+// A spent budget must only skip the EXPENSIVE recompute path. Cache hits are
+// already in memory (BumpBatch computed them up front), so an account that hit
+// the cache must still be served even when it sits after the account that spent
+// the budget — dropping a ready answer would needlessly absent a correct count.
+func TestBadgeCountBatch_BudgetSpentMidBatch_LaterCacheHitStillServed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	cctx, cancel := context.WithCancel(context.Background())
+	c := ctx("", "site-a")
+	c.SetContext(cctx)
+	// "a" misses and recomputes, spending the budget; "c" is a cache hit; "b" misses.
+	badge := &fakeBadgeCache{
+		bumpBatch: func(accounts []string, roomID string) map[string]int {
+			return map[string]int{"c": 7} // only c hits the cache
+		},
+		seed: func(account string, roomIDs []string, trigger string) (int, bool) { return 1, true },
+	}
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "a", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ int) ([]models.ActiveSubscription, error) {
+			cancel()
+			return []models.ActiveSubscription{localUnreadSub("a", "ra", "site-a")}, nil
+		})
+	// "b" misses and sits past the spent budget — its expensive recompute must be skipped.
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "b", gomock.Any()).Times(0)
+	svc := newBadgeService(t, subs, badge)
+	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"a", "b", "c"}})
+	require.NoError(t, err)
+	assert.Contains(t, resp.Counts, "a", "the account computed before the budget was spent still answers")
+	assert.NotContains(t, resp.Counts, "b", "a MISS past the spent budget is skipped")
+	assert.Equal(t, 7, resp.Counts["c"], "a cache HIT past the spent budget must still be served from memory")
 }
 
 // A failing cross-site RPC still answers from the best-effort ids ∪ trigger,
@@ -219,7 +284,7 @@ func TestBadgeCountBatch_Degraded_NoSeed(t *testing.T) {
 	failingRoomClient(rooms, "site-b")
 
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return(
-		[]model.EnrichedSubscription{crossSiteSub("r-remote", "site-b")}, nil)
+		[]models.ActiveSubscription{crossSiteSub("r-remote", "site-b")}, nil)
 
 	resp, err := svc.BadgeCountBatch(ctx("alice", "site-a"),
 		model.BadgeCountBatchRequest{RoomID: "r-trigger", Accounts: []string{"alice"}})

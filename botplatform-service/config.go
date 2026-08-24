@@ -1,6 +1,11 @@
 package main
 
-import "time"
+import (
+	"time"
+
+	"github.com/hmchangw/chat/pkg/ginutil"
+	"github.com/hmchangw/chat/pkg/mongoutil"
+)
 
 type config struct {
 	Port string `env:"PORT" envDefault:"8080"`
@@ -12,6 +17,9 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+
+	Pool mongoutil.PoolConfig
+	HTTP ginutil.TimeoutConfig
 
 	// SessionsMaxPerAccount is the per-user FIFO cap; excess sessions are evicted oldest-first.
 	SessionsMaxPerAccount int `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`

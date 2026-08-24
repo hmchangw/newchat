@@ -91,10 +91,10 @@ func (mr *MockSubscriptionRepositoryMockRecorder) FindChannelsByMembers(ctx, acc
 }
 
 // GetActiveSubscriptions mocks base method.
-func (m *MockSubscriptionRepository) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error) {
+func (m *MockSubscriptionRepository) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]models.ActiveSubscription, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetActiveSubscriptions", ctx, account, limit)
-	ret0, _ := ret[0].([]model.EnrichedSubscription)
+	ret0, _ := ret[0].([]models.ActiveSubscription)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

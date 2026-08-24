@@ -751,7 +751,7 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 
 	var ids []string
 	degraded := false
-	crossBySite := map[string][]model.EnrichedSubscription{}
+	crossBySite := map[string][]models.ActiveSubscription{}
 	roomIDsBySite := map[string][]string{}
 	for i := range subs {
 		if subs[i].SiteID == s.siteID {

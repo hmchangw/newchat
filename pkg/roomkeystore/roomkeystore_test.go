@@ -2,6 +2,7 @@ package roomkeystore
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
 
@@ -120,4 +121,56 @@ func TestKeyDoc_pairForVersion(t *testing.T) {
 			assert.Equal(t, tc.want, got.PrivateKey)
 		})
 	}
+}
+
+func TestRetiredKeyID(t *testing.T) {
+	assert.Equal(t, "room123:7", retiredKeyID("room123", 7))
+	assert.Equal(t, "room123:0", retiredKeyID("room123", 0))
+}
+
+func TestNewMongoStore_RetiredKeysOptional(t *testing.T) {
+	t.Run("omitted leaves the archive disabled", func(t *testing.T) {
+		s := newMongoStore(nil, time.Hour)
+		assert.Nil(t, s.retiredCol)
+		assert.Zero(t, s.retiredTTL)
+	})
+
+	t.Run("option records the retention", func(t *testing.T) {
+		s := newMongoStore(nil, time.Hour, WithRetiredKeys(nil, 20*time.Minute))
+		assert.Equal(t, 20*time.Minute, s.retiredTTL)
+	})
+}
+
+func TestMongoStore_EnsureIndexes_NoArchiveConfigured(t *testing.T) {
+	s := newMongoStore(nil, time.Hour)
+	require.NoError(t, s.EnsureIndexes(context.Background()),
+		"EnsureIndexes must no-op when the archive is not configured")
+}
+
+func TestMongoStore_retiredDoc(t *testing.T) {
+	priv := bytes.Repeat([]byte{0x33}, 32)
+	now := time.Date(2026, 8, 14, 9, 0, 0, 0, time.UTC)
+
+	s := newMongoStore(nil, time.Hour, WithRetiredKeys(nil, 20*time.Minute))
+	s.now = func() time.Time { return now }
+
+	doc := s.retiredDoc(priv)
+	assert.Equal(t, priv, doc["priv"])
+	assert.Equal(t, now.Add(20*time.Minute).UTC(), doc["expiresAt"],
+		"expiresAt is stamped from the injected clock plus the retention")
+}
+
+func TestMongoStore_archiveRetired_NoArchiveConfigured(t *testing.T) {
+	s := newMongoStore(nil, time.Hour)
+	// retiredCol is nil — must return without touching Mongo rather than panic.
+	s.archiveRetired(context.Background(), "room1", 4, bytes.Repeat([]byte{0x01}, 32))
+}
+
+// The len(priv) == 0 guard needs a configured collection; covered in integration_test.go.
+
+func TestMongoStore_retiredByVersion_NoArchiveConfigured(t *testing.T) {
+	s := newMongoStore(nil, time.Hour)
+	pair, err := s.retiredByVersion(context.Background(), "room1", 3)
+	require.NoError(t, err, "an unconfigured archive is a clean miss, not an error")
+	assert.Nil(t, pair)
 }

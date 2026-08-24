@@ -455,7 +455,7 @@ existing `MONGO_` / `NATS_` blocks:
 | `ROOM_BATCH_CHUNK` | `100` | Enrichment fan-out chunk size |
 | `PREVIEW_CONTENT_CHARS` | `50` | Truncate `previewMessage.content` to N runes; 0 disables |
 | `MAX_SITE_FANOUT` | `8` | Concurrent enrichment calls in flight |
-| `MONGO_MAX_POOL_SIZE` | `100` | NATS-path pool, now explicit |
+| `MONGO_MAX_POOL_SIZE` | `150` | NATS-path pool — the fleet-wide `mongoutil.PoolConfig` default |
 | `MONGO_MIN_POOL_SIZE` | `0` | NATS-path warm floor; per member, so non-zero is a standing cost |
 | `MONGO_MAX_IDLE_TIME` | `5m` | Reap idle NATS-path connections; 0 = never |
 | `HEALTH_ADDR` | `:8081` | Probe listener |
@@ -470,7 +470,7 @@ silently dropping the budget), `HTTP_WRITE_TIMEOUT > HTTP_HANDLER_TIMEOUT`,
 `HTTP_MAX_CONNS ≥ 0` with `0` disabling the limiter and any positive value
 required to exceed `HTTP_MAX_CONCURRENCY` (keep-alive connections outnumber
 in-flight requests), `HTTP_MONGO_MAX_IDLE_TIME ≥ 0`, `MONGO_MAX_IDLE_TIME ≥ 0`,
-`MONGO_MIN_POOL_SIZE ≤ MONGO_MAX_POOL_SIZE`, `PREVIEW_CONTENT_CHARS ≥ 0`,
+`PREVIEW_CONTENT_CHARS ≥ 0`,
 `GOMEMLIMIT_FRACTION` in `(0, 1]` — fail fast at startup, matching the existing
 validation style.
 
@@ -511,14 +511,16 @@ than melting the replica set.
 
 **Cost, flagged for the DBA.** `MaxPoolSize` is enforced **per server**, not per
 client, so the ceiling is the pool limits times the number of replica-set members
-a client talks to — with a three-member set that is up to (100 + 128) × 3 ≈ **684
-connections per pod**, ~6,840 across ten pods, not the 228/2,280 an earlier draft
-of this document claimed. `MinPoolSize` is likewise per server, so the HTTP
+a client talks to — with a three-member set that is up to (150 + 128) × 3 ≈ **834
+connections per pod**, ~8,340 across ten pods, not the 228/2,280 an earlier draft
+of this document claimed. The NATS side is 150 because it now takes the
+fleet-wide `mongoutil.PoolConfig` default introduced in #347, rather than a
+user-service-specific number. `MinPoolSize` is likewise per server, so the HTTP
 minimum is therefore held on each active member, which is why it now defaults to
 **0**: a warm floor is a connection the cluster carries whether or not traffic
 arrives, and cold-checkout latency is the cheaper price. Sustained HTTP cost is
 `MinPoolSize × members × pods` = **0** at the defaults; peak is
-`MaxPoolSize × members × pods` = 3,840. Size these against the replica set's
+`MaxPoolSize × members × pods` = 3,840 for the HTTP client alone. Size these against the replica set's
 budget rather than the per-pod intuition — failover shifts pool creation between
 members and briefly multiplies the count.
 
@@ -528,9 +530,11 @@ That ceiling used to be *sticky*: the driver reaps idle connections only when
 grew the pool held those sockets for the life of the process, and failover
 re-growing them on a new member added to the total rather than replacing it. The
 two clients now set a reaping interval — `HTTP_MONGO_MAX_IDLE_TIME` and
-`MONGO_MAX_IDLE_TIME`, 5m each — so 684 is a transient peak that drains back
-toward `MinPoolSize × members` once the burst passes. `MONGO_MIN_POOL_SIZE`
-mirrors the HTTP knob and defaults to 0 for the same per-member reason.
+`MONGO_MAX_IDLE_TIME`, 5m each — so 834 is a transient peak that drains back
+toward `MinPoolSize × members` once the burst passes. `MONGO_MAX_IDLE_TIME` lives
+on the shared `mongoutil.PoolConfig`, so every service that adopted #347's helper
+gets the reaping default rather than user-service alone; `MONGO_MIN_POOL_SIZE`
+defaults to 0 for the same per-member reason as the HTTP floor.
 
 ## 14. Deployment and operations
 

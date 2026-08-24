@@ -1231,7 +1231,9 @@ messages that don't exist or belong to a different room.
 
 Most-recently-pinned first. Kill-switch and large-room override do **not** apply to
 listing. Caller with a `historySharedSince` lower bound receives redacted stubs for pins
-whose underlying message predates their access window.
+whose underlying message predates their access window, and for thread-only (`tshow=false`)
+replies whose thread parent predates it; `tshow=true` replies are judged on their own
+`createdAt` alone.
 
 #### Request body
 
@@ -1860,7 +1862,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 
 | Field | Type | Notes |
 |---|---|---|
-| `subscriptions` | Subscription[] | One page of room-info-enriched records, ordered by `lastMsgAt` desc. |
+| `subscriptions` | Subscription[] | One page of room-info-enriched records, ordered by `lastMsgAt` desc. Ordering freshness is cache-bounded (default 15s) and per server instance — dedupe by `roomId` across a multi-page drain; row fields, `updatedWithinDays`, `favorite` and open/closed membership are always fresh (a row that stops matching the filters before its page is built is dropped, not returned stale). |
 | `hasMore` | boolean | `true` when another page follows. Advance `offset` by your `limit` for the next page. |
 
 Per-room-type fields: channel rows add `name` (channel name); DM rows add `hrInfo`;
