@@ -67,6 +67,7 @@ type config struct {
 	RoomKeyGracePeriod          time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	RoomKeyCacheTTL             time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
 	RoomKeyCacheSize            int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	RoomKeyRetiredTTL           time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"` // read only, to fail fast when too short for this cache's TTL
 	RoomMetaL2TTL               time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
 	ValkeyAddrs                 []string        `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword              string          `env:"VALKEY_PASSWORD"           envDefault:""`
@@ -242,6 +243,11 @@ func main() {
 		// Caching beyond the grace period could serve a rotated-out key that clients can no longer decrypt; refuse to cache rather than risk it.
 		slog.Warn("room-key cache disabled: TTL must be below key grace period",
 			"ttl", cfg.RoomKeyCacheTTL, "grace_period", cfg.RoomKeyGracePeriod)
+	case !retiredTTLSafe(cfg.RoomKeyRetiredTTL, cfg.RoomKeyCacheTTL):
+		// Too short a retention breaks the client's later fetch; refuse to start.
+		slog.Error("ROOM_KEY_RETIRED_TTL must be at least twice ROOM_KEY_CACHE_TTL",
+			"retired_ttl", cfg.RoomKeyRetiredTTL, "cache_ttl", cfg.RoomKeyCacheTTL)
+		os.Exit(1)
 	default:
 		keyCache = NewCachedKeyProvider(keyStore, cfg.RoomKeyCacheSize, cfg.RoomKeyCacheTTL)
 		keyProvider = keyCache

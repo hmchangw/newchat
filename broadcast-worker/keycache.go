@@ -126,3 +126,8 @@ func (c *CachedKeyProvider) Get(ctx context.Context, roomID string) (*roomkeysto
 func keyCacheTTLSafe(ttl, grace time.Duration) bool {
 	return ttl > 0 && ttl < grace
 }
+
+// retiredTTLSafe: retention must outlast a cached key, which can be stamped at the end of its life.
+func retiredTTLSafe(retiredTTL, cacheTTL time.Duration) bool {
+	return retiredTTL >= 2*cacheTTL
+}

@@ -6714,7 +6714,7 @@ reply through the same caching path it uses for live events.
 | Condition | Error envelope `error` text | Notes |
 |---|---|---|
 | Requester is not a member of the room | `only room members can list members` | Surfaces the existing `errNotRoomMember` sentinel. |
-| Key not held (rolled past grace window, or never existed) | `room key not available` | Includes "explicit version not in the previous-key slot". |
+| Key not held (rolled past grace window, or never existed) | `room key not available` | Includes "explicit version resolvable in neither the previous-key slot nor the retired-key archive". |
 | Malformed request body | `invalid request: …` | |
 | Internal failure | `internal error` | |
 
