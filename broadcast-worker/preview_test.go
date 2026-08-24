@@ -284,7 +284,50 @@ func TestLastMessageUpdate_EligibleMessageStampsTheNewestIDNotTheSealedOne(t *te
 	keyCond := fields["previewForMsgId"].(bson.M)["$cond"].(bson.A)
 	assert.Equal(t, bson.M{"$literal": "m-system"}, keyCond[1],
 		"the freshness key must name the room's newest message, or the identity check fails against lastMsgId")
-	assert.EqualValues(t, at.UnixMilli(), fields["previewAsOf"].(bson.M)["$cond"].(bson.A)[1])
+
+	// The KEY takes the newest message's identity; the WATERMARK takes the preview's own
+	// clock. They are different questions: "what is this body paired with" versus "when
+	// was this body established". Stamping the body with the system message's time would
+	// claim it is as-of a moment it knows nothing about -- and would beat a mutation that
+	// landed in between carrying the correct body.
+	assert.EqualValues(t, at.Add(-time.Second).UnixMilli(),
+		fields["previewAsOf"].(bson.M)["$cond"].(bson.A)[1],
+		"the body write is ordered by pvwAt, not by the room tuple's clock")
+}
+
+// The coalescer keeps pvwAt on its own clock precisely so a later ineligible message
+// cannot displace the preview. The flush must not discard that separation: a mutation
+// landing between the sealed message and the flush writes the correct body, and a flush
+// stamped with the ineligible message's later time would overwrite it with stale content
+// under a key that then equals lastMsgId -- so the reader serves it as current.
+func TestLastMessageUpdate_BodyWriteCannotOutrankAnInterveningMutation(t *testing.T) {
+	m := &mongoStore{previews: true}
+	sealedAt := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
+	ineligibleAt := sealedAt.Add(10 * time.Second)
+
+	for _, tc := range []struct {
+		name string
+		upd  roomLastMsgUpdate
+	}{
+		{"a stored body", roomLastMsgUpdate{
+			msgID: "m-system", at: ineligibleAt,
+			pvw:   &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-eligible"}},
+			pvwAt: sealedAt,
+		}},
+		{"a cleared body", roomLastMsgUpdate{
+			msgID: "m-system", at: ineligibleAt,
+			pvwFailed: true, pvwAt: sealedAt,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := m.lastMessageUpdate(&tc.upd).(mongo.Pipeline)[0][0].Value.(bson.M)
+			got := fields["previewAsOf"].(bson.M)["$cond"].(bson.A)[1]
+			assert.EqualValues(t, sealedAt.UnixMilli(), got,
+				"the preview write is as-of when the preview was established")
+			assert.NotEqualValues(t, ineligibleAt.UnixMilli(), got,
+				"the room tuple's clock must not order the preview")
+		})
+	}
 }
 
 func TestLastMessageUpdate_IneligibleMessageAdvancesTheKeyOnly(t *testing.T) {

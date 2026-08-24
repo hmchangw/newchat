@@ -156,19 +156,28 @@ func (m *mongoStore) lastMessageUpdate(u *roomLastMsgUpdate) any {
 		}
 	}
 	asOf := u.at.UnixMilli()
+	// The preview rides its own clock, and the flush must not collapse the two. u.at names
+	// the room's NEWEST message, which may be a later ineligible one; the body was
+	// established at pvwAt. Ordering the body by u.at would claim it is as-of a moment it
+	// knows nothing about, and would outrank a mutation that landed in between carrying the
+	// corrected body — restoring stale content under a key that then equals lastMsgId, so
+	// the reader serves it as current. Losing to that mutation instead only costs a walk.
+	pvwAsOf := u.pvwAt.UnixMilli()
 	var pvwFields bson.M
 	switch {
 	case u.pvwFailed:
 		// The stored body is the PREVIOUS message's and opens under any key later pointing at
 		// it, so withholding is not enough — the next ineligible message would revalidate it.
-		pvwFields = preview.GuardedClearFields(asOf)
+		pvwFields = preview.GuardedClearFields(pvwAsOf)
 	case u.pvw != nil:
-		// Stamped here, not at seal time: the key must name the room's newest message,
-		// and a later ineligible one may have arrived after this was sealed.
+		// The KEY takes the newest message's identity, the WATERMARK the preview's own clock:
+		// "what is this body paired with" and "when was it established" are different
+		// questions, and a later ineligible message answers only the first.
 		sealed := *u.pvw
 		sealed.ForMsgID = u.msgID
-		pvwFields = preview.GuardedSetFields(sealed, asOf)
+		pvwFields = preview.GuardedSetFields(sealed, pvwAsOf)
 	default:
+		// The key advance IS the newest message's event, so it keeps that clock.
 		pvwFields = preview.GuardedAdvanceKeyFields(u.msgID, asOf)
 	}
 	maps.Copy(fields, pvwFields)
