@@ -263,3 +263,35 @@ func boundedLabelsInWidenedForms(ctx context.Context, c metric.Int64Counter, v s
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.Bool("run_info", true)))
 }
+
+// --- metrics-no-unbounded-label: propagation through a local variable ---
+
+// The structural patterns only saw a constructor nested directly inside a sink.
+// Hoisting it into a variable first is not a rewrite anyone does to evade the
+// rule — it is what you write when the key is chosen by a branch — but it took
+// the attribute out of the pattern's reach all the same. The same shape is why
+// search-service's inline fallback option survived a full repo scan.
+//
+// The rule is taint mode now, so it reports at the sink rather than at the
+// constructor. That is the more useful location anyway: the defect is an
+// unbounded attribute reaching a metric option, and the sink is where it does.
+func unboundedViaLocalVariable(ctx context.Context, c metric.Int64Counter, v string) {
+	kv := attribute.String("room_id", v)
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(kv))
+
+	keyed := attribute.Key("accountID").String(v)
+	// ruleid: metrics-no-unbounded-label
+	_ = attribute.NewSet(keyed)
+}
+
+// The same hop with a bounded key must stay silent on the cardinality rule, or
+// the dataflow arm has simply widened the gate rather than deepened it.
+func boundedViaLocalVariable(ctx context.Context, c metric.Int64Counter, v string) {
+	outcome := attribute.String("outcome", v)
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(outcome))
+
+	errType := attribute.Key("error_type").String(v)
+	_ = attribute.NewSet(errType)
+}

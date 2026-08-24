@@ -89,6 +89,21 @@ underscored, because OTel semconv spells these keys `user.id`, `session.id` and
 `error.stack`. Widening the separator does not widen the tails, so `error.type`
 and `user.agent` stay legal.
 
+It also follows the value rather than only matching a shape. The rule runs in
+semgrep's taint mode, with the forbidden constructors as sources and
+`metric.WithAttributes` / `attribute.NewSet` as sinks, so a hop through a local
+does not shake it off:
+
+```go
+kv := attribute.String("room_id", roomID)
+c.Add(ctx, 1, metric.WithAttributes(kv))   // still caught
+```
+
+The earlier structural form missed that, and the miss was not theoretical:
+`search-service`'s unknown-kind fallback built its option one line before using
+it and passed a full repo scan. Findings land on the sink, since that is where
+the unbounded value reaches the metric.
+
 A key the rule cannot recognise as bounded but which genuinely is takes a
 `nosemgrep` with a justification naming *what enforces* the boundedness. A claim
 with nothing behind it is how the `_INBOX` leak survived review once already.
