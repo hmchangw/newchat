@@ -42,7 +42,8 @@ func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[mode
 	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	hydrated := &models.Message{
@@ -78,7 +79,7 @@ func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[mode
 	// acts on it, so the observable is the destructive write itself.
 	var gone bool
 	rooms.EXPECT().ClearPreview(gomock.Any(), "r1", gomock.Any()).
-		DoAndReturn(func(context.Context, string, int64) error { gone = true; return nil }).AnyTimes()
+		DoAndReturn(func(context.Context, string, int64) (bool, error) { gone = true; return true, nil }).AnyTimes()
 
 	var got *model.PreviewMessage
 	pub.EXPECT().

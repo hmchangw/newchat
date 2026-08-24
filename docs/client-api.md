@@ -1025,8 +1025,9 @@ real content; a room with only ineligible messages omits `previewMessage`.
 Editing or deleting a message also updates the stored preview: an edit to the previewed
 message refreshes it, and deleting it moves the preview back to the previous eligible
 message, or removes it when the recompute confirms the room has no eligible message
-left. A recompute that cannot complete leaves the stored preview as it was — the event
-omits `previewMessage`, but later reads still serve the previous one.
+left. A recompute that cannot complete does not leave the pre-edit or deleted content in
+place: the event omits `previewMessage`, and the stored preview stops being served, so the
+next read resolves the room's preview from message history instead.
 
 | Field | Type | Notes |
 |---|---|---|

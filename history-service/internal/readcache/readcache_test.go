@@ -168,6 +168,8 @@ type fakeRoomSource struct {
 	updateBodyArgs    previewWrite
 	clearPreviewCalls atomic.Int32
 	clearPreviewArgs  previewWrite
+	invalidateCalls   atomic.Int32
+	invalidateArgs    previewWrite
 }
 
 // previewWrite captures the identifying arguments of a preview write so a test can
@@ -209,20 +211,26 @@ func (f *fakeRoomSource) SetPreviewMessage(_ context.Context, roomID string, _ p
 }
 
 //nolint:gocritic // hugeParam: the by-value shape is the RoomSource contract under test.
-func (f *fakeRoomSource) UpdatePreviewBody(_ context.Context, roomID string, _ pkgmodel.PreviewMessage, _ string, asOf int64) error {
+func (f *fakeRoomSource) UpdatePreviewBody(_ context.Context, roomID string, _ pkgmodel.PreviewMessage, _ string, asOf int64) (bool, error) {
 	f.updateBodyCalls.Add(1)
 	f.updateBodyArgs = previewWrite{roomID: roomID, asOf: asOf}
-	return nil
+	return true, nil
 }
 
-func (f *fakeRoomSource) ClearPreview(_ context.Context, roomID string, asOf int64) error {
+func (f *fakeRoomSource) ClearPreview(_ context.Context, roomID string, asOf int64) (bool, error) {
 	f.clearPreviewCalls.Add(1)
 	f.clearPreviewArgs = previewWrite{roomID: roomID, asOf: asOf}
+	return true, nil
+}
+
+func (f *fakeRoomSource) InvalidatePreviewKey(_ context.Context, roomID, msgID string) error {
+	f.invalidateCalls.Add(1)
+	f.invalidateArgs = previewWrite{roomID: roomID, forMsgID: msgID}
 	return nil
 }
 
-// The three preview writes are pass-throughs, not cached reads: a stale write would
-// be a correctness bug, where a stale read is only a stale row.
+// The preview writes are pass-throughs, not cached reads: a stale write would be a
+// correctness bug, where a stale read is only a stale row.
 func TestRoomCache_PreviewWrites_BypassTheCache(t *testing.T) {
 	src := &fakeRoomSource{}
 	c, err := NewRoomCache(src, 8, time.Minute)
@@ -231,8 +239,13 @@ func TestRoomCache_PreviewWrites_BypassTheCache(t *testing.T) {
 
 	require.NoError(t, c.SetPreviewMessage(ctx, "r1", pkgmodel.PreviewMessage{}, "m-9", 100))
 	require.NoError(t, c.SetPreviewMessage(ctx, "r1", pkgmodel.PreviewMessage{}, "m-9", 100))
-	require.NoError(t, c.UpdatePreviewBody(ctx, "r1", pkgmodel.PreviewMessage{}, "m-observed", 200))
-	require.NoError(t, c.ClearPreview(ctx, "r1", 300))
+	applied, err := c.UpdatePreviewBody(ctx, "r1", pkgmodel.PreviewMessage{}, "m-observed", 200)
+	require.NoError(t, err)
+	assert.True(t, applied, "the applied signal must survive the passthrough")
+	cleared, err := c.ClearPreview(ctx, "r1", 300)
+	require.NoError(t, err)
+	assert.True(t, cleared, "the applied signal must survive the passthrough")
+	require.NoError(t, c.InvalidatePreviewKey(ctx, "r1", "m-mutated"))
 
 	assert.Equal(t, int32(2), src.setPreviewCalls.Load(), "an identical repeat write must still reach the source")
 	assert.Equal(t, previewWrite{roomID: "r1", forMsgID: "m-9", asOf: 100}, src.setPreviewArgs)
@@ -240,6 +253,8 @@ func TestRoomCache_PreviewWrites_BypassTheCache(t *testing.T) {
 	assert.Equal(t, previewWrite{roomID: "r1", asOf: 200}, src.updateBodyArgs)
 	assert.Equal(t, int32(1), src.clearPreviewCalls.Load())
 	assert.Equal(t, previewWrite{roomID: "r1", asOf: 300}, src.clearPreviewArgs)
+	assert.Equal(t, int32(1), src.invalidateCalls.Load())
+	assert.Equal(t, previewWrite{roomID: "r1", forMsgID: "m-mutated"}, src.invalidateArgs)
 }
 
 func TestRoomCache_SetPreviewMessage_PropagatesError(t *testing.T) {

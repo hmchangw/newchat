@@ -273,3 +273,56 @@ func TestGuardedAdvanceKeyFields_OnlyAdvancesAnAlreadyCurrentKey(t *testing.T) {
 	assert.Contains(t, rendered, "lastMsgId",
 		"the guard must compare it against the stored lastMsgId (pre-update in a $set stage)")
 }
+
+// The invalidate is keyed on the STORED BODY's own message id, not on the freshness key.
+// The key does not identify what the body describes — an ineligible insert advances it
+// over an untouched body — so pinning to it would miss exactly the case this repairs.
+func TestGuardedInvalidateKeyFields_KeysOnTheStoredBody(t *testing.T) {
+	fields := GuardedInvalidateKeyFields("m-mutated")
+
+	require.Contains(t, fields, "previewForMsgId")
+	cond := fields["previewForMsgId"].(bson.M)["$cond"].(bson.A)
+	assert.Equal(t,
+		bson.M{"$eq": bson.A{bson.M{"$ifNull": bson.A{"$previewMeta.messageId", ""}}, "m-mutated"}},
+		cond[0], "the predicate must compare the stored body's message id against the mutated one")
+	assert.Equal(t, "$$REMOVE", cond[1], "a passing guard withdraws the key")
+	assert.Equal(t, "$previewForMsgId", cond[2], "a failing guard leaves the key alone")
+}
+
+// Withdrawing the key without the watermark that protects it would strand the room: the
+// warm-back meant to refill it is watermark-guarded, so a future-stamped previewAsOf
+// (clock skew, a future-dated insert) would reject the repair as well as the write that
+// failed. They go together, under one predicate, so the room cannot end up certified-by
+// -nothing and un-repairable at once.
+func TestGuardedInvalidateKeyFields_WithdrawsTheWatermarkWithTheKey(t *testing.T) {
+	fields := GuardedInvalidateKeyFields("m-mutated")
+
+	require.Contains(t, fields, "previewAsOf")
+	key := fields["previewForMsgId"].(bson.M)["$cond"].(bson.A)
+	mark := fields["previewAsOf"].(bson.M)["$cond"].(bson.A)
+	assert.Equal(t, key[0], mark[0], "both must move under the same predicate or neither is safe")
+	assert.Equal(t, "$$REMOVE", mark[1])
+	assert.Equal(t, "$previewAsOf", mark[2])
+}
+
+// This repair follows a write that did NOT land, and a watermark comparison is one of the
+// ways such a write fails to land. Guarding the repair on the watermark would reject it
+// for the same reason, which is the failure rather than a safeguard against it.
+func TestGuardedInvalidateKeyFields_IsNotItselfWatermarkGuarded(t *testing.T) {
+	fields := GuardedInvalidateKeyFields("m-mutated")
+
+	assert.NotContains(t, fmt.Sprintf("%v", fields), "$gte",
+		"a watermark conjunct would reject exactly the writes this repair exists to follow")
+}
+
+// The body survives. The reader is what stops trusting it, and the walk that replaces it
+// runs on the next read; clearing it here would be a destructive write authorised by a
+// mutation that, by definition, failed to establish what the room now holds.
+func TestGuardedInvalidateKeyFields_LeavesTheBodyIntact(t *testing.T) {
+	fields := GuardedInvalidateKeyFields("m-mutated")
+
+	for _, f := range previewBodyFields {
+		assert.NotContains(t, fields, f, "%s must survive; only its certification is withdrawn", f)
+	}
+	assert.Len(t, fields, 2, "the key and its watermark, nothing else")
+}

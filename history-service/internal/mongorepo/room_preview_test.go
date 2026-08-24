@@ -277,7 +277,9 @@ func TestRoomRepo_UpdatePreviewBody_ReplacesBodyKeepingFreshnessKey(t *testing.T
 
 	edited := samplePreview()
 	edited.Content = "edited content"
-	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-edit", edited, "m-preview", 200))
+	applied, err := repo.UpdatePreviewBody(ctx, "r-edit", edited, "m-preview", 200)
+	require.NoError(t, err)
+	assert.True(t, applied, "a write that lands must report applied")
 
 	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-edit"})
 	require.NoError(t, err)
@@ -297,7 +299,9 @@ func TestRoomRepo_UpdatePreviewBody_RefusesToCreate(t *testing.T) {
 	ctx := context.Background()
 	seedBareRoom(t, repo, "r-nopreview", "m-newest")
 
-	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-nopreview", samplePreview(), "m-newest", 200))
+	applied, err := repo.UpdatePreviewBody(ctx, "r-nopreview", samplePreview(), "m-newest", 200)
+	require.NoError(t, err)
+	assert.False(t, applied, "refusing to create is a rejected write, not a silent success")
 
 	var raw bson.M
 	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-nopreview"}).Decode(&raw))
@@ -312,7 +316,9 @@ func TestRoomRepo_ClearPreview_RemovesEveryPreviewField(t *testing.T) {
 	ctx := context.Background()
 	seedRoomWithPreview(t, repo, "r-cleared", "m-preview", "m-preview")
 
-	require.NoError(t, repo.ClearPreview(ctx, "r-cleared", 200))
+	cleared, err := repo.ClearPreview(ctx, "r-cleared", 200)
+	require.NoError(t, err)
+	assert.True(t, cleared, "a clear that lands must report applied")
 
 	var raw bson.M
 	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-cleared"}).Decode(&raw))
@@ -334,11 +340,107 @@ func TestRoomRepo_PreviewWrites_NoCipherIsANoOp(t *testing.T) {
 	seedBareRoom(t, repo, "r-off", "m-newest")
 
 	require.NoError(t, repo.SetPreviewMessage(ctx, "r-off", samplePreview(), "m-newest", 100))
-	require.NoError(t, repo.UpdatePreviewBody(ctx, "r-off", samplePreview(), "m-any", 100))
-	require.NoError(t, repo.ClearPreview(ctx, "r-off", 100))
+	updated, err := repo.UpdatePreviewBody(ctx, "r-off", samplePreview(), "m-any", 100)
+	require.NoError(t, err)
+	assert.False(t, updated, "previews off writes nothing, so nothing was applied")
+	cleared, err := repo.ClearPreview(ctx, "r-off", 100)
+	require.NoError(t, err)
+	assert.False(t, cleared)
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-off", "m-any"))
 
 	var raw bson.M
 	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-off"}).Decode(&raw))
 	assert.NotContains(t, raw, "previewCiphertext")
 	assert.NotContains(t, raw, "previewAsOf", "a disabled writer must not even advance the watermark")
 }
+
+// --- #226: withdrawing certification a mutation could not renew ---
+
+// The shape #226 describes: the body is still stored and still keyed to the room's last
+// message, so the reader serves it as current even though the message it describes has
+// just been edited or deleted. Withdrawing the key is what makes the next read miss.
+func TestRoomRepo_InvalidatePreviewKey_WithholdsThePreviewItNamed(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedRoomWithPreview(t, repo, "r-withdraw", "m-preview", "m-preview")
+
+	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-withdraw"})
+	require.NoError(t, err)
+	require.NotNil(t, got["r-withdraw"].Preview, "precondition: served as current before the repair")
+
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-withdraw", "m-preview"))
+
+	got, err = repo.GetRoomTimesByIDs(ctx, []string{"r-withdraw"})
+	require.NoError(t, err)
+	require.Contains(t, got, "r-withdraw", "the row itself still comes back")
+	assert.Nil(t, got["r-withdraw"].Preview, "a preview whose key was withdrawn must be withheld")
+}
+
+// The body survives the repair: a degraded walk is not evidence the room is empty, and
+// the read-time walk is what replaces it. The watermark goes with the key, so the
+// warm-back that refills the room cannot be rejected by a watermark left behind.
+func TestRoomRepo_InvalidatePreviewKey_KeepsTheBodyAndDropsTheWatermark(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedRoomWithPreview(t, repo, "r-body", "m-preview", "m-preview")
+
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-body", "m-preview"))
+
+	var raw bson.M
+	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-body"}).Decode(&raw))
+	assert.NotContains(t, raw, "previewForMsgId", "the certification comes off")
+	assert.NotContains(t, raw, "previewAsOf", "and the watermark protecting it, or the repair cannot land")
+	assert.Contains(t, raw, "previewCiphertext", "the body itself must survive")
+	assert.Contains(t, raw, "previewMeta")
+}
+
+// Keyed on the stored body, so a preview some newer write already replaced is left alone —
+// otherwise a slow mutation would knock out a perfectly good preview it has nothing to do
+// with, at the cost of a Cassandra walk on the next read.
+func TestRoomRepo_InvalidatePreviewKey_LeavesAPreviewOfAnotherMessage(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedRoomWithPreview(t, repo, "r-other", "m-preview", "m-preview")
+
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-other", "m-someone-else"))
+
+	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-other"})
+	require.NoError(t, err)
+	assert.NotNil(t, got["r-other"].Preview, "a body this mutation did not change stays current")
+}
+
+// The repair must survive the failure it follows. A seal is what breaks when Vault is
+// down, so the invalidate does not seal — it must still land with the cipher unusable.
+func TestRoomRepo_InvalidatePreviewKey_NeedsNoSeal(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedRoomWithPreview(t, repo, "r-noseal", "m-preview", "m-preview")
+
+	// A repo whose cipher cannot encrypt, standing in for a Vault outage on the seal path.
+	broken := NewRoomRepo(db, failingCipher{}, previewKey)
+	_, err := broken.UpdatePreviewBody(ctx, "r-noseal", samplePreview(), "m-preview", 200)
+	require.Error(t, err, "precondition: the body write is what fails")
+	require.NoError(t, broken.InvalidatePreviewKey(ctx, "r-noseal", "m-preview"),
+		"the repair must not depend on the seal path that just failed")
+
+	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-noseal"})
+	require.NoError(t, err)
+	assert.Nil(t, got["r-noseal"].Preview)
+}
+
+// failingCipher stands in for an unreachable Vault: every seal fails, decrypts included.
+type failingCipher struct{}
+
+func (failingCipher) Encrypt(context.Context, string, atrest.EncryptedFields) ([]byte, atrest.EncMeta, error) {
+	return nil, atrest.EncMeta{}, fmt.Errorf("vault unreachable")
+}
+
+func (failingCipher) Decrypt(context.Context, string, []byte, atrest.EncMeta) (atrest.EncryptedFields, error) {
+	return atrest.EncryptedFields{}, fmt.Errorf("vault unreachable")
+}
+
+func (failingCipher) EnsureDEK(context.Context, string) error { return nil }
