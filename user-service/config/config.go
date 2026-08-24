@@ -153,7 +153,7 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
-		return Config{}, err
+		return Config{}, fmt.Errorf("validate mongo pool config: %w", err)
 	}
 	return cfg, nil
 }

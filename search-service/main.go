@@ -106,9 +106,16 @@ type Config struct {
 	ShowTeamsAccounts []string `env:"SHOW_TEAMS_ROOM_ACCOUNTS" envSeparator:","`
 	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE / MONGO_MIN_POOL_SIZE).
 	Pool mongoutil.PoolConfig
-	// Guard bounds in-flight handlers (MAX_CONCURRENCY) and per-request duration
-	// (REQUEST_TIMEOUT) so a burst can't saturate the Mongo pool.
-	Guard natsrouter.GuardConfig
+	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
+	// door instead of piling unbounded work onto Elasticsearch/Mongo; 0 disables.
+	//
+	// Deliberately the cap alone, not a full natsrouter.GuardConfig: this service
+	// already pins a per-request deadline of its own (SEARCH_REQUEST_TIMEOUT, via
+	// handler.withRequestTimeout on every route). A second router-level deadline
+	// of the same magnitude would race it, cancelling the context out from under
+	// the inner budget before it can turn the expiry into a search-timeout reply.
+	// One deadline per request — the inner one, which owns the error handling.
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 }
 
 // teamsAccountSet builds a lookup set from the SHOW_TEAMS_ROOM_ACCOUNTS list, dropping blanks.
@@ -137,8 +144,8 @@ func main() {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
-	if err := cfg.Guard.Validate(); err != nil {
-		slog.Error("invalid config", "error", err)
+	if cfg.MaxConcurrency < 0 {
+		slog.Error("invalid config", "error", fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency))
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
@@ -242,11 +249,14 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	router := natsrouter.New(nc, "search-service", cfg.Guard.Options()...)
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
+	if cfg.MaxConcurrency > 0 {
+		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
+	}
+	router := natsrouter.New(nc, "search-service", routerOpts...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())
-	router.Use(cfg.Guard.TimeoutMiddleware()...)
 	handler.Register(router)
 
 	// Health-only listener. All four timeouts guard against hung probes tying

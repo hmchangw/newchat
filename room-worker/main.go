@@ -272,7 +272,8 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard)
+	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)

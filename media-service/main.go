@@ -49,10 +49,10 @@ func run() error {
 		return fmt.Errorf("EID_CACHE_TTL must be positive, got %s", cfg.EIDCacheTTL)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
-		return err
+		return fmt.Errorf("validate mongo pool config: %w", err)
 	}
 	if err := cfg.Guard.Validate(); err != nil {
-		return err
+		return fmt.Errorf("validate guard config: %w", err)
 	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
@@ -85,7 +85,7 @@ func run() error {
 
 	h := newHandler(store, store, blobs, &cfg)
 
-	router := natsrouter.DefaultGuarded(nc, "media-service", cfg.Guard)
+	router := natsrouter.DefaultGuarded(nc, "media-service", cfg.Guard, natsrouter.WithSiteID(cfg.SiteID))
 	registerEmojiNATS(router, h, cfg.SiteID)
 
 	gin.SetMode(gin.ReleaseMode)

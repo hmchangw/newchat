@@ -60,8 +60,12 @@ func (g GuardConfig) TimeoutMiddleware() []HandlerFunc {
 // half of the overload protection — the cap (a construction option) and the
 // timeout (post-middleware) are otherwise two separate calls that are easy to
 // forget one of. Services needing a non-standard middleware order keep New.
-func DefaultGuarded(nc *o11ynats.Conn, queue string, g GuardConfig) *Router {
-	r := Default(nc, queue, g.Options()...)
+//
+// opts are the caller's own construction options (WithSiteID, WithMetrics, …),
+// applied alongside the guard's. They are variadic rather than absent so that
+// adopting the helper never costs a service an option it already installed.
+func DefaultGuarded(nc *o11ynats.Conn, queue string, g GuardConfig, opts ...Option) *Router {
+	r := Default(nc, queue, append(g.Options(), opts...)...)
 	r.Use(g.TimeoutMiddleware()...)
 	return r
 }

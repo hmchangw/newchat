@@ -68,7 +68,7 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 	if err := c.Pool.Validate(); err != nil {
-		return Config{}, err
+		return Config{}, fmt.Errorf("validate mongo pool config: %w", err)
 	}
 	return c, nil
 }
