@@ -113,6 +113,8 @@ func runSoakMongoProbe(
 			if !ok {
 				return nil
 			}
+			// Probe publishes its outcome through the snapshot, metrics, and
+			// transition logs; the loop has no additional error action.
 			_ = probe.Probe(ctx)
 		}
 	}
@@ -132,6 +134,8 @@ func startSoakMongoProbe(
 	go func() {
 		defer close(done)
 		defer ticker.Stop()
+		// Probe and the loop publish health through their observable state;
+		// shutdown consumes only this goroutine's completion signal.
 		_ = probe.Probe(probeCtx)
 		_ = runSoakMongoProbe(probeCtx, probe, ticker.C)
 	}()
