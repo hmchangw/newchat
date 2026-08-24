@@ -14,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model"
@@ -168,8 +169,33 @@ func (s *mongoSoakStore) FindConflictingRoomIDs(
 	return conflicts, nil
 }
 
+// soakManifestWriteConcern keeps every manifest lease write durable across a
+// replica-set failover. The manifest is the fence seed and teardown read to
+// decide whether a run is still alive, so an acknowledged write a rollback can
+// erase would let teardown act on a heartbeat the surviving primary never saw
+// while the run is still dispatching. Most deployments already default to
+// majority; a PSA topology or a URI carrying w:1 does not, and the lease is
+// too load-bearing to inherit that.
+func soakManifestWriteConcern() *writeconcern.WriteConcern {
+	concern := writeconcern.Majority()
+	journal := true
+	concern.Journal = &journal
+	return concern
+}
+
+// manifestCollection is the only handle the manifest write paths may use, so
+// the lease concern cannot be lost by adding a write that reaches for the
+// plain collection. Reads are unaffected by write concern and use s.db
+// directly.
+func (s *mongoSoakStore) manifestCollection() *mongo.Collection {
+	return s.db.Collection(
+		soakManifestCollection,
+		options.Collection().SetWriteConcern(soakManifestWriteConcern()),
+	)
+}
+
 func (s *mongoSoakStore) PutManifest(ctx context.Context, manifest *soakManifest) error {
-	_, err := s.db.Collection(soakManifestCollection).ReplaceOne(
+	_, err := s.manifestCollection().ReplaceOne(
 		ctx,
 		bson.D{{Key: "_id", Value: manifest.ID}},
 		manifest,
@@ -206,7 +232,7 @@ func (s *mongoSoakStore) TouchHeartbeat(
 	at time.Time,
 ) error {
 	heartbeat := at.UTC()
-	result, err := s.db.Collection(soakManifestCollection).UpdateOne(
+	result, err := s.manifestCollection().UpdateOne(
 		ctx,
 		bson.D{
 			{Key: "_id", Value: runID},
@@ -784,7 +810,7 @@ func (s *mongoSoakStore) DeleteOwnership(ctx context.Context, runID string) erro
 
 func (s *mongoSoakStore) MarkCleaned(ctx context.Context, runID string) error {
 	now := time.Now().UTC()
-	result, err := s.db.Collection(soakManifestCollection).UpdateOne(
+	result, err := s.manifestCollection().UpdateOne(
 		ctx,
 		bson.D{{Key: "_id", Value: runID}},
 		bson.D{{Key: "$set", Value: bson.D{

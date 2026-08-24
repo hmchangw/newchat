@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 )
 
 func TestSoakOwnershipIDFilter_UsesRunScopedPrimaryKeyRange(t *testing.T) {
@@ -23,4 +25,13 @@ func TestSoakOwnershipIDFilter_UsesRunScopedPrimaryKeyRange(t *testing.T) {
 			{Key: "$lt", Value: "run-a;"},
 		},
 	}}, soakOwnershipIDFilter("run-a", "run-a:000001"))
+}
+
+func TestSoakManifestWriteConcern_IsMajorityAndJournaled(t *testing.T) {
+	concern := soakManifestWriteConcern()
+
+	require.NotNil(t, concern)
+	assert.Equal(t, writeconcern.WCMajority, concern.W)
+	require.NotNil(t, concern.Journal)
+	assert.True(t, *concern.Journal)
 }
