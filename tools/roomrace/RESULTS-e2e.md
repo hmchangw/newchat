@@ -174,3 +174,58 @@ With `message-worker` stalled (history read returns nothing) and a 12 ms client 
 |---|---|---|---|
 | alice | **0%** | 100% | **0%** |
 | bob | **0%** | 100% | **0%** |
+
+
+---
+
+# The client-only flow, tested (2026-08-23)
+
+Sequence under test, with the server-side grace window **off**:
+
+1. `room.create` on the user's "send" click
+2. on `subscription.update` → subscribe to the room subject immediately
+3. buffer any system-message live events
+4. `msg.send` after the create async job result
+5. on the gatekeeper reply → enter the room → `msg.history` → merge with the buffer
+6. own message arrives live → merge
+7. both are on screen
+
+10 rooms per delay, `-early-sub -hint -history-at open`:
+
+| client subscribe delay | missing from live | missing from read | **lost** |
+|---|---|---|---|
+| 0 ms | 0% | 0–13% | **0%** |
+| 5 ms | 50% | 0% | **0%** |
+| 12 ms | 67% | 0–7% | **0%** |
+| 30 ms | 67% | 0–7% | **0%** |
+| 100 ms | 67% | 0–10% | **0%** |
+
+It works. Past ~5 ms the live path loses both system messages exactly as step 3 anticipates,
+and step 5's read covers them every time. What makes it work is the ~500 ms between room
+creation and the first user message — the create async job result round trip — which is far
+longer than the write lag, so by the time history is read the system messages are durable.
+
+## The hint is required, not optional
+
+A member slow enough to miss the *user* message live too (`-client-delay 600ms`):
+
+| | missing from live | missing from read | **lost** |
+|---|---|---|---|
+| bob, no hint | 100% | 17% | **17%** |
+| bob, with `meta.lastMsgAt` | 100% | 0% | **0%** |
+
+Without the hint the scan ceiling is the room document's `lastMsgAt`, which the just-sent
+message has not reached; that member loses it permanently.
+
+## The one hole
+
+`message-worker` stalled, 12 ms delay, grace window off:
+
+| | missing from live | missing from read | **lost** |
+|---|---|---|---|
+| alice | 67% | 100% | **67%** |
+| bob | 67% | 100% | **67%** |
+
+The flow's correctness rests on the read covering what the live path dropped. When the write
+path lags, neither has it. The grace window is what removes that dependency (0% lost under the
+same stall).

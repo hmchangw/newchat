@@ -36,6 +36,7 @@ type client struct {
 	rec     *recorder
 
 	subscribeOnUpdate bool
+	readHistoryOnJoin bool
 	renderDelay       time.Duration
 
 	mu           sync.Mutex
@@ -79,8 +80,11 @@ func (c *client) onUserEvent(m *nats.Msg) {
 		if c.subscribeOnUpdate {
 			time.Sleep(c.renderDelay)
 			c.openRoom(evt.Subscription.RoomID)
-			// subscribe -> flush -> read, immediately, the way the recommended
-			// client does it. Reading here is what exposes the double-miss.
+			if !c.readHistoryOnJoin {
+				// The proposed flow buffers live events here and reads history
+				// later, when the UI actually enters the room.
+				return
+			}
 			msgs, _ := c.loadHistory(evt.Subscription.RoomID, false, "")
 			c.mu.Lock()
 			c.joinHist[evt.Subscription.RoomID] = msgs

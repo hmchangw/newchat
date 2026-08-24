@@ -45,6 +45,7 @@ var (
 	probeRoom   = flag.String("probe-room", "", "just load history for this room id and exit")
 	writeLag    = flag.Bool("write-lag", false, "after the send, poll hinted history every 5ms to measure when the message becomes readable")
 	verbose     = flag.Bool("v", false, "print the per-iteration timeline")
+	historyAt   = flag.String("history-at", "join", "when the client reads history: join (on subscription.update) or open (after the send is accepted, i.e. when the UI enters the room)")
 )
 
 type ev struct {
@@ -170,6 +171,8 @@ func runOne(i int, aTally, bTally *tally) error {
 	b.renderDelay = *clientDelay
 	a.subscribeOnUpdate = *earlySub
 	b.subscribeOnUpdate = true
+	a.readHistoryOnJoin = *historyAt == "join"
+	b.readHistoryOnJoin = *historyAt == "join"
 	if err := a.login(); err != nil {
 		return err
 	}
@@ -182,10 +185,13 @@ func runOne(i int, aTally, bTally *tally) error {
 		return fmt.Errorf("create channel: %w", err)
 	}
 
+	rec.add(*userA, "rpc", "create-room async job result ok", "", roomID)
+
 	msgID := idgen.GenerateMessageID()
 	if err := a.send(roomID, msgID, "first message"); err != nil {
 		return fmt.Errorf("send first message: %w", err)
 	}
+	rec.add(*userA, "rpc", "msg.send accepted by gatekeeper", msgID, "")
 
 	var lag time.Duration
 	var probes int
@@ -197,7 +203,9 @@ func runOne(i int, aTally, bTally *tally) error {
 	b.waitRoomOpen(roomID, 3*time.Second)
 
 	aHist, _ := a.loadHistory(roomID, *backfill, msgID)
+	rec.add(*userA, "history", fmt.Sprintf("room-open msg.history returned %d", len(aHist)), "", "")
 	bHist, _ := b.loadHistory(roomID, *backfill, msgID)
+	rec.add(*userB, "history", fmt.Sprintf("room-open msg.history returned %d", len(bHist)), "", "")
 	// When the client joined via subscription.update it already read history
 	// there; that earlier read is the one whose freshness is under test.
 	if jh, ok := a.joinHistory(roomID); ok {
