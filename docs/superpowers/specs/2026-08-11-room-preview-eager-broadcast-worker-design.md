@@ -26,7 +26,7 @@ Everything below is downstream of that addition:
 | Cassandra on `rooms.get` | on every first read of a room | only on a miss, which the eager writer makes rare |
 | Cold rooms (pre-rollout) | resolved on first read | resolved on first read |
 | Backfill | not needed (reads self-heal) | not needed (reads self-heal) |
-| `pkg/preview` write shapes | set, clear | set, clear, **advance-key**, **update-body** |
+| `pkg/preview` write shapes | set, clear | set, clear, **advance-key**, **update-body**, **invalidate-key** |
 | Preview cache in history-service | required (fronts the walk) | retained, fronting the fallback only |
 
 ### Who writes what, and why that split
@@ -86,6 +86,24 @@ writer has no walk, so it must reconstruct the same invariant from the event str
   refuses to write when no key is stored — under eager persistence an insert is the only
   thing that may *create* a preview, because only an insert knows the id that makes one
   readable.
+- **Mutation that cannot write the new body** → the freshness key is *withdrawn*. This is
+  `GuardedInvalidateKeyFields`, and it exists because the same fact that makes the
+  update-body shape safe makes its failure permanent: `lastMsgId` does not move, so the
+  identity check keeps passing over a body describing a message that has just been edited
+  or deleted, and no read ever re-derives it. Withdrawing the key is what turns that into
+  a miss the read-time walk repairs.
+
+  Its predicate is `previewMeta.messageId`, not the freshness key: an ineligible insert
+  can advance the key over a body it did not touch, so the key does not identify what the
+  body describes. Keying on the body also makes the repair a no-op exactly when it should
+  be — once any newer write has replaced the body, the mutation has nothing to invalidate.
+
+  It is neither sealed nor watermark-guarded, and it withdraws `previewAsOf` along with
+  the key. All three follow from what it is: the repair for a write that did *not* land.
+  Sealing is one of the things that breaks (Vault), a watermark comparison is one of the
+  ways a write is rejected, and a watermark left behind would reject the warm-back meant
+  to refill the room just as it rejected the write. It cannot cover a Mongo outage — the
+  repair is itself a Mongo write — which is the part that still wants a durable queue.
 - **Eligible insert that fails to seal** → the stored body is *cleared*. This case looks
   like an ineligible insert (no body to write) but must not be treated as one: the stored
   body is *not* the room's last eligible message, so leaving it in place risks presenting

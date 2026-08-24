@@ -620,11 +620,12 @@ func (m *MockRoomRepository) EXPECT() *MockRoomRepositoryMockRecorder {
 }
 
 // ClearPreview mocks base method.
-func (m *MockRoomRepository) ClearPreview(ctx context.Context, roomID string, asOf int64) error {
+func (m *MockRoomRepository) ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ClearPreview", ctx, roomID, asOf)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // ClearPreview indicates an expected call of ClearPreview.
@@ -694,6 +695,20 @@ func (mr *MockRoomRepositoryMockRecorder) GetRoomUserCount(ctx, roomID any) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomUserCount", reflect.TypeOf((*MockRoomRepository)(nil).GetRoomUserCount), ctx, roomID)
 }
 
+// InvalidatePreviewKey mocks base method.
+func (m *MockRoomRepository) InvalidatePreviewKey(ctx context.Context, roomID, msgID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "InvalidatePreviewKey", ctx, roomID, msgID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// InvalidatePreviewKey indicates an expected call of InvalidatePreviewKey.
+func (mr *MockRoomRepositoryMockRecorder) InvalidatePreviewKey(ctx, roomID, msgID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InvalidatePreviewKey", reflect.TypeOf((*MockRoomRepository)(nil).InvalidatePreviewKey), ctx, roomID, msgID)
+}
+
 // SetPreviewMessage mocks base method.
 func (m *MockRoomRepository) SetPreviewMessage(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error {
 	m.ctrl.T.Helper()
@@ -709,11 +724,12 @@ func (mr *MockRoomRepositoryMockRecorder) SetPreviewMessage(ctx, roomID, pvw, fo
 }
 
 // UpdatePreviewBody mocks base method.
-func (m *MockRoomRepository) UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error {
+func (m *MockRoomRepository) UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdatePreviewBody", ctx, roomID, pvw, forMsgID, asOf)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdatePreviewBody indicates an expected call of UpdatePreviewBody.

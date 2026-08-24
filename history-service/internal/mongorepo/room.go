@@ -144,15 +144,32 @@ func (r *RoomRepo) openStoredPreview(ctx context.Context, room *model.Room) *mod
 
 // applyPreviewFields is the chokepoint for every preview write; the nil-cipher check is
 // load-bearing, since preview.Seal would call Encrypt on a nil interface.
-func (r *RoomRepo) applyPreviewFields(ctx context.Context, roomID, what string, fields bson.M) error {
+//
+// applied reports that the write actually landed. A guarded write that loses its guard is
+// not an error — the newer state is already stored — but it is also not applied, and the
+// mutation path has to tell those apart: a preview it failed to replace goes on reading
+// as current, since a mutation never moves lastMsgId (#226, #364). Previews being off
+// reports (false, nil); the repair that follows is a no-op on the same check.
+//
+// match adds the caller's guard to the QUERY, not just the pipeline, wherever a modified
+// document would otherwise be mistaken for an applied one: previewAsOf advances on the
+// watermark alone, so a write whose field condition rejected it still modifies the doc.
+// A guard expressible in the query filter belongs there; the pipeline keeps its own copy,
+// which is what makes the write atomic.
+func (r *RoomRepo) applyPreviewFields(ctx context.Context, roomID, what string, match, fields bson.M) (bool, error) {
 	if r.cipher == nil {
-		return nil
+		return false, nil
+	}
+	filter := bson.M{"_id": roomID}
+	for k, v := range match {
+		filter[k] = v
 	}
 	pipeline := mongo.Pipeline{{{Key: "$set", Value: fields}}}
-	if _, err := r.rooms.Raw().UpdateOne(ctx, bson.M{"_id": roomID}, pipeline); err != nil {
-		return fmt.Errorf("%s %s: %w", what, roomID, err)
+	res, err := r.rooms.Raw().UpdateOne(ctx, filter, pipeline)
+	if err != nil {
+		return false, fmt.Errorf("%s %s: %w", what, roomID, err)
 	}
-	return nil
+	return res.ModifiedCount > 0, nil
 }
 
 // seal encrypts pvw under the site preview DEK, or reports that previews are off.
@@ -178,30 +195,56 @@ func (r *RoomRepo) SetPreviewMessage(ctx context.Context, roomID string, pvw mod
 	if err != nil || !ok {
 		return err
 	}
-	return r.applyPreviewFields(ctx, roomID, "store room preview", preview.GuardedSetFields(sealed, asOf))
+	// No applied signal: the warm-back has nothing to do differently when it loses.
+	_, err = r.applyPreviewFields(ctx, roomID, "store room preview", nil, preview.GuardedSetFields(sealed, asOf))
+	return err
 }
 
 // UpdatePreviewBody reseals the body for a mutation, leaving previewForMsgId alone. It
 // refuses to create: a doc minted here would carry no key and never be invalidatable.
 //
 //nolint:gocritic // hugeParam: pvw's by-value shape matches SetPreviewMessage and the RoomRepository contract.
-func (r *RoomRepo) UpdatePreviewBody(ctx context.Context, roomID string, pvw model.PreviewMessage, forMsgID string, asOf int64) error {
+func (r *RoomRepo) UpdatePreviewBody(ctx context.Context, roomID string, pvw model.PreviewMessage, forMsgID string, asOf int64) (bool, error) {
 	// No observed key means nothing to pin the body to; storing it could pair this
 	// body with whatever key the doc happens to hold.
 	if forMsgID == "" {
-		return nil
+		return false, nil
 	}
 	sealed, ok, err := r.seal(ctx, roomID, "", pvw)
 	if err != nil || !ok {
-		return err
+		return false, err
 	}
+	// The observed key is also a query predicate, so a write this guard rejects matches
+	// nothing and reports not-applied. In the pipeline alone it could not: previewAsOf
+	// advances on the watermark whatever the body condition decided, and the repair this
+	// signal drives exists precisely for the case where an insert moved the key.
 	return r.applyPreviewFields(ctx, roomID, "update room preview body",
+		bson.M{"previewForMsgId": forMsgID},
 		preview.GuardedUpdateBodyFields(sealed, forMsgID, asOf))
 }
 
 // ClearPreview removes every preview field, advancing previewAsOf against older replays.
-func (r *RoomRepo) ClearPreview(ctx context.Context, roomID string, asOf int64) error {
-	return r.applyPreviewFields(ctx, roomID, "clear room preview", preview.GuardedClearFields(asOf))
+//
+// No query predicate: this guard is the watermark, the same one previewAsOf carries, so a
+// rejected clear changes nothing and ModifiedCount already tells the truth.
+func (r *RoomRepo) ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error) {
+	return r.applyPreviewFields(ctx, roomID, "clear room preview", nil, preview.GuardedClearFields(asOf))
+}
+
+// InvalidatePreviewKey withdraws the freshness key from a stored preview whose body
+// describes msgID, so the reader stops serving it and the next read re-derives it. The
+// repair for a mutation that could not replace the body it just changed: without it the
+// identity check keeps passing, because a mutation never moves lastMsgId (#226).
+//
+// Deliberately unsealed and unguarded by the watermark — it must be able to succeed on
+// the failures it follows, including the ones where sealing is what broke.
+func (r *RoomRepo) InvalidatePreviewKey(ctx context.Context, roomID, msgID string) error {
+	if msgID == "" {
+		return nil
+	}
+	_, err := r.applyPreviewFields(ctx, roomID, "invalidate room preview key", nil,
+		preview.GuardedInvalidateKeyFields(msgID))
+	return err
 }
 
 // GetRoomUserCount returns userCount; a missing room is wrapped ErrNoDocuments, an infra error.

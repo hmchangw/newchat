@@ -79,10 +79,20 @@ type RoomRepository interface {
 	// OBSERVED: the write lands only while the stored key still equals it, so an
 	// insert that advanced the key between walk and write makes this a no-op
 	// rather than pairing this older body with the newer key.
-	UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error
+	//
+	// Reports whether the write landed. Losing a guard is not an error, but the
+	// caller must still repair: the body it failed to replace goes on reading as
+	// current, since a mutation never moves lastMsgId (#226).
+	UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) (bool, error)
 	// ClearPreview removes the stored preview under the same guard, for a
-	// mutation that leaves the room with no eligible message.
-	ClearPreview(ctx context.Context, roomID string, asOf int64) error
+	// mutation that leaves the room with no eligible message. Reports whether the
+	// write landed, for the same reason UpdatePreviewBody does.
+	ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error)
+	// InvalidatePreviewKey withdraws the freshness key from a stored preview whose
+	// body describes msgID, so the reader stops serving it and the next read
+	// re-derives it. The repair when neither write above could establish what the
+	// room now holds; a no-op once any newer write has replaced the body.
+	InvalidatePreviewKey(ctx context.Context, roomID, msgID string) error
 }
 
 // EventPublisher publishes events to NATS with a Nats-Msg-Id dedup header.

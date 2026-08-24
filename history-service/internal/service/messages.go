@@ -554,7 +554,7 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 	pvw := s.previewAfterMutation(c, msg, roomID)
 	canonicalEvt.PreviewMessage = pvw.EventPreview()
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUpdated(siteID), &canonicalEvt)
-	s.persistMutatedPreview(c, roomID, &pvw, editedAt)
+	s.persistMutatedPreview(c, roomID, msg.MessageID, &pvw, editedAt)
 
 	return &models.EditMessageResponse{
 		MessageID: req.MessageID,
@@ -634,7 +634,7 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 	pvw := s.previewAfterMutation(c, msg, roomID)
 	canonicalEvt.PreviewMessage = pvw.EventPreview()
 	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
-	s.persistMutatedPreview(c, roomID, &pvw, actualDeletedAt)
+	s.persistMutatedPreview(c, roomID, msg.MessageID, &pvw, actualDeletedAt)
 
 	return &models.DeleteMessageResponse{
 		MessageID: req.MessageID,
@@ -651,31 +651,64 @@ func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models
 	return s.roomLastPreviewMessage(c, roomID, nil, time.Now().UTC())
 }
 
-// persistMutatedPreview writes what the mutation walk resolved — best-effort and bounded.
-// A failed write leaves the previous preview reading as current (#226).
-func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID string, w *previewWalk, at time.Time) {
-	asOf := at.UnixMilli()
+// persistMutatedPreview stores what the mutation walk resolved, and repairs the room when
+// it could not. Best-effort and bounded throughout: the mutation itself has committed.
+//
+// The repair is the load-bearing half. The reader serves a stored preview on
+// previewForMsgId == lastMsgId, and a mutation never moves lastMsgId, so a body this
+// mutation changed but failed to replace keeps reading as current — deleted content stays
+// on the room list until the room's next message, which may never come (#226). Whenever
+// the write does not land, the freshness key comes off instead, and the next read misses,
+// walks and warms back.
+//
+// It cannot cover every failure: an invalidate is itself a Mongo write, so a Mongo outage
+// takes both. It does cover the ones where only the write path broke — a failed seal
+// (Vault), a guard that rejected the write, and a walk that never resolved — which is
+// every case where the room is repairable at all without a durable retry queue.
+func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID, msgID string, w *previewWalk, at time.Time) {
+	// A hidden thread reply never reaches the room timeline, so no stored preview can
+	// describe it: nothing to write, and nothing to withdraw.
+	if w.State == previewSkipped {
+		return
+	}
+
+	applied, err := s.writeMutatedPreview(c, roomID, w, at.UnixMilli())
+	if err != nil {
+		slog.WarnContext(c, "persist mutated room preview failed", "room_id", roomID,
+			"request_id", natsutil.RequestIDFromContext(c), "error", err)
+	}
+	if applied {
+		return
+	}
+	// Keyed on the mutated message, not on what the walk observed: the freshness key can
+	// name a message the body does not describe, so only the body's own id identifies
+	// what this mutation invalidated. Already-replaced bodies make it a no-op.
+	ctx, cancel := context.WithTimeout(c, warmBackTimeout)
+	defer cancel()
+	if err := s.rooms.InvalidatePreviewKey(ctx, roomID, msgID); err != nil {
+		slog.WarnContext(c, "withdraw stale room preview key failed", "room_id", roomID,
+			"message_id", msgID, "request_id", natsutil.RequestIDFromContext(c), "error", err)
+	}
+}
+
+// writeMutatedPreview applies the walk's outcome, reporting whether the write landed. A
+// degraded walk establishes nothing, so it writes nothing and reports not-applied — the
+// caller's repair is what keeps the room from serving the body it could not re-derive.
+func (s *HistoryService) writeMutatedPreview(c *natsrouter.Context, roomID string, w *previewWalk, asOf int64) (bool, error) {
+	ctx, cancel := context.WithTimeout(c, warmBackTimeout)
+	defer cancel()
 
 	switch w.State {
 	case previewFound:
 		// Body only: a mutation does not move lastMsgId. Pinned to the key the walk
 		// OBSERVED, not left unconditional — an insert landing between the walk and this
 		// write advances the key, and an unpinned body would then be stored under it.
-		ctx, cancel := context.WithTimeout(c, warmBackTimeout)
-		defer cancel()
-		if err := s.rooms.UpdatePreviewBody(ctx, roomID, w.Preview, w.NewestObservedID, asOf); err != nil {
-			slog.WarnContext(c, "update mutated room preview failed", "room_id", roomID,
-				"request_id", natsutil.RequestIDFromContext(c), "error", err)
-		}
+		return s.rooms.UpdatePreviewBody(ctx, roomID, w.Preview, w.NewestObservedID, asOf)
 	case previewEmpty:
 		// The one outcome authorising a destructive write: completed, and nothing left.
-		ctx, cancel := context.WithTimeout(c, warmBackTimeout)
-		defer cancel()
-		if err := s.rooms.ClearPreview(ctx, roomID, asOf); err != nil {
-			slog.WarnContext(c, "clear room preview failed", "room_id", roomID,
-				"request_id", natsutil.RequestIDFromContext(c), "error", err)
-		}
-	default: // previewDegraded / previewSkipped — a survivor may still exist, touch nothing
+		return s.rooms.ClearPreview(ctx, roomID, asOf)
+	default: // previewDegraded — a survivor may still exist, so the body must survive
+		return false, nil
 	}
 }
 

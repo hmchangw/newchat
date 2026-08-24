@@ -161,3 +161,32 @@ func GuardedClearFields(asOf int64) bson.M {
 	}
 	return guardedFields(asOf, previewDocFields, watermarkGuard(asOf), onPass)
 }
+
+// GuardedInvalidateKeyFields withdraws a stored preview's certification when a mutation
+// could not replace the body it describes — the repair for #226. The reader serves a
+// preview on previewForMsgId == lastMsgId, and a mutation never moves lastMsgId, so a
+// body whose message was edited or deleted goes on reading as current forever unless
+// something withdraws the key. Removing it makes the next read miss, walk, and warm back.
+//
+// The predicate is the STORED BODY's own message id, not the freshness key: an ineligible
+// insert advances the key over an untouched body, so the key does not identify what the
+// body describes. Keying on the body also makes this a no-op precisely when it should be
+// — once any newer write has replaced the body, previewMeta.messageId no longer names the
+// mutated message.
+//
+// previewAsOf goes with it, under the same predicate. This follows a write that did not
+// land, and a watermark comparison is one of the ways a write fails to land; leaving a
+// future-stamped watermark in place would reject the warm-back too, and the room would be
+// left certified by nothing and unable to repair itself. For the same reason the repair is
+// not itself watermark-guarded.
+func GuardedInvalidateKeyFields(msgID string) bson.M {
+	cond := bson.M{"$eq": bson.A{
+		bson.M{"$ifNull": bson.A{"$previewMeta.messageId", ""}},
+		msgID,
+	}}
+	out := bson.M{}
+	for _, f := range []string{"previewForMsgId", "previewAsOf"} {
+		out[f] = bson.M{"$cond": bson.A{cond, "$$REMOVE", "$" + f}}
+	}
+	return out
+}
