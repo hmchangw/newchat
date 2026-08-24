@@ -105,8 +105,15 @@ type Config struct {
 	// Valkey; when ValkeyAddrs is empty the whole cache is disabled and reads go
 	// direct to Cassandra. Only sealed buckets (strictly older than the current
 	// one) are cached; the hot current bucket is always read live.
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS"                 envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD"              envDefault:""`
+	// BucketCacheOptIn gates the whole feature. VALKEY_ADDRS alone is not the
+	// gate: it is a fleet-wide variable that several other services already
+	// consume, so a deployment that injects it everywhere would switch this
+	// cache on for history-service as a side effect of merging rather than as a
+	// decision. Turning it on is opting into the staleness bounds documented on
+	// BucketCacheTTL, which is a choice an operator makes deliberately.
+	BucketCacheOptIn bool     `env:"HISTORY_BUCKET_CACHE_ENABLED" envDefault:"false"`
+	ValkeyAddrs      []string `env:"VALKEY_ADDRS"                 envSeparator:","`
+	ValkeyPassword   string   `env:"VALKEY_PASSWORD"              envDefault:""`
 	// BucketCacheL1MaxBytes caps the total encoded bucket data held in the
 	// per-replica L1, LRU-evicted to stay under budget. Byte-bounded (not entry-
 	// count-bounded) so the memory ceiling holds regardless of bucket size.
@@ -132,12 +139,14 @@ type Config struct {
 }
 
 // BucketCacheEnabled reports whether the per-bucket sealed-read cache should be
-// stood up. Zero is the documented disable value for each knob, so any one of
-// them at zero keeps Valkey unconnected and the cache uninstalled — including
+// stood up. It requires an explicit opt-in (see BucketCacheOptIn) on top of
+// usable knobs. Zero is the documented disable value for each knob, so any one
+// of them at zero keeps Valkey unconnected and the cache uninstalled — including
 // MaxRows, where a zero cap would otherwise install a cache that classifies
 // every non-empty bucket as oversized and so can never serve a hit.
 func (c *Config) BucketCacheEnabled() bool {
-	return len(c.ValkeyAddrs) > 0 &&
+	return c.BucketCacheOptIn &&
+		len(c.ValkeyAddrs) > 0 &&
 		c.BucketCacheL1MaxBytes > 0 &&
 		c.BucketCacheTTL > 0 &&
 		c.BucketCacheMaxRows > 0
