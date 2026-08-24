@@ -65,7 +65,11 @@ const (
 // An unknown tag decodes to Miss, which also makes a rolling deploy over
 // untagged entries written by an older build a plain cache miss.
 const (
-	tagBucket    byte = 1
+	// tagBucket is the current cached-bucket layout. Tag 1 was the previous one
+	// (a bare gob []models.Message, which lost a zero TCount — see bucketBlob);
+	// it is retired rather than reused, so entries an older build left in Valkey
+	// fall to interpret's unknown-tag case and degrade to a plain miss.
+	tagBucket    byte = 3
 	tagOversized byte = 2
 )
 
@@ -263,13 +267,45 @@ func interpret(blob []byte) (msgs []models.Message, res Lookup, ok bool) {
 	}
 }
 
+// bucketBlob is the gob body of a cached bucket.
+//
+// TCounts carries Message.TCount out of band. gob flattens a pointer to the
+// value it points at and then omits any field whose value is the zero value, so
+// a *int pointing at 0 — a thread parent whose replies have all been deleted —
+// decodes back as nil. Since `json:"tcount,omitempty"` on a pointer emits
+// "tcount":0 for the pointer and drops the field entirely for nil, that would
+// serialize the same message differently depending on whether the read was
+// served from cache.
+//
+// Only TCount needs this. The other pointer fields are timestamps and structs
+// whose zero value never occurs in a stored row, so gob's omission is
+// unobservable there — but a new pointer field whose zero value IS meaningful
+// would need the same treatment.
+type bucketBlob struct {
+	Rows    []models.Message
+	TCounts []optionalInt
+}
+
+// optionalInt is a *int in a shape gob round-trips: presence lives in its own
+// field, so a zero Val is no longer indistinguishable from absence.
+type optionalInt struct {
+	Set bool
+	Val int
+}
+
 // encode gob-encodes a bucket's messages for cache storage behind a tag byte.
 // gob (not JSON) is used because models.Message.Reactions is a struct-keyed,
 // marshal-only map that JSON cannot round-trip.
 func encode(msgs []models.Message) ([]byte, error) {
+	tcounts := make([]optionalInt, len(msgs))
+	for i := range msgs {
+		if c := msgs[i].TCount; c != nil {
+			tcounts[i] = optionalInt{Set: true, Val: *c}
+		}
+	}
 	var buf bytes.Buffer
 	buf.WriteByte(tagBucket)
-	if err := gob.NewEncoder(&buf).Encode(msgs); err != nil {
+	if err := gob.NewEncoder(&buf).Encode(bucketBlob{Rows: msgs, TCounts: tcounts}); err != nil {
 		return nil, fmt.Errorf("gob encode bucket: %w", err)
 	}
 	return buf.Bytes(), nil
@@ -279,9 +315,20 @@ func encode(msgs []models.Message) ([]byte, error) {
 // freshly-allocated slice on every call so a cached blob is never aliased into a
 // caller that mutates it in place.
 func decode(blob []byte) ([]models.Message, error) {
-	var msgs []models.Message
-	if err := gob.NewDecoder(bytes.NewReader(blob)).Decode(&msgs); err != nil {
+	var body bucketBlob
+	if err := gob.NewDecoder(bytes.NewReader(blob)).Decode(&body); err != nil {
 		return nil, fmt.Errorf("gob decode bucket: %w", err)
 	}
-	return msgs, nil
+	for i := range body.Rows {
+		if i >= len(body.TCounts) {
+			break
+		}
+		if c := body.TCounts[i]; c.Set {
+			v := c.Val
+			body.Rows[i].TCount = &v
+		} else {
+			body.Rows[i].TCount = nil
+		}
+	}
+	return body.Rows, nil
 }
