@@ -442,11 +442,7 @@ func (r *SubscriptionRepo) activeFilter(account string) bson.M {
 	return filter
 }
 
-// activeSubscriptionProjection is the terminal $project for the badge path: the
-// exact fields models.ActiveSubscription decodes, and nothing else. Everything
-// roomsEnrichStages adds beyond lastMsgAt — the room's counts, its E2E key slot,
-// the sort key — is dropped here instead of being shipped and discarded.
-// TestActiveSubscriptionProjection_MatchesRowType pins it to the struct.
+// activeSubscriptionProjection is the terminal $project: exactly the fields models.ActiveSubscription decodes.
 func activeSubscriptionProjection() bson.M {
 	return bson.M{
 		"_id":          0,
@@ -469,14 +465,8 @@ func (r *SubscriptionRepo) CountActiveSubscriptions(ctx context.Context, account
 	return int(n), nil
 }
 
-// activeSubscriptionPipeline builds the exact aggregation pipeline
-// GetActiveSubscriptions runs. It exists so the raw-BSON guard in
-// subscriptions_test.go (TestGetActiveSubscriptions_ProjectsBadgeFields_Integration)
-// can execute the identical pipeline instead of a hand-rebuilt copy: if the
-// terminal $project were ever dropped from production, that test's assertion
-// on the raw document's keys would fail immediately, because it would be
-// running production's own pipeline rather than a copy that could drift out
-// of sync with it.
+// activeSubscriptionPipeline builds the pipeline GetActiveSubscriptions runs. The
+// raw-BSON guard runs this same builder, so a dropped $project fails a test.
 func (r *SubscriptionRepo) activeSubscriptionPipeline(account string, limit int) bson.A {
 	pipeline := bson.A{bson.M{"$match": r.activeFilter(account)}}
 	// MongoDB rejects $limit:0 — treat it as "no cap".
@@ -488,11 +478,7 @@ func (r *SubscriptionRepo) activeSubscriptionPipeline(account string, limit int)
 	return pipeline
 }
 
-// GetActiveSubscriptions returns the active set used by the unread count, capped by
-// limit. The cap runs before the rooms join, so $lookup touches ≤limit rows and the
-// page is exactly limit — no stage after the cap can drop a row. The terminal
-// projection returns only the fields unreadRooms reads: the room baseline beyond
-// lastMsgAt (counts, key slot, sort key) is dropped rather than decoded and discarded.
+// GetActiveSubscriptions returns the active set for the unread count, capped before the join.
 func (r *SubscriptionRepo) GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]models.ActiveSubscription, error) {
 	return r.activeSecondary.Aggregate(ctx, r.activeSubscriptionPipeline(account, limit))
 }

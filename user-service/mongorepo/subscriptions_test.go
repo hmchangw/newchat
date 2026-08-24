@@ -828,9 +828,7 @@ func TestAppSubscriptionRoundTrip_Integration(t *testing.T) {
 	})
 }
 
-// The badge path must come back with exactly the five fields it reads, correctly
-// populated for a local room, a room with no messages, and a cross-site sub with
-// no local room document at all.
+// The badge path must return exactly its five fields, across local, empty and cross-site rooms.
 func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
 	r, db := newTestSubscriptionRepo(t)
 	ctx := context.Background()
@@ -878,15 +876,7 @@ func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
 	assert.Nil(t, remote.LastMsgAt, "a cross-site sub has no local room document")
 	require.NotNil(t, remote.LastSeenAt)
 
-	// The joined room carries an E2E key slot (encKey) that the projection must
-	// not leak — but decoding into models.ActiveSubscription (five fields, no
-	// inline/catch-all) would silently discard any extra field Mongo actually
-	// returned, so that decode step can't be where this is proven. Re-run the
-	// identical pipeline through a raw handle and decode the p-room row — the
-	// row where all five projected fields are populated — into bson.M: an
-	// unregressed $project returns a document keyed by exactly those five
-	// names, while a regression that let encKey (or any other enrichment
-	// field) through the $project stage surfaces here as an extra map key.
+	// Assert on the raw document: decoding first would discard a leaked encKey.
 	pipeline := r.activeSubscriptionPipeline("alice", 100)
 	cur, err := db.Collection(subscriptionsCollection).Aggregate(ctx, pipeline)
 	require.NoError(t, err)
