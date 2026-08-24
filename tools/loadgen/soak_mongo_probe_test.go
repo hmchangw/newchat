@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -92,6 +95,25 @@ func TestSoakMongoProbe_ShutdownCancellationPreservesLastCompletedSnapshot(t *te
 	assert.Zero(t, testutil.ToFloat64(
 		metrics.MongoProbeAttempts.WithLabelValues(string(soakMongoProbeError))),
 		"shutdown cancellation must not manufacture a Mongo outage attempt")
+}
+
+func TestSoakMongoProbe_LogsOnlyHealthTransitions(t *testing.T) {
+	wantErr := errors.New("primary unavailable")
+	pinger := &fakeSoakMongoPinger{errors: []error{wantErr, wantErr, nil, nil}}
+	probe := newSoakMongoProbe(pinger, time.Second, time.Now, nil)
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	assert.ErrorIs(t, probe.Probe(context.Background()), wantErr)
+	assert.ErrorIs(t, probe.Probe(context.Background()), wantErr)
+	require.NoError(t, probe.Probe(context.Background()))
+	require.NoError(t, probe.Probe(context.Background()))
+
+	output := logs.String()
+	assert.Equal(t, 1, strings.Count(output, "Mongo primary probe entered degraded state"))
+	assert.Equal(t, 1, strings.Count(output, "Mongo primary probe recovered"))
 }
 
 func TestRunSoakMongoProbe_StopsWhenTicksClose(t *testing.T) {

@@ -149,6 +149,23 @@ longer dispatching. The emergency override for a crashed loadgen is documented
 in the Kubernetes runbook and is permitted only after the Deployment is stopped
 and the heartbeat is proven not to advance.
 
+On that lease-risk path only, in-flight lanes receive half of one heartbeat
+interval to drain. If they finish, the other half remains for ledger, observer,
+NATS, and process shutdown. If a lane does not drain, loadgen logs the active
+lane names and counts, records
+`loadgen_failure_invalidations_total{reason="lease_abort"}` through the durable
+ledger, and bypasses graceful cleanup so no later unbounded wait can cross the
+lease boundary. The abandoned operations may recover from the WAL as
+`unverified`, but the `lease_abort` invalidation makes the affected campaign
+interval explicitly **INCONCLUSIVE**. Ordinary SIGTERM and duration completion
+retain the existing unbounded graceful drain.
+
+The invalidation write itself is bounded to one quarter of a heartbeat interval
+so a stalled WAL cannot defeat the lease fence. If that final write does not
+finish, loadgen emits a separate error saying the invalidation may not have
+reached the WAL and exits anyway; the lease guarantee takes precedence over
+preserving that last evidence record.
+
 Loadgen requires
 `heartbeatStaleAfter >= 2 * heartbeatInterval + 5s`; the additional interval is
 the shutdown margin and the five seconds cover an in-progress heartbeat

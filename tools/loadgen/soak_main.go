@@ -433,6 +433,7 @@ func runSoakWorkload(
 	opts soakOptions,
 ) (exitCode int) {
 	seed := opts.Seed
+	fastLeaseAbort := false
 	client, err := mongoutil.Connect(
 		ctx,
 		cfg.MongoURI,
@@ -443,7 +444,11 @@ func runSoakWorkload(
 		slog.Error("connect Mongo for Cassandra soak", "error", err)
 		return 1
 	}
-	defer mongoutil.Disconnect(context.Background(), client)
+	defer func() {
+		if !fastLeaseAbort {
+			mongoutil.Disconnect(context.Background(), client)
+		}
+	}()
 	store := &mongoSoakStore{db: client.Database(cfg.MongoDB)}
 
 	topology, err := store.LoadTopology(ctx, cfg.Soak.RunID, cfg.SiteID)
@@ -460,16 +465,27 @@ func runSoakWorkload(
 	metrics := NewMetrics()
 	heartbeatStatus := newSoakHeartbeatStatus(metrics)
 	shutdownMongoProbe := startSoakMongoProbe(ctx, client, metrics, time.Now)
-	defer shutdownMongoProbe()
+	defer func() {
+		if !fastLeaseAbort {
+			shutdownMongoProbe()
+		}
+	}()
 	reconcileBreaches := warnSoakReconcileConfig(&cfg.Soak)
 	setSoakRunInfo(metrics, cfg.Soak.Environment)
-	defer metrics.stopNATSHealth()
+	defer func() {
+		if !fastLeaseAbort {
+			metrics.stopNATSHealth()
+		}
+	}()
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
 	if err != nil {
 		slog.Error("connect NATS for Cassandra soak", "error", err)
 		return 1
 	}
 	defer func() {
+		if fastLeaseAbort {
+			return
+		}
 		if err := nc.Drain(); err != nil {
 			slog.Error("drain Cassandra soak NATS connection", "error", err)
 		}
@@ -488,6 +504,9 @@ func runSoakWorkload(
 
 	metricsServer := startSoakMetricsServer(cfg.MetricsAddr, metrics)
 	defer func() {
+		if fastLeaseAbort {
+			return
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
@@ -502,6 +521,9 @@ func runSoakWorkload(
 	}
 	if pprofServer != nil {
 		defer func() {
+			if fastLeaseAbort {
+				return
+			}
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := pprofServer.Shutdown(shutdownCtx); err != nil {
@@ -526,6 +548,9 @@ func runSoakWorkload(
 			heapProfiler.Run(profileCtx, profileTicker.C)
 		}()
 		defer func() {
+			if fastLeaseAbort {
+				return
+			}
 			stopProfiling()
 			<-profileDone
 		}()
@@ -562,6 +587,9 @@ func runSoakWorkload(
 		metrics.FailureDropped.Add(float64(dropped))
 	}
 	defer func() {
+		if fastLeaseAbort {
+			return
+		}
 		err := ledger.Close()
 		if err != nil {
 			slog.Error("close Cassandra soak failure ledger", "error", err)
@@ -626,7 +654,11 @@ func runSoakWorkload(
 			<-expiryDone
 		})
 	}
-	defer shutdownExpiry()
+	defer func() {
+		if !fastLeaseAbort {
+			shutdownExpiry()
+		}
+	}()
 	consumerSamplerCtx, stopConsumerSamplers := context.WithCancel(context.Background())
 	var consumerSamplerWG sync.WaitGroup
 	js, jetStreamErr := jetstream.New(nc.NatsConn())
@@ -664,7 +696,11 @@ func runSoakWorkload(
 			consumerSamplerWG.Wait()
 		})
 	}
-	defer shutdownConsumerSamplers()
+	defer func() {
+		if !fastLeaseAbort {
+			shutdownConsumerSamplers()
+		}
+	}()
 	if cfg.Soak.RecipientObserverEnabled {
 		recipientObserver := observationRuntime.Recipient()
 		recipientSource := newPooledNATSFailureRecipientSource(
@@ -690,6 +726,9 @@ func runSoakWorkload(
 		}
 	}
 	defer func() {
+		if fastLeaseAbort {
+			return
+		}
 		if err := observationRuntime.Close(); err != nil {
 			slog.Error("shutdown recipient observer", "error", err)
 		}
@@ -780,7 +819,11 @@ func runSoakWorkload(
 		slog.Error("subscribe Cassandra soak send responses", "error", err)
 		return 1
 	}
-	defer func() { _ = responseSub.Unsubscribe() }()
+	defer func() {
+		if !fastLeaseAbort {
+			_ = responseSub.Unsubscribe()
+		}
+	}()
 
 	if err := runSoakEncryptionPreflight(
 		ctx,
@@ -1163,8 +1206,19 @@ func runSoakWorkload(
 		nil,
 		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
 		withSoakHeartbeatObserver(heartbeatStatus),
+		withSoakFailureInvalidation(ledger.Invalidate),
 	)
 	result, runErr := workload.Run(workloadCtx)
+	if result.LeaseAbort {
+		fastLeaseAbort = true
+		stopWorkload(runErr)
+		slog.Error(
+			"bypass graceful soak cleanup after lease abort",
+			"consequence", "process must exit before the teardown lease becomes stale",
+			"error", runErr,
+		)
+		return 1
+	}
 	shutdownExpiry()
 	shutdownConsumerSamplers()
 	if err := observationRuntime.Close(); err != nil {

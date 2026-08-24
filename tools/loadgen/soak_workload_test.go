@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -166,6 +168,106 @@ func TestSoakWorkload_CancellationStopsNewWorkAndDrainsInFlight(t *testing.T) {
 	assert.ErrorIs(t, <-done, context.Canceled)
 	assert.True(t, finished.Load())
 	assert.Equal(t, int64(1), dispatcher.started.Load())
+}
+
+func TestNewSoakWorkload_DerivesASafeDefaultLeaseFromHeartbeatInterval(t *testing.T) {
+	workload := newSoakWorkload(&soakWorkloadConfig{
+		HeartbeatInterval: 90 * time.Second,
+	}, nil, nil, nil, nil, nil)
+
+	assert.Equal(t, 90*time.Second, workload.cfg.HeartbeatInterval)
+	assert.Equal(t, 185*time.Second, workload.cfg.HeartbeatStaleAfter)
+
+	workload = newSoakWorkload(&soakWorkloadConfig{
+		HeartbeatInterval: 30 * time.Second,
+	}, nil, nil, nil, nil, nil)
+	assert.Equal(t, 2*time.Minute, workload.cfg.HeartbeatStaleAfter,
+		"the familiar two-minute default remains the floor")
+}
+
+func TestSoakWorkload_LeaseRiskBoundsLaneDrainAndInvalidatesEvidence(t *testing.T) {
+	const heartbeatInterval = 200 * time.Millisecond
+	metrics := NewMetrics()
+	ledger, err := newFailureLedger(&failureLedgerConfig{
+		Capacity: 16, Recorder: newFailureLedgerPromRecorder(metrics),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ledger.Close()) })
+
+	startedAt := time.Now().UTC()
+	realStartedAt := time.Now()
+	var advanceToLeaseBoundary atomic.Bool
+	now := func() time.Time {
+		if advanceToLeaseBoundary.Load() {
+			return startedAt.Add(5700*time.Millisecond + time.Since(realStartedAt))
+		}
+		return startedAt
+	}
+	store := seededLifecycleStoreAt("run-1", startedAt.Add(-time.Minute))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	dispatcher := &singleSoakDispatcher{}
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	workload := newSoakWorkload(&soakWorkloadConfig{
+		RunID: "run-1", Duration: time.Hour,
+		HeartbeatInterval: heartbeatInterval, HeartbeatStaleAfter: 6 * time.Second,
+		SendRate: 1, MaxInFlight: 1,
+	}, store, &soakWorkloadActions{
+		Send: func(context.Context, bool) error {
+			advanceToLeaseBoundary.Store(true)
+			close(started)
+			<-release
+			return nil
+		},
+	}, dispatcher.Dispatch, now, nil,
+		withSoakFailureInvalidation(ledger.Invalidate),
+	)
+
+	done := make(chan struct{})
+	var result soakWorkloadResult
+	var runErr error
+	go func() {
+		result, runErr = workload.Run(context.Background())
+		close(done)
+	}()
+	<-started
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("lease-risk shutdown did not bound an uncooperative lane drain")
+	}
+	close(release)
+
+	assert.ErrorIs(t, runErr, errSoakHeartbeatLeaseAtRisk)
+	assert.Equal(t, soakCompletionDependencyFailure, result.Completion)
+	assert.True(t, result.LeaseAbort,
+		"the outer runner must bypass graceful cleanup that can wait indefinitely")
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.FailureInvalidations.WithLabelValues(invalidReasonLeaseAbort)))
+	assert.Contains(t, logs.String(), "soak lane drain exceeded lease safety budget")
+	assert.Contains(t, logs.String(), `"inFlight":1`)
+	assert.Contains(t, logs.String(), `"send":1`)
+}
+
+func TestWaitSoakFailureInvalidation_BoundsAStalledLedgerWrite(t *testing.T) {
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	invalidate := func(string) {
+		defer close(finished)
+		<-release
+	}
+
+	assert.False(t, waitSoakFailureInvalidation(invalidate, invalidReasonLeaseAbort, 10*time.Millisecond))
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("stalled invalidation goroutine did not finish after release")
+	}
 }
 
 func TestPrepareSoakRun_ReusesManifestDeadlineAfterRestart(t *testing.T) {
@@ -508,6 +610,8 @@ func TestRunSoakHeartbeat_ClassifiesCancellationDegradedAndInactive(t *testing.T
 		)
 
 		require.Error(t, err)
+		assert.ErrorIs(t, err, errSoakHeartbeatLeaseInvalid)
+		assert.NotErrorIs(t, err, errSoakHeartbeatLeaseAtRisk)
 		assert.ErrorContains(t, err, "soak heartbeat lease")
 	})
 

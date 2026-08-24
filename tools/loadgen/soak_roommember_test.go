@@ -1139,6 +1139,38 @@ func TestSoakRoomLanes_RoomCreateCapsOwnershipRetryAtDeadline(t *testing.T) {
 		"the terminal ownership attempt must remain claimable at the deadline")
 }
 
+func TestSoakRoomLanes_ExpiryLeavesTerminalOwnershipAttemptToTheLane(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.store.appendErr = errors.New("primary unavailable")
+	fixture.advance(operation.Deadline.Sub(fixture.now) - 500*time.Millisecond)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	require.True(t, reconciled)
+	retry := soakSingleActiveOperation(t, fixture.ledger)
+	require.Equal(t, operation.Deadline, retry.nextVerifyAt)
+
+	fixture.advance(500 * time.Millisecond)
+	expiredIDs, err := fixture.ledger.Expire(fixture.now)
+	require.NoError(t, err)
+	assert.Empty(t, expiredIDs,
+		"expiry grace must leave a deadline probe to the reconciliation lane")
+
+	reconciled, err = fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Empty(t, fixture.ledger.ActiveOperations())
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		fixture.metrics.FailureUntracked.WithLabelValues("ownership")),
+		"a terminal ownership failure must remain visible to teardown operators")
+	assert.Equal(t, uint64(1), fixture.ledger.Snapshot().Results[failureResultGood])
+}
+
 // Reads against a created room are issued as the account that created it. Any
 // other account is not a member, so the room_read lane would measure
 // authorization failures instead of the reads it is there to exercise.

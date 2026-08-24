@@ -67,7 +67,7 @@ func TestFailureDashboardContract_BundledDashboardUsesCurrentMetricContract(t *t
 		// Both startup reasons, not just the capacity floor. A panel pinned to
 		// one reason goes blank for the other, which is the same "a metric
 		// nobody surfaces closes nothing" the panel was added to fix.
-		`loadgen_failure_invalidations_total{reason=~\"reconcile_capacity|reconcile_lag_range\"}`,
+		`loadgen_failure_invalidations_total{reason=~\"reconcile_capacity|reconcile_lag_range|lease_abort\"}`,
 		"loadgen_mongo_up",
 		"loadgen_mongo_probe_timestamp_seconds",
 		`increase(loadgen_mongo_probe_attempts_total{outcome=\"error\"}[2m])`,

@@ -101,6 +101,7 @@ type soakWorkloadResult struct {
 	Completion   soakCompletion
 	Deadline     time.Time
 	RestartCount int
+	LeaseAbort   bool
 }
 
 type soakRunWindow struct {
@@ -116,9 +117,10 @@ type soakLifecycleStore interface {
 }
 
 var (
-	errSoakManifestNotFound     = errors.New("soak run manifest not found")
-	errSoakRunNotActive         = errors.New("soak run is not active")
-	errSoakHeartbeatLeaseAtRisk = errors.New("soak heartbeat lease can no longer be renewed safely")
+	errSoakManifestNotFound      = errors.New("soak run manifest not found")
+	errSoakRunNotActive          = errors.New("soak run is not active")
+	errSoakHeartbeatLeaseInvalid = errors.New("soak heartbeat lease configuration is invalid")
+	errSoakHeartbeatLeaseAtRisk  = errors.New("soak heartbeat lease can no longer be renewed safely")
 )
 
 type soakHeartbeatOutcome string
@@ -199,6 +201,10 @@ func withSoakHeartbeatObserver(observer soakHeartbeatObserver) soakWorkloadOptio
 	return func(workload *soakWorkload) { workload.heartbeatObserver = observer }
 }
 
+func withSoakFailureInvalidation(invalidate func(string)) soakWorkloadOption {
+	return func(workload *soakWorkload) { workload.invalidateFailure = invalidate }
+}
+
 type soakWorkload struct {
 	cfg               soakWorkloadConfig
 	store             soakLifecycleStore
@@ -208,6 +214,7 @@ type soakWorkload struct {
 	onSaturation      func()
 	pacing            *soakPacingMetrics
 	heartbeatObserver soakHeartbeatObserver
+	invalidateFailure func(string)
 }
 
 func newSoakWorkload(
@@ -230,7 +237,11 @@ func newSoakWorkload(
 		config.HeartbeatInterval = 30 * time.Second
 	}
 	if config.HeartbeatStaleAfter <= 0 {
-		config.HeartbeatStaleAfter = 2 * time.Minute
+		minimumStaleAfter, _ := minimumSoakHeartbeatStaleAfter(
+			config.HeartbeatInterval,
+			soakHeartbeatAttemptTimeout,
+		)
+		config.HeartbeatStaleAfter = max(2*time.Minute, minimumStaleAfter)
 	}
 	if dispatch == nil {
 		dispatch = dispatchSoakLane
@@ -316,6 +327,7 @@ func (w *soakWorkload) Run(
 		fatalErr error
 		laneWG   sync.WaitGroup
 	)
+	laneActivity := newSoakLaneActivity()
 	setFatal := func(err error) {
 		if err == nil || !w.cfg.StopOnActionError {
 			return
@@ -389,6 +401,8 @@ func (w *soakWorkload) Run(
 					}
 					w.pacing.Record(lane.name, soakPacingDispatched, 1)
 					defer func() { <-globalBudget }()
+					finishActivity := laneActivity.Start(lane.name)
+					defer finishActivity()
 					measured := !w.now().Before(warmupDeadline)
 					setFatal(lane.action(actionCtx, measured))
 				},
@@ -397,11 +411,39 @@ func (w *soakWorkload) Run(
 	}
 
 	<-runCtx.Done()
-	laneWG.Wait()
 	<-heartbeatDone
 	fatalMu.Lock()
 	dependencyErr := fatalErr
 	fatalMu.Unlock()
+	if errors.Is(dependencyErr, errSoakHeartbeatLeaseAtRisk) {
+		drainBudget := w.cfg.HeartbeatInterval / 2
+		if !waitSoakLaneDrain(&laneWG, drainBudget) {
+			activeLanes, inFlight := laneActivity.Snapshot()
+			slog.Error(
+				"soak lane drain exceeded lease safety budget",
+				"drainBudget", drainBudget,
+				"inFlight", inFlight,
+				"lanes", activeLanes,
+			)
+			invalidationBudget := drainBudget / 2
+			if !waitSoakFailureInvalidation(
+				w.invalidateFailure,
+				invalidReasonLeaseAbort,
+				invalidationBudget,
+			) {
+				slog.Error(
+					"soak lease-abort invalidation exceeded safety budget",
+					"invalidationBudget", invalidationBudget,
+					"consequence", "the process will exit even if the invalidation did not reach the WAL",
+				)
+			}
+			result.Completion = soakCompletionDependencyFailure
+			result.LeaseAbort = true
+			return result, dependencyErr
+		}
+	} else {
+		laneWG.Wait()
+	}
 	switch {
 	case dependencyErr != nil:
 		result.Completion = soakCompletionDependencyFailure
@@ -447,6 +489,80 @@ type soakLane struct {
 	name   string
 	rate   float64
 	action soakWorkloadAction
+}
+
+type soakLaneActivity struct {
+	mu     sync.Mutex
+	active map[string]int
+}
+
+func newSoakLaneActivity() *soakLaneActivity {
+	return &soakLaneActivity{active: make(map[string]int)}
+}
+
+func (a *soakLaneActivity) Start(lane string) func() {
+	a.mu.Lock()
+	a.active[lane]++
+	a.mu.Unlock()
+	return func() {
+		a.mu.Lock()
+		a.active[lane]--
+		if a.active[lane] == 0 {
+			delete(a.active, lane)
+		}
+		a.mu.Unlock()
+	}
+}
+
+func (a *soakLaneActivity) Snapshot() (map[string]int, int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	active := make(map[string]int, len(a.active))
+	total := 0
+	for lane, count := range a.active {
+		active[lane] = count
+		total += count
+	}
+	return active, total
+}
+
+func waitSoakLaneDrain(laneWG *sync.WaitGroup, budget time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		laneWG.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func waitSoakFailureInvalidation(
+	invalidate func(string),
+	reason string,
+	budget time.Duration,
+) bool {
+	if invalidate == nil {
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		invalidate(reason)
+		close(done)
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 func (w *soakWorkload) lanes() []soakLane {
@@ -712,7 +828,8 @@ func runSoakHeartbeat(
 	)
 	if !validLeaseDurations || staleAfter < minimumStaleAfter {
 		return fmt.Errorf(
-			"soak heartbeat lease requires stale threshold at least twice the shutdown margin plus the attempt timeout",
+			"%w: stale threshold must be at least twice the shutdown margin plus the attempt timeout",
+			errSoakHeartbeatLeaseInvalid,
 		)
 	}
 	if lastSuccessAt.IsZero() {

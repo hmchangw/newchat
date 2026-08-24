@@ -48,6 +48,13 @@ seconds. This dashboard freshness threshold is deliberately independent from
 much longer during a planned Mongo fault. Positive correctness evidence
 survives either control-plane blind interval.
 
+Any increase in
+`loadgen_failure_invalidations_total{reason="lease_abort"}` makes the affected
+campaign interval `INCONCLUSIVE`. It means loadgen deliberately stopped waiting
+for one or more in-flight lanes so the process could exit before the Mongo
+heartbeat lease became stale; the structured error log carries the lane names
+and counts.
+
 ## Dispatch validity
 
 The dispatch ratio for each enabled lane is:

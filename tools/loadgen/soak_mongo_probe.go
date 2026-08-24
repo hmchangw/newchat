@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,9 +67,9 @@ func (p *soakMongoProbe) Probe(ctx context.Context) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("ping Mongo primary: %w", ctxErr)
 	}
-	p.state.Store(&soakMongoProbeSnapshot{
-		Up: err == nil, CompletedAt: p.now().UTC(),
-	})
+	previous := p.Snapshot()
+	completedAt := p.now().UTC()
+	p.state.Store(&soakMongoProbeSnapshot{Up: err == nil, CompletedAt: completedAt})
 	if p.metrics != nil {
 		outcome := soakMongoProbeSuccess
 		if err != nil {
@@ -77,7 +78,13 @@ func (p *soakMongoProbe) Probe(ctx context.Context) error {
 		p.metrics.MongoProbeAttempts.WithLabelValues(string(outcome)).Inc()
 	}
 	if err != nil {
+		if previous.CompletedAt.IsZero() || previous.Up {
+			slog.Warn("Mongo primary probe entered degraded state", "error", err)
+		}
 		return fmt.Errorf("ping Mongo primary: %w", err)
+	}
+	if !previous.CompletedAt.IsZero() && !previous.Up {
+		slog.Info("Mongo primary probe recovered")
 	}
 	return nil
 }
