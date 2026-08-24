@@ -57,10 +57,10 @@ type Config struct {
 	Mongo         MongoConfig    `envPrefix:"MONGO_"`
 	Presence      PresenceConfig `envPrefix:"PRESENCE_"`
 
-	// Pool caps the Mongo connection pool. RequestTimeout bounds each handler so
-	// a slow op frees its connection. No concurrency cap: the presence routes are
-	// fire-and-forget (RegisterVoid), which admission control would silently drop
-	// under saturation — so this service takes only the timeout knob.
+	// Pool caps the Mongo connection pool. RequestTimeout bounds the reply routes
+	// only, so a slow op frees its connection; the fire-and-forget presence routes
+	// take neither it nor an admission cap, because both discard an update silently
+	// (see the router wiring in main).
 	Pool           mongoutil.PoolConfig
 	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
 }
@@ -153,22 +153,29 @@ func main() {
 	peer := NewNATSPeerPresenceClient(nc.NatsConn(), cfg.Presence.PeerTimeout)
 	handler := NewHandler(store, userDir, peer, publish, cfg.SiteID, cfg.Presence.BatchMax)
 
-	// No admission cap here: Hello/Ping/Activity/Bye are fire-and-forget
-	// (RegisterVoid), and under a saturated concurrency semaphore those are
-	// silently dropped (no reply, no redelivery) — a reconnect storm would lose
-	// presence updates and strand users online/offline. Only the per-request
-	// timeout is applied.
-	router := natsrouter.Default(nc, "user-presence-service", natsrouter.WithSiteID(cfg.SiteID))
+	// Two routers on one connection, because neither guard may apply to every
+	// route. Hello/Ping/Activity/Bye are fire-and-forget (RegisterVoid): no reply,
+	// no redelivery, so the handler is the only delivery attempt. A shed request
+	// (admission cap) or a cancelled one (per-request deadline) discards the update
+	// with the producer none the wiser — a dropped Bye strands a user online until
+	// the sweeper repairs it. So the void routes take neither guard.
+	//
+	// The reply routes do take the deadline: a caller is waiting on the inbox and
+	// sees the error, so bounding them frees the Mongo connection without losing
+	// an update silently.
+	voidRouter := natsrouter.Default(nc, "user-presence-service", natsrouter.WithSiteID(cfg.SiteID))
+	natsrouter.RegisterVoid(voidRouter, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
+	natsrouter.RegisterVoid(voidRouter, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
+	natsrouter.RegisterVoid(voidRouter, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
+	natsrouter.RegisterVoid(voidRouter, subject.PresenceByePattern(cfg.SiteID), handler.Bye)
+
+	replyRouter := natsrouter.Default(nc, "user-presence-service", natsrouter.WithSiteID(cfg.SiteID))
 	if cfg.RequestTimeout > 0 {
-		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
+		replyRouter.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
 	}
-	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
-	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
-	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
-	natsrouter.RegisterVoid(router, subject.PresenceByePattern(cfg.SiteID), handler.Bye)
-	natsrouter.Register(router, subject.PresenceManualSetPattern(cfg.SiteID), handler.SetManual)
-	natsrouter.Register(router, subject.PresenceQueryBatch(cfg.SiteID), handler.QueryBatch)
-	natsrouter.Register(router, subject.PresenceQueryBatchPeer(cfg.SiteID), handler.QueryBatchPeer)
+	natsrouter.Register(replyRouter, subject.PresenceManualSetPattern(cfg.SiteID), handler.SetManual)
+	natsrouter.Register(replyRouter, subject.PresenceQueryBatch(cfg.SiteID), handler.QueryBatch)
+	natsrouter.Register(replyRouter, subject.PresenceQueryBatchPeer(cfg.SiteID), handler.QueryBatchPeer)
 
 	sweeper := NewSweeper(store, publish, cfg.SiteID, cfg.Presence.SweepInterval)
 	sweepCtx, stopSweep := context.WithCancel(ctx)
@@ -192,7 +199,8 @@ func main() {
 				return fmt.Errorf("sweeper shutdown timed out: %w", ctx.Err())
 			}
 		},
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
+		func(ctx context.Context) error { return voidRouter.Shutdown(ctx) },
+		func(ctx context.Context) error { return replyRouter.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(_ context.Context) error { return store.Close() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },

@@ -116,7 +116,7 @@ func run() error {
 	// LOCAL sysmsg emission on create/add/remove; never federated cross-site.
 	h.sysmsgPub = jsPublishAdapter{js: js}
 
-	router := natsrouter.DefaultGuarded(nc, "bot-room-service", guard)
+	router := natsrouter.DefaultGuarded(nc, "bot-room-service", guard, natsrouter.WithSiteID(cfg.SiteID))
 	h.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

@@ -341,7 +341,8 @@ func main() {
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
-	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard)
+	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	handler.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

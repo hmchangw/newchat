@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
@@ -71,13 +72,25 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
 		cfg, err := env.ParseAs[Config]()
 		require.NoError(t, err)
-		assert.Equal(t, 256, cfg.Guard.MaxConcurrency)
+		assert.Equal(t, 256, cfg.MaxConcurrency)
 	})
 
 	t.Run("override", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "64")
 		cfg, err := env.ParseAs[Config]()
 		require.NoError(t, err)
-		assert.Equal(t, 64, cfg.Guard.MaxConcurrency)
+		assert.Equal(t, 64, cfg.MaxConcurrency)
 	})
+}
+
+// SEARCH_REQUEST_TIMEOUT is this service's only per-request deadline: the
+// handlers pin it themselves (withRequestTimeout), so no router-level timeout is
+// installed that would race it and preempt its error handling.
+func TestConfig_SearchRequestTimeoutIsThePerRequestDeadline(t *testing.T) {
+	setRequiredSearchEnv(t)
+	require.NoError(t, os.Unsetenv("SEARCH_REQUEST_TIMEOUT"))
+
+	cfg, err := env.ParseAs[Config]()
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Second, cfg.Search.RequestTimeout)
 }

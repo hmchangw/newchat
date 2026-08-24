@@ -83,5 +83,25 @@ func TestLoadConfig_ZeroMaxPoolSizeFails(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://x:4222")
 	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
 	_, err := loadConfig()
-	assert.Error(t, err)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "MONGO_MAX_POOL_SIZE",
+			"the failure must name the knob that was rejected, not just any config error")
+	}
+}
+
+// The in-handler waits must fit inside the budget withRequestBudget pins, or a
+// permission request is cancelled mid-fanout and reports syncFailures for peers
+// that were still working. TestApplyBaseMiddleware_ImposesNoRequestDeadline
+// guards the other half: that no router deadline shrinks that budget.
+func TestRequestBudget_OutlastsTheFanout(t *testing.T) {
+	t.Setenv("SITE_ID", "site-local")
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x:4222")
+
+	cfg, err := loadConfig()
+	require.NoError(t, err)
+	assert.Less(t, cfg.FanoutTimeout, requestBudget,
+		"the fanout must fit inside the request budget")
+	assert.Less(t, cfg.RoomRPCTimeout, requestBudget,
+		"the room RPC must fit inside the request budget")
 }

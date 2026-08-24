@@ -87,7 +87,7 @@ func run() error {
 	pub := JetStreamPublisher{JS: js}
 	h := newHandler(store, pub, cfg.SiteID)
 
-	router := natsrouter.DefaultGuarded(nc, "bot-message-handler", guard)
+	router := natsrouter.DefaultGuarded(nc, "bot-message-handler", guard, natsrouter.WithSiteID(cfg.SiteID))
 	h.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

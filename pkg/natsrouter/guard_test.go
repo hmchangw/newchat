@@ -67,3 +67,23 @@ func TestGuardConfig_TimeoutMiddleware(t *testing.T) {
 	c.Next()
 	assert.True(t, ok, "timeout middleware sets a context deadline")
 }
+
+// DefaultGuarded must compose the guard's options with the caller's own, so a
+// migrating service keeps WithSiteID/WithMetrics instead of silently losing them.
+func TestDefaultGuarded_ForwardsExtraOptions(t *testing.T) {
+	g := GuardConfig{MaxConcurrency: 4, RequestTimeout: 50 * time.Millisecond}
+	r := DefaultGuarded(nil, "svc", g, WithSiteID("site-a"))
+
+	assert.Equal(t, "site-a", r.siteID, "caller options must survive the guard wiring")
+	require.NotNil(t, r.sem, "the guard's own cap must still be installed")
+	assert.Equal(t, 4, cap(r.sem))
+	assert.Len(t, r.middleware, 4)
+}
+
+func TestDefaultGuarded_ExtraOptionsWithoutGuardOptions(t *testing.T) {
+	r := DefaultGuarded(nil, "svc", GuardConfig{}, WithSiteID("site-b"))
+
+	assert.Equal(t, "site-b", r.siteID)
+	assert.Nil(t, r.sem, "an empty guard still installs no cap")
+	assert.Len(t, r.middleware, 3)
+}

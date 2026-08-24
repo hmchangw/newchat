@@ -25,16 +25,19 @@ type PoolConfig struct {
 
 // WithPool is a Connect option that applies this pool configuration, so call
 // sites read `Connect(ctx, uri, u, p, mongoutil.WithPool(cfg.Pool), ...)` rather
-// than hand-splicing pool options into the variadic. MaxPoolSize is always
-// applied (authoritative, validated >= 1); MinPoolSize is applied only when > 0,
-// so an unset floor leaves a minPoolSize from the URI (or the driver default)
-// intact rather than forcing it to 0.
+// than hand-splicing pool options into the variadic.
+//
+// Both limits are authoritative, an explicit zero minimum included, so Validate()
+// checks exactly the pair that reaches the driver. Applying only the maximum
+// would leave a minPoolSize from the URI in force: a URI floor above the
+// configured ceiling passes Validate() as {0, max} but reaches the driver as
+// {uriMin, max}, which it rejects at construction — the pod then fails to start
+// on a rollout that only lowered the maximum. It also leaves MONGO_MIN_POOL_SIZE=0
+// unable to clear a URI floor.
 func WithPool(p PoolConfig) Option {
 	return func(c *connectConfig) {
 		c.maxPoolSize = &p.MaxPoolSize
-		if p.MinPoolSize > 0 {
-			c.minPoolSize = &p.MinPoolSize
-		}
+		c.minPoolSize = &p.MinPoolSize
 	}
 }
 

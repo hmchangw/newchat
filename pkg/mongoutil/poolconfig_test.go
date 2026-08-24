@@ -18,16 +18,29 @@ func TestWithPool_AppliesToClient(t *testing.T) {
 	assert.Equal(t, uint64(20), *clientOpts.MinPoolSize)
 }
 
-// MinPoolSize=0 (the default) must NOT emit a min option — otherwise it clobbers
-// a minPoolSize supplied via the connection URI, defeating the nil-skip contract
-// in tuning.go. Max stays authoritative (always applied).
-func TestWithPool_OmitsMinPoolSizeWhenZero(t *testing.T) {
+// Both limits are authoritative, zero included: Validate() checks the same pair
+// that reaches the driver, and MONGO_MIN_POOL_SIZE=0 clears a URI-supplied floor
+// rather than letting it survive above the forced maximum.
+func TestWithPool_AppliesZeroMinPoolSizeAuthoritatively(t *testing.T) {
 	clientOpts := options.Client()
 	newConnectConfig(WithPool(PoolConfig{MaxPoolSize: 500, MinPoolSize: 0})).applyTuning(clientOpts)
 
 	require.NotNil(t, clientOpts.MaxPoolSize)
 	assert.Equal(t, uint64(500), *clientOpts.MaxPoolSize)
-	assert.Nil(t, clientOpts.MinPoolSize, "zero MinPoolSize must leave a URI/driver value intact")
+	require.NotNil(t, clientOpts.MinPoolSize, "an explicit zero must reach the driver, not be skipped")
+	assert.Equal(t, uint64(0), *clientOpts.MinPoolSize)
+}
+
+// A URI minPoolSize above the configured maximum must not survive into the
+// client: the driver rejects min > max at construction, so the pod would fail to
+// start on a rollout that only changed the max.
+func TestWithPool_OverridesURIMinPoolSizeAboveMax(t *testing.T) {
+	clientOpts := options.Client().SetMinPoolSize(200)
+	newConnectConfig(WithPool(PoolConfig{MaxPoolSize: 150, MinPoolSize: 0})).applyTuning(clientOpts)
+
+	require.NotNil(t, clientOpts.MinPoolSize)
+	assert.Equal(t, uint64(0), *clientOpts.MinPoolSize, "the configured pair must win over the URI floor")
+	assert.Equal(t, uint64(150), *clientOpts.MaxPoolSize)
 }
 
 func TestPoolConfig_Validate_AcceptsValid(t *testing.T) {
