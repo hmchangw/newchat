@@ -143,6 +143,15 @@ func TestSoakMongoProbe_StartsImmediatelyAndStopsIdempotently(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Mongo probe did not run immediately")
 	}
+	// Ping signals from inside the call, so entering it is not the same fact as
+	// having published the outcome. Probe deliberately discards a reading taken
+	// across a cancellation, so shutting down in that window would leave both
+	// gauges at zero -- wait for the state the assertions below actually read.
+	require.Eventually(t, func() bool {
+		return loadgenGaugeValue(
+			metrics, "loadgen_mongo_probe_timestamp_seconds",
+		) != 0
+	}, time.Second, time.Millisecond, "Mongo probe did not publish its first outcome")
 	shutdown()
 	shutdown()
 
@@ -151,6 +160,32 @@ func TestSoakMongoProbe_StartsImmediatelyAndStopsIdempotently(t *testing.T) {
 	)
 	assert.Equal(t, float64(1), values["loadgen_mongo_up"])
 	assert.Equal(t, float64(now.Unix()), values["loadgen_mongo_probe_timestamp_seconds"])
+}
+
+func TestSoakMongoProbe_PublishesNothingWhenCancelledMidProbe(t *testing.T) {
+	metrics := NewMetrics()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancelling from inside Ping is the race the start-up test used to lose:
+	// the reading spans a cancellation, so it says nothing about Mongo and must
+	// not reach the gauges a validity gate reads.
+	pinger := &cancellingSoakMongoPinger{cancel: cancel}
+	probe := newSoakMongoProbe(pinger, 2*time.Second, time.Now, metrics)
+
+	require.Error(t, probe.Probe(ctx))
+
+	assert.True(t, probe.Snapshot().CompletedAt.IsZero())
+	assert.Zero(t, loadgenGaugeValue(metrics, "loadgen_mongo_probe_timestamp_seconds"))
+	assert.Zero(t, testutil.ToFloat64(
+		metrics.MongoProbeAttempts.WithLabelValues(string(soakMongoProbeSuccess)),
+	))
+}
+
+type cancellingSoakMongoPinger struct{ cancel context.CancelFunc }
+
+func (p *cancellingSoakMongoPinger) Ping(context.Context, *readpref.ReadPref) error {
+	p.cancel()
+	return nil
 }
 
 func TestSoakHeartbeatStatus_ExportsAttemptsHealthAndFreshness(t *testing.T) {
@@ -240,6 +275,22 @@ func TestSoakControlPlaneCollectors_ReadEachSnapshotOncePerScrape(t *testing.T) 
 	assert.Equal(t, int64(1), heartbeatCalls.Load())
 	assert.Zero(t, values["loadgen_soak_heartbeat_degraded"])
 	assert.Equal(t, float64(456), values["loadgen_soak_heartbeat_success_timestamp_seconds"])
+}
+
+// loadgenGaugeValue reads one gauge without failing the test, so a poll can ask
+// for a value that is legitimately not there yet.
+func loadgenGaugeValue(metrics *Metrics, name string) float64 {
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		return 0
+	}
+	for _, family := range families {
+		if family.GetName() != name || len(family.Metric) != 1 {
+			continue
+		}
+		return family.Metric[0].GetGauge().GetValue()
+	}
+	return 0
 }
 
 func gatherLoadgenMetricValues(
