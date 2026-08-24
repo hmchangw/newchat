@@ -327,6 +327,23 @@ func TestHistoryService_RoomsGet_MutationDropsTheCachedPreview(t *testing.T) {
 		"an invalidated room must re-resolve, not serve the pre-mutation entry")
 }
 
+// The batched read already returned the room document, so a room with no messages must
+// not send history-service back to Mongo for the same two fields (#291).
+func TestHistoryService_RoomsGet_NeverMessagedRoomDoesNotRereadRoomTimes(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	// Zero lastMsgAt: the room exists and has never been posted in.
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{"r1": {}}, nil)
+	// No GetRoomTimes EXPECT at all — the mock controller fails if the walk re-reads.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage(nil, false), nil)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Empty(t, resp.Rooms, "a room with no eligible message is omitted")
+}
+
 // A failed read must surface: an empty map is indistinguishable from "no previews" at the
 // client and would blank every row in the list.
 func TestHistoryService_RoomsGet_ReadFailureIsAnError(t *testing.T) {

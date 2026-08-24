@@ -103,7 +103,7 @@ func (s *HistoryService) fillLazyPreviews(
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			pvw, ok := s.resolvePreview(ctx, roomID, metaFromRow(rows[roomID]), now)
+			pvw, ok := s.resolvePreview(ctx, roomID, rows[roomID], now)
 			if !ok {
 				return
 			}
@@ -119,26 +119,21 @@ func (s *HistoryService) fillLazyPreviews(
 	return ctx.Err()
 }
 
-// metaFromRow turns the batched row into walk bounds. A zero lastMsgAt returns nil, not a
-// synthetic zero: that would trip resolveRoomTimes' created>last refetch.
-func metaFromRow(rt mongorepo.RoomTimes) *models.RoomMeta {
-	if rt.LastMsgAt.IsZero() {
-		return nil
-	}
-	last := rt.LastMsgAt.UnixMilli()
-	meta := &models.RoomMeta{LastMsgAt: &last}
-	if !rt.CreatedAt.IsZero() {
-		created := rt.CreatedAt.UnixMilli()
-		meta.CreatedAt = &created
-	}
-	return meta
+// walkBoundsFromRow derives the walk's bounds from the batched read directly. The row IS
+// the room document, so a zero lastMsgAt there is what Mongo says, not an unknown to go
+// re-read: routing it through RoomMeta made resolveRoomTimes fetch the same document
+// again, once per never-messaged room per request (#291). walkBounds already ceilings a
+// zero lastMsgAt at now+skew, which is the same walk that second read produced.
+func walkBoundsFromRow(rt mongorepo.RoomTimes) (lastMsgAt, createdAt time.Time) {
+	return rt.LastMsgAt, rt.CreatedAt
 }
 
 // resolvePreview resolves one room the lazy way, through the cache when installed.
 // The cache is positives-only, so empty and degraded walks re-resolve rather than cache.
-func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) (models.PreviewMessage, bool) {
+func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, rt mongorepo.RoomTimes, now time.Time) (models.PreviewMessage, bool) {
+	lastMsgAt, createdAt := walkBoundsFromRow(rt)
 	load := func(ctx context.Context) (models.PreviewMessage, bool, error) {
-		w := s.roomLastPreviewMessage(ctx, roomID, meta, now)
+		w := s.walkForPreview(ctx, roomID, lastMsgAt, createdAt, now)
 		if w.State == previewFound {
 			s.warmBackPreview(ctx, roomID, &w, now)
 		}
@@ -216,7 +211,12 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 		return previewWalk{State: previewDegraded}
 	}
+	return s.walkForPreview(ctx, roomID, lastMsgAt, createdAt, now)
+}
 
+// walkForPreview is roomLastPreviewMessage with the room's times already in hand, so a
+// caller that just read the room document does not read it again.
+func (s *HistoryService) walkForPreview(ctx context.Context, roomID string, lastMsgAt, createdAt, now time.Time) previewWalk {
 	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
 	before := ceiling.Add(time.Millisecond)
 
