@@ -29,10 +29,15 @@ type mongoChangeSource struct {
 	cs *mongo.ChangeStream
 }
 
-// openMongoChangeSource opens a change stream at sp with no lookups/pre-images — native oplog only.
-// federationFilter adds a $match dropping foreign-origin insert/replace (caller scopes it to the message collection).
-func openMongoChangeSource(ctx context.Context, coll *mongo.Collection, sp startPoint, federationFilter bool) (*mongoChangeSource, error) {
+// openMongoChangeSource opens a change stream at sp. federationFilter adds a $match dropping
+// foreign-origin insert/replace (caller scopes it to the message collection). updateLookup, when
+// true, sets fullDocument=updateLookup so update events carry the current post-image inline (the
+// DR lane needs self-contained events); when false the stream is native oplog only (migration).
+func openMongoChangeSource(ctx context.Context, coll *mongo.Collection, sp startPoint, federationFilter, updateLookup bool) (*mongoChangeSource, error) {
 	opts := options.ChangeStream()
+	if updateLookup {
+		opts.SetFullDocument(options.UpdateLookup)
+	}
 	switch sp.Kind {
 	case startAfterToken:
 		opts.SetStartAfter(sp.Token)
