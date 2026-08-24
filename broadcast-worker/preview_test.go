@@ -460,3 +460,45 @@ func TestHandler_PreviewForInserted_StalledSealLeavesTheFanOutBudgetIntact(t *te
 	assert.True(t, failed, "a stalled seal is a seal failure, not an ineligible message")
 	assert.NoError(t, parent.Err(), "bounding the seal must not cancel the context fan-out still needs")
 }
+
+// Bounding the seal is not by itself a reserve: WithTimeout inherits the parent's earlier
+// deadline, so on a short budget a wedged dependency spends all of it and hands the
+// required fan-out a dead context. Below the reserve the seal must not start at all.
+func TestHandler_PreviewForInserted_SkipsTheSealWhenTheBudgetCannotCoverIt(t *testing.T) {
+	cipher := blockingCipher{entered: make(chan struct{})}
+	sealer := testSealer(cipher)
+	sealer.timeout = time.Second
+	h := &Handler{sealer: sealer}
+
+	// Less left than timeout+reserve, but far more than a test takes to run.
+	parent, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
+	defer cancel()
+
+	sealed, failed := h.previewForInserted(parent, &model.Message{
+		ID: "msg-1", RoomID: "room-1", Content: "hi", CreatedAt: time.Now(),
+	}, nil, nil)
+
+	assert.Nil(t, sealed, "a skipped seal stores nothing")
+	assert.True(t, failed, "an eligible message with no sealed body is a seal failure: letting the "+
+		"key advance would certify the previous body for a message it does not describe")
+	assert.NoError(t, parent.Err(), "the fan-out budget must survive the skip")
+
+	select {
+	case <-cipher.entered:
+		t.Fatal("the cipher was called; the seal must be skipped, not attempted and abandoned")
+	default:
+	}
+}
+
+// A caller with no deadline at all has budget by definition — the common case on the
+// JetStream path, and it must not be mistaken for an exhausted one.
+func TestHandler_PreviewForInserted_SealsWhenTheCallerHasNoDeadline(t *testing.T) {
+	h := &Handler{sealer: testSealer(fakeCipher{})}
+
+	sealed, failed := h.previewForInserted(context.Background(), &model.Message{
+		ID: "msg-1", RoomID: "room-1", Content: "hi", CreatedAt: time.Now(),
+	}, nil, nil)
+
+	assert.False(t, failed, "a deadline-free caller must not read as an exhausted budget")
+	require.NotNil(t, sealed, "the seal must run")
+}

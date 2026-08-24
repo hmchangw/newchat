@@ -178,17 +178,23 @@ func main() {
 			slog.Error("PREVIEW_KEY_EPOCH must be >= 1", "preview_key_epoch", cfg.PreviewKeyEpoch)
 			os.Exit(1)
 		}
+		// Degrade, don't refuse to start. This worker exists for the canonical fan-out;
+		// the preview is an optional rider on it, and the runtime seal already degrades
+		// on the same dependency failing. Exiting here would stop message delivery for
+		// every room on this site because an optional feature's key store was down --
+		// history-service still serves previews from the lazy walk meanwhile.
 		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
 		if err != nil {
-			slog.Error("failed to construct Vault key wrapper", "addr", cfg.Vault.Address, "error", err)
-			os.Exit(1)
+			slog.Error("Vault key wrapper unavailable; starting with room-preview persistence disabled",
+				"addr", cfg.Vault.Address, "error", err)
+		} else {
+			vaultWrapper = w
+			// The preview DEK lives in its own collection, and is written here on first
+			// use; pin to primary so a just-minted key isn't missed on a lagging secondary.
+			dekColl := db.Collection(preview.DEKCollection, options.Collection().SetReadPreference(readpref.Primary()))
+			previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+			slog.Info("room-preview persistence enabled", "site_id", cfg.SiteID, "key_epoch", cfg.PreviewKeyEpoch)
 		}
-		vaultWrapper = w
-		// The preview DEK lives in its own collection, and is written here on first
-		// use; pin to primary so a just-minted key isn't missed on a lagging secondary.
-		dekColl := db.Collection(preview.DEKCollection, options.Collection().SetReadPreference(readpref.Primary()))
-		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
-		slog.Info("room-preview persistence enabled", "site_id", cfg.SiteID, "key_epoch", cfg.PreviewKeyEpoch)
 	} else {
 		slog.Info("room-preview persistence disabled (ATREST_ENABLED=false); the room doc must never hold a plaintext body")
 	}

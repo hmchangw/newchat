@@ -28,6 +28,12 @@ func eligibleAsPreview(msg *model.Message) bool {
 // Matches parentFetchTimeout, the other optional enrichment on this path.
 const previewSealTimeout = 2 * time.Second
 
+// previewSealReserve is what the seal must leave behind for the fan-out it precedes.
+// Bounding the seal is not a reserve on its own: context.WithTimeout inherits the
+// parent's earlier deadline, so on a short budget a wedged dependency still spends all
+// of it. Mirrors history-service's warmBackReserve on the other optional-write path.
+const previewSealReserve = 250 * time.Millisecond
+
 // previewSealer seals the room-doc preview; the only read is a bot sender's app name.
 type previewSealer struct {
 	cipher  atrest.Cipher // nil when ATREST_ENABLED=false — previews are then not stored
@@ -96,8 +102,21 @@ func (h *Handler) previewForInserted(
 	if !h.sealer.enabled() || !eligibleAsPreview(msg) {
 		return nil, false
 	}
-	// The preview is optional, the fan-out below it is not: bound the seal on its own
-	// clock so a wedged cipher or app-name read cannot hand required work a dead context.
+	// The preview is optional, the fan-out below it is not. A budget that cannot cover the
+	// seal AND leave the reserve is not worth starting: the bound below would inherit the
+	// caller's earlier deadline, and a wedged dependency would spend the fan-out's time.
+	//
+	// Skipping reports a seal FAILURE, not an ineligible message. The message is eligible,
+	// so letting the freshness key advance over the previous body would certify it for a
+	// message it does not describe; clearing sends the room to the lazy walk instead.
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < h.sealer.timeout+previewSealReserve {
+		slog.WarnContext(ctx, "room preview seal skipped; too little budget left for the fan-out",
+			"room_id", msg.RoomID, "messageID", msg.ID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+		return nil, true
+	}
+	// Bound the seal on its own clock so a wedged cipher or app-name read cannot spend
+	// more of the caller's budget than the reserve check above allowed for.
 	sealCtx, cancel := context.WithTimeout(ctx, h.sealer.timeout)
 	defer cancel()
 	sealed, err := h.sealer.sealInserted(sealCtx, msg, users, mentions)
