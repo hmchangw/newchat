@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
 func TestTruncateContent_RuneBoundaries(t *testing.T) {
@@ -51,6 +53,37 @@ func TestBuild_TruncatesAndNormalizesUTC(t *testing.T) {
 	assert.Equal(t, "m1", got.MessageID)
 	assert.Equal(t, strings.Repeat("x", MaxContentRunes), got.Content)
 	assert.Equal(t, time.UTC, got.CreatedAt.Location())
+}
+
+// Content was capped from the start; the collections were not, so one wide message could
+// size the writer's buffer, the stored document and every read of it at once (#290).
+func TestBuild_CapsAttachmentsAndMentions(t *testing.T) {
+	atts := make([]cassandra.Attachment, MaxAttachments+5)
+	for i := range atts {
+		atts[i] = cassandra.Attachment{ID: "f" + strconv.Itoa(i)}
+	}
+	mentions := make([]model.Participant, MaxMentions+7)
+	for i := range mentions {
+		mentions[i] = model.Participant{Account: "u" + strconv.Itoa(i)}
+	}
+
+	got := Build(model.PreviewMessage{MessageID: "m1", Attachments: atts, Mentions: mentions})
+
+	require.Len(t, got.Attachments, MaxAttachments)
+	require.Len(t, got.Mentions, MaxMentions)
+	assert.Equal(t, "f0", got.Attachments[0].ID, "the cap keeps the head, not an arbitrary window")
+	assert.Equal(t, "u0", got.Mentions[0].Account)
+}
+
+// Under the cap nothing is touched — including the nil case, which must stay nil rather
+// than becoming an empty slice that would serialize as [] instead of being omitted.
+func TestBuild_LeavesCollectionsUnderTheCapAlone(t *testing.T) {
+	got := Build(model.PreviewMessage{
+		MessageID:   "m1",
+		Attachments: []cassandra.Attachment{{ID: "f1"}},
+	})
+	require.Len(t, got.Attachments, 1)
+	assert.Nil(t, got.Mentions, "an absent collection must not be materialized")
 }
 
 func TestBotAwareDisplayName_Fallbacks(t *testing.T) {

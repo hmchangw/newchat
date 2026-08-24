@@ -1039,8 +1039,8 @@ next read resolves the room's preview from message history instead.
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
 | `content` | string | Message content snippet, capped at 500 runes (longer bodies are truncated). On `subscription.list` (both transports) it is truncated further to a short preview — 50 characters by default, whole characters only, no ellipsis appended. |
 | `createdAt` | string | RFC 3339 timestamp. |
-| `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
-| `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |
+| `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. At most 10 — the room list renders a count, not the set. |
+| `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. At most 20. |
 
 #### AppSubscription
 

@@ -15,12 +15,30 @@ import (
 // MaxContentRunes caps PreviewMessage.Content: the room list renders a snippet only.
 const MaxContentRunes = 500
 
+// MaxAttachments and MaxMentions cap the collections the room list renders as a count or
+// a couple of chips. Capping Content alone bounded the one field that was already the
+// smallest risk: attachments and mentions ride uncapped from the message, so a single
+// wide message could size the coalescer's buffered entry, the stored document and every
+// reader's materialization of it at once. One cap at compose time bounds all three (#290).
+const (
+	MaxAttachments = 10
+	MaxMentions    = 20
+)
+
 // Build normalizes a composed preview: truncated content, UTC timestamp. Takes
 // PreviewMessage itself so a new field cannot silently default on every write path.
 //
 //nolint:gocritic // hugeParam: PreviewMessage is the stored/wire shape itself; by-value keeps callers simple and the copy cost is negligible.
 func Build(p model.PreviewMessage) model.PreviewMessage {
 	p.Content = truncateContent(p.Content)
+	// Reslice, don't copy: these are already-materialized slices from the caller's
+	// message, and the trimmed tail is dropped with it.
+	if len(p.Attachments) > MaxAttachments {
+		p.Attachments = p.Attachments[:MaxAttachments]
+	}
+	if len(p.Mentions) > MaxMentions {
+		p.Mentions = p.Mentions[:MaxMentions]
+	}
 	p.CreatedAt = p.CreatedAt.UTC()
 	return p
 }
