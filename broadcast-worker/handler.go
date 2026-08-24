@@ -91,6 +91,8 @@ type Handler struct {
 	siteID            string
 	// publish relays onto the OUTBOX; nil disables the cross-site mention fan-out.
 	publish PublishFunc
+	// sealer seals the room-doc preview; nil means previews are not persisted.
+	sealer *previewSealer
 }
 
 type handlerOption func(*handlerOptions)
@@ -100,6 +102,7 @@ type handlerOptions struct {
 	threadViewSubject bool
 	siteID            string
 	publish           PublishFunc
+	sealer            *previewSealer
 }
 
 func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
@@ -116,6 +119,12 @@ func withOutboxFederation(siteID string, publish PublishFunc) handlerOption {
 		opts.siteID = siteID
 		opts.publish = publish
 	}
+}
+
+// withPreviewSealer supplies the room-preview sealer; absent (or nil) disables
+// preview persistence, which is what ATREST_ENABLED=false yields.
+func withPreviewSealer(sealer *previewSealer) handlerOption {
+	return func(opts *handlerOptions) { opts.sealer = sealer }
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
@@ -139,6 +148,7 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		threadViewSubject: opts.threadViewSubject,
 		siteID:            opts.siteID,
 		publish:           opts.publish,
+		sealer:            opts.sealer,
 	}
 }
 
@@ -234,7 +244,15 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
-	if err := h.store.UpdateRoomLastMessage(ctx, msg.RoomID, msg.ID, msg.CreatedAt, resolved.MentionAll); err != nil {
+	sealed, sealFailed := h.previewForInserted(ctx, &msg, userByAccount, resolved.Participants)
+	if err := h.store.UpdateRoomLastMessage(ctx, roomLastMessage{
+		RoomID:        msg.RoomID,
+		MsgID:         msg.ID,
+		At:            msg.CreatedAt,
+		MentionAll:    resolved.MentionAll,
+		Preview:       sealed,
+		PreviewFailed: sealFailed,
+	}); err != nil {
 		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
 	}
 	// Sending implies the sender has read up to their own message: advance the

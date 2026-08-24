@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -86,4 +87,11 @@ func unwrapOutbox(t *testing.T, data []byte) (model.OutboxEvent, model.InboxEven
 	var evt model.SubscriptionMentionEvent
 	require.NoError(t, json.Unmarshal(envelope.Payload, &evt))
 	return relay, envelope, evt
+}
+
+// lastMsg builds the room-doc update a plain (preview-less) insert produces, so
+// the many existing expectations stay one line. Preview is nil: these tests run
+// with previews off, which is also the ATREST_ENABLED=false production shape.
+func lastMsg(roomID, msgID string, at time.Time, mentionAll bool) roomLastMessage {
+	return roomLastMessage{RoomID: roomID, MsgID: msgID, At: at, MentionAll: mentionAll}
 }
