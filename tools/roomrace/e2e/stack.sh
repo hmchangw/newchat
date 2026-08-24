@@ -16,7 +16,10 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 RUN=${RUN_DIR:-/tmp/roomrace-e2e}
 BIN=$RUN/bin
 LOGS=$RUN/logs
-SERVICES="room-service room-worker message-gatekeeper broadcast-worker message-worker history-service"
+# inbox-worker owns the INBOX stream. Without it, room-worker's create path blocks
+# on a PubAck that never comes and the creator's async job result is ~500ms late -
+# an artifact that makes the client flow look far safer than it is.
+SERVICES="room-service room-worker message-gatekeeper broadcast-worker message-worker history-service inbox-worker"
 
 export NATS_URL=nats://localhost:4222
 export NATS_CREDS_FILE=$ROOT/docker-local/backend.creds
@@ -44,6 +47,7 @@ port_for() {
     broadcast-worker) echo 18084 ;;
     message-worker) echo 18085 ;;
     history-service) echo 18086 ;;
+    inbox-worker) echo 18087 ;;
   esac
 }
 

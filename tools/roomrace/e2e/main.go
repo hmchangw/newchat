@@ -45,6 +45,7 @@ var (
 	probeRoom   = flag.String("probe-room", "", "just load history for this room id and exit")
 	writeLag    = flag.Bool("write-lag", false, "after the send, poll hinted history every 5ms to measure when the message becomes readable")
 	verbose     = flag.Bool("v", false, "print the per-iteration timeline")
+	debugFlow   = flag.Bool("debug-flow", false, "set X-Debug: flow on room.create so the services emit flow-rung timing breadcrumbs")
 	historyAt   = flag.String("history-at", "join", "when the client reads history: join (on subscription.update) or open (after the send is accepted, i.e. when the UI enters the room)")
 )
 

@@ -170,7 +170,21 @@ Three things the measurements settle:
 Running the real services changed the picture in two ways. Full numbers in
 `tools/roomrace/RESULTS-e2e.md`.
 
-**The creator learns about her own room ~500 ms after everyone else.**
+**Correction — the 500 ms creator gap was a harness artifact, not production.**
+Earlier runs showed the creator's async job result arriving ~500 ms after the system messages.
+That was caused by the minimal test stack omitting `inbox-worker`: `finishCreateRoom`
+JetStream-publishes to `chat.inbox.{siteID}.internal.member_added`, the INBOX stream did not
+exist, and the publish blocked until its PubAck timed out (`nats: no response from stream`),
+delaying the deferred `publishAsyncJobResult`. With `inbox-worker` running the async result
+lands at **23–25 ms**. In production INBOX exists, so the real gap is tens of milliseconds.
+
+This makes the client's job **harder**, not easier: the whole first exchange — subscription
+events, both system messages, and the first user message — now happens inside ~30 ms, so a
+client that takes even 12 ms to subscribe misses most or all of it live (measured: the invited
+member missed 97–100% of live events at a 12–30 ms delay). The history read carries the load,
+which makes its freshness the whole ballgame.
+
+**The original ordering point still stands.**
 `room-worker.finishCreateRoom` publishes `subscription.update` to every member,
 *then* the `room_created` / `members_added` system messages, *then* the deferred
 `publishAsyncJobResult`. Measured: members get `subscription.update` at 23 ms, the
@@ -312,7 +326,7 @@ For reference, neither Slack nor Zulip built a compound endpoint: both made DM c
 | # | Change | Side | Fixes | Evidence |
 |---|---|---|---|---|
 | 1 | `new_message` upserts the room from the event payload instead of dropping it | client | **Problem 1, completely** | `dm / client buffers unknown room`: 0% at every delay |
-| 1b | Subscribe to the room subject on the client's **own** `subscription.update`, not on the create job result or on room-open | client | the creator missing her own room's system messages | E2E: subscribed at 24 ms vs system messages at 29 ms; the job result lands at 529 ms |
+| 1b | Subscribe to the room subject on the client's **own** `subscription.update`, not on the create job result or on room-open | client | the creator missing her own room's system messages | E2E: the whole first exchange completes inside ~30 ms, so this is the only moment early enough to catch any of it |
 | 2 | On channel join: subscribe → flush → `msg.history` **with `meta.lastMsgAt`** → merge by message id | client | **Problem 2**, recovered | `channel / … + backfill`: 0% at every delay; E2E: 3 of 3 on the first try |
 | 3 | Gap detection on `lastMsgId` + reconcile on reconnect | client | the `message-worker`/`broadcast-worker` write race, and every event lost to a disconnect | see §4 caveat |
 | 4 | Join grace window: dual-publish to the per-user subject for members joined < N s ago (`JOIN_GRACE`, default off) | server | **Problem 2**, delivered live — and the only fix that survives a lagging `message-worker` | 0% live loss at client delays 0 ms–1 s; 0% lost with `message-worker` stalled |

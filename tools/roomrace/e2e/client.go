@@ -228,6 +228,9 @@ func (c *client) createChannel(name, other string) (string, error) {
 	req := nats.NewMsg(subject.RoomCreate(c.account, *siteID))
 	req.Data = body
 	req.Header.Set("X-Request-ID", requestID)
+	if *debugFlow {
+		req.Header.Set("X-Debug", "flow")
+	}
 
 	reply, err := c.nc.RequestMsg(req, rpcTimeout)
 	if err != nil {

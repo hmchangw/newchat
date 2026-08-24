@@ -27,7 +27,7 @@ and alice's `first message`. All three are confirmed present in Cassandra.
    24ms  bob    room-subject   subscribed
    29ms  bob    room-subject   new_message [members_added]
    29ms  bob    room-subject   new_message [room_created]
-  529ms  alice  rpc            create-room async result ok      <-- 500ms after the sys messages
+  529ms  alice  rpc            create-room async result ok      <-- harness artifact, see the correction below
   534ms  alice  rpc            msg.send reply ok
   534ms  alice  room-subject   subscribed                        <-- too late for the sys messages
   539ms  bob    room-subject   new_message first message
@@ -38,7 +38,9 @@ and alice's `first message`. All three are confirmed present in Cassandra.
 
 ## Findings
 
-**1. The creator is told about her own room ~500 ms after everyone else.**
+**1. The creator is told about her own room after everyone else.** (The ~500 ms figure in these
+early runs was a harness artifact — see the correction at the end of this file. The ordering
+holds; the gap is tens of milliseconds.)
 `room-worker.finishCreateRoom` publishes `subscription.update` to every member,
 *then* the system messages, *then* the deferred `publishAsyncJobResult`. A client
 that waits for the async result before subscribing has already missed the system
@@ -229,3 +231,52 @@ message has not reached; that member loses it permanently.
 The flow's correctness rests on the read covering what the live path dropped. When the write
 path lags, neither has it. The grace window is what removes that dependency (0% lost under the
 same stall).
+
+
+---
+
+# Correction: the 500 ms creator gap was a harness artifact (2026-08-24)
+
+`room-worker.finishCreateRoom` JetStream-publishes to `chat.inbox.{siteID}.internal.member_added`.
+The minimal stack omitted `inbox-worker`, which **owns the INBOX stream**, so that publish had
+nothing to ack it and blocked until its PubAck timed out:
+
+```
+ERROR local inbox member_added publish failed
+      error="publish to \"chat.inbox.site-local.internal.member_added\": nats: no response from stream"
+```
+
+`publishAsyncJobResult` is deferred, so the timeout pushed the creator's async result out to
+~525 ms. With `inbox-worker` started, the same measurement three times in a row:
+
+| | sync `accepted` | async job result |
+|---|---|---|
+| run 1 | 11 ms | **23 ms** |
+| run 2 | 12 ms | **23 ms** |
+| run 3 | 14 ms | **25 ms** |
+
+**In production INBOX exists, so the real gap is ~10 ms, not 500 ms.**
+
+## What that changes
+
+The whole first exchange now completes inside ~30 ms, which removes the cushion the client-only
+flow was leaning on. Re-measured with realistic timing, grace window off, 10 rooms per delay:
+
+| client subscribe delay | alice missing live | bob missing live | **lost** |
+|---|---|---|---|
+| 0 ms | 0% | 0% | **0%** |
+| 5 ms | 27% | 27% | **0%** |
+| 12 ms | 43% | **97%** | **0%** |
+| 30 ms | 53% | **100%** | **0%** |
+
+The invited member now misses essentially the entire conversation on the live path, and the
+history read is the only thing holding it up. Nothing is lost while the write path is healthy.
+
+When it is not — `message-worker` stalled, 12 ms delay:
+
+| | missing live | missing read | **lost** | with `JOIN_GRACE=30s` |
+|---|---|---|---|---|
+| alice | 0% | 100% | **0%** | 0% |
+| bob | **100%** | 100% | **100%** | **0%** |
+
+Bob sees a completely empty room. The grace window returns him to 0%.
