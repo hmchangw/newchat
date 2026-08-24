@@ -23,7 +23,7 @@ somebody else's dashboard.
 | Transactions | admin-service uses `WithTransaction` for credential and session revocation (`admin-service/store_mongo.go`) | The callback may run more than once on a transient transaction error, so side effects inside it must stay transaction-only and idempotent |
 | Unordered bulk writes | broadcast-worker, inbox-worker, room-service, room-worker and `pkg/mongoutil/collection.go` | A bulk result can be partially applied. Reconcile per document, never per request |
 | Pool tuning | Driver/URI defaults almost everywhere; history-service configures min/max explicitly (`history-service/cmd/main.go`) | Pool exhaustion and recovery are per service. One service's headroom says nothing about another's |
-| Readiness | Health servers register `natsutil.HealthCheck` only; no service probes MongoDB | A pod with a broken Mongo client stays `Ready` and keeps taking traffic. This is deliberate for this round — see §5 |
+| Readiness | Health servers register `natsutil.HealthCheck` only; no service probes MongoDB | A pod with a broken Mongo client stays `Ready` and keeps taking traffic. This is deliberate for this round — see §6 |
 | Startup | `mongoutil.Connect` pings and callers exit on failure | A pod that restarts during an outage crash-loops. That is a different scenario from steady-state degradation and must not be read as one |
 
 One consequence outranks the rest: **a Mongo write succeeding and the caller
@@ -56,7 +56,7 @@ per-operation verdict.
 | media-service, upload-service, portal-service, tcard-service | Avatars/emoji, uploads, users and HR employees, cards | **No traffic** |
 | bot-message-handler, bot-message-worker, bot-room-service, botplatform-service | Bot users, subscriptions, rooms, room DEKs | **No traffic**: the `botroom` mode is synthetic and does not drive the real bot chain |
 | hr-sync-worker | Reads HR employees, bulk-upserts users | **No traffic** |
-| inbox-worker | Applies cross-site subscription/room/user state | Out of scope this round (§5) |
+| inbox-worker | Applies cross-site subscription/room/user state | Out of scope this round (§6) |
 
 ## 3. Paths that need reconciliation, and how they fail
 
