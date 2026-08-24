@@ -75,7 +75,7 @@ func walkedPreviewOpts(t *testing.T, readErr error, opt service.Option, pages ..
 	c := testContext()
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
-	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
 	hydrated := &models.Message{

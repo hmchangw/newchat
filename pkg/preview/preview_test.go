@@ -323,7 +323,7 @@ func TestGuardedAdvanceKeyFields_OnlyAdvancesAnAlreadyCurrentKey(t *testing.T) {
 // The key does not identify what the body describes — an ineligible insert advances it
 // over an untouched body — so pinning to it would miss exactly the case this repairs.
 func TestGuardedInvalidateKeyFields_KeysOnTheStoredBody(t *testing.T) {
-	fields := GuardedInvalidateKeyFields("m-mutated")
+	fields := GuardedInvalidateKeyFields("m-mutated", 500)
 
 	require.Contains(t, fields, "previewForMsgId")
 	cond := fields["previewForMsgId"].(bson.M)["$cond"].(bson.A)
@@ -334,27 +334,37 @@ func TestGuardedInvalidateKeyFields_KeysOnTheStoredBody(t *testing.T) {
 	assert.Equal(t, "$previewForMsgId", cond[2], "a failing guard leaves the key alone")
 }
 
-// Withdrawing the key without the watermark that protects it would strand the room: the
-// warm-back meant to refill it is watermark-guarded, so a future-stamped previewAsOf
-// (clock skew, a future-dated insert) would reject the repair as well as the write that
-// failed. They go together, under one predicate, so the room cannot end up certified-by
-// -nothing and un-repairable at once.
-func TestGuardedInvalidateKeyFields_WithdrawsTheWatermarkWithTheKey(t *testing.T) {
-	fields := GuardedInvalidateKeyFields("m-mutated")
+// The watermark moves WITH the key, but to the invalidation time rather than away.
+//
+// Removing it was reaching for a real property: a future-stamped previewAsOf (clock skew,
+// a future-dated insert) would otherwise reject the warm-back meant to refill the room
+// as well as the write that failed. Stamping "now" keeps that -- it lowers a future
+// watermark just as removal did, and the warm-back runs later so it still passes.
+//
+// What removal ALSO did was drop the fence. An insert flush delayed past this mutation
+// carries an older asOf, and against a missing watermark ($ifNull => 0) it passes
+// GuardedSetFields and restores the ciphertext for the message just edited or deleted --
+// under a key that then equals lastMsgId, so it reads as current.
+func TestGuardedInvalidateKeyFields_StampsTheWatermarkRatherThanRemovingIt(t *testing.T) {
+	const invalidatedAt int64 = 500
+	fields := GuardedInvalidateKeyFields("m-mutated", invalidatedAt)
 
 	require.Contains(t, fields, "previewAsOf")
 	key := fields["previewForMsgId"].(bson.M)["$cond"].(bson.A)
 	mark := fields["previewAsOf"].(bson.M)["$cond"].(bson.A)
+
 	assert.Equal(t, key[0], mark[0], "both must move under the same predicate or neither is safe")
-	assert.Equal(t, "$$REMOVE", mark[1])
-	assert.Equal(t, "$previewAsOf", mark[2])
+	assert.Equal(t, "$$REMOVE", key[1], "the key is what an invalidation withdraws")
+	assert.Equal(t, invalidatedAt, mark[1],
+		"the watermark is stamped, not removed: removal leaves nothing to reject an older delayed insert")
+	assert.Equal(t, "$previewAsOf", mark[2], "a failing predicate leaves the watermark alone")
 }
 
 // This repair follows a write that did NOT land, and a watermark comparison is one of the
 // ways such a write fails to land. Guarding the repair on the watermark would reject it
 // for the same reason, which is the failure rather than a safeguard against it.
 func TestGuardedInvalidateKeyFields_IsNotItselfWatermarkGuarded(t *testing.T) {
-	fields := GuardedInvalidateKeyFields("m-mutated")
+	fields := GuardedInvalidateKeyFields("m-mutated", 500)
 
 	assert.NotContains(t, fmt.Sprintf("%v", fields), "$gte",
 		"a watermark conjunct would reject exactly the writes this repair exists to follow")
@@ -364,7 +374,7 @@ func TestGuardedInvalidateKeyFields_IsNotItselfWatermarkGuarded(t *testing.T) {
 // runs on the next read; clearing it here would be a destructive write authorised by a
 // mutation that, by definition, failed to establish what the room now holds.
 func TestGuardedInvalidateKeyFields_LeavesTheBodyIntact(t *testing.T) {
-	fields := GuardedInvalidateKeyFields("m-mutated")
+	fields := GuardedInvalidateKeyFields("m-mutated", 500)
 
 	for _, f := range previewBodyFields {
 		assert.NotContains(t, fields, f, "%s must survive; only its certification is withdrawn", f)

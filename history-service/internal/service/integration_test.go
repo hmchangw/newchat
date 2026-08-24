@@ -168,7 +168,7 @@ func (stubRoomRepo) SetPreviewMessage(_ context.Context, _ string, _ model.Previ
 	return nil
 }
 
-func (stubRoomRepo) InvalidatePreviewKey(_ context.Context, _, _ string) error { return nil }
+func (stubRoomRepo) InvalidatePreviewKey(_ context.Context, _, _ string, _ int64) error { return nil }
 
 //nolint:gocritic // hugeParam: the by-value shape is the RoomRepository contract.
 func (stubRoomRepo) UpdatePreviewBody(_ context.Context, _ string, _ model.PreviewMessage, _ string, _ int64) (bool, error) {

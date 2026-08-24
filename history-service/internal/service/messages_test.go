@@ -52,7 +52,7 @@ func newService(t *testing.T, opts ...service.Option) (*service.HistoryService, 
 	// set their own expectations instead of inheriting these.
 	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
 	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
-	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	rooms.EXPECT().
 		GetRoomTimes(gomock.Any(), gomock.Any()).
@@ -2079,7 +2079,7 @@ func TestHistoryService_DeleteMessage_PreviewWriteFails_WithdrawsTheFreshnessKey
 		Return(false, errors.New("vault unavailable"))
 	// Keyed on the message this mutation changed, NOT on the id the walk observed: the
 	// freshness key can name a message the body does not describe.
-	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1").Return(nil)
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1", gomock.Any()).Return(nil)
 
 	_, err := svc.DeleteMessage(testContext(), "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err, "the repair is best-effort; the delete itself still succeeds")
@@ -2094,7 +2094,7 @@ func TestHistoryService_DeleteMessage_PreviewWriteRejected_WithdrawsTheFreshness
 
 	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(false, nil)
-	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1").Return(nil)
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1", gomock.Any()).Return(nil)
 
 	_, err := svc.DeleteMessage(testContext(), "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
@@ -2125,7 +2125,7 @@ func TestHistoryService_DeleteMessage_ClearFails_WithdrawsTheFreshnessKey(t *tes
 		Return(makePage(nil, false), nil)
 
 	rooms.EXPECT().ClearPreview(gomock.Any(), "r1", gomock.Any()).Return(false, errors.New("mongo timeout"))
-	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1").Return(nil)
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1", gomock.Any()).Return(nil)
 
 	_, err := svc.DeleteMessage(testContext(), "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
@@ -2143,7 +2143,7 @@ func TestHistoryService_DeleteMessage_DegradedWalk_WithdrawsTheKeyButNotTheBody(
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(cassrepo.Page[models.Message]{}, errors.New("cassandra unavailable"))
 
-	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1").Return(nil)
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1", gomock.Any()).Return(nil)
 
 	_, err := svc.DeleteMessage(testContext(), "site-test", models.DeleteMessageRequest{MessageID: "msg-1"})
 	require.NoError(t, err)
@@ -2173,7 +2173,7 @@ func TestHistoryService_EditMessage_PreviewWriteFails_WithdrawsTheFreshnessKey(t
 
 	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(false, errors.New("vault unavailable"))
-	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1").Return(nil)
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), "r1", "msg-1", gomock.Any()).Return(nil)
 
 	_, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{MessageID: "msg-1", NewMsg: "after"})
 	require.NoError(t, err)

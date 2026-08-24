@@ -92,7 +92,7 @@ type RoomRepository interface {
 	// body describes msgID, so the reader stops serving it and the next read
 	// re-derives it. The repair when neither write above could establish what the
 	// room now holds; a no-op once any newer write has replaced the body.
-	InvalidatePreviewKey(ctx context.Context, roomID, msgID string) error
+	InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error
 }
 
 // EventPublisher publishes events to NATS with a Nats-Msg-Id dedup header.

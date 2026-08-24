@@ -696,17 +696,17 @@ func (mr *MockRoomRepositoryMockRecorder) GetRoomUserCount(ctx, roomID any) *gom
 }
 
 // InvalidatePreviewKey mocks base method.
-func (m *MockRoomRepository) InvalidatePreviewKey(ctx context.Context, roomID, msgID string) error {
+func (m *MockRoomRepository) InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "InvalidatePreviewKey", ctx, roomID, msgID)
+	ret := m.ctrl.Call(m, "InvalidatePreviewKey", ctx, roomID, msgID, asOf)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // InvalidatePreviewKey indicates an expected call of InvalidatePreviewKey.
-func (mr *MockRoomRepositoryMockRecorder) InvalidatePreviewKey(ctx, roomID, msgID any) *gomock.Call {
+func (mr *MockRoomRepositoryMockRecorder) InvalidatePreviewKey(ctx, roomID, msgID, asOf any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InvalidatePreviewKey", reflect.TypeOf((*MockRoomRepository)(nil).InvalidatePreviewKey), ctx, roomID, msgID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InvalidatePreviewKey", reflect.TypeOf((*MockRoomRepository)(nil).InvalidatePreviewKey), ctx, roomID, msgID, asOf)
 }
 
 // SetPreviewMessage mocks base method.

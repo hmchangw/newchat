@@ -194,19 +194,24 @@ func GuardedClearFields(asOf int64) bson.M {
 // — once any newer write has replaced the body, previewMeta.messageId no longer names the
 // mutated message.
 //
-// previewAsOf goes with it, under the same predicate. This follows a write that did not
-// land, and a watermark comparison is one of the ways a write fails to land; leaving a
-// future-stamped watermark in place would reject the warm-back too, and the room would be
-// left certified by nothing and unable to repair itself. For the same reason the repair is
-// not itself watermark-guarded.
-func GuardedInvalidateKeyFields(msgID string) bson.M {
+// previewAsOf is STAMPED with asOf, not removed. Removing it looked right -- a
+// future-stamped watermark would reject the warm-back this invalidation exists to invite --
+// but it also drops the fence against OLDER writes. An insert flush delayed past this
+// mutation carries an older asOf, and against a missing watermark ($ifNull => 0) it passes,
+// runs GuardedSetFields, and restores the ciphertext for the very message that was just
+// edited or deleted, under a key that then equals lastMsgId and so reads as current.
+//
+// Stamping the invalidation time does both jobs: it rejects anything older, still admits
+// the warm-back (which runs later), and lowers a future-skewed watermark, which is what
+// removing it was reaching for. The repair itself stays unguarded by the watermark: a
+// watermark comparison is one of the ways the write it follows failed to land.
+func GuardedInvalidateKeyFields(msgID string, asOf int64) bson.M {
 	cond := bson.M{"$eq": bson.A{
 		bson.M{"$ifNull": bson.A{"$previewMeta.messageId", ""}},
 		msgID,
 	}}
-	out := bson.M{}
-	for _, f := range []string{"previewForMsgId", "previewAsOf"} {
-		out[f] = bson.M{"$cond": bson.A{cond, "$$REMOVE", "$" + f}}
+	return bson.M{
+		"previewForMsgId": bson.M{"$cond": bson.A{cond, "$$REMOVE", "$previewForMsgId"}},
+		"previewAsOf":     bson.M{"$cond": bson.A{cond, asOf, "$previewAsOf"}},
 	}
-	return out
 }

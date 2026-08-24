@@ -692,7 +692,7 @@ func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID, ms
 	// what this mutation invalidated. Already-replaced bodies make it a no-op.
 	ctx, cancel := context.WithTimeout(c, warmBackTimeout)
 	defer cancel()
-	if err := s.rooms.InvalidatePreviewKey(ctx, roomID, msgID); err != nil {
+	if err := s.rooms.InvalidatePreviewKey(ctx, roomID, msgID, at.UnixMilli()); err != nil {
 		slog.WarnContext(c, "withdraw stale room preview key failed", "room_id", roomID,
 			"message_id", msgID, "request_id", natsutil.RequestIDFromContext(c), "error", err)
 	}

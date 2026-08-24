@@ -160,7 +160,7 @@ type RoomSource interface {
 	SetPreviewMessage(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) error
 	UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) (bool, error)
 	ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error)
-	InvalidatePreviewKey(ctx context.Context, roomID, msgID string) error
+	InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error
 }
 
 type roomTimes struct {
@@ -257,8 +257,8 @@ func (c *RoomCache) ClearPreview(ctx context.Context, roomID string, asOf int64)
 
 // InvalidatePreviewKey bypasses the cache and delegates to the source — a write,
 // not a read this cache fronts.
-func (c *RoomCache) InvalidatePreviewKey(ctx context.Context, roomID, msgID string) error {
-	return c.inner.InvalidatePreviewKey(ctx, roomID, msgID)
+func (c *RoomCache) InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error {
+	return c.inner.InvalidatePreviewKey(ctx, roomID, msgID, asOf)
 }
 
 // previewEntry is the cached resolved room preview. found=false is never stored

@@ -223,7 +223,7 @@ func (f *fakeRoomSource) ClearPreview(_ context.Context, roomID string, asOf int
 	return true, nil
 }
 
-func (f *fakeRoomSource) InvalidatePreviewKey(_ context.Context, roomID, msgID string) error {
+func (f *fakeRoomSource) InvalidatePreviewKey(_ context.Context, roomID, msgID string, _ int64) error {
 	f.invalidateCalls.Add(1)
 	f.invalidateArgs = previewWrite{roomID: roomID, forMsgID: msgID}
 	return nil
@@ -245,7 +245,7 @@ func TestRoomCache_PreviewWrites_BypassTheCache(t *testing.T) {
 	cleared, err := c.ClearPreview(ctx, "r1", 300)
 	require.NoError(t, err)
 	assert.True(t, cleared, "the applied signal must survive the passthrough")
-	require.NoError(t, c.InvalidatePreviewKey(ctx, "r1", "m-mutated"))
+	require.NoError(t, c.InvalidatePreviewKey(ctx, "r1", "m-mutated", 500))
 
 	assert.Equal(t, int32(2), src.setPreviewCalls.Load(), "an identical repeat write must still reach the source")
 	assert.Equal(t, previewWrite{roomID: "r1", forMsgID: "m-9", asOf: 100}, src.setPreviewArgs)

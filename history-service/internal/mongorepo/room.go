@@ -238,12 +238,12 @@ func (r *RoomRepo) ClearPreview(ctx context.Context, roomID string, asOf int64) 
 //
 // Deliberately unsealed and unguarded by the watermark — it must be able to succeed on
 // the failures it follows, including the ones where sealing is what broke.
-func (r *RoomRepo) InvalidatePreviewKey(ctx context.Context, roomID, msgID string) error {
+func (r *RoomRepo) InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error {
 	if msgID == "" {
 		return nil
 	}
 	_, err := r.applyPreviewFields(ctx, roomID, "invalidate room preview key", nil,
-		preview.GuardedInvalidateKeyFields(msgID))
+		preview.GuardedInvalidateKeyFields(msgID, asOf))
 	return err
 }
 

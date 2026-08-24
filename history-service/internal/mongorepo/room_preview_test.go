@@ -366,7 +366,7 @@ func TestRoomRepo_PreviewWrites_NoCipherIsANoOp(t *testing.T) {
 	cleared, err := repo.ClearPreview(ctx, "r-off", 100)
 	require.NoError(t, err)
 	assert.False(t, cleared)
-	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-off", "m-any"))
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-off", "m-any", 500))
 
 	var raw bson.M
 	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-off"}).Decode(&raw))
@@ -389,7 +389,7 @@ func TestRoomRepo_InvalidatePreviewKey_WithholdsThePreviewItNamed(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, got["r-withdraw"].Preview, "precondition: served as current before the repair")
 
-	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-withdraw", "m-preview"))
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-withdraw", "m-preview", 500))
 
 	got, err = repo.GetRoomTimesByIDs(ctx, []string{"r-withdraw"})
 	require.NoError(t, err)
@@ -406,7 +406,7 @@ func TestRoomRepo_InvalidatePreviewKey_KeepsTheBodyAndDropsTheWatermark(t *testi
 	ctx := context.Background()
 	seedRoomWithPreview(t, repo, "r-body", "m-preview", "m-preview")
 
-	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-body", "m-preview"))
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-body", "m-preview", 500))
 
 	var raw bson.M
 	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-body"}).Decode(&raw))
@@ -425,7 +425,7 @@ func TestRoomRepo_InvalidatePreviewKey_LeavesAPreviewOfAnotherMessage(t *testing
 	ctx := context.Background()
 	seedRoomWithPreview(t, repo, "r-other", "m-preview", "m-preview")
 
-	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-other", "m-someone-else"))
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-other", "m-someone-else", 500))
 
 	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-other"})
 	require.NoError(t, err)
@@ -444,7 +444,7 @@ func TestRoomRepo_InvalidatePreviewKey_NeedsNoSeal(t *testing.T) {
 	broken := NewRoomRepo(db, failingCipher{}, previewKey)
 	_, err := broken.UpdatePreviewBody(ctx, "r-noseal", samplePreview(), "m-preview", 200)
 	require.Error(t, err, "precondition: the body write is what fails")
-	require.NoError(t, broken.InvalidatePreviewKey(ctx, "r-noseal", "m-preview"),
+	require.NoError(t, broken.InvalidatePreviewKey(ctx, "r-noseal", "m-preview", 500),
 		"the repair must not depend on the seal path that just failed")
 
 	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-noseal"})
