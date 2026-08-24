@@ -68,6 +68,44 @@ func TestCoalescingStore_UpdateRoomLastMessage_BuffersWithoutFlush(t *testing.T)
 	assert.Equal(t, 0, bulk.callCount(), "buffered updates must not hit Mongo until Flush")
 }
 
+// messages_by_room clusters (created_at DESC, message_id DESC), so created_at alone
+// does not order two rows. Coalescing by timestamp only made same-millisecond messages
+// resolve by arrival order, which need not be the order the walk reads them back in --
+// the room could then store one body under the other's lastMsgId.
+func TestCoalescingStore_UpdateRoomLastMessage_BreaksTimestampTiesOnMessageID(t *testing.T) {
+	t0 := time.Unix(1700000000, 0).UTC()
+
+	t.Run("a greater id at the same instant wins", func(t *testing.T) {
+		bulk := &fakeBulkWriter{}
+		c := newCoalescer(bulk)
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), lastMsg("room-1", "msg-b", t0, false)))
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), lastMsg("room-1", "msg-a", t0, false)))
+		require.NoError(t, c.Flush(context.Background()))
+		assert.Equal(t, "msg-b", bulk.lastCall()["room-1"].msgID,
+			"the clustering order picks the greater id, whichever arrived first")
+	})
+
+	t.Run("arrival order does not decide it", func(t *testing.T) {
+		bulk := &fakeBulkWriter{}
+		c := newCoalescer(bulk)
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), lastMsg("room-1", "msg-a", t0, false)))
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), lastMsg("room-1", "msg-b", t0, false)))
+		require.NoError(t, c.Flush(context.Background()))
+		assert.Equal(t, "msg-b", bulk.lastCall()["room-1"].msgID,
+			"same pair, opposite arrival order, same winner")
+	})
+
+	t.Run("a newer timestamp still beats a greater id", func(t *testing.T) {
+		bulk := &fakeBulkWriter{}
+		c := newCoalescer(bulk)
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), lastMsg("room-1", "msg-z", t0, false)))
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), lastMsg("room-1", "msg-a", t0.Add(time.Millisecond), false)))
+		require.NoError(t, c.Flush(context.Background()))
+		assert.Equal(t, "msg-a", bulk.lastCall()["room-1"].msgID,
+			"created_at is still the primary key of the ordering")
+	})
+}
+
 func TestCoalescingStore_Flush_WritesPendingBatch(t *testing.T) {
 	bulk := &fakeBulkWriter{}
 	c := newCoalescer(bulk)

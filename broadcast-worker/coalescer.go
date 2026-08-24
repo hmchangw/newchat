@@ -33,6 +33,20 @@ type roomLastMsgUpdate struct {
 	pvw              *preview.Sealed
 	pvwFailed        bool
 	pvwAt            time.Time
+	// pvwMsgID is the message that last moved the preview clock, so the preview and the
+	// room tuple break ties the same way rather than on separate rules.
+	pvwMsgID string
+}
+
+// newerRow reports whether (at, id) sorts newer than (curAt, curID) in messages_by_room's
+// clustering order: created_at DESC, message_id DESC. created_at alone does not order two
+// rows, so comparing it alone leaves same-instant messages resolved by arrival -- which
+// need not match the order the preview walk reads them back in (#293).
+func newerRow(at time.Time, id string, curAt time.Time, curID string) bool {
+	if !at.Equal(curAt) {
+		return at.After(curAt)
+	}
+	return id > curID
 }
 
 // bulkRoomLastMsgWriter is the flush boundary, kept off Store so the contract stays narrow.
@@ -107,7 +121,7 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, upd roomLastM
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cur := c.pending[upd.RoomID]
-	if upd.At.After(cur.at) {
+	if newerRow(upd.At, upd.MsgID, cur.at, cur.msgID) {
 		cur.msgID = upd.MsgID
 		cur.at = upd.At
 	}
@@ -116,10 +130,11 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, upd roomLastM
 	}
 	// Against pvwAt, not at: a later ineligible message must not evict the preview it
 	// cannot replace. A seal failure moves this clock too, so an older seal cannot win.
-	if (upd.Preview != nil || upd.PreviewFailed) && upd.At.After(cur.pvwAt) {
+	if (upd.Preview != nil || upd.PreviewFailed) && newerRow(upd.At, upd.MsgID, cur.pvwAt, cur.pvwMsgID) {
 		cur.pvw = upd.Preview
 		cur.pvwFailed = upd.PreviewFailed
 		cur.pvwAt = upd.At
+		cur.pvwMsgID = upd.MsgID
 	}
 	c.pending[upd.RoomID] = cur
 	return nil
