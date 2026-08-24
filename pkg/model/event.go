@@ -44,8 +44,13 @@ type MessageEvent struct {
 	// ThreadParentSenderAccount is the thread parent's author, resolved best-effort by the
 	// gatekeeper (empty on soft-fail/edit/delete); lets workers skip their own parent fetch.
 	ThreadParentSenderAccount string `json:"threadParentSenderAccount,omitempty" bson:"-"`
-	// PreviewMessage is the room's refreshed preview, computed by history-service on
-	// edit/delete for broadcast-worker to relay. nil for other events or when cleared.
+	// PreviewMessage is the room's refreshed preview, computed AND persisted by
+	// history-service on edit/delete; it rides the event purely so broadcast-worker can
+	// relay it to clients. nil for other events, for a hidden thread reply, or when the
+	// mutation left the room with no eligible message.
+	//
+	// A nil therefore carries no storage instruction: the walk that could tell "the room
+	// is empty" from "the walk gave up" is the one that already acted on the difference.
 	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
