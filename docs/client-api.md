@@ -1014,20 +1014,27 @@ document (`previewMessage` always omitted there). All fields are optional
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
 | `privateKey` | string | Base64-encoded room E2E private key — initial key bootstrap for room members (see [§5](#5-room-encryption)). Present only for encrypted (channel) rooms whose key the caller's site holds; omitted otherwise. |
 | `keyVersion` | number | Version of `privateKey`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, resolved server-side at read time; its `content` is truncated to a short preview (see [PreviewMessage](#previewmessage)). Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, stored server-side. Served from the room document when one is stored; when not, it is resolved from message history and that result is stored, so the room serves it from the document on subsequent reads. Its `content` is truncated to a short preview (see [PreviewMessage](#previewmessage)). Omitted when the room has no eligible message at all, when that site's enrichment degraded, when read-time resolution degrades for that room (a per-room read failure; the rest of the batch is unaffected), or when the request set `includeLastMessage: false` — best-effort, never fails the list. |
 
 ##### PreviewMessage
 
-A room's most-recent **eligible** message, resolved at read time and enriched for
-room-list rendering. Eligible = not soft-deleted and not a system message (quoted
-replies are normal content and ARE eligible) — an ineligible tail is walked back to
-an earlier survivor; a room with only ineligible messages omits `previewMessage`.
+A room's most-recent **eligible** message, composed and stored when that message is
+delivered, and enriched for room-list rendering. Eligible = not soft-deleted and not a
+system message (quoted replies are normal content and ARE eligible) — an ineligible
+newer message leaves the stored preview in place, so the room keeps showing its last
+real content; a room with only ineligible messages omits `previewMessage`.
+
+Editing or deleting a message also updates the stored preview: an edit to the previewed
+message refreshes it, and deleting it moves the preview back to the previous eligible
+message, or removes it when the recompute confirms the room has no eligible message
+left. A recompute that cannot complete leaves the stored preview as it was — the event
+omits `previewMessage`, but later reads still serve the previous one.
 
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | |
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
-| `content` | string | The message body. On `subscription.list` (both transports) it is truncated server-side to a short preview — 50 characters by default, whole characters only, no ellipsis appended. Everywhere else it is the full body. |
+| `content` | string | Message content snippet, capped at 500 runes (longer bodies are truncated). On `subscription.list` (both transports) it is truncated further to a short preview — 50 characters by default, whole characters only, no ellipsis appended. |
 | `createdAt` | string | RFC 3339 timestamp. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |
