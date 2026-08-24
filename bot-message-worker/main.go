@@ -43,6 +43,7 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	Pool          mongoutil.PoolConfig
 	Atrest        atrest.Config
 	Vault         atrest.VaultConfig `envPrefix:"VAULT_"`
 
@@ -63,6 +64,10 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate mongo pool config: %w", err)
 	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
@@ -98,7 +103,7 @@ func run() error {
 		if cfg.MongoURI == "" {
 			return fmt.Errorf("ATREST_ENABLED=true requires MONGO_URI for the DEK collection")
 		}
-		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 		if err != nil {
 			return fmt.Errorf("connect mongo: %w", err)
 		}

@@ -315,6 +315,27 @@ func TestLoad_BadgeCountCacheFirst(t *testing.T) {
 	require.True(t, cfg.BadgeCountCacheFirst)
 }
 
+// Load delegates pool checks to mongoutil.PoolConfig.Validate — exhaustive
+// cases live in that package; this just proves the wiring.
+func TestLoad_DelegatesPoolValidation(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
+	_, err := Load()
+	require.ErrorContains(t, err, "MONGO_MAX_POOL_SIZE")
+}
+
+// Load rejects a negative MAX_CONCURRENCY (user-service's bespoke concurrency knob).
+func TestLoad_RejectsNegativeMaxConcurrency(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MAX_CONCURRENCY", "-1")
+	_, err := Load()
+	require.ErrorContains(t, err, "MAX_CONCURRENCY")
+}
+
 func TestLoad_SSORefreshWindowMustBePositive(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")

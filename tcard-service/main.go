@@ -35,6 +35,9 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+
+	Pool mongoutil.PoolConfig
+	HTTP ginutil.TimeoutConfig
 }
 
 func main() {
@@ -49,6 +52,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate pool config: %w", err)
+	}
+	if err := cfg.HTTP.Validate(); err != nil {
+		return fmt.Errorf("validate http timeout: %w", err)
+	}
 
 	refreshAt, err := parseRefreshAt(cfg.CacheRefreshAt)
 	if err != nil {
@@ -62,7 +71,7 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
@@ -95,6 +104,7 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
+	r.Use(cfg.HTTP.Middleware())
 	registerRoutes(r, handler)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)

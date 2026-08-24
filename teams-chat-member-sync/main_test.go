@@ -6,6 +6,8 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 func setRequiredEnv(t *testing.T) {
@@ -46,6 +48,7 @@ func TestConfig_MissingRequired(t *testing.T) {
 func baseConfig() Config {
 	return Config{
 		MongoURI: "mongodb://localhost:27017", MongoDB: "chat",
+		Pool:          mongoutil.PoolConfig{MaxPoolSize: 500},
 		MaxWorkers:    8,
 		GraphTenantID: "tenant", GraphClientID: "client", GraphClientSecret: "secret",
 	}
@@ -59,6 +62,7 @@ func TestValidateConfig(t *testing.T) {
 	}{
 		{"valid", func(c *Config) {}, false},
 		{"zero max workers", func(c *Config) { c.MaxWorkers = 0 }, true},
+		{"zero max pool size", func(c *Config) { c.Pool.MaxPoolSize = 0 }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

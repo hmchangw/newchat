@@ -48,13 +48,20 @@ func run() error {
 	if cfg.EIDCacheTTL <= 0 {
 		return fmt.Errorf("EID_CACHE_TTL must be positive, got %s", cfg.EIDCacheTTL)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		return err
+	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
@@ -78,14 +85,7 @@ func run() error {
 
 	h := newHandler(store, store, blobs, &cfg)
 
-	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
-	// instead of piling unbounded work onto MongoDB/MinIO. MAX_CONCURRENCY=0 disables.
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
-	if cfg.MaxConcurrency > 0 {
-		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
-	}
-	router := natsrouter.New(nc, "media-service", routerOpts...)
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router := natsrouter.DefaultGuarded(nc, "media-service", cfg.Guard)
 	registerEmojiNATS(router, h, cfg.SiteID)
 
 	gin.SetMode(gin.ReleaseMode)
@@ -95,6 +95,10 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
+	// No blanket HTTP timeout: the avatar/emoji GET routes stream blobs via
+	// c.DataFromReader and the PUT routes accept uploads, both bound to the
+	// request context — a short deadline would cancel a slow up/download
+	// mid-stream. (The NATS request/reply side still uses cfg.Guard.)
 	sessions := botauth.NewValidator(
 		restyutil.New("", restyutil.WithTimeout(5*time.Second), restyutil.WithMaxIdleConns(32)), cfg.BotplatformURL)
 	registerRoutes(r, h, sessions, cfg.SiteID)

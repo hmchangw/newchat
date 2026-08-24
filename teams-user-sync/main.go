@@ -40,18 +40,21 @@ func run() error {
 	if cfg.GraphPageSize <= 0 || cfg.GraphPageSize > 999 {
 		return fmt.Errorf("GRAPH_PAGE_SIZE must be in 1..999, got %d", cfg.GraphPageSize)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("invalid mongo pool config: %w", err)
+	}
 
 	// SIGTERM/SIGINT (pod deletion, Job activeDeadlineSeconds) cancels the run
 	// so it aborts between operations instead of being killed mid-batch.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoRead.URI, cfg.MongoRead.Username, cfg.MongoRead.Password)
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoRead.URI, cfg.MongoRead.Username, cfg.MongoRead.Password, mongoutil.WithPool(cfg.Pool))
 	if err != nil {
 		return fmt.Errorf("connect mongo read client: %w", err)
 	}
 	defer disconnect(readClient)
-	writeClient, err := mongoutil.Connect(ctx, cfg.MongoWrite.URI, cfg.MongoWrite.Username, cfg.MongoWrite.Password)
+	writeClient, err := mongoutil.Connect(ctx, cfg.MongoWrite.URI, cfg.MongoWrite.Username, cfg.MongoWrite.Password, mongoutil.WithPool(cfg.Pool))
 	if err != nil {
 		return fmt.Errorf("connect mongo write client: %w", err)
 	}

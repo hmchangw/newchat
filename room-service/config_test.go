@@ -9,8 +9,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+// main wires cfg.Pool.Validate / cfg.Guard.Validate; the exhaustive cases live
+// in those packages' tests — these just prove the fields are on config and are
+// validated.
+func TestConfig_DelegatesPoolValidation(t *testing.T) {
+	cfg := config{Pool: mongoutil.PoolConfig{MaxPoolSize: 0}}
+	err := cfg.Pool.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_MAX_POOL_SIZE")
+}
+
+func TestConfig_DelegatesGuardValidation(t *testing.T) {
+	cfg := config{Guard: natsrouter.GuardConfig{MaxConcurrency: -1}}
+	err := cfg.Guard.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MAX_CONCURRENCY")
+}
 
 func TestLegacyRoomOrigins_UnmarshalText(t *testing.T) {
 	var l legacyRoomOrigins
@@ -101,21 +120,21 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 256, cfg.MaxConcurrency)
+		assert.Equal(t, 256, cfg.Guard.MaxConcurrency)
 	})
 
 	t.Run("override", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "64")
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 64, cfg.MaxConcurrency)
+		assert.Equal(t, 64, cfg.Guard.MaxConcurrency)
 	})
 
 	t.Run("zero_disables", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "0")
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 0, cfg.MaxConcurrency)
+		assert.Equal(t, 0, cfg.Guard.MaxConcurrency)
 	})
 }
 

@@ -88,6 +88,8 @@ type Config struct {
 	BadgeCountCacheFirst bool        `env:"BADGE_COUNT_CACHE_FIRST" envDefault:"false"`
 	Mongo                MongoConfig `envPrefix:"MONGO_"`
 	NATS                 NATSConfig  `envPrefix:"NATS_"`
+	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE / MONGO_MIN_POOL_SIZE).
+	Pool mongoutil.PoolConfig
 	// ShowTeamsRoom controls whether Teams-migrated rooms (origin "teams")
 	// appear in the subscription list/count; false hides them (reversible
 	// read-time filter — see pkg/model.OriginTeams).
@@ -149,6 +151,9 @@ func Load() (Config, error) {
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return Config{}, fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }
