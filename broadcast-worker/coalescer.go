@@ -38,6 +38,16 @@ type roomLastMsgUpdate struct {
 	pvwMsgID string
 }
 
+// maxPendingPreviews bounds how many buffered rooms may hold a sealed preview body. The
+// room tuple is tiny and required; the preview is the large, optional half, so a stalled
+// flush sheds previews and keeps ordering rather than growing without limit. A shed room
+// simply has no stored preview, which the reader already handles by walking (#289).
+const maxPendingPreviews = 5000
+
+// maxFlushDuration bounds one bulk write, so a stalled Mongo cannot hold the drained
+// batch (and the replacement map filling behind it) for the process's lifetime.
+const maxFlushDuration = 30 * time.Second
+
 // newerRow reports whether (at, id) sorts newer than (curAt, curID) in messages_by_room's
 // clustering order: created_at DESC, message_id DESC. created_at alone does not order two
 // rows, so comparing it alone leaves same-instant messages resolved by arrival -- which
@@ -97,6 +107,9 @@ type coalescingStore struct {
 
 	mu      sync.Mutex
 	pending map[string]roomLastMsgUpdate
+	// pendingPreviews counts buffered rooms currently holding a preview, so the cap is a
+	// counter rather than a scan of pending on every message.
+	pendingPreviews int
 }
 
 func (c *coalescingStore) clock() time.Time {
@@ -131,10 +144,18 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, upd roomLastM
 	// Against pvwAt, not at: a later ineligible message must not evict the preview it
 	// cannot replace. A seal failure moves this clock too, so an older seal cannot win.
 	if (upd.Preview != nil || upd.PreviewFailed) && newerRow(upd.At, upd.MsgID, cur.pvwAt, cur.pvwMsgID) {
-		cur.pvw = upd.Preview
-		cur.pvwFailed = upd.PreviewFailed
-		cur.pvwAt = upd.At
-		cur.pvwMsgID = upd.MsgID
+		// Over the cap, a room that is not already carrying one does not start: shedding
+		// the optional half keeps the required room tuple buffered for every room, which
+		// is the opposite of what dropping whole entries would do.
+		if cur.pvw != nil || cur.pvwFailed || c.pendingPreviews < maxPendingPreviews {
+			if cur.pvw == nil && !cur.pvwFailed {
+				c.pendingPreviews++
+			}
+			cur.pvw = upd.Preview
+			cur.pvwFailed = upd.PreviewFailed
+			cur.pvwAt = upd.At
+			cur.pvwMsgID = upd.MsgID
+		}
 	}
 	c.pending[upd.RoomID] = cur
 	return nil
@@ -149,7 +170,12 @@ func (c *coalescingStore) Flush(ctx context.Context) error {
 	}
 	batch := c.pending
 	c.pending = make(map[string]roomLastMsgUpdate, len(batch))
+	c.pendingPreviews = 0
 	c.mu.Unlock()
+	// Bounded: the drained batch stays live for the whole write, and handlers fill the
+	// replacement map behind it, so an unbounded write is an unbounded pair of maps.
+	ctx, cancel := context.WithTimeout(ctx, maxFlushDuration)
+	defer cancel()
 	c.refreshRemoteActivity(ctx, batch)
 	return c.bulk.BulkUpdateRoomLastMessage(ctx, batch)
 }

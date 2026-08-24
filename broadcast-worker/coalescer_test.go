@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/preview"
 )
 
 type fakeBulkWriter struct {
@@ -104,6 +107,63 @@ func TestCoalescingStore_UpdateRoomLastMessage_BreaksTimestampTiesOnMessageID(t 
 		assert.Equal(t, "msg-a", bulk.lastCall()["room-1"].msgID,
 			"created_at is still the primary key of the ordering")
 	})
+}
+
+// The room tuple is small and required; the sealed preview is the large, optional half.
+// A stalled flush must shed the second rather than let the buffer grow without limit,
+// and must keep buffering the first for every room (#289).
+func TestCoalescingStore_ShedsPreviewsPastTheCapButKeepsOrdering(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c := newCoalescer(bulk)
+	t0 := time.Unix(1700000000, 0).UTC()
+
+	const over = maxPendingPreviews + 50
+	for i := range over {
+		upd := lastMsg("room-"+strconv.Itoa(i), "msg-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Millisecond), false)
+		upd.Preview = &preview.Sealed{ForMsgID: "msg-" + strconv.Itoa(i)}
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), upd))
+	}
+	require.NoError(t, c.Flush(context.Background()))
+
+	got := bulk.lastCall()
+	require.Len(t, got, over, "every room keeps its ordering fields, capped or not")
+
+	withPreview := 0
+	for _, u := range got {
+		if u.pvw != nil {
+			withPreview++
+		}
+	}
+	assert.Equal(t, maxPendingPreviews, withPreview, "previews are shed at the cap, ordering is not")
+	assert.NotEmpty(t, got["room-"+strconv.Itoa(over-1)].msgID,
+		"a shed room still carries the last-message tuple it was buffered for")
+}
+
+// A room already holding a preview must keep being updated past the cap: refusing it
+// would freeze that room on an older body while newer messages kept arriving.
+func TestCoalescingStore_CapDoesNotFreezeARoomAlreadyHoldingAPreview(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c := newCoalescer(bulk)
+	t0 := time.Unix(1700000000, 0).UTC()
+
+	first := lastMsg("room-hot", "msg-1", t0, false)
+	first.Preview = &preview.Sealed{ForMsgID: "msg-1"}
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), first))
+
+	for i := range maxPendingPreviews + 10 {
+		upd := lastMsg("room-"+strconv.Itoa(i), "m"+strconv.Itoa(i), t0.Add(time.Duration(i+1)*time.Millisecond), false)
+		upd.Preview = &preview.Sealed{ForMsgID: "m" + strconv.Itoa(i)}
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), upd))
+	}
+
+	later := lastMsg("room-hot", "msg-2", t0.Add(time.Hour), false)
+	later.Preview = &preview.Sealed{ForMsgID: "msg-2"}
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), later))
+	require.NoError(t, c.Flush(context.Background()))
+
+	got := bulk.lastCall()["room-hot"]
+	require.NotNil(t, got.pvw)
+	assert.Equal(t, "msg-2", got.pvw.ForMsgID, "an already-counted room is not re-capped")
 }
 
 func TestCoalescingStore_Flush_WritesPendingBatch(t *testing.T) {
