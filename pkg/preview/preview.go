@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
 // MaxContentRunes caps PreviewMessage.Content: the room list renders a snippet only.
@@ -31,13 +32,14 @@ const (
 //nolint:gocritic // hugeParam: PreviewMessage is the stored/wire shape itself; by-value keeps callers simple and the copy cost is negligible.
 func Build(p model.PreviewMessage) model.PreviewMessage {
 	p.Content = truncateContent(p.Content)
-	// Reslice, don't copy: these are already-materialized slices from the caller's
-	// message, and the trimmed tail is dropped with it.
+	// Copy, don't reslice. Reslicing keeps the ORIGINAL backing array reachable, tail
+	// included, and this value is retained by Sealed.Meta and by the read cache — so the
+	// cap would bound the length while pinning exactly the memory it exists to bound.
 	if len(p.Attachments) > MaxAttachments {
-		p.Attachments = p.Attachments[:MaxAttachments]
+		p.Attachments = append([]cassandra.Attachment(nil), p.Attachments[:MaxAttachments]...)
 	}
 	if len(p.Mentions) > MaxMentions {
-		p.Mentions = p.Mentions[:MaxMentions]
+		p.Mentions = append([]model.Participant(nil), p.Mentions[:MaxMentions]...)
 	}
 	p.CreatedAt = p.CreatedAt.UTC()
 	return p

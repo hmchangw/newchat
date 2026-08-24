@@ -139,6 +139,51 @@ func TestCoalescingStore_ShedsPreviewsPastTheCapButKeepsOrdering(t *testing.T) {
 		"a shed room still carries the last-message tuple it was buffered for")
 }
 
+// The cap bounds memory; it must not buy that by reintroducing #224. A shed room whose
+// update carries neither a body nor a failure marker would take the flush's key-advance
+// branch, stamping the new message's id over the room's PREVIOUS body — a preview
+// certified for a message it does not describe.
+func TestCoalescingStore_ShedPreviewIsASealFailureNotAKeyAdvance(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c := newCoalescer(bulk)
+	t0 := time.Unix(1700000000, 0).UTC()
+
+	for i := range maxPendingPreviews {
+		upd := lastMsg("room-"+strconv.Itoa(i), "m"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Millisecond), false)
+		upd.Preview = &preview.Sealed{ForMsgID: "m" + strconv.Itoa(i)}
+		require.NoError(t, c.UpdateRoomLastMessage(context.Background(), upd))
+	}
+
+	shed := lastMsg("room-shed", "msg-new", t0.Add(time.Hour), false)
+	shed.Preview = &preview.Sealed{ForMsgID: "msg-new"}
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), shed))
+	require.NoError(t, c.Flush(context.Background()))
+
+	got := bulk.lastCall()["room-shed"]
+	assert.Nil(t, got.pvw, "the body is what the cap sheds")
+	assert.True(t, got.pvwFailed,
+		"an eligible message with no composed preview is a seal failure; without the marker "+
+			"the flush advances the freshness key over whatever body the room already had")
+	assert.Equal(t, "msg-new", got.msgID, "ordering is still recorded")
+}
+
+// created_at is a Cassandra timestamp — milliseconds. Two messages differing only below
+// that resolution are one clustering position there, so the id tiebreaker must decide
+// them; comparing Go's full precision would silently skip it.
+func TestCoalescingStore_TiesWithinOneMillisecondUseTheIDTiebreaker(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	c := newCoalescer(bulk)
+	t0 := time.Unix(1700000000, 0).UTC()
+
+	// Same millisecond, different nanoseconds — indistinguishable once stored.
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), lastMsg("room-1", "msg-b", t0.Add(400*time.Microsecond), false)))
+	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), lastMsg("room-1", "msg-a", t0.Add(900*time.Microsecond), false)))
+	require.NoError(t, c.Flush(context.Background()))
+
+	assert.Equal(t, "msg-b", bulk.lastCall()["room-1"].msgID,
+		"a later nanosecond must not beat a greater id inside one stored millisecond")
+}
+
 // A room already holding a preview must keep being updated past the cap: refusing it
 // would freeze that room on an older body while newer messages kept arriving.
 func TestCoalescingStore_CapDoesNotFreezeARoomAlreadyHoldingAPreview(t *testing.T) {

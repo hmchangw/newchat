@@ -75,6 +75,20 @@ func TestBuild_CapsAttachmentsAndMentions(t *testing.T) {
 	assert.Equal(t, "u0", got.Mentions[0].Account)
 }
 
+// The cap is a MEMORY bound, and reslicing is not one: the original backing array stays
+// reachable through the shortened slice, and Sealed.Meta and the read cache both retain
+// that value. Capacity is the observable that separates a copy from a reslice.
+func TestBuild_CapsReleaseTheDiscardedTail(t *testing.T) {
+	atts := make([]cassandra.Attachment, MaxAttachments+500)
+	mentions := make([]model.Participant, MaxMentions+500)
+
+	got := Build(model.PreviewMessage{MessageID: "m1", Attachments: atts, Mentions: mentions})
+
+	assert.Less(t, cap(got.Attachments), cap(atts),
+		"a resliced prefix keeps the whole original allocation alive")
+	assert.Less(t, cap(got.Mentions), cap(mentions))
+}
+
 // Under the cap nothing is touched — including the nil case, which must stay nil rather
 // than becoming an empty slice that would serialize as [] instead of being omitted.
 func TestBuild_LeavesCollectionsUnderTheCapAlone(t *testing.T) {

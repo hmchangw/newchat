@@ -53,8 +53,14 @@ const maxFlushDuration = 30 * time.Second
 // rows, so comparing it alone leaves same-instant messages resolved by arrival -- which
 // need not match the order the preview walk reads them back in (#293).
 func newerRow(at time.Time, id string, curAt time.Time, curID string) bool {
-	if !at.Equal(curAt) {
-		return at.After(curAt)
+	// Compared at the precision Cassandra STORES, not the precision Go carries. created_at
+	// is a Cassandra timestamp — milliseconds — so two messages that differ only in
+	// sub-millisecond digits are one clustering position there. Comparing full Go
+	// precision would take the timestamp branch and skip the id tiebreaker that exists to
+	// match that position, which is the whole point of the comparator.
+	a, b := at.UnixMilli(), curAt.UnixMilli()
+	if a != b {
+		return a > b
 	}
 	return id > curID
 }
@@ -144,18 +150,28 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, upd roomLastM
 	// Against pvwAt, not at: a later ineligible message must not evict the preview it
 	// cannot replace. A seal failure moves this clock too, so an older seal cannot win.
 	if (upd.Preview != nil || upd.PreviewFailed) && newerRow(upd.At, upd.MsgID, cur.pvwAt, cur.pvwMsgID) {
-		// Over the cap, a room that is not already carrying one does not start: shedding
-		// the optional half keeps the required room tuple buffered for every room, which
-		// is the opposite of what dropping whole entries would do.
-		if cur.pvw != nil || cur.pvwFailed || c.pendingPreviews < maxPendingPreviews {
-			if cur.pvw == nil && !cur.pvwFailed {
-				c.pendingPreviews++
-			}
-			cur.pvw = upd.Preview
-			cur.pvwFailed = upd.PreviewFailed
-			cur.pvwAt = upd.At
-			cur.pvwMsgID = upd.MsgID
+		had := cur.pvw != nil
+		switch {
+		case upd.PreviewFailed:
+			cur.pvw, cur.pvwFailed = nil, true
+		case had || c.pendingPreviews < maxPendingPreviews:
+			cur.pvw, cur.pvwFailed = upd.Preview, false
+		default:
+			// Over the cap: shed the BODY, and record that an eligible message arrived
+			// without one — which is a seal FAILURE, not an ineligible message. Leaving
+			// it as neither would take the flush's key-advance branch and stamp the new
+			// id over the room's previous body, certifying a preview for a message it
+			// does not describe. That is #224, reintroduced by the cap that bounds #289.
+			cur.pvw, cur.pvwFailed = nil, true
 		}
+		switch now := cur.pvw != nil; {
+		case !had && now:
+			c.pendingPreviews++
+		case had && !now:
+			c.pendingPreviews--
+		}
+		cur.pvwAt = upd.At
+		cur.pvwMsgID = upd.MsgID
 	}
 	c.pending[upd.RoomID] = cur
 	return nil
