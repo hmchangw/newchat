@@ -144,3 +144,33 @@ The live path can only be made race-free by delivering on a subject the client s
 **before the room existed**. Everything else — subscribing faster, flushing, reading history —
 narrows the window without closing it, because the client's subscribe causally follows the
 event that tells it the room exists.
+
+
+---
+
+# Zero-cost join window (2026-08-23, revised)
+
+The first cut of the window queried the roster on every channel message. That is exactly what
+the single room-subject publish exists to avoid, so it was replaced: `room-worker` publishes a
+join notice on `chat.server.joingrace.{siteID}` (core NATS, not queue-subscribed, so every
+`broadcast-worker` replica sees it), each replica keeps the joiners in memory for the window,
+and the message path does one map lookup. No roster query — the unit tests set no
+`ListSubscriptions` expectation, and gomock fails on an unexpected call.
+
+Re-verified end-to-end, 8 rooms per delay:
+
+| client subscribe delay | `JOIN_GRACE` off | `JOIN_GRACE=30s` |
+|---|---|---|
+| 0 ms | 0% live loss | **0%** |
+| 12 ms | **67% live loss** | **0%** |
+| 100 ms | — | **0%** |
+| 1 s | — | **0%** |
+
+Control at 12 ms with the window off reproduces the 67% loss, so the registry is what closes it.
+
+With `message-worker` stalled (history read returns nothing) and a 12 ms client delay:
+
+| | missing from live | missing from read | **missing from both** |
+|---|---|---|---|
+| alice | **0%** | 100% | **0%** |
+| bob | **0%** | 100% | **0%** |

@@ -1689,6 +1689,14 @@ func ServerBroadcastThreadTCount(siteID string) string {
 	return fmt.Sprintf("chat.server.broadcast.%s.thread.tcount", siteID)
 }
 
+// JoinGraceNotice carries room-worker's "these accounts just joined" notice to
+// broadcast-worker. Deliberately OUTSIDE chat.server.broadcast.{siteID}.> so it
+// is not swallowed by that wildcard's queue group: every broadcast-worker
+// replica needs this notice, not one of them.
+func JoinGraceNotice(siteID string) string {
+	return fmt.Sprintf("chat.server.joingrace.%s", siteID)
+}
+
 // ServerBroadcastWildcard is the queue-subscribe subject used by broadcast-worker
 // to receive all server-broadcast events for a site.
 func ServerBroadcastWildcard(siteID string) string {

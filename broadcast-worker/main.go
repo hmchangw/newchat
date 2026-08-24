@@ -244,6 +244,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Join notices are NOT queue-subscribed: every replica keeps its own registry,
+	// so all of them must see every notice.
+	var joinSub *nats.Subscription
+	if cfg.JoinGrace > 0 {
+		joinSub, err = nc.Subscribe(ctx, subject.JoinGraceNotice(cfg.SiteID),
+			func(msgCtx context.Context, msg *nats.Msg) {
+				handler.HandleJoinGraceNotice(msgCtx, msg.Data)
+			})
+		if err != nil {
+			slog.Error("subscribe join-grace failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 	if err != nil {
 		slog.Error("messages failed", "error", err)
@@ -269,6 +283,12 @@ func main() {
 	hooks := []func(context.Context) error{
 		func(_ context.Context) error {
 			return broadcastSub.Unsubscribe()
+		},
+		func(_ context.Context) error {
+			if joinSub == nil {
+				return nil
+			}
+			return joinSub.Unsubscribe()
 		},
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)

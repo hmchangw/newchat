@@ -73,6 +73,7 @@ type Handler struct {
 	metrics       *broadcastMetrics
 	joinGrace     time.Duration
 	now           func() time.Time
+	joins         *joinRegistry
 }
 
 type handlerOption func(*handlerOptions)
@@ -120,6 +121,7 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		metrics:       opts.metrics,
 		joinGrace:     opts.joinGrace,
 		now:           opts.now,
+		joins:         newJoinRegistry(opts.joinGrace, opts.now),
 	}
 }
 
@@ -910,34 +912,46 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.M
 // Best-effort: the room-subject publish has already happened, so returning an error
 // here would only produce a duplicate on JetStream redelivery.
 func (h *Handler) fanOutToFreshMembers(ctx context.Context, roomID string, payload []byte) {
-	if h.joinGrace <= 0 {
+	// The steady-state cost of the join window is exactly this: one map lookup
+	// that misses. No roster query, no extra round trip - a channel message
+	// stays a single publish to the room subject.
+	accounts := h.joins.Fresh(roomID)
+	if len(accounts) == 0 {
 		return
 	}
-	subs, err := h.store.ListSubscriptions(ctx, roomID)
-	if err != nil {
-		slog.WarnContext(ctx, "join-grace roster lookup failed",
-			"error", err, "room_id", roomID,
-			"request_id", natsutil.RequestIDFromContext(ctx))
-		return
-	}
-	cutoff := h.now().Add(-h.joinGrace)
-	fresh := 0
-	for i := range subs {
-		account := subs[i].User.Account
-		if subs[i].User.IsBot || isBot(account) || subs[i].JoinedAt.Before(cutoff) {
+	sent := 0
+	for _, account := range accounts {
+		if isBot(account) {
 			continue
 		}
-		fresh++
+		sent++
 		if err := h.pub.Publish(ctx, subject.UserRoomEvent(account), payload); err != nil {
 			slog.WarnContext(ctx, "join-grace delivery failed",
 				"error", err, "account", account, "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
 		}
 	}
-	if fresh > 0 {
+	if sent > 0 {
 		slog.Log(ctx, logctx.LevelFlow, "broadcast join-grace fan-out", "phase", "fanout",
-			"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID, "recipients", fresh)
+			"request_id", natsutil.RequestIDFromContext(ctx), "room_id", roomID, "recipients", sent)
 	}
+}
+
+// HandleJoinGraceNotice records a room-worker join notice. Fire-and-forget: a
+// dropped notice costs this replica the window for that join, nothing more.
+func (h *Handler) HandleJoinGraceNotice(ctx context.Context, data []byte) {
+	var evt model.JoinGraceEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		slog.WarnContext(ctx, "malformed join-grace notice", "error", err)
+		return
+	}
+	joinedAt := h.now()
+	if evt.JoinedAt > 0 {
+		joinedAt = time.UnixMilli(evt.JoinedAt).UTC()
+	}
+	h.joins.Record(evt.RoomID, evt.Accounts, joinedAt)
+	slog.DebugContext(ctx, "join-grace notice recorded",
+		"room_id", evt.RoomID, "accounts", len(evt.Accounts))
 }
 
 // publishRoomEvent fans a channel room's .event out via subject.RoomEventTargets — the

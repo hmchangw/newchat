@@ -218,6 +218,21 @@ Stream wildcard: `chat.server.notification.push.{siteID}.>` (wildcard accommodat
 
 This is a server-only, backend stream. Clients never interact with it.
 
+### Join-grace notice (core NATS, no stream)
+
+| Subject | Publisher | Consumer | Purpose |
+|---------|-----------|----------|---------|
+| `chat.server.joingrace.{siteID}` | room-worker | broadcast-worker | "these accounts just joined this channel" |
+
+Deliberately **outside** `chat.server.broadcast.{siteID}.>`, which broadcast-worker
+queue-subscribes: every replica must see every join notice, not one of them. Each replica
+keeps the joiners in memory for the `JOIN_GRACE` window and, while a member is inside it,
+also delivers that channel's events to their own user subject — the subject the client has
+held since connect, which no join can race. Fire-and-forget: a dropped notice costs that
+replica the window for that join, and the client's history read still covers it.
+
+Server-only. Clients never interact with it.
+
 ### INBOX Stream (`INBOX-{siteID}`)
 
 Cross-site federation events are published **directly** into a site's INBOX —

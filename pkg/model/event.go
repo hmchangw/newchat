@@ -749,3 +749,17 @@ type StatusWithRequestReply struct {
 type RoomRenameRequest struct {
 	NewName string `json:"newName"`
 }
+
+// JoinGraceEvent tells broadcast-worker that Accounts just joined RoomID, so a
+// channel's events can also reach them on their own user subject while they are
+// too new to be relied on to hold the room subject. Core NATS, fan-out to every
+// broadcast-worker replica (not a queue group).
+type JoinGraceEvent struct {
+	RoomID   string   `json:"roomId"`
+	Accounts []string `json:"accounts"`
+	JoinedAt int64    `json:"joinedAt"`
+	SiteID   string   `json:"siteId"`
+	// Timestamp is when the notice was published (event-level), distinct from
+	// JoinedAt which is the domain-level join time.
+	Timestamp int64 `json:"timestamp" bson:"timestamp"`
+}

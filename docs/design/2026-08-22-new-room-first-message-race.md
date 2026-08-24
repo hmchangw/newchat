@@ -324,10 +324,18 @@ reconnects, and everything outside the join window. But step 4 is the one that m
 go away rather than shrink, and it remains strictly dependent on step 1: a client that discards
 a room event for an unknown room discards the grace copy too (measured: 100% still lost).
 
-The shipped prototype does the roster lookup on every channel message while `JOIN_GRACE > 0`.
-Before enabling it on a busy site, gate the lookup on a cached `LastJoinAt` in
-`roommetacache.Meta` (which already carries `CrossSiteAt` for an analogous grace window) so a
-room with no recent join pays only a nil check.
+**The window costs nothing per message.** A channel message must stay one publish to the room
+subject — that is the whole reason the room subject exists — so the fan-out does **not** query
+the roster. `room-worker` publishes a join notice to `chat.server.joingrace.{siteID}` (core
+NATS, *not* queue-subscribed: every `broadcast-worker` replica needs it), each replica holds
+the joiners in memory for the window, and the message path does one map lookup that misses in
+the steady state. No Mongo read, no Valkey read, no extra round trip.
+
+Two alternatives were rejected. A roster query per message is what the room subject exists to
+avoid. Gating that query on a `LastJoinAt` in `roommetacache.Meta` looks cheaper but is
+unreliable: the L1 meta cache is per-replica with its own TTL (`ROOM_META_CACHE_TTL`, 2 m) and
+`bustRoomMeta` clears only L2, so a member added to an *active* channel — where the entry is
+warm — would not be seen until the window had already passed.
 
 Do **not** start with step 4 alone: measured, it fixes nothing.
 

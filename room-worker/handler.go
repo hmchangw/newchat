@@ -106,6 +106,32 @@ func (h *Handler) bustRoomMeta(ctx context.Context, roomID string) {
 	roommetacache.BustMeta(bustCtx, h.valkey, roomID)
 }
 
+// publishJoinGrace tells broadcast-worker which accounts just joined a channel,
+// so its fan-out can also reach them on their own user subject while they are
+// too new to be relied on to hold the room subject. Core NATS, best-effort: a
+// dropped notice costs those members the window, and the client's history read
+// still covers them.
+func (h *Handler) publishJoinGrace(ctx context.Context, roomID string, accounts []string, joinedAt time.Time) {
+	if len(accounts) == 0 {
+		return
+	}
+	evt := model.JoinGraceEvent{
+		RoomID:    roomID,
+		Accounts:  accounts,
+		JoinedAt:  joinedAt.UTC().UnixMilli(),
+		SiteID:    h.siteID,
+		Timestamp: time.Now().UTC().UnixMilli(),
+	}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		slog.ErrorContext(ctx, "marshal join-grace notice failed", "error", err, "room_id", roomID)
+		return
+	}
+	if err := h.publish(ctx, subject.JoinGraceNotice(h.siteID), data, ""); err != nil {
+		slog.WarnContext(ctx, "publish join-grace notice failed", "error", err, "room_id", roomID)
+	}
+}
+
 // publishSubscriptionUpdate fans out the per-user subscription.update event for the FE; best-effort.
 func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account string, subEvtData []byte) {
 	if err := h.publish(ctx, subject.SubscriptionUpdate(account), subEvtData, ""); err != nil {
@@ -1034,6 +1060,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
 			return fmt.Errorf("bulk create subscriptions: %w", err)
 		}
+		joined := make([]string, 0, len(subs))
+		for _, sub := range subs {
+			joined = append(joined, sub.User.Account)
+		}
+		h.publishJoinGrace(ctx, req.RoomID, joined, acceptedAt)
 	}
 
 	// Collect all room_member docs to write in a single bulk insert:
@@ -1825,6 +1856,9 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	accounts := make([]string, 0, len(subs))
 	for _, sub := range subs {
 		accounts = append(accounts, sub.User.Account)
+	}
+	if room.Type == model.RoomTypeChannel {
+		h.publishJoinGrace(ctx, room.ID, accounts, now)
 	}
 	inner := model.MemberAddEvent{
 		Type:               model.InboxMemberAdded,
