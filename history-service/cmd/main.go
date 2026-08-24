@@ -27,6 +27,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/pagefit"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -132,8 +133,9 @@ func main() {
 	}
 
 	var (
-		cipher       atrest.Cipher
-		vaultWrapper atrest.KeyWrapperCloser
+		cipher        atrest.Cipher
+		previewCipher atrest.Cipher
+		vaultWrapper  atrest.KeyWrapperCloser
 	)
 	if cfg.Atrest.Enabled {
 		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
@@ -147,12 +149,18 @@ func main() {
 		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName,
 			options.Collection().SetReadPreference(readpref.Primary()))
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+		// Preview DEKs live in their own collection (written by broadcast-worker), so
+		// they need their own cipher over the same wrapper. Sharing one cipher would
+		// also share its DEK cache across two id spaces for no benefit.
+		previewDEKColl := mongoClient.Database(cfg.Mongo.DB).Collection(preview.DEKCollection,
+			options.Collection().SetReadPreference(readpref.Primary()))
+		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
 
 	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
-	roomRepo := mongorepo.NewRoomRepo(db)
+	roomRepo := mongorepo.NewRoomRepo(db, previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch})
 	threadRoomRepo := mongorepo.NewThreadRoomRepo(db)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	userStore := userstore.NewMongoStore(db.Collection("users"))
@@ -188,6 +196,8 @@ func main() {
 		slog.Info("room cache enabled", "size", cfg.RoomCacheSize, "ttl", cfg.RoomCacheTTL)
 	}
 
+	// Fronts rooms.get's lazy fallback only: a room served from a stored preview
+	// never reaches the walk this caches.
 	var opts []service.Option
 	if cfg.PreviewCacheSize > 0 && cfg.PreviewCacheTTL > 0 {
 		pc, err := readcache.NewPreviewCache(cfg.PreviewCacheSize, cfg.PreviewCacheTTL)

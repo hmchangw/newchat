@@ -96,8 +96,14 @@ type Config struct {
 	RoomCacheSize int           `env:"HISTORY_ROOM_CACHE_SIZE" envDefault:"50000"`
 	RoomCacheTTL  time.Duration `env:"HISTORY_ROOM_CACHE_TTL"  envDefault:"10s"`
 
-	// Room-list preview cache (resolved last-eligible message per room).
-	// Positives-only; lastMsgAt volatility ⇒ short TTL. Set size or ttl to 0 to disable.
+	// PreviewKeyEpoch selects the site preview DEK (preview:{siteID}:{epoch}).
+	// Must match broadcast-worker, which writes what this service reads: a reader
+	// on another epoch treats the stored preview as absent.
+	PreviewKeyEpoch int `env:"PREVIEW_KEY_EPOCH" envDefault:"1"`
+
+	// Room-list preview cache, fronting rooms.get's lazy fallback only — a room
+	// served from a stored preview never reaches it. Positives-only; lastMsgAt
+	// volatility ⇒ short TTL. Set size or ttl to 0 to disable.
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
@@ -136,6 +142,11 @@ func validate(cfg *Config) error {
 	}
 	if cfg.RoomCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_ROOM_CACHE_TTL must be >= 0, got %s", cfg.RoomCacheTTL)
+	}
+	// Part of a DEK id, so a non-positive value mints a sentinel rotation could
+	// never move forward from.
+	if cfg.PreviewKeyEpoch < 1 {
+		return fmt.Errorf("PREVIEW_KEY_EPOCH must be >= 1, got %d", cfg.PreviewKeyEpoch)
 	}
 	if cfg.PreviewCacheSize < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_SIZE must be >= 0, got %d", cfg.PreviewCacheSize)

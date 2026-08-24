@@ -19,7 +19,6 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -158,6 +157,24 @@ func (stubRoomRepo) GetRoomTimesByIDs(_ context.Context, _ []string) (map[string
 
 func (stubRoomRepo) GetRoomUserCount(_ context.Context, _ string) (int, error) {
 	return 0, nil
+}
+
+// The preview writes are no-ops here: these tests drive the Cassandra side of a
+// mutation, and the Mongo write it triggers is covered by the mongorepo round-trip
+// tests and the mocked service tests.
+//
+//nolint:gocritic // hugeParam: the by-value shape is the RoomRepository contract.
+func (stubRoomRepo) SetPreviewMessage(_ context.Context, _ string, _ model.PreviewMessage, _ string, _ int64) error {
+	return nil
+}
+
+//nolint:gocritic // hugeParam: the by-value shape is the RoomRepository contract.
+func (stubRoomRepo) UpdatePreviewBody(_ context.Context, _ string, _ model.PreviewMessage, _ string, _ int64) error {
+	return nil
+}
+
+func (stubRoomRepo) ClearPreview(_ context.Context, _ string, _ int64) error {
+	return nil
 }
 
 func TestEditMessage_Integration(t *testing.T) {
@@ -423,42 +440,10 @@ func TestDeleteMessage_Integration_ThreadReplyPublishesMetadataEvent(t *testing.
 	assert.Equal(t, 0, *canonicalEvt.NewTCount, "tcount seeded at 1 minus one decrement must equal 0")
 }
 
-// TestRoomsGet_Integration_EnrichesPreview seeds a message with attachments, mentions,
-// and visibleTo, then asserts rooms.get surfaces them on the enriched preview.
-func TestRoomsGet_Integration_EnrichesPreview(t *testing.T) {
-	session := setupCassandra(t)
-	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, &recordingPublisher{}, nil, nil, nil, nil, &config.Config{
-		MessageHistoryFloorDays: 730,
-		LargeRoomThreshold:      500,
-		MaxPinnedPerRoom:        10,
-		PinEnabled:              true,
-	})
-
-	sender := models.Participant{ID: "u1", Account: "alice", EngName: "Alice", CompanyName: "愛麗絲"}
-	mentions := []models.Participant{{ID: "u2", Account: "bob", CompanyName: "小明"}}
-	atts := cassandra.EncodeAttachments([]cassandra.Attachment{{ID: "f1", Title: "a.png", Type: "file"}})
-	roomID := "r-preview"
-	msgID := "m-preview"
-	createdAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
-
-	require.NoError(t, session.Query(
-		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg, mentions, attachments, visible_to)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "hello", mentions, atts, "u1",
-	).Exec())
-
-	c := natsrouter.NewContext(map[string]string{"account": "alice"})
-	resp, err := svc.RoomsGet(c, models.RoomsGetRequest{RoomIDs: []string{roomID}})
-	require.NoError(t, err)
-	require.Contains(t, resp.Rooms, roomID)
-	pm := resp.Rooms[roomID]
-	assert.Equal(t, msgID, pm.MessageID)
-	assert.Equal(t, "hello", pm.Content)
-	assert.Equal(t, "愛麗絲", pm.Sender.ChineseName)
-	require.Len(t, pm.Attachments, 1)
-	assert.Equal(t, "a.png", pm.Attachments[0].Title)
-	require.Len(t, pm.Mentions, 1)
-	assert.Equal(t, "bob", pm.Mentions[0].Account)
-	assert.Equal(t, "u1", pm.VisibleTo)
-}
+// rooms.get no longer resolves previews: it is one batched room-doc read, and the
+// enrichment this test used to assert now happens at write time in broadcast-worker.
+// The read-side contract that remains — which stored previews are served and which
+// are withheld — lives in the repo, and is covered by the round-trip tests in
+// history-service/internal/mongorepo/room_preview_test.go. The handler's own contract
+// (serves stored, omits unstored, never reads a message) is covered by the unit
+// tests in rooms_test.go.
