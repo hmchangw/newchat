@@ -397,10 +397,11 @@ func TestRoomRepo_InvalidatePreviewKey_WithholdsThePreviewItNamed(t *testing.T) 
 	assert.Nil(t, got["r-withdraw"].Preview, "a preview whose key was withdrawn must be withheld")
 }
 
-// The body survives the repair: a degraded walk is not evidence the room is empty, and
-// the read-time walk is what replaces it. The watermark goes with the key, so the
-// warm-back that refills the room cannot be rejected by a watermark left behind.
-func TestRoomRepo_InvalidatePreviewKey_KeepsTheBodyAndDropsTheWatermark(t *testing.T) {
+// The body survives the repair: a degraded walk is not evidence the room is empty, and the
+// read-time walk is what replaces it. The watermark is RESTAMPED, not dropped — dropping it
+// would leave nothing to reject a delayed older insert, which would then restore the very
+// body this mutation invalidated (see the replay test below).
+func TestRoomRepo_InvalidatePreviewKey_KeepsTheBodyAndRestampsTheWatermark(t *testing.T) {
 	db := setupMongo(t)
 	repo := NewRoomRepo(db, previewCipher{}, previewKey)
 	ctx := context.Background()
@@ -411,9 +412,33 @@ func TestRoomRepo_InvalidatePreviewKey_KeepsTheBodyAndDropsTheWatermark(t *testi
 	var raw bson.M
 	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-body"}).Decode(&raw))
 	assert.NotContains(t, raw, "previewForMsgId", "the certification comes off")
-	assert.NotContains(t, raw, "previewAsOf", "and the watermark protecting it, or the repair cannot land")
+	assert.EqualValues(t, 500, raw["previewAsOf"], "the watermark is restamped at the invalidation")
 	assert.Contains(t, raw, "previewCiphertext", "the body itself must survive")
 	assert.Contains(t, raw, "previewMeta")
+}
+
+// The reason the watermark is restamped rather than removed. An insert flush delayed past
+// the mutation carries an OLDER asOf; against a REMOVED watermark ($ifNull => 0) it would
+// pass and restore the ciphertext for the message that was just edited or deleted, under a
+// key that then equals lastMsgId — so the reader would serve it as current.
+func TestRoomRepo_InvalidatePreviewKey_FencesADelayedOlderInsert(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewRoomRepo(db, previewCipher{}, previewKey)
+	ctx := context.Background()
+	seedRoomWithPreview(t, repo, "r-replay", "m-preview", "m-preview")
+
+	// The mutation invalidates at 500; a flush buffered before it arrives with 400.
+	require.NoError(t, repo.InvalidatePreviewKey(ctx, "r-replay", "m-preview", 500))
+	require.NoError(t, repo.SetPreviewMessage(ctx, "r-replay", samplePreview(), "m-preview", 400))
+
+	var raw bson.M
+	require.NoError(t, repo.rooms.Raw().FindOne(ctx, bson.M{"_id": "r-replay"}).Decode(&raw))
+	assert.NotContains(t, raw, "previewForMsgId",
+		"the delayed insert must not re-certify the body this mutation invalidated")
+
+	got, err := repo.GetRoomTimesByIDs(ctx, []string{"r-replay"})
+	require.NoError(t, err)
+	assert.Nil(t, got["r-replay"].Preview, "and the reader must still withhold it")
 }
 
 // Keyed on the stored body, so a preview some newer write already replaced is left alone —
