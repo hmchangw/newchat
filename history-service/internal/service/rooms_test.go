@@ -297,6 +297,36 @@ func TestHistoryService_RoomsGet_CacheFrontsTheLazyFallback(t *testing.T) {
 	}
 }
 
+// A mutation changes what the room previews, so the cached entry describes a message
+// that just changed -- and after a delete, one that is gone. Serving it from cache would
+// undo the clear that the same request performed (#292).
+func TestHistoryService_RoomsGet_MutationDropsTheCachedPreview(t *testing.T) {
+	pc, err := readcache.NewPreviewCache(16, time.Minute)
+	require.NoError(t, err)
+	svc, msgs, rooms := newRoomsService(t, service.WithPreviewCache(pc))
+
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil).AnyTimes()
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).AnyTimes()
+	// Twice, not once: the invalidation must force the second request to re-walk.
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{walkedMsg("r1", "m-1", "before")}, false), nil).Times(1)
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Equal(t, "before", resp.Rooms["r1"].Content)
+
+	pc.Invalidate("r1")
+
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{walkedMsg("r1", "m-2", "after")}, false), nil).Times(1)
+	resp, err = svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Equal(t, "after", resp.Rooms["r1"].Content,
+		"an invalidated room must re-resolve, not serve the pre-mutation entry")
+}
+
 // A failed read must surface: an empty map is indistinguishable from "no previews" at the
 // client and would blank every row in the list.
 func TestHistoryService_RoomsGet_ReadFailureIsAnError(t *testing.T) {

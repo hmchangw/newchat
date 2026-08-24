@@ -134,6 +134,8 @@ type AppStore interface {
 // satisfies it.
 type PreviewCache interface {
 	Get(ctx context.Context, roomID string, load func(context.Context) (models.PreviewMessage, bool, error)) (models.PreviewMessage, bool, error)
+	// Invalidate drops a room's entry after a mutation changed what it previews.
+	Invalidate(roomID string)
 }
 
 // Option configures optional HistoryService dependencies.

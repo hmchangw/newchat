@@ -671,6 +671,13 @@ func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID, ms
 	if w.State == previewSkipped {
 		return
 	}
+	// Before the writes, and unconditional: the mutation has already committed in
+	// Cassandra, so whatever the cache holds for this room now describes a message that
+	// changed -- possibly one that was just deleted. Even a degraded walk, which writes
+	// nothing, must not leave that entry servable (#292).
+	if s.previewCache != nil {
+		s.previewCache.Invalidate(roomID)
+	}
 
 	applied, err := s.writeMutatedPreview(c, roomID, w, at.UnixMilli())
 	if err != nil {

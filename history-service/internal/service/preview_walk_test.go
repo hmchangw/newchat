@@ -15,6 +15,7 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -55,7 +56,22 @@ func pageSizesOf(calls []walkCall) []int {
 // assert the escalation itself rather than the preview it happened to land on.
 func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[models.Message]) (*model.PreviewMessage, bool, []walkCall) {
 	t.Helper()
-	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
+	return walkedPreviewOpts(t, readErr, nil, pages...)
+}
+
+// walkedPreviewWith drives the same delete with a preview cache installed.
+func walkedPreviewWith(t *testing.T, cache service.PreviewCache, pages ...cassrepo.Page[models.Message]) {
+	t.Helper()
+	walkedPreviewOpts(t, nil, service.WithPreviewCache(cache), pages...)
+}
+
+func walkedPreviewOpts(t *testing.T, readErr error, opt service.Option, pages ...cassrepo.Page[models.Message]) (*model.PreviewMessage, bool, []walkCall) {
+	t.Helper()
+	var opts []service.Option
+	if opt != nil {
+		opts = append(opts, opt)
+	}
+	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t, opts...)
 	c := testContext()
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	rooms.EXPECT().UpdatePreviewBody(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
@@ -114,6 +130,38 @@ func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[mode
 	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-target"})
 	require.NoError(t, err)
 	return got, gone, calls
+}
+
+// countingPreviewCache records invalidations; Get always misses so the walk still runs.
+type countingPreviewCache struct{ invalidated []string }
+
+func (c *countingPreviewCache) Get(ctx context.Context, _ string, load func(context.Context) (model.PreviewMessage, bool, error)) (model.PreviewMessage, bool, error) {
+	return load(ctx)
+}
+
+func (c *countingPreviewCache) Invalidate(roomID string) {
+	c.invalidated = append(c.invalidated, roomID)
+}
+
+// The mutation has already committed in Cassandra, so whatever the cache holds for the
+// room describes a message that changed. Every mutation outcome must drop it -- a
+// degraded walk especially, since it writes nothing and would otherwise leave the entry
+// as the only surviving description of the room (#292).
+func TestPreviewWalk_MutationInvalidatesTheCache(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		page cassrepo.Page[models.Message]
+	}{
+		{"a resolved walk", makePage([]models.Message{msgAt("m-1", 1)}, false)},
+		{"an empty room", makePage(nil, false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := &countingPreviewCache{}
+			walkedPreviewWith(t, cache, tc.page)
+			assert.Equal(t, []string{"r1"}, cache.invalidated,
+				"the mutation must drop the room's cached preview")
+		})
+	}
 }
 
 func msgAt(id string, minutesAgo int) models.Message {

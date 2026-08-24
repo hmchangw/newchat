@@ -59,6 +59,9 @@ func newTTLCache[V any](size int, ttl time.Duration, rec Recorder) (*ttlCache[V]
 // nothing is cached and the error is returned.
 // If ctx is canceled before the shared load finishes, getOrLoad returns ctx.Err() immediately
 // while the load continues detached in the background, bounded by fetchTimeout.
+// remove drops key if present; absent keys are a no-op.
+func (c *ttlCache[V]) remove(key string) { c.lru.Remove(key) }
+
 func (c *ttlCache[V]) getOrLoad(ctx context.Context, key string, load func(context.Context) (V, bool, error)) (V, error) {
 	if v, ok := c.lru.Get(key); ok {
 		c.metrics.Hit(ctx)
@@ -273,6 +276,14 @@ type previewEntry struct {
 // rooms from real-time delivery. Positives-only, singleflight-deduped.
 type PreviewCache struct {
 	cache *ttlCache[previewEntry]
+}
+
+// Invalidate drops roomID's cached preview. A mutation changes what the room previews,
+// and the entry it would otherwise keep serving describes the message that changed --
+// including one that was just deleted. Local only: a sibling replica's copy lives out
+// its TTL, which is why #292 wants revision-keyed identity rather than eviction.
+func (c *PreviewCache) Invalidate(roomID string) {
+	c.cache.remove(roomID)
 }
 
 // NewPreviewCache builds a preview cache of size entries with the given TTL.
