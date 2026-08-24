@@ -173,6 +173,14 @@ for the demand and recovery math and
 [`docs/load-testing/loadgen/dashboard-contract.md`](../../../../docs/load-testing/loadgen/dashboard-contract.md)
 for the evidence-validity queries.
 
+The stop boundary is computed from the timestamp loadgen persisted and its own
+clock, while seed and teardown judge staleness against theirs, so the margin
+also has to cover the clock difference between those nodes. One heartbeat
+interval of margin therefore assumes they agree to within `30s`; ordinary NTP
+keeps them orders of magnitude closer. A server-side heartbeat timestamp would
+remove that assumption rather than size around it, and is listed as follow-up
+work on the pull request.
+
 Staging releases must use an immutable digest. A mutable tag is accepted only
 when `image.allowMutableTag=true`, which is reserved for local kind
 validation.
